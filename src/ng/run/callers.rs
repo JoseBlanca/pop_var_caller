@@ -4326,6 +4326,20 @@ mod the_sample_order_join {
             "with no reads of its own the prior decides alone and the call is barely held: \
              {confidence} Phred",
         );
+        // **And the call says so itself**, which is what emission needs and what nothing
+        // downstream could work out: the likelihoods live in scratch the next locus overwrites.
+        // A sample with no reads has a flat row; one with reads does not.
+        assert_eq!(
+            called.called_loci[0]
+                .per_sample
+                .iter()
+                .map(reads_said_nothing)
+                .collect::<Vec<_>>(),
+            vec![Some(false), None, Some(true), Some(false)],
+            "alpha's reads said nothing because it has none; zeta and mu covered the locus and \
+             theirs did; nu was set aside by the cap and so has no call to carry the fact at \
+             all — which is the second, different route to a `./.`",
+        );
         // **The whole list, not the one entry.** Index 2 of four is a fixed point under
         // several ways of getting the order wrong — reversal about the middle, and a zip that
         // drops a sample and leaves the rest shifted — so asserting one name passes on a list
@@ -4345,6 +4359,18 @@ mod the_sample_order_join {
     /// A call's genotype, or `None` where the sample was set aside.
     fn genotype_of(call: &SampleGenotypeCall) -> Option<&Genotype> {
         call.genotype()
+    }
+
+    /// Whether the loop found this sample's own reads said nothing about its genotype, or
+    /// `None` where the sample was set aside — which is a different fact and a different `./.`.
+    fn reads_said_nothing(call: &SampleGenotypeCall) -> Option<bool> {
+        match call {
+            SampleGenotypeCall::Called {
+                reads_were_uninformative,
+                ..
+            } => Some(*reads_were_uninformative),
+            SampleGenotypeCall::Missing => None,
+        }
     }
 
     /// How sure the caller is, or `None` where the sample was set aside.

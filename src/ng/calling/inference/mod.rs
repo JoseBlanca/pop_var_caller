@@ -1042,6 +1042,10 @@ mod tests {
                 .map(|_| SampleGenotypeCall::Called {
                     genotype: Genotype::new(vec![AlleleId::REFERENCE; 2]),
                     genotype_quality: Phred::try_new(30.0).expect("a legal quality"),
+                    // This stub calls every sample homozygous reference without reading a
+                    // likelihood, so it claims the reads said something rather than
+                    // pretending to have checked.
+                    reads_were_uninformative: false,
                 })
                 .collect();
             let expected = ExpectedAlleleCopies::new(copies, &candidates);

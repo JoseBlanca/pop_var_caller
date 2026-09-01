@@ -2720,6 +2720,29 @@ pub enum SampleGenotypeCall {
         /// genotype took. Step 13's quality model **refines** this number; it does not
         /// replace it (`doc/devel/ng/arch/calling_em_loop.md` §2).
         genotype_quality: Phred,
+        /// **Whether this sample's own reads said nothing about which genotype it has** —
+        /// its genotype likelihoods were flat, so every genotype was equally probable
+        /// under them and the prior decided alone.
+        ///
+        /// **It is what turns a called sample into a `./.`** at emission
+        /// (`doc/devel/ng/spec/vcf_output.md` §7.1), and it is recorded **here**, by
+        /// whoever scored the sample, because nothing downstream can recover it: the
+        /// likelihoods live in per-sample scratch the loop overwrites at the next locus.
+        /// `vcf::assemble`'s own module note named this as the one input it could not be
+        /// given; this is the answer to it.
+        ///
+        /// **It must be the likelihood and not the posterior.** A sample with no reads is
+        /// scored by the loop and comes back with a genotype, because the prior decides it
+        /// alone — and where the fitted frequency is low that posterior is sharply peaked,
+        /// so no threshold on the confidence would catch this sample. The likelihood is
+        /// what the reads said; the posterior is what the reads said plus what the cohort
+        /// assumed.
+        ///
+        /// **True is common and is not a defect.** On six tomato accessions over 400 kb,
+        /// every locus is called on every sample of the run and most samples cover most
+        /// loci — but a sample that covered nothing at a locus is scored there all the
+        /// same, and this is what says so.
+        reads_were_uninformative: bool,
     },
     /// The candidate step ruled this sample uncallable at this locus, so it took no part in
     /// the loop and emission writes its `GT` as missing.
@@ -3636,6 +3659,9 @@ mod tests {
         SampleGenotypeCall::Called {
             genotype: Genotype::new(vec![AlleleId(first), AlleleId(second)]),
             genotype_quality: Phred::try_new(quality).expect("a legal quality"),
+            // These fixtures are about what a called locus holds, not about what the reads
+            // said, so they use the case where the reads said something.
+            reads_were_uninformative: false,
         }
     }
 

@@ -21,10 +21,13 @@
 //! - *Settled* — everything the record does with these inputs. The no-call rule (spec §7.1), the
 //!   `AF` denominator, the padding rule, the field set. Those are design decisions with
 //!   documents behind them and they will not move when the interface does.
-//! - *Provisional* — the shape of [`LocusEvidenceForOutput`] and [`SampleEvidenceForOutput`],
-//!   and in particular where [`SampleEvidenceForOutput::reads_were_uninformative`] is computed.
-//!   §"The one bit that needs the loop" says what it costs to supply and why it cannot be
-//!   recovered here.
+//! - *Provisional* — the shape of [`LocusEvidenceForOutput`] and [`SampleEvidenceForOutput`].
+//!
+//! **⛦ The one input this module could not be given now comes from the loop (2026-09-01).**
+//! Whether a sample's reads said anything is `SampleGenotypeCall::Called`'s
+//! `reads_were_uninformative`, minted where the sample is scored — the likelihoods live in
+//! per-sample scratch the next locus overwrites, so nowhere else can answer it. It used to be a
+//! field of [`SampleEvidenceForOutput`] and this module's one open question.
 //!
 //! When the stream lands, expect to rewrite the *construction* of these two structs and nothing
 //! below them.
@@ -49,21 +52,6 @@ pub struct SampleEvidenceForOutput {
     /// Reads this sample observed that no *written* allele explains: a dropped candidate's
     /// reads, and partial observations. Becomes `DP − ΣAD`.
     pub reads_no_written_allele_explains: u32,
-    /// **Whether this sample's reads said nothing about which genotype it has** — its genotype
-    /// likelihoods were flat.
-    ///
-    /// This is what turns a called sample into a `./.` (spec §7.1), and it is the one input
-    /// here that **cannot be computed from anything downstream**. See the module's own note: the
-    /// likelihoods live in per-sample scratch the loop overwrites, so whoever scores the sample
-    /// has to answer this while it still knows, exactly as the genotype quality is taken during
-    /// the loop's final pass rather than after it.
-    ///
-    /// **It must be the likelihood and not the posterior.** A sample with no reads is scored by
-    /// the loop and comes back with a genotype, because the prior decides it alone — and at a
-    /// locus where the fitted frequency is low that posterior is sharply peaked, so no threshold
-    /// on it would catch this sample. The likelihood is what the reads said; the posterior is
-    /// what the reads said plus what the cohort assumed.
-    pub reads_were_uninformative: bool,
 }
 
 /// **Everything a record needs that the called locus does not already carry.**
@@ -148,7 +136,7 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
         .iter()
         .zip(evidence.samples)
         .map(|(call, sample)| SampleColumn {
-            call: written_call(call, &sample),
+            call: written_call(call),
             read_counts: SampleReadCounts::new(
                 sample.allele_reads,
                 sample.reads_no_written_allele_explains,
@@ -182,14 +170,15 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
 ///   evidence.
 ///
 /// A sample that is neither keeps the genotype and quality the loop gave it.
-fn written_call(call: &SampleGenotypeCall, evidence: &SampleEvidenceForOutput) -> SampleCall {
+fn written_call(call: &SampleGenotypeCall) -> SampleCall {
     match call {
         SampleGenotypeCall::Missing => SampleCall::NoCall,
         SampleGenotypeCall::Called {
             genotype,
             genotype_quality,
+            reads_were_uninformative,
         } => {
-            if evidence.reads_were_uninformative {
+            if *reads_were_uninformative {
                 SampleCall::NoCall
             } else {
                 SampleCall::Called {

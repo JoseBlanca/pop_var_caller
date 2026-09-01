@@ -38,9 +38,21 @@ fn alleles() -> CandidateAlleles {
 }
 
 fn called(alleles: &[u16], genotype_quality: f32) -> SampleGenotypeCall {
+    called_saying(alleles, genotype_quality, false)
+}
+
+/// The same, with **whether the sample's reads said anything** named — the bit that turns a
+/// called sample into a `./.`, which since 2026-09-01 the calling loop mints onto the call
+/// rather than the emission step being handed it separately.
+fn called_saying(
+    alleles: &[u16],
+    genotype_quality: f32,
+    reads_were_uninformative: bool,
+) -> SampleGenotypeCall {
     SampleGenotypeCall::Called {
         genotype: Genotype::new(alleles.iter().copied().map(AlleleId).collect()),
         genotype_quality: quality(genotype_quality),
+        reads_were_uninformative,
     }
 }
 
@@ -89,15 +101,10 @@ fn evidence(
     }
 }
 
-fn sample(
-    allele_reads: Vec<u32>,
-    unexplained: u32,
-    uninformative: bool,
-) -> SampleEvidenceForOutput {
+fn sample(allele_reads: Vec<u32>, unexplained: u32) -> SampleEvidenceForOutput {
     SampleEvidenceForOutput {
         allele_reads,
         reads_no_written_allele_explains: unexplained,
-        reads_were_uninformative: uninformative,
     }
 }
 
@@ -109,15 +116,18 @@ fn sample(
 fn a_sample_whose_reads_said_nothing_is_written_as_a_no_call() {
     // **The rule the owner settled.** The loop calls such a sample — with a flat likelihood the
     // prior decides alone — and the file must not repeat that as a genotype.
+    // **The bit is on the call now**, minted by the loop that scored the sample — which is
+    // why the second sample here is built with `called_saying(..., true)` rather than by a
+    // flag handed to the emission step beside it.
     let locus = locus(
-        vec![called(&[0, 1], 40.0), called(&[0, 0], 3.0)],
+        vec![called(&[0, 1], 40.0), called_saying(&[0, 0], 3.0, true)],
         vec![3.0, 1.0],
         true,
     );
     let record = assemble_record(
         &locus,
         evidence(
-            vec![sample(vec![10, 9], 0, false), sample(vec![0, 0], 0, true)],
+            vec![sample(vec![10, 9], 0), sample(vec![0, 0], 0)],
             FilterVerdict::Pass,
         ),
     );
@@ -143,7 +153,7 @@ fn a_sample_the_caller_declined_to_call_is_written_as_a_no_call_too() {
     let record = assemble_record(
         &locus,
         evidence(
-            vec![sample(vec![10, 9], 0, false), sample(vec![2, 2], 5, false)],
+            vec![sample(vec![10, 9], 0), sample(vec![2, 2], 5)],
             FilterVerdict::Pass,
         ),
     );
@@ -160,7 +170,7 @@ fn a_sample_with_reads_that_spoke_keeps_the_genotype_the_loop_gave_it() {
     let locus = locus(vec![called(&[1, 1], 55.0)], vec![0.2, 1.8], true);
     let record = assemble_record(
         &locus,
-        evidence(vec![sample(vec![1, 14], 2, false)], FilterVerdict::Pass),
+        evidence(vec![sample(vec![1, 14], 2)], FilterVerdict::Pass),
     );
     assert_eq!(sample_columns(&record, diploid()), "1/1:55:17:1,14");
 }
@@ -171,14 +181,14 @@ fn a_sample_written_as_a_no_call_leaves_an_and_ac_alone() {
     // sample the loop scored but the file no-calls is out of it — while its copies stay in the
     // fit `AF` is taken from. The two denominators differ, and that is correct.
     let locus = locus(
-        vec![called(&[0, 1], 40.0), called(&[0, 0], 2.0)],
+        vec![called(&[0, 1], 40.0), called_saying(&[0, 0], 2.0, true)],
         vec![3.0, 1.0],
         true,
     );
     let record = assemble_record(
         &locus,
         evidence(
-            vec![sample(vec![6, 6], 0, false), sample(vec![0, 0], 0, true)],
+            vec![sample(vec![6, 6], 0), sample(vec![0, 0], 0)],
             FilterVerdict::Pass,
         ),
     );
@@ -200,7 +210,7 @@ fn the_alleles_and_the_fitted_copies_come_from_the_locus_itself() {
     let locus = locus(vec![called(&[0, 1], 40.0)], vec![1.25, 0.75], true);
     let record = assemble_record(
         &locus,
-        evidence(vec![sample(vec![5, 5], 0, false)], FilterVerdict::Pass),
+        evidence(vec![sample(vec![5, 5], 0)], FilterVerdict::Pass),
     );
 
     assert_eq!(record.reference(), b"A");
@@ -214,10 +224,7 @@ fn an_unconverged_locus_reaches_the_file_on_its_filter() {
     let locus = locus(vec![called(&[0, 1], 40.0)], vec![1.0, 1.0], false);
     let record = assemble_record(
         &locus,
-        evidence(
-            vec![sample(vec![5, 5], 0, false)],
-            FilterVerdict::EmDidNotConverge,
-        ),
+        evidence(vec![sample(vec![5, 5], 0)], FilterVerdict::EmDidNotConverge),
     );
     assert_eq!(record.filter(), FilterVerdict::EmDidNotConverge);
 }
@@ -225,7 +232,7 @@ fn an_unconverged_locus_reaches_the_file_on_its_filter() {
 #[test]
 fn a_tract_annotation_makes_it_a_tract_record() {
     let locus = locus(vec![called(&[0, 1], 40.0)], vec![1.0, 1.0], true);
-    let mut inputs = evidence(vec![sample(vec![5, 5], 0, false)], FilterVerdict::Pass);
+    let mut inputs = evidence(vec![sample(vec![5, 5], 0)], FilterVerdict::Pass);
     inputs.repeat_tract = Some(TractAnnotation::new(
         Motif::new(b"AT").expect("a two-base motif"),
     ));
@@ -249,7 +256,7 @@ fn evidence_for_a_different_number_of_samples_is_refused() {
     );
     let _ = assemble_record(
         &locus,
-        evidence(vec![sample(vec![5, 5], 0, false)], FilterVerdict::Pass),
+        evidence(vec![sample(vec![5, 5], 0)], FilterVerdict::Pass),
     );
 }
 
@@ -261,7 +268,7 @@ fn a_filter_that_disagrees_with_the_loop_about_convergence_is_refused() {
     let locus = locus(vec![called(&[0, 1], 40.0)], vec![1.0, 1.0], false);
     let _ = assemble_record(
         &locus,
-        evidence(vec![sample(vec![5, 5], 0, false)], FilterVerdict::Pass),
+        evidence(vec![sample(vec![5, 5], 0)], FilterVerdict::Pass),
     );
 }
 
@@ -269,7 +276,7 @@ fn a_filter_that_disagrees_with_the_loop_about_convergence_is_refused() {
 #[should_panic(expected = "AD is written one entry per allele")]
 fn per_sample_counts_of_the_wrong_width_are_refused() {
     let locus = locus(vec![called(&[0, 1], 40.0)], vec![1.0, 1.0], true);
-    let mut inputs = evidence(vec![sample(vec![5, 5], 0, false)], FilterVerdict::Pass);
+    let mut inputs = evidence(vec![sample(vec![5, 5], 0)], FilterVerdict::Pass);
     inputs.samples[0].allele_reads = vec![5, 5, 5];
     let _ = assemble_record(&locus, inputs);
 }

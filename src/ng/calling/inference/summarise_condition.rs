@@ -1305,6 +1305,12 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
         calls.push(SampleGenotypeCall::Called {
             genotype: mint_genotype(copies_of_each_allele),
             genotype_quality,
+            // **Asked of the likelihood row, here, while this pass still has it.** The row is
+            // per-sample scratch the next locus overwrites, so nothing downstream can recover
+            // what the reads said as against what the prior assumed — which is the whole of
+            // why the flag is minted at the point of scoring (`vcf::assemble`'s module note,
+            // and `doc/devel/ng/spec/vcf_output.md` §7.1).
+            reads_were_uninformative: reads_said_nothing(scratch.sample_genotype_likelihoods(row)),
         });
         row += 1;
     }
@@ -1406,6 +1412,22 @@ fn is_callable(evidence: &LocusEvidence<'_>, run_sample: usize) -> bool {
         } => per_sample[run_sample].is_callable(),
         LocusEvidence::Ssr { .. } => true,
     }
+}
+
+/// **Whether a sample's reads said nothing about which genotype it has** — every genotype
+/// equally probable under its own likelihoods, so the prior decides alone.
+///
+/// **Exact equality, not a tolerance, and the shape of the arithmetic is why.** A sample with
+/// no reads at this locus contributes an empty sum to every genotype, and an empty sum is
+/// `0.0` for all of them by the same code path — not three numbers that happen to agree. So a
+/// tolerance would buy nothing here and would start calling *nearly* flat rows flat, which is
+/// a different claim and one nothing has measured a threshold for.
+///
+/// **A row of one genotype is flat**, trivially and correctly: a haploid locus over one allele
+/// has one genotype, the reads cannot distinguish it from anything, and there is nothing for
+/// them to have said.
+fn reads_said_nothing(likelihoods: &[LogProb]) -> bool {
+    likelihoods.iter().all(|score| *score == likelihoods[0])
 }
 
 /// **The weakest warrant behind any parameter that reached this locus** — what the record is
@@ -4490,6 +4512,7 @@ mod tests {
                 SampleGenotypeCall::Called {
                     genotype: Genotype::new(vec![AlleleId(0), AlleleId(0)]),
                     genotype_quality: Phred::try_new(30.0).expect("a quality"),
+                    reads_were_uninformative: false,
                 };
                 3
             ],
@@ -5130,6 +5153,7 @@ mod tests {
             SampleGenotypeCall::Called {
                 genotype,
                 genotype_quality,
+                ..
             } => (genotype, *genotype_quality),
             SampleGenotypeCall::Missing => {
                 panic!("sample {sample} was called, so it is not missing")
