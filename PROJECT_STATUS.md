@@ -1094,8 +1094,14 @@ Skills and agents are instructed to leave it untouched.
 > every locus, so every tract would be called on the model's stated constant; and a library the run
 > declared that no sample carries a rate for shortens the read-group axis silently, which defers
 > the failure to a locus. The second is reachable from data — a library whose reads were all
-> refused at admission — and **what such a run should get is a question for the owner**: refuse it,
-> as now, or give that library the defaulted calibration.
+> refused at admission. **⛦ The owner ruled on it 2026-09-01: "if the user gave no default and a
+> library did not manage to estimate a parameter, that's a hard fail to be reported to the user."**
+> So the refusal stands, and it is now an *error* rather than the assertion it was —
+> `ParameterEstimationError::ErrorRateNotFittedForReadGroup`, naming the library, saying there is
+> no default to fall back on, and giving the two ways out (leave the library out of the run, or
+> supply a rate for it in the parameters file). A panic naming a source file is a hard fail but
+> not a report, which is the defect F1's review found in `--ploidy`. The sample-side twin,
+> `InbreedingNotFittedForSample`, had been that shape all along.
 > **⛦ Eight of 24 planted defects passed every test, and four mattered.** Three of the four
 > library-ownership checks had no test at all — only the error-rate one did, and deleting each of
 > the others left the file green. The seed's fitted diversity could be halved unseen, because the
