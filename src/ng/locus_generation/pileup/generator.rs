@@ -13,18 +13,20 @@
 //! is C2's, and the allocator's lifetime across segments is C3's.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ng::locus_generation::{
     GeneratorCounts, LocusGenerationError, LocusGenerator, SampleLocusObservations,
 };
+use crate::ng::read::filtering::ReadFilterCounts;
 use crate::ng::read::input::cursor::CursorCounts;
 use crate::ng::read::input::sample_cursor::SampleCursor;
 use crate::ng::read::input::{SampleIdentity, SampleReads};
 use crate::ng::read::{PreparedRead, ReadPrepError, ReadPreparer};
 use crate::ng::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq};
-use crate::ng::types::{ContigId, GenomeRegion, Position};
+use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
 
 use super::chain_id_allocator::{ChainIdAllocator, ChainIdAllocatorCounters};
 use super::genome_walk::{PileupWalker, RegionReadSource, RunSummary};
@@ -815,6 +817,19 @@ pub struct PileupGenerator<R: RawRefSeq + EvictableRefSeq + ContigTable, P: Read
     /// it at the boundary, so they are taken there; the live one is asked directly. See
     /// [`cursor_counts`](Self::cursor_counts).
     retired_cursor_counts: CursorCounts,
+    /// **Why reads were dropped, per read group, over the chromosomes already retired** —
+    /// the same taken-at-the-boundary rule as `retired_cursor_counts`, one axis finer.
+    ///
+    /// **Added 2026-09-01, and until then a walk lost every contig but its last.** Spec §8
+    /// requires a run to sum its read-filter tallies at the end or "drop rates under-report by
+    /// a factor of the worker count — silently, since every number stays plausible"; the same
+    /// silence applied one contig at a time, because these counts belong to a cursor from the
+    /// moment it is made and a cursor is rebuilt at every chromosome change. A run over 12
+    /// chromosomes reported the twelfth's drops as the run's.
+    ///
+    /// Keyed by the read group the reads declared, `None` for reads that named none — the key
+    /// [`AlignmentCursor::read_group_counts`] already hands back.
+    retired_read_group_counts: BTreeMap<Option<ReadGroupId>, ReadFilterCounts>,
     /// The sample this generator opened its first cursor for. **One sample per generator** —
     /// a second one is refused rather than answered out of the first one's files. See
     /// [`open_walk`](Self::open_walk).
@@ -883,6 +898,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
             chromosome: None,
             walk: None,
             retired_cursor_counts: CursorCounts::default(),
+            retired_read_group_counts: BTreeMap::new(),
             sample: None,
             pending_failure: None,
             failed: false,
@@ -926,6 +942,26 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
             total += chromosome.walker.reads().reads.counts();
         }
         total
+    }
+
+    /// **Why this sample's reads were dropped, per read group, over the whole walk** — every
+    /// chromosome, not merely the one a cursor is standing on.
+    ///
+    /// Spec §8's finish-time sum, and the failure it names if it is skipped: *"drop rates
+    /// under-report … silently, since every number stays plausible."* Retired chromosomes are
+    /// added up as they go and the live one is asked directly, so the answer is current at any
+    /// moment — the same shape [`cursor_counts`](Self::cursor_counts) has, for the same reason.
+    ///
+    /// **The `None` key is reads that declared no read group**, which is the key the cursor
+    /// itself uses; a run whose files all declare one never sees it.
+    pub fn read_filter_counts(&self) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
+        let mut total = self.retired_read_group_counts.clone();
+        if let Some(chromosome) = &self.chromosome {
+            for (read_group, counts) in chromosome.walker.reads().reads.read_group_counts() {
+                total.entry(read_group).or_default().add(&counts);
+            }
+        }
+        total.into_iter().collect()
     }
 
     /// Start a region: record it and **open nothing**.
@@ -1253,6 +1289,15 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
             // Taken before the walker is consumed: a cursor's tallies die with it, and they
             // are what says whether the cursor did anything (see `cursor_counts`).
             self.retired_cursor_counts += retiring.walker.reads().reads.counts();
+            // **Taken here for the same reason and at the same moment**, one axis finer: a
+            // cursor's per-read-group tallies die with it, and a run that read them only from
+            // the live cursor would report its last chromosome's drops as the whole walk's.
+            for (read_group, counts) in retiring.walker.reads().reads.read_group_counts() {
+                self.retired_read_group_counts
+                    .entry(read_group)
+                    .or_default()
+                    .add(&counts);
+            }
 
             let mut chain_ids = retiring.walker.into_chain_ids();
             // **Redundant with `WalkerState::begin_region`, and kept anyway.** The next
@@ -1332,6 +1377,12 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> LocusGenerat
     /// truncations explaining it into a struct nobody could see (Milestone C review).
     fn counts(&self) -> Option<GeneratorCounts<'_>> {
         Some(GeneratorCounts::Pileup(PileupGenerator::counts(self)))
+    }
+
+    /// **The only way the per-read-group drop tallies are reachable once the generator is
+    /// boxed** — the same gap `counts` closed for the ten locus counters, one axis over.
+    fn read_filter_counts(&self) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
+        PileupGenerator::read_filter_counts(self)
     }
 }
 
@@ -2656,6 +2707,95 @@ mod tests {
             after_second.reads_decoded > after_first.reads_decoded,
             "the second chromosome's reads must add to the first's, not replace them: \
              {after_first:?} then {after_second:?}",
+        );
+    }
+
+    /// **A chromosome's per-read-group drop tallies survive its cursor retiring** — the same
+    /// claim as the test above, one axis finer, and the one nothing checked.
+    ///
+    /// **These counts belong to a cursor from the moment it is made** (spec §8) and a cursor is
+    /// rebuilt at every chromosome change, so a generator that read them off the live cursor
+    /// would report its last chromosome's drops as the whole walk's. Five separate mutations
+    /// along this chain — deleting the harvest at retirement, deleting the live sum,
+    /// double-counting the live cursor, dropping the filled slot from the set's sum, and
+    /// replacing the whole call with an empty vector — passed all 5,880 tests before this
+    /// existed. Deleting the live sum alone means **every single-contig run reports zero
+    /// drops**, since the last cursor never retires.
+    ///
+    /// One plain read and one duplicate-flagged read on each of two contigs, so the answer after
+    /// the second is the sum and not the second's alone.
+    #[test]
+    fn a_chromosomes_read_group_tallies_survive_its_cursor_retiring() {
+        let duplicate = |name: &str, contig: usize| {
+            let mut read = read_named_with_length(name, contig, 10, 30);
+            *read.flags_mut() = noodles_sam::alignment::record::Flags::DUPLICATE;
+            read
+        };
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_named_with_length("kept-on-chr1", 0, 10, 30),
+            duplicate("dup-on-chr1", 0),
+            read_named_with_length("kept-on-chr2", 1, 10, 30),
+            duplicate("dup-on-chr2", 1),
+        ]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+        let summed = |generator: &PileupGenerator<_, _>| {
+            generator
+                .read_filter_counts()
+                .into_iter()
+                .fold((0_u64, 0_u64), |(kept, duplicate), (_, counts)| {
+                    (kept + counts.kept, duplicate + counts.duplicate)
+                })
+        };
+
+        loci_of(&mut generator, region(0, 1, 100), &reads);
+        let after_first = summed(&generator);
+        loci_of(&mut generator, region(1, 1, 200), &reads);
+        let after_second = summed(&generator);
+
+        assert_eq!(
+            after_first,
+            (1, 1),
+            "the first chromosome's one kept and one duplicate, read off its live cursor",
+        );
+        assert_eq!(
+            after_second,
+            (2, 2),
+            "and after the boundary the two chromosomes' counts, summed — not the second's \
+             alone, which is what a generator that lost the retiring cursor would report",
+        );
+    }
+
+    /// **The per-read-group tallies and the aggregate one count the same reads.**
+    ///
+    /// They are two harvests of one cursor taken at the same instant — `reads_decoded` is
+    /// incremented for exactly the read `tally.kept` is — so a walk whose two answers differ has
+    /// lost one of them somewhere between the cursor and the report. Nothing asserted it, and
+    /// the two are read by different callers: the aggregate by whoever asks whether the cursor
+    /// did anything, the per-group by the run report.
+    #[test]
+    fn the_per_read_group_tallies_and_the_aggregate_count_the_same_reads() {
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_named_with_length("on-chr1", 0, 10, 30),
+            read_named_with_length("on-chr2", 1, 10, 30),
+        ]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        loci_of(&mut generator, region(0, 1, 100), &reads);
+        loci_of(&mut generator, region(1, 1, 200), &reads);
+
+        let kept: u64 = generator
+            .read_filter_counts()
+            .iter()
+            .map(|(_, counts)| counts.kept)
+            .sum();
+        assert_eq!(
+            kept,
+            generator.cursor_counts().reads_decoded,
+            "the reads the filters kept, per group, are the reads the cursor decoded",
+        );
+        assert!(
+            kept > 0,
+            "a walk that read nothing could not tell the two apart"
         );
     }
 

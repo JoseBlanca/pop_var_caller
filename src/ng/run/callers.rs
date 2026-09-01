@@ -37,6 +37,7 @@ use crate::ng::calling::{CallingScratch, FrozenParameters, LocusInference};
 use crate::ng::locus_generation::pileup::{PileupGeneratorConfig, PileupGeneratorCounts};
 use crate::ng::locus_generation::{GeneratorCounts, LocusCounts};
 use crate::ng::read::filtering::ReadFilterConfig;
+use crate::ng::read::filtering::ReadFilterCounts;
 use crate::ng::read::input::SampleReads;
 use crate::ng::read::input::read_groups::{ReadGroups, SampleReadGroups};
 use crate::ng::read::input::reference::OpenReference;
@@ -48,7 +49,7 @@ use crate::ng::run::cohort_merge::serial::{
     merge_cohort_handing_each_locus_over, merge_cohort_through_cache,
 };
 use crate::ng::run::cohort_merge::{CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads};
-use crate::ng::types::GenomeRegion;
+use crate::ng::types::{GenomeRegion, ReadGroupId};
 use crate::ng::vcf::VcfRecord;
 use crate::ng::vcf::assemble::assemble_record;
 use crate::pop_var_caller::common::format_md5_hex;
@@ -955,19 +956,19 @@ impl WrittenCohort {
 /// each sample, how much of the analysed ground its walk handled, how much it could not and
 /// why, and what the SNP/indel generator counted while doing it.
 ///
-/// **Two things a run report also wants are not here, and neither is an oversight.**
+/// **⛦ The per-read-group read-filter tallies are here now (2026-09-01), and what they needed
+/// was the generator rather than an accessor.** They belong to a cursor from the moment it is
+/// made, and a cursor is rebuilt at every chromosome change — so a walk had already lost every
+/// contig but its last, and reading them off the live cursor would have reported one
+/// chromosome's drops as the run's. The generator now takes a retiring cursor's counts at the
+/// boundary, the way it already took the aggregate ones, and sums the live cursor in when asked.
+/// Spec §8's finish-time tally, and the failure it names if it is skipped: drop rates
+/// under-report "silently, since every number stays plausible".
 ///
-/// **The per-read-group read-filter tallies**, which spec §8 requires a run to sum at the end
-/// or under-report every drop rate. The read layer does hand them out —
-/// `SampleCursor::read_group_counts` — but the locus generator that owns the cursor does not,
-/// and the harder obstacle is that it could not: at each contig boundary the retiring cursor's
-/// read-group counts are dropped rather than accumulated, so by the end of a walk every contig
-/// but the last has already lost them. Reaching them is a change to the generator, not an
-/// accessor.
-///
-/// **And the repeat-tract slots' counts**, absent because both slots are unfilled — a tract's
-/// ground is charged to `unhandled_not_implemented` in [`SampleWalkTallies::regions`], which
-/// is where a reader looks to see how short this caller's coverage is.
+/// **One thing a run report also wants is still not here, and it is not an oversight.** The
+/// repeat-tract slots' counts are absent because both slots are unfilled — a tract's ground is
+/// charged to `unhandled_not_implemented` in [`SampleWalkTallies::regions`], which is where a
+/// reader looks to see how short this caller's coverage is.
 #[derive(Debug)]
 pub struct CohortWalkTallies {
     /// One per sample, in the run's sample order.
@@ -1015,6 +1016,7 @@ impl CohortWalkTallies {
                     // generator set nobody mis-wired also reports. Nothing in a run can
                     // produce it; if `generic_path_generators` ever fills the slot from a
                     // caller's choice, this becomes two facts and needs two answers.
+                    read_filters: walker.generators().read_filter_counts(),
                     snp_indel: match walker.generators().generic_counts() {
                         Some(GeneratorCounts::Pileup(counts)) => Some(*counts),
                         Some(_) | None => None,
@@ -1045,6 +1047,16 @@ pub struct SampleWalkTallies {
     /// did this run call* cannot be worked out from here. Regions differ in length by orders
     /// of magnitude, so a ratio of region counts is not that fraction.
     pub regions: LocusCounts,
+    /// **Why this sample's reads were dropped, per read group, over the whole walk** — one
+    /// entry a read group the sample's files declared, `None` for reads that named none.
+    ///
+    /// **Summed over every chromosome, which is what makes it the walk's** (2026-09-01). These
+    /// counts belong to a cursor from the moment it is made, and a cursor is rebuilt at every
+    /// chromosome change, so a run that read them off the live cursor reported its last
+    /// chromosome's drops as the whole walk's. Spec §8 asks for the finish-time sum and names
+    /// what skipping it costs: drop rates under-report, "silently, since every number stays
+    /// plausible".
+    pub read_filters: Vec<(Option<ReadGroupId>, ReadFilterCounts)>,
     /// What the SNP/indel generator counted while walking this sample — **`None` where it
     /// counted nothing at all**, which is a sample whose ground held no such region.
     ///

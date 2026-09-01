@@ -320,7 +320,8 @@ not the file. The three sources are disjoint by construction — the leftover is
   reports noodles' *"failed to fill whole buffer"*; the no-index message names only `.csi` when
   `.bai` also works and never mentions `--build-index-if-missing`, the flag in this very command
   that fixes it; and both chains restate one fact four or five times before naming the file.
-- **`GenomeRegion`'s `Display` writes `contig 0` with 0-based coordinates**, and it is reachable
+- **`GenomeRegion`'s `Display` writes `contig 0`** — its coordinates are 1-based and inclusive,
+  as everything in ng is, so it is the chromosome alone a reader cannot match — and it is reachable
   through `RunError::RecordNotWritten` — the one message whose job is to say how far a partial
   file got, and the one a person cannot match against the VCF they are holding. Already on the
   standing list; F1 makes it user-facing.

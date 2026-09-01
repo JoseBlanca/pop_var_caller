@@ -38,6 +38,7 @@
 //! thread; the parallel form exists and is not reached from here (the run driver's plan,
 //! Milestone E, deferred 2026-09-01).
 
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -45,7 +46,9 @@ use clap::Args;
 use thiserror::Error;
 
 use crate::fasta::ContigList;
-use crate::ng::calling::allele_candidates::CandidateSelectionConfig;
+use crate::ng::calling::allele_candidates::{
+    CandidateSelectionConfig, DEFAULT_MAX_CANDIDATE_ALLELES, MaxCandidateAlleles,
+};
 use crate::ng::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
 use crate::ng::calling::inference::CallingLoopConfig;
 use crate::ng::calling::inference::summarise_condition::SummariseConditionLoop;
@@ -70,9 +73,10 @@ use crate::ng::region_typing::GenomeRegions;
 use crate::ng::repeat_catalog::{
     ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria, sibling_catalog_path,
 };
+use crate::ng::run::cohort_merge::{DEFAULT_MAX_COHORT_LOCUS_SPAN, MaxCohortLocusSpan};
+use crate::ng::run::report::BoundsTheRunCalledUnder;
 use crate::ng::run::{
-    AlignedFilesVariantCaller, AlignmentInputs, MergeParameters, RunError, Segmentation,
-    WrittenCohort,
+    AlignedFilesVariantCaller, AlignmentInputs, MergeParameters, RunError, RunReport, Segmentation,
 };
 use crate::ng::types::{DomainError, InbreedingF, Ploidy};
 use crate::ng::vcf::header::{HeaderContig, HeaderMetadataError, VcfHeaderMetadata};
@@ -161,6 +165,25 @@ pub struct CallFromAlignmentsArgs {
     /// Build a `.bai`/`.crai` beside any alignment file that has none.
     #[arg(long, help_heading = "Advanced")]
     pub build_index_if_missing: bool,
+
+    /// The widest a locus may be, in reference bases, before the caller declines to assemble it.
+    ///
+    /// A deletion joins the positions it covers into one locus, so this is what decides how
+    /// long a deletion can be and still be called — and everything else chained into that
+    /// locus goes with it. The run report says how many loci were refused and how long they
+    /// were; raise this and call again if their lengths cluster just above it. Long reads want
+    /// a larger number than short ones.
+    #[arg(long, default_value_t = DEFAULT_MAX_COHORT_LOCUS_SPAN, help_heading = "Advanced")]
+    pub max_cohort_locus_span: u32,
+
+    /// The most alleles a locus may be called over, the reference counted among them.
+    ///
+    /// Where more alleles segregate than this, the worst-evidenced are cut — and a sample whose
+    /// own reads earned one of the cut sequences is set aside at that locus rather than called
+    /// over a set that cannot hold what it carries. The run report says where that left nobody
+    /// callable at all.
+    #[arg(long, default_value_t = DEFAULT_MAX_CANDIDATE_ALLELES.get(), help_heading = "Advanced")]
+    pub max_candidate_alleles: u16,
 }
 
 /// Everything that can stop a run, rendered for a person at a terminal.
@@ -231,6 +254,32 @@ pub enum CallFromAlignmentsCliError {
         /// Why it is not a ploidy.
         #[source]
         source: DomainError,
+    },
+
+    /// A bound that is not a bound.
+    #[error(
+        "--max-cohort-locus-span {asked}: a locus covers at least one reference base, so a \
+         bound of zero would refuse every locus there is"
+    )]
+    MaxCohortLocusSpanIsZero {
+        /// What was asked for.
+        asked: u32,
+    },
+
+    /// An allele cap that is a refusal under another name.
+    ///
+    /// **Below two the reference is the only survivor** and every alternative becomes a
+    /// truncation, so a locus carrying two obvious variants would lose both — which
+    /// `candidate_alleles.md` §4.1 rules out.
+    #[error(
+        "--max-candidate-alleles {asked}: a cap counts the reference among the alleles, so it \
+         needs at least {smallest} — the reference and one alternative"
+    )]
+    MaxCandidateAllelesTooSmall {
+        /// What was asked for.
+        asked: u16,
+        /// The smallest cap that is a cap rather than a refusal.
+        smallest: u16,
     },
 
     /// A ploidy past what the read likelihood scores.
@@ -456,6 +505,25 @@ pub fn run_call_from_alignments(
     // opening a cohort of CRAMs is minutes; a number or a path that was never going to work
     // should cost none of them.
     let asked_ploidy = ploidy_asked_for(args)?;
+    let merge_parameters = MergeParameters {
+        max_cohort_locus_span: MaxCohortLocusSpan(
+            NonZeroU32::new(args.max_cohort_locus_span).ok_or(
+                CallFromAlignmentsCliError::MaxCohortLocusSpanIsZero {
+                    asked: args.max_cohort_locus_span,
+                },
+            )?,
+        ),
+        ..MergeParameters::DEFAULT
+    };
+    let candidate_selection = CandidateSelectionConfig {
+        max_candidate_alleles: MaxCandidateAlleles::new(args.max_candidate_alleles).ok_or(
+            CallFromAlignmentsCliError::MaxCandidateAllelesTooSmall {
+                asked: args.max_candidate_alleles,
+                smallest: MaxCandidateAlleles::SMALLEST,
+            },
+        )?,
+        ..CandidateSelectionConfig::DEFAULT
+    };
     refuse_an_output_that_cannot_be_written(args)?;
     refuse_an_output_whose_parameters_file_is_this_run_s_input(args)?;
 
@@ -487,6 +555,10 @@ pub fn run_call_from_alignments(
     let reference = OpenReference::new(info);
 
     let analysed = analysed_regions(args, &contigs)?;
+    // **Kept because the segmentation takes the original**, and the report names the ground the
+    // run undertook to speak for — which is the one thing a VCF cannot say and the whole reason
+    // a run reports at all.
+    let analysed_for_the_report = analysed.clone();
     let segmentation = segments_over(args, &analysed, &with_checksums)?;
 
     let read_groups = build_read_groups(&args.alignments)
@@ -536,8 +608,8 @@ pub fn run_call_from_alignments(
         CallingLoopConfig::DEFAULT.validate().map_err(|source| {
             CallFromAlignmentsCliError::CallingLoopSettings(source.to_string())
         })?,
-        CandidateSelectionConfig::DEFAULT,
-        MergeParameters::DEFAULT,
+        candidate_selection,
+        merge_parameters,
     )
     .map_err(|source| CallFromAlignmentsCliError::Run { source })?;
 
@@ -589,7 +661,21 @@ pub fn run_call_from_alignments(
             source,
         })?;
 
-    report(args, &written, &parameters_at, &parameters_file);
+    report(
+        &args.output,
+        &parameters_at,
+        &RunReport::of(
+            &written,
+            &contigs,
+            &read_groups,
+            &parameters_file,
+            &analysed_for_the_report,
+            BoundsTheRunCalledUnder {
+                max_cohort_locus_span: merge_parameters.max_cohort_locus_span.get(),
+                max_candidate_alleles: candidate_selection.max_candidate_alleles.get(),
+            },
+        ),
+    );
     Ok(())
 }
 
@@ -928,79 +1014,21 @@ fn header_for(
     .map_err(|source| CallFromAlignmentsCliError::Header { source })
 }
 
-/// **What the run wrote, and what it could not speak for** — printed because the two questions a
-/// person has beside a new VCF are how many records are in it and how much of the ground it
-/// covers.
+/// **What the run has to say about itself**, printed when it finishes.
 ///
-/// **The last two rows are what stops an empty file being read as an empty genome.** Every locus
-/// goes down the SNP/indel path today and a repeat tract is charged to *not built yet*, so a run
-/// over tract-rich ground is short rather than wrong — and a summary of six zeros with no reason
-/// beside them cannot be told from a run that looked everywhere and found nothing. **Measured on
-/// a 60-base `AT` tract at 24 reads a sample: every count was zero and the exit status was
-/// success**, which is what this row now answers.
+/// The report proper is [`RunReport`], which is where every rule about what a run owes a reader
+/// lives; this adds the two paths — a person needs to know which files to open — and prints the
+/// lines.
 ///
-/// The run report proper — every refusal, every parameter that was defaulted rather than fitted,
-/// the per-read-group filter tallies — is the run driver's plan step F3; this is the minimum a
-/// command that writes a file has to say about it.
-fn report(
-    args: &CallFromAlignmentsArgs,
-    written: &WrittenCohort,
-    parameters_at: &Path,
-    parameters: &ParametersFile,
-) {
-    println!("output\t{}", args.output.display());
-    // **Named on its own line, because it is a second file the run produced** and a person who
-    // does not know it exists will not look for it. What it rests on is said beside it: a file
-    // a fit wrote and a file a defaults run wrote are the same shape by design (spec §7), and
-    // the count of groups is the file's own answer to *which is this*.
-    // **The file's claim about itself, and not this run's.** `call-from-alignments` fits
-    // nothing — it reads its numbers from a file or takes the compiled-in defaults — so a count
-    // labelled *fitted from this cohort* would be false on every `--parameters` run, which is
-    // the mode this command exists for. `what_the_run_fitted` says so in its own documentation:
-    // *fitted* means the file states a fit produced these numbers, not that this run's reads
-    // did. The label says whose claim it is.
-    let fitted = parameters.what_the_run_fitted();
-    println!("parameters\t{}", parameters_at.display());
-    println!(
-        "  groups_of_numbers_the_file_says_were_fitted\t{} of {}",
-        fitted.fitted().len(),
-        fitted.groups(),
-    );
-    println!("samples\t{}", written.walk.per_sample.len());
-    println!("records_written\t{}", written.records_written);
-    // **Indented, because these two are the parts of the total above them and the four rows
-    // below are not.** A flat list of counts reads as a partition, and only this pair is one.
-    println!("  loci_called\t{}", written.loci_called());
-    println!(
-        "  loci_called_establishing_no_variant\t{}",
-        written.loci_called_but_not_written
-    );
-    println!(
-        "loci_too_wide_to_assemble\t{}",
-        written.loci_too_wide_to_assemble.len()
-    );
-    println!(
-        "loci_with_nobody_to_call\t{}",
-        written.loci_with_nobody_to_call.len()
-    );
-
-    // **Every sample walks the same ground, so one sample's region tally is the run's.** The
-    // loci each sample's walk emitted differ and are not this line's business.
-    let Some(ground) = written.walk.per_sample.first().map(|walk| &walk.regions) else {
-        return;
-    };
-    println!(
-        "regions_walked\t{} of {}",
-        ground.regions_handled, ground.regions_in
-    );
-    println!(
-        "bases_not_called_repeat_tracts_this_caller_has_not_built\t{}",
-        ground.unhandled_not_implemented_bp
-    );
-    println!(
-        "bases_never_called_satellite\t{}",
-        ground.unhandled_out_of_scope_bp
-    );
+/// **The lines are the report's and not this function's**, so that what a run says is something
+/// a test can hold. It was the one part of this command a mutation could change with the whole
+/// suite still green.
+fn report(calls: &Path, parameters_at: &Path, report: &RunReport<'_>) {
+    println!("calls: {}", calls.display());
+    println!("parameters: {}", parameters_at.display());
+    for line in report.lines() {
+        println!("{line}");
+    }
 }
 
 #[cfg(test)]

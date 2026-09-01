@@ -250,6 +250,8 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         defaults: true,
         ploidy: None,
         build_index_if_missing: false,
+        max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+        max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
     }
 }
 
@@ -273,6 +275,8 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         defaults: true,
         ploidy: None,
         build_index_if_missing: false,
+        max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+        max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
     };
 
     let refused = segments_over(
@@ -643,6 +647,8 @@ fn a_cohort_on_disk() -> (
         defaults: true,
         ploidy: None,
         build_index_if_missing: false,
+        max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+        max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
     };
     (reference_dir, zeta_dir, alpha_dir, args)
 }
@@ -720,4 +726,20 @@ fn the_command_refuses_to_write_its_parameters_over_the_file_it_was_given() {
         rendered.contains("calls.parameters.toml"),
         "the message names the file that would be lost, and got: {rendered}",
     );
+}
+
+/// **What a person sees when the command finishes**, printed once so a reviewer of this step
+/// reads the artefact rather than the code that builds it.
+///
+/// Ignored, because its value is the eye and not the assertion — the report's own tests
+/// (`ng::run::report`) are what pin the lines. Run it deliberately:
+///
+/// ```text
+/// cargo test --lib call_from_alignments -- --ignored --nocapture the_report_a_person_sees
+/// ```
+#[test]
+#[ignore = "prints the run report for a person to read; the assertions are in ng::run::report"]
+fn the_report_a_person_sees() {
+    let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
+    run_call_from_alignments(&args).expect("the cohort runs");
 }

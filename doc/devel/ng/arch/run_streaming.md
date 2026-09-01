@@ -57,6 +57,11 @@ src/ng/run/
 │                    and per-allele counts read off the merge's observation, the artifact
 │                    correction, the padding base, and the rule that decides which loci reach
 │                    the file (added 2026-09-01, step F1)
+├── report.rs      – what a run says about itself when it finishes: what it wrote, the three
+│                    kinds of ground it could not speak for, which samples had no reads, why
+│                    the filters dropped what they dropped, and which of its numbers rest on a
+│                    measurement. Lines rather than printed output, and every span named by its
+│                    chromosome (added 2026-09-01, step F3)
 ├── gatherer.rs    – SampleObservationGatherer
 ├── psp_header.rs  – PspHeader: the values every psp records
 └── cohort_merge/  – built; its own arch doc (cohort_merge.md)
@@ -563,11 +568,20 @@ observations to get there.
 
 **⛦ What the run keeps from its walk (2026-09-01).** `ObservationCache::into_sources` hands the
 per-sample readers back, so each walker's region accounting, its SNP/indel generator's counters and
-the assembly-check outcome reach `CohortWalkTallies` before the walkers are dropped. **The
-per-read-group read-filter tallies are still unreachable, and not for want of an accessor**: at
-each contig boundary the retiring cursor's read-group counts are dropped rather than accumulated,
-so by the end of a walk every contig but the last has lost them. Spec §8 requires a run to sum them
-at the end; reaching them is a change to the locus generator, and it is F3's.
+the assembly-check outcome reach `CohortWalkTallies` before the walkers are dropped.
+
+**⛦ The per-read-group read-filter tallies reach it too, from step F3** — they were recorded here
+as unreachable "not for want of an accessor", because at each contig boundary the retiring
+cursor's read-group counts were dropped rather than accumulated and a walk had lost every contig
+but its last. The change was the one the generator already made for the *aggregate* cursor counts,
+one axis finer: take the retiring cursor's at the boundary, sum the live one in when asked
+(`PileupGenerator::read_filter_counts`, reached through a defaulted `LocusGenerator` trait method
+so a boxed generator can be asked). Spec §8's finish-time tally, and the failure it names if it is
+skipped — drop rates under-report "silently, since every number stays plausible".
+
+**⛦ And `LocusCounts` gained `regions_handled_bp`**, so the analysed ground partitions in bases as
+it already did in regions. Without it a run could say how many typed regions it handled and not
+how much genome that was, and typed regions differ in length by orders of magnitude.
 
 **⛦ Direct mode writes VCF records, and hands them over one at a time (2026-09-01, step F1).**
 `call_cohort_handing_each_record_over(&genotyper, &mut hand_over)` is the path a command takes;

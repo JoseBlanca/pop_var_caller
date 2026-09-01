@@ -22,6 +22,7 @@ mod witness;
 /// lives in (arch *Module home*).
 pub use witness::{LocusLen, ReadWitness, WitnessedLocusPositions};
 
+use crate::ng::read::filtering::ReadFilterCounts;
 use crate::ng::read::input::{IngestError, SampleReads};
 use crate::ng::ref_seq::RefSeqError;
 use crate::ng::region_typing::segment_criteria::{Motif, SsrSegment};
@@ -492,6 +493,20 @@ pub trait LocusGenerator<S> {
     fn counts(&self) -> Option<GeneratorCounts<'_>> {
         None
     }
+
+    /// **Why this generator's reader dropped reads, per read group, over the whole walk.**
+    ///
+    /// Kept apart from [`counts`](Self::counts) because it is a fact about the *reader* rather
+    /// than about the loci — the same reason `PileupGenerator::cursor_counts` is not a field of
+    /// `PileupGeneratorCounts`, whose shape the dump tools assert byte-identical against
+    /// committed baselines.
+    ///
+    /// Spec §8 requires a run to sum these when it finishes, or drop rates under-report
+    /// silently. Empty by default, so a generator with no reader of its own — [`NoLoci`], a
+    /// test fake — says so by saying nothing.
+    fn read_filter_counts(&self) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
+        Vec::new()
+    }
 }
 
 /// What a generator counted, tagged by which generator counted it.
@@ -700,11 +715,21 @@ impl LocusGenerationError {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LocusCounts {
     /// Typed regions dispatched — the total, which partitions **exactly** into
-    /// `regions_handled` plus the two unhandled counters (spec §13.2).
+    /// `regions_handled` plus the two unhandled counters (spec §13.2). **The bases partition
+    /// the same way**, into `regions_handled_bp` and the two unhandled base counters.
     pub regions_in: u64,
     /// Regions routed to a filled generator, whatever number of loci it then emitted
     /// (including zero). With the two unhandled counters this sums to `regions_in`.
     pub regions_handled: u64,
+    /// The bases those `regions_handled` regions cover — **the ground this caller spoke for**.
+    ///
+    /// **Added 2026-09-01, and what it makes answerable is a question the region counts alone
+    /// cannot.** Typed regions differ in length by orders of magnitude, so half the regions can
+    /// be a twentieth of the ground: a run reporting "9,000 of 10,000 regions handled" says
+    /// nothing about how much genome it covered. With the two unhandled base counters beside
+    /// it, this completes the partition in bases as `regions_handled` completes it in regions,
+    /// so *what fraction of the analysed ground did this run call* has an answer.
+    pub regions_handled_bp: u64,
     /// Loci emitted, across every generator. **Not** a region count — one handled region
     /// yields zero, one, or many.
     pub loci_emitted: u64,
@@ -792,6 +817,15 @@ impl<S> GeneratorSlot<S> {
             GeneratorSlot::Unfilled(_) => None,
         }
     }
+
+    /// Why this slot's generator dropped reads, per read group — nothing for an unfilled slot,
+    /// which read none.
+    fn read_filter_counts(&self) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
+        match self {
+            GeneratorSlot::Generator(generator) => generator.read_filter_counts(),
+            GeneratorSlot::Unfilled(_) => Vec::new(),
+        }
+    }
 }
 
 /// The set of generators the dispatcher routes to — one slot per region kind — plus the
@@ -863,6 +897,31 @@ impl GeneratorSet {
         self.ssr_bundle.counts()
     }
 
+    /// **Why this sample's reads were dropped, per read group, summed over every generator of
+    /// the set** — spec §8's finish-time tally, which a run reports.
+    ///
+    /// **Summed and not one accessor a slot**, unlike the three above: each generator drives a
+    /// reader of its own over the same sample's files, so a read group's drops are spread
+    /// across whichever generators walked its ground and no single slot holds the sample's
+    /// answer. The three counts above are per-generator facts a reader compares; this is one
+    /// fact about the sample. Only one slot is filled today, which is what makes the sum look
+    /// like a forwarding.
+    #[must_use]
+    pub fn read_filter_counts(&self) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
+        let mut total: std::collections::BTreeMap<Option<ReadGroupId>, ReadFilterCounts> =
+            std::collections::BTreeMap::new();
+        for slot_counts in [
+            self.ssr.read_filter_counts(),
+            self.generic.read_filter_counts(),
+            self.ssr_bundle.read_filter_counts(),
+        ] {
+            for (read_group, counts) in slot_counts {
+                total.entry(read_group).or_default().add(&counts);
+            }
+        }
+        total.into_iter().collect()
+    }
+
     /// Begin a region: count it, and ready its generator if one is filled. Every region is
     /// counted in `regions_in`; a handled kind also in `regions_handled`, an unfilled kind in
     /// its unhandled counter. Infallible — resetting a generator cannot fail (spec §4).
@@ -888,6 +947,7 @@ impl GeneratorSet {
         };
         if filled {
             self.counts.regions_handled += 1;
+            self.counts.regions_handled_bp += bp;
         }
         self.current = filled.then_some(region);
     }

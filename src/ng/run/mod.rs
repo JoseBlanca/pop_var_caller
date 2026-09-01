@@ -23,6 +23,7 @@
 pub mod callers;
 pub mod cohort_merge;
 pub mod records;
+pub mod report;
 pub mod segments;
 pub mod walker;
 
@@ -30,6 +31,7 @@ pub use callers::{
     AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, CalledCohort,
     CohortWalkTallies, MergeParameters, SampleWalkTallies, WrittenCohort,
 };
+pub use report::RunReport;
 pub use segments::{Segmentation, SegmentationInputs};
 pub use walker::{AlignmentFilesWalker, RunSegments};
 

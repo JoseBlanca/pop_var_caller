@@ -19,7 +19,65 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-01):** **F2 — every run writes the parameters it used, beside
+> - **Last completed task (2026-09-01):** **F3 — the run report: what the run refused, and why**
+> (step F3 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
+> [report](doc/devel/reports/implementations/ng_run_driver_f3_2026-09-01.md)).
+> **5,885 tests in the lib** — 17 added.
+> **Why a run has to say anything at all**: a VCF cannot distinguish ground the caller examined
+> and found nothing at from ground it never spoke for, which is `cohort_merge.md` §3.3's argument
+> for the failed-locus count being *counted* and not merely dropped. The F1 review measured what
+> that costs — a run over a 60-base `AT` tract at 24 reads a sample **printed six zeros and
+> exited successfully**, indistinguishable from a clean genome.
+> **The report states every count as a share of a stated whole**: the analysed ground partitions
+> into what was called and the two kinds of what was not, each with its percentage. A refusal
+> that did not happen gets a count and no advice; one that did shows a handful of spans and what
+> to do about them, which is what §3.3 says a non-zero count should lead a reader to. A filter
+> reason that did not fire is not printed. And the groups of numbers that were **not** fitted are
+> named rather than counted — a run whose contamination is a compiled-in constant is a different
+> claim from one whose base-quality calibration is, and *five of seven* says neither.
+> **⛦ Three of the four things Checkpoints C and D recorded as owed to F3 are built**, because the
+> report cannot state its arithmetic without them.
+> **The per-read-group read-filter tallies**, recorded as needing "a change to the generator, not
+> an accessor" — right, and the change is the one the generator already makes for the aggregate
+> cursor counts, one axis finer: take the retiring cursor's at each contig boundary, sum the live
+> one in when asked. Until now a walk had lost every contig but its last, so a run over twelve
+> chromosomes reported the twelfth's drop rates as its own. Spec §8's finish-time tally, and its
+> named failure — drop rates under-report "silently, since every number stays plausible".
+> **`LocusCounts::regions_handled_bp`**, so the ground partitions in bases as it already did in
+> regions: typed regions differ in length by orders of magnitude, so half the regions can be a
+> twentieth of the ground.
+> **And contigs named rather than numbered** — `GenomeRegion`'s `Display` writes `contig 0:15-15`
+> because a region carries no reference; a run carries one, so `RunReport` names every span it
+> shows. The `Display` is unchanged.
+> **⚑ The fourth is not built**: `RunError::RecordNotWritten` still renders its locus through that
+> `Display`, so the one message whose job is to say how far a partial file got prints `contig 0`
+> and 0-based coordinates a reader cannot match against the VCF they hold. It is an error type
+> reached from a path with no contig table in hand.
+> **The report is lines, not printed output**, which is what makes it testable — F2's report
+> records its correctness pass finding the summary the one part of this command a mutation could
+> change with the whole suite green.
+> **⚑ The review found the report telling a false thing about the VCF.** A sample the caller could
+> not use was printed as "each still carries a genotype, from the prior alone" — what the *loop*
+> does, not what the *file* writes. `vcf_output.md` §7.1 no-calls a sample whose likelihoods are
+> flat, F1 implemented it, and every such sample is `./.`. It also found "no reads here"
+> collapsing three problems and false for two (a sample whose 720 reads were all duplicates was
+> called *no reads* four lines above the line saying it had 720); a share reading **200.0%**,
+> because a repeat tract is walked whole where a BED asks for part of it and the denominator was
+> the part; and advice naming `--max-cohort-locus-span`, **which was not a flag this command
+> accepted**. Both bounds are flags now, and the advice quotes the value in force beside each
+> refused span's length.
+> **⚑ And the step's hardest change had no test: five mutations along the read-filter chain
+> survived all 5,880.** Deleting the live sum alone means *every single-contig run reports zero
+> drops*, since the last cursor never retires. Two tests close it, one measured against the
+> mutation. The pass also found `other_sample` counted as a dropped read against its own field's
+> documentation — "counting it as a drop would make a shared file look like a low-quality one" —
+> which on a cohort sharing one multi-sample BAM would have dominated every sample's drop count.
+> **⚑ One thing recorded and not acted on, because it will bite whoever fills a tract slot**:
+> `SsrGenerator` keeps a reader and its own retired counts and does not override
+> `read_filter_counts`, so the moment a repeat-tract slot is filled the report under-reports by
+> whatever share of the ground is tracts, silently. Both slots are unfilled today.
+>
+> - **Previously (2026-09-01):** **F2 — every run writes the parameters it used, beside
 > its VCF** (step F2 of
 > [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
 > [report](doc/devel/reports/implementations/ng_run_driver_f2_2026-09-01.md)).
@@ -72,7 +130,7 @@ Skills and agents are instructed to leave it untouched.
 > run under another name and would break the two-mode oracle — so the sentence was corrected and
 > the golden `every_shape_as_written.toml` regenerated, its diff being that sentence alone.
 >
-> - **Previously (2026-09-01):** **F1 — `call-from-alignments`: a cohort of CRAMs in, a
+> - **Earlier (2026-09-01):** **F1 — `call-from-alignments`: a cohort of CRAMs in, a
 > VCF out** (step F1 of
 > [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
 > [report](doc/devel/reports/implementations/ng_run_driver_f1_2026-09-01.md)). A person can now

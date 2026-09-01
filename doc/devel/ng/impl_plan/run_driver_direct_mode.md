@@ -436,8 +436,27 @@ construction, so a path would be wrong the moment somebody moved the pair. F1 de
 the line off.
 *Depends:* F1. *Source:* [`parameters_file.md`](../spec/parameters_file.md) §7.
 
-☐ **F3. The run report.** What the run refused and why: loci the merge would not build, samples with
+✅ **F3. The run report.** What the run refused and why: loci the merge would not build, samples with
 no reads, every parameter that was defaulted rather than fitted.
+
+**⛦ Three of the four things Checkpoints C and D recorded as owed to F3 are built here**, because
+the report cannot state its arithmetic without them.
+
+- **The per-read-group read-filter tallies.** Recorded as needing "a change to the generator, not
+  an accessor" — which was right, and the change is the one the generator already makes for the
+  aggregate cursor counts: take the retiring cursor's at each contig boundary, sum the live one in
+  when asked. Until now a walk had lost every contig but its last, so a run over twelve
+  chromosomes reported the twelfth's drop rates as its own. Spec §8's finish-time tally.
+- **`LocusCounts::regions_handled_bp`**, so the analysed ground partitions in *bases* as it
+  already did in regions. Typed regions differ in length by orders of magnitude, so "9,000 of
+  10,000 regions handled" says nothing about how much genome a run covered.
+- **Contigs named rather than numbered.** `GenomeRegion`'s `Display` writes `contig 0:15-15`
+  because a region carries no reference; a run carries one, so `RunReport` names every span it
+  shows. The `Display` itself is unchanged — it still has nothing to name a contig with.
+
+**⛦ The report is lines, not printed output**, which is what makes it testable: the summary's
+own text was the one part of this command a mutation could change with the whole suite green, and
+the F2 correctness review said so.
 *Depends:* F2. *Source:* §13 (`cohort_merge.md`'s refusal counts);
 [`parameters_file.md`](../spec/parameters_file.md) §8.
 
