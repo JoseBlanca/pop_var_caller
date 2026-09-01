@@ -460,7 +460,42 @@ the F2 correctness review said so.
 *Depends:* F2. *Source:* §13 (`cohort_merge.md`'s refusal counts);
 [`parameters_file.md`](../spec/parameters_file.md) §8.
 
-> **Checkpoint F:** a person can run ng on a cohort of CRAMs from the command line. Pause for review.
+> **Checkpoint F: met 2026-09-01.** A person can run ng on a cohort of CRAMs from the command
+> line. `pop_var_caller_exp call-from-alignments` takes a reference, the catalog beside it, one
+> `--alignment` per sample, an optional BED, `--parameters` or `--defaults`, and an output VCF;
+> it writes the VCF, the parameters it used beside it, and a report of what it refused and why.
+> **5,885 tests in the lib, 421 in `ng::run`.**
+>
+> **It was driven end to end in review, three times over on built cohorts** — a 4.6 kb two-contig
+> reference, its catalog, samples at 24×, planted variants. `bcftools view`, `query`, `stats`,
+> `norm -f ref.fa -c e` and `index -t` all accept the output with exit 0, the planted genotypes
+> come back right, and a run's own parameters file fed back with `--parameters` reproduces a
+> byte-identical VCF. A hand-edited inbreeding coefficient of 0.9 moved exactly one field: that
+> sample's homozygote from **GQ 63 to GQ 76**.
+>
+> **⚑ Four things wait on the owner.**
+>
+> **The subcommand names are still written nowhere.** `generate-psps`, `generate-census`,
+> `call-from-psps`, `call-from-alignments`, agreed 2026-08-28. F1 built under them and pins the
+> one it added; [`typed_regions_cli.md`](../spec/typed_regions_cli.md) is the owner's to edit.
+>
+> **`DP` now counts reads removed as evidence**, a reading of [`vcf_output.md`](../spec/vcf_output.md)
+> §7 taken 2026-09-01: §7 says `DP` is *"every read observation the sample had at the locus"*,
+> and those reads were observed there. A one-line revert if the owner wants only the two sources
+> `SampleEvidenceForOutput`'s own doc names.
+>
+> **A refused record stops the sink but not the walk**, because
+> `merge_cohort_handing_each_locus_over` takes a sink that returns nothing. On a cohort whose disk
+> fills at chromosome 1 that is the rest of the genome decoded for nothing. The fix is one
+> `ControlFlow` through the merge's two drivers and its region builder — the merge's interface,
+> and not a step of this plan.
+>
+> **And GQ is worth a look.** Measured on a review's own fixture, not a benchmark: at 24 reads a
+> sample a clean homozygous-reference call (`AD 24,0`) came back at **GQ 74** beside a
+> heterozygote (`AD 12,12`) at **GQ 99**, and at `--ploidy 4` the same reads gave GQ 9, 13 and 29
+> — so a routine `GQ>=20` filter would discard nearly every tetraploid call.
+>
+> Pause for review.
 
 ### Milestone G — stop the merge freeing the records it was handed
 
