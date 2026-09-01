@@ -19,7 +19,60 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-01):** **F1 — `call-from-alignments`: a cohort of CRAMs in, a
+> - **Last completed task (2026-09-01):** **F2 — every run writes the parameters it used, beside
+> its VCF** (step F2 of
+> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
+> [report](doc/devel/reports/implementations/ng_run_driver_f2_2026-09-01.md)).
+> `call-from-alignments` now writes two files, and nothing turns the second off — spec §7's
+> unconditional rule, on the ground that the run most needing its parameters recorded is the one
+> whose operator did not think to ask. **5,868 tests in the lib** — 11 added.
+> **Almost all the machinery existed**; what F2 built is the wiring and the two decisions the
+> code's own documentation left to a run driver.
+> **The file is assembled before the first read is decoded and written after the last record.**
+> `ParametersFile::of_run` holds its checks in release and says a panic there would discard a
+> cohort's calling work — every one of them is a startup question, and nothing about the file
+> changes while the run calls. It goes to disk after the VCF is renamed into place, because §7's
+> three purposes are all about a run that finished.
+> **And a run may not write its parameters over the file it was handed.** §7 invites the
+> collision by telling a user to copy the file their run wrote and change a line, so
+> `--parameters calls.parameters.toml --output calls.vcf.gz` is the natural next command and
+> would destroy the edit. Refused before anything is read, with both directories resolved.
+> **§7's first purpose is now an assertion**: a defaults run's file reads back through the
+> binding door into the ploidy, the counts, every coefficient and every multiplier the run scored
+> with. `##parametersFile` is filled, by name rather than by path.
+> **The review drove it end to end** on a 4.6 kb reference with two 24× samples: the round trip
+> gave a byte-identical VCF *and* a byte-identical parameters file, and a hand-edited inbreeding
+> coefficient of 0.9 moved exactly one field — that sample's homozygote from **GQ 63 to GQ 76**.
+> **Four defects it found were fixed.** The summary's count claimed a fit this command never
+> runs (`call-from-alignments` fits nothing; the number is the file's own claim, and the label now
+> says so). **The parameters file was written mode `0600` beside a VCF at `0644`** — a colleague
+> on a shared directory could read the calls and not what they rest on, which is §7 defeated for
+> everyone but the launcher; `write_beside_the_vcf` now creates its temporary the way the VCF's
+> own sink does, so both take their mode from `umask`. A plain `--defaults` re-run destroyed a
+> hand-edited file in silence, and now says it is replacing one. And a run whose VCF was complete
+> exited 1 without naming the VCF, which a `set -e` pipeline would have thrown away.
+> **⚑ The correctness pass found one real defect and a large hole.** A `--parameters` run wrote a
+> file saying it had **no census**, against `of_run`'s explicit contract that a run writing its
+> parameters out again writes back the terms it read. Not a wrong number — a silent loss of
+> provenance one hop through direct mode: a psp fit's file re-run in direct mode keeps its
+> `fitted_here` warrants and loses its census, so a later psp run over the same cohort finds a
+> disagreement and demotes every number to `supplied`. That is the two-mode divergence spec §2.1
+> exists to prevent. The census now travels with the counts and the warrants.
+> **And nine of fourteen mutations survived for one reason: nothing called
+> `run_call_from_alignments`.** Deleting the refusal's call site, or naming `calls.vcf` in
+> `##parametersFile` on every VCF, or handing `of_run` an axis of the wrong length — which panics
+> at startup on any real run — all left the suite green. Two tests now drive the command itself
+> over a reference, a catalog and two samples built on disk. A symlinked `--parameters` also
+> slipped past the refusal (probed) and an absent one was refused with the wrong message; both
+> fixed.
+> **⚑ And the parameters file stated a rule about itself that it did not follow**: of
+> `fallback_length_spectrum_concentration` it said a run handed the file marks it `supplied`,
+> where the round trip writes back `defaulted`. **The code is right** — spec §2.1 settles that a
+> supplied file keeps its warrants, since demoting on every read is demoting on every direct-mode
+> run under another name and would break the two-mode oracle — so the sentence was corrected and
+> the golden `every_shape_as_written.toml` regenerated, its diff being that sentence alone.
+>
+> - **Previously (2026-09-01):** **F1 — `call-from-alignments`: a cohort of CRAMs in, a
 > VCF out** (step F1 of
 > [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
 > [report](doc/devel/reports/implementations/ng_run_driver_f1_2026-09-01.md)). A person can now
@@ -88,7 +141,7 @@ Skills and agents are instructed to leave it untouched.
 > **GQ 74** beside a heterozygote (`AD 12,12`) at **GQ 99**, and at `--ploidy 4` the same reads
 > gave GQ 9, 13 and 29 — so a routine `GQ>=20` filter would discard nearly every tetraploid call.
 >
-> - **Previously (2026-09-01):** **A locus nobody can be called at is counted, not
+> - **Earlier (2026-09-01):** **A locus nobody can be called at is counted, not
 > fatal** — the owner's ruling at Checkpoint D
 > ([report](doc/devel/reports/implementations/ng_locus_with_nobody_to_call_2026-09-01.md)).
 > The allele cap cuts a sequence rather than refusing a locus, on the ground that most samples

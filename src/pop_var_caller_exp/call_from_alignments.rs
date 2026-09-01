@@ -1,5 +1,6 @@
 //! The `call-from-alignments` subcommand: **call a cohort of alignment files and write a VCF**,
-//! in one process, with nothing written to disk in between.
+//! in one process, with nothing written to disk in between — and, beside that VCF, the model
+//! parameters the run scored with.
 //!
 //! This is ng's direct mode (`doc/devel/ng/spec/run_streaming.md` §2 and §5.1) at the command
 //! line. Every sample's file is opened and held for the whole run, every sample's reads are
@@ -11,7 +12,15 @@
 //!
 //! In: the reference, the tandem-repeat catalog built beside it, one alignment file per
 //! sample, the stretch of genome to call over, and the model's numbers — either a parameters
-//! file or `--defaults`. Out: one VCF.
+//! file or `--defaults`.
+//!
+//! Out: **two files**. The VCF, and a `<output stem>.parameters.toml` beside it holding every
+//! number the run scored with. The second is not optional and there is no flag to switch it off
+//! (`doc/devel/ng/spec/parameters_file.md` §7): a run is then reproducible from its own output,
+//! a run that guessed its numbers is auditable in the same form as one that measured them, and
+//! somebody who wants to change one number starts from a file rather than from a document. It
+//! is also why a run whose `--parameters` file is the one it would write is refused — that is
+//! the second command a person types, and it would destroy the edit they just made.
 //!
 //! **The catalog is not optional and it is not a repeat caller's input.** It is what says where
 //! the repeat tracts are, so the run can route them; every locus is called down the SNP/indel
@@ -43,10 +52,12 @@ use crate::ng::calling::inference::summarise_condition::SummariseConditionLoop;
 use crate::ng::calling::likelihood::MAX_PLOIDY_COPIES;
 use crate::ng::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
 use crate::ng::calling::parameters_file::{
-    DeclaredInbreeding, ParametersFile, ParametersFileError,
+    CensusIdentity, DeclaredInbreeding, ParametersFile, ParametersFileError,
+    ReadsBehindEachCalibration, beside_the_vcf,
 };
 use crate::ng::calling::run_parameters::RunParameters;
 use crate::ng::locus_generation::pileup::PileupGeneratorConfig;
+use crate::ng::parameter_estimation::Estimate;
 use crate::ng::parameter_estimation::joint::loci::{ReferenceDigest, SelectionError};
 use crate::ng::read::ReadFilterConfig;
 use crate::ng::read::input::read_groups::{ReadGroupError, ReadGroups, build_read_groups};
@@ -63,7 +74,7 @@ use crate::ng::run::{
     AlignedFilesVariantCaller, AlignmentInputs, MergeParameters, RunError, Segmentation,
     WrittenCohort,
 };
-use crate::ng::types::{DomainError, Ploidy};
+use crate::ng::types::{DomainError, InbreedingF, Ploidy};
 use crate::ng::vcf::header::{HeaderContig, HeaderMetadataError, VcfHeaderMetadata};
 use crate::ng::vcf::writer::{VcfWriteError, VcfWriter};
 use crate::pop_var_caller::common::current_command_line;
@@ -240,6 +251,48 @@ pub enum CallFromAlignmentsCliError {
         limit: usize,
     },
 
+    /// The parameters file this run would write is the one it was handed.
+    ///
+    /// **Spec §7 invites the collision**: it tells a user to copy the file their run wrote and
+    /// change a line, so `--parameters calls.parameters.toml --output calls.vcf.gz` is the
+    /// natural next command and would write over the file that was just edited. Refused before
+    /// anything is read, because what it destroys is the edit and the run would look ordinary.
+    #[error(
+        "--parameters {} is the file this run would write beside --output {}; \
+         name the output differently, or copy the parameters somewhere else first",
+        path.display(),
+        output.display()
+    )]
+    ParametersWouldBeOverwritten {
+        /// The file that was handed in.
+        path: PathBuf,
+        /// The output whose sibling it is.
+        output: PathBuf,
+    },
+
+    /// The parameters file could not be written beside the output.
+    ///
+    /// **The VCF is already whole when this can happen**, since the parameters go to disk after
+    /// the last record is renamed into place — so a run that reaches this has its calls and not
+    /// its provenance, which is what the message has to let an operator work out.
+    #[error(
+        "the calls are complete and written to {}, but the parameters that produced them could \
+         not be saved to {} — keep the VCF and re-run to recover its parameters",
+        calls.display(),
+        path.display()
+    )]
+    ParametersNotWritten {
+        /// Where they would have gone.
+        path: PathBuf,
+        /// The VCF that is finished and on disk. **Named because the run still fails**: a
+        /// `set -e` pipeline would otherwise throw away a complete, correctly-headed file, and
+        /// nothing else in the message says it is there.
+        calls: PathBuf,
+        /// What the write said.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// `--output` names a directory rather than a file.
     #[error(
         "--output {} is a directory; give the path of the VCF file to write, such as {}/calls.vcf.gz",
@@ -404,6 +457,7 @@ pub fn run_call_from_alignments(
     // should cost none of them.
     let asked_ploidy = ploidy_asked_for(args)?;
     refuse_an_output_that_cannot_be_written(args)?;
+    refuse_an_output_whose_parameters_file_is_this_run_s_input(args)?;
 
     // **The FASTA is read to the end before a file is opened.** Two of the run's construction
     // checks compare per-contig checksums — that each sample was aligned to this reference, and
@@ -437,12 +491,36 @@ pub fn run_call_from_alignments(
 
     let read_groups = build_read_groups(&args.alignments)
         .map_err(|source| CallFromAlignmentsCliError::ReadGroups { source })?;
-    let parameters = run_parameters(args, &read_groups, &with_checksums, asked_ploidy)?;
+    let numbers = run_parameters(args, &read_groups, &with_checksums, asked_ploidy)?;
     // **The run's ploidy is the parameters', not the flag's.** A supplied file states the
     // ploidy its numbers were fitted at, and the records' `GT` has to be enumerated at the same
     // one the model scored at; `run_parameters` has already refused a flag that disagrees with
     // it, so on either path this is the number the operator meant.
-    let ploidy = parameters.ploidy();
+    let ploidy = numbers.parameters.ploidy();
+
+    // **The parameters file is assembled here, before a read is decoded, and written after the
+    // last one.** Spec §7 makes writing unconditional, and `ParametersFile::of_run` holds its
+    // wiring checks in release — that this run's read-group table, its parameters and its
+    // inbreeding estimates were all minted from the same inputs. Those are startup questions,
+    // and asking them at startup is what stops a panic from discarding a cohort's calling work,
+    // which `of_run`'s own note leaves to the driver. **Nothing about the file changes while the
+    // run calls**: it records what the run was configured with, not what it found.
+    let digest = ReferenceDigest::of(&with_checksums)
+        .map_err(|source| CallFromAlignmentsCliError::ReferenceNotDigested { source })?;
+    let parameters_file = ParametersFile::of_run(
+        &numbers.parameters,
+        &read_groups,
+        &numbers.reads_behind_each_calibration,
+        &numbers.inbreeding_by_sample,
+        &digest,
+        // **The census the numbers were fitted under, not this run's.** Direct mode never has
+        // one of its own (`run_streaming.md` §2) — it reads its evidence from the alignment
+        // files, builds no psp and runs no fit — so on the defaults path this names no terms,
+        // which is how a run with no census spells itself. On the supplied path it is what the
+        // file recorded, because a run writing its parameters out again writes back the terms it
+        // read; see [`TheRunsNumbers::census`].
+        numbers.census.clone(),
+    );
 
     let caller = AlignedFilesVariantCaller::open(
         AlignmentInputs {
@@ -454,7 +532,7 @@ pub fn run_call_from_alignments(
             reference_with_checksums: &with_checksums,
         },
         segmentation,
-        parameters,
+        numbers.parameters,
         CallingLoopConfig::DEFAULT.validate().map_err(|source| {
             CallFromAlignmentsCliError::CallingLoopSettings(source.to_string())
         })?,
@@ -485,7 +563,33 @@ pub fn run_call_from_alignments(
             source,
         })?;
 
-    report(args, &written);
+    // **After the VCF is on disk, not before.** Spec §7's three purposes — a run reproducible
+    // from its own output, a defaults run auditable, an edit that starts from something — are
+    // all about a run that finished, and a parameters file standing beside a VCF that does not
+    // exist would answer none of them. The file goes to a temporary in the same directory and is
+    // renamed over its destination, so what lands is whole or is not there at all.
+    // **A file already there is replaced, and the run says so.** Spec §7 makes writing
+    // unconditional, so this is not a refusal — but a person who edited the parameters in place
+    // and then re-ran to compare has just lost the edit, and a run that did that in silence was
+    // measured doing exactly that. The `--parameters` route is refused outright
+    // (`refuse_an_output_whose_parameters_file_is_this_run_s_input`); this is the other route to
+    // the same loss, where no flag names the file.
+    let would_write = beside_the_vcf(&args.output);
+    if would_write.exists() {
+        eprintln!(
+            "note: replacing the parameters file already at {}",
+            would_write.display()
+        );
+    }
+    let parameters_at = parameters_file
+        .write_beside_the_vcf(&args.output)
+        .map_err(|source| CallFromAlignmentsCliError::ParametersNotWritten {
+            path: would_write,
+            calls: args.output.clone(),
+            source,
+        })?;
+
+    report(args, &written, &parameters_at, &parameters_file);
     Ok(())
 }
 
@@ -537,6 +641,67 @@ fn refuse_an_output_that_cannot_be_written(
         });
     }
     Ok(())
+}
+
+/// **A run may not write its parameters file over the one it was handed.**
+///
+/// Spec §7 tells a user to copy the file their run wrote and change a line, so a re-run whose
+/// supplied file and whose output share a stem writes over its own input — `calls.vcf.gz` and
+/// `calls.parameters.toml` are exactly that pair. What it would destroy is whatever the person
+/// changed by hand, and the numbers that came back would look ordinary, so this is refused
+/// rather than done. `write_beside_the_vcf`'s own note leaves the choice to the driver; this is
+/// the driver making it.
+///
+/// **Only a file that is there is compared**, so a mistyped `--parameters` gets the message
+/// about the file not existing rather than an instruction to copy a file that does not exist.
+///
+/// **Both sides are resolved through the file system where it can resolve them**, which is what
+/// makes the comparison see three things a textual one does not: `./calls.parameters.toml` and
+/// `calls.parameters.toml` are one file; a symlink pointing at the file the run would write is
+/// that file, and following it would have destroyed the target through the link; and on a
+/// case-insensitive volume — macOS's default, and this project builds there — `CALLS.vcf.gz`'s
+/// sibling is the same file as `calls.parameters.toml`. Where a path cannot be resolved, its
+/// directory is resolved and the name compared as typed, which is the honest answer for a
+/// destination that does not exist yet.
+fn refuse_an_output_whose_parameters_file_is_this_run_s_input(
+    args: &CallFromAlignmentsArgs,
+) -> Result<(), CallFromAlignmentsCliError> {
+    let Some(supplied) = &args.parameters else {
+        return Ok(());
+    };
+    if !supplied.exists() {
+        return Ok(());
+    }
+    let would_write = beside_the_vcf(&args.output);
+    if resolved(&would_write) == resolved(supplied) {
+        return Err(CallFromAlignmentsCliError::ParametersWouldBeOverwritten {
+            path: supplied.clone(),
+            output: args.output.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// A path as the file system knows it: fully resolved where it exists, and otherwise its
+/// directory resolved with the name as typed. A name with no directory part is the working
+/// directory's.
+fn resolved(path: &Path) -> PathBuf {
+    if let Ok(whole) = path.canonicalize() {
+        return whole;
+    }
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    let directory = if directory.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        directory
+    };
+    let resolved = directory
+        .canonicalize()
+        .unwrap_or_else(|_| directory.to_path_buf());
+    match path.file_name() {
+        Some(name) => resolved.join(name),
+        None => resolved,
+    }
 }
 
 /// The ground this run calls over: the BED it was given, or every base of every contig.
@@ -614,6 +779,37 @@ fn segments_over(
     .map_err(|source| CallFromAlignmentsCliError::Run { source })
 }
 
+/// **The numbers this run scores with, and the two things a file recording them needs beside
+/// each.**
+///
+/// `RunParameters` keeps what *calling* reads — one bare multiplier a read group, one bare
+/// coefficient a sample — and a file has to say how much data stood behind each and under what
+/// warrant. Neither is recoverable from the parameters afterwards, so both travel from wherever
+/// the numbers came from (`ParametersFile::of_run`'s own note says the same of the inbreeding
+/// warrants).
+struct TheRunsNumbers {
+    /// What every locus is scored against.
+    parameters: RunParameters,
+    /// How many reads stood behind each read group's base-quality multiplier, in the run's dense
+    /// read-group order.
+    reads_behind_each_calibration: ReadsBehindEachCalibration,
+    /// Each sample's inbreeding coefficient with its warrant, in the run's sample order.
+    inbreeding_by_sample: Vec<Estimate<InbreedingF>>,
+    /// **The census these numbers were fitted under, as the file that carried them named it** —
+    /// naming no terms where they came from the defaults, which is how a run with no census
+    /// spells itself.
+    ///
+    /// **Carried rather than restated, and `of_run`'s own contract is why**: *"a run that read a
+    /// file fitted under other terms and writes its parameters out again has to write back the
+    /// terms it read, not its own."* Direct mode never has a census of its own, so writing
+    /// *there was none* would erase what the fit recorded — and a later psp run over the same
+    /// cohort and the same census would then find a disagreement and demote every warrant to
+    /// `supplied`, where reading the original file would have kept them. Provenance would
+    /// degrade by one hop through direct mode, silently, which is exactly the divergence spec
+    /// §2.1 exists to prevent.
+    census: CensusIdentity,
+}
+
 /// The numbers this run scores with — a supplied file, or the defaults compiled in.
 ///
 /// **A supplied file is bound to this run at its own door**: it is refused if it was fitted
@@ -621,18 +817,32 @@ fn segments_over(
 /// position where the two lists diverge (`doc/devel/ng/spec/parameters_file.md` §6). No census
 /// is compared against, because direct mode has none — §2.1 settles that this keeps the file's
 /// warrants rather than demoting them.
+///
+/// **A run that read a file writes back what it read.** The counts behind its multipliers and
+/// the warrants on its coefficients belong to whichever run fitted them, and a run that dropped
+/// them would write a file claiming its supplied numbers rest on nothing (spec §7).
 fn run_parameters(
     args: &CallFromAlignmentsArgs,
     read_groups: &ReadGroups,
     with_checksums: &ReferenceInfo,
     ploidy: Ploidy,
-) -> Result<RunParameters, CallFromAlignmentsCliError> {
+) -> Result<TheRunsNumbers, CallFromAlignmentsCliError> {
     let Some(path) = &args.parameters else {
-        return Ok(RunParameters::of_defaults(
-            read_groups,
-            ploidy,
-            &DeclaredInbreeding::nothing_said(),
-        ));
+        // **The defaults run's warrants are a pure function of what it was told**, which is what
+        // lets these two be built beside the parameters rather than out of them:
+        // `RunParameters::of_defaults` and `DeclaredInbreeding::of_each_sample` take the same
+        // two arguments, so the coefficients here cannot disagree with the ones being scored.
+        let inbreeding = DeclaredInbreeding::nothing_said();
+        return Ok(TheRunsNumbers {
+            parameters: RunParameters::of_defaults(read_groups, ploidy, &inbreeding),
+            reads_behind_each_calibration: ReadsBehindEachCalibration::nothing_was_fitted(
+                read_groups.len(),
+            ),
+            inbreeding_by_sample: inbreeding.of_each_sample(read_groups),
+            // Nothing was fitted, so no census produced these numbers — and that is a fact
+            // about them rather than a gap.
+            census: CensusIdentity::of_a_run_with_no_census(),
+        });
     };
     let text = std::fs::read_to_string(path).map_err(|source| {
         CallFromAlignmentsCliError::ParametersUnreadable {
@@ -654,29 +864,37 @@ fn run_parameters(
             path: path.clone(),
             source,
         })?;
-    let parameters = bound.from_file.parameters;
+    let from_file = bound.from_file;
     // **A flag that was typed may only agree with the file.** Spec §3.2 puts the ploidy in the
     // file so that a supplied one "cannot be paired with a run at a different ploidy without
     // saying so", and calling at the file's number while an operator typed another is exactly
     // that. Only a ploidy that was *typed* is compared: `--ploidy` is an `Option` for this
     // reason, so a tetraploid file is not refused for the flag's default being two.
     if let Some(asked) = args.ploidy
-        && asked != parameters.ploidy().get()
+        && asked != from_file.parameters.ploidy().get()
     {
         return Err(CallFromAlignmentsCliError::PloidyIsNotTheParametersFiles {
             path: path.clone(),
             asked,
-            in_the_file: parameters.ploidy().get(),
+            in_the_file: from_file.parameters.ploidy().get(),
         });
     }
-    Ok(parameters)
+    Ok(TheRunsNumbers {
+        parameters: from_file.parameters,
+        reads_behind_each_calibration: ReadsBehindEachCalibration::as_a_file_recorded_them(
+            from_file.reads_behind_each_calibration,
+        ),
+        inbreeding_by_sample: from_file.inbreeding_by_sample,
+        census: file.fitted_from.census.clone(),
+    })
 }
 
 /// What the file's header states about the run that wrote it.
 ///
-/// **The `##parametersFile` line is left off**, because this step writes no parameters file
-/// beside its output and a header naming one that is not there would send a reader looking for
-/// it. The run driver's plan step F2 is what writes the file and fills the line in.
+/// **`##parametersFile` names the file this run writes beside its VCF**, by name and not by
+/// path: the two are siblings by construction (`beside_the_vcf`), so a path would say the same
+/// thing at greater length and would be wrong the moment somebody moved the pair. A reader who
+/// wants to know what the genotypes rest on opens it and reads the line it opens with.
 fn header_for(
     args: &CallFromAlignmentsArgs,
     contigs: &ContigList,
@@ -701,7 +919,11 @@ fn header_for(
         caller.sample_names().map(str::to_owned).collect(),
         current_command_line(),
         args.reference.display().to_string(),
-        String::new(),
+        beside_the_vcf(&args.output)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
     )
     .map_err(|source| CallFromAlignmentsCliError::Header { source })
 }
@@ -720,8 +942,30 @@ fn header_for(
 /// The run report proper — every refusal, every parameter that was defaulted rather than fitted,
 /// the per-read-group filter tallies — is the run driver's plan step F3; this is the minimum a
 /// command that writes a file has to say about it.
-fn report(args: &CallFromAlignmentsArgs, written: &WrittenCohort) {
+fn report(
+    args: &CallFromAlignmentsArgs,
+    written: &WrittenCohort,
+    parameters_at: &Path,
+    parameters: &ParametersFile,
+) {
     println!("output\t{}", args.output.display());
+    // **Named on its own line, because it is a second file the run produced** and a person who
+    // does not know it exists will not look for it. What it rests on is said beside it: a file
+    // a fit wrote and a file a defaults run wrote are the same shape by design (spec §7), and
+    // the count of groups is the file's own answer to *which is this*.
+    // **The file's claim about itself, and not this run's.** `call-from-alignments` fits
+    // nothing — it reads its numbers from a file or takes the compiled-in defaults — so a count
+    // labelled *fitted from this cohort* would be false on every `--parameters` run, which is
+    // the mode this command exists for. `what_the_run_fitted` says so in its own documentation:
+    // *fitted* means the file states a fit produced these numbers, not that this run's reads
+    // did. The label says whose claim it is.
+    let fitted = parameters.what_the_run_fitted();
+    println!("parameters\t{}", parameters_at.display());
+    println!(
+        "  groups_of_numbers_the_file_says_were_fitted\t{} of {}",
+        fitted.fitted().len(),
+        fitted.groups(),
+    );
     println!("samples\t{}", written.walk.per_sample.len());
     println!("records_written\t{}", written.records_written);
     // **Indented, because these two are the parts of the total above them and the four rows

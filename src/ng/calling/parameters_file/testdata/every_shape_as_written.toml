@@ -254,10 +254,12 @@ rung = "fitted_curve"
 # larger number makes the prior harder for the reads to move. A run that fitted
 # any stratum states the median of the concentrations those fits produced and
 # marks it `fitted_here`; a run that fitted none states a built-in constant and
-# marks it `defaulted`; a run handed this file by another run marks it
-# `supplied`, and so should you if you change it. It carries no `observations`
-# in any of those cases — a median over strata is not a measurement with a
-# sample size.
+# marks it `defaulted`. A run handed this file writes back the warrant it found
+# there, because a file's warrants survive being read — demoting them on every
+# read would have the same cohort report different warrants depending on which
+# way it was called. Mark it `supplied` yourself if you change the number. It
+# carries no `observations` in any of those cases — a median over strata is not
+# a measurement with a sample size.
 fallback_length_spectrum_concentration = { value = 3.5, warrant = "fitted_here" }
 slippage_group_by_read_group = [
     { read_group = 0, slippage_group = 0 },

@@ -414,7 +414,26 @@ sample showing two sequences one read each — the merge builds the position on 
 candidate selection then drops both.
 *Depends:* D3, and the command-surface note above. *Source:* [`typed_regions_cli.md`](../spec/typed_regions_cli.md).
 
-☐ **F2. The run writes the parameters it used, beside its output.**
+✅ **F2. The run writes the parameters it used, beside its output.**
+
+**⛦ The file is assembled before the first read is decoded and written after the last record.**
+`ParametersFile::of_run` holds its wiring checks in release and its own note leaves the order to
+the driver, saying what a panic there would cost — it runs after the last locus, so it would
+discard a cohort's calling work. Every one of those checks is a startup question (this run's
+read-group table, its parameters and its inbreeding estimates all minted from the same inputs),
+so the file is built at startup and nothing about it changes while the run calls. It goes to disk
+**after** the VCF is renamed into place, because spec §7's three purposes are all about a run
+that finished and a parameters file beside a VCF that does not exist answers none of them.
+
+**⛦ A run may not write its parameters over the file it was handed** — the second thing
+`write_beside_the_vcf` leaves to the driver. Spec §7 invites the collision by telling a user to
+copy the file their run wrote and change a line, so `--parameters calls.parameters.toml --output
+calls.vcf.gz` is the natural next command and would destroy the edit. Refused before anything is
+read, comparing the two with their directories resolved.
+
+**⛦ And `##parametersFile` is filled**, by name rather than by path: the two are siblings by
+construction, so a path would be wrong the moment somebody moved the pair. F1 deliberately left
+the line off.
 *Depends:* F1. *Source:* [`parameters_file.md`](../spec/parameters_file.md) §7.
 
 ☐ **F3. The run report.** What the run refused and why: loci the merge would not build, samples with

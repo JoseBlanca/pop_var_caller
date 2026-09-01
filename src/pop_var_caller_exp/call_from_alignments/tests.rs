@@ -3,6 +3,10 @@
 
 use super::*;
 use clap::Parser;
+use std::path::Path;
+
+use crate::ng::repeat_catalog::StrRepeatCriteria;
+use crate::ng::types::InbreedingF;
 
 use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
 
@@ -290,5 +294,430 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
     assert!(
         rendered.contains("repeat-catalog"),
         "and the command that builds it, and got: {rendered}",
+    );
+}
+
+// ---------------------------------------------------------------------
+// The parameters the run wrote beside its VCF (spec §7)
+// ---------------------------------------------------------------------
+
+/// **The header names the file the run writes beside its output**, by name and not by path.
+///
+/// A reader holding the VCF has to be able to find what its genotypes rest on, and the two are
+/// siblings by construction — so the name is enough, and a path would be wrong the moment
+/// somebody moved the pair.
+#[test]
+fn the_headers_parameters_file_is_the_one_the_run_writes_beside_the_vcf() {
+    for (output, expected) in [
+        ("/data/run7/calls.vcf.gz", "calls.parameters.toml"),
+        ("/data/run7/calls.vcf", "calls.parameters.toml"),
+        ("tomato.bcf", "tomato.parameters.toml"),
+    ] {
+        assert_eq!(
+            beside_the_vcf(Path::new(output))
+                .file_name()
+                .expect("a file name")
+                .to_string_lossy(),
+            expected,
+            "from {output}",
+        );
+    }
+}
+
+/// **A run may not write its parameters over the file it was handed**, and the collision is the
+/// one spec §7 invites: it tells a user to copy the file their run wrote and change a line, so
+/// `--parameters calls.parameters.toml --output calls.vcf.gz` is the natural next command.
+#[test]
+fn a_run_whose_output_would_overwrite_its_own_parameters_file_is_refused() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let supplied = directory.path().join("calls.parameters.toml");
+    std::fs::write(&supplied, "# a file somebody edited\n").expect("a file to be handed");
+    let mut args = a_run_writing_to(directory.path().join("calls.vcf.gz"));
+    args.defaults = false;
+    args.parameters = Some(supplied);
+
+    let refused = refuse_an_output_whose_parameters_file_is_this_run_s_input(&args)
+        .expect_err("the run would write over its own input");
+
+    let rendered = crate::error_render::format_error_chain(&refused);
+    assert!(
+        rendered.contains("calls.parameters.toml") && rendered.contains("calls.vcf.gz"),
+        "the message names both files, and got: {rendered}",
+    );
+}
+
+/// **Two spellings of one path are one file**, so a relative name does not slip past the
+/// refusal.
+#[test]
+fn the_refusal_sees_through_two_spellings_of_one_path() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    std::fs::write(directory.path().join("calls.parameters.toml"), "# edited\n")
+        .expect("a file to be handed");
+    std::fs::create_dir(directory.path().join("sub")).expect("a subdirectory to walk back out of");
+    let mut args = a_run_writing_to(directory.path().join("calls.vcf.gz"));
+    args.defaults = false;
+    args.parameters = Some(
+        directory
+            .path()
+            .join(".")
+            .join("sub")
+            .join("..")
+            .join("calls.parameters.toml"),
+    );
+
+    assert!(
+        refuse_an_output_whose_parameters_file_is_this_run_s_input(&args).is_err(),
+        "`<dir>/sub/../calls.parameters.toml` is `<dir>/calls.parameters.toml`",
+    );
+}
+
+/// **A symlink pointing at the file the run would write is that file**, and following it would
+/// have destroyed the target through the link — the same loss, one indirection away.
+#[cfg(unix)]
+#[test]
+fn the_refusal_follows_a_symlink_to_the_file_the_run_would_write() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let target = directory.path().join("calls.parameters.toml");
+    std::fs::write(&target, "# edited by hand\n").expect("a file to be handed");
+    let handy = directory.path().join("handy.toml");
+    std::os::unix::fs::symlink(&target, &handy).expect("a symlink to it");
+    let mut args = a_run_writing_to(directory.path().join("calls.vcf.gz"));
+    args.defaults = false;
+    args.parameters = Some(handy);
+
+    assert!(
+        refuse_an_output_whose_parameters_file_is_this_run_s_input(&args).is_err(),
+        "a link to the destination is the destination",
+    );
+}
+
+/// **A `--parameters` file that is not there is not this refusal's business.** The person
+/// mistyped a name, and telling them to copy a file that does not exist sends them nowhere; the
+/// message they need comes from the read that follows.
+#[test]
+fn a_parameters_file_that_does_not_exist_is_left_to_the_read_that_follows() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let mut args = a_run_writing_to(directory.path().join("calls.vcf.gz"));
+    args.defaults = false;
+    args.parameters = Some(directory.path().join("calls.parameters.toml"));
+
+    assert!(
+        refuse_an_output_whose_parameters_file_is_this_run_s_input(&args).is_ok(),
+        "nothing is there to be overwritten yet",
+    );
+}
+
+/// A parameters file that is not the run's own output is admitted, and so is a defaults run,
+/// which has no input to overwrite.
+#[test]
+fn a_parameters_file_that_is_not_the_runs_own_output_is_admitted() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let elsewhere = directory.path().join("fitted.parameters.toml");
+    std::fs::write(&elsewhere, "# a fit's own file\n").expect("a file to be handed");
+    let mut args = a_run_writing_to(directory.path().join("calls.vcf.gz"));
+    args.defaults = false;
+    args.parameters = Some(elsewhere);
+    assert!(refuse_an_output_whose_parameters_file_is_this_run_s_input(&args).is_ok());
+
+    let defaults = a_run_writing_to(directory.path().join("calls.vcf.gz"));
+    assert!(
+        refuse_an_output_whose_parameters_file_is_this_run_s_input(&defaults).is_ok(),
+        "a defaults run has no supplied file to overwrite",
+    );
+}
+
+/// Two fixture alignment files, and the run's read-group table over them.
+///
+/// **A real table rather than a fabricated one**, because every axis of a parameters file is
+/// keyed on it — one row a read group, one a sample, in the order this table fixes — and a
+/// hand-built one would not exercise the joins `ParametersFile::of_run` holds in release.
+fn a_cohorts_read_groups() -> (tempfile::TempDir, tempfile::TempDir, ReadGroups) {
+    use crate::ng::read::input::test_fixtures::{header, indexed_named_bam, matching_contigs};
+
+    let with_sample = |sample: &str, file: &str| {
+        indexed_named_bam(
+            &header(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[("rg1", Some(sample))],
+            ),
+            &[],
+            file,
+        )
+    };
+    let (zeta_dir, zeta) = with_sample("zeta", "zeta.bam");
+    let (alpha_dir, alpha) = with_sample("alpha", "alpha.bam");
+    let read_groups = build_read_groups(&[zeta, alpha]).expect("the fixtures declare read groups");
+    (zeta_dir, alpha_dir, read_groups)
+}
+
+/// **A run is reproducible from its own output** — spec §7's first purpose, as an assertion.
+///
+/// The file a defaults run writes beside its VCF reads back into the same numbers that run
+/// scored with: the same ploidy, the same count of libraries and plants, and the same
+/// coefficient for each of them. It is bound to this run at its own door on the way back in —
+/// a file naming another reference or another cohort's read groups is refused there — so what
+/// this shows is that a run's own file passes its own bindings and projects to its own numbers.
+#[test]
+fn what_a_defaults_run_writes_reads_back_into_the_numbers_it_scored_with() {
+    let (_zeta_dir, _alpha_dir, read_groups) = a_cohorts_read_groups();
+    let ploidy = Ploidy::try_new(2).expect("a diploid");
+    let reference = ReferenceDigest([7; 16]);
+    // **The two plants are given different coefficients, and that is what makes the round trip
+    // mean something.** With both at the default the per-sample axis compares equal under any
+    // permutation, so a writer or reader that reversed it would pass — measured, as a surviving
+    // mutation. `sampleA` selfs and `sampleB` outcrosses, so the two rows are distinguishable
+    // and their order is checked rather than assumed.
+    let inbreeding = DeclaredInbreeding::nothing_said().and_this_sample(
+        "zeta",
+        InbreedingF::try_new(0.9).expect("a coefficient in [0, 1)"),
+    );
+    let scored_with = RunParameters::of_defaults(&read_groups, ploidy, &inbreeding);
+    assert_ne!(
+        scored_with.inbreeding_coefficient_by_sample()[0],
+        scored_with.inbreeding_coefficient_by_sample()[1],
+        "a fixture whose two samples score alike could not tell the axis's order",
+    );
+
+    let file = ParametersFile::of_run(
+        &scored_with,
+        &read_groups,
+        &ReadsBehindEachCalibration::nothing_was_fitted(read_groups.len()),
+        &inbreeding.of_each_sample(&read_groups),
+        &reference,
+        CensusIdentity::of_a_run_with_no_census(),
+    );
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let vcf = directory.path().join("calls.vcf.gz");
+    let at = file.write_beside_the_vcf(&vcf).expect("the write succeeds");
+
+    assert_eq!(
+        at,
+        directory.path().join("calls.parameters.toml"),
+        "beside the VCF, named after it",
+    );
+    let text = std::fs::read_to_string(&at).expect("the file is there");
+    let read_back = ParametersFile::from_toml(&text)
+        .expect("what a run wrote is what its reader reads")
+        .to_run_parameters_for(&reference, &read_groups, None)
+        .expect("and it binds to the run that wrote it")
+        .from_file
+        .parameters;
+
+    assert_eq!(read_back.ploidy(), scored_with.ploidy());
+    assert_eq!(read_back.read_group_count(), scored_with.read_group_count(),);
+    assert_eq!(
+        read_back.inbreeding_coefficient_by_sample(),
+        scored_with.inbreeding_coefficient_by_sample(),
+        "one coefficient a plant, in the run's own sample order — and the two differ, so this \
+         compares the order and not only the multiset",
+    );
+    assert_eq!(
+        read_back
+            .calibration_by_read_group()
+            .iter()
+            .map(|calibration| (calibration.scale, calibration.provenance))
+            .collect::<Vec<_>>(),
+        scored_with
+            .calibration_by_read_group()
+            .iter()
+            .map(|calibration| (calibration.scale, calibration.provenance))
+            .collect::<Vec<_>>(),
+        "one multiplier a library",
+    );
+}
+
+/// **A defaults run's file says it fitted nothing**, which is the whole of why spec §7 makes
+/// writing unconditional: a run that guessed its numbers is auditable in the same form as one
+/// that measured them, and the file's own count is what tells a reader which they are holding.
+#[test]
+fn a_defaults_runs_file_says_it_fitted_nothing() {
+    let (_zeta_dir, _alpha_dir, read_groups) = a_cohorts_read_groups();
+    let inbreeding = DeclaredInbreeding::nothing_said();
+    let scored_with = RunParameters::of_defaults(
+        &read_groups,
+        Ploidy::try_new(2).expect("a diploid"),
+        &inbreeding,
+    );
+
+    let file = ParametersFile::of_run(
+        &scored_with,
+        &read_groups,
+        &ReadsBehindEachCalibration::nothing_was_fitted(read_groups.len()),
+        &inbreeding.of_each_sample(&read_groups),
+        &ReferenceDigest([7; 16]),
+        CensusIdentity::of_a_run_with_no_census(),
+    );
+
+    let fitted = file.what_the_run_fitted();
+    assert!(fitted.nothing_was_fitted());
+    assert_eq!(
+        fitted.fitted().len(),
+        0,
+        "none of the {} groups rests on this cohort's reads",
+        fitted.groups(),
+    );
+    assert!(
+        fitted.groups() > 0,
+        "a denominator of zero would make the count above say nothing",
+    );
+}
+
+// ---------------------------------------------------------------------
+// The whole command, driven
+// ---------------------------------------------------------------------
+
+/// **A reference, its catalog, and two samples' alignment files** — everything
+/// [`run_call_from_alignments`] needs, built on disk.
+///
+/// **The reference is the shared fixture's**, a hundred `A`s on `chr1` and two hundred on
+/// `chr2`, which is what the alignment fixtures declare in their `@SQ`. Every base of it is one
+/// mononucleotide run, so the catalog routes the whole genome to the repeat-tract generator and
+/// the run calls no locus at all. **That is what this fixture is for**: what it exercises is the
+/// command's wiring — the files it writes and what they say about each other — and a run that
+/// wrote no record still writes a header, a parameters file, and a summary.
+fn a_cohort_on_disk() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    CallFromAlignmentsArgs,
+) {
+    use crate::ng::read::input::test_fixtures::{header, indexed_named_bam, matching_contigs};
+    use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
+    use crate::ng::repeat_catalog::RepeatCatalogBuilder;
+    use crate::ng::tandem_repeat::ScanParams;
+    use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
+
+    let specs: Vec<ContigSpec> = crate::ng::read::input::test_fixtures::FIXTURE_CONTIGS
+        .iter()
+        .map(|(name, length)| ContigSpec {
+            name: (*name).to_string(),
+            length: *length as u64,
+        })
+        .collect();
+    let (reference_dir, fasta) = build_fasta(&specs).expect("a reference on disk");
+
+    let catalog_path = reference_dir.path().join("ref.fa.repeats.parquet");
+    let criteria = StrRepeatCriteria::default();
+    let mut builder = RepeatCatalogBuilder::create(
+        &catalog_path,
+        criteria.clone(),
+        ScanParams {
+            match_reward: 2,
+            mismatch_penalty: 7,
+            min_copies: 2,
+        },
+    )
+    .expect("a catalog to build into");
+    let reference = read_reference_info_observing(
+        ReferenceSource::Fasta {
+            fasta: fasta.clone(),
+            fai: None,
+        },
+        &mut builder,
+    )
+    .expect("the reference reads");
+    builder.finish(&reference).expect("the catalog is written");
+
+    let with_sample = |sample: &str, file: &str| {
+        indexed_named_bam(
+            &header(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[("rg1", Some(sample))],
+            ),
+            &[],
+            file,
+        )
+    };
+    let (zeta_dir, zeta) = with_sample("zeta", "zeta.bam");
+    let (alpha_dir, alpha) = with_sample("alpha", "alpha.bam");
+
+    let args = CallFromAlignmentsArgs {
+        reference: fasta,
+        catalog: Some(catalog_path),
+        alignments: vec![zeta, alpha],
+        output: reference_dir.path().join("calls.vcf"),
+        regions: None,
+        parameters: None,
+        defaults: true,
+        ploidy: None,
+        build_index_if_missing: false,
+    };
+    (reference_dir, zeta_dir, alpha_dir, args)
+}
+
+/// **The command writes both its files, and each says the right thing about the other.**
+///
+/// **This is the only test that drives `run_call_from_alignments` itself**, and the review that
+/// asked for it measured what its absence cost: nine of fourteen mutations aimed at this step
+/// survived, because every other test calls the helpers directly. Among them were a header
+/// naming `calls.vcf` instead of `calls.parameters.toml` on every VCF a run writes, and two that
+/// hand `ParametersFile::of_run` an axis of the wrong length — which panics at startup on any
+/// real run and on nothing in the suite.
+#[test]
+fn the_command_writes_a_vcf_and_the_parameters_beside_it() {
+    let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
+
+    run_call_from_alignments(&args).expect("the cohort runs");
+
+    let parameters_at = beside_the_vcf(&args.output);
+    assert!(args.output.is_file(), "the VCF is at {:?}", args.output);
+    assert!(
+        parameters_at.is_file(),
+        "and the parameters beside it at {parameters_at:?}",
+    );
+
+    let vcf = std::fs::read_to_string(&args.output).expect("the VCF reads");
+    assert!(
+        vcf.contains("##parametersFile=calls.parameters.toml\n"),
+        "the header names the file the run wrote beside it, and got:\n{}",
+        vcf.lines()
+            .take_while(|line| line.starts_with("##"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+
+    let text = std::fs::read_to_string(&parameters_at).expect("the parameters read");
+    let file = ParametersFile::from_toml(&text).expect("what the run wrote, its reader reads");
+    assert_eq!(
+        file.fitted_from.samples,
+        vec!["zeta".to_string(), "alpha".to_string()],
+        "the run's own samples, in the order its alignment files were named",
+    );
+    assert_eq!(
+        file.fitted_from.read_groups.len(),
+        2,
+        "one row a library, which is what `of_run` joins every other axis against",
+    );
+    assert_eq!(file.inbreeding.by_sample.len(), 2);
+    assert!(
+        file.what_the_run_fitted().nothing_was_fitted(),
+        "a `--defaults` run fitted nothing, and the file says so",
+    );
+}
+
+/// **The second command a person types is refused by the driver**, not merely by the helper the
+/// other tests call.
+///
+/// After a first run, `--parameters calls.parameters.toml --output calls.vcf` is the natural next
+/// thing to type and would write over the file just read. Deleting the refusal's *call site* left
+/// every other test green, which is what this closes.
+#[test]
+fn the_command_refuses_to_write_its_parameters_over_the_file_it_was_given() {
+    let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
+    run_call_from_alignments(&args).expect("the first run writes both files");
+
+    let again = CallFromAlignmentsArgs {
+        parameters: Some(beside_the_vcf(&args.output)),
+        defaults: false,
+        ..args.clone()
+    };
+    let refused = run_call_from_alignments(&again).expect_err("the second run is refused");
+
+    let rendered = crate::error_render::format_error_chain(&refused);
+    assert!(
+        rendered.contains("calls.parameters.toml"),
+        "the message names the file that would be lost, and got: {rendered}",
     );
 }

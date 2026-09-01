@@ -92,6 +92,14 @@ fn matches_any(extension: Option<&OsStr>, any_of: &[&str]) -> bool {
     extension.is_some_and(|extension| any_of.iter().any(|candidate| extension == *candidate))
 }
 
+/// Where the bytes go before they are renamed into place — the destination's own name with
+/// `.tmp` after it, which is the spelling the VCF's sink uses for the same purpose.
+fn in_flight_path_for(at: &Path) -> PathBuf {
+    let mut name = at.as_os_str().to_os_string();
+    name.push(".tmp");
+    PathBuf::from(name)
+}
+
 impl ParametersFile {
     /// **Write this file beside `vcf`**, and say where it went.
     ///
@@ -112,6 +120,23 @@ impl ParametersFile {
     /// share a stem writes over the file it was handed. Whether a driver should refuse that is
     /// the driver's; the rename at least makes the replacement whole.
     ///
+    /// # The temporary is created the way the VCF's is, and the mode is the reason
+    ///
+    /// **`File::create` rather than a `NamedTempFile`, changed 2026-09-01.** A named temporary is
+    /// created mode `0600` and keeps it through the rename, so under an ordinary `umask 022` a
+    /// run wrote its VCF world-readable and the file saying what those calls rest on readable by
+    /// nobody but the person who launched it — measured on a real run: `-rw-r--r--` beside
+    /// `-rw-------`. On a shared directory that defeats §7 for everyone else in the group, which
+    /// is most of who §7 is for. `File::create` is what the VCF's own sink uses
+    /// ([`vcf::writer`](crate::ng::vcf::writer)), so the two files now get their mode from the
+    /// same rule — the process's `umask` — rather than from which crate created them.
+    ///
+    /// **Nothing about being written whole changes**: the bytes still land under a sibling name
+    /// and are renamed over the destination in one step. What is given up is a temporary that
+    /// removes itself on a failed write, so a write that fails part-way leaves
+    /// `<name>.tmp` beside the destination — the same thing the VCF's sink leaves, and visible
+    /// rather than mistakable for the answer.
+    ///
     /// # Errors
     ///
     /// [`io::Error`] from creating, writing or renaming the temporary file — there is nothing
@@ -119,10 +144,12 @@ impl ParametersFile {
     /// not already have.
     pub fn write_beside_the_vcf(&self, vcf: &Path) -> io::Result<PathBuf> {
         let at = beside_the_vcf(vcf);
-        let directory = at.parent().unwrap_or_else(|| Path::new("."));
-        let mut written = tempfile::NamedTempFile::new_in(directory)?;
+        let in_flight = in_flight_path_for(&at);
+        let mut written = std::fs::File::create(&in_flight)?;
         written.write_all(self.to_toml().as_bytes())?;
-        written.persist(&at).map_err(io::Error::from)?;
+        written.sync_all()?;
+        drop(written);
+        std::fs::rename(&in_flight, &at)?;
         Ok(at)
     }
 }
@@ -239,6 +266,48 @@ mod tests {
             crate::ng::calling::parameters_file::ParametersFile::from_toml(&text)
                 .expect("what a run wrote is what its reader reads"),
             file
+        );
+    }
+
+    /// **The parameters file is as readable as the VCF beside it.**
+    ///
+    /// A named temporary is created mode `0600` and keeps it through the rename, so a run under
+    /// an ordinary `umask 022` wrote its calls world-readable and the file saying what those
+    /// calls rest on readable by nobody else — which defeats spec §7 for everyone in the group
+    /// but the person who launched the run. Both files now take their mode from the process's
+    /// `umask`, so the test is that the two agree rather than that either is a fixed number.
+    #[cfg(unix)]
+    #[test]
+    fn the_parameters_file_is_as_readable_as_a_file_the_run_creates_beside_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let vcf = directory.path().join("calls.vcf.gz");
+        // What `File::create` gives under this process's umask — the same call the VCF's own
+        // sink makes, so this is the mode the two files are being asked to share.
+        std::fs::File::create(&vcf).expect("a stand-in for the VCF");
+        let alongside = std::fs::metadata(&vcf)
+            .expect("the stand-in is there")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        let at = a_file_using_every_shape()
+            .write_beside_the_vcf(&vcf)
+            .expect("the write succeeds");
+
+        let written = std::fs::metadata(&at)
+            .expect("the parameters are there")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            written, alongside,
+            "the parameters file is mode {written:o} and a file created beside it is {alongside:o}",
+        );
+        assert!(
+            written & 0o044 != 0 || alongside & 0o044 == 0,
+            "under a umask that lets others read the VCF, they can read the parameters too",
         );
     }
 
