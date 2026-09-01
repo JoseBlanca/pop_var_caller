@@ -295,16 +295,47 @@ sentence rather than to resemble a run.
 *Depends:* D1. *Source:* §5.1; [`calling_loop.md`](calling_loop.md) Milestone E1.
 *Landed 2026-09-01:* [report](../../reports/implementations/ng_run_driver_d2_2026-09-01.md).
 
-☐ **D3. The end-to-end fixture.** A handful of the tomato slices
+✅ **D3. The end-to-end fixture.** A handful of the tomato slices
 (`benchmarks/tomato1/crams/`) over a small BED, alignments in, called genotypes out, on the generic
-path. **Runs in the dev loop in minutes, not hours.** **It also reports where the time went** —
+path. **Runs in the dev loop in minutes, not hours** — 4.8 seconds at its defaults, six accessions
+over 400 kb of SL4.0, 8,411 loci called. **It also reports where the time went** —
 walking the reads, assembling loci, genotyping them — because Milestone E's shape is decided from
 that split and this is the first run that can produce it (owner's ruling above; spec §11 question 7
 asks the same question and says nobody has measured it).
-*Depends:* D2. *Source:* §12 oracle 3 (its direct-mode half).
 
-> **Checkpoint D:** ng calls genotypes from CRAM files. Pause for review — **this is the milestone
-> the whole plan exists for.**
+**⛦ And the answer is not the one this milestone assumed.** Decoding reads is 94–97% of
+`call_cohort`; assembling and genotyping together are 2.2% at three samples and 4.9% at
+twenty-four — which is what Milestone E as written would parallelise. **The 94–97% is one thread**:
+a calling run drives `ObservationCache::cover`, and `cover_in_parallel`, which sweeps the cohort's
+samples concurrently, exists and is reached only by the merge's parallel driver. Measured at three
+samples, 3.199 s of user CPU against 3.313 s elapsed.
+
+**⛦ Two rates are stable; the share is not.** Reading costs about 5 ms per compressed megabyte and
+calling about 1 µs per locus per sample, both flat across 3 to 24 samples. Calling's *share* grows
+only because more accessions segregate more sites — 3,291 loci to 8,825 — and that curve must
+flatten. **No extrapolation from these four cohorts is worth acting on**; a first draft of the
+report fitted two exponents and said "a fifth at a thousand samples", and the review showed three
+defensible models give a tenth, a fifth and a third.
+
+**⛦ Also measured: 2.7 seconds before the first read is decoded**, constant in the cohort and the
+ground — reading and checksumming the 795 MB reference, opening the catalog, building the segments
+— which is more than half of what a person waits for at this probe's defaults.
+*Depends:* D2. *Source:* §12 oracle 3 (its direct-mode half).
+*Landed 2026-09-01:* [report](../../reports/implementations/ng_run_driver_d3_2026-09-01.md).
+
+> **Checkpoint D: met 2026-09-01.** ng calls genotypes from CRAM files — six tomato accessions
+> over 400 kb of SL4.0, through the real repeat catalog, 8,411 loci called, in 4.8 seconds. The
+> assembly check ran against real CRAM headers for the first time and compared 78 of 78 contig
+> checksums. 6.0% of the analysed ground is repeat tracts this caller has not built yet, counted
+> as its own gap rather than called wrongly.
+>
+> **⚑ Three things wait on the owner.** Milestone E's premise, above — its two arrangements
+> parallelise 5% of a run while 95% is one thread that already has a parallel form built. The
+> oracle wording in D2, which asks that a swap change a *genotype* where at real depth it changes
+> the *call*. And a locus where the allele cap has ruled every covering sample uncallable aborts
+> the run with a panic; spec §4.1's ruling does not cover it, and `call_cohort` is the first thing
+> that can reach it from real data — unmeasured, and no tomato run so far has hit it.
+> Pause for review — **this is the milestone the whole plan exists for.**
 
 ### Milestone E — the pool
 

@@ -20,7 +20,8 @@ pub mod segments;
 pub mod walker;
 
 pub use callers::{
-    AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, MergeParameters,
+    AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, CalledCohort,
+    CohortWalkTallies, MergeParameters, SampleWalkTallies,
 };
 pub use segments::{Segmentation, SegmentationInputs};
 pub use walker::{AlignmentFilesWalker, RunSegments};

@@ -19,7 +19,32 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-01):** **D2 of the run driver — the sample-order join**
+> - **Last completed task (2026-09-01):** **Milestone D of the run driver — ng calls genotypes
+> from CRAM files**, at Checkpoint D (steps D1–D3 of
+> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
+> [D3's report](doc/devel/reports/implementations/ng_run_driver_d3_2026-09-01.md)). Six tomato
+> accessions over 400 kb of SL4.0, through the real repeat catalog: **8,411 loci called in 4.8
+> seconds**, the assembly check comparing 78 of 78 contig checksums against real CRAM headers for
+> the first time, and 6.0% of the analysed ground counted as repeat tracts this caller has not
+> built yet rather than called wrongly.
+> **⚑ The measurement Milestone E was waiting for contradicts its premise.** Decoding reads is
+> **94–97% of `call_cohort`**; assembling and genotyping together are 2.2% at three samples and
+> 4.9% at twenty-four — and those two are exactly what Milestone E as written parallelises. **The
+> 94–97% is one thread**: a calling run drives `ObservationCache::cover`, while
+> `cover_in_parallel`, which sweeps the cohort's samples concurrently, exists and is reached only
+> by the merge's parallel driver. Measured at three samples, 3.199 s of user CPU against 3.313 s
+> elapsed, on a nine-thread container.
+> **⛦ Two rates are stable and the share is not**: reading about 5 ms per compressed megabyte,
+> calling about 1 µs per locus per sample, both flat across 3 to 24 samples. Calling's share grows
+> only because more accessions segregate more sites (3,291 loci to 8,825), and that curve must
+> flatten. A first draft fitted exponents and claimed "a fifth at a thousand samples"; the review
+> showed three defensible models give a tenth, a fifth and a third, so **no extrapolation from
+> these cohorts is worth acting on** — the answer is to run the probe at a thousand.
+> **⛦ And 2.7 seconds of every run falls before the first read is decoded** — the 795 MB
+> reference, the catalog, the segments — constant in cohort and ground, and more than half of what
+> a person waits for at the probe's defaults.
+>
+> - **Previously (2026-09-01):** **D2 of the run driver — the sample-order join**
 > (step D2 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
 > [report](doc/devel/reports/implementations/ng_run_driver_d2_2026-09-01.md)). Tests and fixtures
 > only: the join was built with the calling loop, and what it lacked was a cohort that could tell
