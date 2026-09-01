@@ -285,6 +285,38 @@ pub enum ParameterEstimationError {
     )]
     InbreedingNotFittedForSample { sample: String },
 
+    /// **A library this run declared, and no sample fitted an error rate for.**
+    ///
+    /// **A hard fail, and the owner's ruling of 2026-09-01**: where the user gave no default and
+    /// a library did not manage to estimate a parameter, the run stops and says so. It is the
+    /// same shape as [`InbreedingNotFittedForSample`](Self::InbreedingNotFittedForSample) — a
+    /// number nothing measured and nothing supplied — and the same answer.
+    ///
+    /// **It is reachable from data, not only from a mis-paired caller.** A sample's fitted rates
+    /// cover the read groups that produced reads, so a library whose reads were all refused at
+    /// admission has no entry anywhere. That is an ordinary thing for a lane to do.
+    ///
+    /// **Refusing is what stops the failure being deferred to a locus.** The read-group axis is
+    /// built from the rates that are present, so a missing library is dropped from the axis: an
+    /// interior gap trips the contiguity check with a message about ids, and a missing *highest*
+    /// library shortens the axis in silence — after which the run dies at whichever locus first
+    /// carries one of that library's reads, which is exactly the deferred failure assembly
+    /// exists to turn into a message about the run.
+    ///
+    /// **What to do about it is on the line**, because the two answers are different work:
+    /// exclude the library from the run, or supply a rate for it in the parameters file.
+    #[error(
+        "read group {read_group} ({id}) of sample {sample}: this run declares it and no sample          fitted an error rate for it, and calling has no default for one — a library whose reads          were all refused at admission looks exactly like this. Leave the library out of the          run, or supply a rate for it in the parameters file"
+    )]
+    ErrorRateNotFittedForReadGroup {
+        /// The run's own dense index for the library.
+        read_group: u32,
+        /// The `@RG ID` its file declares.
+        id: String,
+        /// The sample whose file declares it.
+        sample: String,
+    },
+
     /// The walk that was to produce this sample's loci failed part-way through.
     ///
     /// **Fatal, and never absorbed.** The loci a walk failed to produce are *missing*

@@ -315,22 +315,21 @@ impl RunParameters {
         // per group), so a declared library whose reads were all refused by admission has no
         // entry anywhere.
         //
-        // **⚑ What such a run should get is a question the design has not answered** — refusing
-        // it, as here, or giving that library the defaulted calibration it would get if it had
-        // been fitted and found unmeasurable. Refusing is the conservative half: it never calls a
-        // locus on a library it silently dropped.
+        // **⛦ The owner ruled on this, 2026-09-01**: where the user gave no default and a
+        // library did not manage to estimate a parameter, that is a hard fail *reported to the
+        // user*. So the refusal stands — it never calls a locus on a library it silently dropped
+        // — and it is an error rather than the assertion it was, because a panic naming a source
+        // file is not a report. The sample-side twin,
+        // `ParameterEstimationError::InbreedingNotFittedForSample`, has been the same shape all
+        // along.
         for (group, declared) in read_groups.iter() {
-            assert!(
-                error_rate_by_read_group.contains_key(&group),
-                "read group {} ({}) of sample {} is one this run declared and no sample's \
-                 parameters carry an error rate for it — a library whose reads were all refused \
-                 looks exactly like this. It cannot be left out: the read-group axis is built \
-                 from the rates that are here, so this library would be dropped from the run and \
-                 the failure deferred to the first locus carrying one of its reads",
-                group.get(),
-                declared.id,
-                declared.sample
-            );
+            if !error_rate_by_read_group.contains_key(&group) {
+                return Err(ParameterEstimationError::ErrorRateNotFittedForReadGroup {
+                    read_group: group.get(),
+                    id: declared.id.to_string(),
+                    sample: declared.sample.to_string(),
+                });
+            }
         }
 
         Ok(Self::assemble(
@@ -3000,16 +2999,21 @@ mod tests {
         );
     }
 
-    /// **A library the run declared that no sample carries a rate for stops the run, by name.**
+    /// **A library the run declared that no sample carries a rate for stops the run, by name and
+    /// as an error a person reads.**
     ///
     /// **Reachable from data rather than only from a mis-paired caller**: a sample's fitted rates
     /// cover the read groups that produced reads, so a library whose reads were all refused at
     /// admission has no entry anywhere. What happens without this check depends on which library
     /// it is, and the worse case is the quieter one — a missing *highest* library shortens the
-    /// read-group axis with nothing said, and the run then panics at whichever locus first
+    /// read-group axis with nothing said, and the run then dies at whichever locus first
     /// carries one of its reads. The fixture drops read group 3, which is that case.
+    ///
+    /// **⛦ An error and not a panic, from the owner's ruling of 2026-09-01**: where the user gave
+    /// no default and a library did not manage to estimate a parameter, that is a hard fail
+    /// *reported to the user*. It was an assertion until then, and a panic naming a source file
+    /// is not a report — the same defect F1's review found in `--ploidy`.
     #[test]
-    #[should_panic(expected = "no sample's parameters carry an error rate for it")]
     fn a_declared_library_with_no_rate_anywhere_is_refused() {
         let groups = the_runs_read_groups();
         let mut generic: Vec<GenericSampleParameters> = (0..SAMPLE_NAMES.len())
@@ -3032,7 +3036,7 @@ mod tests {
                 }
             })
             .collect();
-        let _ = RunParameters::from_prepass(
+        let refused = RunParameters::from_prepass(
             &generic,
             &repeat_tract,
             &the_cohort_fit(),
@@ -3040,6 +3044,23 @@ mod tests {
             a_batch_per_sample(&groups),
             a_slippage_gather(),
             diploid(),
+        )
+        .expect_err("a library with no rate anywhere stops the run");
+
+        let rendered = crate::error_render::format_error_chain(&refused);
+        assert!(
+            rendered.contains("read group 3"),
+            "the message names the library by the run's own index, and got: {rendered}",
+        );
+        assert!(
+            rendered.contains("calling has no default for one"),
+            "and says there is no default to fall back on, which is the whole reason it stops: \
+             {rendered}",
+        );
+        assert!(
+            rendered.contains("supply a rate for it in the parameters file"),
+            "and what to do about it, which is different work from re-running the fit: \
+             {rendered}",
         );
     }
 
