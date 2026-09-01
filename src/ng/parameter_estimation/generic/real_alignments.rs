@@ -363,10 +363,6 @@ impl WalkInputs {
             let fasta = self.fasta.clone();
             let contigs = self.contigs.clone();
             let index = self.index.clone();
-            #[allow(
-                clippy::arc_with_non_send_sync,
-                reason = "as in `accumulate` below: file-backed and single-threaded"
-            )]
             let reference = Arc::new(self.accessor());
             PileupGenerator::new(
                 reference,
@@ -425,10 +421,6 @@ impl WalkInputs {
             let fasta = self.fasta.clone();
             let contigs = self.contigs.clone();
             let index = self.index.clone();
-            #[allow(
-                clippy::arc_with_non_send_sync,
-                reason = "PileupGenerator::new is generic over the accessor and takes Arc; this one is file-backed and single-threaded, as in examples/ng_generic_loci_dump.rs"
-            )]
             let reference = Arc::new(self.accessor());
             PileupGenerator::new(
                 reference,

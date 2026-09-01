@@ -751,10 +751,6 @@ fn run(
     let walk_config = TypedRegionConfig::default();
     let criteria = StrRepeatCriteria::from(&walk_config);
     let bundle_threshold = Bp(walk_config.criteria.bundle_threshold);
-    #[expect(
-        clippy::arc_with_non_send_sync,
-        reason = "RawRefSeq is implemented for Arc only; this walk is single-threaded"
-    )]
     let shared_reference = Arc::new(WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()));
     let mut generators = samples
         .iter()

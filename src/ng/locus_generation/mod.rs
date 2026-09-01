@@ -769,12 +769,15 @@ impl LocusCounts {
 /// the `NoLoci` configuration kept as data, so plugging in a real generator is a one-line
 /// change at the set (spec §5).
 ///
-/// The trait object carries **no `Send` bound**: v1 is single-threaded (`locus_generation.md` §9). If a
-/// `GeneratorSet` is ever moved onto a producer thread rather than built per thread, this
-/// becomes `dyn LocusGenerator<S> + Send` — a deliberate omission now, not an oversight.
+/// The trait object carries **a `Send` bound, since 2026-09-01** — the condition its own
+/// earlier note named ("if a `GeneratorSet` is ever moved onto a producer thread … this
+/// becomes `dyn LocusGenerator<S> + Send`") arrived with the merge's parallel cover, which
+/// sweeps a calling run's walkers across threads, one thread at a time. A generator filled
+/// into a slot must therefore be `Send`; none holds thread-affine state, and the compiler
+/// checks it here rather than at whichever driver first crosses a thread.
 pub enum GeneratorSlot<S> {
     /// A generator supplied for this kind.
-    Generator(Box<dyn LocusGenerator<S>>),
+    Generator(Box<dyn LocusGenerator<S> + Send>),
     /// No generator; account every region of this kind to the reason.
     Unfilled(UnhandledReason),
 }

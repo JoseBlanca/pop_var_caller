@@ -1945,14 +1945,13 @@ pub struct SsrGenerator<R: RawRefSeq + EvictableRefSeq, A: RepeatDelimiter> {
     /// generic generator took at D2 (arch §3.6). It is called at chromosome boundaries and
     /// nowhere else, so the indirection is not on any path that matters.
     ///
-    /// **Not `+ Send`, and a real caller is why.** Review proposed it as free insurance for the
-    /// fan-out. It is not free: `Arc<T>` implements [`RawRefSeq`], and `ng_ssr_cohort_stutter`
-    /// uses that to hand every file a clone of one accessor — but `WindowedRefSeq` holds a
-    /// `RefCell`, so it is `!Sync`, so `Arc<WindowedRefSeq>` is `!Send`, so the closure
-    /// returning it is `!Send`. Requiring `Send` here rules out a caller that exists. The
-    /// fan-out does not need it either: a worker takes its own generator and its own accessor,
-    /// and both generators are already `!Send` through other fields.
-    make_reference: Box<dyn FnMut() -> R>,
+    /// **`+ Send` since 2026-09-01, because [`GeneratorSlot`] now requires it of everything
+    /// boxed into a slot** — a calling run's walkers cross threads under the merge's parallel
+    /// cover, so a generator that could fill a slot must be able to go with them. The caller
+    /// that used to rule the bound out — `ng_ssr_cohort_stutter` handing every file a clone of
+    /// one `Arc<WindowedRefSeq>` — stopped being a counter-example in the same step, when
+    /// `WindowedRefSeq` became `Sync` and that `Arc` became `Send`.
+    make_reference: Box<dyn FnMut() -> R + Send>,
     /// The sample's cursor and the chromosome it covers — **D3.** One per chromosome, minted by
     /// the first locus on each and rebuilt at every boundary, because nothing in a cursor
     /// survives a chromosome change (`spec/alignment_cursor.md` §4).
@@ -2011,7 +2010,7 @@ where
     /// against this, because unit-robust deliberately departs from production's measurement.
     pub fn with_default_aligner(
         reference: R,
-        make_reference: impl FnMut() -> R + 'static,
+        make_reference: impl FnMut() -> R + Send + 'static,
         config: SsrGeneratorConfig,
         bundle_threshold: Bp,
     ) -> Result<Self, SsrGeneratorConfigError> {
@@ -2037,7 +2036,7 @@ where
     /// [`with_default_aligner`](Self::with_default_aligner).
     pub fn new(
         reference: R,
-        make_reference: impl FnMut() -> R + 'static,
+        make_reference: impl FnMut() -> R + Send + 'static,
         aligner: A,
         config: SsrGeneratorConfig,
         bundle_threshold: Bp,

@@ -740,10 +740,6 @@ fn walk_one_sample(
             )
         }
     };
-    #[allow(
-        clippy::arc_with_non_send_sync,
-        reason = "file-backed and single-threaded, as in the census walk this is taken from"
-    )]
     let shared = Arc::new(accessor());
     let generic_generator = PileupGenerator::new(
         Arc::clone(&shared),

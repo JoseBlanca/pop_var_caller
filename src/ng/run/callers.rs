@@ -46,7 +46,8 @@ use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::run::cohort_merge::build::{CohortObservation, RegionOutcome};
 use crate::ng::run::cohort_merge::observation_cache::ObservationCache;
 use crate::ng::run::cohort_merge::serial::{
-    merge_cohort_handing_each_locus_over, merge_cohort_through_cache,
+    merge_cohort_handing_each_locus_over,
+    merge_cohort_handing_each_locus_over_covering_samples_in_parallel, merge_cohort_through_cache,
 };
 use crate::ng::run::cohort_merge::{CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads};
 use crate::ng::types::{GenomeRegion, ReadGroupId};
@@ -122,12 +123,14 @@ pub struct AlignmentInputs<'a> {
     pub reference_with_checksums: &'a ReferenceInfo,
 }
 
-/// The merge's knobs that a single-threaded merge takes.
+/// The merge's knobs that a run's own drivers take.
 ///
 /// **Three values covering four of the merge's five run parameters**, because [`MinAltReads`]
 /// is itself a floor and a share. The one left out is how many building regions are worked at
-/// once, which only means anything once the merge is threaded; this is built against the merge
-/// that runs on one thread (owner's ruling, 2026-08-31).
+/// once, which only means anything under the merge's own region batching — which no calling
+/// run reaches: since E1 the cover threads across samples, and the building itself stays on
+/// one thread (the 2026-08-31 ruling to build against the single-threaded merge, unchanged by
+/// where the cover's sweep runs).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MergeParameters {
     /// How many reference bases one builder's region covers.
@@ -501,13 +504,14 @@ impl AlignedFilesVariantCaller {
     /// `calling_inside_the_builder_gives_what_calling_after_the_merge_gives`, which calls the
     /// same cohort both ways and refuses any difference.
     ///
-    /// # What it does not do yet
+    /// # What it does not do
     ///
-    /// **It still returns everything at once.** Spec §5.1 bounds a run at `callers in flight ×
-    /// one cohort locus`; what this bounds is the *observations*, not the calls, and the pool
-    /// milestone is where the calls start being released one at a time as well. What that
-    /// milestone inherits is a driver that no longer has to buffer the observations to get
-    /// there. **`loci_too_wide_to_assemble` accumulates for the whole run too**, and nothing
+    /// **It still returns everything at once**, and **its cover is the serial one** — this is
+    /// the oracle the parallel-covered record path is compared against (Milestone E), so it
+    /// deliberately takes no part in the parallel cover: one driver has to keep the schedule
+    /// the fixtures were reasoned about under. Spec §5.1 bounds a run at `callers in flight ×
+    /// one cohort locus`; what this bounds is the *observations*, not the calls.
+    /// **`loci_too_wide_to_assemble` accumulates for the whole run too**, and nothing
     /// bounds it either.
     ///
     /// **Every locus goes down the generic path.** Repeat-tract candidate selection is
@@ -591,7 +595,20 @@ impl AlignedFilesVariantCaller {
     /// The path a command takes, where [`call_cohort`](Self::call_cohort) is the oracle:
     /// identical calling, and the answers leave one at a time instead of accumulating. What a
     /// run holds is then its open files, the merge's frontier and one record — spec §5.1's
-    /// bound, less the pool that Milestone E adds.
+    /// bound.
+    ///
+    /// # Where this run's parallelism is (Milestone E, decided 2026-09-01)
+    ///
+    /// **Each cover's samples are drawn forward concurrently; everything else is one
+    /// thread.** Measured on 63 tomato accessions, decoding reads is 88% of `call_cohort`
+    /// and genotyping 5–6%, so the parallelism went to the decode
+    /// ([`merge_cohort_handing_each_locus_over_covering_samples_in_parallel`]'s own note
+    /// carries the numbers) and no pool of genotyping workers was built. The output is
+    /// identical at every thread count — the cover reaches the same fixpoint by any
+    /// schedule, and assembly and calling stay on this thread in genome order — which is
+    /// spec §12.2's oracle: pinned at the driver by
+    /// `the_parallel_cover_gives_the_serial_drivers_answer`, and to be pinned end to end by
+    /// Milestone E2's concurrency-invariance fixture, which is not built yet.
     ///
     /// `hand_over` is given each record in genome order and may refuse. **The first refusal is
     /// the run's answer**, naming the locus it was writing, and no record is handed over after
@@ -678,7 +695,7 @@ impl AlignedFilesVariantCaller {
         let mut stopped: Option<RunError> = None;
 
         let mut cache = ObservationCache::over(walkers);
-        let merged = merge_cohort_handing_each_locus_over(
+        let merged = merge_cohort_handing_each_locus_over_covering_samples_in_parallel(
             segmentation.analysed_regions(),
             &mut cache,
             merge_parameters.cohort_locus_builder_regions_len,
@@ -763,8 +780,9 @@ impl AlignedFilesVariantCaller {
 /// say what, and what each sample's genotype is.**
 ///
 /// Three existing calls and nothing of its own (arch §3.2). It is a free function rather than
-/// a method because it belongs to no run in particular — the pool milestone runs it on a
-/// worker thread, over a scratch that worker owns.
+/// a method because it belongs to no run in particular — and if a pool of genotyping workers
+/// is ever built (measured out at 63 samples, conditional on a large-cohort measurement), a
+/// worker runs it over a scratch that worker owns.
 ///
 /// **`views` is declared here and nowhere higher up, and the type says why.** It borrows the
 /// rows `shaping` holds, and a `Vec` is invariant in its element type, so a list kept across
@@ -788,8 +806,8 @@ impl AlignedFilesVariantCaller {
               evidence, the parameters, and the selection's and the loop's configurations — \
               plus the run's sample count, the two scratches and what to do with the answer. \
               Grouping any of them would make a struct whose only \
-              purpose is this signature, and the pool milestone hands the same nine to a \
-              worker."
+              purpose is this signature — and a genotyping pool, if a large-cohort \
+              measurement ever justifies one, hands the same nine to a worker."
 )]
 fn call_one_generic_locus<S, G, R>(
     genotyper: &G,
@@ -861,7 +879,7 @@ struct RunReadyToWalk {
 ///
 /// A type alias rather than a wrapper, because it adds nothing — it is
 /// [`AlignmentFilesWalker`] with its region stream named. It buys the one signature that names
-/// it the right words, and it is the name every signature the pool milestone adds will want.
+/// it the right words, and it is the name any later concurrency work will want.
 pub type RunWalker = AlignmentFilesWalker<RunSegments>;
 
 /// **What a calling run produced: the genotypes, the two kinds of ground it produced no
@@ -3901,8 +3919,10 @@ mod calling_joined_to_the_merge {
     /// same loci in the same order, each reusing its own scratch across them in the same
     /// pattern, so a missed `clear()` produces the same wrong answer on both sides and
     /// cancels. Separate scratches stop one side's state reaching the other and nothing more.
-    /// The calling-scratch trap (spec §8) is caught where the *order* differs, which is the
-    /// pool milestone's concurrency-invariance step.
+    /// The calling-scratch trap (spec §8) is caught where the *order* differs — no built
+    /// arrangement reorders the loci a scratch sees (the parallel cover threads the decode,
+    /// not the calling), so the trap arms only if a genotyping pool is ever built, and E2's
+    /// concurrency-invariance oracle is the step that would have to catch it.
     #[test]
     fn calling_inside_the_builder_gives_what_calling_after_the_merge_gives() {
         let (_reference_dir, reference) = fixture_reference_from_its_index();

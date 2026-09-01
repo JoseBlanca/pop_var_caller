@@ -40,9 +40,9 @@ pub enum PopVarCallerExpCommand {
     /// Two limits to know before you read the output. Repeat tracts are
     /// analysed and NOT called: every locus goes down the SNP/indel path, and a
     /// tract in the ground you asked for is counted as ground this caller
-    /// cannot yet speak for and reported at the end. And the run is
-    /// single-threaded, so a large cohort takes a long time and says nothing
-    /// while it does.
+    /// cannot yet speak for and reported at the end. And the run decodes every
+    /// sample's reads across the machine's cores, but assembles and genotypes
+    /// on one thread, and says nothing while it works.
     CallFromAlignments(CallFromAlignmentsArgs),
 
     /// Estimate, for each sample in a panel of alignments, what share of its

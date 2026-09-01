@@ -34,9 +34,10 @@
 //! slots are refused as unbuilt and their ground is charged to *not built yet*. A run over
 //! tract-rich ground is therefore short, not wrong, and the summary says by how much.
 //!
-//! **It is single-threaded.** Decoding reads is 94–97% of a calling run and it runs on one
-//! thread; the parallel form exists and is not reached from here (the run driver's plan,
-//! Milestone E, deferred 2026-09-01).
+//! **The decode is parallel; the rest is one thread (Milestone E1, 2026-09-01).** Decoding
+//! reads is 88% of a calling run at 63 samples, and the run sweeps every sample's reader
+//! concurrently on the rayon pool while assembling and genotyping stay on one thread — the
+//! output is identical at every thread count. Nothing is printed while it works.
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};

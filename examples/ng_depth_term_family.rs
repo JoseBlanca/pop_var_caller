@@ -296,10 +296,6 @@ fn main() {
         let fasta = fasta.clone();
         let contigs = contigs.clone();
         let index = index.clone();
-        #[allow(
-            clippy::arc_with_non_send_sync,
-            reason = "file-backed and single-threaded, as in the duplication probe"
-        )]
         let reference = Arc::new(WindowedRefSeq::with_shared_index(
             fasta.clone(),
             contigs.clone(),

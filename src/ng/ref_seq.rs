@@ -28,11 +28,10 @@ use crate::ng::raw_chrom_reader::RawChromReader;
 use crate::ng::types::ContigId;
 use noodles_fasta::Repository;
 use noodles_fasta::fai;
-use std::cell::RefCell;
 use std::io;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Errors from a reference fetch. `#[non_exhaustive]` so matchers must accept future
 /// variants; the shape mirrors the production `fasta::fetcher::ChromRefFetchError`.
@@ -290,7 +289,7 @@ impl<T: ContigTable + ?Sized> ContigTable for std::sync::Arc<T> {
 /// exactly what happened. Both locus generators held their reader by `Arc` and never evicted,
 /// and a forward walk of human chromosome 1 would hold about 250 MB of it.
 ///
-/// Nothing is stretched to allow this: the window already lives behind a `RefCell`, because
+/// Nothing is stretched to allow this: the window already lives behind a lock, because
 /// fetching mutates it through `&self` too ([`RefSeq::fetch_into`]). Eviction is the same
 /// kind of operation on the same field.
 pub trait EvictableRefSeq {
@@ -584,9 +583,14 @@ fn map_chrom_error(contig: ContigId, err: ChromRefFetchError) -> RefSeqError {
 /// `current` field). It wraps [`RawChromReader`], ng's copy of the production
 /// `ManualEvictChromRefFetcher` minus the canonicalisation (one per resident contig, rebuilt on a
 /// contig change), so its buffer / eviction logic — and its canonical bytes — remain
-/// identical to the production streaming path. A `RefCell` keeps `fetch_into(&self)` while
-/// the inner fetcher mutates its buffer; `evict_before` is the inherent `&mut self`
-/// capability. `Send` but not `Sync` (per-worker ownership, like the production fetchers).
+/// identical to the production streaming path. A `Mutex` keeps `fetch_into(&self)` while
+/// the inner fetcher mutates its buffer — a `RefCell` until 2026-09-01, swapped so the
+/// whole walk stack is `Send` and a walker can be swept by the merge's parallel cover.
+/// **Ownership is still per worker, exactly as before**: one accessor is only ever used by
+/// one thread at a time, so the lock is uncontended and what it buys is the `Sync` that
+/// `Arc<WindowedRefSeq>` needs to cross a thread, not concurrent access. The trap in the
+/// spec's §8 (`doc/devel/ng/spec/run_streaming.md`) — a shared accessor behind a lock
+/// serialising the walk — is about *sharing*, which this does not change.
 pub struct WindowedRefSeq {
     fasta_path: PathBuf,
     /// Shared, because a per-query factory hands one to every accessor it builds and
@@ -616,7 +620,7 @@ pub struct WindowedRefSeq {
     /// raw and raw is not derivable from canonical. And it is **one** buffer, not
     /// two — `typed_regions.md` §6: *"one reader for the whole run, sliding
     /// forward, never rebuilt per region — that is what cost 14.6 GB of peak RSS."*
-    current: RefCell<Option<(ContigId, RawChromReader)>>,
+    current: Mutex<Option<(ContigId, RawChromReader)>>,
 }
 
 impl WindowedRefSeq {
@@ -633,7 +637,7 @@ impl WindowedRefSeq {
             fasta_path,
             contigs: Arc::new(contigs),
             index: None,
-            current: RefCell::new(None),
+            current: Mutex::new(None),
         }
     }
 
@@ -661,8 +665,24 @@ impl WindowedRefSeq {
             fasta_path,
             contigs,
             index: Some(index),
-            current: RefCell::new(None),
+            current: Mutex::new(None),
         }
+    }
+
+    /// The resident window, locked.
+    ///
+    /// **The lock cannot be contended** — one accessor belongs to one worker at a time
+    /// (see the type's own note) — so a poisoned lock means *this* accessor's own earlier
+    /// fetch panicked, and there is no state worth salvaging past that.
+    ///
+    /// **A same-thread re-entry would deadlock here where the old `RefCell` panicked.** No
+    /// such path exists — nothing under a fetch or an eviction reaches back into the same
+    /// accessor (traced by E1's correctness review) — but a future edit that adds one gets a
+    /// hang, not a message, so it is said out loud.
+    fn lock_current(&self) -> std::sync::MutexGuard<'_, Option<(ContigId, RawChromReader)>> {
+        self.current
+            .lock()
+            .expect("a reference accessor is used by one worker at a time, and its own earlier fetch panicked")
     }
 
     /// Parse `<fasta_path>.fai` once, for handing to
@@ -691,15 +711,14 @@ impl EvictableRefSeq for WindowedRefSeq {
     /// cannot be fetched by this reader in the first place, so it cannot be buffered
     /// either. Eviction is a hint; a wrong one costs memory, never an answer.
     fn evict_before(&self, pos: u64) {
-        if let Some((_, reader)) = self.current.borrow_mut().as_mut() {
+        if let Some((_, reader)) = self.lock_current().as_mut() {
             reader.evict_before(u32::try_from(pos).unwrap_or(u32::MAX));
         }
     }
 
     /// The resident window, in bases — see the trait method.
     fn resident_bases(&self) -> usize {
-        self.current
-            .borrow()
+        self.lock_current()
             .as_ref()
             .map_or(0, |(_, reader)| reader.resident_bases())
     }
@@ -725,7 +744,7 @@ impl WindowedRefSeq {
             .entries
             .get(contig.get() as usize)
             .ok_or(RefSeqError::UnknownContig(contig))?;
-        let mut current = self.current.borrow_mut();
+        let mut current = self.lock_current();
         let needs_rebuild = !matches!(&*current, Some((resident, _)) if *resident == contig);
         if needs_rebuild {
             let reader = match &self.index {
@@ -1130,12 +1149,9 @@ mod tests {
     #[test]
     fn a_shared_handle_can_release() {
         let (_dir, path, contigs) = build_fasta(FASTA_CONTIGS);
-        // `Arc` around a `!Sync` reader is exactly the shape under test: both locus
-        // generators hold their reference this way, and it is why the trait takes `&self`.
-        #[expect(
-            clippy::arc_with_non_send_sync,
-            reason = "the shared !Sync handle is the thing being tested"
-        )]
+        // `Arc` around the reader is exactly the shape under test: both locus generators
+        // hold their reference this way, and it is why the trait takes `&self`. (The lint
+        // waiver that stood here died with `!Sync` — the window is behind a `Mutex` now.)
         let shared = std::sync::Arc::new(WindowedRefSeq::new(path, contigs));
 
         shared.fetch(ContigId(0), 1, 8).expect("in bounds");

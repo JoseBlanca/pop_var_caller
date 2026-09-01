@@ -295,10 +295,6 @@ fn run_cohort(
     // `Arc` rather than `Rc` even though this walk is single-threaded: `RawRefSeq`
     // is implemented for `Arc<T>` and nothing else (`ref_seq.rs`), so the generator
     // cannot take an `Rc`. Clippy's usual remedy therefore does not apply here.
-    #[expect(
-        clippy::arc_with_non_send_sync,
-        reason = "RawRefSeq is implemented for Arc only; this walk is single-threaded"
-    )]
     let reference = Arc::new(WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()));
     // **One generator per sample, and that is a requirement rather than a tidiness.** A
     // generator opens a reader for one sample's files and keeps it positioned for a whole

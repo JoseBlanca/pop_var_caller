@@ -4532,9 +4532,11 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
 /// ng's reference, for the length of one `#[ignore]`d differential, and it dies with this
 /// file when the two walkers begin to diverge on purpose (A2).
 ///
-/// `Rc`, not `Arc`: [`WindowedRefSeq`](crate::ng::ref_seq::WindowedRefSeq) buffers behind
-/// a `RefCell` and is therefore not `Sync`, and this test is single-threaded. The two
-/// walks are driven one after the other, so the buffer is never borrowed by both.
+/// `Rc`, not `Arc`: this test is single-threaded and the two walks are driven one after the
+/// other, so nothing needs to cross a thread. (When this was written the choice was forced —
+/// [`WindowedRefSeq`](crate::ng::ref_seq::WindowedRefSeq) buffered behind a `RefCell` and was
+/// `!Sync`; it has been `Sync` since 2026-09-01, and the `Rc` stays only because sharing
+/// across threads is still nothing this differential does.)
 struct SharedReference(Rc<crate::ng::ref_seq::WindowedRefSeq>);
 
 impl Clone for SharedReference {

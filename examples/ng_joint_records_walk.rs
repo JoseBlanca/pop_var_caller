@@ -1039,10 +1039,6 @@ fn walk_one(
             )
         }
     };
-    #[allow(
-        clippy::arc_with_non_send_sync,
-        reason = "file-backed and single-threaded, as in real_alignments.rs"
-    )]
     let shared = Arc::new(accessor());
     let generic_generator = PileupGenerator::new(
         Arc::clone(&shared),

@@ -19,7 +19,34 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-01):** **F3 — the run report: what the run refused, and why**
+> - **Last completed task (2026-09-01):** **E1 of the run driver — the calling run's cover goes
+> parallel across samples**
+> (step E1 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
+> [report](doc/devel/reports/implementations/ng_run_driver_e1_2026-09-01.md)).
+> **5,905 tests in the lib** — 3 added by this step, 17 by the pre-pass handover merge that
+> landed on main mid-session.
+> **Measured before built, at the cohort size the plan demanded.** On the whole 63-accession
+> tomato benchmark — both grounds, D3's 200 kb and the full 8 Mb — decoding reads is
+> **87.9–88.1% of `call_cohort` and runs on one thread**; genotyping, which the plan's pool of
+> callers would parallelise, is **5.3–5.9%**, so that pool's ceiling is 1.06× and it was not
+> built. `ObservationCache::cover_in_parallel` — built for the merge's parallel driver, same
+> fixpoint by any schedule — is what reaches the 88%, so the run's record path now covers each
+> building region with the samples swept concurrently, and eviction, assembly and genotyping
+> stay on the merge thread in genome order. Output identical at every thread count (spec §12.2;
+> pinned at the driver, and end to end at E2). **Measured on alternated arms, quiet machine, 8
+> threads: 1.8× on the 200 kb slice (12.1–12.3 s → 6.6–6.7 s calling) and 1.5× on the whole
+> 8 Mb benchmark (473.6 s → 308.8 s), at about half again the CPU** — the residue is per-cover
+> scheduling and cross-thread frees, which is Milestone G's territory.
+> **Getting a walker across a thread took three `Send` widenings** — two at sites whose docs
+> had reserved the change, one that had not: `GeneratorSlot`'s box gained `+ Send`; the pileup
+> generator's read-preparation cell traded `Rc<RefCell<_>>` for `Arc<Mutex<_>>`;
+> `WindowedRefSeq`'s window traded `RefCell` for `Mutex`, making it `Sync` (its doc had only
+> recorded the per-worker ownership that makes the swap safe). Ownership is unchanged — one
+> walker, one thread at a time — so every lock is uncontended; 19 now-dead
+> `arc_with_non_send_sync` waivers went with it (7 `#[expect]`, 12 `#[allow]`).
+> **`call_cohort` keeps the serial cover on purpose**: it is the oracle.
+>
+> - **Earlier (2026-09-01):** **F3 — the run report: what the run refused, and why**
 > (step F3 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
 > [report](doc/devel/reports/implementations/ng_run_driver_f3_2026-09-01.md)).
 > **5,885 tests in the lib** — 17 added.
@@ -2688,10 +2715,14 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 ---
 
 #### Direct mode — alignment files to called loci, in one process
-- **Status:** **A1 and A2 shipped — Milestone A complete, at Checkpoint A.** The object a
-  direct-mode run *is* — every sample's alignment files open at once, the ground to analyse, the
-  numbers to call with — constructed, checked, and inert. No iteration: no merge is driven, no
-  locus called, no record written.
+- **Status:** **Milestones A–D and F shipped; E1 implemented (2026-09-01), E2 — the end-to-end
+  concurrency-invariance oracle — still owed.** A person runs
+  `pop_var_caller_exp call-from-alignments` on a cohort of CRAMs and gets a VCF, the parameters
+  used beside it, and a run report; since E1 the run's record path draws every sample's reader
+  forward concurrently inside each cover (the merge's parallel cover), while assembly and
+  genotyping stay on the merge thread — measured at the full 63-accession benchmark, decoding
+  is 88% of a run and genotyping 5–6%, which is why no pool of genotyping workers was built.
+- **E1 impl report:** [E1](doc/devel/reports/implementations/ng_run_driver_e1_2026-09-01.md).
 - **Plan:** [run_driver_direct_mode.md](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
   **Spec:** [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §5.1;
   **Arch:** [run_streaming.md](doc/devel/ng/arch/run_streaming.md) §1, §3.4, §5.
@@ -2756,6 +2787,19 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   the descriptor message quoted a total nobody could reproduce, because a 32-descriptor allowance
   was invisible; and three assertions could not fail for the reason they stated — one passed on
   the digit `4` inside the number `34`. All fixed.
+- **⚑ Spec statements E1's measurement has overtaken (recorded here; the spec is the owner's to
+  edit).** `run_streaming.md` §3.5 and §5.1 describe the callers as "a serial merge feeding a
+  pool of callers" bounded by `callers in flight × one cohort locus` — §3.5's own first sentence
+  makes everything there provisional until §11's measurements exist, and the measurement now
+  says the pool parallelises 5–6% of a run at 63 samples, so E1 built the parallel cover instead
+  and no `CallersInFlight` exists. §11 question 7's calling half is thereby answered at ≤63
+  samples (the stage worth a pool is the decode, and it has one now); its large-cohort half
+  stays open. §12.2's "at any number of callers in flight" reads, as built, "at any rayon
+  thread count" — the cover's schedule is the only concurrency a calling run has. And §8's
+  trap entry "the reference accessor is `Send` but deliberately not `Sync`" is overtaken in
+  its letter — `WindowedRefSeq` is `Sync` since E1 — while its point (never share one
+  accessor across workers; k cursors on one window serialise the walk) stands and is what the
+  code documents instead.
 - **Open:**
   - **⚑ The empty-cohort refusal is built and is still the owner's to keep or strike** (the plan
     asked for it to be raised at Checkpoint A): a run whose file pattern matched nothing would
@@ -2778,8 +2822,10 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **This plan's Milestone D and the VCF plan's Milestones D and E interlock**, and the
     sequencing is the owner's: this plan's D produces called loci, and the VCF plan's D1 maps a
     called locus to a record while its E1 drives merge → loop → assembly → writer.
-  - Which threads do the genotype arithmetic once several loci are called at once — arch §8,
-    owed by the step that adds the concurrency.
+  - ~~Which threads do the genotype arithmetic once several loci are called at once~~ —
+    answered by measurement at E1 (2026-09-01): the merge thread's, still, because genotyping
+    is 5–6% of a run at 63 samples; the parallelism went to the cover. Arch §8 records the
+    closure; re-opens only on a large-cohort measurement that moves the share.
 
 ---
 

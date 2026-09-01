@@ -249,8 +249,9 @@ pub trait ObservationSource {
   `SampleCursor` (`SampleReads::cursor` takes `&self` and returns an owned, `Send` cursor —
   [`read/input/mod.rs:623`](../../../../src/ng/read/input/mod.rs), test
   [`:1441`](../../../../src/ng/read/input/mod.rs)), the reference accessor from the factory
-  (`WindowedRefSeq` is `Send` and deliberately not `Sync` —
-  [`read/input/mod.rs:606-611`](../../../../src/ng/read/input/mod.rs)), and the generator set whose
+  (`WindowedRefSeq`, one per consumer — `Sync` since E1, but sharing one would still collapse k
+  cursors onto one window: [`read/input/mod.rs:606-611`](../../../../src/ng/read/input/mod.rs)),
+  and the generator set whose
   drop order is load-bearing
   ([`locus_generation/mod.rs:1028-1040`](../../../../src/ng/locus_generation/mod.rs)) — is held by
   that iterator, so the walker inherits it including the `Drop` impl that guards the order. Spec
@@ -271,10 +272,20 @@ pub trait ObservationSource {
   is silent: cohort loci built without that sample, wrong genotypes rather than an error. **Any
   change that adds a retry has to fix this first.**
 
-  **It is neither `Send` nor `Sync`, and not by its own choice.** `GeneratorSlot::Generator` holds
-  a `Box<dyn LocusGenerator<S>>` with no auto-trait bound — deliberate, and recorded at that type.
-  So a walker cannot go under `merge_cohort_in_parallel` without widening that trait object, and a
-  walker and the merge drawing from it stay on one thread. E1 has to plan around it.
+  **It is `Send` since E1 (2026-09-01), and that is what the milestone spent its change on.**
+  Three types below the walker were widened — two at sites whose documentation had reserved the
+  change, one (`WindowedRefSeq`) whose doc had only recorded the per-worker ownership that makes
+  the widening safe:
+  `GeneratorSlot`'s trait object gained `+ Send` (the condition its note named — "if a
+  `GeneratorSet` is ever moved onto a producer thread"); the pileup generator's read-preparation
+  cell traded `Rc<RefCell<_>>` for `Arc<Mutex<_>>`; and `WindowedRefSeq`'s resident window traded
+  `RefCell` for `Mutex`, making it `Sync` so the `Arc` handles the generator keeps are `Send`.
+  **Ownership is unchanged — one walker is used by one thread at a time — so every new lock is
+  uncontended**; spec §8's trap about a shared accessor behind a lock is about sharing, which
+  nothing here does. The walker is still not `Sync`, so it still cannot go under
+  `merge_cohort_in_parallel`, whose builders share the cache; what `Send` buys is the **parallel
+  cover** (`ObservationCache::cover_in_parallel`), which sweeps the walkers from a pool one
+  thread at a time. `a_run_walker_can_cross_a_thread` is the compile-time proof.
 
   **The walker is deliberately not an `Iterator`.** It could not be: the blanket implementation
   at [`observation_cache.rs:98`](../../../../src/ng/run/cohort_merge/observation_cache.rs) already
@@ -320,11 +331,22 @@ way, so direct mode is unaffected.
 **The two stages parallelise along different axes** (spec §3.5), and the draft's single shared
 skeleton — segments dealt to workers, several in flight — describes neither.
 
-- **The two variant callers: a serial merge feeding a pool of callers.** One thread runs the merge
-  and produces cohort loci in genome order; each locus goes to a free caller as it appears; results
-  are released in genome order. The genome is not cut for calling, because a cohort locus is not a
-  position — a deletion joins consecutive positions into one — so where loci begin and end is an
-  output of the merge, not an input to it (spec §3.5).
+- **The two variant callers: a serial merge whose cover sweeps the samples in parallel — the
+  pool of callers is measured out, not built (Milestone E, 2026-09-01).** Spec §3.5 sketched one
+  thread merging and a pool genotyping, and flagged everything there as provisional until §11's
+  measurements existed. The measurement exists and does not support the pool: on the whole
+  63-accession tomato cohort, decoding reads is **88% of `call_cohort` and genotyping 5–6%**
+  (both grounds measured — D3's 200 kb and the full 8 Mb), so a pool of genotyping workers
+  reaches at most a few percent of a run while the decode stays one thread. What E1 built
+  instead: the run's record path covers each building region with
+  `ObservationCache::cover_in_parallel`, which draws every sample's walker forward concurrently
+  and reaches the same fixpoint as the serial sweep, while eviction, assembly and genotyping
+  stay on the merge thread in genome order. The output is identical at every thread count (spec
+  §12.2). The genome is still not cut for calling, for spec §3.5's unchanged reason — a cohort
+  locus is an output of the merge, not an input to it. **`CallersInFlight` (§3.1's sketch below)
+  therefore stays unbuilt**: revisit the pool when a cohort large enough to move genotyping's
+  share (D3's three defensible models give a tenth to a third at a thousand samples) is actually
+  measured.
 - **The walk: one worker per sample.** Several samples are walked at once, one worker each, and
   each sample's walk is serial inside it (spec §5.2).
 
@@ -336,6 +358,9 @@ The knobs are newtypes over `NonZeroUsize` — a count whose zero is illegal:
 /// knob, and what their in-flight memory is a multiple of (spec §3.5, §7.1). The name is the
 /// spec's *callers in flight*; what it counts is loci, not variant callers.
 /// **No default is proposed** — spec §11 question 2 names the sweep that sets it.
+/// **⛦ Unbuilt, and deliberately so (Milestone E, 2026-09-01)**: genotyping is 5–6% of a
+/// measured run at 63 samples, so the pool this would size is not worth its scheduling —
+/// see §3.1's first bullet. The sketch stays because the share grows with the cohort.
 pub struct CallersInFlight(pub NonZeroUsize);
 
 /// Samples being walked at once in psp mode's walk stage. Each costs one open alignment file at
@@ -641,8 +666,9 @@ about a run. Measured on the fixture cohort a locus selection narrows to the ref
 reaches this, which `candidate_alleles.md` §6.2 puts at more than one built locus in four on both
 benchmarks.
 
-**Contract, both callers.** Records in genome order, identical at every number of callers in flight
-(spec §12.2), and identical between the two callers on one cohort with fixed parameters (spec §12.3
+**Contract, both callers.** Records in genome order, identical at every worker count — since E1
+that means every rayon thread count, the cover being the one thing that threads (spec §12.2) —
+and identical between the two callers on one cohort with fixed parameters (spec §12.3
 — the regression anchor). Iteration ends at the first `Err`; direct mode leaves nothing to clean up,
 and a psp without a valid trailer is refused at `open` (spec §9).
 
@@ -947,7 +973,7 @@ Every row read at the cited line on 2026-08-31.
 | the source trait (§2) | `ObservationSource` [`cohort_merge/observation_cache.rs:70`](../../../../src/ng/run/cohort_merge/observation_cache.rs), blanket impl for iterators [`:98`](../../../../src/ng/run/cohort_merge/observation_cache.rs) | **built, and described here rather than moved**; the walker implements it |
 | the walker behind the alignment source | `SampleLocusObservationsIterator` [`locus_generation/mod.rs:921`](../../../../src/ng/locus_generation/mod.rs) | **one per sample for the whole run**; drop order load-bearing [`:1028`](../../../../src/ng/locus_generation/mod.rs) |
 | the per-sample read cursor | `SampleReads` [`read/input/mod.rs:398`](../../../../src/ng/read/input/mod.rs), `cursor` [`:623`](../../../../src/ng/read/input/mod.rs) | one `SampleReads` per sample, one owned cursor per walker (`Send` proven at [`:1441`](../../../../src/ng/read/input/mod.rs)) |
-| the reference accessor factory | factory parameter of `cursor` [`read/input/mod.rs:606-611`](../../../../src/ng/read/input/mod.rs) | one accessor per walker; the factory exists because `WindowedRefSeq` is `Send`, not `Sync` |
+| the reference accessor factory | factory parameter of `cursor` [`read/input/mod.rs:606-611`](../../../../src/ng/read/input/mod.rs) | one accessor per walker; the factory exists because each cursor must own its window — sharing one accessor would collapse k cursors onto one file position (the type stopped forbidding it when it became `Sync` at E1; the reason stands) |
 | "correct in any order, fastest ascending" | per-segment fetch [`pileup/generator.rs:621`](../../../../src/ng/locus_generation/pileup/generator.rs); any-order cursor [`cursor.rs:92`](../../../../src/ng/read/input/cursor.rs), test [`:1207`](../../../../src/ng/read/input/cursor.rs) | the source ordering contract, walker side |
 | read-filter tallies | in the cursor [`read/input/mod.rs:620-622`](../../../../src/ng/read/input/mod.rs) | summed at the gatherer's `finish` (spec §8) |
 | the merge | `merge_cohort_through_cache` [`serial.rs:146`](../../../../src/ng/run/cohort_merge/serial.rs), `merge_cohort_in_parallel` [`parallel.rs:96`](../../../../src/ng/run/cohort_merge/parallel.rs) | **built**; both accumulate the whole run's loci in `RegionOutcome` [`build.rs:743`](../../../../src/ng/run/cohort_merge/build.rs), which is the oracle shape and not the run's |
@@ -983,17 +1009,19 @@ Genuinely open design questions:
   [`../impl_plan/vcf_output.md`](../impl_plan/vcf_output.md) Milestones D and E). **Owner's, and it
   is a sequencing question rather than a design one** — nothing about either shape changes with the
   answer.
-- **OPEN: which threads do the genotype arithmetic, once several loci are genotyped at a time**
-  (§3.2). Two readings, and they are the same run until the second locus starts before the first
-  has finished. Calling *inside* the merge's builder means the threads are the merge's own region
-  builders — they exist, in `merge_cohort_in_parallel`, and are off by default (spec §3.5).
-  Calling *after* the builder means the merge stays on one thread and hands each finished locus to
-  a separate set of workers, which is what spec §3.5 describes.
-  **⛦ Owner's ruling, 2026-08-31: build against the single-threaded merge and settle this from a
-  measurement.** A single-threaded run calls in the same place under either reading, so the run
-  driver reaches genotypes from alignment files without answering it. **Whether the region
-  batching is kept at all is part of the same question** — it is switched off today on a measured
-  1.4× at eight threads, and nothing says it earns its place once genotyping is in the mix.
+- ~~**OPEN: which threads do the genotype arithmetic, once several loci are genotyped at a
+  time**~~ — **answered by measurement, Milestone E (2026-09-01): the merge thread's, still,
+  and no second locus starts before the first finishes.** The measurement the 2026-08-31 ruling
+  deferred to came in twice — D3 at 3–24 samples, E at the whole 63-accession cohort on both
+  grounds — and it says the same thing at every size: decoding reads is 88–97% of `call_cohort`
+  and genotyping 1–6%, so *neither* reading of "which threads genotype" buys a run anything
+  measurable yet. The parallelism went to the cover instead (§3.1's first bullet): each building
+  region's samples are drawn forward concurrently, and assembly plus genotyping stay serial on
+  the merge thread. **The region batching survives untouched and unused by the calling path** —
+  `merge_cohort_in_parallel` remains the merge's own parallel oracle-checked driver, off by
+  default; whether it earns a place in a calling run is re-opened only if a large-cohort
+  measurement moves genotyping's share (a tenth to a third at a thousand samples, on D3's three
+  defensible models).
 - **OPEN: the cheap question a source cannot be asked** — spec §10's second entry. It costs direct
   mode nothing and blocks nothing here.
 

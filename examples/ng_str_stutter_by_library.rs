@@ -493,10 +493,6 @@ fn run(
         eprintln!("  a tract needs {bases} clean bases either side, against ng's default of 30");
     }
     let bundle_threshold = Bp(walk_config.criteria.bundle_threshold);
-    #[expect(
-        clippy::arc_with_non_send_sync,
-        reason = "RawRefSeq is implemented for Arc only; this walk is single-threaded"
-    )]
     let shared_reference = Arc::new(WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()));
     // One generator per sample: a generator holds a reader positioned for one sample's files, so a
     // shared one would answer every sample out of the first one's reads.

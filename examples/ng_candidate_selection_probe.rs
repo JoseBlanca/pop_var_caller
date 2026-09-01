@@ -425,10 +425,6 @@ fn walk_one_sample(
         true,
     )?;
 
-    #[allow(
-        clippy::arc_with_non_send_sync,
-        reason = "PileupGenerator::new takes Arc and this accessor is file-backed and single-threaded, as in ng_cohort_merge_real_cost"
-    )]
     let shared = Arc::new(WindowedRefSeq::with_shared_index(
         fasta.to_path_buf(),
         contigs.clone(),

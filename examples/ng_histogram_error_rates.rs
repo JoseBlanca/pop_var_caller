@@ -162,10 +162,6 @@ fn fit_one_sample(
         contigs.clone(),
         index.clone(),
     ));
-    #[allow(
-        clippy::arc_with_non_send_sync,
-        reason = "PileupGenerator::new takes an Arc'd accessor; this one is file-backed and this tool is single-threaded, as in the harness it copies"
-    )]
     let accessor = Arc::new(WindowedRefSeq::with_shared_index(
         fasta.to_path_buf(),
         contigs.clone(),

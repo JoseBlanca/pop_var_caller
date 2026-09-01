@@ -606,9 +606,11 @@ impl SampleReads {
     /// **One reference accessor per file, taken here once** for the cursor's whole life
     /// rather than rebuilt per region (perf review L2). `RawRefSeq` impls are stateful
     /// readers, so the k files cannot share one: `WindowedRefSeq` holds an open per-contig
-    /// reader and is `Send` but not `Sync`, precisely because each consumer is meant to own
-    /// one. A factory gives each file cursor its own, which is what the type requires; the
-    /// caller writes one closure.
+    /// reader, and each consumer is meant to own one — k cursors on one accessor would be one
+    /// file position and one window serving k readers. A factory gives each file cursor its
+    /// own; the caller writes one closure. (The type itself stopped forbidding the sharing on
+    /// 2026-09-01, when it became `Sync` so a walker could cross threads — the ownership rule
+    /// is the reason, and it is unchanged.)
     ///
     /// **Every accessor the factory hands out is checked against the file it will serve** — its
     /// contig table against that file's, and its ability to fetch this chromosome's bases

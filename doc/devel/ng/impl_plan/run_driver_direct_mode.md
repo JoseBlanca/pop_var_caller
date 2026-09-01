@@ -368,9 +368,29 @@ whether it is worth keeping at all is the same measurement. So D3 comes first an
 time goes, and this milestone is shaped after it.
 *Background:* [`../arch/run_streaming.md`](../arch/run_streaming.md) §8; spec §11 question 7.
 
-☐ **E1. Callers in flight.** The merge stays on one thread; each cohort locus goes to a free worker;
+✅ **E1. Callers in flight.** The merge stays on one thread; each cohort locus goes to a free worker;
 results are released in genome order. The bound is `callers in flight × one cohort locus`.
 *Depends:* D3, and the ruling above. *Source:* §3.5, §5.1.
+
+**⛦ What landed is the milestone's first question answered, not this step's original text — the
+measurement the deferral note demanded ruled the pool out and ruled the parallel cover in.**
+Measured before anything was built, at the full 63-accession cohort on two grounds (200 kb and
+the whole 8 Mb benchmark): decoding reads is **87.9–88.1% of `call_cohort` on one thread**, and
+genotyping — what this step's pool would parallelise — **5.3–5.9%**, ceiling 1.06×. So E1 gave
+the run's record path the **parallel cover** instead: each building region's samples are drawn
+forward concurrently (`ObservationCache::cover_in_parallel`, which existed and was reachable
+only by the merge's parallel driver), while eviction, assembly and genotyping stay on the merge
+thread in genome order. Getting the walkers across threads took three `Send` widenings — two at
+sites whose own documentation had reserved the change (`GeneratorSlot`'s box, the pileup
+generator's preparation cell, `Rc<RefCell>` → `Arc<Mutex>`), and one that had not:
+`WindowedRefSeq`'s window (`RefCell` → `Mutex`, making it `Sync`), whose doc had only recorded
+the per-worker ownership that makes the swap safe — every lock uncontended because ownership
+stays per worker.
+`call_cohort` keeps the serial cover on purpose: it is E2's oracle. **No pool of genotyping
+workers exists and `CallersInFlight` stays unbuilt**; the question re-opens only when a cohort
+large enough to move genotyping's share is measured (a tenth to a third at a thousand samples,
+on D3's three defensible models).
+*Landed 2026-09-01:* [report](../../reports/implementations/ng_run_driver_e1_2026-09-01.md).
 
 ☐ **E2. Concurrency invariance. Own commit, do not bundle.** The same VCF-bound output at one caller
 and at sixteen. **This is where a missed reset in `CallingScratch` shows** — the scratch is per

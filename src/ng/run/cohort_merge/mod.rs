@@ -18,8 +18,10 @@
 //! analysed ground into the regions single builders own, the organiser's **ordered release**,
 //! which takes the builders' outcomes by region index and lets their loci out along an
 //! unbroken run of indexes, and its resolution of the overlaps between neighbouring builders;
-//! [`serial`]'s **two** single-threaded drivers, the oracle every later milestone must
-//! reproduce and the same merge read through the cache, byte for byte; and [`parallel`]'s
+//! [`serial`]'s **two** single-threaded drivers — the oracle every later milestone must
+//! reproduce and the same merge read through the cache, byte for byte — plus, since the run
+//! driver's E1, a third whose only departure is that each cover sweeps the samples
+//! concurrently; and [`parallel`]'s
 //! round-by-round arrangement of the builders, whose output is those two byte for byte at any
 //! number of regions in flight and any region width.
 //!

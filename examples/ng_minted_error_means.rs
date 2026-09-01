@@ -229,10 +229,6 @@ fn walk_sample(
     let sample =
         SampleReads::open_only_sample(&paths, &reference, ReadFilterConfig::default(), true)?;
 
-    #[allow(
-        clippy::arc_with_non_send_sync,
-        reason = "PileupGenerator::new takes an Arc'd accessor; this one is file-backed and this tool is single-threaded — same as ng_generic_walk_probe"
-    )]
     let accessor = Arc::new(WindowedRefSeq::with_shared_index(
         fasta.to_path_buf(),
         contigs.clone(),

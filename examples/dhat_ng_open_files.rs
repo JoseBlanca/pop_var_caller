@@ -153,10 +153,6 @@ fn run(
     // A reference accessor per query, as the real caller does: `RawRefSeq` impls
     // are stateful readers, so one shared accessor would need a lock the moment
     // queries run concurrently.
-    #[expect(
-        clippy::arc_with_non_send_sync,
-        reason = "RawRefSeq is implemented for Arc only; this harness is single-threaded"
-    )]
     let make_reference = || Arc::new(WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()));
 
     // `PVC_OPEN_ONLY` stops here, with every file open and nothing decoded.

@@ -443,14 +443,19 @@ struct ProbeRun {
     reference_check: ReferenceCheck,
 }
 
-fn walk<P: ReadPreparer + 'static>(
+// `Send` bounds because `GeneratorSlot` boxes only `Send` generators now (a walker crosses
+// threads under the merge's parallel cover, 2026-09-01); every preparer this probe passes is.
+fn walk<P: ReadPreparer + Send + 'static>(
     fasta: &Path,
     bams: &[PathBuf],
     contig_filter: Option<&str>,
     preparer: P,
     run: ProbeRun,
     cache: &Arc<ReferenceInfoCache>,
-) -> Result<ProbeReport, Box<dyn std::error::Error>> {
+) -> Result<ProbeReport, Box<dyn std::error::Error>>
+where
+    P::Scratch: Send,
+{
     let ProbeRun {
         config,
         chunk_bp,
@@ -471,10 +476,6 @@ fn walk<P: ReadPreparer + 'static>(
     let sample =
         SampleReads::open_only_sample(bams, &reference, ReadFilterConfig::default(), true)?;
 
-    #[allow(
-        clippy::arc_with_non_send_sync,
-        reason = "PileupGenerator::new is generic over the accessor and takes Arc; this accessor is file-backed and single-threaded — see ng_generic_loci_dump::run_dump"
-    )]
     let reference = Arc::new(WindowedRefSeq::with_shared_index(
         fasta.to_path_buf(),
         contigs.clone(),

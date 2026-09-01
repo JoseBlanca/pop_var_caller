@@ -12,10 +12,8 @@
 //! ([`begin_segment`](super::super::LocusGenerator::begin_segment) and the halo)
 //! is C2's, and the allocator's lifetime across segments is C3's.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::ng::locus_generation::{
     GeneratorCounts, LocusGenerationError, LocusGenerator, SampleLocusObservations,
@@ -494,9 +492,11 @@ impl PileupGeneratorCounts {
 /// reallocated at every region boundary, which is what a generator-level
 /// scratch field exists to prevent (arch §1.1).
 ///
-/// One `RefCell` borrow per read, held only across `prepare_read`; the walk is
+/// One uncontended lock per read, held only across `prepare_read`; the walk is
 /// single-threaded (`locus_generation.md` §9) and nothing else touches the cell while a read is
-/// being prepared.
+/// being prepared. **A `Mutex` and not a `RefCell` since 2026-09-01**, not for concurrency —
+/// the two holders are still one thread — but so the generator, and the walker above it, are
+/// `Send` and can be swept by the merge's parallel cover.
 struct ReadPreparation<P: ReadPreparer> {
     preparer: P,
     scratch: P::Scratch,
@@ -519,6 +519,24 @@ struct ReadPreparation<P: ReadPreparer> {
     /// is the one thing both hold. Taken by `end_walk`, so a region's tally is folded
     /// with that region's walk rather than leaking into the next one.
     declined: u64,
+}
+
+/// Lock the shared preparation cell.
+///
+/// **Uncontended by construction** — the stream and the generator that share the cell are
+/// one thread — so a poisoned lock means this walk's own earlier preparation panicked, and
+/// there is no state worth salvaging past that.
+///
+/// **A same-thread re-entry would deadlock here where the old `RefCell` panicked.** No such
+/// path exists — the guard is dropped before `shed` (compiler-enforced: the error arm cannot
+/// hold it), and nothing below the preparer reaches this cell (traced by E1's correctness
+/// review) — but a future edit that adds one gets a hang, not a message.
+fn lock_preparation<P: ReadPreparer>(
+    preparation: &Mutex<ReadPreparation<P>>,
+) -> MutexGuard<'_, ReadPreparation<P>> {
+    preparation
+        .lock()
+        .expect("the read-preparation cell is used by one thread at a time, and its own earlier use panicked")
 }
 
 /// The sample's reads, prepared: the cursor's `AlignedRead`s canonicalised into the
@@ -547,7 +565,7 @@ struct PreparedSampleReads<R: RawRefSeq, P: ReadPreparer> {
     /// generator's own knob, carried here because this is where the widening now happens
     /// — see [`query`](Self::query).
     halo: u32,
-    preparation: Rc<RefCell<ReadPreparation<P>>>,
+    preparation: Arc<Mutex<ReadPreparation<P>>>,
     /// Set once the region is exhausted or an error was latched. Both are
     /// terminal **for the region**: a stream that shed an error must not resume, or the
     /// walk would carry on over a hole it was never told about. Cleared by
@@ -575,7 +593,7 @@ impl<R: RawRefSeq, P: ReadPreparer> Iterator for PreparedSampleReads<R, P> {
                     });
                 }
             };
-            let mut preparation = self.preparation.borrow_mut();
+            let mut preparation = lock_preparation(&self.preparation);
             // Split the borrow: `prepare_read` takes `&self` and `&mut
             // Self::Scratch`, which are two fields of the same cell.
             let ReadPreparation {
@@ -680,7 +698,7 @@ impl<R: RawRefSeq, P: ReadPreparer> PreparedSampleReads<R, P> {
     /// a later one describes a walk that was already over.
     fn shed(&mut self, error: LocusGenerationError) -> Option<PreparedRead> {
         self.done = true;
-        let mut preparation = self.preparation.borrow_mut();
+        let mut preparation = lock_preparation(&self.preparation);
         if preparation.latched_error.is_none() {
             preparation.latched_error = Some(error);
         }
@@ -774,20 +792,21 @@ pub struct PileupGenerator<R: RawRefSeq + EvictableRefSeq + ContigTable, P: Read
     /// coordinates: one accessor between them would be one file position and one sliding
     /// window serving k readers, and its eviction would be driven by whichever asked last.
     ///
-    /// **`+ Send` costs nothing *here* and is kept for the fan-out.** A bare `Box<dyn FnMut>`
-    /// makes this generator `!Send` whatever `R` and `P` are. Nothing is blocked today — the
-    /// `Rc<RefCell<ReadPreparation>>` below already blocks it — but `locus_generation.md` §9
-    /// gives each worker its own generator, so this would become a second blocker to remove
-    /// for no gain.
+    /// **`+ Send` costs nothing *here* and is what the fan-out needed.** A bare
+    /// `Box<dyn FnMut>` makes this generator `!Send` whatever `R` and `P` are. The fan-out
+    /// arrived 2026-09-01: a calling run's walkers are swept by the merge's parallel cover,
+    /// which moves each one between threads (one at a time), so the whole generator is
+    /// `Send` now — the preparation cell below traded its `Rc<RefCell<_>>` for an
+    /// `Arc<Mutex<_>>` in the same step.
     ///
-    /// **The STR generator deliberately does *not* carry the bound**, and the difference is a
-    /// caller rather than a preference: `ng_ssr_cohort_stutter` hands every file a clone of one
-    /// `Arc<WindowedRefSeq>`, which is `!Send` because `WindowedRefSeq` holds a `RefCell` and is
-    /// therefore `!Sync`. Every caller of *this* constructor builds a fresh accessor per call,
-    /// capturing only a `PathBuf` and two `Arc`s.
+    /// **The STR generator's factory carries the same bound now** — until 2026-09-01 it
+    /// deliberately did not, because `ng_ssr_cohort_stutter` hands every file a clone of one
+    /// `Arc<WindowedRefSeq>` and that `Arc` was `!Send`; the counter-example dissolved when
+    /// `WindowedRefSeq` became `Sync`. The factory *shape* stays either way: one accessor
+    /// across k interleaving cursors would be one window serving k readers.
     make_reference: Box<dyn FnMut() -> R + Send>,
     /// The preparer and its scratch, lent to each region's read stream.
-    preparation: Rc<RefCell<ReadPreparation<P>>>,
+    preparation: Arc<Mutex<ReadPreparation<P>>>,
     /// Lives across chromosomes so `next_id` never repeats — **`None` exactly while a
     /// [`ChromosomeWalk`] holds it**, which is the invariant `enter_chromosome` keeps.
     ///
@@ -882,7 +901,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
         Ok(Self {
             reference,
             make_reference: Box::new(make_reference),
-            preparation: Rc::new(RefCell::new(ReadPreparation {
+            preparation: Arc::new(Mutex::new(ReadPreparation {
                 preparer,
                 scratch: P::Scratch::default(),
                 latched_error: None,
@@ -1026,7 +1045,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
             .summary();
         self.counts
             .fold_region_walk(&summary, walk.chain_ids_at_open);
-        let mut preparation = self.preparation.borrow_mut();
+        let mut preparation = lock_preparation(&self.preparation);
         // Taken, not read: the cell outlives every walk, so a tally left in it would be
         // folded again at the next region's end — the same shape as the shed error below.
         self.counts.reads_declined_by_preparer += std::mem::take(&mut preparation.declined);
@@ -1236,8 +1255,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
             .get()
             .saturating_sub(u64::from(self.config.max_record_span));
         self.reference.evict_before(keep_from);
-        self.preparation
-            .borrow()
+        lock_preparation(&self.preparation)
             .preparer
             .evict_reference_before(keep_from);
         if let Some(chromosome) = &self.chromosome {
@@ -1258,9 +1276,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
     /// it went unnoticed in the first place.
     pub fn resident_reference_bases(&self) -> usize {
         self.reference.resident_bases()
-            + self
-                .preparation
-                .borrow()
+            + lock_preparation(&self.preparation)
                 .preparer
                 .resident_reference_bases()
             + self.chromosome.as_ref().map_or(0, |chromosome| {
@@ -1320,7 +1336,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
             reads: cursor,
             region,
             halo: self.config.max_record_span,
-            preparation: Rc::clone(&self.preparation),
+            preparation: Arc::clone(&self.preparation),
             // Not pointed at a region yet, so there is nothing to read. `move_to_region`
             // clears this; without it the walker's construction peek would ask a cursor
             // that has no region and read the answer as end of input.
@@ -3459,7 +3475,10 @@ mod tests {
             .expect("the walk succeeds")
             .expect("the first read covers the region");
 
-        let after_first = generator.preparation.borrow().preparer.prepared.get();
+        let after_first = lock_preparation(&generator.preparation)
+            .preparer
+            .prepared
+            .get();
         assert!(
             after_first <= 2,
             "the first locus needs the read under the walker and the one peeked ahead, \
@@ -3472,7 +3491,10 @@ mod tests {
             .is_some()
         {}
         assert_eq!(
-            generator.preparation.borrow().preparer.prepared.get(),
+            lock_preparation(&generator.preparation)
+                .preparer
+                .prepared
+                .get(),
             5,
             "and by the end every read has been pulled exactly once"
         );

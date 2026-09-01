@@ -7,7 +7,11 @@
 //! ```
 //!
 //! `NG_SAMPLES=n` calls only the first `n` alignment files of the directory, in name order;
-//! `NG_REGIONS=n` only the first `n` intervals of the BED. **Both default to a handful**, not
+//! `NG_REGIONS=n` only the first `n` intervals of the BED. `NG_COVER=serial|parallel` picks
+//! the arm: `serial` (default) is `call_cohort`, the oracle, one thread throughout;
+//! `parallel` is the run's own record path, whose cover sweeps the samples concurrently
+//! (Milestone E1) — compare the two on one ground to see what the parallel cover buys.
+//! **Both default to a handful**, not
 //! to everything, because this is meant to run inside the development loop: at its defaults it
 //! takes about **5 seconds**, of which nearly 3 are reading and checksumming the reference. The
 //! 63 tomato accessions over all 80 regions is a different measurement and should be asked for
@@ -53,39 +57,54 @@
 //! | 6 | 216.8 | 4,235 | 1.07 s | 1,040.7 ms (96.8%) | 14.9 ms (1.4%) | 12.9 ms (1.2%) |
 //! | 12 | 383.1 | 5,675 | 1.98 s | 1,895.9 ms (96.0%) | 32.9 ms (1.7%) | 34.1 ms (1.7%) |
 //! | 24 | 672.8 | 8,825 | 3.89 s | 3,671.6 ms (94.3%) | 89.6 ms (2.3%) | 103.1 ms (2.6%) |
+//! | 63 | 1,840.7 | 23,450 | 20.55 s | 18,105.0 ms (88.1%) | 1,135.0 ms (5.5%) | 1,090.9 ms (5.3%) |
 //!
 //! **Decoding reads is `call_cohort`.** Assembling and genotyping together are 2.2% of it at
-//! three samples and 4.9% at twenty-four.
+//! three samples, 4.9% at twenty-four and 10.8% at the whole cohort of sixty-three — and the
+//! shape survives the ground: the same sixty-three accessions over all eighty intervals
+//! (8 Mb, 1,069,772 loci, 723.2 s on one thread, measured 2026-09-01 at Milestone E) split
+//! 87.9% drawing, 5.4% assembling, 5.9% genotyping. **That split is what shaped Milestone E**:
+//! the parallelism went to the cover (`NG_COVER=parallel` above), and no pool of genotyping
+//! workers was built, because at every measured size such a pool reaches at most the
+//! genotyping share.
 //!
 //! **But `call_cohort` is not the whole wait.** Reading and checksumming the 795 MB reference,
 //! opening the catalog and building the segments cost **2.73 to 2.81 seconds** across those
 //! four runs — constant in the cohort and in the ground — so at this probe's defaults they are
 //! more than half of the 4.8 seconds a person waits. They are a row of the output.
 //!
-//! **And that 94–97% is one thread.** The driver a calling run uses draws every sample forward
-//! one after another (`ObservationCache::cover`); `cover_in_parallel`, which sweeps the
-//! cohort's samples concurrently and is documented as reaching the same fixpoint by a different
-//! schedule, exists and is reached only by the merge's parallel driver, which a calling run
-//! does not use. Measured at three samples: 3.199 s of user CPU against 3.313 s elapsed, which
-//! is one core of the nine the container had.
+//! **That 88–97% was one thread until Milestone E1 (2026-09-01), and this probe's two arms
+//! are how the fix was measured.** `call_cohort` still draws every sample forward one after
+//! another (`ObservationCache::cover`) — it is the oracle — while the run's record path sweeps
+//! the samples concurrently. Three alternated pairs on a quiet machine, 63 samples over this
+//! same 200 kb: calling went from **12.06–12.32 s serial to 6.61–6.68 s parallel** on 8 rayon
+//! threads — **1.8×** — and on the whole 8 Mb benchmark ground from **473.6 s to 308.8 s** —
+//! **1.5×** — identical loci everywhere. The parallel arm spends about half again the CPU
+//! (22.2–22.8 s of user time against 14.7–15.0 on the slice; 13m37 against 7m59 on the whole
+//! ground): per-cover scheduling, Jacobi re-sweeps, and records freed on a different thread
+//! from the one that allocated them (Milestone G's territory). The gap to the naive 8-thread
+//! ceiling is the cover's granularity — one 200-base building region per sweep, whose barrier
+//! waits for the slowest sample's decode each time.
 //!
-//! # The two rates, and the one thing they cannot settle
+//! # The two rates, and what the fifth row did to one of them
 //!
-//! **Two quantities here are stable, and are what a later run should be compared against:**
+//! **The per-locus calling rate is stable and is what a later run should be compared
+//! against**: about 1 microsecond per locus per sample — 1.34, 1.09, 0.98, 0.91 and 0.74
+//! across the five cohorts, flat and falling.
 //!
-//! - **reading costs about 5 ms per compressed megabyte** — 4.77, 4.80, 4.95 and 5.46 across
-//!   the four cohorts, so it is linear in the bytes opened to within 14% over the whole range;
-//! - **calling costs about 1 microsecond per locus per sample** — 1.34, 1.09, 0.98 and 0.91,
-//!   flat and, if anything, falling.
+//! **The reading rate is not.** 4.77, 4.80, 4.95 and 5.46 ms per compressed megabyte at 3–24
+//! samples, then **9.84 at 63** — the fifth row broke the "linear to within 14%" claim this
+//! header used to carry, and why the whole-cohort rate is near double is unmeasured. Compare a
+//! later run against the range, 4.8–9.8 ms/MB, not against 5.
 //!
-//! **Neither is a share, and the share is what Milestone E turns on.** Calling's share grows
-//! from 2.2% to 4.9% across these four cohorts, and **the whole of that growth is the number of
-//! loci**, not the cost of one: more accessions segregate more sites, so the count goes 3,291
-//! to 8,825 while the cost of each falls. **That curve has to flatten** — 200 kb of SL4.0 holds
-//! a finite number of segregating sites — and where it flattens is what decides whether calling
-//! is a tenth or a third of a thousand-sample run. **This probe cannot see that**, and no
-//! extrapolation from four cohorts of at most twenty-four should be trusted to: the answer is
-//! to run it at a thousand samples, which nothing here prevents.
+//! **Neither is a share, and the share is what Milestone E turned on.** Calling's share grows
+//! 2.2% → 4.9% → 10.8% across 3 → 24 → 63 samples, and **the whole of that growth is the
+//! number of loci**, not the cost of one: more accessions segregate more sites, so the count
+//! goes 3,291 to 23,450 while the cost of each falls. **That curve has to flatten** — 200 kb
+//! of SL4.0 holds a finite number of segregating sites — and where it flattens is what decides
+//! whether calling is a tenth or a third of a thousand-sample run. **This probe cannot see
+//! that**, and no extrapolation from five cohorts of at most sixty-three should be trusted to:
+//! the answer is to run it at a thousand samples, which nothing here prevents.
 //!
 //! **What this must not be read as saying is that reading scales sublinearly in the cohort.**
 //! It does not. The first three accessions in name order happen to be 1.5 times the average
@@ -98,8 +117,10 @@
 //!
 //! # What it does not do
 //!
-//! **It writes no VCF.** What it prints is what the caller produced — called loci, and per
-//! sample how many were called, set aside, or called as carrying an alternative.
+//! **It writes no VCF.** The serial arm prints what the caller produced — called loci, and per
+//! sample how many were called, set aside, or called as carrying an alternative. The parallel
+//! arm prints record totals and no per-sample lines: its records are dropped at the sink, so
+//! the disk stays out of the timing.
 //!
 //! **Every locus goes down the SNP/indel path.** Repeat-tract candidate selection is specified
 //! and unbuilt, so both tract generator slots are refused as such: a repeat tract in the
@@ -327,16 +348,57 @@ fn run(
     // **The counters are global and the report is not reentrant**, so they are put back to
     // zero immediately before the run that is being measured.
     timing::reset();
-    let calling = Instant::now();
-    let called = caller.call_cohort(&SummariseConditionLoop::new(
-        StutterSubstitutionEmission,
-        MarginalizedDirichletPrior,
-    ))?;
-    let calling_seconds = calling.elapsed().as_secs_f64();
+    let genotyper =
+        SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior);
 
-    report_the_calls(&called);
-    report_the_ground(&called, analysed_bases);
-    report_where_the_time_went(calling_seconds, setup_seconds, compressed_bytes);
+    // **Two arms, chosen by `NG_COVER`.** `serial` (the default) is `call_cohort`, the
+    // oracle, whose cover draws every sample on one thread; `parallel` is
+    // `call_cohort_handing_each_record_over`, the path the command takes, whose cover sweeps
+    // the samples concurrently (Milestone E1). Same walk, same merge, same calls per locus —
+    // what the two arms measure against each other is the cover's schedule, which is why the
+    // probe grew the switch.
+    let cover = std::env::var("NG_COVER").unwrap_or_else(|_| "serial".to_string());
+    match cover.as_str() {
+        "serial" => {
+            let calling = Instant::now();
+            let called = caller.call_cohort(&genotyper)?;
+            let calling_seconds = calling.elapsed().as_secs_f64();
+            println!("# cover: serial (call_cohort, the oracle)");
+            report_the_calls(&called);
+            report_the_ground(&called, analysed_bases);
+            report_where_the_time_went(calling_seconds, setup_seconds, compressed_bytes);
+        }
+        "parallel" => {
+            let calling = Instant::now();
+            // The records are dropped where they are handed over: this arm measures the
+            // calling path, and writing a VCF would time the disk beside it. The count comes
+            // back in the answer (`records_written`), so nothing here keeps one.
+            let written = caller.call_cohort_handing_each_record_over(
+                &genotyper,
+                &mut |_record| -> Result<(), std::io::Error> { Ok(()) },
+            )?;
+            let calling_seconds = calling.elapsed().as_secs_f64();
+            println!(
+                "# cover: parallel (call_cohort_handing_each_record_over, the run's path) \
+                 over {} rayon threads",
+                rayon::current_num_threads(),
+            );
+            println!(
+                "# loci called: {} — {} written as records, {} establishing no variant",
+                written.loci_called(),
+                written.records_written,
+                written.loci_called_but_not_written,
+            );
+            println!(
+                "# loci the merge declined to assemble for being too wide: {}",
+                written.loci_too_wide_to_assemble.len(),
+            );
+            report_where_the_time_went(calling_seconds, setup_seconds, compressed_bytes);
+        }
+        other => {
+            return Err(format!("NG_COVER={other}: it answers `serial` or `parallel`").into());
+        }
+    }
     Ok(())
 }
 

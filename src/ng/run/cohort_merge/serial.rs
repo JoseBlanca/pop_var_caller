@@ -179,13 +179,12 @@ where
 /// so nothing about the division of the ground, the eviction or the covering differs between
 /// them, and the merge's oracles check both at once.
 ///
-/// **This is the entry point a calling run drives.** What it buys is that the buffer holds
-/// what the sink made of each locus rather than the locus itself: a called locus is one
-/// genotype per sample, where a cohort observation is every covering sample's reads folded
-/// onto the locus's alleles. Spec §5.1 bounds a run at `callers in flight × one cohort locus`,
-/// and collecting the observations for a whole run is what that bound forbids — the pool
-/// milestone is where the loci also stop being *released* in one go, and this is what lets
-/// them stop being *held*.
+/// **The parallel-cover form below is what a calling run drives since E1; this serial form is
+/// its oracle** — one driver has to keep the schedule the fixtures were reasoned about under.
+/// What handing-over buys either way is that the buffer holds what the sink made of each locus
+/// rather than the locus itself: a called locus is one genotype per sample, where a cohort
+/// observation is every covering sample's reads folded onto the locus's alleles, and
+/// collecting the observations for a whole run is what spec §5.1's bound forbids.
 ///
 /// **The failure behaviour is `merge_cohort_through_cache`'s, and what the sink has already
 /// been handed is kept**: a caller that owns the sink's buffer still holds every locus built
@@ -199,6 +198,109 @@ pub fn merge_cohort_handing_each_locus_over<S, E>(
     min_alt_reads: MinAltReads,
     keep: &mut impl FnMut(CohortObservation),
     refused: &mut Vec<GenomeRegion>,
+) -> Result<(), E>
+where
+    S: ObservationSource<Error = E>,
+{
+    merge_handing_each_locus_over_with(
+        analysed,
+        cache,
+        cohort_locus_builder_regions_len,
+        max_cohort_locus_span,
+        min_alt_reads,
+        keep,
+        refused,
+        &mut ObservationCache::cover,
+    )
+}
+
+/// [`merge_cohort_handing_each_locus_over`], with each cover's samples drawn forward
+/// **concurrently** instead of one after another.
+///
+/// **This is where a calling run's parallelism went, and the measurement that put it here is
+/// the plan's own.** On 63 tomato accessions, drawing the readers forward — every sample's
+/// walk, which is the reads being decoded — is **88% of `call_cohort` and runs on one
+/// thread**, while assembling the loci and genotyping them together are 11%
+/// (`doc/devel/reports/implementations/ng_run_driver_e1_2026-09-01.md`, which extends D3's
+/// 3–24-sample table to the whole cohort). A pool that genotypes several loci at once therefore cannot buy a
+/// run more than a few percent; sweeping the cohort's samples concurrently inside each cover
+/// is the arrangement that reaches the 88%.
+///
+/// **Nothing about the answer changes, and that is the cover's own guarantee, not this
+/// driver's.** [`ObservationCache::cover_in_parallel`] reaches the same fixpoint as the
+/// serial sweep by a different schedule and leaves the same held window (its documentation
+/// carries the argument; the parallel merge's whole oracle battery rests on it). Everything
+/// downstream of the cover — eviction, the builders, the sink — runs on the calling thread
+/// exactly as in the serial form, in the same order, so the loci handed to `keep` are
+/// byte-identical at every thread count. `the_parallel_cover_gives_the_serial_drivers_answer`
+/// pins it here; the run's own concurrency-invariance oracle (spec §12.2, the plan's E2) is
+/// what will pin it end to end, and is not built yet.
+///
+/// **On a pool of one thread it takes the serial sweep**, the same way the parallel merge
+/// asks `rayon::current_num_threads` before handing eviction to workers: the Jacobi schedule
+/// buys nothing with nobody to share the sweep, and can cost one extra sweep per chain link.
+///
+/// **One failure shape is less determined than the serial form's**: when two samples' sources
+/// fail during one sweep, which error comes back depends on the schedule — the serial sweep
+/// always reports the first in the run's sample order. The parallel merge has the same
+/// property. A run stops either way, naming a sample that really failed.
+pub fn merge_cohort_handing_each_locus_over_covering_samples_in_parallel<S, E>(
+    analysed: &[GenomeRegion],
+    cache: &mut ObservationCache<S>,
+    cohort_locus_builder_regions_len: CohortLocusBuilderRegionsLen,
+    max_cohort_locus_span: MaxCohortLocusSpan,
+    min_alt_reads: MinAltReads,
+    keep: &mut impl FnMut(CohortObservation),
+    refused: &mut Vec<GenomeRegion>,
+) -> Result<(), E>
+where
+    S: ObservationSource<Error = E> + Send,
+    E: Send,
+{
+    if rayon::current_num_threads() > 1 {
+        merge_handing_each_locus_over_with(
+            analysed,
+            cache,
+            cohort_locus_builder_regions_len,
+            max_cohort_locus_span,
+            min_alt_reads,
+            keep,
+            refused,
+            &mut ObservationCache::cover_in_parallel,
+        )
+    } else {
+        merge_cohort_handing_each_locus_over(
+            analysed,
+            cache,
+            cohort_locus_builder_regions_len,
+            max_cohort_locus_span,
+            min_alt_reads,
+            keep,
+            refused,
+        )
+    }
+}
+
+/// The one body behind both handing-over drivers: everything but how a cover sweeps.
+///
+/// `cover` is [`ObservationCache::cover`] or [`ObservationCache::cover_in_parallel`] and
+/// nothing else — the division of the ground, the eviction, the building and the sink are
+/// written once here, so the two public forms cannot drift on anything but the sweep
+/// schedule, which is the one thing the cover's own fixpoint argument covers.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seven are the two public drivers' shared signature plus the cover; \
+              grouping them would make a struct whose only purpose is this private call"
+)]
+fn merge_handing_each_locus_over_with<S, E>(
+    analysed: &[GenomeRegion],
+    cache: &mut ObservationCache<S>,
+    cohort_locus_builder_regions_len: CohortLocusBuilderRegionsLen,
+    max_cohort_locus_span: MaxCohortLocusSpan,
+    min_alt_reads: MinAltReads,
+    keep: &mut impl FnMut(CohortObservation),
+    refused: &mut Vec<GenomeRegion>,
+    cover: &mut impl FnMut(&mut ObservationCache<S>, GenomeRegion) -> Result<(), E>,
 ) -> Result<(), E>
 where
     S: ObservationSource<Error = E>,
@@ -227,7 +329,7 @@ where
             });
             evicting.add_to(&timing::EVICT_NANOS);
             let covering = timing::Stopwatch::start();
-            cache.cover(building_region)?;
+            cover(cache, building_region)?;
             covering.add_to(&timing::COVER_NANOS);
             timing::ROUNDS.add(1);
             timing::REGIONS.add(1);
@@ -1750,5 +1852,122 @@ mod tests {
 
         assert_eq!(built.cohort_observations.len(), 1, "three reads reach two");
         assert!(too_quiet.cohort_observations.is_empty(), "and not four");
+    }
+
+    /// Drive the parallel-cover form over `layouts` inside a pool of `threads`, collecting
+    /// what it hands over — the shape every parallel-cover test here compares.
+    fn merge_with_parallel_cover_in_a_pool(
+        threads: usize,
+        analysed: &[GenomeRegion],
+        layouts: &[Vec<SampleLocusObservations>],
+        building_region_width: CohortLocusBuilderRegionsLen,
+    ) -> RegionOutcome {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("a fixture pool");
+        pool.install(|| {
+            let mut cache = ObservationCache::over(
+                layouts
+                    .iter()
+                    .map(|sample| source_of(sample))
+                    .collect::<Vec<_>>(),
+            );
+            let mut merged = RegionOutcome::default();
+            let RegionOutcome {
+                cohort_observations,
+                failed_locus_spans,
+            } = &mut merged;
+            merge_cohort_handing_each_locus_over_covering_samples_in_parallel(
+                analysed,
+                &mut cache,
+                building_region_width,
+                MaxCohortLocusSpan::DEFAULT,
+                MinAltReads::DEFAULT,
+                &mut |built| cohort_observations.push(built),
+                failed_locus_spans,
+            )
+            .expect("the fixture sources hold");
+            merged
+        })
+    }
+
+    /// **The parallel cover gives the serial drivers' answer, at every width and every pool
+    /// size** — Milestone E1's claim at the driver, on the fixture the module's byte-identity
+    /// rests on, which carries a locus chaining two samples across region boundaries and a
+    /// span the width bound refuses at the narrow widths.
+    ///
+    /// The pool of one exercises the fallback branch (a one-thread pool takes the serial
+    /// sweep); the pools of two and eight exercise the Jacobi sweep with genuinely concurrent
+    /// samples. **Whether the sweep truly occupies several threads is untested here**, exactly
+    /// as the parallel merge's own module records for its builders — the claim under test is
+    /// that the schedule cannot change the answer.
+    #[test]
+    fn the_parallel_cover_gives_the_serial_drivers_answer() {
+        let layouts = {
+            let mut layouts = three_samples_over_six_hundred_bases();
+            // A span the 50-base default bound refuses, so the refused list is compared too.
+            layouts.push(vec![member(region(420, 510), &[b'A'; 91], b"A")]);
+            layouts
+        };
+        let analysed = [region(1, 600)];
+        let per_sample: Vec<&[SampleLocusObservations]> =
+            layouts.iter().map(Vec::as_slice).collect();
+        let oracle = merge_cohort_serially(
+            &analysed,
+            &per_sample,
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltReads::DEFAULT,
+        );
+        assert_eq!(
+            oracle.failed_locus_spans,
+            vec![region(420, 510)],
+            "the fixture must carry a locus the width bound refuses",
+        );
+
+        for threads in [1, 2, 8] {
+            for bases in [1, 3, 20, 47, 600] {
+                refuse_any_difference(
+                    &format!("the parallel cover on {bases}-base regions in a pool of {threads}"),
+                    &oracle,
+                    &merge_with_parallel_cover_in_a_pool(
+                        threads,
+                        &analysed,
+                        &layouts,
+                        width(bases),
+                    ),
+                );
+            }
+        }
+    }
+
+    /// A reader that fails ends the merge under the parallel cover, and its own error comes
+    /// back untouched — the same contract as both serial drivers and the parallel merge.
+    #[test]
+    fn a_failing_source_ends_the_merge_under_the_parallel_cover() {
+        let failing = vec![
+            Ok(member(region(5, 5), b"G", b"T")),
+            Err(SourceFailed("the walk failed")),
+        ];
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("a fixture pool");
+
+        let merged = pool.install(|| {
+            let mut cache = ObservationCache::over(vec![failing.into_iter()]);
+            let mut refused = Vec::new();
+            merge_cohort_handing_each_locus_over_covering_samples_in_parallel(
+                &[region(1, 600)],
+                &mut cache,
+                width(20),
+                MaxCohortLocusSpan::DEFAULT,
+                MinAltReads::DEFAULT,
+                &mut |_built| {},
+                &mut refused,
+            )
+        });
+
+        assert_eq!(merged, Err(SourceFailed("the walk failed")));
     }
 }

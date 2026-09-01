@@ -416,7 +416,9 @@ fn split_generic<E>(
 // in five places. This one has two call sites — `main` and the test helper — and every argument
 // is named at both, so a struct would add a type to carry nothing new.
 #[allow(clippy::too_many_arguments)]
-fn run_dump<P: ReadPreparer + 'static>(
+// `Send` bounds because `GeneratorSlot` boxes only `Send` generators now (a walker crosses
+// threads under the merge's parallel cover, 2026-09-01); every preparer this dump passes is.
+fn run_dump<P: ReadPreparer + Send + 'static>(
     fasta: &Path,
     bams: &[PathBuf],
     contig_filter: Option<&str>,
@@ -431,7 +433,10 @@ fn run_dump<P: ReadPreparer + 'static>(
     // environment here, so `main` decides once and every read in the run agrees — two reads
     // of one file disagreeing about whether it was checked would be worse than either answer.
     reference_check: ReferenceCheck,
-) -> Result<DumpReport, Box<dyn std::error::Error>> {
+) -> Result<DumpReport, Box<dyn std::error::Error>>
+where
+    P::Scratch: Send,
+{
     let (info, verify) =
         read_reference_verifying_or_creating_fai(cache, fasta.to_path_buf(), reference_check)?;
     let contigs = Arc::new(info.contig_list());
@@ -469,10 +474,6 @@ fn run_dump<P: ReadPreparer + 'static>(
     // because k accessors over one index must still hold k cursors. Separately,
     // `PileupGenerator` is already `!Send` through its `Rc<RefCell<ReadPreparation>>`, so the
     // handle on the reference is not what stands between this and a worker.
-    #[allow(
-        clippy::arc_with_non_send_sync,
-        reason = "PileupGenerator::new is generic over the accessor and takes Arc, which is meaningful for the Send+Sync in-memory ones; this accessor is file-backed and single-threaded — see the comment above"
-    )]
     let reference = Arc::new(WindowedRefSeq::with_shared_index(
         fasta.to_path_buf(),
         contigs.clone(),

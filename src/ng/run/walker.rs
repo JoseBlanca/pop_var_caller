@@ -73,15 +73,17 @@ use super::{RunError, Segmentation, WalkProgress};
 /// a second walker over one sample would decode the same ground twice while each told the merge
 /// a different story about how far it had got.
 ///
-/// **Neither `Send` nor `Sync`, and it cannot be made so from here.** Arch §2's last contract
-/// clause says a source needs those two only for the parallel merge
-/// ([`merge_cohort_in_parallel`](super::cohort_merge::parallel), which bounds
-/// `S: Sync + Send`); the single-threaded merge this is built against does not. What blocks it
-/// is one layer down: [`GeneratorSlot::Generator`](crate::ng::locus_generation::GeneratorSlot)
-/// holds a `Box<dyn LocusGenerator<S>>` with no auto-trait bound, a deliberate omission its own
-/// documentation records. So a walker and the merge that draws from it stay on one thread, and
-/// putting a walker under the parallel merge means widening that trait object first — stated
-/// here so it is read rather than met as a compiler error.
+/// **`Send`, since 2026-09-01, and that is what lets a calling run cover its samples in
+/// parallel** — the merge's parallel cover sweeps the cohort's walkers from a worker pool, so
+/// a walker must be able to cross a thread (one thread at a time; nothing here is `Sync`, and
+/// nothing shares a walker). Three things below this type were widened to get there — two at
+/// sites whose own documentation had reserved the change, one (`WindowedRefSeq`) whose doc had
+/// only recorded the per-worker ownership that makes the widening safe:
+/// [`GeneratorSlot::Generator`](crate::ng::locus_generation::GeneratorSlot)'s trait object
+/// gained `+ Send`; the pileup generator's read-preparation cell traded `Rc<RefCell<_>>` for
+/// `Arc<Mutex<_>>`; and `WindowedRefSeq`'s resident window traded `RefCell` for `Mutex`, so
+/// the `Arc` handles the generator keeps are `Send`. Every lock is uncontended — ownership
+/// stays per worker — and `a_run_walker_can_cross_a_thread` is the compile-time proof.
 pub struct AlignmentFilesWalker<T> {
     /// The individual this walk is of. **Held rather than read back from the reads**, because
     /// the iterator owns the [`SampleReads`] and does not hand it out, and a failure has to name
@@ -265,9 +267,11 @@ pub struct RunSegments {
     /// one-source-per-sample rule outright. So the handle is shared, and the genome-sized list is
     /// still stored once however many samples read it.
     ///
-    /// **`Arc` rather than `Rc`** even though a walker is `!Send` today: what makes it `!Send` is
-    /// the generator set's unbounded trait object, one layer down, and an `Rc` here would add a
-    /// second blocker that would have to be found and removed again if that one is ever lifted.
+    /// **`Arc` rather than `Rc`**, and since 2026-09-01 the choice is load-bearing rather than
+    /// insurance: the walker is `Send` and crosses threads under the merge's parallel cover, so
+    /// an `Rc` here would take that back. (When this was written the walker was `!Send` through
+    /// the generator set's then-unbounded trait object, and the `Arc` was to avoid adding a
+    /// second blocker; the blocker was lifted and the insurance paid off.)
     segmentation: Arc<Segmentation>,
     /// How far through the list this stream is. An index rather than a slice iterator because a
     /// borrowing iterator is what the shared handle exists to avoid.
@@ -956,6 +960,19 @@ mod tests {
         assert_eq!(walker.counts().regions_in, 2);
     }
 
+    /// **A run's walker can cross a thread**, which is what the merge's parallel cover does
+    /// with it — each sweep hands every sample's walker to a pool worker, one thread at a
+    /// time. This fails at the compiler if anything below the walker loses `Send` again:
+    /// the generator slot's trait object, the pileup generator's preparation cell, or the
+    /// reference accessor's window (see the type's own note for the three). It holds for
+    /// every filling of the generator slots at once, because the slot's box carries the
+    /// bound — a generator that is not `Send` is refused where it is boxed, not here.
+    #[test]
+    fn a_run_walker_can_cross_a_thread() {
+        fn assert_send<T: Send>() {}
+        assert_send::<super::AlignmentFilesWalker<super::RunSegments>>();
+    }
+
     /// **The sample a walker names is the one whose reads it was given.** Two walkers, two
     /// samples, two names — a name hard-coded or read from anywhere else fails here.
     #[test]
@@ -1174,10 +1191,9 @@ mod walking_the_real_generator {
                 .expect("the fixture sample opens");
 
         let preparer = LeftAlignPreparer::with_default_normalizer(fixture_reference_bases());
-        // **No `arc_with_non_send_sync` waiver here, unlike the probes that build a generator
-        // over a file-backed accessor.** `InMemoryRefSeq` holds bases in memory and is `Send +
-        // Sync`, so the `Arc` this generator's constructor asks for is an ordinary one and the
-        // lint does not fire. A waiver copied from those probes is refused as unfulfilled.
+        // An ordinary `Arc`: `InMemoryRefSeq` is `Send + Sync`, as `WindowedRefSeq` also is
+        // since 2026-09-01. (An `arc_with_non_send_sync` waiver contrast used to live here;
+        // the lint stopped firing anywhere when the file-backed accessor became `Sync`.)
         let shared = Arc::new(fixture_reference_bases());
         let generator = PileupGenerator::new(
             shared,
@@ -1489,10 +1505,11 @@ mod walking_the_real_generator {
 /// read preparer keeps a second — neither rebuilt per segment, because a fresh accessor at every
 /// boundary throws away the sliding buffer and re-pays the `.fai` parse. The third is a
 /// *factory*: each of a sample's files gets its own accessor every time a cursor is made, which
-/// is once per file per chromosome. `WindowedRefSeq` holds an open per-contig reader and is
-/// `Send` but deliberately not `Sync`, and the input layer takes a factory for exactly that
-/// reason (spec §8) — sharing one accessor across cursors would collapse them onto one file
-/// position and one window.
+/// is once per file per chromosome. `WindowedRefSeq` holds an open per-contig reader, and the
+/// input layer takes a factory because sharing one accessor across cursors would collapse them
+/// onto one file position and one window (spec §8's trap). The type stopped *forbidding* the
+/// sharing on 2026-09-01, when it became `Sync` so a walker could cross threads — the reason
+/// not to share is the window's ownership, not the auto-trait, and it is unchanged.
 ///
 /// **What is shared instead is the index and the contig table.** An accessor that parses the
 /// `.fai` for itself costs about 189 µs on a GRCh38-shaped reference of 2,580 records; sharing
@@ -1580,18 +1597,12 @@ pub(crate) fn generic_path_generators(
         };
         move || reference.accessor()
     };
-    // **The `Arc` is the generator's constructor asking for one, over an accessor that is
-    // `Send` and deliberately not `Sync`** — a `WindowedRefSeq` holds an open per-contig reader,
-    // which is exactly why the input layer takes a factory and why each of these three accessors
-    // is its own. So the lint is right about the type and wrong about the risk: nothing shares
-    // this handle, and a walker is single-threaded (see [`AlignmentFilesWalker`]). The waiver is
-    // the one every other site that builds a generator over a file-backed accessor carries; the
-    // differential's fixture, which builds one over an in-memory accessor, must **not** carry it,
-    // because there the lint does not fire at all.
-    #[expect(
-        clippy::arc_with_non_send_sync,
-        reason = "PileupGenerator::new takes an Arc; WindowedRefSeq is Send and deliberately not Sync, and this one is never shared"
-    )]
+    // **The `Arc` is the generator's constructor asking for one.** Each of these three
+    // accessors is its own — the input layer takes a factory precisely so nothing shares a
+    // window — and nothing shares this handle either; the `Arc` is the constructor's shape.
+    // *(A `clippy::arc_with_non_send_sync` waiver stood here while `WindowedRefSeq` was
+    // `!Sync`; it became `Sync` on 2026-09-01 so a walker can cross threads under the
+    // merge's parallel cover, and the lint no longer fires.)*
     let shared = Arc::new(reference.accessor());
     let generator = PileupGenerator::new(
         shared,
