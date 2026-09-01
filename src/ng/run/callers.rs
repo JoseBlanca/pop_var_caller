@@ -2620,6 +2620,7 @@ mod the_merge_over_walkers {
             PileupGeneratorConfig::default(),
             CandidateSelectionConfig::DEFAULT,
             shipped_calling_loop(),
+            &DeclaredInbreeding::nothing_said(),
         )
     }
 
@@ -2642,6 +2643,7 @@ mod the_merge_over_walkers {
             locus_generator_settings,
             CandidateSelectionConfig::DEFAULT,
             shipped_calling_loop(),
+            &DeclaredInbreeding::nothing_said(),
         )
     }
 
@@ -2669,6 +2671,31 @@ mod the_merge_over_walkers {
             PileupGeneratorConfig::default(),
             candidate_selection,
             calling_loop,
+            &DeclaredInbreeding::nothing_said(),
+        )
+    }
+
+    /// The same, with **each sample's inbreeding coefficient declared by name**, and with the
+    /// candidate cap named — the two settings the sample-order tests move.
+    ///
+    /// The coefficient is the per-sample parameter with the plainest effect on a call: it is
+    /// how much the prior expects homozygotes, and where the reads leave a genotype in doubt
+    /// it is what decides. The cap is what can rule a sample **uncallable**, which is the one
+    /// thing that makes the calling scratch's rows differ from the run's sample order.
+    pub(super) fn open_over_declaring_inbreeding(
+        paths: &[PathBuf],
+        reference: &OpenReference,
+        inbreeding: &DeclaredInbreeding,
+        candidate_selection: CandidateSelectionConfig,
+    ) -> AlignedFilesVariantCaller {
+        open_over_with_settings(
+            paths,
+            reference,
+            MergeParameters::DEFAULT,
+            PileupGeneratorConfig::default(),
+            candidate_selection,
+            shipped_calling_loop(),
+            inbreeding,
         )
     }
 
@@ -2679,12 +2706,13 @@ mod the_merge_over_walkers {
         locus_generator_settings: PileupGeneratorConfig,
         candidate_selection: CandidateSelectionConfig,
         calling_loop: RunnableCallingLoopConfig,
+        inbreeding: &DeclaredInbreeding,
     ) -> AlignedFilesVariantCaller {
         let read_groups = build_read_groups(paths).expect("the fixtures declare read groups");
         let parameters = RunParameters::of_defaults(
             &read_groups,
             Ploidy::try_new(2).expect("a diploid"),
-            &DeclaredInbreeding::nothing_said(),
+            inbreeding,
         );
         AlignedFilesVariantCaller::open(
             AlignmentInputs {
@@ -2718,6 +2746,67 @@ mod the_merge_over_walkers {
             read_of(&format!("{sample}-r1"), 10, &[b'A'; 30]),
             read_of(&format!("{sample}-r2"), 10, &[b'A'; 30]),
         ];
+        indexed_named_bam(
+            &header(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[("rg1", Some(sample))],
+            ),
+            &records,
+            file_name,
+        )
+    }
+
+    /// A sample carrying `alt` at `chr1:15` on two of its four reads, the other two matching
+    /// the reference — all thirty bases from `chr1:10`.
+    ///
+    /// **Two reads each way is not an ambiguous locus, and the fixture does not need it to
+    /// be.** At the fixture's base quality of 30, two alternative reads cost a
+    /// homozygous-reference genotype about a millionth, so the reads decide the heterozygote
+    /// and the prior only moves how sure the caller is of it: measured, the same four reads
+    /// give `0/1` at **55.4 Phred** under an outbred coefficient and `0/1` at **33.4** under a
+    /// nearly fully inbred one. That difference is what makes a per-sample parameter visible
+    /// in a call.
+    ///
+    /// `alt` is which base the two carrying reads show, so two samples can carry **different**
+    /// alternatives at one position — which is how the allele cap is given something to cut.
+    pub(super) fn sample_carrying(sample: &str, file_name: &str, alt: u8) -> (TempDir, PathBuf) {
+        let mut with_alt = [b'A'; 30];
+        with_alt[5] = alt;
+        let records: Vec<RecordBuf> = (0..2)
+            .map(|read| read_of(&format!("{sample}-alt{read}"), 10, &with_alt))
+            .chain((0..2).map(|read| read_of(&format!("{sample}-ref{read}"), 10, &[b'A'; 30])))
+            .collect();
+        indexed_named_bam(
+            &header(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[("rg1", Some(sample))],
+            ),
+            &records,
+            file_name,
+        )
+    }
+
+    /// A sample **with no reads in the run's analysed ground**: its reads lie on `chr2`, and
+    /// the segmentation these fixtures walk is `chr1` alone.
+    ///
+    /// A sample like this is still a sample of the run and still gets a call — the loop reads
+    /// one entry per run sample, not one per covering sample — but the merge holds no entry
+    /// for it. That is what makes the run's sample order and the merge's covering-sample order
+    /// genuinely different, and where the two are put in the run is the caller's arrangement
+    /// rather than this fixture's business.
+    pub(super) fn sample_with_no_reads_in_the_analysed_ground(
+        sample: &str,
+        file_name: &str,
+    ) -> (TempDir, PathBuf) {
+        let records: Vec<RecordBuf> = (0..3)
+            .map(|read| {
+                let mut record = read_of(&format!("{sample}-r{read}"), 10, &[b'A'; 30]);
+                *record.reference_sequence_id_mut() = Some(1);
+                record
+            })
+            .collect();
         indexed_named_bam(
             &header(
                 Some("coordinate"),
@@ -3393,7 +3482,7 @@ mod calling_joined_to_the_merge {
     ///
     /// Named once so that every test here is calling the same thing the run would, rather than
     /// a stub that would pass whatever the wiring did to the evidence.
-    fn the_shipped_genotyper()
+    pub(super) fn the_shipped_genotyper()
     -> SummariseConditionLoop<StutterSubstitutionEmission, MarginalizedDirichletPrior> {
         SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior)
     }
@@ -3841,5 +3930,347 @@ mod calling_joined_to_the_merge {
              claiming every sample agreed: {:?}",
             called.walk.assembly_check,
         );
+    }
+}
+
+/// **The sample-order join: three numberings meet at every locus, and a mismatch is a wrong
+/// genotype rather than a crash.**
+///
+/// The three, in the words of the modules that own them:
+///
+/// - **the merge's**, which holds only the samples that covered the locus, each carrying its
+///   own index in the run's order (`CohortObservation::per_sample`);
+/// - **the run's**, which is `ReadGroups::read_groups_per_sample`'s first-seen order. Every
+///   per-sample list the calling loop is *given* is in it — the evidence, and the model
+///   parameters;
+/// - **the calling scratch's rows**, which are the run's samples with the uncallable ones
+///   closed up. The loop's own working buffers are indexed by these, so a row index is
+///   neither of the other two, and the scratch is what maps between them
+///   (`CallingScratch::claim_row_for`).
+///
+/// **A per-sample parameter is what makes a swap visible.** Nothing about a call says which
+/// sample it belongs to, so a permutation of the run's samples produces a well-formed answer
+/// for every one of them. What it changes is *which* answer, and only where the samples are
+/// scored under something of their own: here, each sample's inbreeding coefficient, which is
+/// how much the prior expects homozygotes.
+///
+/// **What the coefficient moves at this depth is the confidence, not the genotype, and the
+/// tests compare the whole call for that reason.** At the fixture's base quality of 30, two
+/// alternative reads cost a homozygous-reference genotype about a millionth, so the reads
+/// decide the heterozygote and the prior only moves how sure the caller is: measured, the same
+/// four reads give `0/1` at **55.4 Phred** under an outbred coefficient and `0/1` at **33.4**
+/// under a nearly fully inbred one. A test comparing genotypes alone would have been blind to
+/// a parameters list joined by the merge's entry — measured, that defect leaves both samples
+/// at `0/1` and 55.450. It would **not** have been blind to a wrongly joined *evidence* list,
+/// which moves the genotypes; the genotype assertions here are what guard that.
+#[cfg(test)]
+mod the_sample_order_join {
+    use super::calling_joined_to_the_merge::the_shipped_genotyper;
+    use super::the_merge_over_walkers::{
+        open_over_declaring_inbreeding, sample_carrying,
+        sample_with_no_reads_in_the_analysed_ground,
+    };
+    use crate::ng::calling::SampleGenotypeCall;
+    use crate::ng::calling::allele_candidates::{CandidateSelectionConfig, MaxCandidateAlleles};
+    use crate::ng::calling::parameters_file::DeclaredInbreeding;
+    use crate::ng::read::input::test_fixtures::fixture_reference_from_its_index;
+    use crate::ng::types::{ContigId, GenomeRegion, Genotype, InbreedingF, Phred, Position};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// A coefficient at the outbred end — the prior expects Hardy–Weinberg proportions. It is
+    /// also the shipped default, so a test that means to *move* a sample must not use it.
+    fn outbred() -> InbreedingF {
+        InbreedingF::try_new(0.0).expect("zero is a coefficient")
+    }
+
+    /// A coefficient at the inbred end — the prior expects almost no heterozygotes. Below one,
+    /// which [`InbreedingF`] excludes.
+    fn nearly_fully_inbred() -> InbreedingF {
+        InbreedingF::try_new(0.99).expect("0.99 is a coefficient")
+    }
+
+    /// The one position this module's cohort varies at.
+    fn the_locus() -> GenomeRegion {
+        GenomeRegion {
+            contig: ContigId(0),
+            start: Position(15),
+            end: Position(15),
+        }
+    }
+
+    /// **Four samples whose run order, merge order and scratch rows are three different
+    /// numberings**, returned with their temporary directories so the files outlive the call.
+    ///
+    /// | run index | sample | at `chr1:15` | merge entry | scratch row |
+    /// |---|---|---|---|---|
+    /// | 0 | `zeta` | two reads show `C` | 0 | 0 |
+    /// | 1 | `nu` | two reads show `G` | 1 | — *uncallable* |
+    /// | 2 | `alpha` | no reads in the analysed ground | — | 1 |
+    /// | 3 | `mu` | two reads show `C` | 2 | 2 |
+    ///
+    /// **`nu` is what makes the third column differ from the second.** Its `G` is the cohort's
+    /// lower-ranked alternative — two reads against the four behind `C` — so at a candidate cap
+    /// of two, the reference and one alternative, selection cuts it and rules `nu` uncallable
+    /// for having earned a sequence the cap removed. The scratch then holds a row for every
+    /// sample but `nu`, so `alpha` and `mu` sit one row below their run index.
+    ///
+    /// **`alpha` is what makes the second column differ from the first**, by covering nothing
+    /// where the others cover.
+    ///
+    /// **`zeta` and `mu` bring identical reads**, so any difference between their calls is a
+    /// difference in what they were scored under and nothing else. **The names are not in
+    /// alphabetical order**, and the hazard that guards against is real rather than
+    /// theoretical: `DeclaredInbreeding` holds its per-sample values in a `BTreeMap`, so a
+    /// defect that zipped that map's key order onto the run's samples would hand `zeta` what
+    /// `mu` was declared.
+    fn four_samples_that_do_not_line_up() -> (Vec<TempDir>, Vec<PathBuf>) {
+        let (zeta_dir, zeta) = sample_carrying("zeta", "zeta.bam", b'C');
+        let (nu_dir, nu) = sample_carrying("nu", "nu.bam", b'G');
+        let (alpha_dir, alpha) = sample_with_no_reads_in_the_analysed_ground("alpha", "alpha.bam");
+        let (mu_dir, mu) = sample_carrying("mu", "mu.bam", b'C');
+        (
+            vec![zeta_dir, nu_dir, alpha_dir, mu_dir],
+            vec![zeta, nu, alpha, mu],
+        )
+    }
+
+    /// The candidate cap that cuts the cohort's lower-ranked alternative: the reference and one
+    /// alternative, which is the smallest cap the type allows.
+    fn a_cap_of_one_alternative() -> CandidateSelectionConfig {
+        CandidateSelectionConfig {
+            max_candidate_alleles: MaxCandidateAlleles::new_or_panic(2),
+            ..CandidateSelectionConfig::DEFAULT
+        }
+    }
+
+    /// **The fixture really is three different numberings**, checked rather than described.
+    ///
+    /// **Without it every other test here could be passing on the identity permutation.** If
+    /// `alpha` covered the locus, the merge's samples would be the run's own order; if `nu`
+    /// stayed callable, the scratch's rows would be too. Either way a run that indexed one
+    /// list by another would look correct in every fixture in this module. What this asserts
+    /// is the shape that makes a swap visible: the merge holds **three** entries naming run
+    /// samples **0, 1 and 3**, and exactly one sample comes back with no genotype, so the
+    /// scratch's rows are **three** where the run has four.
+    #[test]
+    fn the_three_numberings_are_three_different_numberings() {
+        let (_dirs, paths) = four_samples_that_do_not_line_up();
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+
+        let merged = open_over_declaring_inbreeding(
+            &paths,
+            &reference,
+            &DeclaredInbreeding::nothing_said(),
+            a_cap_of_one_alternative(),
+        )
+        .merge_cohort()
+        .expect("merges");
+        assert_eq!(merged.cohort_observations.len(), 1);
+        assert_eq!(merged.cohort_observations[0].region, the_locus());
+        assert_eq!(
+            merged.cohort_observations[0]
+                .per_sample
+                .iter()
+                .map(|support| support.sample)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 3],
+            "zeta, nu and mu covered the locus and alpha did not, so the merge's three entries \
+             name the run's first, second and fourth samples",
+        );
+
+        let called = open_over_declaring_inbreeding(
+            &paths,
+            &reference,
+            &DeclaredInbreeding::nothing_said(),
+            a_cap_of_one_alternative(),
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("calls");
+        let calls = &called.called_loci[0].per_sample;
+        assert_eq!(calls.len(), 4, "one call per sample of the run");
+        assert_eq!(
+            calls
+                .iter()
+                .map(SampleGenotypeCall::is_missing)
+                .collect::<Vec<_>>(),
+            vec![false, true, false, false],
+            "nu earned the G the cap cut, so it alone is set aside — which is what makes the \
+             scratch's three rows a different numbering from the run's four samples",
+        );
+    }
+
+    /// **Each sample is scored under its own coefficient, and the fixture is built so that
+    /// scoring it under a neighbour's would show.**
+    ///
+    /// `zeta` and `mu` bring identical reads to the locus and are declared at opposite ends of
+    /// the coefficient's range, so their calls must differ. Between them in the run's order
+    /// sit `nu`, which the cap sets aside, and `alpha`, which covers nothing — so `mu` is the
+    /// run's sample 3, the merge's entry 2 and the scratch's row 2, and a run that reached for
+    /// its coefficient by either of the other two numberings would score it under something
+    /// else.
+    #[test]
+    fn each_samples_own_inbreeding_coefficient_is_what_scores_it() {
+        let (_dirs, paths) = four_samples_that_do_not_line_up();
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+
+        let called = open_over_declaring_inbreeding(
+            &paths,
+            &reference,
+            &DeclaredInbreeding::nothing_said()
+                .and_this_sample("zeta", outbred())
+                .and_this_sample("mu", nearly_fully_inbred()),
+            a_cap_of_one_alternative(),
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("calls");
+
+        assert_eq!(called.called_loci.len(), 1);
+        assert_eq!(called.called_loci[0].region, the_locus());
+        let calls = &called.called_loci[0].per_sample;
+        assert_ne!(
+            calls[0], calls[3],
+            "zeta and mu brought the same two-and-two reads and were declared at opposite ends \
+             of the coefficient's range, so the only thing that can separate their calls is \
+             the coefficient — and it must",
+        );
+        // **The direction is checked as well as the difference.** A join that handed each
+        // sample *some* coefficient other than its own would also make these two calls
+        // differ; what says the right one arrived is which of them is the less confident, and
+        // the sample the prior pushes away from a heterozygote is the inbred one.
+        let (zeta, mu) = (quality_of(&calls[0]), quality_of(&calls[3]));
+        assert!(
+            mu < zeta,
+            "mu is declared nearly fully inbred and called a heterozygote, so it must be the \
+             less confident of the two: zeta {zeta:?} Phred, mu {mu:?} Phred",
+        );
+        // **This one is not a restatement of "the genotype does not move" — it is the guard
+        // on the *evidence* join.** Measured: a sample scored with no reads of its own comes
+        // back `0/1` at 2.2 Phred, and one scored on somebody else's four reads comes back at
+        // 55.4, so if the shaping put the merge's entries on the wrong run rows the two
+        // genotypes would part company here. Deleting it because the qualities already differ
+        // loses the only assertion that sees that defect.
+        assert_eq!(
+            genotype_of(&calls[0]),
+            genotype_of(&calls[3]),
+            "zeta and mu must be called the same genotype — four reads at Q30 decide the \
+             heterozygote at both ends of the coefficient's range, so a difference here is \
+             the evidence reaching the wrong sample rather than the prior doing its work",
+        );
+    }
+
+    /// **Swapping the two coefficients swaps the two calls** — the oracle the plan asks for.
+    ///
+    /// Nothing else about the run moves: the same four files, the same reads, the same order,
+    /// the same cap. Only which sample each declared coefficient names. If the run joined the
+    /// parameters to the samples by anything but the run's own order — the merge's entry, the
+    /// scratch's row, the order the coefficients were declared in, a sort of the names — the
+    /// two calls would not exchange.
+    #[test]
+    fn swapping_two_samples_coefficients_swaps_their_calls() {
+        let (_dirs, paths) = four_samples_that_do_not_line_up();
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+
+        let called_with = |zeta_coefficient, mu_coefficient| {
+            open_over_declaring_inbreeding(
+                &paths,
+                &reference,
+                &DeclaredInbreeding::nothing_said()
+                    .and_this_sample("zeta", zeta_coefficient)
+                    .and_this_sample("mu", mu_coefficient),
+                a_cap_of_one_alternative(),
+            )
+            .call_cohort(&the_shipped_genotyper())
+            .expect("calls")
+        };
+        let one_way = called_with(outbred(), nearly_fully_inbred());
+        let the_other = called_with(nearly_fully_inbred(), outbred());
+
+        let (first, second) = (
+            &one_way.called_loci[0].per_sample,
+            &the_other.called_loci[0].per_sample,
+        );
+        assert_eq!(
+            first[0], second[3],
+            "zeta declared outbred must call exactly as mu does when mu is declared outbred",
+        );
+        assert_eq!(first[3], second[0], "and the inbred end likewise",);
+        assert_ne!(
+            first[0], first[3],
+            "a fixture whose two calls were equal would satisfy the two assertions above \
+             without the coefficients reaching anybody",
+        );
+        // The two samples between them were named by neither declaration, so the swap must
+        // leave both alone — including the one the cap set aside, which has no call to move.
+        assert_eq!(first[1], second[1], "nu is set aside under both");
+        assert_eq!(
+            first[2], second[2],
+            "and alpha was not named by either declaration",
+        );
+    }
+
+    /// **The sample that covers nothing is still called, in its own place in the run's order,
+    /// by the prior alone.**
+    ///
+    /// `alpha` has no reads in the analysed ground, so the merge holds no entry for it — and
+    /// the loop reads one entry per sample of the *run*. An empty sum is zero, so every
+    /// genotype scores alike and the prior decides on its own, which is the right answer
+    /// rather than a special case. Measured: it comes back `0/1` at **2.2 Phred**, a call the
+    /// caller is almost entirely unsure of, which is what "the prior alone" produces and what
+    /// distinguishes it from a sample the candidate step set aside.
+    #[test]
+    fn a_sample_that_covered_nothing_is_called_by_the_prior_alone() {
+        let (_dirs, paths) = four_samples_that_do_not_line_up();
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+
+        let called = open_over_declaring_inbreeding(
+            &paths,
+            &reference,
+            &DeclaredInbreeding::nothing_said(),
+            a_cap_of_one_alternative(),
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("calls");
+
+        let alpha = &called.called_loci[0].per_sample[2];
+        assert!(
+            !alpha.is_missing(),
+            "a sample with no reads here is scored, not set aside — set aside is what the \
+             candidate step does to a sample whose own allele the cap cut, which is nu",
+        );
+        let confidence = quality_of(alpha).expect("a scored sample carries a quality");
+        assert!(
+            confidence < 5.0,
+            "with no reads of its own the prior decides alone and the call is barely held: \
+             {confidence} Phred",
+        );
+        // **The whole list, not the one entry.** Index 2 of four is a fixed point under
+        // several ways of getting the order wrong — reversal about the middle, and a zip that
+        // drops a sample and leaves the rest shifted — so asserting one name passes on a list
+        // that is wrong in both its length and its pairing.
+        assert_eq!(
+            called
+                .walk
+                .per_sample
+                .iter()
+                .map(|walk| walk.sample_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zeta", "nu", "alpha", "mu"],
+            "one entry per sample, in the run's own sample order",
+        );
+    }
+
+    /// A call's genotype, or `None` where the sample was set aside.
+    fn genotype_of(call: &SampleGenotypeCall) -> Option<&Genotype> {
+        call.genotype()
+    }
+
+    /// How sure the caller is, or `None` where the sample was set aside.
+    ///
+    /// **Compared as an `f32` and not as an `Option`**, wherever the comparison is what a test
+    /// rests on: `None < Some(_)`, so a sample that went missing would slip past an ordering
+    /// assertion written on the options and print `None` where the message says Phred.
+    fn quality_of(call: &SampleGenotypeCall) -> Option<f32> {
+        call.score_best_genotype().map(Phred::get)
     }
 }

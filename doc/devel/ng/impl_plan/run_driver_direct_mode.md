@@ -267,13 +267,33 @@ pin it is a fixture reference with varied bases, which four modules share.
 [`calling_loop.md`](calling_loop.md), *Out of scope*.
 *Landed 2026-09-01:* [report](../../reports/implementations/ng_run_driver_d1_2026-09-01.md).
 
-☐ **D2. The sample-order join. Own commit, do not bundle.** The merge names samples by their index
+✅ **D2. The sample-order join. Own commit, do not bundle.** The merge names samples by their index
 in the run's order; the parameters name them by sample name; the scratch rows are the run's sample
 order with the uncallable ones closed up. **Three numberings, and a mismatch produces wrong
 genotypes rather than a crash** — the same accident that made six mutations survive the calling
 loop's own tests. **Oracle:** a fixture where the three orders genuinely differ, so that swapping
 any two changes a called genotype.
+
+**⛦ The first draft separated two of the three, and the review caught it.** A sample's scratch row
+differs from its run index only where some sample is **uncallable**, which happens only where the
+allele cap cuts a sequence that sample's own reads earned — and with one alternative against a cap
+of six, nothing was cut. The cohort is now four samples at a cap of one alternative: `nu` carries
+the cohort's lower-ranked alternative and is set aside, `alpha` covers nothing, and `mu` is the
+run's sample 3, the merge's entry 2 and the scratch's row 2.
+
+**⛦ That fixture caught two defects nothing else in the crate could see** — the calling loop
+reading a sample's coefficient by its scratch row rather than its run sample, and the per-sample
+evidence views emitted in reverse run order. Both survive on any cohort where every sample is
+callable, which every fixture before this one was.
+
+**⛦ The oracle's wording is owed a ruling.** It says swapping two samples changes a called
+*genotype*; at real read depth it changes the *call* and not the genotype, because four reads at
+Q30 decide the heterozygote long before the prior does — measured, `0/1` at 55.4 Phred outbred
+against `0/1` at 33.4 nearly fully inbred. The tests compare the whole call. Making the genotype
+itself flip would need evidence contrived to be ambiguous, which is a fixture built to satisfy a
+sentence rather than to resemble a run.
 *Depends:* D1. *Source:* §5.1; [`calling_loop.md`](calling_loop.md) Milestone E1.
+*Landed 2026-09-01:* [report](../../reports/implementations/ng_run_driver_d2_2026-09-01.md).
 
 ☐ **D3. The end-to-end fixture.** A handful of the tomato slices
 (`benchmarks/tomato1/crams/`) over a small BED, alignments in, called genotypes out, on the generic

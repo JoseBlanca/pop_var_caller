@@ -19,7 +19,29 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-01):** **D1 of the run driver — calling, joined to the merge**
+> - **Last completed task (2026-09-01):** **D2 of the run driver — the sample-order join**
+> (step D2 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
+> [report](doc/devel/reports/implementations/ng_run_driver_d2_2026-09-01.md)). Tests and fixtures
+> only: the join was built with the calling loop, and what it lacked was a cohort that could tell
+> a correct join from a wrong one. 373 tests in `ng::run`, 5,813 in the lib.
+> **⛦ The first draft separated two of the three numberings and the review caught it.** A
+> sample's scratch row differs from its run index only where some sample is **uncallable**, which
+> happens only where the allele cap cuts a sequence that sample's own reads earned — and with one
+> alternative against a cap of six, nothing was cut, so a third of the plan's oracle was
+> untested. The cohort is now four samples at a cap of one alternative.
+> **⛦ That fixture caught two defects nothing else in the crate could see**: the calling loop
+> reading a sample's coefficient by its scratch row rather than its run sample, and the per-sample
+> evidence views emitted in reverse run order. Both survive on any cohort where every sample is
+> callable, which every fixture before this one was.
+> **⛦ And a claim of the step's own was wrong by about five orders of magnitude** — that two reads
+> each way leave a heterozygote and a homozygote "almost equally loudly", so the prior decides. At
+> Q30 the reads decide the genotype and the prior moves only the confidence: `0/1` at 55.4 Phred
+> outbred against `0/1` at 33.4 nearly fully inbred.
+> **⚑ The plan's oracle wording is owed a ruling**: it asks that swapping two samples change a
+> called *genotype*, and at real depth it changes the *call*. Making the genotype flip would need
+> evidence contrived to be ambiguous.
+>
+> - **Previously (2026-09-01):** **D1 of the run driver — calling, joined to the merge**
 > (step D1 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
 > [report](doc/devel/reports/implementations/ng_run_driver_d1_2026-09-01.md)).
 > `AlignedFilesVariantCaller::call_cohort` walks every sample's alignment files at the merge
