@@ -53,6 +53,10 @@ src/ng/run/
 │                    were computed from
 ├── walker.rs      – one sample's alignment files behind the merge's source trait
 ├── callers.rs     – AlignedFilesVariantCaller, and later PspVariantCaller
+├── records.rs     – what a record needs that the called locus does not carry: the per-sample
+│                    and per-allele counts read off the merge's observation, the artifact
+│                    correction, the padding base, and the rule that decides which loci reach
+│                    the file (added 2026-09-01, step F1)
 ├── gatherer.rs    – SampleObservationGatherer
 ├── psp_header.rs  – PspHeader: the values every psp records
 └── cohort_merge/  – built; its own arch doc (cohort_merge.md)
@@ -565,10 +569,80 @@ each contig boundary the retiring cursor's read-group counts are dropped rather 
 so by the end of a walk every contig but the last has lost them. Spec §8 requires a run to sum them
 at the end; reaching them is a change to the locus generator, and it is F3's.
 
+**⛦ Direct mode writes VCF records, and hands them over one at a time (2026-09-01, step F1).**
+`call_cohort_handing_each_record_over(&genotyper, &mut hand_over)` is the path a command takes;
+`call_cohort` stays as its oracle. Same walkers, same merge, same three calls per locus — what
+differs is that the answer leaves as a `VcfRecord` the moment it is finished and nothing is kept.
+It returns a `WrittenCohort`: the records handed over, the loci called that established no
+variant, and the two refusal lists and walk tallies `CalledCohort` carries.
+
+```rust
+pub fn call_cohort_handing_each_record_over<S, G, E>(
+    self,
+    genotyper: &G,
+    hand_over: &mut impl FnMut(&VcfRecord) -> Result<(), E>,
+) -> Result<WrittenCohort, RunError>
+where G: LocusGenotyper<S>, S: Default, E: std::error::Error + Send + Sync + 'static;
+```
+
+**How the record is built without the locus outliving its evidence.** A record needs what each
+sample's reads showed and which of them no *written* allele explains, and both live in the
+merge's `CohortObservation` and in candidate selection's leftover — neither of which survives the
+call. So `call_one_generic_locus` gained a closure: it is handed the inference, the allele
+remapping and the leftover while all three are still in scope, and what it returns is what the
+driver keeps. `call_cohort` passes a closure returning the inference unchanged; the record path
+passes one that calls `records::evidence_for_output` and `vcf::assemble_record`.
+
+**Two things the record needs that no earlier stage had.** The **corrected** site quality —
+`LocusInference`'s own field is the uncorrected baseline and this is the stage
+`calling_quality.md` §3.5 says may read it, which spends the `dead_code` waiver that accessor
+carried. And the **padding base**: VCF cannot spell an empty allele, so a record with one is
+written by prefixing every allele with the reference base beside its span (`vcf_output.md` §5),
+and the locus carries the span's bases and not the flanking one. The run therefore holds **one
+reference accessor of its own** — minted from the same `WalkReference` the walkers' accessors
+come from, so it shares the index and contig table and has its own cursor — and reads one base
+per such record, releasing what it has passed. It is one more open file, and what it spends is
+the slack inside `DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES` rather than a raise. **A
+base that cannot be read stops the run** (`RunError::PaddingBaseUnreadable`); production's tract
+writer invents the letter `N` there and spec §5 declines to port it.
+
+**⚑ And on today's path no base is ever fetched.** The generic mint anchors its indels —
+`ReadEvent::footprint_span` gives an insertion a reference span of 1, its anchor base alone, and
+a deletion `len + 1`, the anchor plus the deleted run — so a deletion's alternative is one base
+and never nothing, and **no allele a generic locus is called over is empty**. That is
+`cohort_merge.md` §1.3's rule read from the mint's side. The empty allele §5 was written for is
+the repeat-tract path's full-tract deletion, and that path is unbuilt; what F1 built is the
+answer ready for it, and it cannot be omitted because `VcfRecord::new` asserts a padding base is
+carried exactly when some allele is empty. **One consequence, because it is easy to predict
+wrongly:** a left-padded record's `POS` moves one base left and `VcfWriter::write_record` admits
+a tie only generic-then-tract, so a padded *generic* record landing on a preceding generic
+record's `POS` would abort a run — a state the anchoring rule above makes unreachable, and when
+the tract path lands the padded record is a tract record and the tie is the one §5 describes.
+
+**Not every called locus becomes a record.** `vcf_output.md` §9: a locus no written genotype
+carries an alternative at establishes no variant and is left out — there is no gVCF and no
+reference block, so the record's absence is the file saying *nothing here*. The count of those is
+`WrittenCohort::loci_called_but_not_written`, because *called* and *written* differing is a fact
+about a run. Measured on the fixture cohort a locus selection narrows to the reference alone
+reaches this, which `candidate_alleles.md` §6.2 puts at more than one built locus in four on both
+benchmarks.
+
 **Contract, both callers.** Records in genome order, identical at every number of callers in flight
 (spec §12.2), and identical between the two callers on one cohort with fixed parameters (spec §12.3
 — the regression anchor). Iteration ends at the first `Err`; direct mode leaves nothing to clean up,
 and a psp without a valid trailer is refused at `open` (spec §9).
+
+**⛦ "Iteration ends at the first `Err`" is not what the record path does, 2026-09-01.**
+`merge_cohort_handing_each_locus_over` takes a sink that returns nothing
+(`cohort_merge/serial.rs`), so a caller driving the merge cannot end it: the first failure — a
+refused record, an unreadable padding base — is stashed, the sink no-ops for the rest of the run,
+and the merge walks to the end of the analysed ground before the error is returned. On a cohort
+whose disk fills at the first chromosome, that is the remaining genome decoded for nothing. The
+fix is the merge's sink saying *stop* — one `ControlFlow` through both drivers and
+`build_region_handing_over` — which is a change to the merge's interface and belongs with whoever
+next opens it. **And "direct mode leaves nothing to clean up" is a shade strong**: the output's
+`<output>.tmp` is left on disk, since ng's `VcfWriter` has no abort path. What is guaranteed is
+that the *named* output never appears half-written.
 
 **What direct mode holds for the whole run:** one open `SampleReads` per sample, one walker per
 sample, the segmentation, the parameters, the merge's observation cache, and the pool's loci. **The
@@ -612,6 +686,13 @@ command reporting one of these renders the whole chain with `format_error_chain`
 `Display` says which sample would not open; the chain says its index is missing and where it was
 looked for. **Two of the variants below are built (2026-08-31); the rest arrive with A2 and psp
 mode.**
+
+**⛦ Two variants came with the record path (2026-09-01, step F1), and both are about the
+*output* rather than the input** — the first two of this enum that are. `PaddingBaseUnreadable`
+names the locus whose flanking reference base could not be read; `RecordNotWritten` names the
+locus whose record whatever the run was writing to would not take, with the refusal as its cause.
+Both name a locus, because a run writes hundreds of thousands of records and a cause — a full
+disk, a directory that went away — says nothing about where the file stopped.
 
 ```rust
 #[non_exhaustive]

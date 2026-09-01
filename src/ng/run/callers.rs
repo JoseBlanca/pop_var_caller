@@ -26,8 +26,10 @@
 
 use std::sync::Arc;
 
-use crate::ng::calling::allele_candidates::CandidateSelectionConfig;
 use crate::ng::calling::allele_candidates::generic::select_generic;
+use crate::ng::calling::allele_candidates::{
+    AlleleRemap, CandidateSelectionConfig, UnmatchedSupport,
+};
 use crate::ng::calling::evidence_shaping::{GenericEvidenceScratch, shape_generic_locus};
 use crate::ng::calling::inference::{LocusGenotyper, RunnableCallingLoopConfig};
 use crate::ng::calling::run_parameters::RunParameters;
@@ -47,9 +49,14 @@ use crate::ng::run::cohort_merge::serial::{
 };
 use crate::ng::run::cohort_merge::{CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads};
 use crate::ng::types::GenomeRegion;
+use crate::ng::vcf::VcfRecord;
+use crate::ng::vcf::assemble::assemble_record;
 use crate::pop_var_caller::common::format_md5_hex;
 
 use super::RunError;
+use super::records::{
+    a_written_genotype_carries_an_alternative, evidence_for_output, padding_base_beside,
+};
 use super::segments::Segmentation;
 use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, generic_path_generators};
 
@@ -559,6 +566,9 @@ impl AlignedFilesVariantCaller {
                     run_sample_count,
                     &mut shaping,
                     &mut scratch,
+                    // This entry point wants the call and nothing beside it, so the observation's
+                    // remapping and leftover are dropped where they were built.
+                    |inference, _remap, _unmatched| inference,
                 ) {
                     Some(called) => called_loci.push(called),
                     None => loci_with_nobody_to_call.push(region),
@@ -569,6 +579,178 @@ impl AlignedFilesVariantCaller {
 
         Ok(CalledCohort {
             called_loci,
+            loci_too_wide_to_assemble,
+            loci_with_nobody_to_call,
+            walk: CohortWalkTallies::of(sample_names, cache.into_sources(), assembly_check),
+        })
+    }
+
+    /// **Call this run's cohort and hand every record over as it is finished, keeping none.**
+    ///
+    /// The path a command takes, where [`call_cohort`](Self::call_cohort) is the oracle:
+    /// identical calling, and the answers leave one at a time instead of accumulating. What a
+    /// run holds is then its open files, the merge's frontier and one record — spec §5.1's
+    /// bound, less the pool that Milestone E adds.
+    ///
+    /// `hand_over` is given each record in genome order and may refuse. **The first refusal is
+    /// the run's answer**, naming the locus it was writing, and no record is handed over after
+    /// it — but the merge is not stopped, because its sink cannot say so (see the note beside
+    /// `stopped` in the body). So the walk finishes the analysed ground before the error is
+    /// returned.
+    ///
+    /// # Not every called locus becomes a record
+    ///
+    /// **A locus no written genotype carries an alternative at is not written** — spec §9's
+    /// rule, which is the whole of why this file has no gVCF and no reference blocks: the
+    /// record's absence says *nothing here*. The count of those is in the answer, because
+    /// *called* and *written* differing is a fact about a run and not an accident of it.
+    ///
+    /// # The reference is read once more, and only where a record needs it
+    ///
+    /// A record with an empty allele — an insertion's or a deletion's nature — is written by
+    /// padding every allele with the reference base beside the span, which the locus does not
+    /// carry. So this holds one reference accessor of its own for the whole run, over the index
+    /// and contig table the walkers already share, and reads one base per such record
+    /// ([`padding_base_beside`]). It is one more open file, and what it spends is the slack
+    /// inside [`DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES`] rather than a raise.
+    ///
+    /// **On today's path that base is never fetched**, because the generic mint anchors its
+    /// indels and so no generic allele is ever empty — see [`records`](super::records)'s own
+    /// note. The accessor is still opened, and the answer is still computed where a record needs
+    /// one, because [`VcfRecord::new`] asserts a padding base is carried exactly when some
+    /// allele is empty.
+    ///
+    /// # Errors
+    ///
+    /// The first sample whose walk fails ends the run ([`RunError::SourceFailed`]); so does the
+    /// first record `hand_over` refuses ([`RunError::RecordNotWritten`]) and a padding base the
+    /// reference will not serve ([`RunError::PaddingBaseUnreadable`]). Calling itself cannot
+    /// fail: a locus whose loop did not settle comes back with `converged` false and is written
+    /// on the `EMNoConv` filter.
+    pub fn call_cohort_handing_each_record_over<S, G, E>(
+        self,
+        genotyper: &G,
+        hand_over: &mut impl FnMut(&VcfRecord) -> Result<(), E>,
+    ) -> Result<WrittenCohort, RunError>
+    where
+        G: LocusGenotyper<S>,
+        S: Default,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let run_sample_count = self.samples.len();
+        let sample_names: Vec<String> = self.sample_names().map(str::to_owned).collect();
+        // **Minted before the walkers take the run apart**, because `walkers` consumes the
+        // caller. One accessor for the whole run, never shared: it walks forward with the merge
+        // and releases what it has passed.
+        let padding_reference = self.walk_reference.accessor();
+        let pieces = self.walkers()?;
+        let RunReadyToWalk {
+            segmentation,
+            merge_parameters,
+            walkers,
+            parameters,
+            calling_loop_config,
+            candidate_selection,
+            assembly_check,
+        } = pieces;
+
+        let frozen = parameters.view();
+        let mut shaping = GenericEvidenceScratch::default();
+        let mut scratch: CallingScratch<S> = CallingScratch::default();
+        let mut padding_scratch = Vec::new();
+        let mut records_written = 0_u64;
+        let mut loci_called_but_not_written = 0_u64;
+        let mut loci_too_wide_to_assemble = Vec::new();
+        let mut loci_with_nobody_to_call = Vec::new();
+        // **The merge's sink cannot fail**, so the first failure is stashed and the sink does
+        // nothing after it. Reported ahead of whatever the merge itself then returns, because it
+        // happened first.
+        //
+        // **⚑ The walk does not stop, and that is a cost worth naming rather than a choice.**
+        // `merge_cohort_handing_each_locus_over` takes a sink that returns nothing
+        // (`cohort_merge/serial.rs`), so nothing this side can do ends the merge — it runs to the
+        // end of the analysed ground, decoding every remaining read of every sample, before the
+        // error is returned. On a fixture that is invisible; on a cohort whose disk fills at the
+        // first chromosome it is the rest of the genome decoded for nothing. Fixing it means the
+        // merge's sink saying *stop* — one `ControlFlow` through both drivers and the region
+        // builder — which is a change to the merge's interface and not this step's.
+        let mut stopped: Option<RunError> = None;
+
+        let mut cache = ObservationCache::over(walkers);
+        let merged = merge_cohort_handing_each_locus_over(
+            segmentation.analysed_regions(),
+            &mut cache,
+            merge_parameters.cohort_locus_builder_regions_len,
+            merge_parameters.max_cohort_locus_span,
+            merge_parameters.min_alt_reads,
+            &mut |observation| {
+                if stopped.is_some() {
+                    return;
+                }
+                let region = observation.region;
+                let built = call_one_generic_locus(
+                    genotyper,
+                    &observation,
+                    &frozen,
+                    &candidate_selection,
+                    &calling_loop_config,
+                    run_sample_count,
+                    &mut shaping,
+                    &mut scratch,
+                    |inference, remap, unmatched| {
+                        // **Asked before the reference is read**, so a locus that establishes
+                        // no variant costs no fetch and no evidence gathering.
+                        if !a_written_genotype_carries_an_alternative(&inference) {
+                            return Ok(None);
+                        }
+                        let alleles = inference.alleles();
+                        let padding = padding_base_beside(
+                            &padding_reference,
+                            inference.region,
+                            alleles,
+                            &mut padding_scratch,
+                        )
+                        .map_err(|source| {
+                            RunError::PaddingBaseUnreadable {
+                                locus: inference.region,
+                                source,
+                            }
+                        })?;
+                        let evidence = evidence_for_output(
+                            &inference,
+                            &observation,
+                            remap,
+                            unmatched,
+                            padding,
+                        );
+                        Ok(Some(assemble_record(&inference, evidence)))
+                    },
+                );
+                match built {
+                    None => loci_with_nobody_to_call.push(region),
+                    Some(Err(error)) => stopped = Some(error),
+                    Some(Ok(None)) => loci_called_but_not_written += 1,
+                    Some(Ok(Some(record))) => match hand_over(&record) {
+                        Ok(()) => records_written += 1,
+                        Err(source) => {
+                            stopped = Some(RunError::RecordNotWritten {
+                                locus: region,
+                                source: Box::new(source),
+                            });
+                        }
+                    },
+                }
+            },
+            &mut loci_too_wide_to_assemble,
+        );
+        if let Some(stopped) = stopped {
+            return Err(stopped);
+        }
+        merged?;
+
+        Ok(WrittenCohort {
+            records_written,
+            loci_called_but_not_written,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
             walk: CohortWalkTallies::of(sample_names, cache.into_sources(), assembly_check),
@@ -589,15 +771,26 @@ impl AlignedFilesVariantCaller {
 /// ([`shape_generic_locus`]). It is the shaping step's one per-locus allocation; the call
 /// itself makes more, since a [`LocusInference`] owns its per-sample calls and its expected
 /// allele copies.
+///
+/// # `finish` is what the caller does with the call *before the locus is gone*
+///
+/// **The call is not everything a run wants from a locus.** A record also needs what each
+/// sample's reads showed and which of them no written allele explains, and those live in the
+/// cohort observation and in candidate selection's leftover — both of which end here
+/// ([`records`](super::records)). So the answer is handed to a closure rather than returned:
+/// inside it the observation, the allele remapping and the leftover are all still in scope, and
+/// after it they are dropped. [`call_cohort`](AlignedFilesVariantCaller::call_cohort), which
+/// wants the call alone, passes a closure that returns it unchanged.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the eight are the five things a locus is called against — the model, the \
+    reason = "the nine are the five things a locus is called against — the model, the \
               evidence, the parameters, and the selection's and the loop's configurations — \
-              plus the run's sample count and the two scratches. Grouping any of them would make a struct whose only \
-              purpose is this signature, and the pool milestone hands the same eight to a \
+              plus the run's sample count, the two scratches and what to do with the answer. \
+              Grouping any of them would make a struct whose only \
+              purpose is this signature, and the pool milestone hands the same nine to a \
               worker."
 )]
-fn call_one_generic_locus<S, G>(
+fn call_one_generic_locus<S, G, R>(
     genotyper: &G,
     observation: &CohortObservation,
     parameters: &FrozenParameters<'_>,
@@ -606,7 +799,8 @@ fn call_one_generic_locus<S, G>(
     run_sample_count: usize,
     shaping: &mut GenericEvidenceScratch,
     scratch: &mut CallingScratch<S>,
-) -> Option<LocusInference>
+    finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport]) -> R,
+) -> Option<R>
 where
     G: LocusGenotyper<S>,
 {
@@ -636,8 +830,13 @@ where
     }
     // The allele table leaves the selection by value: a discovery round appends to it and the
     // final prune shrinks it, so the loop owns it and hands it back inside the inference.
-    let (alleles, _verdict, _unmatched, _remap) = selection.into_parts();
-    Some(genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch))
+    // **The other two parts stay here for `finish`**: the remapping says which of the merge's
+    // alleles the loop was given, and the leftover says what each covering sample showed that it
+    // was not — neither of which the inference carries and neither of which outlives this call.
+    let (alleles, _verdict, unmatched, remap) = selection.into_parts();
+    let inference =
+        genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch);
+    Some(finish(inference, &remap, &unmatched))
 }
 
 /// **A run whose walkers are built and which has not yet read a byte** — one walker per
@@ -709,6 +908,42 @@ pub struct CalledCohort {
     pub loci_with_nobody_to_call: Vec<GenomeRegion>,
     /// What each sample's walk saw, and what the run could check about the assembly.
     pub walk: CohortWalkTallies,
+}
+
+/// **What a run that wrote its calls out produced** — everything [`CalledCohort`] carries
+/// except the loci themselves, which such a run hands over one at a time rather than keeping.
+///
+/// **Written and called are different counts, and the difference is a fact about the run.** A
+/// locus no written genotype carries an alternative at establishes no variant and is left out
+/// of the file (`doc/devel/ng/spec/vcf_output.md` §9); there is no gVCF and no reference block,
+/// so its absence is the file saying *nothing here*. A run whose two counts are far apart
+/// called a great deal of ground that came back matching the reference, which is ordinary at
+/// low depth and worth being able to see.
+#[derive(Debug)]
+pub struct WrittenCohort {
+    /// Records handed over, which is the file's record count.
+    pub records_written: u64,
+    /// **Loci called where no written genotype carried an alternative**, and so left out of the
+    /// file. Add this to [`Self::records_written`] for the loci that were called.
+    pub loci_called_but_not_written: u64,
+    /// **The ground of the loci the merge declined to assemble for being wider than
+    /// `max_cohort_locus_span`**, in genome order — [`CalledCohort::loci_too_wide_to_assemble`].
+    pub loci_too_wide_to_assemble: Vec<GenomeRegion>,
+    /// **The ground of the loci no sample of the run could be called at**, in genome order —
+    /// [`CalledCohort::loci_with_nobody_to_call`].
+    pub loci_with_nobody_to_call: Vec<GenomeRegion>,
+    /// What each sample's walk saw, and what the run could check about the assembly.
+    pub walk: CohortWalkTallies,
+}
+
+impl WrittenCohort {
+    /// How many loci were called — written, plus those that established no variant.
+    #[inline]
+    #[must_use]
+    pub fn loci_called(&self) -> u64 {
+        self.records_written
+            .saturating_add(self.loci_called_but_not_written)
+    }
 }
 
 /// **What every sample's walk counted, kept past the walk.**
@@ -964,8 +1199,11 @@ const DESCRIPTORS_AN_ALIGNMENT_FILE_NEEDS: u64 = 2;
 const DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES: u64 = 2;
 
 /// Descriptors a run needs for everything that is not per file or per sample: the three standard
-/// streams, the reference and its index, the repeat catalog, and the output and its index —
-/// eight — plus 24 of slack for whatever the runtime holds open on its own.
+/// streams, the reference and its index, the repeat catalog, the output and its index, and — from
+/// 2026-09-01 — the reference accessor a writing run reads its padding bases from
+/// ([`call_cohort_handing_each_record_over`](AlignedFilesVariantCaller::call_cohort_handing_each_record_over))
+/// — **nine** — plus 23 of slack for whatever the runtime holds open on its own. The constant
+/// did not move; what the ninth spent is slack.
 const DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES: u64 = 32;
 
 /// A run that would run out of file descriptors refuses now, naming the arithmetic.
@@ -3700,6 +3938,7 @@ mod calling_joined_to_the_merge {
                     run_sample_count,
                     &mut shaping,
                     &mut scratch,
+                    |inference, _remap, _unmatched| inference,
                 )
                 // **This fixture's cohort leaves every locus with somebody to call**, so a
                 // `None` here would mean the fixture changed under the test rather than that
@@ -4597,5 +4836,402 @@ mod a_locus_nobody_can_be_called_at {
             vec![false, true, false],
             "nu alone is set aside — which is a different fact from the locus having nobody",
         );
+    }
+}
+
+#[cfg(test)]
+mod records_handed_over_as_the_run_finishes_them {
+    //! **The run's own path: records leave one at a time and none is kept.**
+    //!
+    //! [`AlignedFilesVariantCaller::call_cohort`] is the oracle here — same reads, same
+    //! genotyper, same settings — and what these check is the difference: that the records
+    //! describe exactly the loci it calls minus the ones that establish no variant, that they
+    //! arrive in genome order, and that a run whose output refuses a record stops and says
+    //! where.
+
+    use super::calling_joined_to_the_merge::the_shipped_genotyper;
+    use super::the_merge_over_walkers::{open_over, read_of, sample_showing};
+    use super::*;
+    use crate::ng::read::input::test_fixtures::{
+        fixture_reference_from_its_index, header, indexed_named_bam, matching_contigs,
+    };
+    use crate::ng::types::{ContigId, Ploidy, Position};
+    use crate::ng::vcf::header::{HeaderContig, VcfHeaderMetadata};
+    use crate::ng::vcf::writer::VcfWriter;
+    use crate::ng::vcf::{SampleCall, VcfRecord};
+    use noodles_sam::alignment::RecordBuf;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// Collect every record a run hands over, and the counts beside them.
+    fn records_of(caller: AlignedFilesVariantCaller) -> (Vec<VcfRecord>, WrittenCohort) {
+        let mut records = Vec::new();
+        let written = caller
+            .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |record| {
+                records.push(record.clone());
+                Ok::<(), std::io::Error>(())
+            })
+            .expect("the fixture cohort calls and every record is taken");
+        (records, written)
+    }
+
+    /// **The records are the loci `call_cohort` calls, less the ones that establish no
+    /// variant** — same spans, same genotypes, same order.
+    ///
+    /// The oracle is the entry point every Milestone D test is written against, so a record
+    /// path that called differently — a scratch it reset differently, a sample order it read
+    /// differently — shows here as a genotype that does not match.
+    #[test]
+    fn the_records_describe_the_loci_call_cohort_calls() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5]);
+        let (_alpha_dir, alpha) = sample_showing("alpha", "alpha.bam", &[5, 20]);
+        let (_mu_dir, mu) = sample_showing("mu", "mu.bam", &[]);
+        let paths = [zeta, alpha, mu];
+
+        let called = open_over(&paths, &reference)
+            .call_cohort(&the_shipped_genotyper())
+            .expect("calls");
+        let (records, written) = records_of(open_over(&paths, &reference));
+
+        assert_eq!(
+            records.iter().map(VcfRecord::region).collect::<Vec<_>>(),
+            called
+                .called_loci
+                .iter()
+                .map(|locus| locus.region)
+                .collect::<Vec<_>>(),
+            "every locus of this fixture carries an alternative somebody was called on, so the \
+             two lists are the same spans in the same order",
+        );
+        assert_eq!(written.records_written, records.len() as u64);
+        assert_eq!(written.loci_called(), called.called_loci.len() as u64);
+        assert_eq!(
+            written.loci_called_but_not_written, 0,
+            "nothing here was called all-reference",
+        );
+
+        for (record, locus) in records.iter().zip(&called.called_loci) {
+            assert_eq!(
+                record
+                    .sample_columns()
+                    .iter()
+                    .map(|column| matches!(column.call, SampleCall::Called { .. }))
+                    .collect::<Vec<_>>(),
+                locus
+                    .per_sample
+                    .iter()
+                    .map(|call| !call.is_missing())
+                    .collect::<Vec<_>>(),
+                "the samples the file writes a genotype for at {}",
+                record.region(),
+            );
+        }
+    }
+
+    /// A sample carrying `first` on one read and `second` on another at `chr1:15`, with four
+    /// reads matching the reference — thirty bases from `chr1:10`.
+    ///
+    /// **The shape of a locus that is built and then establishes nothing.** The merge keeps a
+    /// position on the cohort's *pooled* non-reference reads, which two of them reach;
+    /// candidate selection then asks each sequence separately, and one read apiece is below its
+    /// floor of two, so both are dropped and the locus is called over the reference alone.
+    /// Measured at more than one built locus in four on both benchmarks
+    /// (`doc/devel/ng/spec/candidate_alleles.md` §6.2), so it is the ordinary case.
+    fn sample_showing_two_sequences_once_each(
+        sample: &str,
+        file_name: &str,
+        first: u8,
+        second: u8,
+    ) -> (TempDir, PathBuf) {
+        let with = |alt: u8| {
+            let mut bases = [b'A'; 30];
+            bases[5] = alt;
+            bases
+        };
+        let records: Vec<RecordBuf> = vec![
+            read_of(&format!("{sample}-a"), 10, &with(first)),
+            read_of(&format!("{sample}-b"), 10, &with(second)),
+            read_of(&format!("{sample}-r0"), 10, &[b'A'; 30]),
+            read_of(&format!("{sample}-r1"), 10, &[b'A'; 30]),
+            read_of(&format!("{sample}-r2"), 10, &[b'A'; 30]),
+            read_of(&format!("{sample}-r3"), 10, &[b'A'; 30]),
+        ];
+        indexed_named_bam(
+            &header(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[("rg1", Some(sample))],
+            ),
+            &records,
+            file_name,
+        )
+    }
+
+    /// **A locus called over the reference alone establishes no variant and is not written**,
+    /// and the run counts it rather than losing it (spec §9).
+    ///
+    /// There is no gVCF and no reference block, so a record's absence is the file saying
+    /// *nothing here*. A run that wrote this locus would emit `ALT .` with every sample `0/0`,
+    /// which spec §5 admits only for a filtered repeat-tract record.
+    #[test]
+    fn a_locus_called_over_the_reference_alone_is_counted_and_not_written() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) =
+            sample_showing_two_sequences_once_each("zeta", "zeta.bam", b'C', b'G');
+
+        let called = open_over(std::slice::from_ref(&zeta), &reference)
+            .call_cohort(&the_shipped_genotyper())
+            .expect("calls");
+        let (records, written) = records_of(open_over(std::slice::from_ref(&zeta), &reference));
+
+        assert_eq!(
+            called.called_loci.len(),
+            1,
+            "the merge builds the position on the cohort's two pooled non-reference reads",
+        );
+        assert_eq!(
+            called.called_loci[0].alleles().len(),
+            1,
+            "and candidate selection leaves the reference alone, each sequence having one read \
+             against a floor of two",
+        );
+        assert!(records.is_empty(), "so nothing is written");
+        assert_eq!(written.records_written, 0);
+        assert_eq!(
+            written.loci_called_but_not_written, 1,
+            "the locus is counted, not lost: called and establishing nothing",
+        );
+        assert_eq!(written.loci_called(), 1);
+    }
+
+    /// **A cohort of one sample writes its records**, which is the end of the range the caller
+    /// commits to (`doc/devel/ng/spec/design_principles.md` §0) and the shape most likely to
+    /// have a guard written `<= 1` where it meant `== 0`.
+    #[test]
+    fn a_cohort_of_one_sample_writes_its_records() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5, 20]);
+
+        let (records, written) = records_of(open_over(std::slice::from_ref(&zeta), &reference));
+
+        assert_eq!(
+            written.records_written, 2,
+            "the two positions zeta varies at"
+        );
+        assert_eq!(records.len(), 2);
+        for record in &records {
+            assert_eq!(
+                record.sample_columns().len(),
+                1,
+                "one column, for the run's one sample",
+            );
+        }
+    }
+
+    /// **A run whose output refuses a record stops there and names the locus it was writing.**
+    ///
+    /// A full disk is the ordinary way to reach this, and the cause — an `io::Error` — says
+    /// nothing about where the file stopped. A consumer holding the two knows how much of its
+    /// output is complete.
+    #[test]
+    fn an_output_that_refuses_a_record_stops_the_run_naming_the_locus() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5, 20]);
+
+        let mut taken = 0;
+        let stopped = open_over(std::slice::from_ref(&zeta), &reference)
+            .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |_record| {
+                taken += 1;
+                Err(std::io::Error::other("the disk is full"))
+            })
+            .expect_err("a refused record ends the run");
+
+        assert_eq!(taken, 1, "the sink is not called again after it refuses");
+        match stopped {
+            RunError::RecordNotWritten { locus, source } => {
+                assert_eq!(
+                    locus,
+                    GenomeRegion {
+                        contig: ContigId(0),
+                        start: Position(15),
+                        end: Position(15),
+                    },
+                    "the first of the two positions, which is where it stopped",
+                );
+                assert!(source.to_string().contains("the disk is full"));
+            }
+            other => panic!("expected the record refusal, got {other:?}"),
+        }
+    }
+
+    /// A sample whose reads carry a `bases`-long insertion after `chr1:14`, thirty reference
+    /// bases from `chr1:10`.
+    ///
+    /// **An insertion rather than a deletion, and the fixture reference is why.** Every module
+    /// here shares a reference of a hundred `A`s, so a deletion inside it sits in one
+    /// homopolymer and left-alignment slides it off the record — measured at D1, where three
+    /// reads carrying a five-base deletion produced no cohort locus at all. An insertion of
+    /// `C`s introduces bases the reference does not have, so it survives left-alignment and
+    /// reaches the merge.
+    fn sample_carrying_an_insertion(
+        sample: &str,
+        file_name: &str,
+        inserted: usize,
+    ) -> (TempDir, PathBuf) {
+        use noodles_sam::alignment::record::cigar::op::{Kind, Op};
+        use noodles_sam::alignment::record_buf::Sequence;
+        let carrying = |name: &str| {
+            let mut record = read_of(name, 10, &[b'A'; 30]);
+            let mut sequence = vec![b'A'; 5];
+            sequence.extend(std::iter::repeat_n(b'C', inserted));
+            sequence.extend(std::iter::repeat_n(b'A', 25));
+            *record.sequence_mut() = Sequence::from(sequence.clone());
+            *record.cigar_mut() = [
+                Op::new(Kind::Match, 5),
+                Op::new(Kind::Insertion, inserted),
+                Op::new(Kind::Match, 25),
+            ]
+            .into_iter()
+            .collect();
+            *record.quality_scores_mut() =
+                noodles_sam::alignment::record_buf::QualityScores::from(vec![
+                    30_u8;
+                    sequence.len()
+                ]);
+            record
+        };
+        let records: Vec<RecordBuf> = (0..3)
+            .map(|read| carrying(&format!("{sample}-ins{read}")))
+            .collect();
+        indexed_named_bam(
+            &header(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[("rg1", Some(sample))],
+            ),
+            &records,
+            file_name,
+        )
+    }
+
+    /// **An insertion goes through the whole path and its record needs no padding base.**
+    ///
+    /// This is the claim three documents now rest on, as a test rather than as prose: the
+    /// generic mint anchors its indels — an insertion's reference span is its anchor base alone
+    /// (`ReadEvent::footprint_span`) — so the record is `REF A` against `ALT ACC`, **no allele
+    /// is empty**, and `POS` does not move. A mint that instead emitted the inserted bases with
+    /// an empty reference would need a padding base here, and `VcfRecord::new` would refuse the
+    /// record without one.
+    ///
+    /// It is also the only fixture in this module whose reads are not all substitutions, which
+    /// is what the correctness review found missing: discarding the fetched padding base passed
+    /// every other test in the crate.
+    #[test]
+    fn an_insertion_is_written_as_a_record_that_needs_no_padding_base() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_carrying_an_insertion("zeta", "zeta.bam", 2);
+
+        let (records, written) = records_of(open_over(std::slice::from_ref(&zeta), &reference));
+
+        assert_eq!(
+            written.records_written,
+            1,
+            "the insertion is one record; got {} record(s) at {:?}",
+            written.records_written,
+            records.iter().map(VcfRecord::region).collect::<Vec<_>>(),
+        );
+        let record = &records[0];
+        assert_eq!(
+            record.padding_base(),
+            None,
+            "the mint anchors the insertion, so the reference allele spells its anchor base and \
+             no allele of the record is empty",
+        );
+        assert_eq!(
+            record.alleles()[0].as_ref(),
+            b"A",
+            "REF is the anchor base alone — the insertion's reference span is 1",
+        );
+        assert!(
+            record
+                .alternatives()
+                .iter()
+                .any(|allele| allele.as_ref() == b"ACC"),
+            "and the alternative is the anchor plus the two inserted bases, got {:?}",
+            record
+                .alternatives()
+                .iter()
+                .map(|allele| String::from_utf8_lossy(allele).into_owned())
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// **A run's records go through the real writer and come back as a readable VCF.**
+    ///
+    /// The artefact a person sees, end to end: the header the run states, one line per record,
+    /// the samples in the run's own order. What this catches that the record assertions above
+    /// cannot is a record the writer refuses — an order it will not accept, a column it cannot
+    /// encode — which is exactly what a run discovers only when it writes.
+    #[test]
+    fn a_runs_records_become_a_vcf_a_reader_can_parse() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5]);
+        let (_alpha_dir, alpha) = sample_showing("alpha", "alpha.bam", &[5, 20]);
+        let paths = [zeta, alpha];
+        let caller = open_over(&paths, &reference);
+        let sample_names: Vec<String> = caller.sample_names().map(str::to_owned).collect();
+        let metadata = VcfHeaderMetadata::try_new(
+            vec![HeaderContig {
+                name: "chr1".to_owned(),
+                length: 100,
+                md5: None,
+            }],
+            sample_names.clone(),
+            "pop_var_caller_exp call-from-alignments".to_owned(),
+            "reference.fa".to_owned(),
+            String::new(),
+        )
+        .expect("a header this run can state");
+
+        let out = tempfile::tempdir().expect("a temporary directory");
+        let path = out.path().join("calls.vcf");
+        let mut writer = VcfWriter::create(&path, metadata, Ploidy::try_new(2).expect("a diploid"))
+            .expect("the output opens");
+        let written = caller
+            .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |record| {
+                writer.write_record(record)
+            })
+            .expect("calls");
+        writer.finish().expect("the file is renamed into place");
+
+        let text = std::fs::read_to_string(&path).expect("the VCF is there");
+        let heading = text
+            .lines()
+            .find(|line| line.starts_with("#CHROM"))
+            .expect("a #CHROM line");
+        assert!(
+            heading.ends_with(&format!("\t{}\t{}", sample_names[0], sample_names[1])),
+            "the samples in the run's own order, and got {heading}",
+        );
+        let records: Vec<&str> = text.lines().filter(|line| !line.starts_with('#')).collect();
+        assert_eq!(records.len(), written.records_written as usize);
+        assert_eq!(
+            records
+                .iter()
+                .map(|line| line.split('\t').take(2).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            vec![vec!["chr1", "15"], vec!["chr1", "30"]],
+            "the two positions the cohort varies at, by contig name and 1-based position",
+        );
+        for line in &records {
+            let columns: Vec<&str> = line.split('\t').collect();
+            assert_eq!(
+                columns.len(),
+                11,
+                "nine fixed columns and two samples: {line}"
+            );
+            assert_eq!(columns[8], "GT:GQ:DP:AD", "the generic FORMAT string");
+        }
     }
 }

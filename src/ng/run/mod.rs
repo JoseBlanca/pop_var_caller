@@ -9,19 +9,26 @@
 //! **Landed so far:** [`cohort_merge`], which turns k samples' observations into one stream of
 //! cohort observations; [`segments`]'s [`Segmentation`], the ground every sample of a run
 //! walks; [`walker`]'s [`AlignmentFilesWalker`], one sample's alignment files behind the merge's
-//! source interface; and [`callers`]'s [`AlignedFilesVariantCaller`], which drives that merge
-//! over one walker per sample and genotypes each cohort locus where it is built — though it
-//! returns them all at once rather than one at a time, and as called loci rather than as VCF
-//! records.
+//! source interface; [`callers`]'s [`AlignedFilesVariantCaller`], which drives that merge
+//! over one walker per sample and genotypes each cohort locus where it is built; and
+//! [`records`], which turns each called locus into what a VCF record states.
+//!
+//! **Two ways out, and only one of them is a run's.**
+//! [`AlignedFilesVariantCaller::call_cohort`] collects every called locus and hands them back at
+//! once, which is what an oracle wants and what no real run can afford;
+//! [`AlignedFilesVariantCaller::call_cohort_handing_each_record_over`] hands each record over as
+//! it is finished and keeps none, which is the path
+//! [`call-from-alignments`](crate::pop_var_caller_exp::call_from_alignments) takes.
 
 pub mod callers;
 pub mod cohort_merge;
+pub mod records;
 pub mod segments;
 pub mod walker;
 
 pub use callers::{
     AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, CalledCohort,
-    CohortWalkTallies, MergeParameters, SampleWalkTallies,
+    CohortWalkTallies, MergeParameters, SampleWalkTallies, WrittenCohort,
 };
 pub use segments::{Segmentation, SegmentationInputs};
 pub use walker::{AlignmentFilesWalker, RunSegments};
@@ -30,7 +37,7 @@ use std::path::PathBuf;
 
 use crate::ng::read::input::{AssemblyMismatch, IngestError};
 use crate::ng::repeat_catalog::RepeatCatalogError;
-use crate::ng::types::GenomePosition;
+use crate::ng::types::{GenomePosition, GenomeRegion};
 
 /// What can go wrong driving a run.
 ///
@@ -300,6 +307,44 @@ pub enum RunError {
         /// The first contig that differs, and how.
         difference: String,
     },
+
+    /// The reference base a record with an empty allele has to be padded with could not be read.
+    ///
+    /// **VCF cannot spell an empty allele**, so an insertion's or a deletion's record is written
+    /// by prefixing every allele with the reference base beside its span
+    /// (`doc/devel/ng/spec/vcf_output.md` §5). The run reads that one base from its own
+    /// reference, and where the read fails the record cannot be written at all — production's
+    /// repeat-tract writer invents the letter `N` in the one case it cannot read, and this
+    /// format deliberately does not port that.
+    ///
+    /// **The ordinary reachable cause is the FASTA becoming unreadable part-way through a run**,
+    /// since the position asked for is inside a contig this run has already been walking.
+    #[error("the reference base beside the locus at {locus} could not be read")]
+    PaddingBaseUnreadable {
+        /// The locus whose record needed the base.
+        locus: GenomeRegion,
+        /// What the reference fetch hit.
+        #[source]
+        source: crate::ng::ref_seq::RefSeqError,
+    },
+
+    /// Whatever the run was handing its records to would not take one.
+    ///
+    /// **The locus is named because a run writes hundreds of thousands of them** and the cause —
+    /// a full disk, a directory that went away — says nothing about where the file stopped. A
+    /// consumer holding the two knows how much of its output is complete.
+    ///
+    /// **It carries no "what to do next"**, for [`SourceFailed`](Self::SourceFailed)'s reason:
+    /// the cause is appended after a colon, so an instruction here would sit in front of the
+    /// thing it is telling the reader to act on.
+    #[error("the record for the locus at {locus} could not be written")]
+    RecordNotWritten {
+        /// The locus whose record was refused.
+        locus: GenomeRegion,
+        /// What refused it.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 /// How far a sample's source had got when something went wrong.
@@ -336,7 +381,7 @@ pub enum WalkProgress {
 ///
 /// The spelling is `contig {n} position {p}`, which is what ng's other genome *positions* print
 /// ([`vcf::writer`](crate::ng::vcf::writer), [`psp::index`](crate::ng::psp::index)).
-/// [`GenomeRegion`](crate::ng::types::GenomeRegion)'s `contig {n}:{start}-{end}` is the spelling
+/// [`GenomeRegion`]'s `contig {n}:{start}-{end}` is the spelling
 /// for a *region*, and keeping the two apart is what stops this line and the cause's from
 /// looking like the same kind of thing.
 impl std::fmt::Display for WalkProgress {

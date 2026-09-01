@@ -19,7 +19,76 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-01):** **A locus nobody can be called at is counted, not
+> - **Last completed task (2026-09-01):** **F1 — `call-from-alignments`: a cohort of CRAMs in, a
+> VCF out** (step F1 of
+> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
+> [report](doc/devel/reports/implementations/ng_run_driver_f1_2026-09-01.md)). A person can now
+> run ng from the command line: reference, catalog, one `--alignment` per sample, an optional
+> BED, `--parameters` or `--defaults`, and an output VCF. **5,857 tests in the lib, 406 in
+> `ng::run`** — 39 added.
+> **The run gained a second entry point and `call_cohort` is unchanged.**
+> `call_cohort_handing_each_record_over` hands each finished `VcfRecord` over and keeps none,
+> which is what `arch/run_streaming.md` §3.4 already gave a caller; `call_cohort` keeps a
+> genome of called loci and stays the oracle every Milestone D test is written against. To build
+> a record without the locus outliving its evidence, `call_one_generic_locus` now takes a closure
+> and is handed the inference, the allele remapping and candidate selection's leftover while all
+> three are still in scope.
+> **The padding base is fetched from a reference accessor the run holds for its output** — minted
+> from the same `WalkReference` the walkers' come from, one byte per record with an empty allele,
+> releasing what it has passed. A base it cannot read stops the run naming the locus; the letter
+> `N` production's tract writer invents there is **not** ported (`vcf_output.md` §5).
+> **Not every called locus becomes a record** (`vcf_output.md` §9): one no written genotype
+> carries an alternative at establishes no variant and is counted rather than written.
+> **The command was driven end to end in review** — a 4.6 kb two-contig reference, its catalog,
+> two 24× samples in BAM and in CRAM — and `bcftools view`, `query`, `stats`,
+> `norm -f ref.fa -c e` and `index -t` all accept the output with exit 0, both planted genotypes
+> right, contigs named by name.
+> **⚑ The padding base is built and, on today's path, never fetched.** The generic mint anchors
+> its indels — an insertion's reference span is its anchor base alone, a deletion's is the anchor
+> plus the deleted run — so a deletion's alternative is one base and **no allele a generic locus
+> is called over is ever empty**. The empty allele `vcf_output.md` §5 was written for is the
+> repeat-tract path's full-tract deletion, which is unbuilt. It cannot be left out: `VcfRecord`
+> asserts a padding base is carried exactly when some allele is empty.
+> **⚑ A refused record stops the sink but not the walk.** `merge_cohort_handing_each_locus_over`
+> takes a sink that returns nothing, so the merge runs to the end of the analysed ground before
+> the error surfaces — on a cohort whose disk fills at chromosome 1, the rest of the genome
+> decoded for nothing. `arch/run_streaming.md` §3.4's *"iteration ends at the first `Err`"* is
+> corrected there. The fix is one `ControlFlow` through the merge's two drivers and its region
+> builder, which is the merge's interface and not F1's.
+> **The correctness pass ran 19 mutations and killed 14; every survivor was a missing test, not
+> wrong code**, and five tests were added to close them — the leftover's numbering against the
+> merge's covering list, `AD` summed over a sample's read groups, the contig-start branch being
+> exactly one position wide, and two `DP` sources. **And no fixture drove an indel through the
+> command**: discarding the fetched padding base passed all 5,845 tests. That is now an
+> insertion of two bases end to end — `REF A` against `ALT ACC`, no padding base — which turns
+> the claim above into an assertion. An insertion and not a deletion because the shared fixture
+> reference is a hundred `A`s, where left-alignment slides a deletion off the record (D1's
+> measurement).
+> **⚑ One reading of `vcf_output.md` §7 was taken and is the owner's to overturn.** `DP` now
+> includes `SampleSupport::reads_removed_as_evidence` — reads named at some of a sample's records
+> inside a locus and not at all of them. §7 says `DP` is "every read observation the sample had at
+> the locus, whether or not a written allele explains them", and those reads were observed there;
+> leaving them out understates the depth at exactly the loci spanning several of a sample's
+> records. The three sources of an unexplained read are disjoint by construction.
+> **Four defects the review found were fixed in the step**: `--ploidy` above 16 panicked after the
+> whole cohort was open (now refused first, naming the ceiling); `--ploidy` was silently discarded
+> when a parameters file was given (now refused if it disagrees, and the flag is an `Option` so a
+> default cannot contradict a file); `--output` naming a directory or a missing directory was
+> discovered after the run (now refused first); a contig longer than a `u32` was narrowed by an
+> `as` cast. **And the summary now prints how much ground the run could not speak for** — measured
+> in review, a run over a 60-base `AT` tract printed six zeros and exited successfully, which no
+> reader could tell from a clean genome.
+> **⚑ Two things are owed to the owner's documents.**
+> **`doc/devel/ng/spec/typed_regions_cli.md` still does not record the four subcommand names** —
+> `generate-psps`, `generate-census`, `call-from-psps`, `call-from-alignments`, agreed
+> 2026-08-28 and written nowhere. F1 built under them and pins the one it added; the spec is the
+> owner's to edit. And the correction below to `arch/candidate_alleles.md` §4.1 still stands.
+> **⚑ And one measurement worth the owner's eye, from the review's own fixture rather than a
+> benchmark**: on 24 reads a sample a clean homozygous-reference call (`AD 24,0`) came back at
+> **GQ 74** beside a heterozygote (`AD 12,12`) at **GQ 99**, and at `--ploidy 4` the same reads
+> gave GQ 9, 13 and 29 — so a routine `GQ>=20` filter would discard nearly every tetraploid call.
+>
+> - **Previously (2026-09-01):** **A locus nobody can be called at is counted, not
 > fatal** — the owner's ruling at Checkpoint D
 > ([report](doc/devel/reports/implementations/ng_locus_with_nobody_to_call_2026-09-01.md)).
 > The allele cap cuts a sequence rather than refusing a locus, on the ground that most samples
@@ -39,7 +108,7 @@ Skills and agents are instructed to leave it untouched.
 > 2.2–4.9% of `call_cohort` while the 94–97% that remains is one thread whose parallel form
 > already exists. **The next milestone is F, the command.**
 >
-> - **Previously (2026-09-01):** **Milestone D of the run driver — ng calls genotypes
+> - **Earlier (2026-09-01):** **Milestone D of the run driver — ng calls genotypes
 > from CRAM files**, at Checkpoint D (steps D1–D3 of
 > [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
 > [D3's report](doc/devel/reports/implementations/ng_run_driver_d3_2026-09-01.md)). Six tomato

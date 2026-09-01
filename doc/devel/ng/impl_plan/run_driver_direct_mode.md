@@ -384,14 +384,34 @@ several worker counts.
 
 ### Milestone F — the command
 
-☐ **F1. `call-from-alignments`.** The subcommand: reference, catalog, alignment files, parameters
+✅ **F1. `call-from-alignments`.** The subcommand: reference, catalog, alignment files, parameters
 file or `--defaults`, analysed regions, output. Kebab-cased from its enum variant, like the three
 that exist ([`cli.rs`](../../../../src/pop_var_caller_exp/cli.rs)).
 
 **⛦ No longer depends on E2** — Milestone E is deferred (owner, 2026-09-01), so this depends on
 D3. **The command-surface note above still stands**: the four subcommand names are agreed and
 written nowhere, and [`typed_regions_cli.md`](../spec/typed_regions_cli.md) is the owner's
-document to record them in.
+document to record them in. Built under those names; PROJECT_STATUS records that the spec still
+owes them.
+
+**⛦ The command needed a second entry point on the caller, and the architecture already had it.**
+`call_cohort` keeps a whole genome of called loci — what an oracle wants and what a command
+cannot afford — while arch §3.4 gives a caller a stream of `VcfRecord`s. So
+`call_cohort_handing_each_record_over` hands each finished record over and keeps none, and
+`call_cohort` is unchanged and stays the oracle every Milestone D test is written against.
+
+**⛦ The padding base is fetched from a reference accessor the run holds for its output.** Minted
+from the same `WalkReference` the walkers' accessors come from — shared index and contig table,
+its own cursor — and read one base at a time, only at a locus some allele of which is empty, with
+what it has passed released after each fetch. One more open file, inside the descriptor
+allowance. A base that cannot be read stops the run naming the locus; the `N` production's tract
+writer invents there is not ported.
+
+**⛦ Not every called locus becomes a record**, which spec §9 settles and which the run now counts:
+a locus no written genotype carries an alternative at establishes no variant and is left out.
+`WrittenCohort::loci_called_but_not_written` is the count, and the fixture that reaches it is a
+sample showing two sequences one read each — the merge builds the position on the pooled two, and
+candidate selection then drops both.
 *Depends:* D3, and the command-surface note above. *Source:* [`typed_regions_cli.md`](../spec/typed_regions_cli.md).
 
 ☐ **F2. The run writes the parameters it used, beside its output.**

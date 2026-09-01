@@ -3329,17 +3329,13 @@ impl LocusInference {
     /// crate's tests — are both inside the crate. When the stage lands it overwrites the
     /// field in place and publishes a reader for the corrected value; there is no moment at
     /// which two qualities exist.
+    ///
+    /// **That stage now exists and this is read by it** (2026-09-01):
+    /// [`evidence_for_output`](crate::ng::run::records::evidence_for_output) takes this as the
+    /// baseline, applies `correct_site_quality`, and the record carries the corrected number.
+    /// The `dead_code` waiver this carried until then is spent.
     #[inline]
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its caller is the ordered output stage that applies the artifact \
-                      correction (spec/calling_quality.md §3.4), which is step 11's plan and \
-                      not this one's"
-        )
-    )]
     pub(crate) fn uncorrected_site_quality(&self) -> Phred {
         self.site_quality
     }

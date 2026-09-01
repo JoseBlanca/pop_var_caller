@@ -8,11 +8,15 @@
 //! `Parser` plus the subcommand enum, and one module per subcommand owns
 //! its `Args`, its `run_*`, and its `#[non_exhaustive]` error enum.
 
+pub mod call_from_alignments;
 pub mod cli;
 pub mod estimate_contamination;
 pub mod repeat_catalog;
 pub mod typed_regions;
 
+pub use call_from_alignments::{
+    CallFromAlignmentsArgs, CallFromAlignmentsCliError, run_call_from_alignments,
+};
 pub use cli::{Cli, PopVarCallerExpCommand};
 pub use estimate_contamination::{
     EstimateContaminationArgs, EstimateContaminationCliError, run_estimate_contamination,

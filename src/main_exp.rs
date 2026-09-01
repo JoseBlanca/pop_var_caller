@@ -9,7 +9,8 @@ use std::process;
 use clap::Parser;
 use pop_var_caller::error_render::format_error_chain;
 use pop_var_caller::pop_var_caller_exp::{
-    Cli, PopVarCallerExpCommand, run_estimate_contamination, run_repeat_catalog, run_typed_regions,
+    Cli, PopVarCallerExpCommand, run_call_from_alignments, run_estimate_contamination,
+    run_repeat_catalog, run_typed_regions,
 };
 
 fn main() {
@@ -20,6 +21,9 @@ fn main() {
         }
         PopVarCallerExpCommand::RepeatCatalog(args) => {
             run_repeat_catalog(&args).map_err(|e| format_error_chain(&e))
+        }
+        PopVarCallerExpCommand::CallFromAlignments(args) => {
+            run_call_from_alignments(&args).map_err(|e| format_error_chain(&e))
         }
         PopVarCallerExpCommand::EstimateContamination(args) => {
             run_estimate_contamination(&args).map_err(|e| format_error_chain(&e))
