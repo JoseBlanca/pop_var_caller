@@ -19,7 +19,24 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **ng's own repeat-tract candidate selection is built,
+> - **Last completed task (2026-09-02):** **the existing caller's replaced rules switched back
+> in, and reproduced on 269 real tomato tracts — step E1**
+> (step E1 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_selection_e1_2026-09-02.md)).
+> Three of the existing caller's rules are replaced on purpose, so a byte-identical parity test
+> has no failing state; what exists instead is a test-only re-implementation of those three —
+> clear-peak nomination, the cohort-summed depth gate, the same-length sibling bar — driving ng's
+> own fold and ladder, and required to reproduce the existing caller's candidate set. **The
+> comparison runs against that caller's own code rather than against frozen expectations**, so
+> nothing in the fixture can go stale. On the 51-accession tomato panel the two rules narrow 184
+> of 269 tracts differently, to 602 candidate sequences against 668 — the replacement stays the
+> cheaper one at three reads a position as well as at 300×. **Three of the five rules cannot be
+> seen on a 51-accession panel at all** — the depth gate, the three-accession recurrence term and
+> the periodicity gate each survived a deliberate mutation — so three further tests reach them:
+> the same tracts with one accession (where the depth gate then refuses every one of them), and
+> two hand-built loci. **Still unrun: E2, the HG002 numbers through the shipped module.**
+>
+> - **Earlier (2026-09-02):** **ng's own repeat-tract candidate selection is built,
 > and proven on hand-built loci — Checkpoint D**
 > (step D3 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
 > [report](doc/devel/reports/implementations/ng_ssr_selection_d3_2026-09-02.md)).

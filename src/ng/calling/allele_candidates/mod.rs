@@ -32,6 +32,10 @@
 
 pub mod generic;
 pub mod ssr;
+/// The repeat-tract selector against production's, on a committed tomato fixture — spec §10's
+/// differential, which is a test and nothing else.
+#[cfg(test)]
+mod ssr_production_differential;
 
 use crate::ng::calling::CandidateAlleles;
 use crate::ng::run::cohort_merge::build::SupportedAllele;

@@ -210,7 +210,7 @@ two modules have to agree on.
 
 ### Milestone E — the two ends of the differential, on real data
 
-**E1. Production's rules as a test-only arm.**  ☐
+**E1. Production's rules as a test-only arm.**  ✅
 In `#[cfg(test)]`, a re-implementation of production's three replaced rules — the clear-peak test,
 the cohort-summed depth gate, the same-length sibling bar — driving the same fold. **Not a field of
 `SsrSelectionConfig`:** the shipping binary carries one rule, and a configuration nobody should set

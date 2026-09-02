@@ -444,6 +444,16 @@ struct TractTally {
     /// Samples that carry a sequence the cap cut, summed over loci: each one is a genotype the
     /// caller must emit as missing.
     samples_made_uncallable: usize,
+    /// **Catalog tracts the merge refused to build a locus for**, because no sample's
+    /// non-reference reads reached its keep rule. Selection never sees one, and the caller
+    /// leaves it at the reference tract — so for the purpose of "how many sequences does a
+    /// tract carry", it is one candidate, not zero loci.
+    ///
+    /// It is counted because the denominator decides the headline number. Production's
+    /// offline scoring, which `spec/candidate_alleles_ssr.md` §5 quotes, emitted a candidate
+    /// set at **every** catalog tract; counting only the tracts that reached selection
+    /// compares a variant-enriched subset against the whole.
+    refused_by_merge: usize,
 }
 
 impl TractTally {
@@ -510,6 +520,23 @@ impl TractTally {
         println!(
             "samples_made_uncallable\t{}\t(a sequence the cap cut that the sample itself earned)",
             self.samples_made_uncallable
+        );
+        // **The same count over the denominator the offline scoring used.** Selection only
+        // ever sees a tract the merge built, so `candidates_per_tract` above is taken over a
+        // set already enriched for tracts that vary. A tract the merge refused is left at its
+        // reference sequence and carries exactly one candidate, so counting it costs nothing
+        // but a division — and the two numbers differ by enough to decide which one a spec
+        // figure is comparable with.
+        let catalog_tracts = self.loci + self.refused_by_merge;
+        println!(
+            "# catalog tracts the merge refused (no sample's non-reference reads reached its keep rule): {}",
+            self.refused_by_merge
+        );
+        println!(
+            "candidates_per_catalog_tract\t{:.3}\t({} candidates over {} tracts, a refused tract counted as the reference alone)",
+            (self.candidates + self.refused_by_merge) as f64 / catalog_tracts.max(1) as f64,
+            self.candidates + self.refused_by_merge,
+            catalog_tracts,
         );
     }
 }
@@ -650,12 +677,22 @@ fn run_tracts(
     cram_paths: &[PathBuf],
     cache: &Arc<ReferenceInfoCache>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+
     let _ = crams;
     let copies: u8 = std::env::var("NG_REAL_PLOIDY")
         .ok()
         .map(|value| value.parse().expect("a positive copy number"))
         .unwrap_or(2);
-    let config = SsrSelectionConfig::at_ploidy(Ploidy::try_new(copies)?);
+    let mut config = SsrSelectionConfig::at_ploidy(Ploidy::try_new(copies)?);
+    // **`NG_TRACT_SHARE` moves the support share this arm runs under**, so the shipped value
+    // and the one `spec/candidate_alleles_ssr.md` §5 swept can be compared on one tract set
+    // rather than argued about. It is an environment knob on the probe and not a field anyone
+    // sets in a run: the shipping caller carries one share (see `SsrSelectionConfig::at_ploidy`).
+    if let Ok(raw) = std::env::var("NG_TRACT_SHARE") {
+        config.shared.min_allele_support.share =
+            MinAltReadShare::new(raw.parse().expect("a number")).expect("a fraction of one");
+    }
     println!(
         "# tract selection: ploidy {}, bar {:?}, cap {}, off-grid share {}",
         config.ploidy,
@@ -681,8 +718,61 @@ fn run_tracts(
     let mut scratch = SelectionScratch::new();
     let mut tally = TractTally::default();
     let mut set_aside = 0_usize;
+    // **`NG_TRACT_DUMP=<path>` writes one row per (tract, candidate sequence)**, which is what
+    // turns "1.6 candidates a tract" into "and here is which tracts they are on". A tract the
+    // merge refused gets a single row with no bases, so the file carries the whole catalog set
+    // and a reader picking a denominator is not guessing at what is missing.
+    let mut dump = match std::env::var("NG_TRACT_DUMP") {
+        Ok(path) => {
+            let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+            writeln!(
+                out,
+                "contig\tstart\tend\tmotif\tperiod\tbuilt\tverdict\tcandidates\tallele\tkept\treads\tbest_share\tbases"
+            )?;
+            println!("# per-tract candidate dump written to {path}");
+            Some(out)
+        }
+        Err(_) => None,
+    };
+    // **`NG_TRACT_ROWS=<path>` writes the evidence itself, one row per (tract, sample,
+    // sequence)** — the reads a sample lent one spelling at one tract. It is what a checked-in
+    // differential fixture needs and the dump above cannot supply: production's own selector
+    // and ng's both consume exactly this, so a fixture built from it can be run through the
+    // two and their candidate sets compared.
+    //
+    // **A sequence is named by its index into the tract's allele table, not by its bases**, so
+    // this file stays small enough to check in; the bases are the `NG_TRACT_DUMP` file's
+    // `allele`/`bases` columns for the same locus, which is written from the same table in the
+    // same order.
+    let mut rows = match std::env::var("NG_TRACT_ROWS") {
+        Ok(path) => {
+            let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+            writeln!(out, "contig,start,end,sample,allele,reads")?;
+            println!("# per-sample tract evidence rows written to {path}");
+            Some(out)
+        }
+        Err(_) => None,
+    };
     for locus in LocusCloser::over(&all, MaxCohortLocusSpan::DEFAULT, MinAltReads::DEFAULT) {
+        let motif = match &locus.kind {
+            LocusKind::Ssr(detail) => Some(detail.motif),
+            _ => None,
+        };
         if locus.verdict != Verdict::Build {
+            // Refused by the merge, so selection never sees it and the caller leaves it at the
+            // reference tract. Counted, because the denominator is half of the headline number.
+            tally.refused_by_merge += 1;
+            if let (Some(out), Some(motif)) = (dump.as_mut(), motif) {
+                writeln!(
+                    out,
+                    "{}\t{}\t{}\t{}\t{}\t0\tRefusedByMerge\t1\t0\t1\t0\t0.0000\t",
+                    locus.region.contig.0,
+                    locus.region.start.get(),
+                    locus.region.end.get(),
+                    String::from_utf8_lossy(motif.as_bytes()),
+                    motif.period(),
+                )?;
+            }
             continue;
         }
         let observation = CohortObservation::over(&locus);
@@ -694,7 +784,84 @@ fn run_tracts(
             set_aside += 1;
             continue;
         }
-        tally.push(&select_ssr(&observation, &config, &mut scratch));
+        let narrowed = select_ssr(&observation, &config, &mut scratch);
+        if let (Some(out), Some(motif)) = (dump.as_mut(), motif) {
+            // **Every allele the merge put in the table, not only the survivors.** A true
+            // sequence that is missing from a tract's candidate list was lost in one of two
+            // places, and only these two columns tell them apart: it reached the table and
+            // the support rule refused it (`kept` 0 with reads beside it), or no read ever
+            // carried it and the table never held it at all.
+            let mut pooled: Vec<u32> = vec![0; observation.alleles.len()];
+            let mut best_share: Vec<f64> = vec![0.0; observation.alleles.len()];
+            for sample in &observation.per_sample {
+                let compared: u32 = sample
+                    .supported
+                    .iter()
+                    .map(|row| row.support.num_reads)
+                    .sum();
+                let mut here: Vec<u32> = vec![0; observation.alleles.len()];
+                for row in &sample.supported {
+                    here[row.allele] += row.support.num_reads;
+                }
+                for (at, reads) in here.iter().enumerate() {
+                    pooled[at] += reads;
+                    let share = f64::from(*reads) / f64::from(compared.max(1));
+                    if share > best_share[at] {
+                        best_share[at] = share;
+                    }
+                }
+            }
+            for (at, bases) in observation.alleles.iter().enumerate() {
+                writeln!(
+                    out,
+                    "{}\t{}\t{}\t{}\t{}\t1\t{:?}\t{}\t{}\t{}\t{}\t{:.4}\t{}",
+                    observation.region.contig.0,
+                    observation.region.start.get(),
+                    observation.region.end.get(),
+                    String::from_utf8_lossy(motif.as_bytes()),
+                    motif.period(),
+                    narrowed.selection.verdict(),
+                    narrowed.selection.alleles().len(),
+                    at,
+                    u8::from(narrowed.selection.remap().candidate_for(at).is_some()),
+                    pooled[at],
+                    best_share[at],
+                    String::from_utf8_lossy(bases),
+                )?;
+            }
+        }
+        if let Some(out) = rows.as_mut() {
+            for sample in &observation.per_sample {
+                // Read groups are pooled, as production's Stage-1 evidence is: its
+                // `seq_counts` is one entry per distinct sequence with a read total.
+                let mut pooled: Vec<u32> = vec![0; observation.alleles.len()];
+                for row in &sample.supported {
+                    pooled[row.allele] += row.support.num_reads;
+                }
+                for (at, reads) in pooled.iter().enumerate() {
+                    if *reads == 0 {
+                        continue;
+                    }
+                    writeln!(
+                        out,
+                        "{},{},{},{},{},{}",
+                        observation.region.contig.0,
+                        observation.region.start.get(),
+                        observation.region.end.get(),
+                        sample.sample,
+                        at,
+                        reads,
+                    )?;
+                }
+            }
+        }
+        tally.push(&narrowed);
+    }
+    if let Some(out) = dump.as_mut() {
+        out.flush()?;
+    }
+    if let Some(out) = rows.as_mut() {
+        out.flush()?;
     }
     tally.report();
     if set_aside > 0 {
