@@ -19,7 +19,24 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **ng can narrow a repeat tract end to end — and the
+> - **Last completed task (2026-09-02):** **ng's own repeat-tract candidate selection is built,
+> and proven on hand-built loci — Checkpoint D**
+> (step D3 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_selection_d3_2026-09-02.md)).
+> Given a repeat tract's merged evidence, `select_ssr` now returns the tract sequences worth
+> calling over and, beside them, each one's repeat count — the integer the genotype prior indexes
+> its length spectrum by. **That integer has exactly one producer in the calling path**: the
+> ladder keys its rungs through it and the prior's slice is filled through it, so the two cannot
+> come to disagree about which length an allele sits at, which would put a candidate's prior mass
+> on the wrong length with nothing failing. **What the module does not return is the cohort's
+> commonest repeat length**, which the plan asks for: the prior stopped taking it in August, and
+> the periodicity grid — its last reader anywhere — was moved onto the reference tract's length
+> the same day, so it would be a field with no reader. The ladder still computes it.
+> **Still unrun in this plan: the differential on real data** — reproducing the existing caller's
+> candidate set on tomato with its three replaced rules switched in, and the measured HG002
+> improvement with them switched out.
+>
+> - **Earlier (2026-09-02):** **ng can narrow a repeat tract end to end — and the
 > refusal rule's grid got moved onto the reference tract**
 > (step D2 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
 > [report](doc/devel/reports/implementations/ng_ssr_selection_d2_2026-09-02.md)).
@@ -2961,10 +2978,11 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 ---
 
 #### Candidate alleles at a repeat tract (step 6, STR path) — the ladder, nomination, admission
-- **Status:** fixes-applied — **Milestones B and C complete, D1 and D2 landed**: `select_ssr`
-  exists and narrows a tract end to end on hand-built loci — the ladder, the histogram, nomination
-  with its `±1` rescue and union, sequence admission, and the periodicity verdict. D3, the repeat
-  counts the genotype prior takes, is what remains before Checkpoint D. Branch
+- **Status:** fixes-applied — **Milestones B, C and D complete, at Checkpoint D**: `select_ssr`
+  is built and proven on hand-built loci, including its `NotPeriodic` and reference-only outcomes.
+  What remains in this plan is Milestone E, the differential on real data — production's candidate
+  set reproduced on tomato with its three replaced rules switched in, and the measured HG002
+  numbers reproduced with them switched out. Branch
   `ng-ssr-calling-loop`, worktree `../pop_var_caller-ssr-calling-loop`, from `main` at `55f9c7de`.
   Runs beside `ng-ssr-observations`, which owns the merge, the walker and the run report; this
   branch owns `calling/` and edits none of those.
@@ -2983,7 +3001,8 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   [C1](doc/devel/reports/implementations/ng_ssr_selection_c1_2026-09-02.md),
   [C2](doc/devel/reports/implementations/ng_ssr_selection_c2_2026-09-02.md),
   [D1](doc/devel/reports/implementations/ng_ssr_selection_d1_2026-09-02.md),
-  [D2](doc/devel/reports/implementations/ng_ssr_selection_d2_2026-09-02.md).
+  [D2](doc/devel/reports/implementations/ng_ssr_selection_d2_2026-09-02.md),
+  [D3](doc/devel/reports/implementations/ng_ssr_selection_d3_2026-09-02.md).
 - **⚑ D2 amended the spec and the architecture, on the owner's ruling of 2026-09-02: the
   periodicity grid is anchored on the reference tract's length, not on the ladder's mode.** Read
   literally, "a whole number of motif units from the ladder's mode" anchors at **zero** — the mode
@@ -2998,6 +3017,13 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   cannot move with depth, and because it is the quantity the genotype prior was re-indexed onto on
   2026-08-27. **Reverting to the documents' rule now fails a test**, which is what makes the
   amendment enforceable.
+- **⚑ D3 does not return the ladder's modal repeat count, where the plan says to return it.** Arch
+  §2.3 lists it and arch §4 and §5 retract its reason — the prior's seed was re-indexed onto the
+  reference tract length on 2026-08-27, so *"nothing consumes it now"* — and **D2 removed the last
+  consumer inside the module** by anchoring the periodicity grid on the reference length too. A
+  returned field would have no reader anywhere. The ladder still computes it, so restoring it is
+  one line, and the architecture's own open question — whether selection should carry the mode at
+  all — is left open rather than answered by shipping a field nobody reads.
 - **C1 done (nomination, per sample) — and the test spec §13 calls the one production cannot pass
   is green.** A sample with 150 reads at ten repeats and 150 at eleven promotes **both**: nothing
   here reads a neighbour, where production nominates a length only if its reads exceed both

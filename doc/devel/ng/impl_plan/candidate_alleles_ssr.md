@@ -199,7 +199,7 @@ refuses periodic loci and admits non-periodic ones, and nothing fails.
 their lengths in bases; one sample being periodic saves a locus every other sample fails.
 *Depends:* D1. *Source:* arch §3.3; spec §7, §3.
 
-**D3. What the prior takes: `repeat_counts` and `modal_repeat_count`.**  ☐
+**D3. What the prior takes: `repeat_counts` and `modal_repeat_count`.**  ✅
 `SsrLocusSelection` returns both, parallel to the candidates with the reference at index 0.
 `fill_ssr_seed` takes exactly this slice and must not recompute it — one producer for an integer
 two modules have to agree on.

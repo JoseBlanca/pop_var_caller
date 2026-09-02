@@ -16,9 +16,10 @@
 //! **Under construction, in the order `doc/devel/ng/impl_plan/candidate_alleles_ssr.md` sets.**
 //! This file holds the ladder (its step B1), the path's configuration and the per-sample length
 //! histogram (B2), nomination — each sample's own repeat counts, the `±1` rescue and the cohort's
-//! union (C1, C2) — the admission of the sequences on a promoted rung (D1), and the periodicity
-//! verdict with the entry point [`select_ssr`] it gates (D2). The two numbers the genotype prior
-//! takes are the step after those, and nothing outside this module calls anything here yet.
+//! union (C1, C2) — the admission of the sequences on a promoted rung (D1), the periodicity verdict
+//! with the entry point [`select_ssr`] it gates (D2), and the repeat counts that entry point hands
+//! the genotype prior (D3). **`select_ssr` is complete**; nothing outside this module calls it
+//! yet, and the driver's dispatch to it belongs to the STR loop plan's own Milestone C.
 //!
 //! **Which is why a non-test build expects everything here to be dead.** The expectation rather
 //! than an `allow`, so that the first real caller — `select_ssr`, which the steps after this one
@@ -353,7 +354,8 @@ pub(super) fn build_ladder(
     // below cannot be by zero.
     let period = motif.period();
     let repeat_count_of =
-        |table_index: u32| (observation.alleles[table_index as usize].len() / period) as u32;
+        |table_index: u32| repeat_count_of_bases(&observation.alleles[table_index as usize], motif);
+    debug_assert_eq!(period, motif.period());
 
     ladder.table_indices_by_rung.extend(
         (0..table_len)
@@ -901,6 +903,54 @@ pub(super) fn admit_promoted_sequences(
     LocusSelection::new(alleles, verdict, leftovers, remap, covering_samples)
 }
 
+/// **How many whole motif copies a tract sequence carries** — `bases.len() / motif.period()`,
+/// floored.
+///
+/// **The one producer of this integer in ng's calling path, and that is the point.** The ladder
+/// keys its rungs by it, [`SsrLocusSelection::repeat_counts`] hands it to the genotype prior, and
+/// the prior's length spectrum is indexed by it (`doc/devel/ng/spec/candidate_alleles_ssr.md` §3).
+/// Two spellings of a floor division is how two modules come to disagree about which rung an
+/// allele is on, and a disagreement there puts a candidate's prior mass on the wrong length with
+/// nothing failing.
+///
+/// The period is at least one base — [`Motif::new`] refuses an empty unit — so this cannot divide
+/// by zero.
+#[inline]
+fn repeat_count_of_bases(bases: &[u8], motif: &Motif) -> u32 {
+    (bases.len() / motif.period()) as u32
+}
+
+/// **What the repeat-tract path returns: the shared selection, plus the repeat count of every
+/// candidate it kept** (arch §2.3).
+///
+/// # Why the repeat counts travel with the selection rather than being recomputed
+///
+/// The genotype prior's `fill_ssr_seed` takes exactly this slice. It could derive the same
+/// integers from the candidates' bases and the motif — and that is the failure this field exists
+/// to prevent: a second floor division is a second producer, and the two only have to disagree
+/// once for a candidate's prior mass to land on the wrong length, silently
+/// (spec §3). Everything here comes from [`repeat_count_of_bases`].
+///
+/// # What is *not* here, and why
+///
+/// **The ladder's modal repeat count is not returned.** Arch §2.3 lists it, and arch §4 and §5
+/// then retract its reason: on 2026-08-27 the prior's seed was re-indexed by offset from the
+/// **reference** tract length, which every locus already knows, so the cohort's commonest length
+/// stopped being an input to it — *"nothing consumes it now"*. **This step's own D2 removed the
+/// last remaining consumer inside this module**, by anchoring the periodicity grid on the
+/// reference length too. Returning it would be a field with no reader, and the architecture's own
+/// open question — whether selection should carry the mode at all — is left where it is rather
+/// than answered by shipping one. The ladder still computes it, so restoring it is one line.
+#[derive(Clone, PartialEq, Debug)]
+pub struct SsrLocusSelection {
+    /// The narrowed table, the verdict, the per-sample leftover and the remapping — the same
+    /// bundle the ordinary path returns.
+    pub selection: LocusSelection,
+    /// **Parallel to `selection.alleles()`**, the reference at index 0: each surviving
+    /// candidate's repeat count.
+    pub repeat_counts: Vec<u32>,
+}
+
 /// **Whether this tract's reads actually vary in whole motif units** — the one verdict this path
 /// adds, and the gate in front of everything above (spec §7; arch §3.3).
 ///
@@ -1028,7 +1078,7 @@ pub(super) fn select_ssr(
     observation: &CohortObservation,
     config: &SsrSelectionConfig,
     scratch: &mut SelectionScratch,
-) -> LocusSelection {
+) -> SsrLocusSelection {
     let LocusKind::Ssr(detail) = &observation.kind else {
         panic!(
             "the repeat-tract path was handed a {:?} locus at {}: which path a locus takes is \
@@ -1039,13 +1089,30 @@ pub(super) fn select_ssr(
     };
 
     if !locus_is_periodic(observation, &detail.motif, config.max_off_grid_share) {
-        return reference_tract_alone(observation, detail, SelectionVerdict::NotPeriodic);
+        // The reference tract alone, so `repeat_counts` is one entry — and it comes from the same
+        // derivation the periodic path uses, not from a second floor division written out here.
+        return SsrLocusSelection {
+            selection: reference_tract_alone(observation, detail, SelectionVerdict::NotPeriodic),
+            repeat_counts: vec![repeat_count_of_bases(
+                &observation.alleles[0],
+                &detail.motif,
+            )],
+        };
     }
 
     summarise_alleles(observation, config.shared.min_allele_support, scratch);
     build_ladder(observation, &detail.motif, scratch);
     promote_rungs_for_cohort(observation, config, scratch);
-    admit_promoted_sequences(observation, detail, config, scratch)
+    let selection = admit_promoted_sequences(observation, detail, config, scratch);
+    let repeat_counts = selection
+        .alleles()
+        .iter()
+        .map(|bases| repeat_count_of_bases(bases, &detail.motif))
+        .collect();
+    SsrLocusSelection {
+        selection,
+        repeat_counts,
+    }
 }
 
 /// A table holding the reference tract and nothing else, under `verdict` — what a tract this path
@@ -2492,6 +2559,20 @@ mod tests {
             },
             ..SsrSelectionConfig::at_ploidy(copies)
         };
+        select_ssr(observation, &config, &mut SelectionScratch::new()).selection
+    }
+
+    /// The same narrowing, keeping the repeat counts beside the selection.
+    fn selected_with_counts(observation: &CohortObservation, ploidy: u8) -> SsrLocusSelection {
+        let rule = support_rule_of(2, 0.0);
+        let copies = Ploidy::try_new(ploidy).expect("at least one copy");
+        let config = SsrSelectionConfig {
+            shared: CandidateSelectionConfig {
+                min_allele_support: rule,
+                ..SsrSelectionConfig::at_ploidy(copies).shared
+            },
+            ..SsrSelectionConfig::at_ploidy(copies)
+        };
         select_ssr(observation, &config, &mut SelectionScratch::new())
     }
 
@@ -2709,5 +2790,147 @@ mod tests {
                 b"ATATATATAG".to_vec()
             ]
         );
+    }
+
+    // ---- D3: the repeat counts the genotype prior takes ----
+
+    /// **The repeat counts run parallel to the surviving candidates, reference at index 0.**
+    ///
+    /// Three lengths survive here — four, five and six repeats — and the reference is the
+    /// four-repeat one. A count list that was parallel to the *merge's* table instead, or that
+    /// dropped the reference's entry, would hand the prior a length for the wrong allele at every
+    /// locus where anything was dropped, and nothing downstream could see it.
+    #[test]
+    fn the_repeat_counts_run_parallel_to_the_surviving_candidates() {
+        let observation = tract_of(
+            &[b"ATATATAT", b"ATATATATATAT", b"ATATATATAT", b"ATATATATA"],
+            b"AT",
+            vec![
+                sample_showing(0, vec![row(0, 20, -20.0), row(2, 20, -20.0)]),
+                sample_showing(1, vec![row(1, 20, -20.0), row(3, 1, -1.0)]),
+            ],
+        );
+        let narrowed = selected_with_counts(&observation, 2);
+        assert_eq!(
+            admitted_bases(&narrowed.selection),
+            vec![
+                b"ATATATAT".to_vec(),
+                b"ATATATATATAT".to_vec(),
+                b"ATATATATAT".to_vec()
+            ],
+            "the one-read nine-base sequence is the only one dropped"
+        );
+        assert_eq!(
+            narrowed.repeat_counts,
+            vec![4, 6, 5],
+            "each surviving candidate's own repeat count, in candidate-id order"
+        );
+        assert_eq!(
+            narrowed.repeat_counts.len(),
+            narrowed.selection.alleles().len()
+        );
+    }
+
+    /// A repeat count is the floor of the length over the period, so a sequence carrying a part
+    /// copy takes the count of the rung it sits on — the same integer the ladder keyed it by, from
+    /// the same derivation.
+    ///
+    /// **This tract is the one D2's anchor exists for**: its reference is 7 bases, an odd number
+    /// for a two-base motif, and the alternative at 9 bases is two bases — one whole copy — away
+    /// from it. Anchored on the reference both are on the grid; anchored on zero neither is, and
+    /// the locus would come back refused with a single count instead of two.
+    #[test]
+    fn a_part_copy_carries_the_floored_count_the_ladder_keyed_it_by() {
+        let observation = tract_of(
+            &[b"ATATATA", b"ATATATATA"],
+            b"AT",
+            vec![sample_showing(
+                0,
+                vec![row(0, 20, -20.0), row(1, 20, -20.0)],
+            )],
+        );
+        let narrowed = selected_with_counts(&observation, 2);
+        assert_ne!(
+            narrowed.selection.verdict(),
+            SelectionVerdict::NotPeriodic,
+            "seven and nine bases are one whole copy apart"
+        );
+        assert_eq!(
+            narrowed.repeat_counts,
+            vec![3, 4],
+            "seven bases floor to three copies of a two-base motif and nine to four"
+        );
+    }
+
+    /// **A refused tract still returns a repeat count**, one entry for the reference alone — the
+    /// prior is indexed for it like any other locus.
+    #[test]
+    fn a_refused_tract_returns_one_repeat_count_for_the_reference() {
+        let observation = tract_of(
+            &[b"ATATATATAT", b"ATATATATATA"],
+            b"AT",
+            vec![sample_showing(0, vec![row(0, 1, -1.0), row(1, 40, -40.0)])],
+        );
+        let narrowed = selected_with_counts(&observation, 2);
+        assert_eq!(narrowed.selection.verdict(), SelectionVerdict::NotPeriodic);
+        assert_eq!(narrowed.repeat_counts, vec![5]);
+    }
+
+    /// A homopolymer's counts are its lengths, which is the case where a wrong period would be
+    /// invisible in the ladder and visible here.
+    #[test]
+    fn a_homopolymers_repeat_counts_are_its_lengths() {
+        let observation = tract_of(
+            &[b"AAAA", b"AAAAAA"],
+            b"A",
+            vec![sample_showing(
+                0,
+                vec![row(0, 20, -20.0), row(1, 20, -20.0)],
+            )],
+        );
+        let narrowed = selected_with_counts(&observation, 2);
+        assert_eq!(narrowed.repeat_counts, vec![4, 6]);
+    }
+
+    /// **The counts handed to the prior agree with the ladder's own rung keys**, allele by allele.
+    ///
+    /// This is the coupling the field exists for, asserted rather than described: the ladder keys
+    /// its rungs by one floor division and the prior is indexed by another, and they have to be
+    /// the same integer. The test walks every surviving candidate back to the merge index it came
+    /// from and compares the two.
+    #[test]
+    fn every_candidates_count_is_the_rung_the_ladder_put_it_on() {
+        let observation = tract_of(
+            &[b"ATATATAT", b"ATATATATATAT", b"ATATATATAT", b"ATATATATA"],
+            b"AT",
+            vec![
+                sample_showing(0, vec![row(0, 20, -20.0), row(2, 20, -20.0)]),
+                sample_showing(1, vec![row(1, 20, -20.0), row(3, 20, -20.0)]),
+            ],
+        );
+        let rule = support_rule_of(2, 0.0);
+        let config = SsrSelectionConfig {
+            shared: CandidateSelectionConfig {
+                min_allele_support: rule,
+                ..SsrSelectionConfig::at_ploidy(diploid()).shared
+            },
+            ..SsrSelectionConfig::at_ploidy(diploid())
+        };
+        let mut scratch = SelectionScratch::new();
+        let narrowed = select_ssr(&observation, &config, &mut scratch);
+
+        for table_index in 0..observation.alleles.len() {
+            let Some(candidate) = narrowed.selection.remap().candidate_for(table_index) else {
+                continue;
+            };
+            let from_the_ladder = scratch
+                .ladder
+                .repeat_count_at(scratch.ladder.rung_of_table_index(table_index));
+            assert_eq!(
+                narrowed.repeat_counts[usize::from(candidate.get())],
+                from_the_ladder,
+                "candidate {candidate:?} came from merge allele {table_index}"
+            );
+        }
     }
 }
