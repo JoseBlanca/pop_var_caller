@@ -561,6 +561,24 @@ pub trait LocusGenerator<S> {
     fn read_filter_counts(&self) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
         Vec::new()
     }
+
+    /// Take back a record this generator emitted, so the next locus can be filled into it
+    /// rather than allocated — **G1.**
+    ///
+    /// The merge is the last owner of every record: it draws one, walks it, evicts it and
+    /// offers it here. A generator that fills records from a pool keeps it; one that does
+    /// not lets it go, which is what the default body does.
+    ///
+    /// **Offering is not a promise to keep.** A generator may refuse any record for any
+    /// reason, and the pooling one refuses every record past its bound — a pool that
+    /// accepted everything would be a leak, and at 63 samples it would be a leak of
+    /// exactly the records this exists to stop allocating.
+    ///
+    /// Defaulted to dropping, so the six generators that mint no records of their own —
+    /// [`NoLoci`] and the test fakes — say so by saying nothing.
+    fn recycle(&mut self, record: SampleLocusObservations) {
+        drop(record);
+    }
 }
 
 /// What a generator counted, tagged by which generator counted it.
@@ -866,6 +884,15 @@ impl<S> GeneratorSlot<S> {
         }
     }
 
+    /// Offer a finished record back to this slot's generator — **G1.** An unfilled slot
+    /// never emitted one, so it lets it go.
+    fn recycle(&mut self, record: SampleLocusObservations) {
+        match self {
+            GeneratorSlot::Generator(generator) => generator.recycle(record),
+            GeneratorSlot::Unfilled(_) => drop(record),
+        }
+    }
+
     /// What the generator in this slot has counted, or `None` — for an unfilled slot,
     /// or a generator that counts nothing of its own.
     fn counts(&self) -> Option<GeneratorCounts<'_>> {
@@ -1009,6 +1036,19 @@ impl GeneratorSet {
         self.current = filled.then_some(region);
     }
 
+    /// Offer a finished record back, so the next locus can be filled into it — **G1.**
+    ///
+    /// **It goes to the generic slot, and that is a routing decision rather than an
+    /// accident.** The generic generator is the only one that fills records from a pool;
+    /// the repeat-tract generators build theirs from a re-alignment and have no buffer
+    /// shaped like the last locus's. A record is not tagged with the slot that made it,
+    /// and it does not need to be: a pool's contents are buffers, not loci, so a record
+    /// the tract path emitted is just as good to fill a generic locus into. If a tract
+    /// generator ever starts pooling, this is the line that has to decide between them.
+    pub fn recycle(&mut self, record: SampleLocusObservations) {
+        self.generic.recycle(record);
+    }
+
     /// The next locus of the region begun by [`begin_region`](Self::begin_region), or `None`
     /// once it — or an unfilled/absent region — has no more. After a `None` the caller pulls
     /// the next region and calls `begin_region` again. Holds **one region at a time**: no
@@ -1099,6 +1139,17 @@ impl<T> SampleLocusObservationsIterator<T> {
     /// The running tally — current at any point, final once the stream is exhausted.
     pub fn counts(&self) -> &LocusCounts {
         self.generators.counts()
+    }
+
+    /// Offer a finished record back to the generators, so the next locus can be filled
+    /// into it rather than allocated — **G1.**
+    ///
+    /// This is the seam between the merge and the walk: the merge is the last owner of
+    /// every record, and until this existed it freed each one and the walk allocated the
+    /// next. See [`GeneratorSet::recycle`] for where the record goes and what may refuse
+    /// it.
+    pub fn recycle(&mut self, record: SampleLocusObservations) {
+        self.generators.recycle(record);
     }
 
     /// The generator set, for the per-generator counts the shared tally does not carry

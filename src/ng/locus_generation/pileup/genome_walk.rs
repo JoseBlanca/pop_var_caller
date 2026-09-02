@@ -281,6 +281,13 @@ where
         self.state.chain_ids
     }
 
+    /// Offer a finished record back, so the next column is filled into it — **G1.**
+    ///
+    /// Refused past the pool's bound; see [`RecordPool`](super::record_pool::RecordPool).
+    pub fn recycle(&mut self, record: crate::ng::locus_generation::SampleLocusObservations) {
+        self.state.record_pool.put(record);
+    }
+
     /// The chain-id allocator's counters as they stand now — **ng's, D1.**
     ///
     /// The baseline a region's own contribution is measured against. A walker that lives
@@ -736,11 +743,15 @@ struct WalkerState {
     fast_column_buf: FastColumnScratch,
     /// **Retired locus records, waiting to be filled again — G1.** Scratch like the
     /// buffers above, and kept across regions for the same reason: the merge hands a
-    /// record back after it has evicted it, and the next region's first locus is filled
-    /// into it rather than allocated. Carried across *chromosomes* too, through
-    /// [`adopting_records`](PileupWalker::adopting_records), which is what the chain-id
-    /// allocator does and for a related reason — a walker is minted per chromosome and a
-    /// pool that died with it would be cold at the start of every one.
+    /// record back once it has evicted it, and the next region's first locus is filled
+    /// into it rather than allocated.
+    ///
+    /// **It is not carried across chromosomes, unlike the chain-id allocator**, and the
+    /// difference is that the allocator's *contents* are load-bearing — two fragments of
+    /// one read must not be given the same id — while a pool holds nothing but buffers.
+    /// A walker is minted per chromosome, so a cold pool costs the allocations of one
+    /// locus, twelve times on this reference. Carrying it would be machinery bought for
+    /// twelve allocations a run.
     record_pool: super::record_pool::RecordPool,
     /// **Measurement knob only.** `PVC_FAST_COLUMN=0` sends every column down the general
     /// path, so the two can be A/B-ed inside one binary rather than across two builds — the

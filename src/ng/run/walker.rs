@@ -223,7 +223,15 @@ where
         &mut self,
         spare: Option<SampleLocusObservations>,
     ) -> Option<Result<SampleLocusObservations, RunError>> {
-        drop(spare);
+        // **The spare goes back to the generators — G1.** Until this line it was dropped,
+        // so eviction did not avoid a free, it deferred one into the draw, and the draw
+        // then allocated a fresh record four layers below. Offered here, the ordinary-column
+        // lane fills the next locus into it. The generators may refuse it — the pool is
+        // bounded — and a refused record is freed here, which is where it would have been
+        // freed anyway.
+        if let Some(spare) = spare {
+            self.loci.recycle(spare);
+        }
         match self.loci.next()? {
             Ok(observation) => {
                 // **`reach_position` rather than `region.end`**, because the crate keeps that
