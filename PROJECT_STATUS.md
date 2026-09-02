@@ -19,7 +19,23 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **the run report says what became of the repeat
+> - **Last completed task (2026-09-02):** **what calling repeat tracts is worth, measured —
+> step C4, and Checkpoint C**
+> (step C4 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_loop_c4_2026-09-02.md)).
+> Pooled over the three GIAB samples on their own confident regions, **indel recall goes from
+> 0.673 to 0.915 at 30× and from 0.676 to 0.939 at 50×**; SNP recall from 0.974 to 0.980 and
+> 0.979 to 0.984. The bar is the production caller's 0.987 SNP / 0.930 indel at 30×.
+> **⚠ And the same variant is now written twice.** Indel precision falls from 0.987 to 0.816 at
+> 30×, and **62 of the 68 new false calls are a record the file already holds**: the SNP/indel
+> path emits an insertion anchored at the base beside a tract and the tract path emits the same
+> insertion as a length change, one base apart, identical once left-aligned. Counted once,
+> precision is 0.981. **The duplication is a design question spanning this plan and the typed
+> regions' — the recommendation is to fix it in the routing**, by giving a tract's region the
+> anchor base beside it, so the generic mint never opens the second record. About a third of
+> what the region clip cost in indels is also still missing (0.946 before the clip, 0.915 now).
+>
+> - **Earlier (2026-09-02):** **the run report says what became of the repeat
 > tracts — step C3**
 > (step C3 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
 > [report](doc/devel/reports/implementations/ng_ssr_loop_c3_2026-09-02.md)).

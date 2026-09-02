@@ -138,7 +138,7 @@ way the generic path's outcomes already partition. Wording only where this plan 
 ground shares stayed with the parallel plan.
 *Depends:* C1. *Source:* spec §3.2.
 
-**C4. End to end, measured against the zeros.**  ☐
+**C4. End to end, measured against the zeros.**  ✅
 A GIAB run at 30× and 50× writes tract records. Measure and record: recall on repeat-routed
 ground (baseline 0.000; the bar: production 0.855/0.909 indels, 0.990 SNPs; freebayes
 0.818–0.874), genotype concordance on the dashboard's panel, and E2 byte-identity at 1–16
