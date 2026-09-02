@@ -66,8 +66,8 @@ use std::num::NonZeroU32;
 use crate::ng::calling::CandidateAlleles;
 use crate::ng::calling::allele_candidates::ssr::repeat_count_of_bases;
 use crate::ng::calling::likelihood::SsrSampleEvidence;
+use crate::ng::locus_generation::LocusKind;
 use crate::ng::run::cohort_merge::MinAltReads;
-use crate::ng::types::Motif;
 
 /// **One tract sequence a discovery round would add, and what earned it.**
 ///
@@ -138,19 +138,475 @@ impl DiscoveryScratch {
 /// On a candidate table that is not a repeat tract's — the caller dispatches on the locus kind,
 /// so reaching here with a SNP or indel locus is a routing bug and admitting a "tract sequence"
 /// at one would put a length change into a table that has no motif to measure it against.
-pub fn discover_tract_alleles<'a>(
-    per_sample: &[SsrSampleEvidence<'a>],
+pub fn discover_tract_alleles<'s>(
+    per_sample: &[SsrSampleEvidence<'_>],
     candidates: &CandidateAlleles,
-    motif: &Motif,
     bar: MinAltReads,
     room: usize,
-    scratch: &mut DiscoveryScratch,
-) -> &'a [DiscoveredAllele] {
-    let _ = per_sample;
-    let _ = candidates;
-    let _ = motif;
-    let _ = bar;
-    let _ = room;
-    let _ = scratch;
-    unimplemented!("filled in below")
+    scratch: &'s mut DiscoveryScratch,
+) -> &'s [DiscoveredAllele] {
+    let LocusKind::Ssr(detail) = candidates.kind() else {
+        panic!(
+            "a discovery round was handed a {:?} candidate table: the round is defined on \
+             stutter attribution and has no motif to measure a length change against, so \
+             reaching here off the repeat path is a routing bug",
+            candidates.kind()
+        );
+    };
+    let motif = &detail.motif;
+    scratch.admitted.clear();
+
+    for (sample, evidence) in per_sample.iter().enumerate() {
+        // **The denominator is the sample's spanning reads alone.** A read that ran out
+        // inside the tract says the tract is *at least* this long and cannot say which
+        // length it is, so counting it here would make the share easier to clear exactly
+        // where the evidence is weakest.
+        let spanning: u32 = evidence
+            .complete_observations()
+            .map(|(_, observation)| observation.num_obs)
+            .fold(0, u32::saturating_add);
+
+        // One entry per distinct sequence this sample showed, holding where to read its
+        // bases back from and how many reads carried it. Linear, because a sample's distinct
+        // sequences at one tract are a handful and a map would allocate per locus.
+        scratch.per_sample.clear();
+        for (position, observation) in evidence.complete_observations() {
+            let bases = &*observation.bases;
+            match scratch
+                .per_sample
+                .iter_mut()
+                .find(|(seen, _)| &*evidence.observations[*seen].bases == bases)
+            {
+                Some((_, reads)) => *reads = reads.saturating_add(observation.num_obs),
+                None => scratch.per_sample.push((position, observation.num_obs)),
+            }
+        }
+
+        for &(position, reads) in &scratch.per_sample {
+            let bases = &*evidence.observations[position].bases;
+            if candidates.iter().any(|candidate| candidate == bases) {
+                continue;
+            }
+            if !bar.reached_by(reads, spanning) {
+                continue;
+            }
+            // **A sequence below one whole copy of the unit has no rung and is not offered.**
+            // The tract model's ladder is written in whole repeats, so admitting it would
+            // reach the evidence's `NonZeroU32` count and stop the locus one step later —
+            // refusing it here keeps the refusal where the reason is.
+            let Some(repeats) = NonZeroU32::new(repeat_count_of_bases(bases, motif)) else {
+                continue;
+            };
+            match scratch
+                .admitted
+                .iter_mut()
+                .find(|held| &*held.bases == bases)
+            {
+                // **The best sample's count, not the cohort's sum.** The bar is per sample
+                // and one sample has to clear it alone, so two samples showing a sequence
+                // twice each is not four reads for this purpose.
+                Some(held) => {
+                    if reads > held.best_sample_reads {
+                        held.best_sample_reads = reads;
+                        held.best_sample = sample;
+                    }
+                }
+                None => scratch.admitted.push(DiscoveredAllele {
+                    bases: Box::from(bases),
+                    repeats,
+                    best_sample_reads: reads,
+                    best_sample: sample,
+                }),
+            }
+        }
+    }
+
+    // Best-supported first so a cap keeps the sequences a sample showed most, and ties broken
+    // on the bases so the table is a function of the evidence rather than of the walk order.
+    scratch.admitted.sort_unstable_by(|left, right| {
+        right
+            .best_sample_reads
+            .cmp(&left.best_sample_reads)
+            .then_with(|| left.bases.cmp(&right.bases))
+    });
+    scratch.admitted.truncate(room);
+    &scratch.admitted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ng::calling::inference::DEFAULT_DISCOVERY_BAR;
+    use crate::ng::locus_generation::{
+        ReadWitness, SequenceObservation, SsrDetail, WitnessedLocusPositions,
+    };
+    use crate::ng::run::cohort_merge::{MinAltObs, MinAltReadShare};
+    use crate::ng::types::{Motif, ReadGroupId, SummedLogError};
+
+    /// **A dinucleotide**, so that one whole repeat and one base are different steps — a
+    /// homopolymer fixture cannot tell a sequence one repeat long from one base long, and every
+    /// off-by-a-period mistake in this module would pass on one.
+    const MOTIF: &[u8] = b"AT";
+
+    fn tract(repeats: u32) -> Vec<u8> {
+        MOTIF.repeat(repeats as usize)
+    }
+
+    fn detail() -> SsrDetail {
+        SsrDetail {
+            motif: Motif::new(MOTIF).expect("a dinucleotide motif"),
+            left_flank: Box::from(b"CCCGGG".as_slice()),
+            right_flank: Box::from(b"TTTAAA".as_slice()),
+        }
+    }
+
+    /// A candidate table over the tract lengths given, the first as the reference.
+    fn table(repeats: &[u32]) -> CandidateAlleles {
+        let mut alleles = CandidateAlleles::new(
+            tract(repeats[0]).into_boxed_slice(),
+            LocusKind::Ssr(detail()),
+        );
+        for &length in &repeats[1..] {
+            alleles.admit(tract(length).into_boxed_slice());
+        }
+        alleles
+    }
+
+    fn spanning(bases: &[u8], num_obs: u32) -> SequenceObservation {
+        observation(bases, ReadWitness::Complete, num_obs)
+    }
+
+    /// A read that ran out inside the tract — it says the tract is *at least* this long.
+    fn ran_out(bases: &[u8], num_obs: u32) -> SequenceObservation {
+        let witness = ReadWitness::Partial {
+            positions: WitnessedLocusPositions::one_run_from_offset_and_length(0, 3)
+                .expect("a run from offset zero over three positions is a witness"),
+        };
+        observation(bases, witness, num_obs)
+    }
+
+    fn observation(bases: &[u8], witness: ReadWitness, num_obs: u32) -> SequenceObservation {
+        SequenceObservation {
+            bases: bases.into(),
+            read_witness: witness,
+            read_group: ReadGroupId(0),
+            num_obs,
+            num_fwd: num_obs / 2,
+            q_sum: SummedLogError::from_nats(-13.5),
+            mapq_sum: 60 * u32::from(num_obs as u16),
+            mapq_sum_sq: 3_600 * u64::from(num_obs),
+            placed_left: 1,
+            chain_ids: Vec::new(),
+        }
+    }
+
+    /// The shipped bar: 2 reads **and** 15 in 100 of the sample's spanning reads.
+    fn shipped_bar() -> MinAltReads {
+        DEFAULT_DISCOVERY_BAR
+    }
+
+    /// A bar spelled out, so a test can put the two halves where it wants them.
+    fn bar_of(floor: u32, share: f64) -> MinAltReads {
+        MinAltReads {
+            floor: MinAltObs(NonZeroU32::new(floor).expect("a floor of at least one read")),
+            share: MinAltReadShare::new_or_panic(share),
+        }
+    }
+
+    fn found<'a>(
+        observations: &[Vec<SequenceObservation>],
+        candidates: &CandidateAlleles,
+        bar: MinAltReads,
+        room: usize,
+        detail: &'a SsrDetail,
+        scratch: &'a mut DiscoveryScratch,
+    ) -> Vec<(Vec<u8>, u32, usize)> {
+        let evidence: Vec<SsrSampleEvidence<'_>> = observations
+            .iter()
+            .map(|rows| SsrSampleEvidence::new(rows, detail))
+            .collect();
+        discover_tract_alleles(&evidence, candidates, bar, room, scratch)
+            .iter()
+            .map(|one| (one.bases.to_vec(), one.best_sample_reads, one.best_sample))
+            .collect()
+    }
+
+    /// **The case the whole mechanism exists for**, and it is the one selection cannot reach: a
+    /// diploid sample nominates at most two lengths, so a third it carries is never put forward
+    /// however many reads it has.
+    ///
+    /// Here the sample shows 12 reads at 8 repeats, 10 at 7 — the reference and its slip — and 8
+    /// at 5. Selection's two peaks are 8 and 7; the 5 is invisible to it. The round finds it.
+    #[test]
+    fn a_third_length_one_sample_carries_is_found_where_selection_took_its_two_peaks() {
+        let candidates = table(&[8, 7]);
+        let rows = vec![vec![
+            spanning(&tract(8), 12),
+            spanning(&tract(7), 10),
+            spanning(&tract(5), 8),
+        ]];
+        let detail = detail();
+        let mut scratch = DiscoveryScratch::new();
+        assert_eq!(
+            found(&rows, &candidates, shipped_bar(), 4, &detail, &mut scratch),
+            vec![(tract(5), 8, 0)],
+            "the length neither peak covered, with the reads that earned it"
+        );
+    }
+
+    /// A sequence the table already holds is not offered again, whatever its support.
+    #[test]
+    fn a_length_already_on_the_table_is_not_offered_again() {
+        let candidates = table(&[8, 5]);
+        let rows = vec![vec![spanning(&tract(8), 12), spanning(&tract(5), 20)]];
+        let detail = detail();
+        let mut scratch = DiscoveryScratch::new();
+        assert!(
+            found(&rows, &candidates, shipped_bar(), 4, &detail, &mut scratch).is_empty(),
+            "both sequences are candidates already"
+        );
+    }
+
+    /// **The read floor binds where the share cannot**: at 6 spanning reads, 15 in 100 is one
+    /// read, so the floor of two is the only thing standing between a single stray read and a
+    /// minted allele. This is the low-depth corner spec §4.1 names as the dangerous one.
+    #[test]
+    fn one_read_never_mints_an_allele_however_few_the_sample_has() {
+        let candidates = table(&[8]);
+        let rows = vec![vec![spanning(&tract(8), 5), spanning(&tract(5), 1)]];
+        let detail = detail();
+        let mut scratch = DiscoveryScratch::new();
+        assert!(
+            found(&rows, &candidates, shipped_bar(), 4, &detail, &mut scratch).is_empty(),
+            "one read is below the floor of two, and the share of six reads asks for one"
+        );
+        assert_eq!(
+            found(
+                &[vec![spanning(&tract(8), 5), spanning(&tract(5), 2)]],
+                &candidates,
+                shipped_bar(),
+                4,
+                &detail,
+                &mut scratch
+            ),
+            vec![(tract(5), 2, 0)],
+            "and two reads clears both halves at this depth"
+        );
+    }
+
+    /// **The share binds where the floor cannot**: at 40 spanning reads, 15 in 100 asks for six,
+    /// so a sequence with four reads is refused although it clears the floor of two. This is the
+    /// high-depth end of the same bar.
+    #[test]
+    fn the_share_refuses_a_sequence_the_read_floor_would_admit_at_depth() {
+        let candidates = table(&[8]);
+        let detail = detail();
+        let mut scratch = DiscoveryScratch::new();
+        let rows = vec![vec![spanning(&tract(8), 36), spanning(&tract(5), 4)]];
+        assert!(
+            found(&rows, &candidates, shipped_bar(), 4, &detail, &mut scratch).is_empty(),
+            "four reads of forty is 10 in 100, below the bar's 15"
+        );
+        let rows = vec![vec![spanning(&tract(8), 34), spanning(&tract(5), 6)]];
+        assert_eq!(
+            found(&rows, &candidates, shipped_bar(), 4, &detail, &mut scratch),
+            vec![(tract(5), 6, 0)],
+            "six of forty is 15 in 100 and clears it"
+        );
+    }
+
+    /// **A read that ran out inside the tract counts in neither half of the bar.** It says the
+    /// tract is *at least* this long and cannot say which length it is, so counting it in the
+    /// numerator would mint an allele from evidence that names none, and counting it in the
+    /// denominator would make the share easier to clear exactly where the reads are weakest.
+    #[test]
+    fn a_read_that_ran_out_inside_the_tract_counts_in_neither_half_of_the_bar() {
+        let candidates = table(&[8]);
+        let detail = detail();
+        let mut scratch = DiscoveryScratch::new();
+
+        // Numerator: five partial reads at a length nothing spanned admit nothing.
+        let rows = vec![vec![spanning(&tract(8), 10), ran_out(&tract(5), 5)]];
+        assert!(
+            found(&rows, &candidates, shipped_bar(), 4, &detail, &mut scratch).is_empty(),
+            "a partial names no length, so it cannot earn one"
+        );
+
+        // Denominator: two spanning reads of ten spanning is 20 in 100 and clears the bar —
+        // and stays cleared however many partials sit beside them. Counted in, thirty
+        // partials would put the share at 2 in 32 and refuse it.
+        let rows = vec![vec![
+            spanning(&tract(8), 8),
+            spanning(&tract(5), 2),
+            ran_out(&tract(9), 30),
+        ]];
+        assert_eq!(
+            found(&rows, &candidates, shipped_bar(), 4, &detail, &mut scratch),
+            vec![(tract(5), 2, 0)],
+            "the share is of the spanning reads alone"
+        );
+    }
+
+    /// **One sample has to clear the bar alone.** Three samples showing a length once each is
+    /// three reads across the cohort and one read anywhere, and one read is a stutter product.
+    #[test]
+    fn a_cohort_sum_does_not_clear_a_bar_no_single_sample_clears() {
+        let candidates = table(&[8]);
+        let detail = detail();
+        let mut scratch = DiscoveryScratch::new();
+        let rows = vec![
+            vec![spanning(&tract(8), 5), spanning(&tract(5), 1)],
+            vec![spanning(&tract(8), 5), spanning(&tract(5), 1)],
+            vec![spanning(&tract(8), 5), spanning(&tract(5), 1)],
+        ];
+        assert!(
+            found(&rows, &candidates, shipped_bar(), 4, &detail, &mut scratch).is_empty(),
+            "three reads in three samples is one read in each"
+        );
+    }
+
+    /// The count reported is the **best sample's**, and it names that sample.
+    #[test]
+    fn the_reported_count_is_the_best_samples_and_it_names_that_sample() {
+        let candidates = table(&[8]);
+        let detail = detail();
+        let mut scratch = DiscoveryScratch::new();
+        let rows = vec![
+            vec![spanning(&tract(8), 6), spanning(&tract(5), 2)],
+            vec![spanning(&tract(8), 3), spanning(&tract(5), 7)],
+        ];
+        assert_eq!(
+            found(&rows, &candidates, shipped_bar(), 4, &detail, &mut scratch),
+            vec![(tract(5), 7, 1)],
+            "sample 1 showed it seven times; sample 0's two are not added to them"
+        );
+    }
+
+    /// **The cap keeps the best-supported**, because a cap that kept the first-found would make
+    /// the table depend on the order the samples happen to sit in.
+    #[test]
+    fn the_cap_keeps_the_best_supported_and_cuts_the_rest() {
+        let candidates = table(&[8]);
+        let detail = detail();
+        let mut scratch = DiscoveryScratch::new();
+        let rows = vec![vec![
+            spanning(&tract(8), 4),
+            spanning(&tract(3), 5),
+            spanning(&tract(5), 9),
+            spanning(&tract(7), 7),
+        ]];
+        assert_eq!(
+            found(
+                &rows,
+                &candidates,
+                bar_of(2, 0.05),
+                2,
+                &detail,
+                &mut scratch
+            ),
+            vec![(tract(5), 9, 0), (tract(7), 7, 0)],
+            "nine and seven survive a cap of two; five does not"
+        );
+    }
+
+    /// A sequence below one whole copy of the unit has no rung on the stutter ladder, so it is
+    /// not offered — the refusal sits here, where the reason is, rather than at the conversion
+    /// that would fail one step later.
+    #[test]
+    fn a_sequence_shorter_than_one_whole_repeat_is_not_offered() {
+        let candidates = table(&[8]);
+        let detail = detail();
+        let mut scratch = DiscoveryScratch::new();
+        let rows = vec![vec![spanning(&tract(8), 10), spanning(b"A", 6)]];
+        assert!(
+            found(
+                &rows,
+                &candidates,
+                bar_of(2, 0.05),
+                4,
+                &detail,
+                &mut scratch
+            )
+            .is_empty(),
+            "one base of a two-base unit floors to zero repeats and has no rung"
+        );
+    }
+
+    /// **Ties break on the bases, so the table is a function of the evidence.** Two sequences
+    /// with equal support must come back in one order however the samples were walked.
+    #[test]
+    fn two_sequences_with_equal_support_come_back_in_one_order() {
+        let candidates = table(&[8]);
+        let detail = detail();
+        let mut scratch = DiscoveryScratch::new();
+        let forwards = vec![vec![
+            spanning(&tract(8), 10),
+            spanning(&tract(5), 4),
+            spanning(&tract(6), 4),
+        ]];
+        let backwards = vec![vec![
+            spanning(&tract(8), 10),
+            spanning(&tract(6), 4),
+            spanning(&tract(5), 4),
+        ]];
+        let one = found(
+            &forwards,
+            &candidates,
+            bar_of(2, 0.05),
+            4,
+            &detail,
+            &mut scratch,
+        );
+        let other = found(
+            &backwards,
+            &candidates,
+            bar_of(2, 0.05),
+            4,
+            &detail,
+            &mut scratch,
+        );
+        assert_eq!(one, other, "the walk order must not reach the answer");
+        assert_eq!(
+            one.first().map(|(bases, _, _)| bases.clone()),
+            Some(tract(5)),
+            "the shorter spelling sorts first"
+        );
+    }
+
+    /// **A second round over the same evidence admits nothing**, which is this module's own
+    /// consequence and the reason the round cap cannot bind: the eligible set is a function of
+    /// the observations and the table alone, so once the first round's finds are on the table
+    /// there is nothing left to find.
+    #[test]
+    fn a_second_round_over_the_same_evidence_finds_nothing() {
+        let mut candidates = table(&[8, 7]);
+        let rows = vec![vec![
+            spanning(&tract(8), 12),
+            spanning(&tract(7), 10),
+            spanning(&tract(5), 8),
+        ]];
+        let detail = detail();
+        let mut scratch = DiscoveryScratch::new();
+        let first = found(&rows, &candidates, shipped_bar(), 4, &detail, &mut scratch);
+        assert_eq!(first.len(), 1, "the first round finds the hidden length");
+        for (bases, _, _) in &first {
+            candidates.admit(bases.clone().into_boxed_slice());
+        }
+        assert!(
+            found(&rows, &candidates, shipped_bar(), 4, &detail, &mut scratch).is_empty(),
+            "and the second finds nothing, so the rounds stop at two"
+        );
+    }
+
+    /// A discovery round at a SNP or indel locus is a routing bug, and a crash is the right
+    /// answer: the alternative is measuring a length change against a motif that does not exist.
+    #[test]
+    #[should_panic(expected = "a discovery round was handed a")]
+    fn a_generic_candidate_table_is_refused() {
+        let candidates = CandidateAlleles::new(Box::from(b"A".as_slice()), LocusKind::Generic);
+        let detail = detail();
+        let mut scratch = DiscoveryScratch::new();
+        let rows = vec![vec![spanning(b"AT", 10)]];
+        let _ = found(&rows, &candidates, shipped_bar(), 4, &detail, &mut scratch);
+    }
 }
