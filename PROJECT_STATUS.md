@@ -19,7 +19,21 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **ng calls a repeat tract through its own model —
+> - **Last completed task (2026-09-02):** **a repeat tract's record says so — step C2**
+> (step C2 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_loop_c2_2026-09-02.md)).
+> The motif reaches the record from the called locus's own candidate table, so `STR`, `RU`,
+> `PERIOD` and each called allele's `REPCN` are written; selection's verdict reaches `FILTER`
+> as `notPeriodic` or `tooManyAlleles`, with a loop that did not settle outranking both because
+> `assemble_record` asserts they cannot be carried together. **`lowDepth` is declared and never
+> written** — ng does not port the cohort-summed depth gate, and spec §6 says there is no depth
+> verdict on this path. **`REPCN` needed no wiring**: the encoder derives it from the record's
+> own bases, which leaves two producers of one integer, and a test now holds them to the same
+> floor division. Round-trip measured on a real run — HG002 at 30× over 200 Tier intervals, 78
+> records of which 17 are tracts: through `bcftools view` the tract fields are byte-identical,
+> and the only bytes that move are Float trailing zeros on every record, tract or not.
+>
+> - **Earlier (2026-09-02):** **ng calls a repeat tract through its own model —
 > step C1 of the STR calling loop**
 > (step C1 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
 > [report](doc/devel/reports/implementations/ng_ssr_loop_c1_2026-09-02.md)).

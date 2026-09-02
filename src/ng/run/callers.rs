@@ -32,7 +32,7 @@ use crate::ng::calling::allele_candidates::ssr::{
     SsrLocusSelection, SsrSelectionConfig, select_ssr,
 };
 use crate::ng::calling::allele_candidates::{
-    AlleleRemap, CandidateSelectionConfig, UnmatchedSupport,
+    AlleleRemap, CandidateSelectionConfig, SelectionVerdict, UnmatchedSupport,
 };
 use crate::ng::calling::evidence_shaping::{
     GenericEvidenceScratch, SsrEvidenceScratch, shape_generic_locus, shape_ssr_locus,
@@ -600,7 +600,7 @@ impl AlignedFilesVariantCaller {
                     &mut scratch,
                     // This entry point wants the call and nothing beside it, so the observation's
                     // remapping and leftover are dropped where they were built.
-                    |inference, _remap, _unmatched| inference,
+                    |inference, _remap, _unmatched, _verdict| inference,
                 ) {
                     LocusOutcome::Called(called) => called_loci.push(called),
                     LocusOutcome::NobodyToCall => loci_with_nobody_to_call.push(region),
@@ -754,7 +754,7 @@ impl AlignedFilesVariantCaller {
                     &mut shaping,
                     &mut tract_shaping,
                     &mut scratch,
-                    |inference, remap, unmatched| {
+                    |inference, remap, unmatched, verdict| {
                         // **Asked before the reference is read**, so a locus that establishes
                         // no variant costs no fetch and no evidence gathering.
                         if !a_written_genotype_carries_an_alternative(&inference) {
@@ -778,6 +778,7 @@ impl AlignedFilesVariantCaller {
                             &observation,
                             remap,
                             unmatched,
+                            verdict,
                             padding,
                         );
                         Ok(Some(assemble_record(&inference, evidence)))
@@ -882,7 +883,7 @@ fn call_one_cohort_locus<S, G, R>(
     shaping: &mut GenericEvidenceScratch,
     tract_shaping: &mut SsrEvidenceScratch,
     scratch: &mut CallingScratch<S>,
-    finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport]) -> R,
+    finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport], SelectionVerdict) -> R,
 ) -> LocusOutcome<R>
 where
     G: LocusGenotyper<S>,
@@ -966,7 +967,7 @@ fn call_one_ssr_locus<S, G, R>(
     run_sample_count: usize,
     tract_shaping: &mut SsrEvidenceScratch,
     scratch: &mut CallingScratch<S>,
-    finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport]) -> R,
+    finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport], SelectionVerdict) -> R,
 ) -> LocusOutcome<R>
 where
     G: LocusGenotyper<S>,
@@ -983,7 +984,7 @@ where
         return LocusOutcome::TractWithoutWholeRepeats;
     };
     let SsrLocusSelection { selection, .. } = narrowed;
-    let (alleles, _verdict, unmatched, remap) = selection.into_parts();
+    let (alleles, verdict, unmatched, remap) = selection.into_parts();
 
     let observations_of_each_run_sample = tract_shaping.rebuild(observation, run_sample_count);
     // **Two per-locus allocations, and both are the borrow checker's price rather than a
@@ -1005,7 +1006,7 @@ where
     );
     let inference =
         genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch);
-    LocusOutcome::Called(finish(inference, &remap, &unmatched))
+    LocusOutcome::Called(finish(inference, &remap, &unmatched, verdict))
 }
 
 /// One cohort locus from evidence to genotypes: **which alleles it is called over, whose reads
@@ -1050,7 +1051,7 @@ fn call_one_generic_locus<S, G, R>(
     run_sample_count: usize,
     shaping: &mut GenericEvidenceScratch,
     scratch: &mut CallingScratch<S>,
-    finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport]) -> R,
+    finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport], SelectionVerdict) -> R,
 ) -> Option<R>
 where
     G: LocusGenotyper<S>,
@@ -1084,10 +1085,10 @@ where
     // **The other two parts stay here for `finish`**: the remapping says which of the merge's
     // alleles the loop was given, and the leftover says what each covering sample showed that it
     // was not — neither of which the inference carries and neither of which outlives this call.
-    let (alleles, _verdict, unmatched, remap) = selection.into_parts();
+    let (alleles, verdict, unmatched, remap) = selection.into_parts();
     let inference =
         genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch);
-    Some(finish(inference, &remap, &unmatched))
+    Some(finish(inference, &remap, &unmatched, verdict))
 }
 
 /// **A run whose walkers are built and which has not yet read a byte** — one walker per
@@ -4223,7 +4224,7 @@ mod calling_joined_to_the_merge {
                     run_sample_count,
                     &mut shaping,
                     &mut scratch,
-                    |inference, _remap, _unmatched| inference,
+                    |inference, _remap, _unmatched, _verdict| inference,
                 )
                 // **This fixture's cohort leaves every locus with somebody to call**, so a
                 // `None` here would mean the fixture changed under the test rather than that

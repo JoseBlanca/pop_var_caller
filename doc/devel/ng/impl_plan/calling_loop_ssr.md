@@ -124,7 +124,7 @@ already the STR emission's ([`callers.rs:551`](../../../../src/ng/run/callers.rs
 *Depends:* B1; the parallel plan's Checkpoint C merged, rebase first.
 *Source:* spec §3.2.
 
-**C2. The record's two unwired inputs.**  ☐
+**C2. The record's two unwired inputs.**  ✅
 `records.rs` passes `Some(TractAnnotation::new(motif))` from the observation's kind
 (today `None`, [`records.rs:263`](../../../../src/ng/run/records.rs)), the per-allele repeat
 counts reach `REPCN`, and the FILTER verdict comes from selection and the loop

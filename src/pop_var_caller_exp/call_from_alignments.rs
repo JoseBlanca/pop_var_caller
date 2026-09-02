@@ -29,10 +29,12 @@
 //!
 //! # Where this run is short, and it says so rather than being wrong
 //!
-//! **Repeat tracts are analysed and not called.** Candidate selection at a tract is specified
-//! and unbuilt (`doc/devel/ng/impl_plan/candidate_alleles_ssr.md`), so both tract generator
-//! slots are refused as unbuilt and their ground is charged to *not built yet*. A run over
-//! tract-rich ground is therefore short, not wrong, and the summary says by how much.
+//! **Repeat tracts are called, and repeat *clusters* are not.** A tract goes down its own path
+//! — `select_ssr`, the stutter emission, and the same frequency loop — and its record carries
+//! `STR`, `RU`, `PERIOD` and each called allele's `REPCN`
+//! (`doc/devel/ng/impl_plan/calling_loop_ssr.md` Milestone C). A repeat cluster with no clean
+//! flanks has no generator and no model: its ground is charged to *not built yet* and the
+//! summary says how much of the run's ground that was.
 //!
 //! **The decode is parallel; the rest is one thread (Milestone E1, 2026-09-01).** Decoding
 //! reads is 88% of a calling run at 63 samples, and the run sweeps every sample's reader

@@ -1157,6 +1157,39 @@ mod tests {
     use super::*;
     use crate::ng::types::ReadGroupId;
 
+    /// **The record's `REPCN` and the genotype prior's repeat count are the same integer.**
+    ///
+    /// The VCF derives a called allele's repeat copies from its own bases and the motif
+    /// ([`TractAnnotation::repeat_copies_of`](crate::ng::vcf::TractAnnotation::repeat_copies_of));
+    /// this module derives the same count for the same allele and hands it to the prior. **Two
+    /// derivations of one number is how two modules come to disagree about which rung an allele
+    /// sits on**, and a disagreement there puts a candidate's prior mass at one length while the
+    /// file reports another, with nothing failing. They agree because both are the same floor
+    /// division — and this is what holds them to it, across the two cases where a floor division
+    /// and a rounded one part company.
+    #[test]
+    fn the_records_repeat_count_is_the_one_the_prior_is_given() {
+        let motif = dinucleotide();
+        let annotation = crate::ng::vcf::TractAnnotation::new(motif);
+        for bases in [
+            b"AT".as_slice(),
+            b"ATAT",
+            b"ATATATATAT",
+            // A part unit at the end, where flooring is what the two have to share.
+            b"ATATA",
+            // And shorter than one whole unit, which both count as none.
+            b"A",
+            b"",
+        ] {
+            assert_eq!(
+                annotation.repeat_copies_of(bases) as u32,
+                repeat_count_of_bases(bases, &motif),
+                "the record and the prior count {} differently",
+                String::from_utf8_lossy(bases),
+            );
+        }
+    }
+
     /// A dinucleotide unit, so that a sequence of an odd number of bases has a rung to floor
     /// onto — the case a homopolymer cannot produce.
     fn dinucleotide() -> Motif {

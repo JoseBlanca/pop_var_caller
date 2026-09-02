@@ -37,12 +37,14 @@ pub enum PopVarCallerExpCommand {
     /// are walked at one shared frontier, and each locus is genotyped where it
     /// is built. Nothing is written between the alignments and the VCF.
     ///
-    /// Two limits to know before you read the output. Repeat tracts are
-    /// analysed and NOT called: every locus goes down the SNP/indel path, and a
-    /// tract in the ground you asked for is counted as ground this caller
-    /// cannot yet speak for and reported at the end. And the run decodes every
+    /// One limit to know before you read the output: the run decodes every
     /// sample's reads across the machine's cores, but assembles and genotypes
     /// on one thread, and says nothing while it works.
+    ///
+    /// Repeat tracts ARE called, through their own stutter model, and their
+    /// records carry STR, RU, PERIOD and each called allele's REPCN. What is
+    /// still set aside is a repeat cluster too tangled to have clean flanks;
+    /// its ground is charged to `not built yet` and reported at the end.
     CallFromAlignments(CallFromAlignmentsArgs),
 
     /// Estimate, for each sample in a panel of alignments, what share of its

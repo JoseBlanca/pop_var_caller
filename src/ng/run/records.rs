@@ -43,14 +43,15 @@
 //! spec §5 declines to port that, so a base that cannot be read is a run that stops and says
 //! which position it could not read.
 
-use crate::ng::calling::allele_candidates::{AlleleRemap, UnmatchedSupport};
+use crate::ng::calling::allele_candidates::{AlleleRemap, SelectionVerdict, UnmatchedSupport};
 use crate::ng::calling::quality::artifact_correction::correct_site_quality;
 use crate::ng::calling::{CandidateAlleles, LocusInference, SampleGenotypeCall};
+use crate::ng::locus_generation::LocusKind;
 use crate::ng::ref_seq::{EvictableRefSeq, RefSeq, RefSeqError};
 use crate::ng::run::cohort_merge::build::CohortObservation;
 use crate::ng::types::{GenomeRegion, Position};
 use crate::ng::vcf::assemble::{LocusEvidenceForOutput, SampleEvidenceForOutput};
-use crate::ng::vcf::{FilterVerdict, MapqPool, PaddingBase};
+use crate::ng::vcf::{FilterVerdict, MapqPool, PaddingBase, TractAnnotation};
 
 /// The first base of every contig, 1-based — the one position with no base to its left.
 const FIRST_POSITION_OF_A_CONTIG: Position = Position(1);
@@ -163,6 +164,7 @@ pub fn evidence_for_output(
     observation: &CohortObservation,
     remap: &AlleleRemap,
     unmatched: &[UnmatchedSupport],
+    selection: SelectionVerdict,
     padding_base: Option<PaddingBase>,
 ) -> LocusEvidenceForOutput {
     let written_alleles = locus.alleles().len();
@@ -257,17 +259,52 @@ pub fn evidence_for_output(
         padding_base,
         corrected_site_quality,
         artifact_penalties,
-        // **Not on the called locus today**: the motif reaches the merge in the repeat-tract
-        // candidate step, which is specified and unbuilt, and every locus a run builds today
-        // goes down the generic path.
-        repeat_tract: None,
-        // **The one verdict a generic record can carry beyond `PASS`.** The other three are
-        // repeat-tract filters (spec §8), and `assemble_record` refuses a filter that disagrees
-        // with the loop's own answer.
-        filter: if locus.converged {
-            FilterVerdict::Pass
-        } else {
-            FilterVerdict::EmDidNotConverge
+        // **Read off the called locus's own candidate table**, which is where selection
+        // stamped the kind: a repeat tract's table is `LocusKind::Ssr` and carries the motif,
+        // and everything the record says about the repeat — the `STR` flag, `RU`, `PERIOD`
+        // and each called allele's `REPCN` — is written from that one motif.
+        repeat_tract: match locus.alleles().kind() {
+            LocusKind::Ssr(detail) => Some(TractAnnotation::new(detail.motif)),
+            LocusKind::Generic | LocusKind::SsrBundle => None,
+        },
+        filter: filter_for(locus, selection),
+    }
+}
+
+/// **The one verdict this record is written on**, from the loop's answer and selection's.
+///
+/// # A loop that did not settle outranks everything selection could say
+///
+/// Not a preference: [`assemble_record`](crate::ng::vcf::assemble::assemble_record) asserts that
+/// the filter is `EMNoConv` exactly when the loop failed to converge, so the two cannot be
+/// reported together and the loop's answer is the one the file has to carry. A tract that was
+/// truncated *and* did not converge says `EMNoConv`, and the truncation is visible in the record
+/// anyway — the alternatives it kept are the alternatives it kept.
+///
+/// # The tract verdicts are a tract's, and one of them ng never mints
+///
+/// `notPeriodic` and `tooManyAlleles` come from repeat-tract selection
+/// (`doc/devel/ng/spec/candidate_alleles_ssr.md` §6, §7). **`lowDepth` is declared and never
+/// written**: production refuses a tract whose *cohort-summed* depth is under ten, and ng does
+/// not port that gate — depth is asked once, upstream, per sample, by the merge's keep rule,
+/// and there is no depth verdict on this path (§6). The vocabulary stays in the header because
+/// a file written by an older caller can carry it.
+///
+/// # A truncated SNP/indel locus is not filtered, and that is unchanged
+///
+/// The ordinary path's cap cuts the lowest-ranked alternatives and calls the locus over the
+/// rest; `tooManyAlleles` is spec §8's *tract* filter and stays one. What changed here is only
+/// that a tract's truncation now reaches the column.
+fn filter_for(locus: &LocusInference, selection: SelectionVerdict) -> FilterVerdict {
+    if !locus.converged {
+        return FilterVerdict::EmDidNotConverge;
+    }
+    match locus.alleles().kind() {
+        LocusKind::Generic | LocusKind::SsrBundle => FilterVerdict::Pass,
+        LocusKind::Ssr(_) => match selection {
+            SelectionVerdict::NotPeriodic => FilterVerdict::NotPeriodic,
+            SelectionVerdict::Truncated { .. } => FilterVerdict::TooManyAlleles,
+            _ => FilterVerdict::Pass,
         },
     }
 }
