@@ -568,9 +568,20 @@ the F2 correctness review said so.
 
 ### Milestone G — stop the merge freeing the records it was handed
 
-**⛦ DROPPED — owner's ruling, 2026-09-01: "drop G. We'll work on the performance in future
+**⛦ CLOSED BY MEASUREMENT — G1 was built on 2026-09-02 and reverted: it fills 48% of the
+walk's records into ones the merge handed back, the run gets no faster at one thread or at
+eighteen, and it holds about 13% more memory.
+[Report](../../reports/implementations/ng_run_driver_g1_2026-09-02.md).** The premise had
+expired: G was written on a cross-thread `free` taking a *locked* path, which was the macOS
+system allocator's lock, and the binary was using the system allocator only because
+`src/main_exp.rs` never declared a `#[global_allocator]`. Declaring it took that win first,
+so there was none left for leasing to take. **Two of the numbers below must not be quoted
+again without naming the allocator they were measured under** — "one atomic inside `free` is
+10.6% of the merge's CPU" and "removes 92% of the merge's frees".
+
+**Deferred first — owner's ruling, 2026-09-01: "drop G. We'll work on the performance in future
 sessions. The critical objective right now is to have a first working variant caller to be able
-to improve upon it."** G2 was run first, on the owner's earlier ruling that a measurement decides
+to improve upon it."** (Re-opened 2026-09-02: "I meant to defer it more than to drop it.")** G2 was run first, on the owner's earlier ruling that a measurement decides
 a milestone before it is built, and it does not support building G1: **the records leasing would
 recycle are 20.7–23.9% of a calling run's allocations**, flat across 3, 12, 24 and 63 tomato
 accessions, where the figure this milestone was written around — 92% — was measured on a probe
