@@ -33,7 +33,7 @@ then not scored.
 
 ## Tests added and changed
 
-**Added** `tract_loci_set_aside_are_a_line_of_their_own_and_only_when_there_are_some` — a run
+**Added** `tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_there_are_some` — a run
 with none prints no line, a run with seven says seven, and the same fixture's 950 called bases
 are asserted beside it, because *that* is why the line has to exist: without it a run would
 report a tract's ground as called when nothing was called there.
