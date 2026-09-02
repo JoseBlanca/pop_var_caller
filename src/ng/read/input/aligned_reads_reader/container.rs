@@ -315,6 +315,13 @@ pub(crate) fn decode_container_at(
         payload: Vec::new(),
         cigar_ops: Vec::new(),
     };
+    // **One buffer for every record in this container, not one per record.** The conversion
+    // below is `RecordBuf::default()` followed by `try_clone_from_alignment_record`, and a
+    // fresh destination builds each field from capacity zero — the name, the CIGAR, and a
+    // quality-score push loop that doubles 0 → 4 → … → 256 for a 150-base read. Reused, the
+    // clone `clear()`s and refills buffers that are already the right size, so the growth is
+    // paid once per container rather than once per record.
+    let mut record_buf = RecordBuf::default();
     for slice in container.slices() {
         let slice = slice?;
         // The decoded block data and the borrowed records live only within this block;
@@ -339,8 +346,8 @@ pub(crate) fn decode_container_at(
                 decoded.other_sample_records += 1;
                 continue;
             };
-            let record = RecordBuf::try_from_alignment_record(header, &record)?;
-            decoded.push(&record, owner)?;
+            record_buf.try_clone_from_alignment_record(header, &record)?;
+            decoded.push(&record_buf, owner)?;
         }
     }
 

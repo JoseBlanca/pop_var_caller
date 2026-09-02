@@ -450,15 +450,19 @@ impl RawChromReader {
         let target_len = n_bases.min(remaining);
         self.buf.reserve(target_len);
         self.buf_start_base = start_1based;
-        let chrom = self.chrom_name.clone();
-        read_raw_bases(
+        // **The name is cloned on the error path only.** Binding the result ends the
+        // mutable borrow of `self` that the read needs, so the closure may reach the
+        // field rather than a copy taken before the call — and the copy was taken on
+        // every read, at essentially every locus of the walk, for an error that is
+        // almost never built.
+        let read = read_raw_bases(
             &mut self.file,
             &mut self.file_pos,
             &mut self.buf,
             target_len,
-        )
-        .map_err(|source| ChromRefFetchError::Io {
-            chrom_name: chrom,
+        );
+        read.map_err(|source| ChromRefFetchError::Io {
+            chrom_name: self.chrom_name.clone(),
             source,
         })
     }
@@ -471,12 +475,11 @@ impl RawChromReader {
         let remaining = (self.fai.length - next_base + 1) as usize;
         let take = extra_bases.min(remaining);
         self.buf.reserve(take);
-        let chrom = self.chrom_name.clone();
-        read_raw_bases(&mut self.file, &mut self.file_pos, &mut self.buf, take).map_err(|source| {
-            ChromRefFetchError::Io {
-                chrom_name: chrom,
-                source,
-            }
+        // Cloned on the error path only — see `read_into_buffer_at`.
+        let read = read_raw_bases(&mut self.file, &mut self.file_pos, &mut self.buf, take);
+        read.map_err(|source| ChromRefFetchError::Io {
+            chrom_name: self.chrom_name.clone(),
+            source,
         })
     }
 
@@ -492,13 +495,12 @@ impl RawChromReader {
         let offset = self.fai.base_to_file_offset(new_start);
         self.seek_to(offset)?;
         let mut prefix = Vec::with_capacity(extra_bases);
-        let chrom = self.chrom_name.clone();
-        read_raw_bases(&mut self.file, &mut self.file_pos, &mut prefix, extra_bases).map_err(
-            |source| ChromRefFetchError::Io {
-                chrom_name: chrom,
-                source,
-            },
-        )?;
+        // Cloned on the error path only — see `read_into_buffer_at`.
+        let read = read_raw_bases(&mut self.file, &mut self.file_pos, &mut prefix, extra_bases);
+        read.map_err(|source| ChromRefFetchError::Io {
+            chrom_name: self.chrom_name.clone(),
+            source,
+        })?;
         // `splice` does the memmove and reuses capacity where it can.
         self.buf.splice(..0, prefix);
         self.buf_start_base = new_start;

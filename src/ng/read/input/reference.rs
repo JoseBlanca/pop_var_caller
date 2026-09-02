@@ -237,7 +237,16 @@ impl OpenReference {
     /// result is memoised.
     pub(crate) fn bases_for_contig(&self, contig: ContigId) -> Option<fasta::Repository> {
         let repository = self.inner.bases.get()?;
-        if self.inner.bound_to_one_contig {
+        // **The load is not an optimisation of the swap; it is the same answer.**
+        // Where the stored contig already is this one, the swap writes back what it
+        // read and the comparison below is false — so reading first can only skip a
+        // no-op. What it buys is that the common case takes the cache line shared
+        // instead of exclusive: this is called per region query by every sample's
+        // draw, and a cohort walk keeps every sample on one contig at a time, so all
+        // but the first query of each contig is that case.
+        if self.inner.bound_to_one_contig
+            && self.inner.resident_contig.load(Ordering::Relaxed) != contig.0
+        {
             // `swap`, not load-then-store: two threads observing the same
             // transition both clear, which is harmless, but neither may miss it.
             let previous = self.inner.resident_contig.swap(contig.0, Ordering::Relaxed);
