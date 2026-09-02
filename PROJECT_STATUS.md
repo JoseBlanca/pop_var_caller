@@ -30,6 +30,37 @@ Skills and agents are instructed to leave it untouched.
 > Milestone A exists to unblock it.
 > [Impl report](doc/devel/reports/implementations/ng_ssr_observations_a1_2026-09-02.md).
 >
+> - **Earlier (2026-09-02):** **the calling path's first performance review, and the run it
+> measured is 1.8× faster**
+> ([review](doc/devel/reports/reviews/perf_ng-calling_2026-09-02.md)).
+> Five category reviews over `call-from-alignments`, against two sampling profiles of the
+> real command on the 63-accession tomato cohort. **Three findings applied and measured, two
+> built and reverted for showing nothing.** The two that carried it: `src/main_exp.rs` never
+> declared a `#[global_allocator]`, so every calling run this project had ever timed used the
+> system allocator while every probe under `examples/` used mimalloc; and how much reference
+> one round of locus building covers was fixed at 500 bases — a number measured on the merge
+> reading pre-built `.psp` files, where a round does no reading — when a calling run's rounds
+> are where the cohort's reading is overlapped across threads. It is a flag now, and its
+> default comes from the cohort's size, because what costs memory is `width × samples`.
+> **The whole 8 Mb benchmark at 63 accessions: 212.0 s → 116.8 s on a quiet machine,
+> 320.7 s → 214.4 s on a loaded one, writing a byte-identical VCF, at 1,113 MB → 1,897 MB of
+> peak resident.** The review ranks what is left, largest first: decoding and calling never
+> overlap, and noodles re-MD5s the reference span of every CRAM slice it decodes.
+>
+> - **Earlier (2026-09-02):** **record leasing built, measured, and reverted — Milestone G
+> closed by measurement rather than by assumption**
+> ([report](doc/devel/reports/implementations/ng_run_driver_g1_2026-09-02.md)).
+> The walk fills **48% of its records** — 18,424,572 of 38,384,881 draws, counted — into ones
+> the merge handed back rather than allocating them. The run gets no faster at one thread or
+> at eighteen and holds about **13% more memory**, for a mechanism that is inherent rather
+> than a defect: a refilled record's observation vector keeps the capacity it doubled to,
+> four, where the `collect` it replaced sized it to the one or two a locus at three reads a
+> position carries, over half a million records live in the merge's window.
+> **The milestone's premise had expired.** G was written on a cross-thread `free` taking a
+> locked path — the system allocator's lock, which the binary was taking only because of the
+> missing declaration above. Two of the numbers G was written around must not be quoted again
+> without naming the allocator they were measured under.
+>
 > - **Earlier (2026-09-02):** **the STR path's two implementation plans are
 > written, for parallel execution on separate branches and worktrees**
 > ([observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md);
