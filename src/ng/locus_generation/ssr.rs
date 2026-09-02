@@ -15,6 +15,8 @@
 //! public surface — [`SsrGenerator`], the [`LocusGenerator`](super::LocusGenerator) that turns one
 //! `SsrSegment` into one locus.
 
+use std::collections::BTreeMap;
+
 use super::{
     GeneratorCounts, LocusGenerationError, LocusGenerator, LocusKind, ReadWitness,
     SampleLocusObservations, SsrDetail,
@@ -26,12 +28,13 @@ use crate::ng::alignment::{
     BestPathAligner, PerQualityEmission, RepeatContext, RepeatSpan, StutterModel,
 };
 use crate::ng::read::aligned_read::AlignedRead;
+use crate::ng::read::filtering::ReadFilterCounts;
 use crate::ng::read::input::cursor::{CursorCounts, CursorError};
 use crate::ng::read::input::sample_cursor::SampleCursor;
 use crate::ng::read::input::{SampleIdentity, SampleReads};
 use crate::ng::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq, RefSeq, RefSeqError};
 use crate::ng::region_typing::segment_criteria::SsrSegment;
-use crate::ng::types::{Bp, ContigId, GenomeRegion, Position};
+use crate::ng::types::{Bp, ContigId, GenomeRegion, Position, ReadGroupId};
 
 /// An STR locus ready to align against: the segment plus the reference bases the aligner
 /// aligns the reads to.
@@ -1962,6 +1965,17 @@ pub struct SsrGenerator<R: RawRefSeq + EvictableRefSeq, A: RepeatDelimiter> {
     /// What the cursors of *already-retired* chromosomes did — see
     /// [`cursor_counts`](Self::cursor_counts).
     retired_cursor_counts: CursorCounts,
+    /// **Why the retired chromosomes' cursors dropped reads, per read group** — see
+    /// [`read_filter_counts`](Self::read_filter_counts).
+    ///
+    /// One axis finer than [`retired_cursor_counts`](Self::retired_cursor_counts) and kept for
+    /// the same reason: a cursor's tallies die with it, and this generator rebuilds its cursor
+    /// at every chromosome change, so a reader that asked only the live one would report the
+    /// last chromosome's drops as the whole walk's.
+    ///
+    /// Keyed by the read group the reads declared, `None` for reads that named none — the key
+    /// [`SampleCursor::read_group_counts`] already hands back.
+    retired_read_group_counts: BTreeMap<Option<ReadGroupId>, ReadFilterCounts>,
     /// The sample this generator opened its first cursor for. **One sample per generator** —
     /// a second one is refused rather than answered out of the first one's files. See
     /// [`cursor_for`](Self::cursor_for) for what that mistake looks like when it is not caught.
@@ -2047,6 +2061,7 @@ where
             make_reference: Box::new(make_reference),
             cursor: None,
             retired_cursor_counts: CursorCounts::default(),
+            retired_read_group_counts: BTreeMap::new(),
             sample: None,
             aligner,
             align_scratch: A::Scratch::default(),
@@ -2079,6 +2094,31 @@ where
             total += cursor.counts();
         }
         total
+    }
+
+    /// **Why this sample's reads were dropped, per read group, over the whole walk** — every
+    /// chromosome, not merely the one the cursor is standing on.
+    ///
+    /// `run_streaming.md` §8 requires a run to sum these when it finishes, and names what
+    /// skipping it costs: *"drop rates under-report … silently, since every number stays
+    /// plausible"* — every figure the run prints is a number a real run could have produced,
+    /// so nothing about the output says the tally is short. Retired chromosomes are added up as
+    /// they go and the live one is asked directly, so the answer is current at any moment.
+    ///
+    /// **A drop rate is a read group's property and the entries are never summed together**: a
+    /// run that went badly shows up as one library with an anomalous rate, and adding them
+    /// erases exactly that signal.
+    ///
+    /// **The `None` key is reads that declared no read group**, which is the key the cursor
+    /// itself uses; a run whose files all declare one never sees it.
+    pub fn read_filter_counts(&self) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
+        let mut total = self.retired_read_group_counts.clone();
+        if let Some((_, cursor)) = &self.cursor {
+            for (read_group, counts) in cursor.read_group_counts() {
+                total.entry(read_group).or_default().add(&counts);
+            }
+        }
+        total.into_iter().collect()
     }
 
     /// This sample's cursor for `contig`, minting one if the last locus was on another
@@ -2142,6 +2182,16 @@ where
             // die with the cursor, and they are what says whether it did anything.
             if let Some((_, retiring)) = self.cursor.take() {
                 self.retired_cursor_counts += retiring.counts();
+                // **Taken here for the same reason and at the same moment**, one axis finer: a
+                // cursor's per-read-group tallies die with it, and a run that read them only
+                // from the live cursor would report its last chromosome's drops as the whole
+                // walk's.
+                for (read_group, counts) in retiring.read_group_counts() {
+                    self.retired_read_group_counts
+                        .entry(read_group)
+                        .or_default()
+                        .add(&counts);
+                }
             }
             let cursor = reads
                 .cursor(contig, &mut self.make_reference)
@@ -2281,6 +2331,13 @@ where
     /// to.
     fn counts(&self) -> Option<GeneratorCounts<'_>> {
         Some(GeneratorCounts::Ssr(SsrGenerator::counts(self)))
+    }
+
+    /// **The only way the per-read-group drop tallies are reachable once the generator is
+    /// boxed** — `GeneratorSlot` erases the type, so without this a run with the tract slot
+    /// filled would report only the SNP/indel generator's drops and call them the sample's.
+    fn read_filter_counts(&self) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
+        SsrGenerator::read_filter_counts(self)
     }
 
     fn next_locus(
@@ -2902,6 +2959,136 @@ mod tests {
             vec![1, 3, 4],
             "chr1 decodes one read, chr2 two more, and returning to chr1 decodes its one \
              again — a fold that overwrote instead of accumulating would report [1, 2, 1]",
+        );
+    }
+
+    /// **The generator says why its reader dropped reads, per read group, over the whole walk**
+    /// — and the drops from a chromosome it has left are still in the answer.
+    ///
+    /// **The failure this exists for is silent.** The tally defaulted to empty, so a run with
+    /// the tract slot filled reported only the SNP/indel generator's drops and called them the
+    /// sample's — every number plausible, nothing to notice, and a library that had gone wrong
+    /// invisible. Reading only the *live* cursor is the same failure one chromosome at a time:
+    /// a whole-genome walk would report the last chromosome's drops as the run's.
+    ///
+    /// Two duplicate reads and two kept ones, one pair on each chromosome, so both halves of
+    /// the sum are exercised and neither could be produced by the other.
+    #[test]
+    fn the_generator_reports_its_readers_drops_per_read_group_across_chromosomes() {
+        use crate::ng::read::input::test_fixtures::read_named_with_length;
+        let duplicate = |name: &str, contig: usize| {
+            let mut read = read_named_with_length(name, contig, 20, 30);
+            *read.flags_mut() = noodles_sam::alignment::record::Flags::DUPLICATE;
+            read
+        };
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_named_with_length("kept-on-chr1", 0, 20, 30),
+            duplicate("dup-on-chr1", 0),
+            read_named_with_length("kept-on-chr2", 1, 20, 30),
+            duplicate("dup-on-chr2", 1),
+        ]);
+        let mut generator = ssr_generator();
+        let summed = |generator: &SsrGenerator<_, _>| {
+            generator
+                .read_filter_counts()
+                .into_iter()
+                .fold((0_u64, 0_u64), |(kept, duplicate), (_, counts)| {
+                    (kept + counts.kept, duplicate + counts.duplicate)
+                })
+        };
+
+        fn walk<R, A>(
+            generator: &mut SsrGenerator<R, A>,
+            reads: &SampleReads,
+            contig: u32,
+            name: &str,
+        ) where
+            R: RefSeq + ContigTable + RawRefSeq + EvictableRefSeq,
+            A: RepeatDelimiter,
+        {
+            let segment =
+                SsrSegment::new(name.into(), 30, 39, Motif::new(b"AC").unwrap(), 1.0).unwrap();
+            generator.begin_segment(GenomeRegion {
+                contig: ContigId(contig),
+                start: Position(30),
+                end: Position(39),
+            });
+            generator
+                .next_locus(&segment, reads)
+                .expect("no fetch error")
+                .expect("one locus per segment");
+        }
+
+        walk(&mut generator, &reads, 0, "chr1");
+        let after_first = summed(&generator);
+        walk(&mut generator, &reads, 1, "chr2");
+        let after_second = summed(&generator);
+
+        assert_eq!(
+            after_first,
+            (1, 1),
+            "the first chromosome's one kept read and one duplicate, off its live cursor",
+        );
+        assert_eq!(
+            after_second,
+            (2, 2),
+            "and after the boundary both chromosomes' counts, summed — not the second's alone, \
+             which is what a generator that lost the retiring cursor would report",
+        );
+
+        // **And it is reachable through the trait**, which is the only way a run can ask: a
+        // generator in a `GeneratorSlot` has its type erased, and the trait's default answer is
+        // an empty list. Without the override every number above would be right and no run
+        // could read one.
+        let boxed: &dyn LocusGenerator<SsrSegment> = &generator;
+        assert_eq!(
+            boxed.read_filter_counts(),
+            SsrGenerator::read_filter_counts(&generator),
+        );
+    }
+
+    /// **The per-read-group tallies and the aggregate one count the same reads.**
+    ///
+    /// Two harvests of one cursor taken at the same instant, read by different callers — the
+    /// aggregate by whoever asks whether the cursor did anything, the per-group by the run
+    /// report. A walk whose two answers differ has lost one of them between the cursor and the
+    /// report, and nothing else would say so.
+    #[test]
+    fn the_tract_generators_per_group_tallies_and_its_aggregate_count_the_same_reads() {
+        use crate::ng::read::input::test_fixtures::read_named_with_length;
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_named_with_length("on-chr1", 0, 20, 30),
+            read_named_with_length("on-chr2", 1, 20, 30),
+        ]);
+        let mut generator = ssr_generator();
+
+        for (contig, name) in [(0u32, "chr1"), (1, "chr2")] {
+            let segment =
+                SsrSegment::new(name.into(), 30, 39, Motif::new(b"AC").unwrap(), 1.0).unwrap();
+            generator.begin_segment(GenomeRegion {
+                contig: ContigId(contig),
+                start: Position(30),
+                end: Position(39),
+            });
+            generator
+                .next_locus(&segment, &reads)
+                .expect("no fetch error")
+                .expect("one locus per segment");
+        }
+
+        let kept: u64 = generator
+            .read_filter_counts()
+            .iter()
+            .map(|(_, counts)| counts.kept)
+            .sum();
+        assert_eq!(
+            kept,
+            generator.cursor_counts().reads_decoded,
+            "the reads the filters kept, per group, are the reads the cursor decoded",
+        );
+        assert!(
+            kept > 0,
+            "a walk that read nothing could not tell the two apart",
         );
     }
 

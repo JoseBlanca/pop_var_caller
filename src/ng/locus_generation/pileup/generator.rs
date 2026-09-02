@@ -2011,14 +2011,27 @@ mod tests {
         );
     }
 
-    /// **The halo: a record anchored inside the region keeps the support lying
-    /// beyond the boundary.** `widener`'s deletion grows a record anchored at 99
-    /// out to 139; `beyond` starts at 120, entirely past the region's end, and
-    /// folds into that record. A query for "reads overlapping the region" never
-    /// returns `beyond`, and the record would then be emitted — by the right
-    /// region, with a counter reading zero — carrying half its evidence (spec §2).
+    /// **A record stops at the last base of the region it was walked for**, however far the
+    /// deletion that opened it runs.
+    ///
+    /// **This asserted the opposite until 2026-09-02**, and the opposite was deliberate: a
+    /// record anchored at 99 in a region of 1–100 was emitted spanning 99–139, so that a long
+    /// deletion kept every read supporting it. What made that untenable is that a run's regions
+    /// are *typed*: a generic region's neighbour is always a repeat tract, a bundle or a
+    /// satellite — the classification merges an unbroken generic run into one region, so two
+    /// generic regions are never adjacent. So a footprint reaching past a generic region's end
+    /// always reached into ground of another kind, and once repeat tracts had a generator the
+    /// two kinds' observations chained into one cohort locus, which the merge refuses.
+    ///
+    /// **The deletion is not lost, it is split** (the owner's ruling, 2026-09-02): the bases
+    /// inside this region are called here, and whatever removes the rest is the next region's
+    /// path to explain. The analogy that settles it is a deletion at a chromosome's end — it
+    /// cannot run past the last base, because no read can align there.
+    ///
+    /// `beyond` starts at 120 and so overlaps nothing the clipped record covers; it supported
+    /// the old, widened record and supports nothing now.
     #[test]
-    fn the_halo_keeps_the_support_that_lies_past_the_region_end() {
+    fn a_record_stops_at_the_end_of_the_region_it_was_walked_for() {
         use noodles_sam::alignment::record::cigar::op::Kind;
 
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
@@ -2038,19 +2051,21 @@ mod tests {
 
         let loci = loci_of(&mut generator, region(1, 1, 100), &reads);
 
-        let widened = loci
+        let clipped = loci
             .iter()
             .find(|locus| locus.region.start == Position(99))
             .expect("the deletion opens a record at its anchor, inside the region");
         assert_eq!(
-            widened.region.end,
-            Position(139),
-            "the record spans the whole deletion"
+            clipped.region.end,
+            Position(100),
+            "the record covers the deleted bases this region owns and stops there — 139 is \
+             what it spanned before the clip",
         );
         assert_eq!(
-            total_obs(widened),
-            2,
-            "both the widener and the read lying entirely beyond the region support it"
+            total_obs(clipped),
+            1,
+            "only the widener covers those two bases; the read beginning at 120 overlaps \
+             nothing the clipped record spans",
         );
     }
 
@@ -2081,20 +2096,26 @@ mod tests {
         );
     }
 
-    /// **A record anchored inside the region keeps growing past the boundary.**
-    /// The stop rule has two halves and this is the second one: at position 101
-    /// the record anchored at 99 is still open, so the walk must carry on rather
-    /// than finalise it where it stands.
+    /// **A deletion anchored past the region does not widen a record inside it.**
     ///
-    /// The fixture is built so that only *widening* distinguishes the two halves.
-    /// A record's footprint is fixed when it opens, so an early flush does not
-    /// shorten it — the observable difference is the widen that has not happened
-    /// yet: `later` is anchored at 99, inside the region and inside a plain query,
-    /// and its deletion anchors at **101**, one position past the bound. Stop at
-    /// 101 and the record is emitted spanning 99..=109; wait for it and it spans
-    /// 99..=131.
+    /// `later` is anchored at 99 — inside the region — and carries a deletion whose own anchor
+    /// is at **101**, one past the end. Before the clip that deletion grew the record at 99 out
+    /// to 131; now the record ends at 100 and the deletion opens a record of its own at 101,
+    /// which the generator discards as starting outside the region. The next region walks that
+    /// ground and speaks for it.
+    ///
+    /// **⚑ This test used to prove something it no longer can, and that is worth recording
+    /// rather than quietly dropping.** It was the second half of the stop rule: *at position
+    /// 101 the record anchored at 99 is still open, so the walk must carry on rather than
+    /// finalise it where it stands*. Widening was the only observable difference between
+    /// stopping and carrying on, and the clip removes widening past the end — so with every
+    /// footprint bounded by the region, a record anchored at or before the stop is complete as
+    /// soon as the walker passes the stop, and the second half of the rule has no effect left
+    /// to observe. It is harmless and it is now dead weight, in the same family as the read
+    /// halo the clip also emptied of purpose; both belong to one follow-up, with byte-identical
+    /// output as the evidence that neither was doing anything.
     #[test]
-    fn a_record_anchored_inside_the_region_still_widens_past_the_boundary() {
+    fn a_deletion_anchored_past_the_region_does_not_widen_a_record_inside_it() {
         use noodles_sam::alignment::record::cigar::op::Kind;
 
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
@@ -2119,14 +2140,21 @@ mod tests {
 
         let loci = loci_of(&mut generator, region(1, 1, 100), &reads);
 
-        let widened = loci
+        let clipped = loci
             .iter()
             .find(|locus| locus.region.start == Position(99))
             .expect("the first deletion opens a record at 99, inside the region");
         assert_eq!(
-            widened.region.end,
-            Position(131),
-            "the walk stopped before the second deletion widened the record"
+            clipped.region.end,
+            Position(100),
+            "the record stops at the region's last base — 131 is what the deletion anchored \
+             past the end used to grow it to",
+        );
+        assert!(
+            loci.iter().all(|locus| locus.region.start.get() <= 100),
+            "and nothing anchored past the region is emitted, so the ground beyond is left \
+             whole for the region that owns it: {:?}",
+            loci.iter().map(|locus| locus.region).collect::<Vec<_>>(),
         );
     }
 
@@ -2204,10 +2232,13 @@ mod tests {
     fn a_walk_failure_reaches_the_caller_as_a_walker_error() {
         use noodles_sam::alignment::record::cigar::op::Kind;
 
+        // The deletion is anchored at 34 and runs to 74, wholly inside the region: since
+        // 2026-09-02 a record is clipped at the region's last base, so a deletion straddling
+        // the end is bounded by the region before the cap can complain about it.
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[read_with_cigar(
             "too_wide",
             1,
-            95,
+            30,
             &[(Kind::Match, 5), (Kind::Deletion, 40), (Kind::Match, 30)],
         )]);
         let mut generator = a_generator(PileupGeneratorConfig {
@@ -3066,14 +3097,18 @@ mod tests {
 
     // --- the review's fixes: properties that were load-bearing and unpinned --
 
-    /// **The halo is exactly `max_record_span` wide.** The shipped halo test put
-    /// its far read 20 positions into a 60-position halo, so a halo of *half*
-    /// the width passed it (review). Here the far read starts at 131 — one past
-    /// half of a 60-position halo over a region ending at 100 — and folds into a
-    /// record anchored at the region's last position whose deletion runs the
-    /// full span.
+    /// **A deletion anchored on the region's very last base is one position wide** — the
+    /// sharpest case of the clip, and the one an off-by-one gets wrong in either direction.
+    ///
+    /// A record anchored at 100 in a region of 1–100 owns exactly that base. Clipping at
+    /// `region_end` rather than `region_end + 1` would give it zero width; not clipping at all
+    /// gives it 159, which is what this asserted before 2026-09-02.
+    ///
+    /// **The reference is still one base and the allele is still a deletion.** The read removes
+    /// position 100 along with 58 bases the next region owns; over this record it says that
+    /// base is absent, which is true and is all this region can say.
     #[test]
-    fn the_halo_reaches_a_read_at_its_far_end() {
+    fn a_deletion_anchored_on_the_regions_last_base_is_one_position_wide() {
         use noodles_sam::alignment::record::cigar::op::Kind;
 
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
@@ -3093,15 +3128,25 @@ mod tests {
 
         let loci = loci_of(&mut generator, region(1, 1, 100), &reads);
 
-        let widened = loci
+        let clipped = loci
             .iter()
             .find(|locus| locus.region.start == Position(100))
             .expect("the deletion opens a record at 100, the region's last position");
-        assert_eq!(widened.region.end, Position(159));
         assert_eq!(
-            total_obs(widened),
-            2,
-            "a halo narrower than max_record_span never returns the read at 131"
+            clipped.region.end,
+            Position(100),
+            "one base wide — not zero, which a clip at region_end would give, and not 159, \
+             which is what it spanned before the clip",
+        );
+        assert_eq!(
+            clipped.reference_bases.len(),
+            1,
+            "and its reference is that one base",
+        );
+        assert_eq!(
+            total_obs(clipped),
+            1,
+            "the read at 131 overlaps nothing the clipped record spans",
         );
     }
 
@@ -3557,10 +3602,13 @@ mod tests {
     fn a_walk_that_failed_does_not_restart() {
         use noodles_sam::alignment::record::cigar::op::Kind;
 
+        // The deletion is anchored at 34 and runs to 74, wholly inside the region: since
+        // 2026-09-02 a record is clipped at the region's last base, so a deletion straddling
+        // the end is bounded by the region before the cap can complain about it.
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[read_with_cigar(
             "too_wide",
             1,
-            95,
+            30,
             &[(Kind::Match, 5), (Kind::Deletion, 40), (Kind::Match, 30)],
         )]);
         let mut generator = a_generator(PileupGeneratorConfig {

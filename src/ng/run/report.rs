@@ -200,7 +200,8 @@ impl<'a> RunReport<'a> {
             share_of(ground.regions_handled_bp, covered),
         ));
         lines.push(format!(
-            "  not called — repeat tracts this caller has not built yet: {} bases ({})",
+            "  not called — clusters of repeats too close together to have clean flanks: {} \
+             bases ({})",
             ground.unhandled_not_implemented_bp,
             share_of(ground.unhandled_not_implemented_bp, covered),
         ));
@@ -209,6 +210,18 @@ impl<'a> RunReport<'a> {
             ground.unhandled_out_of_scope_bp,
             share_of(ground.unhandled_out_of_scope_bp, covered),
         ));
+        // **Loci, not bases, and it is a different fact from either line above.** Those two say
+        // what ground no generator looked at; this says what was looked at, built, merged
+        // across the cohort — and then not scored, because nothing in the run scores a repeat
+        // tract yet. A run that printed only the base lines would now say a tract's ground was
+        // *called*, which it was not.
+        if self.written.tract_loci_set_aside > 0 {
+            lines.push(format!(
+                "  repeat tracts built and then not called: {} locus/loci — the evidence is \
+                 gathered and nothing scores it yet",
+                self.written.tract_loci_set_aside,
+            ));
+        }
 
         self.refused_loci(
             lines,

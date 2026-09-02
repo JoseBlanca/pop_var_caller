@@ -146,14 +146,14 @@ rows.
 
 ### Milestone C — the tract slot is filled, and the accounting is paid
 
-**C1. `SsrGenerator` reports its read-filter counts.**  ☐
+**C1. `SsrGenerator` reports its read-filter counts.**  ✅
 Override [`read_filter_counts`](../../../../src/ng/locus_generation/mod.rs) (default: empty)
 with the generator's own reader tallies, per read group. **Own commit, do not bundle** — the
 failure is silent under-reporting with every number plausible; the oracle is a test that
 walks tract ground and asserts non-zero per-group drops where reads were filtered.
 *Depends:* none. *Source:* spec §3.2.
 
-**C2. The slot filled, and the driver's temporary set-aside.**  ☐
+**C2. The slot filled, and the driver's temporary set-aside.**  ✅
 `generic_path_generators` ([`walker.rs:1588`](../../../../src/ng/run/walker.rs)) builds an
 `SsrGenerator` into the `Ssr` slot — unit-robust aligner, `SsrGeneratorConfig::default()`,
 same `WalkReference` accessors as the pileup generator. And the driver, on meeting a
@@ -162,14 +162,14 @@ non-generic cohort observation, **sets it aside and counts it** — never hands 
 unfilled.
 *Depends:* A1, C1. *Source:* spec §3.1, §5.
 
-**C3. The run report survives both states.**  ☐
+**C3. The run report survives both states.**  ✅
 The ground partition still sums to 100% with tract regions handled; the *not called* line
 now names what is actually unbuilt (bundles, satellites) rather than every repeat; the
 set-aside tract loci of C2 are a counted line of their own. Wording per spec: a smaller,
 honest *not called* line, not a zero and not the old sentence.
 *Depends:* C2. *Source:* spec §3.2, §5.
 
-**C4. Invariance, end to end.**  ☐
+**C4. Invariance, end to end.**  ✅
 The E2 oracle re-run with the slot filled: byte-identical VCF at pools of 1–16 across two
 building-region widths on the concurrency fixture, and the report's counts identical too.
 *Depends:* C2. *Source:* spec §3.3, §10.

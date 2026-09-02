@@ -54,7 +54,23 @@ Skills and agents are instructed to leave it untouched.
 > seen on a 51-accession panel at all** — the depth gate, the three-accession recurrence term and
 > the periodicity gate each survived a deliberate mutation — so three further tests reach them:
 > the same tracts with one accession (where the depth gate then refuses every one of them), and
-> two hand-built loci. **Still unrun: E2, the HG002 numbers through the shipped module.**
+> two hand-built loci.
+>
+> - **Also on 2026-09-02, from the parallel plan:** **a run now produces repeat-tract observations, and
+> nothing scores them yet** — the whole of the
+> [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), all twelve steps,
+> merged to `main`. Every sample's walk emits tract observations beside its SNP/indel ones, the
+> merge unifies them across the cohort and each carries its motif, and the driver sets each one
+> aside and counts it until the calling loop's dispatch lands.
+> **⚠ Two things to carry forward.** Filling the slot exposed a defect the plan did not
+> anticipate and only a real genome could find: a run **aborted**, because the SNP/indel
+> generator lets an indel's footprint reach past the region it was walked for, and a generic
+> region's neighbour is always a typed one. A record now stops at its region's end (the owner's
+> ruling) — and **that costs 90 of 312 true indels on the GIAB benchmark, indel recall 0.9455 →
+> 0.6727, with SNPs unchanged at 2,008 true positives**. Merged on the owner's ruling rather
+> than held. Whether those calls come back once tracts are scored is the open question, and it
+> is not obvious that they do under allele concordance.
+> [Report](doc/devel/reports/ng_tract_slot_mixed_kind_2026-09-02.md).
 >
 > - **Earlier (2026-09-02):** **ng's own repeat-tract candidate selection is built,
 > and proven on hand-built loci — Checkpoint D**
@@ -3376,9 +3392,14 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     closure; re-opens only on a large-cohort measurement that moves the share.
 
 #### Step 5/6 — STR observations through a run: routing, the tract slot, and the kind at the merge
-- **Status:** `implemented` — **✅ MILESTONE A COMPLETE and merged to `main`**; **✅ MILESTONE B COMPLETE, at
-  Checkpoint B** on branch `ng-ssr-observations`, not yet merged. C fills the tract slot and
-  pays the two accounting debts.
+- **Status:** `implemented` — **✅ THE WHOLE PLAN COMPLETE: milestones A, B and C, all twelve
+  steps, merged to `main`** (owner's ruling, 2026-09-02). **A run now produces repeat-tract
+  observations, per sample and per cohort, and nothing scores them yet** — the driver sets each
+  aside and counts it until [`calling_loop_ssr.md`](doc/devel/ng/impl_plan/calling_loop_ssr.md)'s
+  dispatch replaces that guard.
+  - **⚠ Merged knowing it costs 90 of 312 true indels**, and that is the one number to carry
+    forward: see the clip below. The owner ruled to merge rather than hold the milestone until
+    the calling loop can score a tract.
 - **Plan:** [run_ssr_observations.md](doc/devel/ng/impl_plan/run_ssr_observations.md);
   **Spec:** [run_ssr_observations.md](doc/devel/ng/spec/run_ssr_observations.md); the parallel
   plan it seams with: [calling_loop_ssr.md](doc/devel/ng/impl_plan/calling_loop_ssr.md); what
@@ -3450,7 +3471,56 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   New: `benchmarks/giab/src/score_ng_recall.sh`, which scores one results directory the way
   `accuracy_dashboard.py` does so two can be compared.
   [Report](doc/devel/reports/ng_str_routing_recovery_2026-09-02.md).
+- **C1 done (the tract generator says why its reader dropped reads):**
+  [ssr.rs](src/ng/locus_generation/ssr.rs) — the per-read-group tallies of the retired
+  chromosomes' cursors, plus the trait override without which they are unreachable once the
+  generator is boxed. The trait's default is an empty list, so a run with the slot filled would
+  have reported only the SNP/indel generator's drops and called them the sample's: every number
+  plausible, nothing to notice. Two mutations killed.
+  [Impl report](doc/devel/reports/implementations/ng_ssr_observations_c1_2026-09-02.md).
+- **C2 done (a run produces repeat-tract observations, and sets each aside):**
+  [walker.rs](src/ng/run/walker.rs) builds an `SsrGenerator` into the slot, with its own
+  reference accessors and **the bundle radius the ground was cut with** rather than the constant
+  that happens to equal it; [callers.rs](src/ng/run/callers.rs) counts and skips every
+  non-generic cohort observation. The guard is not politeness — handed a tract,
+  `call_one_generic_locus` would rank its tract lengths as ordinary alleles and emit a
+  well-formed record whose genotype has no stutter model behind it. Two mutations killed.
+  [Impl report](doc/devel/reports/implementations/ng_ssr_observations_c2_2026-09-02.md).
+- **C3 done (the report reads truthfully with the slot filled):**
+  [report.rs](src/ng/run/report.rs) — the *not called* line names what is actually unbuilt
+  (clusters of repeats with no clean flanks) instead of repeat tracts, and a new line in **loci**
+  says how many tracts were built, merged and then not scored. Printed only when there are some.
+  [Impl report](doc/devel/reports/implementations/ng_ssr_observations_c3_2026-09-02.md).
+- **C4 done (invariance, end to end):** byte-identical VCF at pools of 1–16 across both
+  building-region widths with the slot filled — **and on a cohort where the tract path actually
+  fires**, since the concurrency fixture's own tract is too quiet to build and its set-aside
+  count is zero at every pool size, which any implementation passes.
+- **⚑ And a defect the plan did not anticipate, found by running the caller on a genome:** with
+  the slot filled, a real run **aborted**. The merge refuses to put two kinds of ground in one
+  cohort locus, and its argument — no observation crosses a segment boundary — was false: the
+  SNP/indel generator clamps an observation's *start* to its segment and lets an indel's
+  footprint reach past the end, deliberately and with a test asserting it. A generic region's
+  neighbour is always a typed one (measured: 457 typed regions over 400 kb of chr1, 229 generic,
+  **zero** adjacent generic pairs), so that reach always went into a tract, a bundle or a
+  satellite. 177 collisions across the three GIAB samples at 30×. **The owner ruled the fix**
+  (2026-09-02): a record stops at the end of the region it was walked for, and a deletion
+  crossing the edge becomes two alleles in two loci — *"the STR tract is only the tandem
+  repeat"*. **Measured cost: 90 of 312 true indels, indel recall 0.9455 → 0.6727, SNPs
+  unchanged at 2,008 true positives.** Merged anyway on the owner's ruling.
+  [Report](doc/devel/reports/ng_tract_slot_mixed_kind_2026-09-02.md).
 - **Open:**
+  - **⚠ The 90 lost indels, and what brings them back.** The shape that fits, **not yet
+    confirmed**: an indel belonging to a repeat tract left-aligns to an anchor *before* the
+    tract, so its footprint reached in, and the SNP/indel path was calling it whole by reaching
+    into ground it does not own. If so the calls return when the calling loop scores tracts —
+    but **not under allele concordance**, since a deletion split across two loci is two records
+    against the truth set's one. The check that settles it is one step past the table in the
+    report: are the 90 deletions overlapping a tract's first base?
+  - **⚠ The clip left two things with no job**, both harmless and both dead weight: the read
+    halo (reads fetched up to `max_record_span` past a region, for a footprint that can no
+    longer reach them) and the second half of the walk's stop rule (carry on past the bound
+    while something anchored inside is still open — widening was its only observable). One
+    follow-up, with byte-identical output as the evidence that neither was doing anything.
   - **⚠ Three tests in the two locus dumps still fail, and each says something different.**
     Both targets had been red since `8ffb0f84` (*"the live tandem-repeat scan is gone"*,
     2026-08-11): their fixtures write a FASTA and a BAM into a temporary directory and built

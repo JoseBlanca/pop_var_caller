@@ -35,7 +35,7 @@ use crate::ng::calling::inference::{LocusGenotyper, RunnableCallingLoopConfig};
 use crate::ng::calling::run_parameters::RunParameters;
 use crate::ng::calling::{CallingScratch, FrozenParameters, LocusInference};
 use crate::ng::locus_generation::pileup::{PileupGeneratorConfig, PileupGeneratorCounts};
-use crate::ng::locus_generation::{GeneratorCounts, LocusCounts};
+use crate::ng::locus_generation::{GeneratorCounts, LocusCounts, LocusKind};
 use crate::ng::read::filtering::ReadFilterConfig;
 use crate::ng::read::filtering::ReadFilterCounts;
 use crate::ng::read::input::SampleReads;
@@ -50,7 +50,7 @@ use crate::ng::run::cohort_merge::serial::{
     merge_cohort_handing_each_locus_over_covering_samples_in_parallel, merge_cohort_through_cache,
 };
 use crate::ng::run::cohort_merge::{CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads};
-use crate::ng::types::{GenomeRegion, ReadGroupId};
+use crate::ng::types::{Bp, GenomeRegion, ReadGroupId};
 use crate::ng::vcf::VcfRecord;
 use crate::ng::vcf::assemble::assemble_record;
 use crate::pop_var_caller::common::format_md5_hex;
@@ -431,8 +431,19 @@ impl AlignedFilesVariantCaller {
     fn walkers(self) -> Result<RunReadyToWalk, RunError> {
         let mut walkers = Vec::with_capacity(self.samples.len());
         for reads in self.samples {
-            let generators =
-                generic_path_generators(&self.walk_reference, self.locus_generator_settings)?;
+            let generators = generic_path_generators(
+                &self.walk_reference,
+                self.locus_generator_settings,
+                // **The radius the ground was actually cut with**, so the tract generator's
+                // flank is checked against the classification that produced the segments it
+                // will be handed rather than against a constant that happens to match.
+                Bp(self
+                    .segmentation
+                    .inputs()
+                    .repeat_tract_criteria
+                    .classification
+                    .bundle_threshold),
+            )?;
             walkers.push(AlignmentFilesWalker::over(
                 Arc::clone(&self.segmentation),
                 reads,
@@ -552,6 +563,9 @@ impl AlignedFilesVariantCaller {
         let mut called_loci = Vec::new();
         let mut loci_too_wide_to_assemble = Vec::new();
         let mut loci_with_nobody_to_call = Vec::new();
+        // Counted rather than collected: a run over tract-rich ground meets millions of these,
+        // and what the report owes is how many, not where each one was.
+        let mut tract_loci_set_aside = 0_u64;
 
         let mut cache = ObservationCache::over(walkers);
         merge_cohort_handing_each_locus_over(
@@ -562,6 +576,10 @@ impl AlignedFilesVariantCaller {
             merge_parameters.min_alt_reads,
             &mut |observation| {
                 let region = observation.region;
+                if set_aside_because_nothing_calls_it_yet(&observation) {
+                    tract_loci_set_aside += 1;
+                    return;
+                }
                 match call_one_generic_locus(
                     genotyper,
                     &observation,
@@ -586,6 +604,7 @@ impl AlignedFilesVariantCaller {
             called_loci,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
+            tract_loci_set_aside,
             walk: CohortWalkTallies::of(sample_names, cache.into_sources(), assembly_check),
         })
     }
@@ -680,6 +699,8 @@ impl AlignedFilesVariantCaller {
         let mut loci_called_but_not_written = 0_u64;
         let mut loci_too_wide_to_assemble = Vec::new();
         let mut loci_with_nobody_to_call = Vec::new();
+        // Counted rather than collected — see the other driver.
+        let mut tract_loci_set_aside = 0_u64;
         // **The merge's sink cannot fail**, so the first failure is stashed and the sink does
         // nothing after it. Reported ahead of whatever the merge itself then returns, because it
         // happened first.
@@ -703,6 +724,10 @@ impl AlignedFilesVariantCaller {
             merge_parameters.min_alt_reads,
             &mut |observation| {
                 if stopped.is_some() {
+                    return;
+                }
+                if set_aside_because_nothing_calls_it_yet(&observation) {
+                    tract_loci_set_aside += 1;
                     return;
                 }
                 let region = observation.region;
@@ -771,8 +796,34 @@ impl AlignedFilesVariantCaller {
             loci_called_but_not_written,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
+            tract_loci_set_aside,
             walk: CohortWalkTallies::of(sample_names, cache.into_sources(), assembly_check),
         })
+    }
+}
+
+/// **Whether this locus is one nothing in the run can call yet** — a repeat tract or a repeat
+/// bundle, which is every kind but the SNP/indel one.
+///
+/// **A temporary guard, and it exists because the alternative is silently wrong.**
+/// `call_one_generic_locus` is the SNP/indel path and nothing in it knows what a tract is: it
+/// would take the tract's distinct read sequences as ordinary alleles, select among them by
+/// read support, and emit a record whose `REF`/`ALT` are whole tract lengths scored under a
+/// substitution model. Every field would be well formed and the genotype would be a guess with
+/// no stutter model behind it. Setting the locus aside and counting it says the same thing
+/// honestly, and it is already an improvement on never building the observation at all
+/// (`run_ssr_observations.md` §5).
+///
+/// **What replaces it** is the dispatch on the observation's kind that `calling_loop_ssr.md`
+/// Milestone C builds, once there is a tract selector to dispatch *to*. The two documents are
+/// independently buildable precisely because this guard stands between them.
+///
+/// Exhaustive on the kind on purpose: a fourth kind must be decided here rather than falling
+/// into whichever arm the compiler picks for it.
+fn set_aside_because_nothing_calls_it_yet(observation: &CohortObservation) -> bool {
+    match observation.kind {
+        LocusKind::Generic => false,
+        LocusKind::Ssr(_) | LocusKind::SsrBundle => true,
     }
 }
 
@@ -925,6 +976,20 @@ pub struct CalledCohort {
     /// **A non-empty list is worth acting on**: raising `max_candidate_alleles` keeps more of
     /// what those loci vary over.
     pub loci_with_nobody_to_call: Vec<GenomeRegion>,
+    /// **Cohort loci built over repeat ground and set aside uncalled** — a tract or a bundle,
+    /// which no path in this run can score yet.
+    ///
+    /// **A temporary count with a named successor.** The merge now produces observations at
+    /// repeat tracts and nothing consumes them: the SNP/indel path would take a tract's read
+    /// sequences as ordinary alleles and emit a well-formed record with no stutter model behind
+    /// its genotype, so the driver sets each aside instead
+    /// (`doc/devel/ng/spec/run_ssr_observations.md` §5). It goes when
+    /// `calling_loop_ssr.md`'s dispatch replaces the guard.
+    ///
+    /// **Not the same fact as the walk's `unhandled_not_implemented`**, which counts *regions*
+    /// whose generator slot is unfilled — bundles, today. This counts *loci* that were built,
+    /// merged across the cohort, and then not called.
+    pub tract_loci_set_aside: u64,
     /// What each sample's walk saw, and what the run could check about the assembly.
     pub walk: CohortWalkTallies,
 }
@@ -951,6 +1016,9 @@ pub struct WrittenCohort {
     /// **The ground of the loci no sample of the run could be called at**, in genome order —
     /// [`CalledCohort::loci_with_nobody_to_call`].
     pub loci_with_nobody_to_call: Vec<GenomeRegion>,
+    /// **Cohort loci built over repeat ground and set aside uncalled** —
+    /// [`CalledCohort::tract_loci_set_aside`].
+    pub tract_loci_set_aside: u64,
     /// What each sample's walk saw, and what the run could check about the assembly.
     pub walk: CohortWalkTallies,
 }
@@ -3386,6 +3454,7 @@ mod cohort_loci_from_reads_match_cohort_loci_from_records {
                 let generators = generic_path_generators(
                     &walk_reference,
                     crate::ng::locus_generation::pileup::PileupGeneratorConfig::default(),
+                    Bp(crate::ng::region_typing::segment_criteria::DEFAULT_BUNDLE_THRESHOLD),
                 )
                 .expect("the shipped generator settings are accepted");
                 SampleLocusObservationsIterator::new(
@@ -3757,9 +3826,12 @@ mod what_the_fixtures_above_could_not_distinguish {
     fn a_repeat_tract_is_refused_as_unbuilt_rather_than_as_out_of_scope() {
         let (_reference_dir, reference) = fixture_reference_from_its_index();
         let walk_reference = WalkReference::of(&reference).expect("the fixture has bases");
-        let mut generators =
-            generic_path_generators(&walk_reference, PileupGeneratorConfig::default())
-                .expect("the shipped settings are accepted");
+        let mut generators = generic_path_generators(
+            &walk_reference,
+            PileupGeneratorConfig::default(),
+            Bp(crate::ng::region_typing::segment_criteria::DEFAULT_BUNDLE_THRESHOLD),
+        )
+        .expect("the shipped settings are accepted");
 
         let (_bam_dir, bam) = bam_for("zeta", "zeta.bam");
         let read_groups = build_read_groups(&[bam]).expect("read groups");
@@ -5583,9 +5655,15 @@ mod records_handed_over_as_the_run_finishes_them {
             "kappa's two-singletons locus is called and establishes nothing",
         );
         // **Every sample, not the first one.** A run hands one segmentation to the whole
-        // cohort, so all five walk the same three segments and charge the same tract to
-        // not-built-yet; reading only `per_sample[0]` would pass just as well if the tallies
-        // were paired with the wrong samples, or if four of the five were left empty.
+        // cohort, so all five walk the same three segments and handle all three; reading only
+        // `per_sample[0]` would pass just as well if the tallies were paired with the wrong
+        // samples, or if four of the five were left empty.
+        //
+        // **The second number was 1 until the tract slot was filled** (C2, 2026-09-02): the
+        // fixture's tract was a region whose generator did not exist, and is now a region with
+        // one. What the run cannot do with the *locus* it builds there is a different count —
+        // `tract_loci_set_aside` below — and keeping the two apart is the point: one says
+        // ground nobody looked at, the other says loci nobody scored.
         assert_eq!(
             baseline
                 .walk
@@ -5596,9 +5674,16 @@ mod records_handed_over_as_the_run_finishes_them {
                     walk.regions.unhandled_not_implemented
                 ))
                 .collect::<Vec<_>>(),
-            vec![(3, 1); paths.len()],
-            "each sample walks the fixture's three segments and charges the tract to \
-             not-built-yet, on every thread count",
+            vec![(3, 0); paths.len()],
+            "each sample walks the fixture's three segments and now handles all three, on \
+             every thread count",
+        );
+        assert_eq!(
+            baseline.tract_loci_set_aside, 0,
+            "no sample of this cohort varies inside the tract, so the merge finds it too quiet \
+             to build and there is no locus to set aside — \
+             `a_tract_a_sample_varies_at_is_built_and_set_aside_uncalled` is the fixture that \
+             does vary there",
         );
         assert_eq!(
             walk_counts_by_name(&baseline),
@@ -5648,6 +5733,10 @@ mod records_handed_over_as_the_run_finishes_them {
                         baseline.loci_with_nobody_to_call
                     );
                     assert_eq!(
+                        again.tract_loci_set_aside, baseline.tract_loci_set_aside,
+                        "the tract loci set aside at a pool of {threads}",
+                    );
+                    assert_eq!(
                         walk_tallies_of(&again),
                         walk_tallies_of(&baseline),
                         "each sample's walk tallies at a pool of {threads}",
@@ -5655,6 +5744,81 @@ mod records_handed_over_as_the_run_finishes_them {
                 }
             }
         }
+    }
+
+    /// One sample whose reads vary **inside** [`ground_with_a_tract_interleaved`]'s tract, so
+    /// the merge has a tract locus to build.
+    ///
+    /// Forty-five bases from chr1:25, so 25–69 — the whole 41–52 tract with the fifteen bases
+    /// of flank the generator fetches on each side, so its reads pin a repeat length rather
+    /// than coming back as partials. The changed base is at 45, inside the tract. Four reads,
+    /// where the merge's keep rule asks for two.
+    ///
+    /// **The mixed cohort does not vary there**, which is why its own set-aside count is zero
+    /// and why this fixture exists.
+    fn a_sample_varying_inside_the_tract() -> (TempDir, PathBuf) {
+        let mut bases = [b'A'; 45];
+        bases[20] = b'C';
+        let records: Vec<RecordBuf> = (0..4)
+            .map(|read| read_of(&format!("varies-r{read}"), 25, &bases))
+            .collect();
+        indexed_named_bam(
+            &header(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[("rg1", Some("varies"))],
+            ),
+            &records,
+            "varies.bam",
+        )
+    }
+
+    /// **A cohort locus at a repeat tract is built, merged, and then not called** — the guard
+    /// that stands until the calling loop learns to dispatch on the observation's kind
+    /// (`run_ssr_observations.md` §5).
+    ///
+    /// **What it is guarding against is a plausible record, not a crash.** Without the guard
+    /// the tract's observation goes to `call_one_generic_locus`, which knows nothing about
+    /// repeats: it would take the distinct tract lengths the reads showed as ordinary alleles,
+    /// rank them by read support, and emit a record whose `REF` and `ALT` are whole tract
+    /// sequences scored under a substitution model with no stutter term. So the test asserts
+    /// **both halves** — the locus is counted as set aside, *and* no record was written over
+    /// the tract's ground. Asserting only the count would pass on a run that set it aside and
+    /// called it as well.
+    ///
+    /// The sample's reads span the tract with room either side, and carry one changed base
+    /// inside it, so the merge has something to build. The mixed cohort above does not vary
+    /// there, which is why its own count is zero.
+    #[test]
+    fn a_tract_a_sample_varies_at_is_built_and_set_aside_uncalled() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+
+        let (_bam_dir, bam) = a_sample_varying_inside_the_tract();
+
+        let called = open_over_the_tract_ground_with(
+            std::slice::from_ref(&bam),
+            &reference,
+            MergeParameters::DEFAULT,
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("the fixture cohort calls");
+
+        assert_eq!(
+            called.tract_loci_set_aside, 1,
+            "the tract's cohort locus is built and merged, and the driver declines to score it",
+        );
+        assert!(
+            called
+                .called_loci
+                .iter()
+                .all(|locus| locus.region.end.get() < 41 || locus.region.start.get() > 52),
+            "no locus over the tract's ground reaches the caller, and got {:?}",
+            called
+                .called_loci
+                .iter()
+                .map(|locus| locus.region)
+                .collect::<Vec<_>>(),
+        );
     }
 
     /// **And the records are the serial caller's loci** — the oracle the plan names for E2.
@@ -5768,6 +5932,60 @@ mod records_handed_over_as_the_run_finishes_them {
                          {threads} at a {width}-base building region (repetition {repetition})",
                     );
                     assert_eq!(walk_tallies_of(&again), walk_tallies_of(&serial));
+                }
+            }
+        }
+    }
+
+    /// **The tract path is thread-invariant too, and on a cohort where it actually fires** —
+    /// C4's half of the E2 oracle.
+    ///
+    /// The sweep above runs the tract generator at every thread count, but no sample of that
+    /// cohort varies inside its tract, so the merge finds the tract too quiet to build and the
+    /// set-aside count is zero at every pool size: **a comparison of zeros, which any
+    /// implementation passes.** This runs the same sweep on the sample that does vary there, so
+    /// the file, the walk tallies and the set-aside count are compared at a value the tract
+    /// path produced.
+    ///
+    /// **What could go wrong here that the sweep above cannot see.** The tract generator holds
+    /// a cursor and its own reference accessors, one set per sample, and a run's walkers cross
+    /// threads under the merge's parallel cover. A generator that shared a window or a cursor
+    /// between workers would answer differently depending on which worker reached it first —
+    /// and what would move is the tract's own observation, which is exactly what the fixture
+    /// above holds constant at nothing.
+    #[test]
+    fn the_tract_path_is_byte_identical_at_every_thread_count() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_bam_dir, bam) = a_sample_varying_inside_the_tract();
+        let alone = [bam];
+
+        for merge in the_two_widths() {
+            let width = merge.cohort_locus_builder_regions_len.get();
+            let (serial_bytes, serial) = mixed_cohort_vcf_in_a_pool(1, &alone, &reference, merge);
+            assert_eq!(
+                serial.tract_loci_set_aside, 1,
+                "the fixture varies inside the tract, so a locus is built there and set aside \
+                 — without this the comparisons below are of zeros",
+            );
+            for threads in [2, 4, 8, 16] {
+                for repetition in 0..3 {
+                    let (bytes, again) =
+                        mixed_cohort_vcf_in_a_pool(threads, &alone, &reference, merge);
+                    assert_eq!(
+                        bytes, serial_bytes,
+                        "the VCF differs between a pool of 1 and a pool of {threads} at a \
+                         {width}-base building region (repetition {repetition})",
+                    );
+                    assert_eq!(
+                        again.tract_loci_set_aside, serial.tract_loci_set_aside,
+                        "the tract loci set aside at a pool of {threads}",
+                    );
+                    assert_eq!(
+                        walk_tallies_of(&again),
+                        walk_tallies_of(&serial),
+                        "the walk tallies at a pool of {threads} — the tract generator's own \
+                         read-filter counts among them",
+                    );
                 }
             }
         }
