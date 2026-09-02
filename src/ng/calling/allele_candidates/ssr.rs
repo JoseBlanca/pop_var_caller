@@ -16,9 +16,9 @@
 //! **Under construction, in the order `doc/devel/ng/impl_plan/candidate_alleles_ssr.md` sets.**
 //! This file holds the ladder (its step B1), the path's configuration and the per-sample length
 //! histogram (B2), nomination — each sample's own repeat counts, the `±1` rescue and the cohort's
-//! union (C1, C2) — and the admission of the sequences on a promoted rung (D1). The periodicity
-//! verdict, the two numbers the genotype prior takes and the entry point `select_ssr` are the
-//! steps after those, and nothing outside this module calls anything here yet.
+//! union (C1, C2) — the admission of the sequences on a promoted rung (D1), and the periodicity
+//! verdict with the entry point [`select_ssr`] it gates (D2). The two numbers the genotype prior
+//! takes are the step after those, and nothing outside this module calls anything here yet.
 //!
 //! **Which is why a non-test build expects everything here to be dead.** The expectation rather
 //! than an `allow`, so that the first real caller — `select_ssr`, which the steps after this one
@@ -27,6 +27,7 @@
 //! failing when it is wrong.
 #![cfg_attr(not(test), expect(dead_code))]
 
+use super::summarise_alleles;
 use super::{
     AlleleRemap, CandidateSelectionConfig, LocusSelection, MaxCandidateAlleles, SelectionScratch,
     SelectionVerdict,
@@ -898,6 +899,176 @@ pub(super) fn admit_promoted_sequences(
         })
         .collect();
     LocusSelection::new(alleles, verdict, leftovers, remap, covering_samples)
+}
+
+/// **Whether this tract's reads actually vary in whole motif units** — the one verdict this path
+/// adds, and the gate in front of everything above (spec §7; arch §3.3).
+///
+/// A stretch the catalog called a repeat tract whose reads sit at lengths the motif cannot
+/// explain is not a tract this caller's model describes: the stutter distribution is written on
+/// whole-repeat and part-repeat regimes and the prior's ladder is written on repeat counts.
+/// Genotyping it against that model would produce a confident answer from a model that does not
+/// apply.
+///
+/// # The grid is anchored on the reference tract's own length
+///
+/// A read is **off the grid** when the difference between its tract length and the reference
+/// tract's is not a whole number of motif units. A sample is non-periodic when more than
+/// `max_off_grid_share` of its spanning reads are off the grid, and **the locus is judged
+/// non-periodic only when no sample is periodic** — the same "one sample suffices" shape as
+/// everything else on this path.
+///
+/// **The anchor is a decision, taken by the owner on 2026-09-02, and it is not what the design
+/// documents say.** Arch §3.3 and spec §7 anchor the grid on the ladder's mode, and spec §3 adds
+/// that ng measures it in units where production measures it in bases. Taken literally those two
+/// give a grid anchored at **zero** — the mode is a repeat count, so its length in bases is a whole
+/// number of units and cancels out of the subtraction — and a zero-anchored grid refuses a real
+/// class of tract:
+///
+/// - the catalog trims every tract back to whole motif copies **at both ends**, but a
+///   length-changing interruption inside puts the two ends out of phase with each other, so the
+///   tract's own reference length is then **not** a multiple of the period;
+/// - such a tract is admitted whenever the interruption is late enough to clear the catalog's
+///   purity floor of 0.8. Measured through the catalog's own `minimal_trim` and `recompute_purity`
+///   on 2026-09-02: 49 bases of an `AT` repeat with one extra base 40 bases in trims to 49 bases at
+///   **purity 0.816**, and 49 is odd;
+/// - at that tract every read at the reference length is off a zero-anchored grid, so every sample
+///   is non-periodic and **the locus is refused and never called**.
+///
+/// Production avoids that by anchoring on the commonest observed length in bases
+/// ([`candidate_set.rs:114-145`](../../../../src/ssr/cohort/candidate_set.rs)) — its own comment
+/// says so: *"the grid is anchored to the modal length, not to zero, so an interrupted repeat
+/// sitting at an odd reference length stays periodic"*. **The reference tract's length is the
+/// third anchor and the one taken here**, because it keeps those tracts *and* is a property of the
+/// locus rather than of the reads: the commonest observed length moves with depth, so a shallow
+/// sample could shift which lengths count as on-grid. It is also the quantity the genotype prior
+/// was re-indexed onto on 2026-08-27 — offset from the reference tract length
+/// (`doc/devel/ng/spec/population_diversity.md` §4.2) — so the periodicity grid and the prior's
+/// index are now the same number.
+///
+/// # What the counting includes
+///
+/// **Spanning reads only.** A read that ran out inside the tract names no length, so it is on no
+/// grid and in no denominator (spec §8) — it is not in the merge's support rows at all.
+///
+/// **A sample with no spanning reads is not asked**, rather than counted as periodic. Counting it
+/// as periodic would make one silent sample enough to save every locus, and a silent sample is
+/// exactly what a tract too long for a read to span produces. A locus where **no** sample has a
+/// spanning read is periodic by default: there is nothing to judge it on, and refusing it would be
+/// a verdict about coverage rather than about the tract.
+///
+/// **A homopolymer can never be off the grid**, since every difference is a whole number of
+/// one-base units. That falls out of the arithmetic rather than needing production's explicit
+/// short-circuit.
+///
+/// # Panics
+///
+/// On an empty allele table, and on a sample's rows out of ascending allele order.
+pub(super) fn locus_is_periodic(
+    observation: &CohortObservation,
+    motif: &Motif,
+    max_off_grid_share: MaxOffGridShare,
+) -> bool {
+    assert!(
+        !observation.alleles.is_empty(),
+        "a cohort locus always holds at least its reference allele, and the repeat tract at {} \
+         holds none",
+        observation.region
+    );
+    let period = motif.period();
+    let reference_len = observation.alleles[0].len();
+    let mut any_sample_judged = false;
+
+    for sample in &observation.per_sample {
+        let spanning_reads = super::compared_reads_of(sample);
+        if spanning_reads == 0 {
+            continue;
+        }
+        any_sample_judged = true;
+        let mut off_grid_reads = 0_u32;
+        for rows in super::one_run_per_allele(sample, observation.region) {
+            let length = observation.alleles[rows[0].allele].len();
+            if !length.abs_diff(reference_len).is_multiple_of(period) {
+                let pooled_reads = rows.iter().fold(0_u32, |total, row| {
+                    total.saturating_add(row.support.num_reads)
+                });
+                off_grid_reads = off_grid_reads.saturating_add(pooled_reads);
+            }
+        }
+        if f64::from(off_grid_reads) <= max_off_grid_share.get() * f64::from(spanning_reads) {
+            return true;
+        }
+    }
+    // Nobody had a spanning read to judge, so there is no evidence the tract is not a tract.
+    !any_sample_judged
+}
+
+/// **Narrow one repeat tract's allele table to the tract sequences worth calling over**
+/// (spec §4, §5, §7) — the entry point, and the repeat-tract sibling of
+/// [`select_generic`](super::generic::select_generic).
+///
+/// **Four passes over the locus, in this order**, because each needs the one before: fold the
+/// rows into per-allele summaries; build the ladder over them; nominate rungs per sample and union
+/// them; then admit the sequences on nominated rungs that cleared the bar, apply the cap and fill
+/// the leftover.
+///
+/// **The periodicity verdict runs first of all**, and a tract that fails it returns the reference
+/// tract alone with [`SelectionVerdict::NotPeriodic`] — a usable table rather than a refusal, so
+/// what the run does with such a locus stays emission's decision (spec §7). Its leftover is one
+/// zeroed entry per covering sample: nothing was cut by the cap, so no sample is uncallable for
+/// that reason, and the tract likelihood does not read the pool at all (spec §8).
+///
+/// # Panics
+///
+/// On a cohort observation that is not a repeat tract. Which path a locus takes is decided by its
+/// kind at the driver's dispatch, so reaching here with a `Generic` or bundle locus is a routing
+/// bug, and the alternative — scoring a SNP against a stutter model — is a confident wrong answer
+/// rather than a crash.
+pub(super) fn select_ssr(
+    observation: &CohortObservation,
+    config: &SsrSelectionConfig,
+    scratch: &mut SelectionScratch,
+) -> LocusSelection {
+    let LocusKind::Ssr(detail) = &observation.kind else {
+        panic!(
+            "the repeat-tract path was handed a {:?} locus at {}: which path a locus takes is \
+             decided by its kind at the dispatch, and scoring one kind against the other's model \
+             is a confident wrong answer rather than a failure",
+            observation.kind, observation.region
+        );
+    };
+
+    if !locus_is_periodic(observation, &detail.motif, config.max_off_grid_share) {
+        return reference_tract_alone(observation, detail, SelectionVerdict::NotPeriodic);
+    }
+
+    summarise_alleles(observation, config.shared.min_allele_support, scratch);
+    build_ladder(observation, &detail.motif, scratch);
+    promote_rungs_for_cohort(observation, config, scratch);
+    admit_promoted_sequences(observation, detail, config, scratch)
+}
+
+/// A table holding the reference tract and nothing else, under `verdict` — what a tract this path
+/// declines to narrow still yields.
+fn reference_tract_alone(
+    observation: &CohortObservation,
+    detail: &SsrDetail,
+    verdict: SelectionVerdict,
+) -> LocusSelection {
+    let alleles = CandidateAlleles::new(
+        observation.alleles[0].clone(),
+        LocusKind::Ssr(detail.clone()),
+    );
+    let mut remap = AlleleRemap::with_all_dropped(observation.alleles.len());
+    remap.admit(0, AlleleId::REFERENCE);
+    let covering_samples = observation.per_sample.len();
+    LocusSelection::new(
+        alleles,
+        verdict,
+        vec![super::UnmatchedSupport::default(); covering_samples],
+        remap,
+        covering_samples,
+    )
 }
 
 #[cfg(test)]
@@ -2293,6 +2464,250 @@ mod tests {
                 b"ATATATAT".to_vec()
             ],
             "the reference first, then the merge's indices 1 and 2 in that order"
+        );
+    }
+
+    // ---- D2: the periodicity verdict, and the entry point ----
+
+    /// A tract locus of `alleles` covered by `per_sample`, carrying `motif`.
+    fn tract_of(
+        alleles: &[&[u8]],
+        motif: &[u8],
+        per_sample: Vec<SampleSupport>,
+    ) -> CohortObservation {
+        let mut observation = locus_of(alleles, per_sample);
+        observation.kind = LocusKind::Ssr(detail_of(motif));
+        observation
+    }
+
+    /// Narrow `observation` through the entry point, at the shipped defaults but with the bar
+    /// spelled out so a handful of reads can decide it.
+    fn selected(observation: &CohortObservation, ploidy: u8) -> LocusSelection {
+        let rule = support_rule_of(2, 0.0);
+        let copies = Ploidy::try_new(ploidy).expect("at least one copy");
+        let config = SsrSelectionConfig {
+            shared: CandidateSelectionConfig {
+                min_allele_support: rule,
+                ..SsrSelectionConfig::at_ploidy(copies).shared
+            },
+            ..SsrSelectionConfig::at_ploidy(copies)
+        };
+        select_ssr(observation, &config, &mut SelectionScratch::new())
+    }
+
+    /// **A tract whose reads are all a whole number of units from the reference is periodic,
+    /// whatever their lengths in bases.**
+    ///
+    /// The reference here is 49 bases — an `AT` repeat with one extra base in it, which is what a
+    /// length-changing interruption leaves behind and what the catalog admits at purity 0.816.
+    /// Every read sits at 49, 51 or 47 bases, all an even number of bases from the reference and
+    /// none of them an even number of bases from zero. **Anchored on zero this locus is entirely
+    /// off the grid and refused**; anchored on the reference it is periodic, which is the whole of
+    /// the owner's decision of 2026-09-02.
+    #[test]
+    fn a_tract_at_an_odd_reference_length_is_periodic_about_its_own_reference() {
+        let reference = [b"AT".repeat(20), b"G".to_vec(), b"AT".repeat(4)].concat();
+        let shorter = [b"AT".repeat(19), b"G".to_vec(), b"AT".repeat(4)].concat();
+        let longer = [b"AT".repeat(21), b"G".to_vec(), b"AT".repeat(4)].concat();
+        assert_eq!(reference.len(), 49, "the measured tract, 49 bases");
+        let observation = tract_of(
+            &[&reference, &shorter, &longer],
+            b"AT",
+            vec![sample_showing(
+                0,
+                vec![row(0, 20, -20.0), row(1, 20, -20.0), row(2, 20, -20.0)],
+            )],
+        );
+        assert!(locus_is_periodic(
+            &observation,
+            &Motif::new(b"AT").expect("a two-base motif"),
+            MaxOffGridShare::DEFAULT
+        ));
+        assert_ne!(
+            selected(&observation, 2).verdict(),
+            SelectionVerdict::NotPeriodic
+        );
+    }
+
+    /// A tract whose reads mostly sit at lengths the motif cannot explain is refused, and the
+    /// refusal still yields a table: the reference tract alone.
+    #[test]
+    fn a_tract_whose_reads_are_off_the_motif_grid_is_refused_but_still_yields_the_reference() {
+        let observation = tract_of(
+            &[b"ATATATATAT", b"ATATATATATA", b"ATATATATATAAA"],
+            b"AT",
+            vec![sample_showing(
+                0,
+                vec![row(0, 1, -1.0), row(1, 20, -20.0), row(2, 20, -20.0)],
+            )],
+        );
+        let selection = selected(&observation, 2);
+        assert_eq!(selection.verdict(), SelectionVerdict::NotPeriodic);
+        assert_eq!(admitted_bases(&selection), vec![b"ATATATATAT".to_vec()]);
+        assert_eq!(
+            selection.unmatched().len(),
+            1,
+            "one zeroed leftover per covering sample"
+        );
+        assert!(!selection.unmatched()[0].genotype_must_be_missing());
+    }
+
+    /// **One periodic sample saves a locus every other sample fails.**
+    ///
+    /// Two samples of forty reads each: the first is entirely off the grid, the second entirely
+    /// on it. The verdict is the cohort's, and it takes one sample to carry it — the same shape as
+    /// the support bar, and for the same reason.
+    #[test]
+    fn one_periodic_sample_saves_a_locus_every_other_sample_fails() {
+        let alleles: [&[u8]; 3] = [b"ATATATATAT", b"ATATATATATA", b"ATATATATATAT"];
+        let all_off = tract_of(
+            &alleles,
+            b"AT",
+            vec![sample_showing(0, vec![row(1, 40, -40.0)])],
+        );
+        assert_eq!(
+            selected(&all_off, 2).verdict(),
+            SelectionVerdict::NotPeriodic
+        );
+
+        let one_on = tract_of(
+            &alleles,
+            b"AT",
+            vec![
+                sample_showing(0, vec![row(1, 40, -40.0)]),
+                sample_showing(1, vec![row(2, 40, -40.0)]),
+            ],
+        );
+        assert_ne!(
+            selected(&one_on, 2).verdict(),
+            SelectionVerdict::NotPeriodic,
+            "the second sample is wholly on the grid, and that is enough"
+        );
+    }
+
+    /// **One read in ten off the grid is allowed; more is not** — the share, at the boundary.
+    ///
+    /// Forty reads a sample: four off the grid is exactly a tenth and passes, five does not.
+    #[test]
+    fn the_off_grid_share_decides_at_one_read_in_ten() {
+        let alleles: [&[u8]; 2] = [b"ATATATATAT", b"ATATATATATA"];
+        let at_the_share = tract_of(
+            &alleles,
+            b"AT",
+            vec![sample_showing(0, vec![row(0, 36, -36.0), row(1, 4, -4.0)])],
+        );
+        assert!(locus_is_periodic(
+            &at_the_share,
+            &Motif::new(b"AT").expect("a two-base motif"),
+            MaxOffGridShare::DEFAULT
+        ));
+
+        let above_it = tract_of(
+            &alleles,
+            b"AT",
+            vec![sample_showing(0, vec![row(0, 35, -35.0), row(1, 5, -5.0)])],
+        );
+        assert!(!locus_is_periodic(
+            &above_it,
+            &Motif::new(b"AT").expect("a two-base motif"),
+            MaxOffGridShare::DEFAULT
+        ));
+    }
+
+    /// **A homopolymer can never be off the grid**, because every difference is a whole number of
+    /// one-base units. Production short-circuits period 1 explicitly; here it falls out of the
+    /// arithmetic, so this test is what says the arithmetic really does it.
+    #[test]
+    fn a_homopolymer_is_always_periodic() {
+        let observation = tract_of(
+            &[b"AAAAA", b"AAAAAA", b"AAA"],
+            b"A",
+            vec![sample_showing(
+                0,
+                vec![row(0, 1, -1.0), row(1, 20, -20.0), row(2, 20, -20.0)],
+            )],
+        );
+        assert!(locus_is_periodic(
+            &observation,
+            &Motif::new(b"A").expect("a one-base motif"),
+            MaxOffGridShare::DEFAULT
+        ));
+    }
+
+    /// **A sample with no spanning reads is not asked**, rather than counted as periodic.
+    ///
+    /// A tract too long for a read to span produces exactly such a sample, and counting it as
+    /// periodic would make one of them enough to save every locus in the run — the verdict would
+    /// become unreachable wherever coverage is thin, which is where it is most needed.
+    #[test]
+    fn a_sample_with_no_spanning_reads_does_not_vote() {
+        let observation = tract_of(
+            &[b"ATATATATAT", b"ATATATATATA"],
+            b"AT",
+            vec![
+                sample_with_only_partials(0, 40),
+                sample_showing(1, vec![row(1, 40, -40.0)]),
+            ],
+        );
+        assert!(
+            !locus_is_periodic(
+                &observation,
+                &Motif::new(b"AT").expect("a two-base motif"),
+                MaxOffGridShare::DEFAULT
+            ),
+            "the silent sample does not carry the locus for the one that is off the grid"
+        );
+    }
+
+    /// A locus **no** sample spanned is periodic by default: there is nothing to judge it on, and
+    /// refusing it would be a verdict about coverage rather than about the tract.
+    #[test]
+    fn a_locus_no_sample_spanned_is_periodic_by_default() {
+        let observation = tract_of(
+            &[b"ATATATATAT"],
+            b"AT",
+            vec![sample_with_only_partials(0, 40)],
+        );
+        assert!(locus_is_periodic(
+            &observation,
+            &Motif::new(b"AT").expect("a two-base motif"),
+            MaxOffGridShare::DEFAULT
+        ));
+    }
+
+    /// The entry point refuses a locus of the wrong kind rather than scoring a SNP against a
+    /// stutter model.
+    #[test]
+    #[should_panic(expected = "the repeat-tract path was handed a")]
+    fn the_entry_point_refuses_a_locus_that_is_not_a_tract() {
+        let observation = locus_of(
+            &[b"A", b"C"],
+            vec![sample_showing(0, vec![row(0, 9, -9.0), row(1, 9, -9.0)])],
+        );
+        selected(&observation, 2);
+    }
+
+    /// End to end through the entry point: a heterozygote whose two copies are the same length
+    /// spelled differently comes back with both spellings and the reference.
+    #[test]
+    fn the_entry_point_offers_both_spellings_of_one_length() {
+        let observation = tract_of(
+            &[b"ATATATAT", b"ATATATATAT", b"ATATATATAG"],
+            b"AT",
+            vec![sample_showing(
+                0,
+                vec![row(0, 4, -4.0), row(1, 9, -9.0), row(2, 9, -9.0)],
+            )],
+        );
+        let selection = selected(&observation, 2);
+        assert_eq!(selection.verdict(), SelectionVerdict::Selected);
+        assert_eq!(
+            admitted_bases(&selection),
+            vec![
+                b"ATATATAT".to_vec(),
+                b"ATATATATAT".to_vec(),
+                b"ATATATATAG".to_vec()
+            ]
         );
     }
 }

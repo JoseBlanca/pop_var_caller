@@ -19,7 +19,22 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **every spelling of a promoted repeat length now stands
+> - **Last completed task (2026-09-02):** **ng can narrow a repeat tract end to end — and the
+> refusal rule's grid got moved onto the reference tract**
+> (step D2 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_selection_d2_2026-09-02.md)).
+> A stretch the catalog called a repeat tract, whose reads sit at lengths the motif cannot explain,
+> is refused — the reference tract alone comes back and no other length is called there. **What
+> "cannot explain" is measured from was the decision**, and the design documents' own words turned
+> out to refuse real tracts: they anchor the grid at zero, and a tract with a length-changing
+> interruption late enough to clear the catalog's purity floor has a reference length that is not a
+> whole number of motif copies, so every read at its own reference length would count as
+> unexplained. Measured on the catalog's own trimming and purity code: 49 bases of an `AT` repeat
+> with one extra base 40 bases in, purity 0.816, admitted by the catalog and refused by the caller.
+> The grid is now anchored on the reference tract's length — a property of the locus rather than of
+> the reads, so it cannot move with depth — and both design documents carry a dated note saying so.
+>
+> - **Earlier (2026-09-02):** **every spelling of a promoted repeat length now stands
 > on its own reads**
 > (step D1 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
 > [report](doc/devel/reports/implementations/ng_ssr_selection_d1_2026-09-02.md)).
@@ -2946,10 +2961,10 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 ---
 
 #### Candidate alleles at a repeat tract (step 6, STR path) — the ladder, nomination, admission
-- **Status:** fixes-applied — **Milestones B and C complete and D1 landed**: the ladder, the
-  per-sample length histogram, nomination with its `±1` rescue and union, and the admission of the
-  sequences on a promoted rung are all proven on hand-built loci. D2, the periodicity verdict, is
-  next, and it carries a decision for the owner (below). Branch
+- **Status:** fixes-applied — **Milestones B and C complete, D1 and D2 landed**: `select_ssr`
+  exists and narrows a tract end to end on hand-built loci — the ladder, the histogram, nomination
+  with its `±1` rescue and union, sequence admission, and the periodicity verdict. D3, the repeat
+  counts the genotype prior takes, is what remains before Checkpoint D. Branch
   `ng-ssr-calling-loop`, worktree `../pop_var_caller-ssr-calling-loop`, from `main` at `55f9c7de`.
   Runs beside `ng-ssr-observations`, which owns the merge, the walker and the run report; this
   branch owns `calling/` and edits none of those.
@@ -2967,7 +2982,22 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   [B2](doc/devel/reports/implementations/ng_ssr_selection_b2_2026-09-02.md),
   [C1](doc/devel/reports/implementations/ng_ssr_selection_c1_2026-09-02.md),
   [C2](doc/devel/reports/implementations/ng_ssr_selection_c2_2026-09-02.md),
-  [D1](doc/devel/reports/implementations/ng_ssr_selection_d1_2026-09-02.md).
+  [D1](doc/devel/reports/implementations/ng_ssr_selection_d1_2026-09-02.md),
+  [D2](doc/devel/reports/implementations/ng_ssr_selection_d2_2026-09-02.md).
+- **⚑ D2 amended the spec and the architecture, on the owner's ruling of 2026-09-02: the
+  periodicity grid is anchored on the reference tract's length, not on the ladder's mode.** Read
+  literally, "a whole number of motif units from the ladder's mode" anchors at **zero** — the mode
+  is a repeat count, so its base length cancels out — and that refuses a real class of tract. The
+  catalog trims a tract to whole motif copies **at both ends**, but a length-changing interruption
+  inside puts the ends out of phase, so the tract's own reference length is then not a multiple of
+  the period; measured through the catalog's own `minimal_trim` and `recompute_purity`, 49 bases of
+  an `AT` repeat with one extra base 40 bases in scores **purity 0.816** and clears the 0.8 floor.
+  Every read at that tract's reference length is off a zero-anchored grid, so the locus would be
+  refused and never called. The reference length was preferred to production's anchor — the
+  commonest observed length — because it is a property of the locus rather than of the reads, so it
+  cannot move with depth, and because it is the quantity the genotype prior was re-indexed onto on
+  2026-08-27. **Reverting to the documents' rule now fails a test**, which is what makes the
+  amendment enforceable.
 - **C1 done (nomination, per sample) — and the test spec §13 calls the one production cannot pass
   is green.** A sample with 150 reads at ten repeats and 150 at eleven promotes **both**: nothing
   here reads a neighbour, where production nominates a length only if its reads exceed both

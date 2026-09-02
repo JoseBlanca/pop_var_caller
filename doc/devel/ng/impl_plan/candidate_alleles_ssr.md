@@ -186,7 +186,7 @@ privileged representative, no recurrence term. Then the shared cap and truncatio
 leftover, and the reference tract admitted first and exempt from both.
 *Depends:* C2. *Source:* arch §3.2; spec §5.
 
-**D2. Periodicity, per sample. — own commit, do not bundle.**  ☐
+**D2. Periodicity, per sample. — own commit, do not bundle.**  ✅
 A sample is non-periodic when more than `max_off_grid_share` of its spanning reads sit at a length
 that is not a whole number of motif units from the ladder's mode; the locus is `NotPeriodic` only
 when **no** sample is periodic. A `NotPeriodic` locus returns the reference tract alone, that
