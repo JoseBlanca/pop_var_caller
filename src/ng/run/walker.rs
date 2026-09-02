@@ -48,6 +48,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use crate::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
+use crate::ng::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
 use crate::ng::locus_generation::{
     GeneratorSet, GeneratorSlot, LocusCounts, LocusGenerationError, SampleLocusObservations,
     SampleLocusObservationsIterator, UnhandledReason,
@@ -57,6 +58,7 @@ use crate::ng::read::input::reference::OpenReference;
 use crate::ng::read::left_align::LeftAlignPreparer;
 use crate::ng::ref_seq::WindowedRefSeq;
 use crate::ng::region_typing::TypedRegion;
+use crate::ng::types::Bp;
 
 use super::cohort_merge::observation_cache::ObservationSource;
 use super::{RunError, Segmentation, WalkProgress};
@@ -1572,22 +1574,35 @@ impl std::fmt::Debug for WalkReference {
     }
 }
 
-/// The generator set a run builds today: **the generic path filled, and both repeat-tract slots
-/// refused as unbuilt**.
+/// The generator set a run builds today: **the SNP/indel path and the repeat-tract path both
+/// filled, and the bundle slot refused as unbuilt**.
 ///
 /// A segment routed to an unfilled slot emits no locus and is counted against
 /// `unhandled_not_implemented`, which is how a run says *this ground was analysed and this
 /// caller cannot yet speak for it* — as opposed to the satellite's permanent refusal. **So a run
-/// over ground with repeat tracts in it is not wrong, it is short**, and the tally says by how
-/// much. Candidate selection at a tract is specified and unbuilt
-/// (`doc/devel/ng/impl_plan/candidate_alleles_ssr.md`); this is where the second slot is filled
-/// when it exists.
+/// over ground with repeat bundles in it is not wrong, it is short**, and the tally says by how
+/// much. A bundle is a cluster of repeats none of which has a clean flank, and it has neither a
+/// generator nor a design (`run_ssr_observations.md` §8); this is where its slot is filled if
+/// one is ever written.
+///
+/// **The tract slot was refused as unbuilt until 2026-09-02 and the generator was not** — it
+/// was built, tested and reachable only from the development tools. Filling it makes a run
+/// *produce* tract observations; what the calling loop does with one is
+/// `calling_loop_ssr.md`'s, and until that lands the driver sets each aside and counts it.
+///
+/// **The aligner is not a knob here**: the delimiter bake-off is recorded and a run gets its
+/// winner, the unit-robust algorithm 4u.
+///
+/// **`bundle_threshold` comes from the criteria the ground was cut with**, not from a constant,
+/// so the flank the generator fetches is checked against the radius the classification actually
+/// used. No flag moves it today, and if one is added this is the second place it has to reach.
 ///
 /// One set per sample: a locus generator carries state across segments and cannot be shared
 /// (spec §8).
 pub(crate) fn generic_path_generators(
     reference: &WalkReference,
     config: PileupGeneratorConfig,
+    bundle_threshold: Bp,
 ) -> Result<GeneratorSet, RunError> {
     let make_reference = {
         let reference = WalkReference {
@@ -1611,8 +1626,27 @@ pub(crate) fn generic_path_generators(
         config,
     )
     .map_err(|source| RunError::LocusGeneratorSettings { source })?;
+    // **Its own accessors, like the generic generator's**, and for the same reason: the input
+    // layer takes a factory precisely so that no two readers share a window. The two generators
+    // also hold separate cursors on purpose — their regions interleave, and sharing one would
+    // tie their lifetimes together (`locus_generation_ssr.md` §12).
+    let make_tract_reference = {
+        let reference = WalkReference {
+            fasta: reference.fasta.clone(),
+            contigs: Arc::clone(&reference.contigs),
+            index: Arc::clone(&reference.index),
+        };
+        move || reference.accessor()
+    };
+    let tracts = SsrGenerator::with_default_aligner(
+        reference.accessor(),
+        make_tract_reference,
+        SsrGeneratorConfig::default(),
+        bundle_threshold,
+    )
+    .map_err(|source| RunError::TractGeneratorSettings { source })?;
     Ok(GeneratorSet::new(
-        GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
+        GeneratorSlot::Generator(Box::new(tracts)),
         GeneratorSlot::Generator(Box::new(generator)),
         GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
     ))

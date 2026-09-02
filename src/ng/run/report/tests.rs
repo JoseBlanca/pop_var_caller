@@ -91,6 +91,7 @@ fn a_run(
         loci_called_but_not_written,
         loci_too_wide_to_assemble: too_wide,
         loci_with_nobody_to_call: nobody,
+        tract_loci_set_aside: 0,
         walk: CohortWalkTallies {
             per_sample,
             assembly_check: AssemblyCheckOutcome::NothingCouldBeChecked {

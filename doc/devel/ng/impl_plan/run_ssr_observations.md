@@ -153,7 +153,7 @@ failure is silent under-reporting with every number plausible; the oracle is a t
 walks tract ground and asserts non-zero per-group drops where reads were filtered.
 *Depends:* none. *Source:* spec §3.2.
 
-**C2. The slot filled, and the driver's temporary set-aside.**  ☐
+**C2. The slot filled, and the driver's temporary set-aside.**  ✅
 `generic_path_generators` ([`walker.rs:1588`](../../../../src/ng/run/walker.rs)) builds an
 `SsrGenerator` into the `Ssr` slot — unit-robust aligner, `SsrGeneratorConfig::default()`,
 same `WalkReference` accessors as the pileup generator. And the driver, on meeting a

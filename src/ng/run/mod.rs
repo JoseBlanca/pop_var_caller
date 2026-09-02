@@ -187,6 +187,20 @@ pub enum RunError {
         source: crate::ng::locus_generation::pileup::PileupGeneratorConfigError,
     },
 
+    /// The repeat-tract generator's settings contradict the ground's classification.
+    ///
+    /// One cross-config rule, and it is the only way this fires: the flank the generator
+    /// fetches beside a tract must fit inside the radius within which the classification
+    /// bundles two tracts together. A flank wider than that reaches into a neighbour the
+    /// classification had already decided was far enough away.
+    ///
+    /// **The message is the cause's alone**, for the reason above.
+    #[error(transparent)]
+    TractGeneratorSettings {
+        /// Which setting, and why it was refused.
+        source: crate::ng::locus_generation::ssr::SsrGeneratorConfigError,
+    },
+
     /// The parameters were assembled for a different cohort from the one this run opened.
     ///
     /// **A count, not a name.** The assembled parameters carry no sample names — one number
