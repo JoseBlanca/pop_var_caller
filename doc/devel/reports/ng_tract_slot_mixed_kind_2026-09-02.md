@@ -126,3 +126,43 @@ The plan's own C4 asks for byte-identical output at 1–16 threads with the slot
 now holds on a fixture where the tract path fires. It says nothing about this, because a unit
 fixture had no reason to build the shape that breaks it — which is the lesson worth keeping:
 **the defect was found by running the caller on a genome, not by the suite.**
+
+---
+
+## 7. The clip is built, and it costs 90 true indels — measured 2026-09-02
+
+The owner ruled on §4 and the clip is committed: the walk's right bound reaches the
+open-record table, a footprint stops at the region's last base, and the run that aborted now
+finishes. **The unit suite is green at 5,998, and the GIAB benchmark says the clip costs a
+quarter of the caller's indel recall.**
+
+Two runs of the three GIAB samples at 30×, on the same reads and the same catalog, differing
+only in this branch's last two steps:
+
+| state | SNP recall | indel recall | indel TP | indel FN |
+|---|---:|---:|---:|---:|
+| tract slot unfilled (C1) | 0.9743 | **0.9455** | 312 | 18 |
+| tract slot filled, records clipped (C2 + the clip) | 0.9743 | **0.6727** | 222 | 108 |
+
+**SNPs do not move at all** — 2,008 true positives in both, and precision rises slightly, from
+0.9916 to 0.9931. **Indels lose 90 of 312**, and every sample loses: HG002 130 → 92, HG003
+89 → 65, HG004 93 → 65.
+
+**Filling the slot is not what costs them.** Tract ground was uncalled before the slot was
+filled and is uncalled after it, since the driver sets each tract locus aside; the accounting
+moved and the calls did not. What costs them is the clip.
+
+**What I have not established is the mechanism**, and it matters for what to do next. The
+shape that fits: an indel that really belongs to a repeat tract left-aligns to an anchor
+*before* the tract, so its footprint reaches in — and the SNP/indel path was calling it, whole
+and matching the truth set's allele, by reaching into ground it does not own. The clip stops
+that, and the repeat path that should now own the call cannot make one yet. If that is right,
+the loss is temporary in the sense that the tract path will call those loci — but **not
+recoverable in this scoring**, because a deletion split across two loci is two records and the
+truth set holds one.
+
+**So the decision is not settled by the ruling on §4.** The design is right and the clip
+implements it; what is now on the table is whether a quarter of the indel recall may sit on the
+floor between here and the calling loop's dispatch landing, or whether the two have to arrive
+together. The check that would sharpen it is one command more than this table: whether the 90
+lost calls are deletions overlapping a tract's first base.
