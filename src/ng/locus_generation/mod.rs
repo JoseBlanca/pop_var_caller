@@ -27,7 +27,9 @@ use crate::ng::read::input::{IngestError, SampleReads};
 use crate::ng::ref_seq::RefSeqError;
 use crate::ng::region_typing::segment_criteria::{Motif, SsrSegment};
 use crate::ng::region_typing::{RegionKind, TypedRegion};
-use crate::ng::types::{GenomePosition, GenomeRegion, Position, ReadGroupId, SummedLogError};
+use crate::ng::types::{
+    ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId, SummedLogError,
+};
 use crate::pileup_record::ChainId;
 
 /// One sample's locus: the stretch of genome it covers, and what that sample's reads
@@ -61,6 +63,34 @@ pub struct SampleLocusObservations {
 }
 
 impl SampleLocusObservations {
+    /// A record holding nothing, for a pool to hand to a fill site that overwrites every
+    /// field — **G1.**
+    ///
+    /// **Not a meaningful locus, and it never becomes one by accident.** Its region names
+    /// contig 0 at position 0, which no walk emits; the only caller is
+    /// [`RecordPool::take`](crate::ng::locus_generation::pileup::record_pool) when nothing
+    /// has been handed back yet, and every fill site rebuilds the record from an exhaustive
+    /// struct literal before it leaves. It exists so a fill site needs no branch for the
+    /// first locus of a walk.
+    ///
+    /// Deliberately **not** a `Default` impl: `Default` is reachable from anywhere and
+    /// would make an empty record look like a legitimate value to construct.
+    #[must_use]
+    pub(crate) fn empty_shell() -> Self {
+        Self {
+            region: GenomeRegion {
+                contig: ContigId(0),
+                start: Position(0),
+                end: Position(0),
+            },
+            reference_bases: Vec::new(),
+            observations: Vec::new(),
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Generic,
+        }
+    }
+
     /// Read depth at each position of `region`, in order — **derived, not stored**.
     ///
     /// A [`Complete`](ReadWitness::Complete) observation counts its `num_obs` at every
@@ -368,6 +398,30 @@ pub struct SequenceObservation {
 }
 
 impl SequenceObservation {
+    /// An observation holding nothing, for a fill site to overwrite — **G1.**
+    ///
+    /// Its only caller is the record fill in
+    /// [`fast_column`](super::locus_generation::pileup), growing a recycled record's
+    /// observation list when this locus has more observations than the last one did. Like
+    /// [`SampleLocusObservations::empty_shell`], it is not a `Default` impl, because an
+    /// observation of nothing is not a value anything should be able to construct by
+    /// accident.
+    #[must_use]
+    pub(crate) fn empty_shell() -> Self {
+        Self {
+            bases: Vec::new(),
+            read_witness: ReadWitness::Complete,
+            read_group: ReadGroupId(0),
+            num_obs: 0,
+            num_fwd: 0,
+            q_sum: SummedLogError::from_nats(0.0),
+            mapq_sum: 0,
+            mapq_sum_sq: 0,
+            placed_left: 0,
+            chain_ids: Vec::new(),
+        }
+    }
+
     /// Whether these reads showed the reference's own bases over `reference_bases`.
     ///
     /// **The one place the comparison is written** — a byte comparison, which is all it

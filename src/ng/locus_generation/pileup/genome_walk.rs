@@ -734,6 +734,14 @@ struct WalkerState {
     drained_buf: Vec<OpenPileupRecord>,
     /// Reusable buffers for the ordinary-column path — see [`fast_column`](super::fast_column).
     fast_column_buf: FastColumnScratch,
+    /// **Retired locus records, waiting to be filled again — G1.** Scratch like the
+    /// buffers above, and kept across regions for the same reason: the merge hands a
+    /// record back after it has evicted it, and the next region's first locus is filled
+    /// into it rather than allocated. Carried across *chromosomes* too, through
+    /// [`adopting_records`](PileupWalker::adopting_records), which is what the chain-id
+    /// allocator does and for a related reason — a walker is minted per chromosome and a
+    /// pool that died with it would be cold at the start of every one.
+    record_pool: super::record_pool::RecordPool,
     /// **Measurement knob only.** `PVC_FAST_COLUMN=0` sends every column down the general
     /// path, so the two can be A/B-ed inside one binary rather than across two builds — the
     /// only way to alternate runs on a host several other measurements are sharing. Read
@@ -798,6 +806,7 @@ impl WalkerState {
             mate_overlap_buf: MateOverlapScratch::default(),
             drained_buf: Vec::new(),
             fast_column_buf: FastColumnScratch::default(),
+            record_pool: super::record_pool::RecordPool::new(),
             fast_column_enabled: std::env::var_os("PVC_FAST_COLUMN")
                 .is_none_or(|value| value != "0"),
             sealed: None,
@@ -872,6 +881,9 @@ impl WalkerState {
             mate_overlap_buf: _,
             drained_buf: _,
             fast_column_buf: _,
+            // Scratch, and kept for the same reason as the buffers above: a record handed
+            // back during region N is exactly the right shape for region N+1's first locus.
+            record_pool: _,
             // A knob the walker was built with, like `config`.
             fast_column_enabled: _,
             // Region-scoped, and **dropped rather than emitted** — for the reason the open
@@ -1070,6 +1082,7 @@ impl WalkerState {
                 &self.open_records,
                 reference,
                 &mut self.fast_column_buf,
+                &mut self.record_pool,
                 self.config.max_snp_column_depth as usize,
                 may_have_mate_overlap,
             )?

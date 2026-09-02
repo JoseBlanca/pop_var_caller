@@ -121,6 +121,7 @@ mod open_record;
 /// so which reads survive a cap is a fact about the reads and not about the container
 /// that happens to hold them.
 mod read_sampling;
+mod record_pool;
 mod witnessed_ref;
 
 /// Production's own end-to-end suite, copied verbatim and run against the copy —
