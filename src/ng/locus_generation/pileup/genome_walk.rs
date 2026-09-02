@@ -480,7 +480,7 @@ where
         stop_after: u32,
     ) -> Result<(), I::Error> {
         self.reads.move_to_region(region)?;
-        self.state.begin_region();
+        self.state.begin_region(Some(stop_after));
         // Records produced by the region being left and never collected. The per-region
         // walker took them to the grave; so does this.
         self.pending.clear();
@@ -685,6 +685,32 @@ struct Locus {
 struct WalkerState {
     chrom_id: u32,
     walker_pos: u32,
+    /// **The last reference position this walk's region owns**, 1-based inclusive — the
+    /// furthest right an open record's footprint may reach. `None` for a walk that was never
+    /// pointed at a region, which owns the whole source and has nothing to be bounded by.
+    ///
+    /// **A record must not reach past it, and until 2026-09-02 one could.** A deletion's
+    /// footprint is its anchor plus the bases it removes, so a read carrying one anchored on a
+    /// region's last base opened a record spanning into whatever came next. At a contig's end
+    /// that is impossible — no read aligns past the last base, so the *data* forbids it — but a
+    /// region's end has no such protection: the reference simply continues and the fetch
+    /// succeeds.
+    ///
+    /// **What it cost, and it was invisible until repeat tracts got a generator.** A run cuts
+    /// its ground into typed regions and a generic region's neighbour is always a *typed* one —
+    /// the classification merges an unbroken generic run into a single region, so two generic
+    /// regions are never adjacent (measured over 400 kb of GRCh38 chr1: 457 typed regions, 229
+    /// generic, zero adjacent pairs). So a footprint reaching past a generic region's end
+    /// always reached into a repeat tract, a bundle or a satellite. While nothing produced
+    /// observations there it was harmless; once the tract generator was wired in, the two kinds
+    /// of observation chained into one cohort locus and the merge refused it — 177 times across
+    /// three GIAB samples at 30×.
+    ///
+    /// **A deletion crossing the edge is now two alleles in two loci** — the part outside the
+    /// tract on the SNP/indel path, the part inside on the repeat path — which the owner ruled
+    /// on 2026-09-02 is a consequence of the design rather than a loss: *"the STR tract is only
+    /// the tandem repeat"*, and the ground either side of it is somebody else's to explain.
+    region_end: Option<u32>,
     /// `None` until the first read is admitted. Tracks the
     /// chromosome the walker has been processing so the
     /// flush-on-chromosome-change logic knows whether to flush
@@ -768,6 +794,8 @@ impl WalkerState {
         Self {
             chrom_id: 0,
             walker_pos: 1,
+            // A walker points at no region until it is told to; `move_to_region` sets it.
+            region_end: None,
             last_admitted_chrom_id: None,
             last_admitted_locus: None,
             active_reads: ActiveReads::new(),
@@ -850,10 +878,14 @@ impl WalkerState {
     ///
     /// The destructure is exhaustive on purpose: a field added to this struct is a compile
     /// error here until someone decides which side of that line it falls on.
-    fn begin_region(&mut self) {
+    fn begin_region(&mut self, bound: Option<u32>) {
         let Self {
             chrom_id,
             walker_pos,
+            // Replaced outright: the bound belongs to the region being entered, and a walk
+            // that kept the last region's would let a footprint reach past this one's end
+            // wherever the two differ.
+            region_end,
             last_admitted_chrom_id,
             last_admitted_locus,
             active_reads,
@@ -884,6 +916,7 @@ impl WalkerState {
             // `positions_short_of_cap` would blame this region for the last one's losses.
             ceiling_losses_by_end,
         } = self;
+        *region_end = bound;
         *sealed = None;
         ceiling_losses_by_end.clear();
 
@@ -1358,6 +1391,7 @@ impl WalkerState {
             &self.truncated_read_ids_buf,
             &self.active_reads,
             reference,
+            self.region_end,
         )?;
         self.summary.record_widen_events += outcome.widen_count;
 

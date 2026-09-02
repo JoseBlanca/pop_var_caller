@@ -2392,6 +2392,29 @@ pub(super) fn find_allele_index(alleles: &[OpenAllele], seq: &[u8]) -> Option<us
 /// affected at this step are not re-folded — those reads were
 /// folded at the walker step where the record was created or
 /// widened, and folding again here would double-count.
+/// A record's footprint end, stopped at the region's last base.
+///
+/// `region_end` is 1-based inclusive and the ends here are exclusive, so the bound is
+/// `region_end + 1`. An event beginning past the bound is left alone: it belongs to the halo,
+/// and clamping it would give it zero width instead of the width its own reads say.
+fn clamped_to_region(event_start: u32, event_end: u32, region_end: Option<u32>) -> u32 {
+    let Some(region_end) = region_end else {
+        return event_end;
+    };
+    let bound = region_end.saturating_add(1);
+    if event_start >= bound {
+        return event_end;
+    }
+    event_end.min(bound)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one step of the walk, and every argument is a different thing the walk holds — \
+              the table, where it stands, whose chromosome, this position's contributors, what \
+              the cap took, the open reads, the reference, and the region's right bound. A \
+              bundle would be a second type naming the walker's own fields back to it"
+)]
 pub(super) fn process_position(
     open: &mut OpenPileupRecordTable,
     walker_pos: u32,
@@ -2400,6 +2423,8 @@ pub(super) fn process_position(
     truncated_by_cap: &[u32],
     active_reads: &ActiveReads,
     reference: &dyn RefSeq,
+    // The last reference position the walk's region owns — see `WalkerState::region_end`.
+    region_end: Option<u32>,
 ) -> Result<ProcessOutcome, WalkerError> {
     let mut affected: Vec<u32> = Vec::new();
     let mut widen_count: u64 = 0;
@@ -2413,7 +2438,25 @@ pub(super) fn process_position(
             // multi-Gbp chromosomes a raw `+` would wrap and the
             // `find_overlapping` range lookup would search the
             // wrong region.
-            let event_end = event_start.saturating_add(ev.footprint_span());
+            //
+            // **Stopped at the region's last base**, so a footprint
+            // never reaches into ground this walk was not given —
+            // which for a generic region is always ground of another
+            // *kind* (see `WalkerState::region_end`). A deletion
+            // anchored on the last base is emitted as the deletion of
+            // the bases inside the region, and whatever removes the
+            // rest is the next region's path to explain.
+            //
+            // **Only where the event starts inside the region.** Past
+            // it, the record belongs to the halo, is built at whatever
+            // width its own reads say, and is discarded by the
+            // generator's own clamp on the way out; clamping it here
+            // would make it zero-width instead.
+            let event_end = clamped_to_region(
+                event_start,
+                event_start.saturating_add(ev.footprint_span()),
+                region_end,
+            );
 
             let key = if let Some(k) = open.find_overlapping(event_start, event_end) {
                 // PANIC-FREE: `find_overlapping` returned `Some(k)`
@@ -2431,7 +2474,11 @@ pub(super) fn process_position(
                 }
                 k
             } else {
-                let new = open.open_new(chrom_id, event_start, ev.footprint_span(), reference)?;
+                // The clamped width, not the event's own: a record opened at the event's
+                // footprint and never widened again would keep the reach the clamp exists to
+                // remove.
+                let span = event_end.saturating_sub(event_start);
+                let new = open.open_new(chrom_id, event_start, span, reference)?;
                 new.pos
             };
             if !affected.contains(&key) {
@@ -3974,8 +4021,17 @@ mod tests {
         let mut open = OpenPileupRecordTable::new();
         for pos in [5u32, 7] {
             let contributors = contributors_at(&active, pos);
-            process_position(&mut open, pos, 0, &contributors, &[], &active, &reference)
-                .expect("the fixture walks cleanly");
+            process_position(
+                &mut open,
+                pos,
+                0,
+                &contributors,
+                &[],
+                &active,
+                &reference,
+                None,
+            )
+            .expect("the fixture walks cleanly");
         }
         (open, active)
     }
@@ -4027,7 +4083,17 @@ mod tests {
         let (active, _ids) = admitted(widen_fixture_reads());
         let mut open = OpenPileupRecordTable::new();
         let contributors = contributors_at(&active, 5);
-        process_position(&mut open, 5, 0, &contributors, &[], &active, &reference).expect("opens");
+        process_position(
+            &mut open,
+            5,
+            0,
+            &contributors,
+            &[],
+            &active,
+            &reference,
+            None,
+        )
+        .expect("opens");
 
         let opener_id = read_id_of(&active, "opener");
         // A quality the walk decided and the events cannot reproduce.
@@ -4044,7 +4110,17 @@ mod tests {
         }
 
         let contributors = contributors_at(&active, 7);
-        process_position(&mut open, 7, 0, &contributors, &[], &active, &reference).expect("widens");
+        process_position(
+            &mut open,
+            7,
+            0,
+            &contributors,
+            &[],
+            &active,
+            &reference,
+            None,
+        )
+        .expect("widens");
 
         let record = open.records.get(&5).expect("the record at 5");
         assert_eq!(
@@ -4311,7 +4387,17 @@ mod tests {
         let mut open = OpenPileupRecordTable::new();
 
         let contributors = contributors_at(&active, 5);
-        process_position(&mut open, 5, 0, &contributors, &[], &active, &reference).expect("opens");
+        process_position(
+            &mut open,
+            5,
+            0,
+            &contributors,
+            &[],
+            &active,
+            &reference,
+            None,
+        )
+        .expect("opens");
         let shortie_id = read_id_of(&active, "shortie");
         let narrow = {
             let record = open.records.get(&5).expect("the record at 5");
@@ -4338,7 +4424,17 @@ mod tests {
         };
 
         let contributors = contributors_at(&active, 7);
-        process_position(&mut open, 7, 0, &contributors, &[], &active, &reference).expect("widens");
+        process_position(
+            &mut open,
+            7,
+            0,
+            &contributors,
+            &[],
+            &active,
+            &reference,
+            None,
+        )
+        .expect("widens");
 
         let record = open.records.get(&5).expect("the record at 5");
         assert_eq!(
@@ -4401,8 +4497,17 @@ mod tests {
         let mut open = OpenPileupRecordTable::new();
         for pos in [5u32, 7] {
             let contributors = contributors_at(&active, pos);
-            process_position(&mut open, pos, 0, &contributors, &[], &active, &reference)
-                .expect("the fixture walks cleanly");
+            process_position(
+                &mut open,
+                pos,
+                0,
+                &contributors,
+                &[],
+                &active,
+                &reference,
+                None,
+            )
+            .expect("the fixture walks cleanly");
         }
 
         let record = open.records.remove(&5).expect("the record at 5");
@@ -4457,8 +4562,17 @@ mod tests {
         ]);
         let mut open = OpenPileupRecordTable::new();
         let contributors = contributors_at(&active, 7);
-        process_position(&mut open, 7, 0, &contributors, &[], &active, &reference)
-            .expect("the fixture walks cleanly");
+        process_position(
+            &mut open,
+            7,
+            0,
+            &contributors,
+            &[],
+            &active,
+            &reference,
+            None,
+        )
+        .expect("the fixture walks cleanly");
         (open, active)
     }
 
@@ -4531,7 +4645,17 @@ mod tests {
         let (active, _ids) = admitted(vec![first, second]);
         let mut open = OpenPileupRecordTable::new();
         let contributors = contributors_at(&active, 5);
-        process_position(&mut open, 5, 0, &contributors, &[], &active, &reference).expect("walks");
+        process_position(
+            &mut open,
+            5,
+            0,
+            &contributors,
+            &[],
+            &active,
+            &reference,
+            None,
+        )
+        .expect("walks");
 
         let record = open.records.get(&5).expect("the record at 5");
         let observations = record.keyed_observations(record.footprint_end_exclusive());
@@ -4645,8 +4769,17 @@ mod tests {
         );
         let mut open = OpenPileupRecordTable::new();
         let contributors = contributors_at(&active, 5);
-        process_position(&mut open, 5, 0, &contributors, &[], &active, &reference)
-            .expect("the fixture walks cleanly");
+        process_position(
+            &mut open,
+            5,
+            0,
+            &contributors,
+            &[],
+            &active,
+            &reference,
+            None,
+        )
+        .expect("the fixture walks cleanly");
 
         let record = open.records.remove(&5).expect("the record at 5");
         let observations = record.keyed_observations(record.footprint_end_exclusive());
@@ -4690,7 +4823,17 @@ mod tests {
         )]);
         let mut open = OpenPileupRecordTable::new();
         let contributors = contributors_at(&active, 5);
-        process_position(&mut open, 5, 0, &contributors, &[], &active, &reference).expect("walks");
+        process_position(
+            &mut open,
+            5,
+            0,
+            &contributors,
+            &[],
+            &active,
+            &reference,
+            None,
+        )
+        .expect("walks");
         let (one_base, _) = open.records.remove(&5).expect("the record at 5").finalise();
         assert_eq!(one_base.region.start.get(), 5);
         assert_eq!(
@@ -4827,6 +4970,7 @@ mod tests {
                 &truncated,
                 &active,
                 &reference,
+                None,
             )
             .expect("the fixture walks cleanly");
         }
@@ -4899,6 +5043,7 @@ mod tests {
                 std::slice::from_ref(&holey_id),
                 &active,
                 &reference,
+                None,
             )
             .expect("the fixture walks cleanly");
         }
@@ -5026,8 +5171,17 @@ mod tests {
         // walker would not stop for it either.
         for pos in [5u32, 6, 8, 9] {
             let contributors = contributors_at(&active, pos);
-            process_position(&mut open, pos, 0, &contributors, &[], &active, &reference)
-                .expect("the fixture walks cleanly");
+            process_position(
+                &mut open,
+                pos,
+                0,
+                &contributors,
+                &[],
+                &active,
+                &reference,
+                None,
+            )
+            .expect("the fixture walks cleanly");
         }
 
         let record = open.records.remove(&5).expect("the record at 5");
@@ -5110,7 +5264,17 @@ mod tests {
         let mut open = OpenPileupRecordTable::new();
 
         let contributors = contributors_at(&active, 5);
-        process_position(&mut open, 5, 0, &contributors, &[], &active, &reference).expect("opens");
+        process_position(
+            &mut open,
+            5,
+            0,
+            &contributors,
+            &[],
+            &active,
+            &reference,
+            None,
+        )
+        .expect("opens");
         let holed_id = read_id_of(&active, "holed");
         assert!(
             open.records
@@ -5127,7 +5291,17 @@ mod tests {
             "`holed` must be inside its own deletion at 7, or the fold loop reaches it \
              and `refold_live_reads` is not the path under test"
         );
-        process_position(&mut open, 7, 0, &contributors, &[], &active, &reference).expect("widens");
+        process_position(
+            &mut open,
+            7,
+            0,
+            &contributors,
+            &[],
+            &active,
+            &reference,
+            None,
+        )
+        .expect("widens");
 
         let record = open.records.remove(&5).expect("the record at 5");
         assert_eq!(
@@ -5189,8 +5363,17 @@ mod tests {
         let mut open = OpenPileupRecordTable::new();
         for pos in [5u32, 7] {
             let contributors = contributors_at(&active, pos);
-            process_position(&mut open, pos, 0, &contributors, &[], &active, &reference)
-                .expect("the fixture walks cleanly");
+            process_position(
+                &mut open,
+                pos,
+                0,
+                &contributors,
+                &[],
+                &active,
+                &reference,
+                None,
+            )
+            .expect("the fixture walks cleanly");
         }
 
         let record = open.records.get(&5).expect("the record at 5");
