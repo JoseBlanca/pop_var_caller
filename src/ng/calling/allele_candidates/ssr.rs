@@ -15,8 +15,9 @@
 //!
 //! **Under construction, in the order `doc/devel/ng/impl_plan/candidate_alleles_ssr.md` sets.**
 //! This file holds the ladder (its step B1), the path's configuration and the per-sample length
-//! histogram (B2). Nomination, admission, periodicity and the entry point `select_ssr` are the
-//! steps after those, and nothing outside this module calls anything here yet.
+//! histogram (B2), and the per-sample nomination of repeat counts (C1). The `±1` rescue and the
+//! cohort's union, admission, periodicity and the entry point `select_ssr` are the steps after
+//! those, and nothing outside this module calls anything here yet.
 //!
 //! **Which is why a non-test build expects everything here to be dead.** The expectation rather
 //! than an `allow`, so that the first real caller — `select_ssr`, which the steps after this one
@@ -319,6 +320,7 @@ pub(super) fn build_ladder(
         ranked_table_indices: _,
         ladder,
         sample_reads_per_rung: _,
+        promoted_rungs: _,
     } = scratch;
     // **Asserted empty rather than emptied here.** `reset_for` already clears the ladder, and the
     // fold calls it, so a `clear()` on this line would be a second owner of one rule — and being
@@ -568,6 +570,88 @@ pub(super) fn fill_sample_reads_per_rung(
         "every support row's allele is on some rung, so a sample's reads over the rungs are its \
          compared reads at {locus} — and nomination divides by the second while counting the first"
     );
+}
+
+/// **Which repeat counts one sample puts forward** — the rungs whose reads cleared the shared
+/// support rule for this sample, cut to the best `ploidy` of them (spec §4; arch §3.1).
+///
+/// `promoted` comes back holding **rung indices, ascending**, at most `ploidy` of them.
+///
+/// # The rule is the shared one, asked of a rung
+///
+/// A repeat count is nominated when this sample's reads at it reach
+/// `max(2 reads, ceil(share × this sample's spanning reads))` — [`MinAltReads::reached_by`], the
+/// same predicate the merge asks of a sample's non-reference reads and the ordinary path asks of
+/// one sequence, with the rung's read total as the numerator. **Not a second predicate**: a second
+/// spelling of one rule is how two rules become different rules, which is why neither the
+/// numerator nor the denominator is computed here.
+///
+/// **The denominator is the sample's own spanning reads**, so nothing about which other samples
+/// are in the run can change what this one nominates. That is what makes a cohort of one and a
+/// cohort of a thousand give this sample the same answer.
+///
+/// # Top `ploidy`, ties to the shorter length
+///
+/// A diploid sample carries two copies, so at most two lengths are real and the rest are stutter
+/// and error; `ploidy` comes from the run's parameters, so a triploid region promotes three. Ties
+/// break toward the **shorter** repeat count, which is production's rule
+/// ([`candidate_set.rs:231-238`](../../../../src/ssr/cohort/candidate_set.rs)) and is kept for
+/// determinism rather than for a measured reason: at a heterozygote whose two lengths carry
+/// exactly equal reads the answer must not depend on the order the rungs were walked, since the
+/// run's output has to be byte-identical at any worker count.
+///
+/// # What is not ported: production's clear-peak test
+///
+/// Production nominates a length only if its reads exceed **both** neighbouring lengths by more
+/// than three (`is_clear_peak`, [`rung_ladder.rs:274`](../../../../src/ssr/cohort/rung_ladder.rs)).
+/// A heterozygote whose two copies differ by one repeat is then invisible: neither length is a
+/// peak, because each has the other beside it. Spec §4.1 measures what that costs — both alleles
+/// offered at 33–78% of such tracts against 97–100% for this rule, and with **fewer** candidates,
+/// not more. Nothing here reads a neighbour.
+///
+/// # Panics
+///
+/// On a `sample_reads_per_rung` that is not this ladder's — one entry per rung is what makes a
+/// rung index mean the same thing in both. A histogram of another locus's width would nominate
+/// lengths this tract does not hold.
+pub(super) fn promote_rungs_for_sample(
+    sample_reads_per_rung: &[u32],
+    compared_reads: u32,
+    config: &SsrSelectionConfig,
+    ladder: &RepeatLadder,
+    promoted: &mut Vec<u32>,
+) {
+    assert_eq!(
+        sample_reads_per_rung.len(),
+        ladder.rung_count(),
+        "the histogram runs parallel to the ladder's rungs, one entry each"
+    );
+    promoted.clear();
+    promoted.extend(
+        (0..ladder.rung_count())
+            .filter(|&rung| {
+                config
+                    .shared
+                    .min_allele_support
+                    .reached_by(sample_reads_per_rung[rung], compared_reads)
+            })
+            .map(|rung| u32::try_from(rung).expect("a tract with fewer than four billion rungs")),
+    );
+
+    // Two orders in turn, as the ordinary path's cap does: rank to decide *which* rungs survive,
+    // then back to ascending rung order, because that is the order everything downstream reads
+    // them in and it is the merge's own order underneath.
+    let copies = usize::from(config.ploidy.get());
+    if promoted.len() > copies {
+        promoted.sort_unstable_by_key(|&rung| {
+            (
+                std::cmp::Reverse(sample_reads_per_rung[rung as usize]),
+                rung,
+            )
+        });
+        promoted.truncate(copies);
+        promoted.sort_unstable();
+    }
 }
 
 #[cfg(test)]
@@ -1213,5 +1297,284 @@ mod tests {
         let stray = sample_showing(0, vec![row(5, 3, -3.0)]);
         let mut histogram = Vec::new();
         fill_sample_reads_per_rung(&stray, observation.region, &scratch.ladder, &mut histogram);
+    }
+
+    // ---- C1: which repeat counts one sample puts forward ----
+
+    /// Nominate for one sample of `observation`, at `ploidy` copies and a bar of `floor` reads or
+    /// `share` of that sample's own spanning reads.
+    ///
+    /// It runs the whole chain the shipped path will — fold, ladder, histogram, nomination —
+    /// rather than hand-building a histogram, so a test cannot pass against numbers no ladder
+    /// produced.
+    fn promoted_for(
+        observation: &CohortObservation,
+        sample: usize,
+        ploidy: u8,
+        floor: u32,
+        share: f64,
+    ) -> Vec<u32> {
+        let rule = support_rule_of(floor, share);
+        let mut scratch = SelectionScratch::new();
+        summarise_alleles(observation, rule, &mut scratch);
+        build_ladder(observation, &dinucleotide(), &mut scratch);
+
+        let config = SsrSelectionConfig {
+            shared: CandidateSelectionConfig {
+                min_allele_support: rule,
+                ..SsrSelectionConfig::at_ploidy(diploid()).shared
+            },
+            ploidy: Ploidy::try_new(ploidy).expect("at least one copy"),
+            ..SsrSelectionConfig::at_ploidy(diploid())
+        };
+        let SelectionScratch {
+            ladder,
+            sample_reads_per_rung,
+            promoted_rungs,
+            ..
+        } = &mut scratch;
+        let support = &observation.per_sample[sample];
+        fill_sample_reads_per_rung(support, observation.region, ladder, sample_reads_per_rung);
+        promote_rungs_for_sample(
+            sample_reads_per_rung,
+            super::super::compared_reads_of(support),
+            &config,
+            ladder,
+            promoted_rungs,
+        );
+        promoted_rungs.clone()
+    }
+
+    /// **The test spec §13 names as the one production cannot pass: a sample with 150 reads at
+    /// ten repeats and 150 at eleven nominates both.**
+    ///
+    /// Production requires a length's reads to exceed *both* neighbours by more than three before
+    /// it is nominated at all, so at a heterozygote whose two copies differ by one repeat neither
+    /// length is a peak — each has the other beside it — and the sample resolves nothing. Spec
+    /// §4.1 measures the cost at 33–78% of such tracts against 97–100%. This asserts the
+    /// difference from production rather than a value, so it stays meaningful when the constants
+    /// move.
+    #[test]
+    fn a_sample_with_equal_reads_at_adjacent_lengths_nominates_both() {
+        let observation = locus_of(
+            &[b"ATATATATATATATATATAT", b"ATATATATATATATATATATAT"],
+            vec![sample_showing(
+                0,
+                vec![row(0, 150, -150.0), row(1, 150, -150.0)],
+            )],
+        );
+        assert_eq!(
+            promoted_for(&observation, 0, 2, 2, 0.05),
+            vec![0, 1],
+            "ten repeats and eleven, both promoted — no neighbour is consulted"
+        );
+    }
+
+    /// **Only the best `ploidy` rungs survive.** A diploid sample carries two copies, so a third
+    /// length is stutter or error however many reads it has relative to the bar.
+    #[test]
+    fn a_diploid_sample_promotes_its_two_best_supported_rungs() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT", b"ATATATATAT", b"ATATATATATAT"],
+            vec![sample_showing(
+                0,
+                vec![
+                    row(0, 4, -4.0),
+                    row(1, 30, -30.0),
+                    row(2, 40, -40.0),
+                    row(3, 6, -6.0),
+                ],
+            )],
+        );
+        assert_eq!(
+            promoted_for(&observation, 0, 2, 2, 0.0),
+            vec![1, 2],
+            "thirty reads at four repeats and forty at five, not the four- and six-read rungs — \
+             and **in ascending rung order**, where the cut ranked them 2 then 1"
+        );
+    }
+
+    /// The same locus at three copies promotes three rungs — the ploidy is the run's, and it is
+    /// the only thing that changes here.
+    #[test]
+    fn a_triploid_sample_promotes_three() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT", b"ATATATATAT", b"ATATATATATAT"],
+            vec![sample_showing(
+                0,
+                vec![
+                    row(0, 4, -4.0),
+                    row(1, 30, -30.0),
+                    row(2, 40, -40.0),
+                    row(3, 6, -6.0),
+                ],
+            )],
+        );
+        assert_eq!(promoted_for(&observation, 0, 3, 2, 0.0), vec![1, 2, 3]);
+    }
+
+    /// **A tie between two rungs goes to the shorter repeat count.**
+    ///
+    /// Both middle rungs carry twenty reads and only one fits under a haploid sample's single
+    /// copy. The rule is production's, and it is kept for determinism rather than for a measured
+    /// reason: the run's output must be byte-identical at any worker count, so no tie may fall
+    /// through to the order the rungs were walked.
+    #[test]
+    fn a_tie_in_support_goes_to_the_shorter_repeat_count() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT"],
+            vec![sample_showing(
+                0,
+                vec![row(0, 20, -20.0), row(1, 20, -20.0)],
+            )],
+        );
+        assert_eq!(
+            promoted_for(&observation, 0, 1, 2, 0.0),
+            vec![0],
+            "rung 0 is three repeats, rung 1 is four"
+        );
+    }
+
+    /// A rung whose reads do not reach the bar is not nominated, even where the sample has copies
+    /// to spare — the bar and the `ploidy` cut are two different questions.
+    #[test]
+    fn a_rung_below_the_bar_is_not_nominated_even_with_copies_to_spare() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT"],
+            vec![sample_showing(0, vec![row(0, 9, -9.0), row(1, 1, -1.0)])],
+        );
+        assert_eq!(
+            promoted_for(&observation, 0, 2, 2, 0.0),
+            vec![0],
+            "one read against a floor of two, and the second copy simply goes unused"
+        );
+    }
+
+    /// **The share is of this sample's own spanning reads.** Two reads out of ten clear a bar of
+    /// 20 in 100; the same two out of a hundred do not.
+    ///
+    /// The floor is set to 1 so that the share is what decides — at the shipped floor of two reads
+    /// both cases would pass on the floor alone and the test would assert nothing.
+    #[test]
+    fn the_bar_is_a_share_of_the_samples_own_spanning_reads() {
+        let shallow = locus_of(
+            &[b"ATATAT", b"ATATATAT"],
+            vec![sample_showing(0, vec![row(0, 8, -8.0), row(1, 2, -2.0)])],
+        );
+        assert_eq!(
+            promoted_for(&shallow, 0, 2, 1, 0.20),
+            vec![0, 1],
+            "two reads in ten is a fifth of them"
+        );
+
+        let deep = locus_of(
+            &[b"ATATAT", b"ATATATAT"],
+            vec![sample_showing(0, vec![row(0, 98, -98.0), row(1, 2, -2.0)])],
+        );
+        assert_eq!(
+            promoted_for(&deep, 0, 2, 1, 0.20),
+            vec![0],
+            "the same two reads in a hundred are not, and the bar asks for twenty"
+        );
+    }
+
+    /// **What one sample nominates does not depend on who else is in the run.**
+    ///
+    /// The same sample, alone and beside a second sample that is deep at a length it never showed.
+    /// The denominator is the sample's own spanning reads and no term of the bar reads the cohort,
+    /// so a run of one and a run of a thousand give this sample the same answer — the property
+    /// that has to hold across the cohort-size range.
+    #[test]
+    fn a_samples_nomination_is_the_same_alone_and_in_a_cohort() {
+        let alone = locus_of(
+            &[b"ATATAT", b"ATATATAT", b"ATATATATAT"],
+            vec![sample_showing(0, vec![row(0, 5, -5.0), row(1, 5, -5.0)])],
+        );
+        let in_cohort = locus_of(
+            &[b"ATATAT", b"ATATATAT", b"ATATATATAT"],
+            vec![
+                sample_showing(0, vec![row(0, 5, -5.0), row(1, 5, -5.0)]),
+                sample_showing(1, vec![row(2, 400, -400.0)]),
+            ],
+        );
+        assert_eq!(promoted_for(&alone, 0, 2, 2, 0.10), vec![0, 1]);
+        assert_eq!(
+            promoted_for(&in_cohort, 0, 2, 2, 0.10),
+            vec![0, 1],
+            "the neighbour's four hundred reads at a third length change nothing here"
+        );
+    }
+
+    /// A sample whose reads all stopped inside the tract nominates nothing, and does not divide by
+    /// its zero denominator on the way.
+    #[test]
+    fn a_sample_with_only_partials_nominates_nothing() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT"],
+            vec![
+                sample_showing(0, vec![row(0, 5, -5.0), row(1, 5, -5.0)]),
+                sample_with_only_partials(1, 40),
+            ],
+        );
+        assert!(promoted_for(&observation, 1, 2, 2, 0.10).is_empty());
+    }
+
+    /// **Nominating for a second sample leaves none of the first's rungs**, since the buffer is
+    /// one per worker and walked sample by sample.
+    ///
+    /// The first sample here promotes two rungs and the second promotes one, so a buffer that was
+    /// appended to rather than emptied would hand the second sample a length it never showed —
+    /// and the union C2 builds would then carry it for the whole cohort.
+    #[test]
+    fn nominating_for_a_second_sample_leaves_none_of_the_firsts_rungs() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT", b"ATATATATAT"],
+            vec![
+                sample_showing(0, vec![row(0, 9, -9.0), row(1, 9, -9.0)]),
+                sample_showing(1, vec![row(2, 9, -9.0)]),
+            ],
+        );
+        let config = SsrSelectionConfig::at_ploidy(diploid());
+        let mut scratch = ladder_over(&observation);
+        let SelectionScratch {
+            ladder,
+            sample_reads_per_rung,
+            promoted_rungs,
+            ..
+        } = &mut scratch;
+
+        for (sample, expected) in [(0_usize, vec![0_u32, 1]), (1, vec![2])] {
+            let support = &observation.per_sample[sample];
+            fill_sample_reads_per_rung(support, observation.region, ladder, sample_reads_per_rung);
+            promote_rungs_for_sample(
+                sample_reads_per_rung,
+                super::super::compared_reads_of(support),
+                &config,
+                ladder,
+                promoted_rungs,
+            );
+            assert_eq!(*promoted_rungs, expected);
+        }
+    }
+
+    /// A histogram of another locus's width is refused rather than nominating lengths this tract
+    /// does not hold.
+    #[test]
+    #[should_panic(expected = "one entry each")]
+    fn a_histogram_that_is_not_this_ladders_is_refused() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT"],
+            vec![sample_showing(0, vec![row(0, 5, -5.0), row(1, 5, -5.0)])],
+        );
+        let mut scratch = ladder_over(&observation);
+        let mut promoted = Vec::new();
+        promote_rungs_for_sample(
+            &[3, 3, 3],
+            9,
+            &SsrSelectionConfig::at_ploidy(diploid()),
+            &scratch.ladder,
+            &mut promoted,
+        );
+        scratch.ladder.clear();
     }
 }

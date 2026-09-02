@@ -113,7 +113,7 @@ built without a field `CohortObservation` does not carry.*
 > parallel with the STR loop plan and merges this change to `main` first. Do not build it
 > twice: when that checkpoint has merged, flip A1 here and start at Milestone B.
 
-**A1. `ClosedLocus` and `CohortObservation` carry `LocusKind`.**  ☐
+**A1. `ClosedLocus` and `CohortObservation` carry `LocusKind`.**  ✅
 The closer already has the kind in scope where it builds a `ClosedLocus`
 ([`close.rs:713-721`](../../../../src/ng/run/cohort_merge/close.rs)) and drops it; carry it
 through, and have `CohortObservation::over` copy it onto the assembled locus. **The clone is one
@@ -155,7 +155,7 @@ histogram over spanning reads. `SelectionScratch` gains both buffers.
 
 ### Milestone C — nomination
 
-**C1. The per-sample bar over rungs, and top-`ploidy`.**  ☐
+**C1. The per-sample bar over rungs, and top-`ploidy`.**  ✅
 A repeat count is nominated when the sample's reads at it clear the **shared** support rule against
 that sample's spanning reads — `MinAltReads::reached_by` with the rung's read total as the
 numerator, not a second predicate. The top `ploidy` by support are promoted, ties to the shorter

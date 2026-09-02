@@ -618,6 +618,14 @@ pub struct SelectionScratch {
     /// question and keeps only the rungs it promoted, so no two samples' histograms are ever
     /// needed at once. Empty on the ordinary path, which never fills it.
     sample_reads_per_rung: Vec<u32>,
+    /// **The rung indices one sample put forward** — refilled per sample, like the histogram it is
+    /// derived from.
+    ///
+    /// It holds two orders in turn, exactly as [`ranked_table_indices`](Self::ranked_table_indices)
+    /// does: while the top-`ploidy` cut chooses, the rungs are ordered by the sample's reads at
+    /// them; once it has chosen, they are sorted back into ascending rung order, which is the
+    /// order everything downstream reads them in.
+    promoted_rungs: Vec<u32>,
 }
 
 impl SelectionScratch {
@@ -649,6 +657,7 @@ impl SelectionScratch {
             ranked_table_indices,
             ladder,
             sample_reads_per_rung,
+            promoted_rungs,
         } = self;
         per_allele.clear();
         per_allele.resize(table_len, AlleleSummary::default());
@@ -656,6 +665,7 @@ impl SelectionScratch {
         ranked_table_indices.reserve(table_len);
         ladder.clear();
         sample_reads_per_rung.clear();
+        promoted_rungs.clear();
     }
 
     /// How many alleles the buffers are currently sized for.

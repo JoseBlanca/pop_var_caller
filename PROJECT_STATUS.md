@@ -19,7 +19,20 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **the tract path's settings and the per-sample length
+> - **Last completed task (2026-09-02):** **each sample now says which repeat lengths it carries**
+> (step C1 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_selection_c1_2026-09-02.md)).
+> A sample puts a repeat length forward when its own reads at that length reach the same bar the
+> merge and the SNP/indel path already use — two reads, or a tenth of that sample's reads across
+> the tract, whichever is more — and the best two of those survive, three in a triploid region,
+> ties going to the shorter length. **The existing STR caller cannot make this call at the case
+> that matters most**: it requires a length's reads to exceed both neighbouring lengths by more
+> than three, so at a heterozygote whose two copies differ by one repeat neither length is a peak
+> and the sample resolves nothing. ng reads no neighbour, and a sample with 150 reads at ten
+> repeats and 150 at eleven now puts both forward — the case the spec measures the old rule losing
+> two tracts in three to.
+>
+> - **Earlier (2026-09-02):** **the tract path's settings and the per-sample length
 > histogram — Milestone B of ng's own STR candidate selection is complete**
 > (step B2 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
 > [report](doc/devel/reports/implementations/ng_ssr_selection_b2_2026-09-02.md)).
@@ -2909,8 +2922,9 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 ---
 
 #### Candidate alleles at a repeat tract (step 6, STR path) — the ladder, nomination, admission
-- **Status:** fixes-applied — **Milestone B complete, at Checkpoint B**: the ladder and the
-  per-sample length histogram are proven on hand-built loci, with nothing nominated yet. Branch
+- **Status:** fixes-applied — **Milestone B complete and C1 landed**: the ladder, the per-sample
+  length histogram and each sample's own nomination of repeat counts are proven on hand-built
+  loci. C2, the `±1` rescue and the cohort's union, is next. Branch
   `ng-ssr-calling-loop`, worktree `../pop_var_caller-ssr-calling-loop`, from `main` at `55f9c7de`.
   Runs beside `ng-ssr-observations`, which owns the merge, the walker and the run report; this
   branch owns `calling/` and edits none of those.
@@ -2925,7 +2939,17 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   [mod.rs](src/ng/calling/allele_candidates/mod.rs). 25 tests; the module's filter goes
   93 → 118 passing.
 - **Impl reports:** [B1](doc/devel/reports/implementations/ng_ssr_selection_b1_2026-09-02.md),
-  [B2](doc/devel/reports/implementations/ng_ssr_selection_b2_2026-09-02.md).
+  [B2](doc/devel/reports/implementations/ng_ssr_selection_b2_2026-09-02.md),
+  [C1](doc/devel/reports/implementations/ng_ssr_selection_c1_2026-09-02.md).
+- **C1 done (nomination, per sample) — and the test spec §13 calls the one production cannot pass
+  is green.** A sample with 150 reads at ten repeats and 150 at eleven promotes **both**: nothing
+  here reads a neighbour, where production nominates a length only if its reads exceed both
+  neighbours by more than three and so resolves nothing at a heterozygote whose copies differ by
+  one repeat. Two range properties are asserted rather than argued: the same sample alone and
+  beside a neighbour carrying 400 reads at a third length nominates the same two rungs, because no
+  term of the bar reads the cohort; and a sample whose reads all stopped inside the tract nominates
+  nothing without dividing by its zero denominator, because the floor is tested first by integer
+  comparison.
 - **B2 done (the settings and the histogram) — and one departure that moves a number Milestone E
   checks against.** The tract path's support share is the ordinary path's **10 in 100**, where spec
   §5 writes 5. **The spec's own reason for its number points at the other one**: it sets 5 *"so
