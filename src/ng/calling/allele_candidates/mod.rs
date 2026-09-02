@@ -31,6 +31,7 @@
 //! whether a sample keeps its genotype (§5), so the two words are never interchangeable.
 
 pub mod generic;
+pub mod ssr;
 
 use crate::ng::calling::CandidateAlleles;
 use crate::ng::run::cohort_merge::build::SupportedAllele;
@@ -601,6 +602,15 @@ pub struct SelectionScratch {
     /// alleles survive and the merge decides what order they appear in — which is the order
     /// that reaches the VCF's `ALT` column.
     ranked_table_indices: Vec<u32>,
+    /// **The repeat-tract path's grouping of the table by repeat count** — empty on the ordinary
+    /// path, which never builds one.
+    ///
+    /// Here rather than in a scratch of its own because one worker runs both paths, locus by
+    /// locus, and a second per-worker buffer set would be allocated for whichever path that
+    /// worker's next locus is not (arch `candidate_alleles_ssr.md` §4). A generic locus costs it
+    /// nothing but the clear in [`reset_for`](Self::reset_for), and the
+    /// capacity the last tract reserved is what the next tract reuses.
+    ladder: ssr::RepeatLadder,
 }
 
 impl SelectionScratch {
@@ -630,11 +640,13 @@ impl SelectionScratch {
         let Self {
             per_allele,
             ranked_table_indices,
+            ladder,
         } = self;
         per_allele.clear();
         per_allele.resize(table_len, AlleleSummary::default());
         ranked_table_indices.clear();
         ranked_table_indices.reserve(table_len);
+        ladder.clear();
     }
 
     /// How many alleles the buffers are currently sized for.
@@ -1521,10 +1533,29 @@ mod tests {
     /// table, and requires every entry to be the default — a `resize` without a `clear`
     /// would grow the buffer and leave the written row in place at index 0, which is the
     /// mistake this method exists to prevent and which no downstream test could see.
+    ///
+    /// **The repeat-tract ladder is checked here too**, and it is the buffer this test has to
+    /// carry rather than `ssr.rs`: the tract path's own [`build_ladder`](ssr::build_ladder)
+    /// empties the ladder before it fills it, so a `reset_for` that forgot the ladder would
+    /// still leave every tract correct and only a *reader between a reset and a build* would
+    /// see the previous locus's rungs. Nothing else can fail if this line goes.
     #[test]
     fn resetting_the_scratch_leaves_no_value_from_an_earlier_locus() {
         let mut scratch = SelectionScratch::new();
-        scratch.reset_for(2);
+        let tract = fixtures::locus_of(
+            &[b"ATATAT", b"ATATATAT"],
+            vec![fixtures::sample_showing(
+                0,
+                vec![fixtures::row(0, 3, -3.0), fixtures::row(1, 5, -5.0)],
+            )],
+        );
+        summarise_alleles(&tract, fixtures::support_rule_of(2, 0.0), &mut scratch);
+        ssr::build_ladder(
+            &tract,
+            &crate::ng::types::Motif::new(b"AT").expect("a two-base motif"),
+            &mut scratch,
+        );
+        assert_eq!(scratch.ladder.rung_count(), 2, "the ladder is filled");
         scratch.per_allele[0] = AlleleSummary {
             best_within_sample_share: 0.9,
             samples_clearing_the_bar: 7,
@@ -1543,6 +1574,11 @@ mod tests {
             "a reset locus must not see the previous locus's fold"
         );
         assert!(scratch.ranked_table_indices.is_empty());
+        assert_eq!(
+            scratch.ladder.rung_count(),
+            0,
+            "a reset locus must not see the previous tract's rungs"
+        );
     }
 
     /// Resetting to a *smaller* table shrinks the visible buffer.

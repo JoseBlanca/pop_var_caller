@@ -129,7 +129,7 @@ now name a kind.
 
 ### Milestone B — the ladder
 
-**B1. `RepeatLadder`, keyed by repeat count. — own commit, do not bundle.**  ☐
+**B1. `RepeatLadder`, keyed by repeat count. — own commit, do not bundle.**  ✅
 Built once per locus from the merge's allele table and `SsrDetail::motif`: each rung holds the
 merge-table indices of the sequences at that repeat count, ascending, and the ladder holds the
 cohort's modal repeat count — most-supported rung, ties to the shorter, and **not the reference's

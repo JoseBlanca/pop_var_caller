@@ -19,7 +19,27 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **routing on ng's own floors cut the truth variants
+> - **Last completed task (2026-09-02):** **the repeat ladder — the first piece of ng's own STR
+> candidate selection**
+> (step B1 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md), run on
+> the [STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md)'s branch;
+> [report](doc/devel/reports/implementations/ng_ssr_selection_b1_2026-09-02.md)).
+> A repeat tract's alleles are ordered where a SNP's are not, and the ladder is that ordering made
+> explicit: every sequence in the merge's table placed on the rung named by its length divided by
+> the motif's period, floored — the same integer the genotype prior must agree with — with the
+> rungs ascending and the cohort's most-supported rung recorded. Nomination, admission and the
+> periodicity test all read it. **It did not wait for the merge's `LocusKind` field**, which the
+> parallel observations plan delivered later the same day: the tract's motif is an argument, which
+> the architecture had already chosen as the shape that survives the merge fix, so the whole
+> selector was built and proven on hand-built loci before that field existed. **Five mutations run, and
+> the one that survived was the finding**: `build_ladder`'s own `clear()` could not fail, because
+> the fold's `reset_for` already empties the ladder — so it is now an assertion that the ladder is
+> empty, and appending two loci's sequences onto one ladder is a named panic instead of silence.
+>
+> - **Earlier (2026-09-02):** **a cohort observation now states what kind of
+> ground it sits on** — step A1 of the
+>
+> - **Earlier (2026-09-02):** **routing on ng's own floors cut the truth variants
 > this caller misses from 195 to 71, and the caller was not touched to do it** — step
 > B4, which completes Milestone B of the
 > [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
@@ -2866,6 +2886,55 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **Three obligations handed forward to the steps that can discharge them**, each recorded in the doc comment of the thing that creates it: `select_generic` must assert a cap of at least 2 (C2), until the cap's shape question is settled; `Truncated { dropped: u16 }` over an uncapped `usize` merge table needs a saturating conversion (C2); and spec §8 names three caller bugs that must assert, of which Milestone A lands one — a non-finite `q_sum` and a sample with rows but no reads belong to B1 and C3.
   - **The two parallelism invariants are documented and half-enforced.** `AlleleRemap`'s is structural — the length is fixed at construction and both accessors assert in release. `LocusSelection`'s is checked in its constructor, which is what `select_generic` and `select_ssr` will call, but the fields remain `pub` per arch §2.4 so a struct literal can still bypass it.
   - **⚠ `cargo clippy --all-targets --all-features` is red on `main`** with 14 errors in five benches and examples, none in `src/` and none touched by this plan. This step is gated on `--lib --tests` plus `cargo doc --lib --no-deps`.
+
+---
+
+#### Candidate alleles at a repeat tract (step 6, STR path) — the ladder, nomination, admission
+- **Status:** in-flight — **B1 implemented, reviewed and fixes applied; Milestone B is not
+  complete** (B2, the config and the per-sample length histogram, is next). Branch
+  `ng-ssr-calling-loop`, worktree `../pop_var_caller-ssr-calling-loop`, from `main` at `55f9c7de`.
+  Runs beside `ng-ssr-observations`, which owns the merge, the walker and the run report; this
+  branch owns `calling/` and edits none of those.
+- **Plans:** [calling_loop_ssr.md](doc/devel/ng/impl_plan/calling_loop_ssr.md) is the driving plan;
+  its Milestones A and B execute [candidate_alleles_ssr.md](doc/devel/ng/impl_plan/candidate_alleles_ssr.md)
+  B–E, whose checkboxes are the live record. **Spec:** [candidate_alleles_ssr.md](doc/devel/ng/spec/candidate_alleles_ssr.md);
+  **Arch:** [candidate_alleles_ssr.md](doc/devel/ng/arch/candidate_alleles_ssr.md).
+- **Code:** [src/ng/calling/allele_candidates/ssr.rs](src/ng/calling/allele_candidates/ssr.rs) —
+  `RepeatLadder` and `build_ladder`; the `ladder` buffer on the shared `SelectionScratch` in
+  [mod.rs](src/ng/calling/allele_candidates/mod.rs). 14 tests; the module's filter goes
+  93 → 107 passing.
+- **Impl reports:** [B1](doc/devel/reports/implementations/ng_ssr_selection_b1_2026-09-02.md).
+- **B1 done (the ladder) — and the mutation that mattered was the one that survived.** Five
+  deliberate defects; four were caught by the step's own tests, and deleting `build_ladder`'s
+  `ladder.clear()` broke nothing, because `reset_for` already empties the ladder and the fold
+  calls it. A line with no failing state is a second owner of one rule, so it is now an assertion
+  that the ladder is empty — which turns a silent append of two loci's sequences onto one ladder
+  into a named panic.
+- **Open:**
+  - **⚑ B1's stated dependency on the merge's `LocusKind` did not bind, and the real one arrives
+    later.** `build_ladder` takes the motif as an argument, which arch §1 already chose as the
+    shape that survives the merge fix. What waits for the parallel plan's Milestone A is the call
+    site — `select_ssr` reading the motif off `CohortObservation::kind` — so the selection work
+    can run to its own Checkpoint D before that field exists.
+  - **⚑ `rung_of_repeat_count` is not production's `occupied` test, by one rung.** The merge
+    interns the reference at index 0 whether or not a read landed on it, so the reference's rung
+    can exist carrying zero reads, where production's rescue asks `cohort_support(length) > 0`.
+    **C2, which ports the `±1` rescue, must ask this accessor together with `cohort_reads_at`**;
+    `the_reference_rung_exists_with_no_reads_on_it` pins the difference.
+  - **The `(repeat count, table index)` sort key is a determinism guarantee no fixture can
+    check.** It makes the order total so it cannot depend on the sort's stability, which is what
+    byte-identical output at any worker count needs — but at three alleles an unstable sort
+    reorders nothing, so the guarantee is structural rather than test-covered.
+  - **B2 inherits two settled constants that are not yet written:**
+    `DEFAULT_MAX_CANDIDATE_ALLELES_SSR = 32` against the ordinary path's six (owner, 2026-08-24),
+    and the owner's recommendation of **10 in 100 on the repeat-tract path where the SNP/indel
+    path keeps 5** — both recorded under *Candidate alleles (step 6)* above, both landing in
+    `ssr.rs`, which this plan owns.
+  - **⚠ `cargo test --all-targets --all-features` exits non-zero on this tree for a pre-existing
+    reason** — the index-out-of-bounds in `benches/psp_writer_perf.rs:386` already recorded
+    against the calling loop. The step's gate is the library and test targets plus `cargo fmt`,
+    `cargo clippy --all-targets --all-features -- -D warnings` and `cargo doc --no-deps`
+    (26 unresolved links, unchanged from the pre-change tree, none in these files).
 
 ---
 
