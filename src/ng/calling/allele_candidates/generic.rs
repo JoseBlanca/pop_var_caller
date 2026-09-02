@@ -101,9 +101,16 @@ pub fn select_generic(
     );
     summarise_alleles(observation, config.min_allele_support, scratch);
 
+    // `ladder` is named and ignored rather than covered by a `..`, so that a buffer added to the
+    // scratch later is a compile error here — the same rule `SelectionScratch::reset_for` states.
+    // The ordinary path builds no ladder: a locus's alleles are an unordered set here.
     let SelectionScratch {
         per_allele,
         ranked_table_indices,
+        ladder: _,
+        sample_reads_per_rung: _,
+        promoted_rungs: _,
+        rung_is_promoted: _,
     } = scratch;
     // Every alternative some sample's reads earned, in the merge table's own order — which is
     // also the order they are admitted in, so nothing has to sort it. Step C2's cap is what

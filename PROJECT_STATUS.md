@@ -19,7 +19,115 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **routing on ng's own floors cut the truth variants
+> - **Last completed task (2026-09-02):** **ng's own repeat-tract candidate selection is built,
+> and proven on hand-built loci — Checkpoint D**
+> (step D3 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_selection_d3_2026-09-02.md)).
+> Given a repeat tract's merged evidence, `select_ssr` now returns the tract sequences worth
+> calling over and, beside them, each one's repeat count — the integer the genotype prior indexes
+> its length spectrum by. **That integer has exactly one producer in the calling path**: the
+> ladder keys its rungs through it and the prior's slice is filled through it, so the two cannot
+> come to disagree about which length an allele sits at, which would put a candidate's prior mass
+> on the wrong length with nothing failing. **What the module does not return is the cohort's
+> commonest repeat length**, which the plan asks for: the prior stopped taking it in August, and
+> the periodicity grid — its last reader anywhere — was moved onto the reference tract's length
+> the same day, so it would be a field with no reader. The ladder still computes it.
+> **Still unrun in this plan: the differential on real data** — reproducing the existing caller's
+> candidate set on tomato with its three replaced rules switched in, and the measured HG002
+> improvement with them switched out.
+>
+> - **Earlier (2026-09-02):** **ng can narrow a repeat tract end to end — and the
+> refusal rule's grid got moved onto the reference tract**
+> (step D2 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_selection_d2_2026-09-02.md)).
+> A stretch the catalog called a repeat tract, whose reads sit at lengths the motif cannot explain,
+> is refused — the reference tract alone comes back and no other length is called there. **What
+> "cannot explain" is measured from was the decision**, and the design documents' own words turned
+> out to refuse real tracts: they anchor the grid at zero, and a tract with a length-changing
+> interruption late enough to clear the catalog's purity floor has a reference length that is not a
+> whole number of motif copies, so every read at its own reference length would count as
+> unexplained. Measured on the catalog's own trimming and purity code: 49 bases of an `AT` repeat
+> with one extra base 40 bases in, purity 0.816, admitted by the catalog and refused by the caller.
+> The grid is now anchored on the reference tract's length — a property of the locus rather than of
+> the reads, so it cannot move with depth — and both design documents carry a dated note saying so.
+>
+> - **Earlier (2026-09-02):** **every spelling of a promoted repeat length now stands
+> on its own reads**
+> (step D1 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_selection_d1_2026-09-02.md)).
+> A promoted length says the length is worth calling over; it does not say which sequences at that
+> length are. Each one now faces the same support bar the SNP/indel path asks, with no privileged
+> representative — where the existing STR caller promotes the length's best-supported sequence
+> unconditionally and makes any sibling clear three further gates, one of which demands **three
+> distinct samples with no cohort-size clamp**, so below three samples a second spelling can never
+> be promoted at all. The reference tract is admitted first and asked nothing.
+>
+> - **Earlier (2026-09-02):** **nomination is complete — ng decides which repeat
+> lengths a tract is worth calling over**
+> (step C2 and Checkpoint C of
+> [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_selection_c2_2026-09-02.md)).
+> A sample that resolved fewer lengths than it has copies also puts forward the lengths one repeat
+> either side of what it did resolve — a second allele hidden under the first by stutter — **but
+> only lengths some sample's reads actually reached**, which is what stops it offering a length
+> nothing in the run has seen. That rescue is the one part of the existing STR caller's nomination
+> ng keeps. The cohort's set is then the **union** of what each sample put forward, not a vote: an
+> allele one accession of sixty-three carries is still an allele, and the cost of a union is
+> candidates, which the cap exists to bound.
+>
+> - **Earlier (2026-09-02):** **each sample now says which repeat lengths it carries**
+> (step C1 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_selection_c1_2026-09-02.md)).
+> A sample puts a repeat length forward when its own reads at that length reach the same bar the
+> merge and the SNP/indel path already use — two reads, or a tenth of that sample's reads across
+> the tract, whichever is more — and the best two of those survive, three in a triploid region,
+> ties going to the shorter length. **The existing STR caller cannot make this call at the case
+> that matters most**: it requires a length's reads to exceed both neighbouring lengths by more
+> than three, so at a heterozygote whose two copies differ by one repeat neither length is a peak
+> and the sample resolves nothing. ng reads no neighbour, and a sample with 150 reads at ten
+> repeats and 150 at eleven now puts both forward — the case the spec measures the old rule losing
+> two tracts in three to.
+>
+> - **Earlier (2026-09-02):** **the tract path's settings and the per-sample length
+> histogram — Milestone B of ng's own STR candidate selection is complete**
+> (step B2 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_selection_b2_2026-09-02.md)).
+> The path's configuration has **no default ploidy** — a constant there would write a diploid
+> assumption where a polyploid region is in scope, and ploidy is the one thing that changes how
+> many rungs a sample promotes — and its cap is **32 tract sequences against the ordinary path's
+> six**. The histogram counts one sample's spanning reads onto the ladder's rungs, pooling its
+> read groups through the same helper the ordinary path's fold uses, so the two cannot come to
+> disagree about what "a sample's reads for this sequence" means. **One departure moves a number
+> the plan checks against**: the support share is the ordinary path's 10 in 100 where the spec
+> writes 5, because the spec's own reason for 5 is that one number should govern both paths and
+> the ordinary path's moved to 10 the same day. It costs 0.3 points of same-length recall at 300×
+> — 85.8% against 86.1% — and buys 0.04 fewer candidate sequences per tract; at 30× and below the
+> two are the same rule. **The mutation that decided the tests was the one predicted to survive**:
+> counting a rung by overwrite instead of by addition is invisible on every fixture except a
+> sample carrying two spellings of one length, which is the interrupted repeat this path exists to
+> offer both of.
+>
+> - **Earlier (2026-09-02):** **the repeat ladder — the first piece of ng's own STR
+> candidate selection**
+> (step B1 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md), run on
+> the [STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md)'s branch;
+> [report](doc/devel/reports/implementations/ng_ssr_selection_b1_2026-09-02.md)).
+> A repeat tract's alleles are ordered where a SNP's are not, and the ladder is that ordering made
+> explicit: every sequence in the merge's table placed on the rung named by its length divided by
+> the motif's period, floored — the same integer the genotype prior must agree with — with the
+> rungs ascending and the cohort's most-supported rung recorded. Nomination, admission and the
+> periodicity test all read it. **It did not wait for the merge's `LocusKind` field**, which the
+> parallel observations plan delivered later the same day: the tract's motif is an argument, which
+> the architecture had already chosen as the shape that survives the merge fix, so the whole
+> selector was built and proven on hand-built loci before that field existed. **Five mutations run, and
+> the one that survived was the finding**: `build_ladder`'s own `clear()` could not fail, because
+> the fold's `reset_for` already empties the ladder — so it is now an assertion that the ladder is
+> empty, and appending two loci's sequences onto one ladder is a named panic instead of silence.
+>
+> - **Earlier (2026-09-02):** **a cohort observation now states what kind of
+> ground it sits on** — step A1 of the
+>
+> - **Earlier (2026-09-02):** **routing on ng's own floors cut the truth variants
 > this caller misses from 195 to 71, and the caller was not touched to do it** — step
 > B4, which completes Milestone B of the
 > [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
@@ -2866,6 +2974,114 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **Three obligations handed forward to the steps that can discharge them**, each recorded in the doc comment of the thing that creates it: `select_generic` must assert a cap of at least 2 (C2), until the cap's shape question is settled; `Truncated { dropped: u16 }` over an uncapped `usize` merge table needs a saturating conversion (C2); and spec §8 names three caller bugs that must assert, of which Milestone A lands one — a non-finite `q_sum` and a sample with rows but no reads belong to B1 and C3.
   - **The two parallelism invariants are documented and half-enforced.** `AlleleRemap`'s is structural — the length is fixed at construction and both accessors assert in release. `LocusSelection`'s is checked in its constructor, which is what `select_generic` and `select_ssr` will call, but the fields remain `pub` per arch §2.4 so a struct literal can still bypass it.
   - **⚠ `cargo clippy --all-targets --all-features` is red on `main`** with 14 errors in five benches and examples, none in `src/` and none touched by this plan. This step is gated on `--lib --tests` plus `cargo doc --lib --no-deps`.
+
+---
+
+#### Candidate alleles at a repeat tract (step 6, STR path) — the ladder, nomination, admission
+- **Status:** fixes-applied — **Milestones B, C and D complete, at Checkpoint D**: `select_ssr`
+  is built and proven on hand-built loci, including its `NotPeriodic` and reference-only outcomes.
+  What remains in this plan is Milestone E, the differential on real data — production's candidate
+  set reproduced on tomato with its three replaced rules switched in, and the measured HG002
+  numbers reproduced with them switched out. Branch
+  `ng-ssr-calling-loop`, worktree `../pop_var_caller-ssr-calling-loop`, from `main` at `55f9c7de`.
+  Runs beside `ng-ssr-observations`, which owns the merge, the walker and the run report; this
+  branch owns `calling/` and edits none of those.
+- **Plans:** [calling_loop_ssr.md](doc/devel/ng/impl_plan/calling_loop_ssr.md) is the driving plan;
+  its Milestones A and B execute [candidate_alleles_ssr.md](doc/devel/ng/impl_plan/candidate_alleles_ssr.md)
+  B–E, whose checkboxes are the live record. **Spec:** [candidate_alleles_ssr.md](doc/devel/ng/spec/candidate_alleles_ssr.md);
+  **Arch:** [candidate_alleles_ssr.md](doc/devel/ng/arch/candidate_alleles_ssr.md).
+- **Code:** [src/ng/calling/allele_candidates/ssr.rs](src/ng/calling/allele_candidates/ssr.rs) —
+  `RepeatLadder` and `build_ladder`; `SsrSelectionConfig`, `MaxOffGridShare`,
+  `DEFAULT_MAX_CANDIDATE_ALLELES_SSR` and `fill_sample_reads_per_rung`; the `ladder` and
+  `sample_reads_per_rung` buffers on the shared `SelectionScratch` in
+  [mod.rs](src/ng/calling/allele_candidates/mod.rs). 25 tests; the module's filter goes
+  93 → 118 passing.
+- **Impl reports:** [B1](doc/devel/reports/implementations/ng_ssr_selection_b1_2026-09-02.md),
+  [B2](doc/devel/reports/implementations/ng_ssr_selection_b2_2026-09-02.md),
+  [C1](doc/devel/reports/implementations/ng_ssr_selection_c1_2026-09-02.md),
+  [C2](doc/devel/reports/implementations/ng_ssr_selection_c2_2026-09-02.md),
+  [D1](doc/devel/reports/implementations/ng_ssr_selection_d1_2026-09-02.md),
+  [D2](doc/devel/reports/implementations/ng_ssr_selection_d2_2026-09-02.md),
+  [D3](doc/devel/reports/implementations/ng_ssr_selection_d3_2026-09-02.md).
+- **⚑ D2 amended the spec and the architecture, on the owner's ruling of 2026-09-02: the
+  periodicity grid is anchored on the reference tract's length, not on the ladder's mode.** Read
+  literally, "a whole number of motif units from the ladder's mode" anchors at **zero** — the mode
+  is a repeat count, so its base length cancels out — and that refuses a real class of tract. The
+  catalog trims a tract to whole motif copies **at both ends**, but a length-changing interruption
+  inside puts the ends out of phase, so the tract's own reference length is then not a multiple of
+  the period; measured through the catalog's own `minimal_trim` and `recompute_purity`, 49 bases of
+  an `AT` repeat with one extra base 40 bases in scores **purity 0.816** and clears the 0.8 floor.
+  Every read at that tract's reference length is off a zero-anchored grid, so the locus would be
+  refused and never called. The reference length was preferred to production's anchor — the
+  commonest observed length — because it is a property of the locus rather than of the reads, so it
+  cannot move with depth, and because it is the quantity the genotype prior was re-indexed onto on
+  2026-08-27. **Reverting to the documents' rule now fails a test**, which is what makes the
+  amendment enforceable.
+- **⚑ D3 does not return the ladder's modal repeat count, where the plan says to return it.** Arch
+  §2.3 lists it and arch §4 and §5 retract its reason — the prior's seed was re-indexed onto the
+  reference tract length on 2026-08-27, so *"nothing consumes it now"* — and **D2 removed the last
+  consumer inside the module** by anchoring the periodicity grid on the reference length too. A
+  returned field would have no reader anywhere. The ladder still computes it, so restoring it is
+  one line, and the architecture's own open question — whether selection should carry the mode at
+  all — is left open rather than answered by shipping a field nobody reads.
+- **C1 done (nomination, per sample) — and the test spec §13 calls the one production cannot pass
+  is green.** A sample with 150 reads at ten repeats and 150 at eleven promotes **both**: nothing
+  here reads a neighbour, where production nominates a length only if its reads exceed both
+  neighbours by more than three and so resolves nothing at a heterozygote whose copies differ by
+  one repeat. Two range properties are asserted rather than argued: the same sample alone and
+  beside a neighbour carrying 400 reads at a third length nominates the same two rungs, because no
+  term of the bar reads the cohort; and a sample whose reads all stopped inside the tract nominates
+  nothing without dividing by its zero denominator, because the floor is tested first by integer
+  comparison.
+- **C2 done (the rescue and the union) — its two named silent failures each have a failing test
+  now.** Dropping the occupancy test would offer a repeat count nothing in the run has seen, at
+  every under-resolved sample of every tract; firing the rescue on a sample that did resolve its
+  ploidy would widen every locus by up to two rungs a sample. Both mutations were run and both are
+  caught. The occupancy test is `a rung exists at that count **and** its cohort reads are
+  non-zero`, which is where B1's pinned difference from production matters: the merge interns the
+  reference tract whether or not a read landed on it. The cohort's set is the **union** across
+  samples, not a vote — an allele one accession of sixty-three carries is still an allele.
+- **B2 done (the settings and the histogram) — and one departure that moves a number Milestone E
+  checks against.** The tract path's support share is the ordinary path's **10 in 100**, where spec
+  §5 writes 5. **The spec's own reason for its number points at the other one**: it sets 5 *"so
+  that one number governs both paths"*, and the ordinary path's value moved to 10 the same day, by
+  the owner's decision taken against what recall alone would say. From the spec's own sweep at 300×
+  on HG002, on the class this path exists for — a heterozygote whose two copies are the same length
+  spelled differently, 296 of 695 heterozygous tracts — 5 offers both spellings at 86.1% at 1.26
+  candidates per tract and 10 at **85.8% at 1.22**: three tracts in a thousand, and fewer
+  candidates. At 30× and below the two are the same rule, the floor deciding. **So Milestone E's
+  targets are 85.8% and 1.22**, not the plan's 86.1% and 1.26.
+- **B1 done (the ladder) — and the mutation that mattered was the one that survived.** Five
+  deliberate defects; four were caught by the step's own tests, and deleting `build_ladder`'s
+  `ladder.clear()` broke nothing, because `reset_for` already empties the ladder and the fold
+  calls it. A line with no failing state is a second owner of one rule, so it is now an assertion
+  that the ladder is empty — which turns a silent append of two loci's sequences onto one ladder
+  into a named panic.
+- **Open:**
+  - **⚑ B1's stated dependency on the merge's `LocusKind` did not bind, and the real one arrives
+    later.** `build_ladder` takes the motif as an argument, which arch §1 already chose as the
+    shape that survives the merge fix. What waits for the parallel plan's Milestone A is the call
+    site — `select_ssr` reading the motif off `CohortObservation::kind` — so the selection work
+    can run to its own Checkpoint D before that field exists.
+  - **⚑ `rung_of_repeat_count` is not production's `occupied` test, by one rung.** The merge
+    interns the reference at index 0 whether or not a read landed on it, so the reference's rung
+    can exist carrying zero reads, where production's rescue asks `cohort_support(length) > 0`.
+    **C2, which ports the `±1` rescue, must ask this accessor together with `cohort_reads_at`**;
+    `the_reference_rung_exists_with_no_reads_on_it` pins the difference.
+  - **The `(repeat count, table index)` sort key is a determinism guarantee no fixture can
+    check.** It makes the order total so it cannot depend on the sort's stability, which is what
+    byte-identical output at any worker count needs — but at three alleles an unstable sort
+    reorders nothing, so the guarantee is structural rather than test-covered.
+  - **⚑ Checkpoint B's one question for the owner: is 10 in 100 the right share at a tract?**
+    Taken as described above and applied, because leaving 5 would create the second number the
+    spec argues against. It is cheap to reverse — one field in `SsrSelectionConfig::at_ploidy` —
+    and reversing it is worth 0.3 points of same-length recall at 300× against 0.04 more candidate
+    sequences per tract, with nothing either way at 30× and below.
+  - **⚠ `cargo test --all-targets --all-features` exits non-zero on this tree for a pre-existing
+    reason** — the index-out-of-bounds in `benches/psp_writer_perf.rs:386` already recorded
+    against the calling loop. The step's gate is the library and test targets plus `cargo fmt`,
+    `cargo clippy --all-targets --all-features -- -D warnings` and `cargo doc --no-deps`
+    (26 unresolved links, unchanged from the pre-change tree, none in these files).
 
 ---
 

@@ -91,7 +91,7 @@ runs that prove each of those.
 
 ### Milestone A — selection, on hand-built loci
 
-**A1. Execute [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) Milestones B, C and D.**  ☐
+**A1. Execute [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) Milestones B, C and D.**  ✅
 The ladder, nomination, and admission/periodicity/outputs, exactly as that plan writes them —
 its checkboxes are the live record; this box flips when its Checkpoint D passes. Its
 Milestone A is already on `main` (the parallel plan's Checkpoint A — verify before starting).

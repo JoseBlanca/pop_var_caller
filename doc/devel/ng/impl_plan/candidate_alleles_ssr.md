@@ -113,7 +113,7 @@ built without a field `CohortObservation` does not carry.*
 > parallel with the STR loop plan and merges this change to `main` first. Do not build it
 > twice: when that checkpoint has merged, flip A1 here and start at Milestone B.
 
-**A1. `ClosedLocus` and `CohortObservation` carry `LocusKind`.**  ☐
+**A1. `ClosedLocus` and `CohortObservation` carry `LocusKind`.**  ✅
 The closer already has the kind in scope where it builds a `ClosedLocus`
 ([`close.rs:713-721`](../../../../src/ng/run/cohort_merge/close.rs)) and drops it; carry it
 through, and have `CohortObservation::over` copy it onto the assembled locus. **The clone is one
@@ -129,7 +129,7 @@ now name a kind.
 
 ### Milestone B — the ladder
 
-**B1. `RepeatLadder`, keyed by repeat count. — own commit, do not bundle.**  ☐
+**B1. `RepeatLadder`, keyed by repeat count. — own commit, do not bundle.**  ✅
 Built once per locus from the merge's allele table and `SsrDetail::motif`: each rung holds the
 merge-table indices of the sequences at that repeat count, ascending, and the ladder holds the
 cohort's modal repeat count — most-supported rung, ties to the shorter, and **not the reference's
@@ -143,7 +143,7 @@ whose length is not a whole number of units lands on the floored rung and is cou
 mode is the rung with the most reads and the shorter of a tie.
 *Depends:* A1. *Source:* arch §2.1; spec §3.
 
-**B2. `SsrSelectionConfig` and the per-sample length histogram.**  ☐
+**B2. `SsrSelectionConfig` and the per-sample length histogram.**  ✅
 The config — the shared `CandidateSelectionConfig`, `max_off_grid_share` with
 `DEFAULT_MAX_OFF_GRID_SHARE = 0.10` marked inherited-and-never-measured, and `ploidy` taken from
 the caller rather than a constant — and the per-sample fold from the merge's rows into a length
@@ -155,14 +155,14 @@ histogram over spanning reads. `SelectionScratch` gains both buffers.
 
 ### Milestone C — nomination
 
-**C1. The per-sample bar over rungs, and top-`ploidy`.**  ☐
+**C1. The per-sample bar over rungs, and top-`ploidy`.**  ✅
 A repeat count is nominated when the sample's reads at it clear the **shared** support rule against
 that sample's spanning reads — `MinAltReads::reached_by` with the rung's read total as the
 numerator, not a second predicate. The top `ploidy` by support are promoted, ties to the shorter
 length. Production's `is_clear_peak` is not called and not ported.
 *Depends:* B2. *Source:* arch §3.1; spec §4.
 
-**C2. The `±1` rescue and the union. — own commit, do not bundle.**  ☐
+**C2. The `±1` rescue and the union. — own commit, do not bundle.**  ✅
 When a sample resolved fewer than `ploidy` counts, promote each promoted count's `±1` neighbours
 **where some sample's reads reached that length** — production's `occupied` test
 ([`candidate_set.rs:221`](../../../../src/ssr/cohort/candidate_set.rs)), ported unchanged. The
@@ -180,13 +180,13 @@ one production cannot pass — a sample with 150 reads at count 10 and 150 at 11
 
 ### Milestone D — admission, periodicity, and the outputs
 
-**D1. Sequence admission within a promoted rung.**  ☐
+**D1. Sequence admission within a promoted rung.**  ✅
 Every sequence on a promoted rung faces the shared support rule, asked of the sequence: no
 privileged representative, no recurrence term. Then the shared cap and truncation, the shared
 leftover, and the reference tract admitted first and exempt from both.
 *Depends:* C2. *Source:* arch §3.2; spec §5.
 
-**D2. Periodicity, per sample. — own commit, do not bundle.**  ☐
+**D2. Periodicity, per sample. — own commit, do not bundle.**  ✅
 A sample is non-periodic when more than `max_off_grid_share` of its spanning reads sit at a length
 that is not a whole number of motif units from the ladder's mode; the locus is `NotPeriodic` only
 when **no** sample is periodic. A `NotPeriodic` locus returns the reference tract alone, that
@@ -199,7 +199,7 @@ refuses periodic loci and admits non-periodic ones, and nothing fails.
 their lengths in bases; one sample being periodic saves a locus every other sample fails.
 *Depends:* D1. *Source:* arch §3.3; spec §7, §3.
 
-**D3. What the prior takes: `repeat_counts` and `modal_repeat_count`.**  ☐
+**D3. What the prior takes: `repeat_counts` and `modal_repeat_count`.**  ✅
 `SsrLocusSelection` returns both, parallel to the candidates with the reference at index 0.
 `fill_ssr_seed` takes exactly this slice and must not recompute it — one producer for an integer
 two modules have to agree on.

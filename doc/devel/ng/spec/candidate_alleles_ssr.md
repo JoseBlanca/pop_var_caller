@@ -300,6 +300,23 @@ refuses loci for being polymorphic rather than for being bad.
 
 ## 7. The periodicity verdict
 
+> **⚠ 2026-09-02 — the grid is anchored on the reference tract's length, not on the ladder's
+> mode.** Owner's decision, taken at step D2 of
+> [`../impl_plan/candidate_alleles_ssr.md`](../impl_plan/candidate_alleles_ssr.md). Read
+> literally, "a whole number of motif units from the ladder's mode" anchors the grid at **zero**
+> — the mode is a repeat count, so its length in bases is a whole number of units and cancels out
+> of the subtraction — and a zero-anchored grid refuses a real class of tract. The catalog trims
+> every tract back to whole motif copies **at both ends**, but a length-changing interruption
+> inside puts the two ends out of phase, so the tract's own reference length is then not a
+> multiple of the period; such a tract is admitted whenever the break is late enough to clear the
+> purity floor of 0.8. Measured through the catalog's own `minimal_trim` and `recompute_purity`:
+> 49 bases of an `AT` repeat with one extra base 40 bases in trims to 49 bases at **purity
+> 0.816**, and 49 is odd — so every read at that tract's reference length is off a zero-anchored
+> grid and the locus is refused. Production avoids this by anchoring on the commonest observed
+> length in bases; the reference tract's length is preferred to that because it is a property of
+> the locus rather than of the reads, so it cannot move with depth, and because it is the
+> quantity the genotype prior was re-indexed onto on 2026-08-27.
+
 **`NotPeriodic` survives, and it is the one verdict this path adds.** A stretch the catalog called
 a repeat tract whose reads do not actually vary in whole motif units is not a tract this caller's
 model describes: the stutter distribution is written on whole-repeat and part-repeat regimes
