@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Is a repeat tract's QUAL worth believing, and can it be gated on?
+"""Is a repeat tract's QUAL worth believing, can it be gated on, and are the
+genotypes right?
 
 `doc/devel/ng/spec/calling_loop_ssr.md` §3.3 asks two questions about the site
 quality a caller writes at a repeat tract, and this program answers both on one
-callset:
+callset — plus a third the same files can answer and the site-level two cannot:
 
 * **Calibration** — bin the emitted records by QUAL and, in each bin, count how
   many sit at a repeat tract the truth set really does carry a variant in. A
@@ -28,7 +29,19 @@ callset:
   `accuracy_dashboard.py`'s, so a number here is read against the ones already
   recorded for these callsets.
 
-Both are split by **motif period** — a homopolymer against everything with a
+* **Genotype accuracy** — where the truth set and the caller both call a tract,
+  how often the caller's genotype is the truth's. Compared as multisets of
+  allele sequences, so two files that order their ALT columns differently still
+  agree and phase is ignored. Written only when `--genotype-out` asks for it.
+
+  **This is the question a discovery round moves and the other two barely see.**
+  Admitting an allele that was hiding under stutter does not usually add a
+  variant site — the site was already variant — it turns a homozygote into the
+  heterozygote it really is. A calibration that counts sites cannot see that at
+  all, and the threshold sweep sees only half of it: the allele appears in the
+  ALT column, and whether the sample was given a copy of it is a different fact.
+
+All three are split by **motif period** — a homopolymer against everything with a
 repeat unit of two bases or more — because slippage rises steeply as the period
 falls, and the risk §3.3 names is a model that under-prices slip products where
 they are commonest.
@@ -79,9 +92,9 @@ Usage:
     tract_qual_experiment.py --reference <ref.fa> --truth <truth.vcf.gz> \\
         --query <calls.vcf> --confident-bed <sample.bed> --tract-bed <tracts.bed> \\
         --arm ng --ground giab_per_sample --depth 30x --sample HG002 \\
-        --calibration-out calib.tsv --sweep-out sweep.tsv
+        --calibration-out calib.tsv --sweep-out sweep.tsv --genotype-out gt.tsv
 
-Both output files are appended to when they already carry a header, so a driver
+Every output file is appended to when it already carries a header, so a driver
 loops over arms and depths and ends with one table of each.
 
 `bcftools` does the left-alignment and the region restriction; everything else is
@@ -214,6 +227,7 @@ class VcfRecord:
     alt: str
     qual: float
     info: str
+    samples: tuple[str, ...] = ()
 
     @property
     def end(self) -> int:
@@ -253,6 +267,50 @@ class VcfRecord:
         return None
 
 
+    def genotype_of(self, column: int) -> tuple[str, ...] | None:
+        """This record's genotype at one sample column, as its allele sequences.
+
+        A pair of sequences rather than a pair of indices, so two callers whose
+        ALT columns list the same alleles in different orders still compare —
+        and so a genotype can be compared across two files that were never
+        going to agree on an index. Sorted, because a genotype is a multiset:
+        `0/1` and `1/0` are one genotype and phase is not this scorer's
+        question.
+
+        `None` where the sample is not called (`./.`), where the record has no
+        such column, or where an index names an allele the record does not
+        carry — the last being a malformed record rather than a no-call, and
+        one this returns rather than guesses at.
+        """
+        if column >= len(self.samples):
+            return None
+        genotype = self.samples[column].split(":", 1)[0]
+        if genotype in (".", "./.", ".|."):
+            return None
+        alleles = [self.ref.upper(), *[one.upper() for one in self.alt.split(",")]]
+        called = []
+        for index in genotype.replace("|", "/").split("/"):
+            if index == ".":
+                return None
+            try:
+                called.append(alleles[int(index)])
+            except (ValueError, IndexError):
+                return None
+        return tuple(sorted(called))
+
+
+def sample_columns_of(path: Path) -> list[str]:
+    """The sample names of a VCF, in column order."""
+    opener = gzip.open if str(path).endswith(".gz") else open
+    with opener(path, "rt", encoding="utf-8") as handle:  # type: ignore[operator]
+        for line in handle:
+            if line.startswith("#CHROM"):
+                return line.rstrip("\n").split("\t")[9:]
+            if not line.startswith("#"):
+                break
+    return []
+
+
 def read_vcf(path: Path, *, require_qual: bool) -> tuple[list[VcfRecord], int]:
     """Every data line of `path`, and how many were dropped for having no QUAL.
 
@@ -279,7 +337,15 @@ def read_vcf(path: Path, *, require_qual: bool) -> tuple[list[VcfRecord], int]:
             else:
                 qual = float(qual_text)
             records.append(
-                VcfRecord(fields[0], int(fields[1]), fields[3], fields[4], qual, fields[7])
+                VcfRecord(
+                    fields[0],
+                    int(fields[1]),
+                    fields[3],
+                    fields[4],
+                    qual,
+                    fields[7],
+                    tuple(fields[9:]),
+                )
             )
     return records, without_qual
 
@@ -509,6 +575,131 @@ def sweep(
     return cells
 
 
+@dataclass
+class GenotypeCell:
+    """One (period class) cell of the genotype comparison.
+
+    **The three wrong-answer counts are the point of the cell, not decoration.**
+    A discovery round's whole purpose is to find an allele hiding under stutter,
+    and a sample carrying one is called *homozygous where the truth is
+    heterozygous* — so `called_homozygous_truth_heterozygous` is the number that
+    says whether the mechanism is aimed at the failure this data actually has.
+    Its opposite, `called_heterozygous_truth_homozygous`, is the damage a
+    wrongly admitted allele does, and the same round can only make it worse.
+    """
+
+    tracts_truth_calls: int = 0
+    tracts_both_call: int = 0
+    genotype_right: int = 0
+    no_call: int = 0
+    called_homozygous_truth_heterozygous: int = 0
+    called_heterozygous_truth_homozygous: int = 0
+    wrong_some_other_way: int = 0
+    truth_allele_never_offered: int = 0
+
+    def score(
+        self,
+        called: tuple[str, ...],
+        expected: tuple[str, ...],
+        offered: frozenset[str],
+    ) -> None:
+        """Charge one comparison to the right counters.
+
+        `offered` is every allele the caller's record listed — its REF and its
+        whole ALT column, whether or not this sample was given a copy. **A wrong
+        genotype whose truth allele is not in it is the ceiling on what a
+        discovery round can fix**: the allele was never on the table, so no
+        genotype over that table could have been right. A wrong genotype whose
+        alleles were all offered is a different failure, and adding more alleles
+        cannot help it.
+        """
+        self.tracts_both_call += 1
+        if called == expected:
+            self.genotype_right += 1
+            return
+        if any(allele not in offered for allele in expected):
+            self.truth_allele_never_offered += 1
+        called_homozygous = len(set(called)) == 1
+        truth_homozygous = len(set(expected)) == 1
+        if called_homozygous and not truth_homozygous:
+            self.called_homozygous_truth_heterozygous += 1
+        elif truth_homozygous and not called_homozygous:
+            self.called_heterozygous_truth_homozygous += 1
+        else:
+            self.wrong_some_other_way += 1
+
+
+def best_record_per_tract(
+    records: list[VcfRecord], ground: TractGround
+) -> dict[tuple[str, int, int], VcfRecord]:
+    """One record a tract — the highest-QUAL one where a caller wrote several.
+
+    **A tract is the unit here for the same reason it is the calibration's**: a
+    genotype at a repeat tract is a statement about that tract's two lengths,
+    and a caller that spelled it across two records has still made one such
+    statement. Ties on QUAL keep the earlier record, so the choice is a
+    function of the file rather than of the dictionary's order.
+    """
+    best: dict[tuple[str, int, int], VcfRecord] = {}
+    for record in records:
+        tract = ground.tract_at(record.contig, record.pos, record.end)
+        if tract is None:
+            continue
+        key = (record.contig, tract.start, tract.end)
+        held = best.get(key)
+        if held is None or record.qual > held.qual:
+            best[key] = record
+    return best
+
+
+def compare_genotypes(
+    query: list[VcfRecord],
+    truth: list[VcfRecord],
+    ground: TractGround,
+    query_column: int,
+    truth_column: int,
+) -> dict[str, GenotypeCell]:
+    """How often the caller's genotype at a tract is the truth's.
+
+    **This is the question a discovery round moves, and the site-level ones are
+    not.** Admitting an allele that was hiding under stutter does not usually
+    add a variant site — the site was already variant — it turns a homozygote
+    into the heterozygote it really is. A measurement that counts sites cannot
+    see that at all, and a precision-and-recall sweep over alleles sees only
+    half of it (the allele appears; whether the sample was given a copy is a
+    different fact).
+
+    Scored where **both sides call the tract**, because a genotype the caller
+    did not write is a recall question and is already counted as one. The
+    genotypes are compared as multisets of allele sequences, so two files that
+    order their ALT columns differently still agree, and phase is ignored.
+    """
+    truth_by_tract = best_record_per_tract(truth, ground)
+    query_by_tract = best_record_per_tract(query, ground)
+    cells: dict[str, GenotypeCell] = {}
+    for key, truth_record in truth_by_tract.items():
+        tract = ground.tract_at(truth_record.contig, truth_record.pos, truth_record.end)
+        if tract is None:
+            continue
+        cell = cells.setdefault(period_class_of(tract.period), GenotypeCell())
+        expected = truth_record.genotype_of(truth_column)
+        if expected is None:
+            continue
+        cell.tracts_truth_calls += 1
+        query_record = query_by_tract.get(key)
+        if query_record is None:
+            continue
+        called = query_record.genotype_of(query_column)
+        if called is None:
+            cell.no_call += 1
+            continue
+        offered = frozenset(
+            [query_record.ref.upper(), *[one.upper() for one in query_record.alt.split(",")]]
+        )
+        cell.score(called, expected, offered)
+    return cells
+
+
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
@@ -521,6 +712,13 @@ CALIBRATION_HEADER = (
 SWEEP_HEADER = (
     "arm\tground\tdepth\tsample\tperiod_class\tmin_qual\ttp\tfp\t"
     "fp_with_no_called_copy\tfn\tprecision\trecall\n"
+)
+
+GENOTYPE_HEADER = (
+    "arm\tground\tdepth\tsample\tperiod_class\ttracts_truth_calls\t"
+    "tracts_both_call\tgenotype_right\tno_call\tgenotype_accuracy\t"
+    "called_hom_truth_het\tcalled_het_truth_hom\twrong_some_other_way\t"
+    "truth_allele_never_offered\n"
 )
 
 
@@ -566,6 +764,24 @@ def main() -> int:
     parser.add_argument("--calibration-out", type=Path, required=True)
     parser.add_argument("--sweep-out", type=Path, required=True)
     parser.add_argument(
+        "--genotype-out",
+        type=Path,
+        default=None,
+        help="where to write the genotype comparison; skipped when not given",
+    )
+    parser.add_argument(
+        "--genotype-sample",
+        default=None,
+        help="which of the query's sample columns to compare; its first by default",
+    )
+    parser.add_argument(
+        "--genotype-truth-sample",
+        default=None,
+        help="the truth column holding the same individual, where the two files "
+        "name it differently (production writes HG002_30x for the truth's HG002); "
+        "the query's own name by default",
+    )
+    parser.add_argument(
         "--keep-work",
         type=Path,
         default=None,
@@ -609,6 +825,40 @@ def main() -> int:
         )
         cells = sweep(query_allele_records, truth_allele_records, ground)
 
+        genotype_cells: dict[str, GenotypeCell] = {}
+        genotype_note = "not asked for"
+        if args.genotype_out is not None:
+            query_samples = sample_columns_of(query_sites)
+            truth_samples = sample_columns_of(truth_sites)
+            wanted = args.genotype_sample or (query_samples[0] if query_samples else None)
+            # **Both columns are named, never matched by position.** Comparing
+            # column 0 with column 0 would silently score one individual's
+            # genotypes against another's wherever two files order their samples
+            # differently, and every number after that would look plausible. The
+            # two names may differ — production writes `HG002_30x` where the
+            # truth set writes `HG002` — so saying they are the same individual
+            # is the caller's statement to make rather than this program's guess.
+            in_truth = args.genotype_truth_sample or wanted
+            if wanted is None:
+                genotype_note = "the query names no sample"
+            elif wanted not in query_samples:
+                genotype_note = f"the query has no sample {wanted}"
+            elif in_truth not in truth_samples:
+                genotype_note = f"the truth has no sample {in_truth}"
+            else:
+                genotype_cells = compare_genotypes(
+                    query_site_records,
+                    truth_site_records,
+                    ground,
+                    query_samples.index(wanted),
+                    truth_samples.index(in_truth),
+                )
+                genotype_note = (
+                    f"query {wanted} against truth {in_truth}"
+                    if in_truth != wanted
+                    else f"sample {wanted}"
+                )
+
     calibration_rows = []
     for key in sorted(bins):
         kind, period_class, index = key
@@ -632,6 +882,22 @@ def main() -> int:
             f"{ratio(cell.tp, cell.tp + cell.fn)}\n"
         )
     append_rows(args.sweep_out, SWEEP_HEADER, sweep_rows)
+
+    if args.genotype_out is not None:
+        genotype_rows = []
+        for period_class in sorted(genotype_cells):
+            cell = genotype_cells[period_class]
+            genotype_rows.append(
+                f"{args.arm}\t{args.ground}\t{args.depth}\t{args.sample}\t"
+                f"{period_class}\t{cell.tracts_truth_calls}\t{cell.tracts_both_call}\t"
+                f"{cell.genotype_right}\t{cell.no_call}\t"
+                f"{ratio(cell.genotype_right, cell.tracts_both_call)}\t"
+                f"{cell.called_homozygous_truth_heterozygous}\t"
+                f"{cell.called_heterozygous_truth_homozygous}\t"
+                f"{cell.wrong_some_other_way}\t{cell.truth_allele_never_offered}\n"
+            )
+        append_rows(args.genotype_out, GENOTYPE_HEADER, genotype_rows)
+        print(f"  genotypes: {genotype_note}", file=sys.stderr)
 
     print(
         f"{args.arm} {args.ground} {args.depth} {args.sample}: "

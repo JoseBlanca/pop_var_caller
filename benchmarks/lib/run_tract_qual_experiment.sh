@@ -9,6 +9,9 @@
 #
 #   calibration.tsv  records binned by QUAL against the share truly variant
 #   sweep.tsv        precision and recall as a QUAL threshold sweeps
+#   genotype.tsv     where both sides call a tract, how often the genotype is
+#                    right — the question a discovery round moves and the other
+#                    two barely see
 #
 # Both are appended to, so a second ground adds rows rather than replacing them;
 # delete the directory to start over.
@@ -79,6 +82,7 @@ DEPTHS="${DEPTHS:-30x 50x}"
 
 CALIBRATION="$OUT_DIR/calibration.tsv"
 SWEEP="$OUT_DIR/sweep.tsv"
+GENOTYPE="$OUT_DIR/genotype.tsv"
 GROUND_DIR="$OUT_DIR/ground"
 mkdir -p "$GROUND_DIR"
 
@@ -111,7 +115,8 @@ score() {
         --reference "$9" --truth "$truth" --query "$query" \
         --confident-bed "$confident" --tract-bed "$tracts" \
         --arm "$arm" --ground "$ground" --depth "$depth" --sample "$sample" \
-        --calibration-out "$CALIBRATION" --sweep-out "$SWEEP"
+        --calibration-out "$CALIBRATION" --sweep-out "$SWEEP" \
+        --genotype-out "$GENOTYPE" --genotype-sample "${GENOTYPE_SAMPLE:-$sample}"
 }
 
 # ---------------------------------------------------------------------------
@@ -222,8 +227,13 @@ run_simulator() {
                 --parameters "$dir/fitted.parameters.toml" \
                 > "$dir/ng_fitted.log" 2>&1
 
+            # **The calibration and the sweep are the cohort's and the
+            # genotype comparison is one sample's**, so the sample column is
+            # named here rather than left to the `pooled` label the other two
+            # carry. `sim000` is the first sample the simulator writes and the
+            # only one at the default `samples=1`.
             for arm in ng ng_fitted; do
-                score "$arm" "simulator_slip${slip}" "$depth" pooled \
+                GENOTYPE_SAMPLE=sim000 score "$arm" "simulator_slip${slip}" "$depth" pooled \
                     "$dir/truth.vcf" "$dir/${arm}.vcf" \
                     "$dir/confident.bed" "$dir/tracts.bed" "$dir/reference.fa"
             done
@@ -242,3 +252,4 @@ esac
 echo
 echo "calibration : $CALIBRATION"
 echo "sweep       : $SWEEP"
+echo "genotype    : $GENOTYPE"
