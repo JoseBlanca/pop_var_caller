@@ -1523,6 +1523,7 @@ impl OpenPileupRecordTable {
         reference: &dyn RefSeq,
         active_reads: &ActiveReads,
         contributors: &[ReadContribution],
+        region_end: Option<u32>,
     ) -> Result<bool, WalkerError> {
         // Split-borrow so the fetch can write into `widen_bases_buf` while
         // `rec` holds a mutable borrow of `records`. `max_record_span` is
@@ -1618,6 +1619,7 @@ impl OpenPileupRecordTable {
             refold_ids_buf,
             active_reads,
             contributors,
+            region_end,
         );
 
         Ok(true)
@@ -1791,6 +1793,9 @@ pub(super) fn apply_events_into(
     record_pos: u32,
     ref_seq: &[u8],
     events: &[ReadEvent],
+    // The last reference position the walk's region owns — see
+    // [`inserted_past_the_regions_last_base`], which is the only thing that reads it.
+    region_end: Option<u32>,
 ) {
     allele_seq.clear();
     allele_seq.reserve(ref_seq.len() + 8);
@@ -1892,7 +1897,13 @@ pub(super) fn apply_events_into(
                 if offset < ref_len && offset >= consumed_until {
                     allele_seq.push(ref_seq[offset as usize]);
                 }
-                allele_seq.extend_from_slice(seq);
+                // **Unless the inserted bases are past the region's last base**, where they
+                // are ground this walk was not given. The anchor base above is still emitted:
+                // the read did witness it, and it matches, which is all this region can say
+                // about that read. See [`inserted_past_the_regions_last_base`].
+                if !inserted_past_the_regions_last_base(ev, region_end) {
+                    allele_seq.extend_from_slice(seq);
+                }
                 consumed_until = consumed_until.max(offset + 1);
             }
             ReadEvent::Deletion {
@@ -1942,10 +1953,11 @@ pub(super) fn apply_events(
     record_pos: u32,
     ref_seq: &[u8],
     events: &[ReadEvent],
+    region_end: Option<u32>,
 ) -> Option<(Vec<u8>, WitnessedRefPositions)> {
     let mut out = Vec::new();
     let mut runs = WitnessedRefRuns::new();
-    apply_events_into(&mut out, &mut runs, record_pos, ref_seq, events);
+    apply_events_into(&mut out, &mut runs, record_pos, ref_seq, events, region_end);
     Some((out, WitnessedRefPositions::take_from(&mut runs)?))
 }
 
@@ -1993,6 +2005,11 @@ struct RecordFoldState<'a> {
 /// reach: a read with no events in the window yields no observation a line below. The
 /// contributor path passes the contributor's walker-position BQ anyway, because that is
 /// what production passes and the parity claim is about the walk.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one read folded into one record, and the bound the walk was given — see \
+              `inserted_past_the_regions_last_base`, which is the only thing that reads it"
+)]
 fn fold_read_into_record(
     record: &mut RecordFoldState<'_>,
     allele_seq_buf: &mut Vec<u8>,
@@ -2001,6 +2018,7 @@ fn fold_read_into_record(
     active: &super::active_read_set::ActiveRead,
     window_events: &[ReadEvent],
     bq_fallback: u8,
+    region_end: Option<u32>,
 ) {
     let RecordFoldState {
         alleles,
@@ -2016,6 +2034,7 @@ fn fold_read_into_record(
         rec_pos,
         &alleles[0].seq,
         window_events,
+        region_end,
     );
     // **The buffer is the answer, and taking it is where "no observation" is decided.** The
     // fold used to ask `apply_events_into` for a `bool` and then take the buffer separately,
@@ -2161,6 +2180,7 @@ fn refold_live_reads(
     ids: &mut Vec<u32>,
     active_reads: &ActiveReads,
     contributors: &[ReadContribution],
+    region_end: Option<u32>,
 ) {
     // Already ascending: `folded_reads` is ordered by `read_id`, so the sort this used to
     // run is gone. The ids are still copied out rather than iterated in place, because the
@@ -2211,6 +2231,7 @@ fn refold_live_reads(
             rec_pos,
             &alleles[0].seq,
             &window,
+            region_end,
         );
         // **The refill is the decision, and it comes first.** It **swaps**, so the read's
         // old witness storage goes back into the buffer rather than being dropped and a
@@ -2392,6 +2413,50 @@ pub(super) fn find_allele_index(alleles: &[OpenAllele], seq: &[u8]) -> Option<us
 /// affected at this step are not re-folded — those reads were
 /// folded at the walker step where the record was created or
 /// widened, and folding again here would double-count.
+/// **Whether this event's only content sits past the region's last base** — an insertion
+/// anchored on that base, whose inserted bases are ground this walk was not given.
+///
+/// # The same bound that truncates a deletion, applied to an insertion
+///
+/// [`clamped_to_region`] stops a deletion's footprint at the region's last base, so a deletion
+/// crossing the edge becomes the bases it removes *inside* the region and whatever removes the
+/// rest is the next region's to explain. An insertion has no reference footprint of its own: its
+/// anchor base is unchanged — it is there because a VCF record needs a base, not because the
+/// variant touches it — and its inserted bases sit **between** the anchor and the position after
+/// it. Anchored on the last base, that is entirely outside the region, so the same clamp leaves
+/// nothing of it and the event contributes no allele here.
+///
+/// # Why it matters, measured
+///
+/// A run's ground is typed and **two generic regions are never adjacent** (see
+/// [`WalkerState::region_end`](super::genome_walk)), so a generic region's last base always abuts
+/// a repeat tract, a bundle or a satellite. Until the tract generator was wired in nothing else
+/// described that ground, and the insertion was the only record of it. Now the tract path
+/// describes the same event as a length change one base along, and both were written: **62 of
+/// 68 new false indel calls across the three GIAB samples at 30× were one variant written
+/// twice**, 57 of them a generic record sitting exactly one base before a tract record
+/// (`doc/devel/reports/implementations/ng_ssr_loop_c4_2026-09-02.md`).
+///
+/// **The owner's ruling, 2026-09-02**, on the example above: *"the A belongs to the str, not to
+/// the snp/indel. It would be different if it were an indel that crosses the boundary, but this
+/// is not the case. This is an indel inside the str that happens to be coded inside the generic
+/// segment, but it does not belong in there."* An indel that genuinely starts inside the generic
+/// ground — one that removes the last base and continues into the tract — is untouched by this:
+/// it is a deletion, its anchor is earlier, and the clamp above already gives it the part inside.
+///
+/// # What it costs
+///
+/// **An insertion at the last base of the last analysed region of a stretch is dropped and
+/// nothing describes it**, because the walk is given one region at a time and cannot see whether
+/// another follows. On HG002's benchmark ground at 30× that costs nothing: of the 27 insertions
+/// anchored on a generic region's last base, 26 are followed by a repeat tract and one by a
+/// bundle, and none sits at an edge with no successor. Of the 27, 25 are a record the tract path
+/// also wrote; the two that are not are a bundle's edge, where nothing can call it either way,
+/// and one tract the repeat path called as reference.
+fn inserted_past_the_regions_last_base(event: &ReadEvent, region_end: Option<u32>) -> bool {
+    matches!(event, ReadEvent::Insertion { .. }) && region_end == Some(event.anchor_pos())
+}
+
 /// A record's footprint end, stopped at the region's last base.
 ///
 /// `region_end` is 1-based inclusive and the ends here are exclusive, so the bound is
@@ -2434,6 +2499,9 @@ pub(super) fn process_position(
     for contrib in contributors {
         for ev in &contrib.events_at_pos {
             let event_start = ev.anchor_pos();
+            if inserted_past_the_regions_last_base(ev, region_end) {
+                continue;
+            }
             // `saturating_add` for `event_end` per Mi8: on
             // multi-Gbp chromosomes a raw `+` would wrap and the
             // `find_overlapping` range lookup would search the
@@ -2468,7 +2536,14 @@ pub(super) fn process_position(
                     .expect("just located")
                     .footprint_end_exclusive();
                 if event_end > cur_end
-                    && open.widen(k, event_end, reference, active_reads, contributors)?
+                    && open.widen(
+                        k,
+                        event_end,
+                        reference,
+                        active_reads,
+                        contributors,
+                        region_end,
+                    )?
                 {
                     widen_count += 1;
                 }
@@ -2623,6 +2698,7 @@ pub(super) fn process_position(
                 active_read,
                 window_events,
                 contrib.bq_baq_at_walker_pos,
+                region_end,
             );
         }
 
@@ -3269,7 +3345,7 @@ mod tests {
         rec.alleles.push(OpenAllele::new(b"T".to_vec()));
         rec.alleles[1].support.num_obs = 1;
         // Now widen to span 3 ("ACG").
-        t.widen(1, 4, &f, &active, &[]).unwrap();
+        t.widen(1, 4, &f, &active, &[], None).unwrap();
         let rec = t.records.get(&1).unwrap();
         assert_eq!(rec.alleles[0].seq, b"ACG", "the REF bucket grows");
         assert_eq!(
@@ -3366,7 +3442,7 @@ mod tests {
     #[test]
     fn apply_events_with_no_events_witnesses_nothing() {
         let ref_seq = b"ACGTA";
-        assert!(apply_events(100, ref_seq, &[]).is_none());
+        assert!(apply_events(100, ref_seq, &[], None).is_none());
     }
 
     /// **The witnessed-runs buffer is the callee's to clear, and C1 is what put a caller's
@@ -3403,6 +3479,7 @@ mod tests {
             100,
             ref_seq,
             std::slice::from_ref(&snp),
+            None,
         );
         assert_eq!(
             runs.as_slice(),
@@ -3410,7 +3487,7 @@ mod tests {
             "the previous read's run must not survive into this one's witness",
         );
 
-        apply_events_into(&mut allele_seq, &mut runs, 100, ref_seq, &[]);
+        apply_events_into(&mut allele_seq, &mut runs, 100, ref_seq, &[], None);
         assert!(
             runs.is_empty(),
             "a read that got no observation leaves the buffer empty for the next one",
@@ -3429,7 +3506,7 @@ mod tests {
             bq_baq: 30,
         };
         let (bases, witnessed) =
-            apply_events(100, ref_seq, std::slice::from_ref(&snp)).expect("one run");
+            apply_events(100, ref_seq, std::slice::from_ref(&snp), None).expect("one run");
         assert_eq!(bases, b"X");
         assert_eq!(witnessed, ref_run(102, 103));
     }
@@ -3447,7 +3524,7 @@ mod tests {
                 bq_baq: 30,
             })
             .collect();
-        let (bases, witnessed) = apply_events(100, ref_seq, &events).expect("one run");
+        let (bases, witnessed) = apply_events(100, ref_seq, &events, None).expect("one run");
         assert_eq!(
             bases, b"ACXTA",
             "exactly what production emits for this read"
@@ -3469,7 +3546,7 @@ mod tests {
             bq_proxy: 30,
         };
         let (bases, witnessed) =
-            apply_events(100, ref_seq, std::slice::from_ref(&del)).expect("one run");
+            apply_events(100, ref_seq, std::slice::from_ref(&del), None).expect("one run");
         // The anchor base only — 101 and 102 are deleted, and 103/104 were never
         // witnessed, where production appended them from the reference ("ATA").
         assert_eq!(bases, b"A");
@@ -3503,7 +3580,7 @@ mod tests {
             bq_proxy: 30,
         };
         let (bases, witnessed) =
-            apply_events(100, ref_seq, std::slice::from_ref(&del)).expect("one run");
+            apply_events(100, ref_seq, std::slice::from_ref(&del), None).expect("one run");
         // 99, 100, 101 deleted. 100 and 101 lie inside the record and are witnessed as
         // absent; 102–104 the read said nothing about, where production emitted "GTA".
         assert_eq!(bases, b"");
@@ -3525,7 +3602,7 @@ mod tests {
             bq_proxy: 30,
         };
         let (bases, witnessed) =
-            apply_events(100, ref_seq, std::slice::from_ref(&del)).expect("one run");
+            apply_events(100, ref_seq, std::slice::from_ref(&del), None).expect("one run");
         assert_eq!(bases, b"");
         assert_eq!(
             witnessed,
@@ -3555,7 +3632,7 @@ mod tests {
             seq: b"YY".to_vec(),
             bq_proxy: 30,
         };
-        let (bases, witnessed) = apply_events(100, ref_seq, &[m, i]).expect("one run");
+        let (bases, witnessed) = apply_events(100, ref_seq, &[m, i], None).expect("one run");
         // Anchor: read base 'X' (not REF 'A'), then inserted "YY". The REF tail
         // production appended is gone — the read never witnessed 101–104.
         assert_eq!(bases, b"XYY");
@@ -3582,7 +3659,7 @@ mod tests {
             bq_proxy: 30,
         };
         let (bases, witnessed) =
-            apply_events(100, ref_seq, std::slice::from_ref(&ins)).expect("one run");
+            apply_events(100, ref_seq, std::slice::from_ref(&ins), None).expect("one run");
         assert_eq!(bases, b"AXX", "the borrowed 'A', then the inserted run");
         assert_eq!(
             bases.iter().filter(|b| **b == b'A').count(),
@@ -3621,7 +3698,7 @@ mod tests {
                 bq_baq: 30,
             },
         ];
-        let (bases, witnessed) = apply_events(100, ref_seq, &events).expect("two runs");
+        let (bases, witnessed) = apply_events(100, ref_seq, &events, None).expect("two runs");
         assert_eq!(bases, b"AT", "both bases the read showed, and no third");
         assert_eq!(
             witnessed.runs().collect::<Vec<_>>(),
@@ -3653,7 +3730,7 @@ mod tests {
                 bq_baq: 30,
             },
         ];
-        let (bases, witnessed) = apply_events(100, ref_seq, &events).expect("one run");
+        let (bases, witnessed) = apply_events(100, ref_seq, &events, None).expect("one run");
         assert_eq!(bases, b"CG");
         assert_eq!(witnessed, ref_run(101, 103));
     }
@@ -3675,7 +3752,7 @@ mod tests {
                 bq_baq: 30,
             },
         ];
-        let (bases, witnessed) = apply_events(100, ref_seq, &events).expect("one run");
+        let (bases, witnessed) = apply_events(100, ref_seq, &events, None).expect("one run");
         assert_eq!(bases, b"AT");
         assert_eq!(
             witnessed,
@@ -3713,7 +3790,7 @@ mod tests {
                 bq_proxy: 30,
             },
         ];
-        let _ = apply_events(100, ref_seq, &events);
+        let _ = apply_events(100, ref_seq, &events, None);
     }
 
     #[cfg(not(debug_assertions))]
@@ -3732,7 +3809,7 @@ mod tests {
                 bq_proxy: 30,
             },
         ];
-        let (bases, witnessed) = apply_events(100, ref_seq, &events).expect("one run");
+        let (bases, witnessed) = apply_events(100, ref_seq, &events, None).expect("one run");
         assert_eq!(bases, b"A", "the anchor base once, from the first deletion");
         assert_eq!(
             witnessed,
@@ -4524,6 +4601,100 @@ mod tests {
             },
             "the opener's deletion witnessed 5..=20 whole; the shortie stopped at 7 and \
              the widener started there — both partials are one run, so neither is holed"
+        );
+    }
+
+    /// **An insertion anchored on the region's last base contributes no allele, and the same
+    /// insertion one base inside does.**
+    ///
+    /// An insertion's anchor base is unchanged — it is there because a record needs a base, not
+    /// because the variant touches it — and its inserted bases sit between that base and the
+    /// next. Anchored on the last base, that is entirely outside the region, so the bound that
+    /// truncates a deletion's tail leaves nothing of it.
+    ///
+    /// **The second half is what stops the rule being "drop insertions".** Every insertion
+    /// inside the region is ordinary SNP/indel ground and has to survive; only the one at the
+    /// very edge is somebody else's — which, since two generic regions are never adjacent, is
+    /// always a repeat tract's, a bundle's or a satellite's.
+    ///
+    /// **Written against `process_position` rather than against the generator**, because the
+    /// generator's fixture reference is a run of `A`s: an inserted base there left-aligns to the
+    /// contig's start, so a fixture built on it cannot tell this rule from that shift and passes
+    /// either way. That version of this test was written first and deleted.
+    #[test]
+    fn an_insertion_anchored_on_the_regions_last_base_contributes_no_allele() {
+        let reference = fa(WIDEN_CONTIG);
+        // Matches 7..=9, then inserts two bases between 9 and 10, then matches 10..=12.
+        let (active, _ids) = admitted(vec![plain_read(
+            "inserter",
+            7,
+            12,
+            vec![CigarOp::Match(3), CigarOp::Insertion(2), CigarOp::Match(3)],
+            WIDEN_CONTIG.as_bytes()[6..9]
+                .iter()
+                .copied()
+                .chain(*b"TT")
+                .chain(WIDEN_CONTIG.as_bytes()[9..12].iter().copied())
+                .collect(),
+        )]);
+        let contributors = contributors_at(&active, 9);
+        assert!(
+            contributors.iter().any(|c| c
+                .events_at_pos
+                .iter()
+                .any(|e| matches!(e, ReadEvent::Insertion { .. }))),
+            "the fixture's read really does carry an insertion anchored at 9",
+        );
+
+        let mut at_the_edge = OpenPileupRecordTable::new();
+        process_position(
+            &mut at_the_edge,
+            9,
+            0,
+            &contributors,
+            &[],
+            &active,
+            &reference,
+            Some(9),
+        )
+        .expect("the fixture walks cleanly");
+        let alleles_of = |table: &OpenPileupRecordTable| -> Vec<Vec<u8>> {
+            let mut seen: Vec<Vec<u8>> = table
+                .records
+                .get(&9)
+                .expect("the read matches at 9, so a record is open there either way")
+                .alleles
+                .iter()
+                .map(|allele| allele.seq.to_vec())
+                .collect();
+            seen.sort();
+            seen
+        };
+        assert_eq!(
+            alleles_of(&at_the_edge),
+            vec![b"A".to_vec()],
+            "the reference bucket and the read's allele are the same bases: the inserted ones \
+             sit past the region's last base, so the record holds the \
+             reference base alone and establishes no variant",
+        );
+
+        let mut inside = OpenPileupRecordTable::new();
+        process_position(
+            &mut inside,
+            9,
+            0,
+            &contributors,
+            &[],
+            &active,
+            &reference,
+            Some(10),
+        )
+        .expect("the fixture walks cleanly");
+        assert_eq!(
+            alleles_of(&inside),
+            vec![b"A".to_vec(), b"ATT".to_vec()],
+            "one base further in, the same insertion is ordinary SNP/indel ground and its \
+             bases reach the record",
         );
     }
 

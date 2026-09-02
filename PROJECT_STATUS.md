@@ -19,7 +19,21 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **what calling repeat tracts is worth, measured —
+> - **Last completed task (2026-09-02):** **an insertion at a region's last base belongs to
+> whatever follows, not to the SNP/indel path**
+> ([report](doc/devel/reports/implementations/ng_edge_insertion_2026-09-02.md)), which fixes the
+> duplication C4 measured. **Owner's ruling**: an insertion's anchor base is unchanged — it is
+> there because a record needs a base — and its inserted bases sit past the region's end, so the
+> bound that already truncates a deletion's tail leaves nothing of it. An indel that genuinely
+> starts inside the generic ground, removing the last base and continuing into the tract, is
+> untouched. **Duplicated indel records: 62 at 30× and 66 at 50×, now 0 at both.** Indel
+> precision comes back from 0.816 to 0.983 at 30× (0.987 before tracts were called at all) and
+> recall settles at 0.900 against the duplicated run's 0.915 and the baseline's 0.673 — the five
+> true indels it costs are edges where the tract path wrote nothing. **Still open:** a run whose
+> analysed ground ends at a region boundary loses an insertion there, because the walk is given
+> one region at a time; and ng's indel recall is 4.6 points short of its own pre-clip 0.946.
+>
+> - **Earlier (2026-09-02):** **what calling repeat tracts is worth, measured —
 > step C4, and Checkpoint C**
 > (step C4 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
 > [report](doc/devel/reports/implementations/ng_ssr_loop_c4_2026-09-02.md)).
