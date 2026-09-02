@@ -115,7 +115,7 @@ slot belongs to the parallel plan.
 
 ### Milestone C — the driver calls a tract, and the record says so
 
-**C1. The dispatch.**  ☐
+**C1. The dispatch.**  ✅
 `call_one_generic_locus`'s call site branches on `CohortObservation::kind`
 ([`callers.rs:813`](../../../../src/ng/run/callers.rs)): `Generic` unchanged; `Ssr` runs
 `select_ssr` → `shape_ssr_locus` → the same `genotyper.call_locus`, replacing the

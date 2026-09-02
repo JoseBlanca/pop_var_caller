@@ -24,18 +24,26 @@
 //! `pub(crate)`. Narrow the rest when the command exists to call it. `cohort_merge` carries the
 //! same note for the same reason.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use crate::ng::calling::allele_candidates::generic::select_generic;
+use crate::ng::calling::allele_candidates::ssr::{
+    SsrLocusSelection, SsrSelectionConfig, select_ssr,
+};
 use crate::ng::calling::allele_candidates::{
     AlleleRemap, CandidateSelectionConfig, UnmatchedSupport,
 };
-use crate::ng::calling::evidence_shaping::{GenericEvidenceScratch, shape_generic_locus};
+use crate::ng::calling::evidence_shaping::{
+    GenericEvidenceScratch, SsrEvidenceScratch, shape_generic_locus, shape_ssr_locus,
+};
 use crate::ng::calling::inference::{LocusGenotyper, RunnableCallingLoopConfig};
 use crate::ng::calling::run_parameters::RunParameters;
 use crate::ng::calling::{CallingScratch, FrozenParameters, LocusInference};
 use crate::ng::locus_generation::pileup::{PileupGeneratorConfig, PileupGeneratorCounts};
-use crate::ng::locus_generation::{GeneratorCounts, LocusCounts, LocusKind};
+use crate::ng::locus_generation::{
+    GeneratorCounts, LocusCounts, LocusKind, SequenceObservation, SsrDetail,
+};
 use crate::ng::read::filtering::ReadFilterConfig;
 use crate::ng::read::filtering::ReadFilterCounts;
 use crate::ng::read::input::SampleReads;
@@ -559,6 +567,8 @@ impl AlignedFilesVariantCaller {
         // scratch is resized and refilled by `CallingScratch::prepare_for_locus`, which
         // `call_locus` runs before it reads anything.
         let mut shaping = GenericEvidenceScratch::default();
+        let mut tract_shaping = SsrEvidenceScratch::default();
+        let tract_selection = SsrSelectionConfig::at_ploidy(frozen.ploidy());
         let mut scratch: CallingScratch<S> = CallingScratch::default();
         let mut called_loci = Vec::new();
         let mut loci_too_wide_to_assemble = Vec::new();
@@ -566,6 +576,7 @@ impl AlignedFilesVariantCaller {
         // Counted rather than collected: a run over tract-rich ground meets millions of these,
         // and what the report owes is how many, not where each one was.
         let mut tract_loci_set_aside = 0_u64;
+        let mut tracts_without_whole_repeats = 0_u64;
 
         let mut cache = ObservationCache::over(walkers);
         merge_cohort_handing_each_locus_over(
@@ -576,25 +587,27 @@ impl AlignedFilesVariantCaller {
             merge_parameters.min_alt_reads,
             &mut |observation| {
                 let region = observation.region;
-                if set_aside_because_nothing_calls_it_yet(&observation) {
-                    tract_loci_set_aside += 1;
-                    return;
-                }
-                match call_one_generic_locus(
+                match call_one_cohort_locus(
                     genotyper,
                     &observation,
                     &frozen,
                     &candidate_selection,
+                    &tract_selection,
                     &calling_loop_config,
                     run_sample_count,
                     &mut shaping,
+                    &mut tract_shaping,
                     &mut scratch,
                     // This entry point wants the call and nothing beside it, so the observation's
                     // remapping and leftover are dropped where they were built.
                     |inference, _remap, _unmatched| inference,
                 ) {
-                    Some(called) => called_loci.push(called),
-                    None => loci_with_nobody_to_call.push(region),
+                    LocusOutcome::Called(called) => called_loci.push(called),
+                    LocusOutcome::NobodyToCall => loci_with_nobody_to_call.push(region),
+                    LocusOutcome::BundleSetAside => tract_loci_set_aside += 1,
+                    LocusOutcome::TractWithoutWholeRepeats => {
+                        tracts_without_whole_repeats += 1;
+                    }
                 }
             },
             &mut loci_too_wide_to_assemble,
@@ -693,6 +706,8 @@ impl AlignedFilesVariantCaller {
 
         let frozen = parameters.view();
         let mut shaping = GenericEvidenceScratch::default();
+        let mut tract_shaping = SsrEvidenceScratch::default();
+        let tract_selection = SsrSelectionConfig::at_ploidy(frozen.ploidy());
         let mut scratch: CallingScratch<S> = CallingScratch::default();
         let mut padding_scratch = Vec::new();
         let mut records_written = 0_u64;
@@ -701,6 +716,7 @@ impl AlignedFilesVariantCaller {
         let mut loci_with_nobody_to_call = Vec::new();
         // Counted rather than collected — see the other driver.
         let mut tract_loci_set_aside = 0_u64;
+        let mut tracts_without_whole_repeats = 0_u64;
         // **The merge's sink cannot fail**, so the first failure is stashed and the sink does
         // nothing after it. Reported ahead of whatever the merge itself then returns, because it
         // happened first.
@@ -726,19 +742,17 @@ impl AlignedFilesVariantCaller {
                 if stopped.is_some() {
                     return;
                 }
-                if set_aside_because_nothing_calls_it_yet(&observation) {
-                    tract_loci_set_aside += 1;
-                    return;
-                }
                 let region = observation.region;
-                let built = call_one_generic_locus(
+                let built = call_one_cohort_locus(
                     genotyper,
                     &observation,
                     &frozen,
                     &candidate_selection,
+                    &tract_selection,
                     &calling_loop_config,
                     run_sample_count,
                     &mut shaping,
+                    &mut tract_shaping,
                     &mut scratch,
                     |inference, remap, unmatched| {
                         // **Asked before the reference is read**, so a locus that establishes
@@ -770,10 +784,14 @@ impl AlignedFilesVariantCaller {
                     },
                 );
                 match built {
-                    None => loci_with_nobody_to_call.push(region),
-                    Some(Err(error)) => stopped = Some(error),
-                    Some(Ok(None)) => loci_called_but_not_written += 1,
-                    Some(Ok(Some(record))) => match hand_over(&record) {
+                    LocusOutcome::NobodyToCall => loci_with_nobody_to_call.push(region),
+                    LocusOutcome::BundleSetAside => tract_loci_set_aside += 1,
+                    LocusOutcome::TractWithoutWholeRepeats => {
+                        tracts_without_whole_repeats += 1;
+                    }
+                    LocusOutcome::Called(Err(error)) => stopped = Some(error),
+                    LocusOutcome::Called(Ok(None)) => loci_called_but_not_written += 1,
+                    LocusOutcome::Called(Ok(Some(record))) => match hand_over(&record) {
                         Ok(()) => records_written += 1,
                         Err(source) => {
                             stopped = Some(RunError::RecordNotWritten {
@@ -802,29 +820,192 @@ impl AlignedFilesVariantCaller {
     }
 }
 
-/// **Whether this locus is one nothing in the run can call yet** — a repeat tract or a repeat
-/// bundle, which is every kind but the SNP/indel one.
+/// **What became of one cohort locus** — the four ends a driver has to tell apart.
 ///
-/// **A temporary guard, and it exists because the alternative is silently wrong.**
-/// `call_one_generic_locus` is the SNP/indel path and nothing in it knows what a tract is: it
-/// would take the tract's distinct read sequences as ordinary alleles, select among them by
-/// read support, and emit a record whose `REF`/`ALT` are whole tract lengths scored under a
-/// substitution model. Every field would be well formed and the genotype would be a guess with
-/// no stutter model behind it. Setting the locus aside and counting it says the same thing
-/// honestly, and it is already an improvement on never building the observation at all
-/// (`run_ssr_observations.md` §5).
+/// Three of them produce no record and are not the same fact: a locus nobody can be called at,
+/// a repeat cluster nothing builds a caller for, and a repeat tract the tract model cannot
+/// describe are three different things to report (`calling_loop_ssr.md` §3.2).
+enum LocusOutcome<R> {
+    /// Called, and this is what the caller's own `finish` made of the answer.
+    Called(R),
+    /// **No sample of the run can be called here** — every one of them lost the alleles it
+    /// earned, so there are no rows to genotype. Counted, never fatal (owner's ruling,
+    /// 2026-09-01).
+    NobodyToCall,
+    /// **A repeat cluster with no clean flanks**, which nothing in the run builds a caller for
+    /// yet: the bundle generator is deferred (`candidate_alleles_ssr.md` §11) and the tract
+    /// model wants a single tract with two flanks. Set aside and counted.
+    BundleSetAside,
+    /// **A repeat tract holding a candidate that is not a whole number of motif copies** —
+    /// a sequence shorter than one copy of the unit, which the stutter model is not written
+    /// on: its ladder is in whole repeats and this candidate sits below the bottom rung.
+    ///
+    /// **Rare, and measured rather than assumed**: over HG002's 50,000-region Tier set through
+    /// ng's own catalog, 1 of 17,315 kept candidates at 30× and none at all at 50× or 300×
+    /// (`ng_ssr_selection_e2_2026-09-02.md`'s runs). Refused and counted rather than scored
+    /// under a model that does not apply, and rather than widening the evidence's repeat count
+    /// to admit zero — which is the change to make if that count ever stops being one in ten
+    /// thousand.
+    TractWithoutWholeRepeats,
+}
+
+/// **One cohort locus, down whichever path its kind names** — the dispatch the STR calling
+/// loop's design asks for (`calling_loop_ssr.md` §3.2).
 ///
-/// **What replaces it** is the dispatch on the observation's kind that `calling_loop_ssr.md`
-/// Milestone C builds, once there is a tract selector to dispatch *to*. The two documents are
-/// independently buildable precisely because this guard stands between them.
+/// The two paths share their genotyper, their parameters, their calling-loop configuration and
+/// their scratch; what differs is which selector narrows the locus and which shaper builds its
+/// evidence. **The kind is read off the observation and never inferred from which fields are
+/// populated**, so a third kind has to be decided here rather than falling into whichever arm
+/// the compiler picks for it.
 ///
-/// Exhaustive on the kind on purpose: a fourth kind must be decided here rather than falling
-/// into whichever arm the compiler picks for it.
-fn set_aside_because_nothing_calls_it_yet(observation: &CohortObservation) -> bool {
-    match observation.kind {
-        LocusKind::Generic => false,
-        LocusKind::Ssr(_) | LocusKind::SsrBundle => true,
+/// **A repeat tract's reads are not narrowed to its candidates**, which is the one shape
+/// difference worth naming beside the two calls. The SNP/indel path hands the loop each
+/// sample's reads folded onto the surviving alleles; the tract path hands it every observation
+/// the sample showed, because the stutter model scores a read against a candidate rather than
+/// matching it to one (`doc/devel/ng/spec/read_likelihoods.md` §4). Selection still decides the
+/// candidate list, and the leftover it produces is still what says a sample must be emitted as
+/// missing.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the same nine `call_one_generic_locus` takes, plus the tract path's own selection \
+              configuration and shaping buffers — a struct grouping them would exist for this \
+              signature alone, and both paths' arguments are already the run's own values"
+)]
+fn call_one_cohort_locus<S, G, R>(
+    genotyper: &G,
+    observation: &CohortObservation,
+    parameters: &FrozenParameters<'_>,
+    candidate_selection: &CandidateSelectionConfig,
+    tract_selection: &SsrSelectionConfig,
+    calling_loop_config: &RunnableCallingLoopConfig,
+    run_sample_count: usize,
+    shaping: &mut GenericEvidenceScratch,
+    tract_shaping: &mut SsrEvidenceScratch,
+    scratch: &mut CallingScratch<S>,
+    finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport]) -> R,
+) -> LocusOutcome<R>
+where
+    G: LocusGenotyper<S>,
+{
+    match &observation.kind {
+        LocusKind::Generic => match call_one_generic_locus(
+            genotyper,
+            observation,
+            parameters,
+            candidate_selection,
+            calling_loop_config,
+            run_sample_count,
+            shaping,
+            scratch,
+            finish,
+        ) {
+            Some(called) => LocusOutcome::Called(called),
+            None => LocusOutcome::NobodyToCall,
+        },
+        LocusKind::Ssr(detail) => call_one_ssr_locus(
+            genotyper,
+            observation,
+            detail,
+            parameters,
+            tract_selection,
+            calling_loop_config,
+            run_sample_count,
+            tract_shaping,
+            scratch,
+            finish,
+        ),
+        LocusKind::SsrBundle => LocusOutcome::BundleSetAside,
     }
+}
+
+/// **Selection's repeat counts as the tract's evidence takes them, or nothing** — the one place
+/// a candidate carrying no whole motif copy stops the locus.
+///
+/// Selection counts a candidate's whole repeats by flooring its length by the motif's period,
+/// so a sequence shorter than one copy of the unit comes back as zero; the evidence's counts are
+/// [`NonZeroU32`], because the stutter ladder is written in whole repeats and a candidate below
+/// its bottom rung has no rung. The conversion is therefore the refusal, and it is written once
+/// here rather than as a `map` inside the tract arm, so that its own test can reach it.
+///
+/// **Its frequency is measured, not assumed**: over HG002's 50,000-region Tier set through ng's
+/// own repeat catalog, 1 of 17,315 kept candidates at 30× carries no whole repeat, and none at
+/// all at 50× or 300×
+/// (`doc/devel/reports/implementations/ng_ssr_selection_e2_2026-09-02.md`'s runs). If that ever
+/// stops being one in ten thousand, the change to make is to the evidence's own count type
+/// rather than to this refusal.
+fn repeat_counts_the_tract_model_can_take(counts: &[u32]) -> Option<Vec<NonZeroU32>> {
+    counts.iter().copied().map(NonZeroU32::new).collect()
+}
+
+/// One repeat tract from evidence to genotypes — [`call_one_cohort_locus`]'s tract arm.
+///
+/// Three calls, the same three the SNP/indel path makes: narrow the locus
+/// ([`select_ssr`]), shape its evidence ([`shape_ssr_locus`]), and genotype it with the run's
+/// own genotyper. The differences are all in the first two.
+///
+/// # Why there is no "nobody to call" here
+///
+/// The SNP/indel path can leave a sample with no rows at all — the cap removes an allele the
+/// sample earned and it is set aside for the rest of the locus — and a locus where that
+/// happens to every sample has nothing to genotype. **A tract sets no sample aside**: a
+/// discovery round can put back a length the cap cut, so nobody is locked out
+/// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1), and a sample that showed nothing carries an
+/// empty observation list whose sum is zero, which is the right answer rather than a special
+/// case. So the tract arm's only refusals are the two the outcome names.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the tract path's own spelling of `call_one_generic_locus`'s nine — see there"
+)]
+fn call_one_ssr_locus<S, G, R>(
+    genotyper: &G,
+    observation: &CohortObservation,
+    detail: &SsrDetail,
+    parameters: &FrozenParameters<'_>,
+    tract_selection: &SsrSelectionConfig,
+    calling_loop_config: &RunnableCallingLoopConfig,
+    run_sample_count: usize,
+    tract_shaping: &mut SsrEvidenceScratch,
+    scratch: &mut CallingScratch<S>,
+    finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport]) -> R,
+) -> LocusOutcome<R>
+where
+    G: LocusGenotyper<S>,
+{
+    let narrowed = select_ssr(
+        observation,
+        tract_selection,
+        scratch.candidate_selection_mut(),
+    );
+    // **Converted before anything is shaped**, so a candidate the tract model cannot describe
+    // stops the locus rather than reaching the emission as a one-repeat allele.
+    let Some(repeat_counts) = repeat_counts_the_tract_model_can_take(&narrowed.repeat_counts)
+    else {
+        return LocusOutcome::TractWithoutWholeRepeats;
+    };
+    let SsrLocusSelection { selection, .. } = narrowed;
+    let (alleles, _verdict, unmatched, remap) = selection.into_parts();
+
+    let observations_of_each_run_sample = tract_shaping.rebuild(observation, run_sample_count);
+    // **Two per-locus allocations, and both are the borrow checker's price rather than a
+    // choice.** The slice-of-slices cannot live in the scratch beside the buffers it borrows,
+    // and `views` cannot outlive the locus for the reason `shape_generic_locus` documents: a
+    // `Vec` is invariant in its element type, so one held across two loci would hold the
+    // first's borrow open into the second.
+    let per_sample: Vec<&[SequenceObservation]> = observations_of_each_run_sample
+        .iter()
+        .map(Vec::as_slice)
+        .collect();
+    let mut views = Vec::new();
+    let evidence = shape_ssr_locus(
+        observation.region,
+        &per_sample,
+        detail,
+        &repeat_counts,
+        &mut views,
+    );
+    let inference =
+        genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch);
+    LocusOutcome::Called(finish(inference, &remap, &unmatched))
 }
 
 /// One cohort locus from evidence to genotypes: **which alleles it is called over, whose reads
@@ -5773,24 +5954,26 @@ mod records_handed_over_as_the_run_finishes_them {
         )
     }
 
-    /// **A cohort locus at a repeat tract is built, merged, and then not called** — the guard
-    /// that stands until the calling loop learns to dispatch on the observation's kind
-    /// (`run_ssr_observations.md` §5).
+    /// **A cohort locus at a repeat tract is built, merged, and now called** — the dispatch
+    /// this milestone builds, replacing the guard that stood in its place.
     ///
-    /// **What it is guarding against is a plausible record, not a crash.** Without the guard
-    /// the tract's observation goes to `call_one_generic_locus`, which knows nothing about
-    /// repeats: it would take the distinct tract lengths the reads showed as ordinary alleles,
-    /// rank them by read support, and emit a record whose `REF` and `ALT` are whole tract
-    /// sequences scored under a substitution model with no stutter term. So the test asserts
-    /// **both halves** — the locus is counted as set aside, *and* no record was written over
-    /// the tract's ground. Asserting only the count would pass on a run that set it aside and
-    /// called it as well.
+    /// **This test asserted the opposite until 2026-09-02 and the reversal is the step.** The
+    /// guard set every tract aside because `call_one_generic_locus` knows nothing about
+    /// repeats: it would have taken the distinct tract lengths the reads showed as ordinary
+    /// alleles, ranked them by read support, and emitted a record whose `REF` and `ALT` are
+    /// whole tract sequences scored under a substitution model with no stutter term. What
+    /// replaces the guard is not that path — it is `select_ssr` and the tract model, reached
+    /// through `call_one_cohort_locus`'s branch on the observation's kind.
+    ///
+    /// So the two halves invert together: **nothing is set aside** — the count now holds
+    /// bundles alone — and **a locus over the tract's own ground reaches the caller**. A run
+    /// that dispatched but scored the tract as ordinary sequence would pass the first half and
+    /// is what the record-level fixtures below are for.
     ///
     /// The sample's reads span the tract with room either side, and carry one changed base
-    /// inside it, so the merge has something to build. The mixed cohort above does not vary
-    /// there, which is why its own count is zero.
+    /// inside it, so the merge has something to build.
     #[test]
-    fn a_tract_a_sample_varies_at_is_built_and_set_aside_uncalled() {
+    fn a_tract_a_sample_varies_at_is_built_and_called_through_the_tract_path() {
         let (_reference_dir, reference) = fixture_reference_from_its_index();
 
         let (_bam_dir, bam) = a_sample_varying_inside_the_tract();
@@ -5804,20 +5987,61 @@ mod records_handed_over_as_the_run_finishes_them {
         .expect("the fixture cohort calls");
 
         assert_eq!(
-            called.tract_loci_set_aside, 1,
-            "the tract's cohort locus is built and merged, and the driver declines to score it",
+            called.tract_loci_set_aside, 0,
+            "a repeat tract is dispatched to the tract path, and only a bundle is set aside",
         );
-        assert!(
-            called
-                .called_loci
-                .iter()
-                .all(|locus| locus.region.end.get() < 41 || locus.region.start.get() > 52),
-            "no locus over the tract's ground reaches the caller, and got {:?}",
+        let over_the_tract: Vec<&LocusInference> = called
+            .called_loci
+            .iter()
+            .filter(|locus| locus.region.start.get() >= 41 && locus.region.end.get() <= 52)
+            .collect();
+        assert_eq!(
+            over_the_tract.len(),
+            1,
+            "the tract's own ground is called once, and the caller produced {:?}",
             called
                 .called_loci
                 .iter()
                 .map(|locus| locus.region)
                 .collect::<Vec<_>>(),
+        );
+        // **Which model called it, and not merely that something did.** The SNP/indel path
+        // would also produce a record over this ground — that is what the guard this dispatch
+        // replaces existed to prevent — and the only thing in the answer that tells the two
+        // apart is the kind selection stamped on the candidate table.
+        assert!(
+            matches!(over_the_tract[0].alleles().kind(), LocusKind::Ssr(_)),
+            "the tract was called through the tract path, and its candidates say {:?}",
+            over_the_tract[0].alleles().kind(),
+        );
+    }
+
+    /// **A candidate carrying no whole motif copy stops the tract rather than being scored as
+    /// one repeat** — the conversion that is the refusal.
+    ///
+    /// Selection floors a candidate's length by the period, so a sequence shorter than one
+    /// copy of the unit comes back as zero whole repeats. The stutter ladder is written in
+    /// whole repeats and has no rung below its bottom one; admitting such a candidate as
+    /// `NonZeroU32::new(1)` would put it on the ladder's first rung, which is a different
+    /// allele from the one the reads showed.
+    #[test]
+    fn a_candidate_with_no_whole_repeat_is_not_convertible_for_the_tract_model() {
+        assert_eq!(
+            repeat_counts_the_tract_model_can_take(&[7, 6, 5])
+                .expect("every candidate carries a whole repeat")
+                .iter()
+                .map(|count| count.get())
+                .collect::<Vec<u32>>(),
+            vec![7, 6, 5],
+        );
+        assert!(
+            repeat_counts_the_tract_model_can_take(&[7, 0]).is_none(),
+            "one candidate below the ladder's bottom rung stops the locus",
+        );
+        assert!(
+            repeat_counts_the_tract_model_can_take(&[]).is_some(),
+            "an empty list is not a candidate with no repeats — it is no candidates, which \
+             selection cannot produce, since the reference tract is always admitted",
         );
     }
 
@@ -5937,15 +6161,34 @@ mod records_handed_over_as_the_run_finishes_them {
         }
     }
 
+    /// How many records the written VCF holds over the fixture tract's own ground.
+    ///
+    /// **The tract is `chr1:41-52` in the fixture's segmentation**, which
+    /// `a_tract_a_sample_varies_at_is_built_and_called_through_the_tract_path` names too; a
+    /// record's `POS` is its first base, one-based, so the window is asked inclusively at both
+    /// ends.
+    fn records_over_the_tract(vcf: &[u8]) -> usize {
+        String::from_utf8_lossy(vcf)
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .filter_map(|line| line.split('\t').nth(1)?.parse::<u64>().ok())
+            .filter(|position| (41..=52).contains(position))
+            .count()
+    }
+
     /// **The tract path is thread-invariant too, and on a cohort where it actually fires** —
     /// C4's half of the E2 oracle.
     ///
     /// The sweep above runs the tract generator at every thread count, but no sample of that
-    /// cohort varies inside its tract, so the merge finds the tract too quiet to build and the
-    /// set-aside count is zero at every pool size: **a comparison of zeros, which any
-    /// implementation passes.** This runs the same sweep on the sample that does vary there, so
-    /// the file, the walk tallies and the set-aside count are compared at a value the tract
-    /// path produced.
+    /// cohort varies inside its tract, so the merge finds the tract too quiet to build and
+    /// nothing the tract path does reaches the file at any pool size: **a comparison of
+    /// files that hold no tract record, which any implementation passes.** This runs the same
+    /// sweep on the sample that does vary there, so the bytes and the walk tallies are
+    /// compared at a value the tract path produced.
+    ///
+    /// **The anchor moved with the dispatch (2026-09-02).** It used to be the set-aside count,
+    /// which is now zero at a tract; what stands in its place is a record over the tract's own
+    /// ground, which is the thing the sweep would otherwise be comparing the absence of.
     ///
     /// **What could go wrong here that the sweep above cannot see.** The tract generator holds
     /// a cursor and its own reference accessors, one set per sample, and a run's walkers cross
@@ -5962,10 +6205,14 @@ mod records_handed_over_as_the_run_finishes_them {
         for merge in the_two_widths() {
             let width = merge.cohort_locus_builder_regions_len.get();
             let (serial_bytes, serial) = mixed_cohort_vcf_in_a_pool(1, &alone, &reference, merge);
+            assert!(
+                records_over_the_tract(&serial_bytes) > 0,
+                "the fixture varies inside the tract, so the tract path writes a record there \
+                 — without this the comparisons below are of files holding none",
+            );
             assert_eq!(
-                serial.tract_loci_set_aside, 1,
-                "the fixture varies inside the tract, so a locus is built there and set aside \
-                 — without this the comparisons below are of zeros",
+                serial.tract_loci_set_aside, 0,
+                "a tract is called rather than set aside; the count is bundles alone",
             );
             for threads in [2, 4, 8, 16] {
                 for repetition in 0..3 {
@@ -5979,6 +6226,11 @@ mod records_handed_over_as_the_run_finishes_them {
                     assert_eq!(
                         again.tract_loci_set_aside, serial.tract_loci_set_aside,
                         "the tract loci set aside at a pool of {threads}",
+                    );
+                    assert_eq!(
+                        records_over_the_tract(&bytes),
+                        records_over_the_tract(&serial_bytes),
+                        "the records over the tract's own ground at a pool of {threads}",
                     );
                     assert_eq!(
                         walk_tallies_of(&again),

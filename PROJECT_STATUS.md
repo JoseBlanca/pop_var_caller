@@ -19,7 +19,24 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **what the shipped repeat-tract selector offers
+> - **Last completed task (2026-09-02):** **ng calls a repeat tract through its own model —
+> step C1 of the STR calling loop**
+> (step C1 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_loop_c1_2026-09-02.md)).
+> Both drivers now branch on the observation's kind: the SNP/indel arm is what it was, and a
+> repeat tract runs `select_ssr` → `shape_ssr_locus` → the same genotyper. The guard that set
+> every tract aside is gone and the count it fed holds bundles alone. **The design's one gap was
+> the join in front of evidence shaping**: `shape_ssr_locus` reads the STR generator's own
+> observation rows and the merge does not carry them, so they are rebuilt from its allele table
+> and its per-sample rows — exactly, because a repeat tract is one record per sample, and the
+> four counters a partial loses on the way through the merge are four the tract model does not
+> read. **A candidate carrying no whole motif copy stops the locus**, counted: 1 of 17,315 kept
+> candidates at 30× on HG002 and none at 50× or 300×. Five mutations run, five killed — the
+> fourth only because of an assertion added after predicting it would survive, which says *which
+> model* called the tract rather than that something did. **Next: C2, the record's motif, repeat
+> counts and FILTER.**
+>
+> - **Earlier (2026-09-02):** **what the shipped repeat-tract selector offers
 > HG002, measured — step E2 and Checkpoint E**
 > (step E2 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md), which is
 > Milestone B of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);

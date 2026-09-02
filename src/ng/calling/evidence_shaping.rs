@@ -69,9 +69,9 @@ use std::num::NonZeroU32;
 use super::SsrSampleEvidence;
 use super::allele_candidates::LocusSelection;
 use super::{GenericLocusSample, GenericObservation, GenericSampleEvidence, LocusEvidence};
-use crate::ng::locus_generation::{SequenceObservation, SsrDetail};
+use crate::ng::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
 use crate::ng::run::cohort_merge::build::CohortObservation;
-use crate::ng::types::{AlleleId, GenomeRegion};
+use crate::ng::types::{AlleleId, GenomeRegion, SummedLogError};
 
 /// How far selection's pooled leftover and this narrowing's own sum may differ before the two
 /// are treated as disagreeing, **relative to the larger of them**.
@@ -460,6 +460,112 @@ pub fn shape_ssr_locus<'a>(
     LocusEvidence::ssr(region, views, detail, candidate_repeat_counts)
 }
 
+/// **A repeat tract's observations, rebuilt from the merge's rows** — reusable buffers, one
+/// entry per sample of the run.
+///
+/// # Why anything has to be rebuilt
+///
+/// [`shape_ssr_locus`] reads the STR generator's own rows, and the merge does not hand them
+/// over: it interns each distinct sequence into the locus's allele table and folds every
+/// sample's reads onto `(allele, read group)` pairs. The driver has the merged object and
+/// nothing else, so the rows are put back together from it.
+///
+/// # It is exact, and the reason is that a tract is one record
+///
+/// **Three of the four things the tract model reads come straight back.** The bases are the
+/// allele table's own; the read group is the row's key; the read count is the row's
+/// `num_reads`. The fourth is the witness, and that is what the merge's two lists already
+/// are — a `supported` row is a read that spanned the locus, a `partials` entry is one whose
+/// reads ran out inside it, carrying the positions it did witness.
+///
+/// **Nothing is folded together on the way in, because a repeat tract is one record per
+/// sample.** The merge merges two of a sample's rows only where two of its *records* fall
+/// inside one cohort locus, which on this path cannot happen — so each merge row is exactly one
+/// generator observation and the counts come back undivided.
+///
+/// **Four counters do not survive on a partial, and none of them is read here.** The merge
+/// keeps a partial's reads and its error mass and drops its forward-strand count, its two MAPQ
+/// moments and its left-placed count ([`PartialObservation`](crate::ng::run::cohort_merge::build::PartialObservation)).
+/// The repeat-tract model reads an observation's bases, its read group and its read count and
+/// nothing else — the site-quality artifact correction, which is what reads the other four,
+/// skips a tract by design (the `LocusEvidence::Ssr` arm of `summarise_condition`'s fold).
+/// They are filled with zeros on a rebuilt partial rather than invented, so a consumer that
+/// starts reading them at a tract sees zero rather than a plausible wrong number, and this
+/// paragraph is where it will look.
+#[derive(Default)]
+pub struct SsrEvidenceScratch {
+    /// One list per sample of the run, empty where the sample covered nothing.
+    per_run_sample: Vec<Vec<SequenceObservation>>,
+}
+
+impl SsrEvidenceScratch {
+    /// Rebuild every run sample's observations at `observation`'s tract.
+    ///
+    /// The buffers are cleared and refilled, so one scratch serves every locus a worker meets.
+    ///
+    /// # Panics
+    ///
+    /// On a covering sample whose index is not a sample of the run — a merge that named a
+    /// sample the run does not have.
+    pub fn rebuild(
+        &mut self,
+        observation: &CohortObservation,
+        run_sample_count: usize,
+    ) -> &[Vec<SequenceObservation>] {
+        self.per_run_sample.truncate(run_sample_count);
+        self.per_run_sample.resize_with(run_sample_count, Vec::new);
+        for rows in &mut self.per_run_sample {
+            rows.clear();
+        }
+        for sample in &observation.per_sample {
+            let rows = self
+                .per_run_sample
+                .get_mut(sample.sample)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the merge named sample {} at {}, and the run has {run_sample_count}",
+                        sample.sample, observation.region,
+                    )
+                });
+            rows.reserve(sample.supported.len() + sample.partials.len());
+            for row in &sample.supported {
+                rows.push(SequenceObservation {
+                    bases: observation.alleles[row.allele].clone(),
+                    read_witness: ReadWitness::Complete,
+                    read_group: row.read_group,
+                    num_obs: row.support.num_reads,
+                    num_fwd: row.support.num_fwd,
+                    q_sum: SummedLogError::from_nats(row.support.q_sum),
+                    mapq_sum: row.support.mapq_sum,
+                    mapq_sum_sq: row.support.mapq_sum_sq,
+                    placed_left: row.support.placed_left,
+                    // Empty on the STR path, which does not phase: a tract is one record, so
+                    // the witness already says whether a read spanned it.
+                    chain_ids: Vec::new(),
+                });
+            }
+            for partial in &sample.partials {
+                rows.push(SequenceObservation {
+                    bases: partial.bases.clone(),
+                    read_witness: ReadWitness::Partial {
+                        positions: partial.witnessed_in_locus.clone(),
+                    },
+                    read_group: partial.read_group,
+                    num_obs: partial.num_reads,
+                    q_sum: SummedLogError::from_nats(partial.q_sum),
+                    // The four the merge does not keep for a partial — see the type's note.
+                    num_fwd: 0,
+                    mapq_sum: 0,
+                    mapq_sum_sq: 0,
+                    placed_left: 0,
+                    chain_ids: Vec::new(),
+                });
+            }
+        }
+        &self.per_run_sample
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,7 +573,10 @@ mod tests {
     use crate::ng::calling::CandidateAlleles;
     use crate::ng::calling::allele_candidates::{AlleleRemap, SelectionVerdict, UnmatchedSupport};
     use crate::ng::locus_generation::LocusKind;
-    use crate::ng::run::cohort_merge::build::{AlleleSupport, SampleSupport, SupportedAllele};
+    use crate::ng::locus_generation::WitnessedLocusPositions;
+    use crate::ng::run::cohort_merge::build::{
+        AlleleSupport, PartialObservation, SampleSupport, SupportedAllele,
+    };
     use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId, SummedLogError};
 
     /// Two candidates' repeat counts, different from each other — the shape a tract's evidence
@@ -563,6 +672,139 @@ mod tests {
             remap,
             covering_samples,
         )
+    }
+
+    /// A tract locus over `alleles` many sequences, covered by `per_sample`.
+    fn merged_tract(alleles: usize, per_sample: Vec<SampleSupport>) -> CohortObservation {
+        let sequences = [b"ATAT".as_slice(), b"ATATAT", b"ATATATAT", b"AT"];
+        CohortObservation {
+            region: region(),
+            alleles: sequences[..alleles].iter().map(|s| Box::from(*s)).collect(),
+            per_sample,
+            kind: LocusKind::Ssr(ssr_detail()),
+        }
+    }
+
+    fn ssr_detail() -> SsrDetail {
+        SsrDetail {
+            motif: crate::ng::types::Motif::new(b"AT").expect("a dinucleotide"),
+            left_flank: Box::from(&b"CCCC"[..]),
+            right_flank: Box::from(&b"GGGG"[..]),
+        }
+    }
+
+    /// **Every merge row comes back as the observation the STR generator minted** — the bases,
+    /// the read group, the read count, and a witness that says the read spanned the tract.
+    ///
+    /// **This is the join the tract path rests on and nothing in the types enforces it.** The
+    /// merge keys its rows on `(allele, read group)`; the tract model reads bases, read group
+    /// and read count off an observation. A rebuild that took the row's index for its allele,
+    /// or dropped the read group, would still produce a well-formed evidence object and would
+    /// score every read against the wrong candidate.
+    #[test]
+    fn a_merge_row_is_rebuilt_as_the_observation_the_generator_minted() {
+        let observation = merged_tract(
+            3,
+            vec![covering(
+                1,
+                vec![merge_row(2, 7, 11, -22.0), merge_row(0, 7, 4, -8.0)],
+            )],
+        );
+        let mut scratch = SsrEvidenceScratch::default();
+        let rebuilt = scratch.rebuild(&observation, 3);
+
+        assert_eq!(rebuilt.len(), 3, "one list per sample of the run");
+        assert!(rebuilt[0].is_empty(), "sample 0 covered nothing");
+        assert!(rebuilt[2].is_empty(), "sample 2 covered nothing");
+        let rows: Vec<(&[u8], u32, u32, bool)> = rebuilt[1]
+            .iter()
+            .map(|row| {
+                (
+                    row.bases.as_ref(),
+                    row.read_group.0,
+                    row.num_obs,
+                    matches!(row.read_witness, ReadWitness::Complete),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (b"ATATATAT".as_slice(), 7, 11, true),
+                (b"ATAT".as_slice(), 7, 4, true),
+            ],
+            "each row's own allele bases, its own group and its own reads, in the merge's order",
+        );
+    }
+
+    /// **A partial stays a partial, and it keeps the positions it witnessed.**
+    ///
+    /// The witness is the only thing that separates a read that spanned the tract from one
+    /// that ran out inside it, and the two are scored by different terms — a partial read
+    /// scored as complete is scored as a *short* allele, because its bases are a prefix of
+    /// the truth (`doc/devel/ng/spec/read_likelihoods.md` §5.1). A rebuild that lost the
+    /// witness would put every partial on the complete side and nothing would say so.
+    #[test]
+    fn a_partial_row_is_rebuilt_as_a_partial_with_its_witnessed_positions() {
+        let witnessed =
+            WitnessedLocusPositions::from_half_open_runs([(0_u16, 3_u16)]).expect("a witness");
+        let mut sample = covering(0, vec![merge_row(0, 1, 5, -10.0)]);
+        sample.partials.push(PartialObservation {
+            witnessed_in_locus: witnessed.clone(),
+            read_group: ReadGroupId(1),
+            bases: Box::from(&b"ATA"[..]),
+            num_reads: 3,
+            q_sum: -6.0,
+        });
+        let observation = merged_tract(2, vec![sample]);
+        let detail = ssr_detail();
+        let mut scratch = SsrEvidenceScratch::default();
+        let rebuilt = scratch.rebuild(&observation, 1);
+
+        let evidence = SsrSampleEvidence::new(&rebuilt[0], &detail);
+        assert_eq!(
+            evidence
+                .complete_observations()
+                .map(|(_, row)| row.num_obs)
+                .collect::<Vec<u32>>(),
+            vec![5],
+        );
+        assert_eq!(
+            evidence
+                .partial_observations()
+                .map(|(_, row)| (row.bases.as_ref().to_vec(), row.num_obs))
+                .collect::<Vec<(Vec<u8>, u32)>>(),
+            vec![(b"ATA".to_vec(), 3)],
+        );
+        assert_eq!(
+            rebuilt[0][1].read_witness,
+            ReadWitness::Partial {
+                positions: witnessed
+            },
+            "the positions the read did witness travel with it",
+        );
+    }
+
+    /// **The buffers are emptied between loci, and a shorter run does not leave the last one's
+    /// rows behind.**
+    ///
+    /// One scratch serves every locus of a worker, so a locus that fails to clear a sample's
+    /// list hands the next locus reads from the previous tract — bases that do not appear in
+    /// its allele table at all, scored against its candidates as though a read had shown them.
+    #[test]
+    fn one_scratch_over_two_loci_holds_only_the_seconds_rows() {
+        let mut scratch = SsrEvidenceScratch::default();
+        let first = merged_tract(2, vec![covering(0, vec![merge_row(1, 0, 9, -18.0)])]);
+        let _ = scratch.rebuild(&first, 2);
+
+        let second = merged_tract(2, vec![covering(1, vec![merge_row(0, 0, 2, -4.0)])]);
+        let rebuilt = scratch.rebuild(&second, 2);
+        assert!(
+            rebuilt[0].is_empty(),
+            "sample 0 covered the first locus and not the second, and its rows are gone",
+        );
+        assert_eq!(rebuilt[1].len(), 1);
+        assert_eq!(rebuilt[1][0].bases.as_ref(), b"ATAT");
     }
 
     fn leftover(q_sum: f64, earned_reads_cut_by_the_cap: u32) -> UnmatchedSupport {
