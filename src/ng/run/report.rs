@@ -210,17 +210,47 @@ impl<'a> RunReport<'a> {
             ground.unhandled_out_of_scope_bp,
             share_of(ground.unhandled_out_of_scope_bp, covered),
         ));
-        // **Loci, not bases, and it is a different fact from either line above.** Those two say
-        // what ground no generator looked at; this says what was looked at, built, merged
-        // across the cohort — and then not scored, because nothing in the run scores a repeat
-        // tract yet. A run that printed only the base lines would now say a tract's ground was
-        // *called*, which it was not.
-        if self.written.tract_loci_set_aside > 0 {
+        // **Loci, not bases, and a different fact from either line above.** Those two say what
+        // ground no generator looked at; these say what was looked at, built and merged across
+        // the cohort — and then called, filtered, or not scored at all. A run that printed only
+        // the base lines would say a refused tract's ground was *called*, which it was not.
+        //
+        // **The two refusals are here because the file cannot say them.** A tract refused as not
+        // periodic is called over the reference tract alone, so every sample is homozygous
+        // reference and no record is written; in the file it is indistinguishable from a tract
+        // nobody varied at (`doc/devel/ng/spec/vcf_output.md` §9).
+        let tracts = &self.written.tracts;
+        if tracts.built() > 0 {
             lines.push(format!(
-                "  repeat tracts built and then not called: {} locus/loci — the evidence is \
-                 gathered and nothing scores it yet",
-                self.written.tract_loci_set_aside,
+                "repeat tracts: {} built, of which {} called",
+                tracts.built(),
+                tracts.called,
             ));
+            if tracts.not_periodic > 0 {
+                lines.push(format!(
+                    "  not called — the reads do not vary in whole motif units (notPeriodic): {}",
+                    tracts.not_periodic,
+                ));
+            }
+            if tracts.too_many_alleles > 0 {
+                lines.push(format!(
+                    "  called over fewer sequences than segregate there (tooManyAlleles): {}",
+                    tracts.too_many_alleles,
+                ));
+            }
+            if tracts.without_whole_repeats > 0 {
+                lines.push(format!(
+                    "  not called — a candidate shorter than one copy of the motif: {}",
+                    tracts.without_whole_repeats,
+                ));
+            }
+            if tracts.bundles_set_aside > 0 {
+                lines.push(format!(
+                    "  not called — clusters of repeats with no clean flanks, which nothing \
+                     builds a caller for yet: {}",
+                    tracts.bundles_set_aside,
+                ));
+            }
         }
 
         self.refused_loci(

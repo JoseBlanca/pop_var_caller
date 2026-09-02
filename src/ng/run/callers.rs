@@ -575,8 +575,7 @@ impl AlignedFilesVariantCaller {
         let mut loci_with_nobody_to_call = Vec::new();
         // Counted rather than collected: a run over tract-rich ground meets millions of these,
         // and what the report owes is how many, not where each one was.
-        let mut tract_loci_set_aside = 0_u64;
-        let mut tracts_without_whole_repeats = 0_u64;
+        let mut tracts = TractOutcomes::default();
 
         let mut cache = ObservationCache::over(walkers);
         merge_cohort_handing_each_locus_over(
@@ -597,6 +596,7 @@ impl AlignedFilesVariantCaller {
                     run_sample_count,
                     &mut shaping,
                     &mut tract_shaping,
+                    &mut tracts,
                     &mut scratch,
                     // This entry point wants the call and nothing beside it, so the observation's
                     // remapping and leftover are dropped where they were built.
@@ -604,10 +604,8 @@ impl AlignedFilesVariantCaller {
                 ) {
                     LocusOutcome::Called(called) => called_loci.push(called),
                     LocusOutcome::NobodyToCall => loci_with_nobody_to_call.push(region),
-                    LocusOutcome::BundleSetAside => tract_loci_set_aside += 1,
-                    LocusOutcome::TractWithoutWholeRepeats => {
-                        tracts_without_whole_repeats += 1;
-                    }
+                    // Both counted inside the dispatch, where the verdict that decided them is.
+                    LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {}
                 }
             },
             &mut loci_too_wide_to_assemble,
@@ -617,7 +615,7 @@ impl AlignedFilesVariantCaller {
             called_loci,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
-            tract_loci_set_aside,
+            tracts,
             walk: CohortWalkTallies::of(sample_names, cache.into_sources(), assembly_check),
         })
     }
@@ -715,8 +713,7 @@ impl AlignedFilesVariantCaller {
         let mut loci_too_wide_to_assemble = Vec::new();
         let mut loci_with_nobody_to_call = Vec::new();
         // Counted rather than collected — see the other driver.
-        let mut tract_loci_set_aside = 0_u64;
-        let mut tracts_without_whole_repeats = 0_u64;
+        let mut tracts = TractOutcomes::default();
         // **The merge's sink cannot fail**, so the first failure is stashed and the sink does
         // nothing after it. Reported ahead of whatever the merge itself then returns, because it
         // happened first.
@@ -753,6 +750,7 @@ impl AlignedFilesVariantCaller {
                     run_sample_count,
                     &mut shaping,
                     &mut tract_shaping,
+                    &mut tracts,
                     &mut scratch,
                     |inference, remap, unmatched, verdict| {
                         // **Asked before the reference is read**, so a locus that establishes
@@ -786,10 +784,8 @@ impl AlignedFilesVariantCaller {
                 );
                 match built {
                     LocusOutcome::NobodyToCall => loci_with_nobody_to_call.push(region),
-                    LocusOutcome::BundleSetAside => tract_loci_set_aside += 1,
-                    LocusOutcome::TractWithoutWholeRepeats => {
-                        tracts_without_whole_repeats += 1;
-                    }
+                    // Both counted inside the dispatch, where the verdict that decided them is.
+                    LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {}
                     LocusOutcome::Called(Err(error)) => stopped = Some(error),
                     LocusOutcome::Called(Ok(None)) => loci_called_but_not_written += 1,
                     LocusOutcome::Called(Ok(Some(record))) => match hand_over(&record) {
@@ -815,9 +811,57 @@ impl AlignedFilesVariantCaller {
             loci_called_but_not_written,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
-            tract_loci_set_aside,
+            tracts,
             walk: CohortWalkTallies::of(sample_names, cache.into_sources(), assembly_check),
         })
+    }
+}
+
+/// **What became of this run's repeat tracts** — the partition the run report prints, the way
+/// the SNP/indel path's own outcomes already partition.
+///
+/// **The five are disjoint and they sum to every tract-kind locus the merge built.** Two of them
+/// were never scored; three were, and two of those three carry a `FILTER` the file states. The
+/// partition is what makes the report checkable: a run whose tract ground is charged to *called*
+/// while a third of its tracts were refused would be saying something false, and the sum is what
+/// says it is not.
+///
+/// **The refusals have to be counted because the file cannot state them.** A tract refused as
+/// not periodic is called over the reference tract alone, so every sample is homozygous
+/// reference and no record is written — in the file it is indistinguishable from a tract nobody
+/// varied at (`doc/devel/ng/spec/vcf_output.md` §9). The count is the only place it appears.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TractOutcomes {
+    /// Scored, and carrying no repeat-tract filter.
+    pub called: u64,
+    /// Scored, and refused as not varying in whole motif units — `notPeriodic`.
+    pub not_periodic: u64,
+    /// Scored, and carrying more candidate sequences than the cap admits — `tooManyAlleles`.
+    /// The locus is still called over the ones the cap kept.
+    pub too_many_alleles: u64,
+    /// **Not scored: a candidate carrying no whole motif copy**, which the stutter ladder has no
+    /// rung for. See [`repeat_counts_the_tract_model_can_take`] for how often this fires.
+    pub without_whole_repeats: u64,
+    /// **Not scored: a repeat cluster with no clean flanks**, which nothing in the run builds a
+    /// caller for — the bundle generator is deferred and has no model.
+    pub bundles_set_aside: u64,
+}
+
+impl TractOutcomes {
+    /// Every tract-kind locus the merge built — the sum of the five.
+    #[must_use]
+    pub fn built(&self) -> u64 {
+        self.called
+            + self.not_periodic
+            + self.too_many_alleles
+            + self.without_whole_repeats
+            + self.bundles_set_aside
+    }
+
+    /// Those that were scored and then refused by a filter of their own.
+    #[must_use]
+    pub fn refused_by_a_filter(&self) -> u64 {
+        self.not_periodic + self.too_many_alleles
     }
 }
 
@@ -882,6 +926,7 @@ fn call_one_cohort_locus<S, G, R>(
     run_sample_count: usize,
     shaping: &mut GenericEvidenceScratch,
     tract_shaping: &mut SsrEvidenceScratch,
+    tracts: &mut TractOutcomes,
     scratch: &mut CallingScratch<S>,
     finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport], SelectionVerdict) -> R,
 ) -> LocusOutcome<R>
@@ -912,10 +957,33 @@ where
             calling_loop_config,
             run_sample_count,
             tract_shaping,
+            tracts,
             scratch,
             finish,
         ),
-        LocusKind::SsrBundle => LocusOutcome::BundleSetAside,
+        LocusKind::SsrBundle => {
+            tracts.bundles_set_aside += 1;
+            LocusOutcome::BundleSetAside
+        }
+    }
+}
+
+/// **Which of the report's tract outcomes this locus is**, from selection's own verdict.
+///
+/// **Counted here rather than read off the written record**, because two of the three leave no
+/// record to read. A tract refused as `notPeriodic` is called over the reference tract alone, so
+/// every sample is homozygous reference and the locus establishes no variant — it is left out of
+/// the file, where it is indistinguishable from a tract nobody varied at
+/// (`doc/devel/ng/spec/vcf_output.md` §9). This count is the only place it appears.
+///
+/// **A truncated tract is still called** over the sequences the cap kept, and it is counted as
+/// `tooManyAlleles` rather than as called so that the two are not summed into one number a
+/// reader would take for clean calls.
+fn count_this_tract(verdict: SelectionVerdict, tracts: &mut TractOutcomes) {
+    match verdict {
+        SelectionVerdict::NotPeriodic => tracts.not_periodic += 1,
+        SelectionVerdict::Truncated { .. } => tracts.too_many_alleles += 1,
+        _ => tracts.called += 1,
     }
 }
 
@@ -966,6 +1034,7 @@ fn call_one_ssr_locus<S, G, R>(
     calling_loop_config: &RunnableCallingLoopConfig,
     run_sample_count: usize,
     tract_shaping: &mut SsrEvidenceScratch,
+    tracts: &mut TractOutcomes,
     scratch: &mut CallingScratch<S>,
     finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport], SelectionVerdict) -> R,
 ) -> LocusOutcome<R>
@@ -981,10 +1050,12 @@ where
     // stops the locus rather than reaching the emission as a one-repeat allele.
     let Some(repeat_counts) = repeat_counts_the_tract_model_can_take(&narrowed.repeat_counts)
     else {
+        tracts.without_whole_repeats += 1;
         return LocusOutcome::TractWithoutWholeRepeats;
     };
     let SsrLocusSelection { selection, .. } = narrowed;
     let (alleles, verdict, unmatched, remap) = selection.into_parts();
+    count_this_tract(verdict, tracts);
 
     let observations_of_each_run_sample = tract_shaping.rebuild(observation, run_sample_count);
     // **Two per-locus allocations, and both are the borrow checker's price rather than a
@@ -1158,20 +1229,13 @@ pub struct CalledCohort {
     /// **A non-empty list is worth acting on**: raising `max_candidate_alleles` keeps more of
     /// what those loci vary over.
     pub loci_with_nobody_to_call: Vec<GenomeRegion>,
-    /// **Cohort loci built over repeat ground and set aside uncalled** — a tract or a bundle,
-    /// which no path in this run can score yet.
-    ///
-    /// **A temporary count with a named successor.** The merge now produces observations at
-    /// repeat tracts and nothing consumes them: the SNP/indel path would take a tract's read
-    /// sequences as ordinary alleles and emit a well-formed record with no stutter model behind
-    /// its genotype, so the driver sets each aside instead
-    /// (`doc/devel/ng/spec/run_ssr_observations.md` §5). It goes when
-    /// `calling_loop_ssr.md`'s dispatch replaces the guard.
+    /// **What became of this run's repeat tracts**, partitioned five ways — called, refused by
+    /// each of the two tract filters, and the two kinds of tract nothing scored.
     ///
     /// **Not the same fact as the walk's `unhandled_not_implemented`**, which counts *regions*
-    /// whose generator slot is unfilled — bundles, today. This counts *loci* that were built,
-    /// merged across the cohort, and then not called.
-    pub tract_loci_set_aside: u64,
+    /// whose generator slot is unfilled. This counts *loci* that were built and merged across
+    /// the cohort.
+    pub tracts: TractOutcomes,
     /// What each sample's walk saw, and what the run could check about the assembly.
     pub walk: CohortWalkTallies,
 }
@@ -1198,9 +1262,8 @@ pub struct WrittenCohort {
     /// **The ground of the loci no sample of the run could be called at**, in genome order —
     /// [`CalledCohort::loci_with_nobody_to_call`].
     pub loci_with_nobody_to_call: Vec<GenomeRegion>,
-    /// **Cohort loci built over repeat ground and set aside uncalled** —
-    /// [`CalledCohort::tract_loci_set_aside`].
-    pub tract_loci_set_aside: u64,
+    /// **What became of this run's repeat tracts** — [`CalledCohort::tracts`].
+    pub tracts: TractOutcomes,
     /// What each sample's walk saw, and what the run could check about the assembly.
     pub walk: CohortWalkTallies,
 }
@@ -5861,7 +5924,8 @@ mod records_handed_over_as_the_run_finishes_them {
              every thread count",
         );
         assert_eq!(
-            baseline.tract_loci_set_aside, 0,
+            baseline.tracts.built(),
+            0,
             "no sample of this cohort varies inside the tract, so the merge finds it too quiet \
              to build and there is no locus to set aside — \
              `a_tract_a_sample_varies_at_is_built_and_set_aside_uncalled` is the fixture that \
@@ -5915,7 +5979,7 @@ mod records_handed_over_as_the_run_finishes_them {
                         baseline.loci_with_nobody_to_call
                     );
                     assert_eq!(
-                        again.tract_loci_set_aside, baseline.tract_loci_set_aside,
+                        again.tracts, baseline.tracts,
                         "the tract loci set aside at a pool of {threads}",
                     );
                     assert_eq!(
@@ -5988,7 +6052,7 @@ mod records_handed_over_as_the_run_finishes_them {
         .expect("the fixture cohort calls");
 
         assert_eq!(
-            called.tract_loci_set_aside, 0,
+            called.tracts.bundles_set_aside, 0,
             "a repeat tract is dispatched to the tract path, and only a bundle is set aside",
         );
         let over_the_tract: Vec<&LocusInference> = called
@@ -6015,6 +6079,41 @@ mod records_handed_over_as_the_run_finishes_them {
             "the tract was called through the tract path, and its candidates say {:?}",
             over_the_tract[0].alleles().kind(),
         );
+    }
+
+    /// **Each of selection's verdicts lands in its own outcome**, and a truncated tract is not
+    /// counted among the cleanly called ones.
+    ///
+    /// The counting cannot be read off the file: two of the three leave no record — a tract
+    /// refused as `notPeriodic` is called over the reference alone, so it establishes no variant
+    /// and is left out. So the mapping is asserted here rather than against an output.
+    #[test]
+    fn each_selection_verdict_lands_in_its_own_tract_outcome() {
+        let outcome_of = |verdict| {
+            let mut tracts = TractOutcomes::default();
+            count_this_tract(verdict, &mut tracts);
+            tracts
+        };
+        assert_eq!(outcome_of(SelectionVerdict::Selected).called, 1);
+        assert_eq!(outcome_of(SelectionVerdict::NotPeriodic).not_periodic, 1);
+        assert_eq!(
+            outcome_of(SelectionVerdict::Truncated { dropped: 4 }).too_many_alleles,
+            1,
+        );
+        assert_eq!(
+            outcome_of(SelectionVerdict::Truncated { dropped: 4 }).called,
+            0,
+            "a truncated tract is called over what the cap kept, and is not counted among the \
+             tracts nothing was cut from",
+        );
+        // Each of the three adds exactly one locus to the partition, and to one part of it.
+        for verdict in [
+            SelectionVerdict::Selected,
+            SelectionVerdict::NotPeriodic,
+            SelectionVerdict::Truncated { dropped: 1 },
+        ] {
+            assert_eq!(outcome_of(verdict).built(), 1);
+        }
     }
 
     /// **A candidate carrying no whole motif copy stops the tract rather than being scored as
@@ -6212,7 +6311,7 @@ mod records_handed_over_as_the_run_finishes_them {
                  — without this the comparisons below are of files holding none",
             );
             assert_eq!(
-                serial.tract_loci_set_aside, 0,
+                serial.tracts.bundles_set_aside, 0,
                 "a tract is called rather than set aside; the count is bundles alone",
             );
             for threads in [2, 4, 8, 16] {
@@ -6225,7 +6324,7 @@ mod records_handed_over_as_the_run_finishes_them {
                          {width}-base building region (repetition {repetition})",
                     );
                     assert_eq!(
-                        again.tract_loci_set_aside, serial.tract_loci_set_aside,
+                        again.tracts, serial.tracts,
                         "the tract loci set aside at a pool of {threads}",
                     );
                     assert_eq!(

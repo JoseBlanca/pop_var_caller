@@ -132,7 +132,7 @@ counts reach `REPCN`, and the FILTER verdict comes from selection and the loop
 convergence alone. Round-trip pin: a tract record through `bcftools` unchanged.
 *Depends:* C1. *Source:* spec §3.2; [`../spec/vcf_output.md`](../spec/vcf_output.md) §6–§8.
 
-**C3. The run report partitions tract outcomes.**  ☐
+**C3. The run report partitions tract outcomes.**  ✅
 Called, refused-by-FILTER, and set-aside-as-unbuilt (bundles) are three counted lines, the
 way the generic path's outcomes already partition. Wording only where this plan owns it — the
 ground shares stayed with the parallel plan.

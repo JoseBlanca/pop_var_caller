@@ -17,6 +17,7 @@ use crate::ng::read::input::read_groups::{ReadGroups, build_read_groups};
 use crate::ng::region_typing::GenomeRegions;
 use crate::ng::repeat_catalog::StrRepeatCriteria;
 use crate::ng::run::AssemblyCheckOutcome;
+use crate::ng::run::callers::TractOutcomes;
 use crate::ng::run::callers::{CohortWalkTallies, SampleWalkTallies};
 use crate::ng::types::{ContigId, Ploidy, Position, ReadGroupId};
 
@@ -91,7 +92,7 @@ fn a_run(
         loci_called_but_not_written,
         loci_too_wide_to_assemble: too_wide,
         loci_with_nobody_to_call: nobody,
-        tract_loci_set_aside: 0,
+        tracts: TractOutcomes::default(),
         walk: CohortWalkTallies {
             per_sample,
             assembly_check: AssemblyCheckOutcome::NothingCouldBeChecked {
@@ -765,22 +766,93 @@ fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_ther
     let none_built = a_run(3, 0, Vec::new(), Vec::new(), ground.clone());
     let text = rendered(&none_built, &read_groups, &parameters, 1_000);
     assert!(
-        !text.contains("repeat tracts built and then not called"),
-        "a run with no such locus prints no line for it, rather than a zero: {text}",
+        !text.contains("repeat tracts:"),
+        "a run that built no tract prints no line for them, rather than a row of zeros: {text}",
     );
 
     let some_built = WrittenCohort {
-        tract_loci_set_aside: 7,
-        ..a_run(3, 0, Vec::new(), Vec::new(), ground)
+        tracts: TractOutcomes {
+            called: 40,
+            not_periodic: 5,
+            too_many_alleles: 3,
+            without_whole_repeats: 1,
+            bundles_set_aside: 7,
+        },
+        ..a_run(3, 0, Vec::new(), Vec::new(), ground.clone())
     };
     let text = rendered(&some_built, &read_groups, &parameters, 1_000);
+
+    // **The headline is the sum and the share of it that was called**, so a reader who stops
+    // after one line still knows how much of the tract ground the run spoke for.
     assert!(
-        text.contains("repeat tracts built and then not called: 7 locus/loci"),
-        "and a run with seven says seven: {text}",
+        text.contains("repeat tracts: 56 built, of which 40 called"),
+        "the five outcomes sum to the tracts built: {text}",
     );
+    for (line, what) in [
+        (
+            "(notPeriodic): 5",
+            "the reads do not vary in whole motif units",
+        ),
+        (
+            "(tooManyAlleles): 3",
+            "more sequences segregate than the cap admits",
+        ),
+        (
+            "shorter than one copy of the motif: 1",
+            "no rung on the stutter ladder",
+        ),
+        (
+            "no clean flanks, which nothing builds a caller for yet: 7",
+            "a bundle",
+        ),
+    ] {
+        assert!(
+            text.contains(line),
+            "the report says {what} and how many, and got: {text}",
+        );
+    }
     assert!(
         text.contains("called: 950 bases (95.0%)"),
-        "the tract's bases are called ground now — which is exactly why the line above has to \
+        "the tract's bases are called ground — which is exactly why the lines above have to \
          exist: {text}",
     );
+
+    // **Each refusal's line appears only when it happened.** Four lines of zeros under a
+    // headline is a report a reader stops reading.
+    let only_called = WrittenCohort {
+        tracts: TractOutcomes {
+            called: 40,
+            ..TractOutcomes::default()
+        },
+        ..a_run(3, 0, Vec::new(), Vec::new(), ground)
+    };
+    let text = rendered(&only_called, &read_groups, &parameters, 1_000);
+    assert!(text.contains("repeat tracts: 40 built, of which 40 called"));
+    for absent in [
+        "notPeriodic",
+        "tooManyAlleles",
+        "shorter than one copy",
+        "clean flanks, which",
+    ] {
+        assert!(
+            !text.contains(absent),
+            "a run where {absent} never happened does not print a zero for it: {text}",
+        );
+    }
+}
+
+/// **The five outcomes are a partition** — every tract-kind locus the merge built is in exactly
+/// one of them, which is what makes the headline's sum a fact rather than an addition.
+#[test]
+fn the_tract_outcomes_sum_to_the_tracts_built() {
+    let outcomes = TractOutcomes {
+        called: 40,
+        not_periodic: 5,
+        too_many_alleles: 3,
+        without_whole_repeats: 1,
+        bundles_set_aside: 7,
+    };
+    assert_eq!(outcomes.built(), 56);
+    assert_eq!(outcomes.refused_by_a_filter(), 8);
+    assert_eq!(TractOutcomes::default().built(), 0);
 }

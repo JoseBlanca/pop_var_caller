@@ -19,7 +19,20 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **a repeat tract's record says so — step C2**
+> - **Last completed task (2026-09-02):** **the run report says what became of the repeat
+> tracts — step C3**
+> (step C3 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_loop_c3_2026-09-02.md)).
+> One count became five and the five are a partition: called, refused as `notPeriodic`, called
+> over fewer sequences than segregate (`tooManyAlleles`), refused for a candidate carrying no
+> whole motif copy, and set aside as a repeat cluster. **Three of the five are visible only
+> here**, because a refused tract leaves no record — `notPeriodic` narrows to the reference
+> alone, so every sample is homozygous reference and the locus is left out of the file, where it
+> is indistinguishable from a tract nobody varied at. On HG002 at 30× over 200 Tier intervals
+> the run now prints `repeat tracts: 24 built, of which 24 called`. **Next: C4, the end-to-end
+> measurement against the zeros.**
+>
+> - **Earlier (2026-09-02):** **a repeat tract's record says so — step C2**
 > (step C2 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
 > [report](doc/devel/reports/implementations/ng_ssr_loop_c2_2026-09-02.md)).
 > The motif reaches the record from the called locus's own candidate table, so `STR`, `RU`,
