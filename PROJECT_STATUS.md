@@ -19,7 +19,67 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **what the shipped repeat-tract selector offers
+> - **Last completed task (2026-09-02):** **what calling repeat tracts is worth, measured —
+> step C4, and Checkpoint C**
+> (step C4 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_loop_c4_2026-09-02.md)).
+> Pooled over the three GIAB samples on their own confident regions, **indel recall goes from
+> 0.673 to 0.915 at 30× and from 0.676 to 0.939 at 50×**; SNP recall from 0.974 to 0.980 and
+> 0.979 to 0.984. The bar is the production caller's 0.987 SNP / 0.930 indel at 30×.
+> **⚠ And the same variant is now written twice.** Indel precision falls from 0.987 to 0.816 at
+> 30×, and **62 of the 68 new false calls are a record the file already holds**: the SNP/indel
+> path emits an insertion anchored at the base beside a tract and the tract path emits the same
+> insertion as a length change, one base apart, identical once left-aligned. Counted once,
+> precision is 0.981. **The duplication is a design question spanning this plan and the typed
+> regions' — the recommendation is to fix it in the routing**, by giving a tract's region the
+> anchor base beside it, so the generic mint never opens the second record. About a third of
+> what the region clip cost in indels is also still missing (0.946 before the clip, 0.915 now).
+>
+> - **Earlier (2026-09-02):** **the run report says what became of the repeat
+> tracts — step C3**
+> (step C3 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_loop_c3_2026-09-02.md)).
+> One count became five and the five are a partition: called, refused as `notPeriodic`, called
+> over fewer sequences than segregate (`tooManyAlleles`), refused for a candidate carrying no
+> whole motif copy, and set aside as a repeat cluster. **Three of the five are visible only
+> here**, because a refused tract leaves no record — `notPeriodic` narrows to the reference
+> alone, so every sample is homozygous reference and the locus is left out of the file, where it
+> is indistinguishable from a tract nobody varied at. On HG002 at 30× over 200 Tier intervals
+> the run now prints `repeat tracts: 24 built, of which 24 called`. **Next: C4, the end-to-end
+> measurement against the zeros.**
+>
+> - **Earlier (2026-09-02):** **a repeat tract's record says so — step C2**
+> (step C2 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_loop_c2_2026-09-02.md)).
+> The motif reaches the record from the called locus's own candidate table, so `STR`, `RU`,
+> `PERIOD` and each called allele's `REPCN` are written; selection's verdict reaches `FILTER`
+> as `notPeriodic` or `tooManyAlleles`, with a loop that did not settle outranking both because
+> `assemble_record` asserts they cannot be carried together. **`lowDepth` is declared and never
+> written** — ng does not port the cohort-summed depth gate, and spec §6 says there is no depth
+> verdict on this path. **`REPCN` needed no wiring**: the encoder derives it from the record's
+> own bases, which leaves two producers of one integer, and a test now holds them to the same
+> floor division. Round-trip measured on a real run — HG002 at 30× over 200 Tier intervals, 78
+> records of which 17 are tracts: through `bcftools view` the tract fields are byte-identical,
+> and the only bytes that move are Float trailing zeros on every record, tract or not.
+>
+> - **Earlier (2026-09-02):** **ng calls a repeat tract through its own model —
+> step C1 of the STR calling loop**
+> (step C1 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_loop_c1_2026-09-02.md)).
+> Both drivers now branch on the observation's kind: the SNP/indel arm is what it was, and a
+> repeat tract runs `select_ssr` → `shape_ssr_locus` → the same genotyper. The guard that set
+> every tract aside is gone and the count it fed holds bundles alone. **The design's one gap was
+> the join in front of evidence shaping**: `shape_ssr_locus` reads the STR generator's own
+> observation rows and the merge does not carry them, so they are rebuilt from its allele table
+> and its per-sample rows — exactly, because a repeat tract is one record per sample, and the
+> four counters a partial loses on the way through the merge are four the tract model does not
+> read. **A candidate carrying no whole motif copy stops the locus**, counted: 1 of 17,315 kept
+> candidates at 30× on HG002 and none at 50× or 300×. Five mutations run, five killed — the
+> fourth only because of an assertion added after predicting it would survive, which says *which
+> model* called the tract rather than that something did. **Next: C2, the record's motif, repeat
+> counts and FILTER.**
+>
+> - **Earlier (2026-09-02):** **what the shipped repeat-tract selector offers
 > HG002, measured — step E2 and Checkpoint E**
 > (step E2 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md), which is
 > Milestone B of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);

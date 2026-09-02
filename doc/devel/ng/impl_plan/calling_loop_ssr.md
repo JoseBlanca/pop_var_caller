@@ -115,7 +115,7 @@ slot belongs to the parallel plan.
 
 ### Milestone C — the driver calls a tract, and the record says so
 
-**C1. The dispatch.**  ☐
+**C1. The dispatch.**  ✅
 `call_one_generic_locus`'s call site branches on `CohortObservation::kind`
 ([`callers.rs:813`](../../../../src/ng/run/callers.rs)): `Generic` unchanged; `Ssr` runs
 `select_ssr` → `shape_ssr_locus` → the same `genotyper.call_locus`, replacing the
@@ -124,7 +124,7 @@ already the STR emission's ([`callers.rs:551`](../../../../src/ng/run/callers.rs
 *Depends:* B1; the parallel plan's Checkpoint C merged, rebase first.
 *Source:* spec §3.2.
 
-**C2. The record's two unwired inputs.**  ☐
+**C2. The record's two unwired inputs.**  ✅
 `records.rs` passes `Some(TractAnnotation::new(motif))` from the observation's kind
 (today `None`, [`records.rs:263`](../../../../src/ng/run/records.rs)), the per-allele repeat
 counts reach `REPCN`, and the FILTER verdict comes from selection and the loop
@@ -132,13 +132,13 @@ counts reach `REPCN`, and the FILTER verdict comes from selection and the loop
 convergence alone. Round-trip pin: a tract record through `bcftools` unchanged.
 *Depends:* C1. *Source:* spec §3.2; [`../spec/vcf_output.md`](../spec/vcf_output.md) §6–§8.
 
-**C3. The run report partitions tract outcomes.**  ☐
+**C3. The run report partitions tract outcomes.**  ✅
 Called, refused-by-FILTER, and set-aside-as-unbuilt (bundles) are three counted lines, the
 way the generic path's outcomes already partition. Wording only where this plan owns it — the
 ground shares stayed with the parallel plan.
 *Depends:* C1. *Source:* spec §3.2.
 
-**C4. End to end, measured against the zeros.**  ☐
+**C4. End to end, measured against the zeros.**  ✅
 A GIAB run at 30× and 50× writes tract records. Measure and record: recall on repeat-routed
 ground (baseline 0.000; the bar: production 0.855/0.909 indels, 0.990 SNPs; freebayes
 0.818–0.874), genotype concordance on the dashboard's panel, and E2 byte-identity at 1–16

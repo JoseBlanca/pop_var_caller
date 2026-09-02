@@ -2,12 +2,13 @@
 //! decides which loci reach the file, and the four numberings the per-allele counts cross.
 
 use super::*;
-use crate::ng::calling::ExpectedAlleleCopies;
 use crate::ng::calling::allele_candidates::generic::select_generic;
 use crate::ng::calling::allele_candidates::{CandidateSelectionConfig, SelectionScratch};
 use crate::ng::calling::quality::ArtifactTestCounts;
+use crate::ng::calling::{ExpectedAlleleCopies, RepeatTractProvenance};
 use crate::ng::locus_generation::{LocusKind, WitnessedLocusPositions};
 use crate::ng::parameter_estimation::Provenance;
+use crate::ng::parameter_estimation::joint::stratum_fits::LengthSpectrumRung;
 use crate::ng::ref_seq::InMemoryRefSeq;
 use crate::ng::run::cohort_merge::build::{
     AlleleSupport, PartialObservation, SampleSupport, SupportedAllele,
@@ -393,7 +394,14 @@ fn ad_is_keyed_by_the_records_allele_table_and_not_the_merges() {
         None,
     );
 
-    let evidence = evidence_for_output(&locus, &observation, &remap, &unmatched, None);
+    let evidence = evidence_for_output(
+        &locus,
+        &observation,
+        &remap,
+        &unmatched,
+        SelectionVerdict::Selected,
+        None,
+    );
 
     assert_eq!(
         evidence.samples[0].allele_reads,
@@ -427,7 +435,14 @@ fn the_pooled_mapping_qualities_count_the_same_reads_as_ad() {
         None,
     );
 
-    let evidence = evidence_for_output(&locus, &observation, &remap, &unmatched, None);
+    let evidence = evidence_for_output(
+        &locus,
+        &observation,
+        &remap,
+        &unmatched,
+        SelectionVerdict::Selected,
+        None,
+    );
 
     for allele in 0..2 {
         let attributed: u64 = evidence
@@ -473,7 +488,14 @@ fn a_covering_samples_reads_land_on_the_run_sample_it_names() {
         None,
     );
 
-    let evidence = evidence_for_output(&locus, &observation, &remap, &unmatched, None);
+    let evidence = evidence_for_output(
+        &locus,
+        &observation,
+        &remap,
+        &unmatched,
+        SelectionVerdict::Selected,
+        None,
+    );
 
     assert_eq!(evidence.samples[0].allele_reads, vec![9, 2]);
     assert_eq!(
@@ -505,7 +527,14 @@ fn a_read_that_stopped_inside_the_locus_is_in_dp_and_in_no_ad_slot() {
     let (remap, unmatched) = selected(&observation);
     let locus = locus_called_over(&[b"A", b"C"], vec![called(&[0, 1], false)], true, None);
 
-    let evidence = evidence_for_output(&locus, &observation, &remap, &unmatched, None);
+    let evidence = evidence_for_output(
+        &locus,
+        &observation,
+        &remap,
+        &unmatched,
+        SelectionVerdict::Selected,
+        None,
+    );
 
     assert_eq!(evidence.samples[0].allele_reads, vec![4, 3]);
     assert_eq!(
@@ -552,7 +581,14 @@ fn the_records_site_quality_is_the_corrected_one_and_the_penalties_are_beside_it
         Some(counts),
     );
 
-    let evidence = evidence_for_output(&locus, &observation, &remap, &unmatched, None);
+    let evidence = evidence_for_output(
+        &locus,
+        &observation,
+        &remap,
+        &unmatched,
+        SelectionVerdict::Selected,
+        None,
+    );
 
     let (expected, penalties) = correct_site_quality(locus.uncorrected_site_quality(), &counts);
     assert_eq!(evidence.corrected_site_quality, expected);
@@ -578,7 +614,14 @@ fn a_locus_the_artifact_tests_did_not_run_on_carries_no_penalties() {
     let (remap, unmatched) = selected(&observation);
     let locus = locus_called_over(&[b"A", b"C"], vec![called(&[0, 1], false)], true, None);
 
-    let evidence = evidence_for_output(&locus, &observation, &remap, &unmatched, None);
+    let evidence = evidence_for_output(
+        &locus,
+        &observation,
+        &remap,
+        &unmatched,
+        SelectionVerdict::Selected,
+        None,
+    );
 
     assert_eq!(evidence.artifact_penalties, None);
     assert_eq!(
@@ -602,11 +645,27 @@ fn a_locus_whose_loop_did_not_settle_carries_the_filter_that_says_so() {
     let did_not = locus_called_over(&[b"A", b"C"], vec![called(&[0, 1], false)], false, None);
 
     assert_eq!(
-        evidence_for_output(&settled, &observation, &remap, &unmatched, None).filter,
+        evidence_for_output(
+            &settled,
+            &observation,
+            &remap,
+            &unmatched,
+            SelectionVerdict::Selected,
+            None,
+        )
+        .filter,
         FilterVerdict::Pass,
     );
     assert_eq!(
-        evidence_for_output(&did_not, &observation, &remap, &unmatched, None).filter,
+        evidence_for_output(
+            &did_not,
+            &observation,
+            &remap,
+            &unmatched,
+            SelectionVerdict::Selected,
+            None,
+        )
+        .filter,
         FilterVerdict::EmDidNotConverge,
     );
 }
@@ -637,7 +696,14 @@ fn a_samples_reads_for_one_allele_are_summed_over_its_read_groups() {
     let (remap, unmatched) = selected(&observation);
     let locus = locus_called_over(&[b"A", b"C"], vec![called(&[0, 1], false)], true, None);
 
-    let evidence = evidence_for_output(&locus, &observation, &remap, &unmatched, None);
+    let evidence = evidence_for_output(
+        &locus,
+        &observation,
+        &remap,
+        &unmatched,
+        SelectionVerdict::Selected,
+        None,
+    );
 
     assert_eq!(
         evidence.samples[0].allele_reads,
@@ -683,7 +749,14 @@ fn a_samples_leftover_is_read_off_the_merges_covering_list_and_not_the_runs_orde
         None,
     );
 
-    let evidence = evidence_for_output(&locus, &observation, &remap, &unmatched, None);
+    let evidence = evidence_for_output(
+        &locus,
+        &observation,
+        &remap,
+        &unmatched,
+        SelectionVerdict::Selected,
+        None,
+    );
 
     assert_eq!(
         evidence.samples[2].reads_no_written_allele_explains, 1,
@@ -709,7 +782,14 @@ fn a_read_removed_as_evidence_is_in_dp_and_in_no_ad_slot() {
     let (remap, unmatched) = selected(&observation);
     let locus = locus_called_over(&[b"A", b"C"], vec![called(&[0, 1], false)], true, None);
 
-    let evidence = evidence_for_output(&locus, &observation, &remap, &unmatched, None);
+    let evidence = evidence_for_output(
+        &locus,
+        &observation,
+        &remap,
+        &unmatched,
+        SelectionVerdict::Selected,
+        None,
+    );
 
     assert_eq!(evidence.samples[0].allele_reads, vec![4, 3]);
     assert_eq!(
@@ -744,7 +824,14 @@ fn the_three_kinds_of_unexplained_read_are_added_together() {
     );
     let locus = locus_called_over(&[b"A", b"C"], vec![called(&[0, 1], false)], true, None);
 
-    let evidence = evidence_for_output(&locus, &observation, &remap, &unmatched, None);
+    let evidence = evidence_for_output(
+        &locus,
+        &observation,
+        &remap,
+        &unmatched,
+        SelectionVerdict::Selected,
+        None,
+    );
 
     assert_eq!(evidence.samples[0].allele_reads, vec![4, 3]);
     assert_eq!(
@@ -752,5 +839,147 @@ fn the_three_kinds_of_unexplained_read_are_added_together() {
         1 + 5 + 2,
         "one read on the dropped sequence, five that stopped inside the locus, two removed as \
          evidence — three counts, and the file states their sum",
+    );
+}
+
+// ---------------------------------------------------------------------
+// The repeat tract's two inputs
+// ---------------------------------------------------------------------
+
+/// A tract's motif — a dinucleotide, so a wrong period is visible in `PERIOD` and in `REPCN`.
+fn tract_detail() -> crate::ng::locus_generation::SsrDetail {
+    crate::ng::locus_generation::SsrDetail {
+        motif: crate::ng::types::Motif::new(b"AT").expect("a dinucleotide"),
+        left_flank: Box::from(&b"CCCC"[..]),
+        right_flank: Box::from(&b"GGGG"[..]),
+    }
+}
+
+/// A locus over `alleles` **called as a repeat tract**: the kind selection stamps on the
+/// candidate table is what the record reads the motif off.
+fn tract_called_over(
+    alleles: &[&[u8]],
+    per_sample: Vec<SampleGenotypeCall>,
+    converged: bool,
+) -> LocusInference {
+    let mut table = CandidateAlleles::new(Box::from(alleles[0]), LocusKind::Ssr(tract_detail()));
+    for allele in &alleles[1..] {
+        table.admit(Box::from(*allele));
+    }
+    let copies = ExpectedAlleleCopies::new(vec![1.0; table.len()], &table);
+    LocusInference::new(
+        region(100, 100),
+        table,
+        per_sample,
+        copies,
+        converged,
+        1,
+        Provenance::Defaulted,
+        // **A stand-in for what this tract's parameters rested on**, which the inference asserts
+        // a tract carries and no test here reads: the record's own tract fields come from the
+        // candidate table's kind, not from this.
+        Some(RepeatTractProvenance::new(
+            LengthSpectrumRung::StatedFlat,
+            0,
+            0,
+            0,
+            0,
+            false,
+        )),
+        Phred::try_new(60.0).expect("a quality"),
+        None,
+    )
+}
+
+/// **A tract record carries its motif, and a SNP/indel record carries none** — the input that
+/// was `None` at every locus until the driver learned to dispatch on the observation's kind.
+///
+/// Everything the file says about the repeat is written from this one value: the `STR` flag,
+/// `RU`, `PERIOD`, and each called allele's `REPCN`. A record left with `None` here would be a
+/// well-formed SNP/indel record over a repeat tract's ground.
+#[test]
+fn a_tract_record_carries_its_motif_and_an_ordinary_one_carries_none() {
+    let observation = observed(
+        &[b"ATAT", b"ATATAT"],
+        vec![covering(0, vec![row(0, 4, 240), row(1, 3, 180)])],
+    );
+    let (remap, unmatched) = selected(&observation);
+    let per_sample = vec![called(&[0, 1], false)];
+
+    let tract = tract_called_over(&[b"ATAT", b"ATATAT"], per_sample.clone(), true);
+    let annotation = evidence_for_output(
+        &tract,
+        &observation,
+        &remap,
+        &unmatched,
+        SelectionVerdict::Selected,
+        None,
+    )
+    .repeat_tract
+    .expect("a tract record carries its motif");
+    assert_eq!(annotation.motif(), b"AT");
+    assert_eq!(annotation.period(), 2);
+    assert_eq!(annotation.repeat_copies_of(b"ATATAT"), 3);
+
+    let ordinary = locus_called_over(&[b"ATAT", b"ATATAT"], per_sample, true, None);
+    assert_eq!(
+        evidence_for_output(
+            &ordinary,
+            &observation,
+            &remap,
+            &unmatched,
+            SelectionVerdict::Selected,
+            None,
+        )
+        .repeat_tract,
+        None,
+        "an ordinary locus over repeat-looking bases is not a tract record",
+    );
+}
+
+/// **Selection's two tract verdicts reach the `FILTER` column, and a loop that did not settle
+/// outranks both.**
+///
+/// The precedence is not a preference: `assemble_record` asserts that the filter is `EMNoConv`
+/// exactly when the loop failed to converge, so the two cannot be carried together.
+#[test]
+fn a_tracts_filter_comes_from_selection_unless_the_loop_did_not_settle() {
+    let observation = observed(
+        &[b"ATAT", b"ATATAT"],
+        vec![covering(0, vec![row(0, 4, 240), row(1, 3, 180)])],
+    );
+    let (remap, unmatched) = selected(&observation);
+    let per_sample = vec![called(&[0, 1], false)];
+    let filter_of = |locus: &LocusInference, verdict| {
+        evidence_for_output(locus, &observation, &remap, &unmatched, verdict, None).filter
+    };
+
+    let settled = tract_called_over(&[b"ATAT", b"ATATAT"], per_sample.clone(), true);
+    assert_eq!(
+        filter_of(&settled, SelectionVerdict::Selected),
+        FilterVerdict::Pass,
+    );
+    assert_eq!(
+        filter_of(&settled, SelectionVerdict::NotPeriodic),
+        FilterVerdict::NotPeriodic,
+    );
+    assert_eq!(
+        filter_of(&settled, SelectionVerdict::Truncated { dropped: 3 }),
+        FilterVerdict::TooManyAlleles,
+    );
+
+    let did_not = tract_called_over(&[b"ATAT", b"ATATAT"], per_sample.clone(), false);
+    assert_eq!(
+        filter_of(&did_not, SelectionVerdict::Truncated { dropped: 3 }),
+        FilterVerdict::EmDidNotConverge,
+        "the loop's own answer is the one the file has to carry",
+    );
+
+    // And the ordinary path is unchanged: its cap cuts and calls, and does not filter.
+    let ordinary = locus_called_over(&[b"ATAT", b"ATATAT"], per_sample, true, None);
+    assert_eq!(
+        filter_of(&ordinary, SelectionVerdict::Truncated { dropped: 3 }),
+        FilterVerdict::Pass,
+        "`tooManyAlleles` is a tract filter, and a truncated SNP/indel locus is still a PASS",
     );
 }
