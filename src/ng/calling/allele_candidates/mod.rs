@@ -611,6 +611,13 @@ pub struct SelectionScratch {
     /// nothing but the clear in [`reset_for`](Self::reset_for), and the
     /// capacity the last tract reserved is what the next tract reuses.
     ladder: ssr::RepeatLadder,
+    /// **One sample's spanning reads counted onto the ladder's rungs** — refilled per sample, so
+    /// it holds whichever sample nomination last looked at and nothing before it.
+    ///
+    /// One buffer rather than one per covering sample: nomination asks each sample its own
+    /// question and keeps only the rungs it promoted, so no two samples' histograms are ever
+    /// needed at once. Empty on the ordinary path, which never fills it.
+    sample_reads_per_rung: Vec<u32>,
 }
 
 impl SelectionScratch {
@@ -641,12 +648,14 @@ impl SelectionScratch {
             per_allele,
             ranked_table_indices,
             ladder,
+            sample_reads_per_rung,
         } = self;
         per_allele.clear();
         per_allele.resize(table_len, AlleleSummary::default());
         ranked_table_indices.clear();
         ranked_table_indices.reserve(table_len);
         ladder.clear();
+        sample_reads_per_rung.clear();
     }
 
     /// How many alleles the buffers are currently sized for.

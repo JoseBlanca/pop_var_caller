@@ -14,9 +14,9 @@
 //! called, not rewritten.
 //!
 //! **Under construction, in the order `doc/devel/ng/impl_plan/candidate_alleles_ssr.md` sets.**
-//! This file holds the ladder (its step B1). Nomination, admission, periodicity and the entry
-//! point `select_ssr` are the steps after it, and nothing outside this module calls anything
-//! here yet.
+//! This file holds the ladder (its step B1), the path's configuration and the per-sample length
+//! histogram (B2). Nomination, admission, periodicity and the entry point `select_ssr` are the
+//! steps after those, and nothing outside this module calls anything here yet.
 //!
 //! **Which is why a non-test build expects everything here to be dead.** The expectation rather
 //! than an `allow`, so that the first real caller — `select_ssr`, which the steps after this one
@@ -25,9 +25,10 @@
 //! failing when it is wrong.
 #![cfg_attr(not(test), expect(dead_code))]
 
-use super::SelectionScratch;
-use crate::ng::run::cohort_merge::build::CohortObservation;
-use crate::ng::types::Motif;
+use super::{CandidateSelectionConfig, MaxCandidateAlleles, SelectionScratch};
+use crate::ng::run::cohort_merge::MinAltReadShare;
+use crate::ng::run::cohort_merge::build::{CohortObservation, SampleSupport};
+use crate::ng::types::{GenomeRegion, Motif, Ploidy};
 
 /// **One locus's observed tract sequences, grouped by how many repeats they carry.**
 ///
@@ -65,6 +66,18 @@ pub(super) struct RepeatLadder {
     /// The occupied rungs, **ascending by repeat count**. Empty exactly when the ladder has not
     /// been built for a locus yet.
     rungs: Vec<Rung>,
+    /// **The other direction: for each allele of the merge's table, in that table's index order,
+    /// which rung it sits on.**
+    ///
+    /// [`table_indices_by_rung`](Self::table_indices_by_rung) answers *which sequences are on this
+    /// rung*, which is what admission walks; this answers *which rung is this sequence on*, which
+    /// is what a walk over one sample's own support rows needs — and those rows name merge-table
+    /// indices, in the merge's order, not the ladder's. Without it a per-sample fold would have to
+    /// re-derive each sequence's repeat count from its bases and search the rungs for it, which is
+    /// a second producer of the one integer this whole type exists to have one producer of.
+    ///
+    /// One `u32` per allele, refilled per locus like the rest.
+    rung_of_table_index: Vec<u32>,
     /// The cohort's modal repeat count — the most-supported rung, ties to the shorter. Filled by
     /// [`build_ladder`], and meaningless while `rungs` is empty, which is why
     /// [`modal_repeat_count`](Self::modal_repeat_count) asserts rather than reads.
@@ -96,7 +109,7 @@ struct Rung {
 impl RepeatLadder {
     /// Empty the ladder without releasing what earlier loci reserved.
     ///
-    /// **`clear` on both buffers, and the mode reset with them.** A ladder left holding the
+    /// **`clear` on all three buffers, and the mode reset with them.** A ladder left holding the
     /// previous locus's mode while its rungs are empty would answer
     /// [`modal_repeat_count`](Self::modal_repeat_count) with a neighbour's number instead of
     /// asserting, which is the one failure the assertion exists to prevent.
@@ -105,10 +118,12 @@ impl RepeatLadder {
         let Self {
             table_indices_by_rung,
             rungs,
+            rung_of_table_index,
             modal_repeat_count,
         } = self;
         table_indices_by_rung.clear();
         rungs.clear();
+        rung_of_table_index.clear();
         *modal_repeat_count = 0;
     }
 
@@ -174,6 +189,24 @@ impl RepeatLadder {
         self.rungs
             .binary_search_by_key(&repeat_count, |rung| rung.repeat_count)
             .ok()
+    }
+
+    /// **Which rung one of the merge table's sequences sits on** — the direction a walk over a
+    /// sample's own support rows needs, since those rows name merge-table indices.
+    ///
+    /// # Panics
+    ///
+    /// On a `table_index` outside the merge table this ladder was built for — a support row
+    /// naming an allele the locus does not hold, which is the merge bug spec §8 makes an assertion
+    /// rather than a value.
+    #[inline]
+    pub(super) fn rung_of_table_index(&self, table_index: usize) -> usize {
+        assert!(
+            table_index < self.rung_of_table_index.len(),
+            "a support row named allele {table_index} of a repeat tract whose table holds {}",
+            self.rung_of_table_index.len()
+        );
+        self.rung_of_table_index[table_index] as usize
     }
 
     /// **The cohort's modal repeat count: the rung with the most reads, ties to the shorter.**
@@ -285,20 +318,24 @@ pub(super) fn build_ladder(
         per_allele,
         ranked_table_indices: _,
         ladder,
+        sample_reads_per_rung: _,
     } = scratch;
     // **Asserted empty rather than emptied here.** `reset_for` already clears the ladder, and the
     // fold calls it, so a `clear()` on this line would be a second owner of one rule — and being
     // the redundant one, it can only hide the case where the fold did not run. Measured: deleting
     // that `clear()` broke no test, which is what a line with no failing state looks like.
     assert!(
-        ladder.rung_count() == 0 && ladder.table_indices_by_rung.is_empty(),
-        "the ladder already holds {} rung(s) over {} index/indices at {}: it is emptied by the \
-         fold's own `SelectionScratch::reset_for`, so a full one here means this tract was never \
-         folded — and appending to it would put two loci's sequences on one ladder. **Both \
-         buffers are named**, because a `clear` that emptied one and not the other would leave \
-         the rungs naming slices of another locus's indices",
+        ladder.rung_count() == 0
+            && ladder.table_indices_by_rung.is_empty()
+            && ladder.rung_of_table_index.is_empty(),
+        "the ladder already holds {} rung(s) over {} index/indices, with {} allele(s) placed, at \
+         {}: it is emptied by the fold's own `SelectionScratch::reset_for`, so a full one here \
+         means this tract was never folded — and appending to it would put two loci's sequences \
+         on one ladder. **All three buffers are named**, because a `clear` that emptied one and \
+         not the others would leave the rungs naming slices of another locus's indices",
         ladder.rung_count(),
         ladder.table_indices_by_rung.len(),
+        ladder.rung_of_table_index.len(),
         observation.region
     );
 
@@ -319,6 +356,9 @@ pub(super) fn build_ladder(
         .table_indices_by_rung
         .sort_unstable_by_key(|&index| (repeat_count_of(index), index));
 
+    // One entry per allele, overwritten below — every allele lands on exactly one rung, so no
+    // entry survives as the placeholder.
+    ladder.rung_of_table_index.resize(table_len, u32::MAX);
     for (position, &table_index) in ladder.table_indices_by_rung.iter().enumerate() {
         let repeat_count = repeat_count_of(table_index);
         let reads = per_allele[table_index as usize].cohort_reads;
@@ -335,6 +375,8 @@ pub(super) fn build_ladder(
                 cohort_reads: reads,
             }),
         }
+        ladder.rung_of_table_index[table_index as usize] = u32::try_from(ladder.rungs.len() - 1)
+            .expect("a merge table narrower than four billion");
     }
 
     // Strictly greater, walking the rungs shortest-first, so a tie keeps the shorter rung — the
@@ -348,16 +390,203 @@ pub(super) fn build_ladder(
     ladder.modal_repeat_count = modal.repeat_count;
 }
 
+/// **The share of one sample's spanning reads that may sit off the motif's grid before that
+/// sample is judged non-periodic** (spec §7).
+///
+/// A validated fraction of one rather than the bare `f64` arch §2.2 sketches, for the reason
+/// [`MinAltReadShare`] gives about its own range and for one this module has already been bitten
+/// by: a mistyped share here does not crash, it deletes the gate. **Above one, no sample is ever
+/// non-periodic and the verdict can never be reached; below zero, every sample is, and every
+/// repeat tract in the run comes back as the reference alone.** Both are runs whose output looks
+/// entirely ordinary.
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+pub struct MaxOffGridShare(f64);
+
+impl MaxOffGridShare {
+    /// The default share, [`DEFAULT_MAX_OFF_GRID_SHARE`].
+    pub const DEFAULT: Self = DEFAULT_MAX_OFF_GRID_SHARE;
+
+    /// The share, or `None` if it is not a fraction of one — negative, above one, or not a
+    /// number. Refusing rather than clamping, for the reason on the type.
+    pub fn new(share: f64) -> Option<Self> {
+        MinAltReadShare::new(share).map(|share| Self(share.get()))
+    }
+
+    /// The same share, for a `const` that has to name one — and it **panics** where
+    /// [`new`](Self::new) returns `None`, exactly as [`MinAltReadShare::new_or_panic`] does and
+    /// with the same caveat: called at runtime it aborts, so a share an operator typed or a file
+    /// carried goes through [`new`](Self::new).
+    pub const fn new_or_panic(share: f64) -> Self {
+        Self(MinAltReadShare::new_or_panic(share).get())
+    }
+
+    /// The share, as a fraction of 1.
+    #[inline]
+    pub const fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl Default for MaxOffGridShare {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// **One read in ten off the motif grid** — production's `max_out_of_frame_frac`
+/// ([`candidate_set.rs:85`](../../../../src/ssr/cohort/candidate_set.rs)), **inherited and never
+/// measured, by them or by us** (spec §12, Q1).
+///
+/// **Soft in the strongest sense available**: every number spec §4.1 and §5 report was taken with
+/// this gate switched off entirely, so nothing measured constrains it, and nothing in the shape of
+/// the code depends on the value.
+pub const DEFAULT_MAX_OFF_GRID_SHARE: MaxOffGridShare = MaxOffGridShare(0.10);
+
+/// **32 tract sequences including the reference, where the ordinary path allows six**
+/// ([`DEFAULT_MAX_CANDIDATE_ALLELES`](super::DEFAULT_MAX_CANDIDATE_ALLELES)) — the owner's
+/// decision of 2026-08-24 on spec §12's Q2.
+///
+/// **A repeat tract carries more real alleles than a SNP does**, six was inherited from a
+/// SNP/indel setting with nothing behind it for tracts, and HipSTR — the nearest comparator — has
+/// no allele limit at all: it admits every sequence clearing a per-sample test and abandons the
+/// locus only if the haplotype product exceeds 1,000.
+///
+/// **Soft, and still unmeasured**: 32 is a judgement bounded by cost. A locus over `A` alleles has
+/// `A(A+1)/2` diploid genotypes and the loop scores every sample against every one — **528 here
+/// against six's 21**, and 2,080 at 64. What would settle it is the tomato panel's tracts through
+/// the merge, histogrammed at 1, 4, 16 and 63 accessions.
+pub const DEFAULT_MAX_CANDIDATE_ALLELES_SSR: MaxCandidateAlleles =
+    MaxCandidateAlleles::new_or_panic(32);
+
+/// **The repeat-tract path's settings** — the shared support rule and cap, the periodicity gate's
+/// share, and the copy number a sample is nominated at (arch §2.2).
+///
+/// **No `Default`, and that is the design.** [`ploidy`](Self::ploidy) is the run's, from
+/// `FrozenParameters`, and a constant here would be a diploid assumption written where a polyploid
+/// crop is in scope. [`at_ploidy`](Self::at_ploidy) is the only constructor of the defaults, so
+/// there is no way to reach one without naming a ploidy.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct SsrSelectionConfig {
+    /// The support rule and the cap — [`CandidateSelectionConfig`], reused rather than restated,
+    /// so that a sweep of the bar is a sweep of both paths.
+    ///
+    /// **Only the cap differs by default**, at [`DEFAULT_MAX_CANDIDATE_ALLELES_SSR`]. The support
+    /// rule is the ordinary path's, unchanged — see [`at_ploidy`](Self::at_ploidy) for the one
+    /// place that departs from what the spec's text says.
+    pub shared: CandidateSelectionConfig,
+    /// How much of one sample's spanning reads may sit off the motif grid before that sample is
+    /// judged non-periodic (spec §7). Default [`DEFAULT_MAX_OFF_GRID_SHARE`].
+    pub max_off_grid_share: MaxOffGridShare,
+    /// Copies per genome — **how many rungs a sample promotes** (arch §3.1). From the run's
+    /// parameters, never a constant in this module: production hard-asserts diploid at its own
+    /// genotyping step and ng does not, and a polyploid run changes only this number.
+    pub ploidy: Ploidy,
+}
+
+impl SsrSelectionConfig {
+    /// The defaults, at the run's ploidy.
+    ///
+    /// # The support share is the ordinary path's 10 in 100, where spec §5 writes 5
+    ///
+    /// **The spec's own reason for its number is what points at this one.** It sets the tract
+    /// share to 5 in 100 *"so that one number governs both paths"* (§5), citing the ordinary
+    /// path's value at the time it was written. That value moved to **10 in 100** on the same day,
+    /// by the owner's decision, taken against what recall alone would say and for a cost nothing
+    /// had yet measured — the candidate count carried in every genotype table, at every sample,
+    /// for the life of the locus (see
+    /// [`DEFAULT_MIN_ALLELE_SUPPORT`](super::DEFAULT_MIN_ALLELE_SUPPORT)). Setting 5 here would
+    /// create the second number the spec's sentence exists to avoid.
+    ///
+    /// **What it costs, from the spec's own sweep at 300× on HG002** (§5): on the class this path
+    /// was designed for — a heterozygote whose two copies are the same length spelled differently,
+    /// 296 of HG002's 695 heterozygous tracts — 5 in 100 offers both spellings at **86.1%** of
+    /// them at 1.26 candidate sequences per tract, and 10 in 100 at **85.8%** at 1.22. **Three
+    /// tracts in a thousand, and fewer candidates.** At 30× and below the two rules are the same
+    /// rule, because the floor of two reads decides.
+    ///
+    /// **This shifts the numbers Milestone E of the plan checks against** — 85.8% and 1.22 where
+    /// the plan quotes 86.1% and 1.26 — and it is recorded so that the difference is read as this
+    /// decision rather than as the defect that plan asks to be traced.
+    pub fn at_ploidy(ploidy: Ploidy) -> Self {
+        Self {
+            shared: CandidateSelectionConfig {
+                max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES_SSR,
+                ..CandidateSelectionConfig::DEFAULT
+            },
+            max_off_grid_share: MaxOffGridShare::DEFAULT,
+            ploidy,
+        }
+    }
+}
+
+/// **Count one sample's spanning reads onto the ladder's rungs** — the per-sample length histogram
+/// nomination reads (arch §3.1; production's `sample_histogram`,
+/// [`rung_ladder.rs:262`](../../../../src/ssr/cohort/rung_ladder.rs), over the merge's rows
+/// instead of its own sequence counts).
+///
+/// `sample_reads_per_rung` comes back one entry per rung of `ladder`, in the ladder's own
+/// shortest-first order, holding that sample's reads at each. It is emptied and refilled here, so
+/// one buffer serves every sample of every locus.
+///
+/// **The read-group rows are pooled**, through the same [`one_run_per_allele`] the ordinary path's
+/// fold uses. A read is a read whichever lane produced it, and asking the rule of each row
+/// separately would be a stricter rule applied to exactly the samples carrying more than one
+/// library — 157 of 1,707 in a surveyed tomato archive (`doc/devel/ng/spec/read_groups.md` §1).
+/// Sharing the grouping with the ordinary path is what stops the two from coming to disagree.
+///
+/// **Only spanning reads are counted, and that is what the merge's support rows already are**: a
+/// read that ran out inside the tract produced a partial, which names no length and is scored on
+/// its own axis (spec §1.3, §8). So the histogram's total is exactly
+/// [`compared_reads_of`](super::compared_reads_of) — the denominator nomination divides by — and
+/// this function deliberately does not return it, because two spellings of one number is how two
+/// rules become different rules.
+///
+/// # Panics
+///
+/// On a support row naming an allele the ladder was not built for, and on a sample's rows out of
+/// ascending allele order — both merge bugs, both held in release (spec §8). In debug it also
+/// checks the total against [`compared_reads_of`](super::compared_reads_of), which is the claim
+/// the paragraph above makes.
+pub(super) fn fill_sample_reads_per_rung(
+    sample: &SampleSupport,
+    locus: GenomeRegion,
+    ladder: &RepeatLadder,
+    sample_reads_per_rung: &mut Vec<u32>,
+) {
+    sample_reads_per_rung.clear();
+    sample_reads_per_rung.resize(ladder.rung_count(), 0);
+    for rows in super::one_run_per_allele(sample, locus) {
+        let rung = ladder.rung_of_table_index(rows[0].allele);
+        let pooled_reads = rows.iter().fold(0_u32, |total, row| {
+            total.saturating_add(row.support.num_reads)
+        });
+        sample_reads_per_rung[rung] = sample_reads_per_rung[rung].saturating_add(pooled_reads);
+    }
+    debug_assert_eq!(
+        sample_reads_per_rung.iter().copied().sum::<u32>(),
+        super::compared_reads_of(sample),
+        "every support row's allele is on some rung, so a sample's reads over the rungs are its \
+         compared reads at {locus} — and nomination divides by the second while counting the first"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::fixtures::*;
     use super::super::summarise_alleles;
     use super::*;
+    use crate::ng::types::ReadGroupId;
 
     /// A dinucleotide unit, so that a sequence of an odd number of bases has a rung to floor
     /// onto — the case a homopolymer cannot produce.
     fn dinucleotide() -> Motif {
         Motif::new(b"AT").expect("a two-base motif")
+    }
+
+    /// Two copies of the genome — the ordinary case, named rather than repeated, since
+    /// [`SsrSelectionConfig`] has no default ploidy on purpose.
+    fn diploid() -> Ploidy {
+        Ploidy::try_new(2).expect("two copies")
     }
 
     /// Fold `observation` and build its ladder, returning the scratch that holds both.
@@ -695,5 +924,294 @@ mod tests {
             )],
         );
         build_ladder(&other, &dinucleotide(), &mut scratch);
+    }
+
+    // ---- B2: the configuration, and the per-sample length histogram ----
+
+    /// The two caps, side by side. **The whole of the tract path's departure from the ordinary
+    /// path's cap is this number**, and stating both in one assertion is what stops a later edit
+    /// from quietly making them the same again.
+    #[test]
+    fn the_tract_cap_is_thirty_two_where_the_ordinary_paths_is_six() {
+        assert_eq!(DEFAULT_MAX_CANDIDATE_ALLELES_SSR.get(), 32);
+        assert_eq!(super::super::DEFAULT_MAX_CANDIDATE_ALLELES.get(), 6);
+        assert_eq!(
+            SsrSelectionConfig::at_ploidy(diploid())
+                .shared
+                .max_candidate_alleles,
+            DEFAULT_MAX_CANDIDATE_ALLELES_SSR,
+            "the config must carry the tract cap and not the shared default"
+        );
+    }
+
+    /// **The support rule is the ordinary path's, unchanged** — including the share, which spec §5
+    /// writes as 5 in 100 and the ordinary path ships at 10.
+    ///
+    /// Read `SsrSelectionConfig::at_ploidy`'s own documentation for why: the spec's stated reason
+    /// for its number is that one number should govern both paths, and the ordinary path's moved.
+    /// This test exists so that the choice is a line someone has to edit rather than a default
+    /// that drifts.
+    #[test]
+    fn the_support_rule_is_the_ordinary_paths_share_and_floor() {
+        let config = SsrSelectionConfig::at_ploidy(diploid());
+        assert_eq!(
+            config.shared.min_allele_support,
+            super::super::DEFAULT_MIN_ALLELE_SUPPORT
+        );
+        assert_eq!(config.shared.min_allele_support.share.get(), 0.10);
+    }
+
+    /// The ploidy is the caller's and reaches the config unchanged — a triploid run promotes three
+    /// rungs a sample, not two.
+    #[test]
+    fn the_ploidy_is_the_callers() {
+        let triploid = Ploidy::try_new(3).expect("three copies");
+        assert_eq!(SsrSelectionConfig::at_ploidy(triploid).ploidy, triploid);
+        assert_eq!(SsrSelectionConfig::at_ploidy(diploid()).ploidy, diploid());
+    }
+
+    /// The off-grid share refuses everything that is not a fraction of one, because neither
+    /// failure crashes: above one the periodicity verdict can never be reached, below zero every
+    /// tract returns the reference alone.
+    #[test]
+    fn the_off_grid_share_refuses_anything_that_is_not_a_fraction_of_one() {
+        assert_eq!(
+            MaxOffGridShare::new(0.0).map(MaxOffGridShare::get),
+            Some(0.0)
+        );
+        assert_eq!(
+            MaxOffGridShare::new(1.0).map(MaxOffGridShare::get),
+            Some(1.0)
+        );
+        assert!(MaxOffGridShare::new(-0.001).is_none());
+        assert!(MaxOffGridShare::new(1.001).is_none());
+        assert!(MaxOffGridShare::new(f64::NAN).is_none());
+        assert!(MaxOffGridShare::new(f64::INFINITY).is_none());
+        assert_eq!(
+            DEFAULT_MAX_OFF_GRID_SHARE.get(),
+            0.10,
+            "production's max_out_of_frame_frac, inherited and never measured"
+        );
+    }
+
+    /// **A sample's reads land on the rungs its sequences sit on**, and a rung it showed nothing
+    /// at is a zero rather than a missing entry.
+    ///
+    /// Three rungs at 3, 4 and 5 repeats; the sample shows the outer two and not the middle one.
+    /// The histogram is parallel to the ladder's rungs, so the middle zero has to be *there* —
+    /// nomination walks the rungs by index and a compacted histogram would shift every count onto
+    /// the wrong length.
+    #[test]
+    fn a_samples_reads_land_on_the_rungs_its_sequences_sit_on() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT", b"ATATATATAT"],
+            vec![
+                sample_showing(0, vec![row(0, 4, -4.0), row(2, 6, -6.0)]),
+                sample_showing(1, vec![row(1, 5, -5.0)]),
+            ],
+        );
+        let scratch = ladder_over(&observation);
+        assert_eq!(
+            rungs_of(&scratch),
+            vec![(3, vec![0]), (4, vec![1]), (5, vec![2])]
+        );
+
+        let mut histogram = Vec::new();
+        fill_sample_reads_per_rung(
+            &observation.per_sample[0],
+            observation.region,
+            &scratch.ladder,
+            &mut histogram,
+        );
+        assert_eq!(
+            histogram,
+            vec![4, 0, 6],
+            "four reads at three repeats, none at four, six at five"
+        );
+    }
+
+    /// **One sample's two read groups are one sample**, pooled onto one rung.
+    ///
+    /// The same rule as the ordinary path's fold, and pooled through the same helper — asking it
+    /// of each row separately would be a stricter rule applied to exactly the samples carrying
+    /// more than one library.
+    #[test]
+    fn one_samples_two_read_groups_land_on_one_rung() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT"],
+            vec![sample_showing(
+                0,
+                vec![
+                    row(0, 2, -2.0),
+                    row_from_group(1, ReadGroupId(0), 3, -3.0),
+                    row_from_group(1, ReadGroupId(1), 4, -4.0),
+                ],
+            )],
+        );
+        let scratch = ladder_over(&observation);
+
+        let mut histogram = Vec::new();
+        fill_sample_reads_per_rung(
+            &observation.per_sample[0],
+            observation.region,
+            &scratch.ladder,
+            &mut histogram,
+        );
+        assert_eq!(
+            histogram,
+            vec![2, 7],
+            "three reads from one lane and four from the other are seven reads at four repeats"
+        );
+    }
+
+    /// **Two spellings of one length are two counts on one rung, added.**
+    ///
+    /// This is the case the rung's count exists for and the one a per-allele overwrite would get
+    /// wrong while every other fixture stayed green: an interrupted repeat gives a sample two
+    /// distinct tract sequences of the same length, and nomination asks whether *that length* has
+    /// enough reads. Counting only the last-seen spelling would refuse a length the sample plainly
+    /// carries.
+    #[test]
+    fn two_spellings_of_one_length_add_on_their_shared_rung() {
+        let observation = locus_of(
+            &[b"ATATATATAT", b"ATATATATAG", b"ATATATAT"],
+            vec![sample_showing(
+                0,
+                vec![row(0, 4, -4.0), row(1, 5, -5.0), row(2, 2, -2.0)],
+            )],
+        );
+        let scratch = ladder_over(&observation);
+        assert_eq!(rungs_of(&scratch), vec![(4, vec![2]), (5, vec![0, 1])]);
+
+        let mut histogram = Vec::new();
+        fill_sample_reads_per_rung(
+            &observation.per_sample[0],
+            observation.region,
+            &scratch.ladder,
+            &mut histogram,
+        );
+        assert_eq!(
+            histogram,
+            vec![2, 9],
+            "four reads and five reads at five repeats are nine reads at five repeats"
+        );
+    }
+
+    /// A covering sample whose reads all stopped inside the tract counts nothing at any rung.
+    ///
+    /// Partials say the sample carries *at least* this much of the tract, not what length it
+    /// carries, so they name no rung and are scored on their own axis. A histogram that counted
+    /// them would nominate a length from reads that never crossed it.
+    #[test]
+    fn a_sample_with_only_partials_counts_at_no_rung() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT"],
+            vec![
+                sample_showing(0, vec![row(0, 3, -3.0), row(1, 3, -3.0)]),
+                sample_with_only_partials(1, 40),
+            ],
+        );
+        let scratch = ladder_over(&observation);
+
+        let mut histogram = Vec::new();
+        fill_sample_reads_per_rung(
+            &observation.per_sample[1],
+            observation.region,
+            &scratch.ladder,
+            &mut histogram,
+        );
+        assert_eq!(
+            histogram,
+            vec![0, 0],
+            "forty partial reads name no length, so every rung is zero"
+        );
+    }
+
+    /// **Refilling for a second sample leaves none of the first's counts** — the buffer is one per
+    /// worker, walked sample by sample, and a count carried across would nominate a length for a
+    /// sample that never showed it.
+    #[test]
+    fn refilling_for_a_second_sample_leaves_none_of_the_firsts_counts() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT", b"ATATATATAT"],
+            vec![
+                sample_showing(0, vec![row(0, 9, -9.0), row(1, 9, -9.0), row(2, 9, -9.0)]),
+                sample_showing(1, vec![row(1, 2, -2.0)]),
+            ],
+        );
+        let scratch = ladder_over(&observation);
+
+        let mut histogram = Vec::new();
+        fill_sample_reads_per_rung(
+            &observation.per_sample[0],
+            observation.region,
+            &scratch.ladder,
+            &mut histogram,
+        );
+        assert_eq!(histogram, vec![9, 9, 9]);
+        fill_sample_reads_per_rung(
+            &observation.per_sample[1],
+            observation.region,
+            &scratch.ladder,
+            &mut histogram,
+        );
+        assert_eq!(
+            histogram,
+            vec![0, 2, 0],
+            "the second sample's two reads, and nothing of the first's twenty-seven"
+        );
+    }
+
+    /// **The histogram's total is the sample's compared reads** — the denominator nomination
+    /// divides by, which is why this function does not return a total of its own.
+    ///
+    /// Asserted here against `compared_reads_of` on a sample carrying two lanes and three rungs,
+    /// so that the two counts are compared on an input where a per-row rule and a per-sample rule
+    /// would differ.
+    #[test]
+    fn the_histogram_totals_the_samples_compared_reads() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT", b"ATATATATAT"],
+            vec![sample_showing(
+                0,
+                vec![
+                    row(0, 2, -2.0),
+                    row_from_group(1, ReadGroupId(0), 3, -3.0),
+                    row_from_group(1, ReadGroupId(1), 4, -4.0),
+                    row(2, 5, -5.0),
+                ],
+            )],
+        );
+        let scratch = ladder_over(&observation);
+
+        let mut histogram = Vec::new();
+        fill_sample_reads_per_rung(
+            &observation.per_sample[0],
+            observation.region,
+            &scratch.ladder,
+            &mut histogram,
+        );
+        assert_eq!(histogram.iter().sum::<u32>(), 14);
+        assert_eq!(
+            histogram.iter().sum::<u32>(),
+            super::super::compared_reads_of(&observation.per_sample[0]),
+            "one producer for the numerator's rungs and the denominator's total"
+        );
+    }
+
+    /// A support row naming an allele the tract's table does not hold is refused, rather than
+    /// counted onto whichever rung the index happens to reach.
+    #[test]
+    #[should_panic(expected = "named allele 5 of a repeat tract whose table holds 2")]
+    fn a_row_naming_an_allele_the_tract_does_not_hold_is_refused() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT"],
+            vec![sample_showing(0, vec![row(0, 3, -3.0), row(1, 3, -3.0)])],
+        );
+        let scratch = ladder_over(&observation);
+
+        let stray = sample_showing(0, vec![row(5, 3, -3.0)]);
+        let mut histogram = Vec::new();
+        fill_sample_reads_per_rung(&stray, observation.region, &scratch.ladder, &mut histogram);
     }
 }

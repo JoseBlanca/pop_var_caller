@@ -19,7 +19,26 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **the repeat ladder — the first piece of ng's own STR
+> - **Last completed task (2026-09-02):** **the tract path's settings and the per-sample length
+> histogram — Milestone B of ng's own STR candidate selection is complete**
+> (step B2 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_selection_b2_2026-09-02.md)).
+> The path's configuration has **no default ploidy** — a constant there would write a diploid
+> assumption where a polyploid region is in scope, and ploidy is the one thing that changes how
+> many rungs a sample promotes — and its cap is **32 tract sequences against the ordinary path's
+> six**. The histogram counts one sample's spanning reads onto the ladder's rungs, pooling its
+> read groups through the same helper the ordinary path's fold uses, so the two cannot come to
+> disagree about what "a sample's reads for this sequence" means. **One departure moves a number
+> the plan checks against**: the support share is the ordinary path's 10 in 100 where the spec
+> writes 5, because the spec's own reason for 5 is that one number should govern both paths and
+> the ordinary path's moved to 10 the same day. It costs 0.3 points of same-length recall at 300×
+> — 85.8% against 86.1% — and buys 0.04 fewer candidate sequences per tract; at 30× and below the
+> two are the same rule. **The mutation that decided the tests was the one predicted to survive**:
+> counting a rung by overwrite instead of by addition is invisible on every fixture except a
+> sample carrying two spellings of one length, which is the interrupted repeat this path exists to
+> offer both of.
+>
+> - **Earlier (2026-09-02):** **the repeat ladder — the first piece of ng's own STR
 > candidate selection**
 > (step B1 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md), run on
 > the [STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md)'s branch;
@@ -2890,8 +2909,8 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 ---
 
 #### Candidate alleles at a repeat tract (step 6, STR path) — the ladder, nomination, admission
-- **Status:** in-flight — **B1 implemented, reviewed and fixes applied; Milestone B is not
-  complete** (B2, the config and the per-sample length histogram, is next). Branch
+- **Status:** fixes-applied — **Milestone B complete, at Checkpoint B**: the ladder and the
+  per-sample length histogram are proven on hand-built loci, with nothing nominated yet. Branch
   `ng-ssr-calling-loop`, worktree `../pop_var_caller-ssr-calling-loop`, from `main` at `55f9c7de`.
   Runs beside `ng-ssr-observations`, which owns the merge, the walker and the run report; this
   branch owns `calling/` and edits none of those.
@@ -2900,10 +2919,23 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   B–E, whose checkboxes are the live record. **Spec:** [candidate_alleles_ssr.md](doc/devel/ng/spec/candidate_alleles_ssr.md);
   **Arch:** [candidate_alleles_ssr.md](doc/devel/ng/arch/candidate_alleles_ssr.md).
 - **Code:** [src/ng/calling/allele_candidates/ssr.rs](src/ng/calling/allele_candidates/ssr.rs) —
-  `RepeatLadder` and `build_ladder`; the `ladder` buffer on the shared `SelectionScratch` in
-  [mod.rs](src/ng/calling/allele_candidates/mod.rs). 14 tests; the module's filter goes
-  93 → 107 passing.
-- **Impl reports:** [B1](doc/devel/reports/implementations/ng_ssr_selection_b1_2026-09-02.md).
+  `RepeatLadder` and `build_ladder`; `SsrSelectionConfig`, `MaxOffGridShare`,
+  `DEFAULT_MAX_CANDIDATE_ALLELES_SSR` and `fill_sample_reads_per_rung`; the `ladder` and
+  `sample_reads_per_rung` buffers on the shared `SelectionScratch` in
+  [mod.rs](src/ng/calling/allele_candidates/mod.rs). 25 tests; the module's filter goes
+  93 → 118 passing.
+- **Impl reports:** [B1](doc/devel/reports/implementations/ng_ssr_selection_b1_2026-09-02.md),
+  [B2](doc/devel/reports/implementations/ng_ssr_selection_b2_2026-09-02.md).
+- **B2 done (the settings and the histogram) — and one departure that moves a number Milestone E
+  checks against.** The tract path's support share is the ordinary path's **10 in 100**, where spec
+  §5 writes 5. **The spec's own reason for its number points at the other one**: it sets 5 *"so
+  that one number governs both paths"*, and the ordinary path's value moved to 10 the same day, by
+  the owner's decision taken against what recall alone would say. From the spec's own sweep at 300×
+  on HG002, on the class this path exists for — a heterozygote whose two copies are the same length
+  spelled differently, 296 of 695 heterozygous tracts — 5 offers both spellings at 86.1% at 1.26
+  candidates per tract and 10 at **85.8% at 1.22**: three tracts in a thousand, and fewer
+  candidates. At 30× and below the two are the same rule, the floor deciding. **So Milestone E's
+  targets are 85.8% and 1.22**, not the plan's 86.1% and 1.26.
 - **B1 done (the ladder) — and the mutation that mattered was the one that survived.** Five
   deliberate defects; four were caught by the step's own tests, and deleting `build_ladder`'s
   `ladder.clear()` broke nothing, because `reset_for` already empties the ladder and the fold
@@ -2925,11 +2957,11 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     check.** It makes the order total so it cannot depend on the sort's stability, which is what
     byte-identical output at any worker count needs — but at three alleles an unstable sort
     reorders nothing, so the guarantee is structural rather than test-covered.
-  - **B2 inherits two settled constants that are not yet written:**
-    `DEFAULT_MAX_CANDIDATE_ALLELES_SSR = 32` against the ordinary path's six (owner, 2026-08-24),
-    and the owner's recommendation of **10 in 100 on the repeat-tract path where the SNP/indel
-    path keeps 5** — both recorded under *Candidate alleles (step 6)* above, both landing in
-    `ssr.rs`, which this plan owns.
+  - **⚑ Checkpoint B's one question for the owner: is 10 in 100 the right share at a tract?**
+    Taken as described above and applied, because leaving 5 would create the second number the
+    spec argues against. It is cheap to reverse — one field in `SsrSelectionConfig::at_ploidy` —
+    and reversing it is worth 0.3 points of same-length recall at 300× against 0.04 more candidate
+    sequences per tract, with nothing either way at 30× and below.
   - **⚠ `cargo test --all-targets --all-features` exits non-zero on this tree for a pre-existing
     reason** — the index-out-of-bounds in `benches/psp_writer_perf.rs:386` already recorded
     against the calling loop. The step's gate is the library and test targets plus `cargo fmt`,

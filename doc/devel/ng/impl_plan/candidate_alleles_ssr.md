@@ -143,7 +143,7 @@ whose length is not a whole number of units lands on the floored rung and is cou
 mode is the rung with the most reads and the shorter of a tie.
 *Depends:* A1. *Source:* arch §2.1; spec §3.
 
-**B2. `SsrSelectionConfig` and the per-sample length histogram.**  ☐
+**B2. `SsrSelectionConfig` and the per-sample length histogram.**  ✅
 The config — the shared `CandidateSelectionConfig`, `max_off_grid_share` with
 `DEFAULT_MAX_OFF_GRID_SHARE = 0.10` marked inherited-and-never-measured, and `ploidy` taken from
 the caller rather than a constant — and the per-sample fold from the merge's rows into a length
