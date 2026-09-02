@@ -626,6 +626,15 @@ pub struct SelectionScratch {
     /// them; once it has chosen, they are sorted back into ascending rung order, which is the
     /// order everything downstream reads them in.
     promoted_rungs: Vec<u32>,
+    /// **One flag per rung of the ladder: whether any sample put that repeat length forward** —
+    /// the union [`promote_rungs_for_cohort`](ssr::promote_rungs_for_cohort) builds, and what
+    /// admission walks.
+    ///
+    /// A flag per rung rather than a list of rung indices, because the union is an OR: every
+    /// sample writes into the same flags and no sample has to check whether an earlier one
+    /// already claimed a length. It also comes out in ascending rung order for free, which is the
+    /// order admission needs.
+    rung_is_promoted: Vec<bool>,
 }
 
 impl SelectionScratch {
@@ -658,6 +667,7 @@ impl SelectionScratch {
             ladder,
             sample_reads_per_rung,
             promoted_rungs,
+            rung_is_promoted,
         } = self;
         per_allele.clear();
         per_allele.resize(table_len, AlleleSummary::default());
@@ -666,6 +676,7 @@ impl SelectionScratch {
         ladder.clear();
         sample_reads_per_rung.clear();
         promoted_rungs.clear();
+        rung_is_promoted.clear();
     }
 
     /// How many alleles the buffers are currently sized for.

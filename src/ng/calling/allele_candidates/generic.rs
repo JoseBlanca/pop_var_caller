@@ -110,6 +110,7 @@ pub fn select_generic(
         ladder: _,
         sample_reads_per_rung: _,
         promoted_rungs: _,
+        rung_is_promoted: _,
     } = scratch;
     // Every alternative some sample's reads earned, in the merge table's own order — which is
     // also the order they are admitted in, so nothing has to sort it. Step C2's cap is what

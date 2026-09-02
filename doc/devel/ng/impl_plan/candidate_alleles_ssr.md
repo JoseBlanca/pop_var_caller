@@ -162,7 +162,7 @@ numerator, not a second predicate. The top `ploidy` by support are promoted, tie
 length. Production's `is_clear_peak` is not called and not ported.
 *Depends:* B2. *Source:* arch §3.1; spec §4.
 
-**C2. The `±1` rescue and the union. — own commit, do not bundle.**  ☐
+**C2. The `±1` rescue and the union. — own commit, do not bundle.**  ✅
 When a sample resolved fewer than `ploidy` counts, promote each promoted count's `±1` neighbours
 **where some sample's reads reached that length** — production's `occupied` test
 ([`candidate_set.rs:221`](../../../../src/ssr/cohort/candidate_set.rs)), ported unchanged. The

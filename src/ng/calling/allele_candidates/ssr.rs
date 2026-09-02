@@ -15,9 +15,9 @@
 //!
 //! **Under construction, in the order `doc/devel/ng/impl_plan/candidate_alleles_ssr.md` sets.**
 //! This file holds the ladder (its step B1), the path's configuration and the per-sample length
-//! histogram (B2), and the per-sample nomination of repeat counts (C1). The `±1` rescue and the
-//! cohort's union, admission, periodicity and the entry point `select_ssr` are the steps after
-//! those, and nothing outside this module calls anything here yet.
+//! histogram (B2), and nomination — each sample's own repeat counts, the `±1` rescue and the
+//! cohort's union (C1, C2). Sequence admission, periodicity and the entry point `select_ssr` are
+//! the steps after those, and nothing outside this module calls anything here yet.
 //!
 //! **Which is why a non-test build expects everything here to be dead.** The expectation rather
 //! than an `allow`, so that the first real caller — `select_ssr`, which the steps after this one
@@ -321,6 +321,7 @@ pub(super) fn build_ladder(
         ladder,
         sample_reads_per_rung: _,
         promoted_rungs: _,
+        rung_is_promoted: _,
     } = scratch;
     // **Asserted empty rather than emptied here.** `reset_for` already clears the ladder, and the
     // fold calls it, so a `clear()` on this line would be a second owner of one rule — and being
@@ -651,6 +652,112 @@ pub(super) fn promote_rungs_for_sample(
         });
         promoted.truncate(copies);
         promoted.sort_unstable();
+    }
+}
+
+/// **When a sample resolved fewer lengths than it has copies, put forward the neighbours of what
+/// it did resolve — but only lengths some sample's reads actually reached** (spec §4; production's
+/// `occupied` test, [`candidate_set.rs:239-258`](../../../../src/ssr/cohort/candidate_set.rs)).
+///
+/// A diploid sample that resolved one length has a copy unaccounted for, and what it most likely
+/// carries there is a neighbour of what it did resolve — a second allele one repeat away, hidden
+/// under the first by stutter. This is the one part of production's nomination ng keeps.
+///
+/// **"Occupied" is what stops it inventing a length.** A neighbour is put forward only where the
+/// cohort's reads reached it; without that test the rescue would offer a repeat count nothing in
+/// the run has ever seen, at every under-resolved sample of every tract.
+///
+/// **And it fires only on an under-resolved sample.** Firing it on a sample that did resolve its
+/// ploidy would widen every locus by up to two rungs a sample, which is extra candidates rather
+/// than a crash — every one of them a column in every genotype table for the life of the locus.
+///
+/// **The rescue is not itself capped at `ploidy`**, which is production's behaviour ported
+/// unchanged: a sample that resolved one length of three occupied ones can come back with three.
+/// The cap that does bind is the shared one over *sequences*, applied at admission.
+///
+/// # Occupied means reads, not a rung
+///
+/// The test is `the ladder has a rung at that count **and** its cohort reads are non-zero`, which
+/// is production's `cohort_support(length) > 0`. The two come apart at exactly one rung: the merge
+/// interns the reference tract at index 0 whether or not a read landed on it, so the reference's
+/// length always has a rung and may have no reads. Promoting it would put forward a length the
+/// cohort never showed — and would gain nothing even if it did, since the reference sequence is
+/// admitted first and exempt from the bar regardless of whether its rung was promoted.
+pub(super) fn rescue_occupied_neighbours(
+    ladder: &RepeatLadder,
+    ploidy: Ploidy,
+    promoted: &mut Vec<u32>,
+) {
+    if promoted.len() >= usize::from(ploidy.get()) {
+        return;
+    }
+    let resolved = promoted.len();
+    for index in 0..resolved {
+        let repeat_count = ladder.repeat_count_at(promoted[index] as usize);
+        for neighbour in [repeat_count.checked_sub(1), repeat_count.checked_add(1)]
+            .into_iter()
+            .flatten()
+        {
+            let Some(rung) = ladder.rung_of_repeat_count(neighbour) else {
+                continue;
+            };
+            if ladder.cohort_reads_at(rung) > 0 {
+                promoted.push(rung as u32);
+            }
+        }
+    }
+    // Ascending and once each: a length can be the neighbour of two resolved lengths, and the
+    // rungs a sample resolved are already in the list.
+    promoted.sort_unstable();
+    promoted.dedup();
+}
+
+/// **The repeat counts the whole cohort puts forward: the union of what each sample does**
+/// (spec §4; arch §3.1).
+///
+/// `rung_is_promoted` comes back one flag per rung of the ladder, true where **some** sample
+/// nominated that length or the rescue reached it for that sample.
+///
+/// **A union and not a vote**, for the same reason one sample reaching the bar admits a sequence
+/// for the whole cohort on the ordinary path: an allele one accession of sixty-three carries is
+/// still an allele, and a rule that needed two would delete exactly the rare variation a cohort is
+/// sequenced to find. The cost of the union is candidates, and that is what the cap is for.
+///
+/// **Every sample is asked its own question against its own reads**, so this loop is the only
+/// place the cohort appears at all — nothing in the bar or the cut reads it.
+///
+/// # Panics
+///
+/// Through the functions it calls: on a scratch whose ladder is not this locus's, and on a
+/// sample's support rows out of ascending allele order.
+pub(super) fn promote_rungs_for_cohort(
+    observation: &CohortObservation,
+    config: &SsrSelectionConfig,
+    scratch: &mut SelectionScratch,
+) {
+    let SelectionScratch {
+        ladder,
+        sample_reads_per_rung,
+        promoted_rungs,
+        rung_is_promoted,
+        ..
+    } = scratch;
+    rung_is_promoted.clear();
+    rung_is_promoted.resize(ladder.rung_count(), false);
+
+    for sample in &observation.per_sample {
+        fill_sample_reads_per_rung(sample, observation.region, ladder, sample_reads_per_rung);
+        promote_rungs_for_sample(
+            sample_reads_per_rung,
+            super::compared_reads_of(sample),
+            config,
+            ladder,
+            promoted_rungs,
+        );
+        rescue_occupied_neighbours(ladder, config.ploidy, promoted_rungs);
+        for &rung in promoted_rungs.iter() {
+            rung_is_promoted[rung as usize] = true;
+        }
     }
 }
 
@@ -1576,5 +1683,238 @@ mod tests {
             &mut promoted,
         );
         scratch.ladder.clear();
+    }
+
+    // ---- C2: the ±1 rescue, and the cohort's union ----
+
+    /// Nominate for one sample **with the rescue applied**, at `ploidy` copies.
+    fn promoted_with_rescue(
+        observation: &CohortObservation,
+        sample: usize,
+        ploidy: u8,
+        floor: u32,
+        share: f64,
+    ) -> Vec<u32> {
+        let rule = support_rule_of(floor, share);
+        let copies = Ploidy::try_new(ploidy).expect("at least one copy");
+        let mut scratch = SelectionScratch::new();
+        summarise_alleles(observation, rule, &mut scratch);
+        build_ladder(observation, &dinucleotide(), &mut scratch);
+
+        let config = SsrSelectionConfig {
+            shared: CandidateSelectionConfig {
+                min_allele_support: rule,
+                ..SsrSelectionConfig::at_ploidy(copies).shared
+            },
+            ..SsrSelectionConfig::at_ploidy(copies)
+        };
+        let SelectionScratch {
+            ladder,
+            sample_reads_per_rung,
+            promoted_rungs,
+            ..
+        } = &mut scratch;
+        let support = &observation.per_sample[sample];
+        fill_sample_reads_per_rung(support, observation.region, ladder, sample_reads_per_rung);
+        promote_rungs_for_sample(
+            sample_reads_per_rung,
+            super::super::compared_reads_of(support),
+            &config,
+            ladder,
+            promoted_rungs,
+        );
+        rescue_occupied_neighbours(ladder, config.ploidy, promoted_rungs);
+        promoted_rungs.clone()
+    }
+
+    /// The cohort's union of promoted rungs, as repeat counts.
+    fn cohort_promoted_counts(observation: &CohortObservation, ploidy: u8) -> Vec<u32> {
+        let copies = Ploidy::try_new(ploidy).expect("at least one copy");
+        let mut scratch = SelectionScratch::new();
+        summarise_alleles(observation, support_rule_of(2, 0.0), &mut scratch);
+        build_ladder(observation, &dinucleotide(), &mut scratch);
+        let config = SsrSelectionConfig {
+            shared: CandidateSelectionConfig {
+                min_allele_support: support_rule_of(2, 0.0),
+                ..SsrSelectionConfig::at_ploidy(copies).shared
+            },
+            ..SsrSelectionConfig::at_ploidy(copies)
+        };
+        promote_rungs_for_cohort(observation, &config, &mut scratch);
+        (0..scratch.ladder.rung_count())
+            .filter(|&rung| scratch.rung_is_promoted[rung])
+            .map(|rung| scratch.ladder.repeat_count_at(rung))
+            .collect()
+    }
+
+    /// **A sample that resolved one length puts forward its occupied neighbours, and not its
+    /// unoccupied ones.**
+    ///
+    /// The sample shows four repeats only. Three repeats is occupied — another sample's reads
+    /// reached it — and five is a rung of the table with no reads on it at all, since only the
+    /// reference sits there. So the rescue offers three and refuses five: **the occupancy test is
+    /// what stops it inventing a length**.
+    #[test]
+    fn a_sample_resolving_one_length_gains_its_occupied_neighbour_only() {
+        let observation = locus_of(
+            &[b"ATATATATAT", b"ATATATAT", b"ATATAT"],
+            vec![
+                sample_showing(0, vec![row(1, 20, -20.0)]),
+                sample_showing(1, vec![row(2, 9, -9.0)]),
+            ],
+        );
+        assert_eq!(
+            promoted_with_rescue(&observation, 0, 2, 2, 0.0),
+            vec![0, 1],
+            "rung 0 is three repeats — occupied by the other sample — and rung 2, five repeats, \
+             holds only the reference and no reads"
+        );
+    }
+
+    /// **A sample that resolved its full ploidy gains no neighbour at all.**
+    ///
+    /// Firing the rescue on a resolved sample would widen every locus by up to two rungs a
+    /// sample, which is extra candidates rather than a crash — every one a column in every
+    /// genotype table for the life of the locus.
+    #[test]
+    fn a_sample_resolving_two_lengths_gains_no_neighbour() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT", b"ATATATATAT"],
+            vec![sample_showing(
+                0,
+                vec![row(0, 9, -9.0), row(1, 9, -9.0), row(2, 9, -9.0)],
+            )],
+        );
+        // All three lengths clear the bar; the cut keeps two, and rung 2 is a live neighbour of
+        // rung 1 — so a rescue that fired regardless of resolution would put it back.
+        assert_eq!(
+            promoted_with_rescue(&observation, 0, 2, 2, 0.0),
+            vec![0, 1],
+            "two copies resolved, so five repeats stays cut"
+        );
+    }
+
+    /// The neighbour is a repeat count away, not a rung away — an unoccupied length between two
+    /// occupied ones breaks the chain rather than being stepped over.
+    #[test]
+    fn the_neighbour_is_one_repeat_away_and_not_one_rung_away() {
+        let observation = locus_of(
+            &[b"ATATATATATAT", b"ATATATAT", b"ATATAT"],
+            vec![
+                sample_showing(0, vec![row(1, 20, -20.0)]),
+                sample_showing(1, vec![row(0, 9, -9.0), row(2, 9, -9.0)]),
+            ],
+        );
+        // Rungs are 3, 4 and 6 repeats. The resolved length is 4; 3 is occupied and promoted, and
+        // 5 does not exist — so rung 2 at six repeats, which is *adjacent as a rung*, is not.
+        assert_eq!(promoted_with_rescue(&observation, 0, 2, 2, 0.0), vec![0, 1]);
+    }
+
+    /// A length at the bottom of the ladder has no lower neighbour, and asking for one does not
+    /// wrap around.
+    ///
+    /// Zero repeats is a real tract length — a deletion that removed the tract entirely — and it
+    /// is the one length whose lower neighbour would underflow. The sample resolves it alone, so
+    /// the rescue does fire and reaches upward only.
+    #[test]
+    fn a_zero_repeat_length_has_no_lower_neighbour() {
+        let observation = locus_of(
+            &[b"", b"AT"],
+            vec![
+                sample_showing(0, vec![row(0, 20, -20.0)]),
+                sample_showing(1, vec![row(1, 9, -9.0)]),
+            ],
+        );
+        assert_eq!(
+            promoted_with_rescue(&observation, 0, 2, 2, 0.0),
+            vec![0, 1],
+            "zero repeats resolved, one repeat rescued, and nothing below zero asked for"
+        );
+    }
+
+    /// **The cohort's promoted set is the union across samples** — an allele one accession
+    /// carries is still an allele.
+    ///
+    /// Three samples, each resolving a different single length. A rule that needed two samples to
+    /// agree would return one length or none; the union returns all three.
+    #[test]
+    fn the_cohorts_promoted_set_is_the_union_across_samples() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT", b"ATATATATAT"],
+            vec![
+                sample_showing(0, vec![row(0, 20, -20.0)]),
+                sample_showing(1, vec![row(1, 20, -20.0)]),
+                sample_showing(2, vec![row(2, 20, -20.0)]),
+            ],
+        );
+        assert_eq!(
+            cohort_promoted_counts(&observation, 2),
+            vec![3, 4, 5],
+            "three repeats, four and five — one sample each"
+        );
+    }
+
+    /// A cohort of one is the same rule as a cohort of many: the union of one sample's rungs is
+    /// that sample's rungs.
+    #[test]
+    fn a_cohort_of_one_promotes_exactly_what_that_sample_does() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT", b"ATATATATAT"],
+            vec![sample_showing(
+                0,
+                vec![row(0, 20, -20.0), row(1, 20, -20.0), row(2, 1, -1.0)],
+            )],
+        );
+        assert_eq!(
+            cohort_promoted_counts(&observation, 2),
+            vec![3, 4],
+            "the single read at five repeats reaches no bar, and no sample under-resolved"
+        );
+    }
+
+    /// A sample that nominates nothing contributes nothing to the union, and does not stop the
+    /// samples after it being asked.
+    #[test]
+    fn a_silent_sample_neither_contributes_nor_blocks() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT"],
+            vec![
+                sample_with_only_partials(0, 40),
+                sample_showing(1, vec![row(0, 9, -9.0), row(1, 9, -9.0)]),
+            ],
+        );
+        assert_eq!(cohort_promoted_counts(&observation, 2), vec![3, 4]);
+    }
+
+    /// Building the union for a second locus leaves no flag of the first — the flags are a
+    /// per-worker buffer like every other.
+    #[test]
+    fn a_second_locus_union_leaves_no_flag_of_the_first() {
+        let first = locus_of(
+            &[b"ATATAT", b"ATATATAT", b"ATATATATAT"],
+            vec![sample_showing(
+                0,
+                vec![row(0, 9, -9.0), row(1, 9, -9.0), row(2, 9, -9.0)],
+            )],
+        );
+        let config = SsrSelectionConfig::at_ploidy(diploid());
+        let mut scratch = SelectionScratch::new();
+        summarise_alleles(&first, support_rule_of(2, 0.0), &mut scratch);
+        build_ladder(&first, &dinucleotide(), &mut scratch);
+        promote_rungs_for_cohort(&first, &config, &mut scratch);
+        assert_eq!(scratch.rung_is_promoted.len(), 3);
+
+        let second = locus_of(
+            &[b"ATATATATAT"],
+            vec![sample_showing(0, vec![row(0, 9, -9.0)])],
+        );
+        summarise_alleles(&second, support_rule_of(2, 0.0), &mut scratch);
+        build_ladder(&second, &dinucleotide(), &mut scratch);
+        promote_rungs_for_cohort(&second, &config, &mut scratch);
+        assert_eq!(
+            scratch.rung_is_promoted,
+            vec![true],
+            "one rung, and none of the first locus's three left behind"
+        );
     }
 }
