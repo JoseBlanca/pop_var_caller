@@ -248,7 +248,9 @@ fn the_report_partitions_the_analysed_ground_and_gives_each_part_its_share() {
     );
     assert!(text.contains("called: 800 bases (80.0%)"), "{text}");
     assert!(
-        text.contains("repeat tracts this caller has not built yet: 150 bases (15.0%)"),
+        text.contains(
+            "clusters of repeats too close together to have clean flanks: 150 bases (15.0%)"
+        ),
         "{text}",
     );
     assert!(
@@ -650,7 +652,9 @@ fn a_bed_that_cuts_a_typed_region_does_not_produce_a_share_above_a_hundred() {
     );
     assert!(text.contains("called: 48 bases (20.0%)"), "{text}");
     assert!(
-        text.contains("repeat tracts this caller has not built yet: 192 bases (80.0%)"),
+        text.contains(
+            "clusters of repeats too close together to have clean flanks: 192 bases (80.0%)"
+        ),
         "not 160.0%: {text}",
     );
 }
@@ -728,5 +732,55 @@ fn a_sample_the_filters_emptied_is_told_apart_from_one_that_had_no_reads() {
         !text.contains("no read reached the caller: zeta"),
         "zeta had 720 reads and the filters took them; saying it had none is the defect this \
          closes: {text}",
+    );
+}
+
+/// **A run that built repeat-tract loci and could not score them says so, in loci**, and a run
+/// that built none says nothing rather than printing a zero.
+///
+/// The two facts are easy to run together and a reader acts on each differently. The base lines
+/// above say what ground *no generator looked at* — clusters of repeats with no clean flanks,
+/// and tandem arrays too long to call. This one says what was looked at, built, merged across
+/// the cohort, and then not scored, because nothing in the run scores a repeat tract yet
+/// (`run_ssr_observations.md` §5). Since the tract slot was filled, a tract's bases count as
+/// *called* on the base lines — so a run that printed only those would say a tract's ground was
+/// called when nothing was called there.
+#[test]
+fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_there_are_some() {
+    let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
+    let parameters = a_defaults_runs_parameters(&read_groups);
+    let ground = vec![walked(
+        "zeta",
+        LocusCounts {
+            regions_in: 10,
+            regions_handled: 9,
+            regions_handled_bp: 950,
+            unhandled_not_implemented: 1,
+            unhandled_not_implemented_bp: 50,
+            ..LocusCounts::default()
+        },
+        Vec::new(),
+    )];
+
+    let none_built = a_run(3, 0, Vec::new(), Vec::new(), ground.clone());
+    let text = rendered(&none_built, &read_groups, &parameters, 1_000);
+    assert!(
+        !text.contains("repeat tracts built and then not called"),
+        "a run with no such locus prints no line for it, rather than a zero: {text}",
+    );
+
+    let some_built = WrittenCohort {
+        tract_loci_set_aside: 7,
+        ..a_run(3, 0, Vec::new(), Vec::new(), ground)
+    };
+    let text = rendered(&some_built, &read_groups, &parameters, 1_000);
+    assert!(
+        text.contains("repeat tracts built and then not called: 7 locus/loci"),
+        "and a run with seven says seven: {text}",
+    );
+    assert!(
+        text.contains("called: 950 bases (95.0%)"),
+        "the tract's bases are called ground now — which is exactly why the line above has to \
+         exist: {text}",
     );
 }

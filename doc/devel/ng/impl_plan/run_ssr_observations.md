@@ -162,7 +162,7 @@ non-generic cohort observation, **sets it aside and counts it** — never hands 
 unfilled.
 *Depends:* A1, C1. *Source:* spec §3.1, §5.
 
-**C3. The run report survives both states.**  ☐
+**C3. The run report survives both states.**  ✅
 The ground partition still sums to 100% with tract regions handled; the *not called* line
 now names what is actually unbuilt (bundles, satellites) rather than every repeat; the
 set-aside tract loci of C2 are a counted line of their own. Wording per spec: a smaller,
