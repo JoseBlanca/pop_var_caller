@@ -727,7 +727,7 @@ fn run_tracts(
             let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
             writeln!(
                 out,
-                "contig\tstart\tend\tmotif\tperiod\tbuilt\tverdict\tcandidates\tallele\tkept\treads\tbest_share\tbases"
+                "contig\tstart\tend\tmotif\tperiod\tbuilt\tverdict\tcandidates\tallele\tkept\tcleared_bar\treads\tbest_share\tbases"
             )?;
             println!("# per-tract candidate dump written to {path}");
             Some(out)
@@ -765,7 +765,7 @@ fn run_tracts(
             if let (Some(out), Some(motif)) = (dump.as_mut(), motif) {
                 writeln!(
                     out,
-                    "{}\t{}\t{}\t{}\t{}\t0\tRefusedByMerge\t1\t0\t1\t0\t0.0000\t",
+                    "{}\t{}\t{}\t{}\t{}\t0\tRefusedByMerge\t1\t0\t1\t1\t0\t0.0000\t",
                     locus.region.contig.0,
                     locus.region.start.get(),
                     locus.region.end.get(),
@@ -786,13 +786,16 @@ fn run_tracts(
         }
         let narrowed = select_ssr(&observation, &config, &mut scratch);
         if let (Some(out), Some(motif)) = (dump.as_mut(), motif) {
-            // **Every allele the merge put in the table, not only the survivors.** A true
-            // sequence that is missing from a tract's candidate list was lost in one of two
-            // places, and only these two columns tell them apart: it reached the table and
-            // the support rule refused it (`kept` 0 with reads beside it), or no read ever
-            // carried it and the table never held it at all.
+            // **Every allele the merge put in the table, not only the survivors**, and for
+            // each one the two facts that say where a true sequence was lost: whether some
+            // sample's reads cleared the support rule (`cleared_bar`), and whether selection
+            // kept it (`kept`). An allele the table never held is a loss upstream of
+            // selection; one that cleared the bar and was still dropped was cut by the
+            // per-sample top-`ploidy` rung cut, not by the bar; one that never cleared it is
+            // the bar's. Without the middle column those last two read alike.
             let mut pooled: Vec<u32> = vec![0; observation.alleles.len()];
             let mut best_share: Vec<f64> = vec![0.0; observation.alleles.len()];
+            let mut cleared_bar: Vec<bool> = vec![false; observation.alleles.len()];
             for sample in &observation.per_sample {
                 let compared: u32 = sample
                     .supported
@@ -809,12 +812,21 @@ fn run_tracts(
                     if share > best_share[at] {
                         best_share[at] = share;
                     }
+                    // The run's own rule, asked of this sample's own reads — the same call
+                    // the shipped fold makes, so this column cannot drift from it.
+                    if config
+                        .shared
+                        .min_allele_support
+                        .reached_by(*reads, compared)
+                    {
+                        cleared_bar[at] = true;
+                    }
                 }
             }
             for (at, bases) in observation.alleles.iter().enumerate() {
                 writeln!(
                     out,
-                    "{}\t{}\t{}\t{}\t{}\t1\t{:?}\t{}\t{}\t{}\t{}\t{:.4}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t1\t{:?}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}",
                     observation.region.contig.0,
                     observation.region.start.get(),
                     observation.region.end.get(),
@@ -824,6 +836,7 @@ fn run_tracts(
                     narrowed.selection.alleles().len(),
                     at,
                     u8::from(narrowed.selection.remap().candidate_for(at).is_some()),
+                    u8::from(cleared_bar[at]),
                     pooled[at],
                     best_share[at],
                     String::from_utf8_lossy(bases),

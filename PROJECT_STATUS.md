@@ -19,7 +19,27 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **the existing caller's replaced rules switched back
+> - **Last completed task (2026-09-02):** **what the shipped repeat-tract selector offers
+> HG002, measured — step E2 and Checkpoint E**
+> (step E2 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md), which is
+> Milestone B of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_selection_e2_2026-09-02.md)).
+> HG002 alone over the whole 50,000-region Tier set at 30×, 50× and 300×, through ng's own
+> repeat catalog and the shipped `select_ssr`, scored against the phased truth set.
+> **Spec §4.1 reproduces and spec §5 does not**: both true repeat *lengths* of an
+> adjacent-length heterozygote are offered at 97.8% / 98.9% / 98.9% against the spec's 97–98%,
+> while both *spellings* of one length are offered at 70.1% at every depth against its 86.1%.
+> **Two thirds of that shortfall is upstream of selection** — of 387 missing true sequences at
+> 300×, 233 were never in the merge's allele table because no read carried them, 28 are tracts
+> the merge refused, 69 the support bar refused at a median 9 reads in 100 against a 10-in-100
+> bar, and 57 cleared the bar and were dropped by the per-sample top-`ploidy` rung cut. **The
+> candidates-per-tract figure was a denominator**: 1.615 counts only the tracts the merge built,
+> and over the whole catalog it is 1.415 at 300× and 1.422 at 30× and 50× — flat with depth,
+> where the built-only figure swings from 1.971 to 1.615. **The remaining question — what ng's
+> tract aligner assigns a read to when a substitution sits inside a repeat — belongs with the
+> STR generator, not with step 6.**
+>
+> - **Earlier (2026-09-02):** **the existing caller's replaced rules switched back
 > in, and reproduced on 269 real tomato tracts — step E1**
 > (step E1 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
 > [report](doc/devel/reports/implementations/ng_ssr_selection_e1_2026-09-02.md)).
