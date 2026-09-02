@@ -169,7 +169,7 @@ set-aside tract loci of C2 are a counted line of their own. Wording per spec: a 
 honest *not called* line, not a zero and not the old sentence.
 *Depends:* C2. *Source:* spec §3.2, §5.
 
-**C4. Invariance, end to end.**  ☐
+**C4. Invariance, end to end.**  ✅
 The E2 oracle re-run with the slot filled: byte-identical VCF at pools of 1–16 across two
 building-region widths on the concurrency fixture, and the report's counts identical too.
 *Depends:* C2. *Source:* spec §3.3, §10.
