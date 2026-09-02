@@ -19,7 +19,20 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **the routing change is pinned from both sides** —
+> - **Last completed task (2026-09-02):** **routing on ng's own floors recovered four in five
+> of the variants the repeat path was losing, and the caller was not touched to do it** — step
+> B4, which completes Milestone B of the
+> [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
+> `ng-ssr-observations`. On the GIAB per-sample benchmark at 30×, pooled over the three samples:
+> **SNP recall 0.935 → 0.974, indel recall 0.818 → 0.946, for one extra false positive in
+> total**. At 50× it is 0.940 → 0.979 and 0.818 → 0.949. The loss report's upper bound was
+> ≈0.97 and ≈0.94 and the measurement lands on it. **ng's indel recall now exceeds the
+> production caller's here** — 0.946 against its 0.930 — while its SNP recall is still below,
+> 0.974 against 0.987. Same reads, same catalog file, same `--defaults` model; what changed is
+> which stretches of reference go to a locus generator that does not exist yet.
+> [Report](doc/devel/reports/ng_str_routing_recovery_2026-09-02.md).
+>
+> - **Earlier (2026-09-02):** **the routing change is pinned from both sides** —
 > step B3 of the [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
 > `ng-ssr-observations`. The run's ground partition is what `ng_typed_region_dump` computes for
 > the same reference at the same floors, which is what every routing number quoted from that
@@ -27,7 +40,7 @@ Skills and agents are instructed to leave it untouched.
 > switch writes **identical VCFs byte for byte**. Tests only, no source change.
 > [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b3_2026-09-02.md).
 >
-> - **Earlier (2026-09-02):** **a run now writes down what it counted as a repeat**
+> - **Earlier still (2026-09-02):** **a run now writes down what it counted as a repeat**
 > — step B2 of the [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on
 > branch `ng-ssr-observations`. Since B1 made that a knob, two runs over the same reference and
 > the same catalog can analyse different ground, and nothing a run wrote said so. The parameters
@@ -3110,10 +3123,9 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     closure; re-opens only on a large-cohort measurement that moves the share.
 
 #### Step 5/6 — STR observations through a run: routing, the tract slot, and the kind at the merge
-- **Status:** `implemented` — **✅ MILESTONE A COMPLETE and merged to `main`**; **B1, B2 and B3
-  done** on branch `ng-ssr-observations`. **B4 — the GIAB recovery measured against the loss
-  report's predicted ≈0.97 SNP / ≈0.94 indel recall — is all that remains before Checkpoint B**;
-  C fills the tract slot.
+- **Status:** `implemented` — **✅ MILESTONE A COMPLETE and merged to `main`**; **✅ MILESTONE B COMPLETE, at
+  Checkpoint B** on branch `ng-ssr-observations`, not yet merged. C fills the tract slot and
+  pays the two accounting debts.
 - **Plan:** [run_ssr_observations.md](doc/devel/ng/impl_plan/run_ssr_observations.md);
   **Spec:** [run_ssr_observations.md](doc/devel/ng/spec/run_ssr_observations.md); the parallel
   plan it seams with: [calling_loop_ssr.md](doc/devel/ng/impl_plan/calling_loop_ssr.md); what
@@ -3170,6 +3182,21 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   on two identical runs or two empty files. **Mutation-tested**: restoring the old
   `StrRepeatCriteria::default()` fails both.
   [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b3_2026-09-02.md).
+- **B4 done (the recovery, measured) — ✅ MILESTONE B COMPLETE, at Checkpoint B:** the GIAB
+  per-sample benchmark re-run at 30× and 50× on all three samples and scored against the calls
+  that were on disk before. **Pooled SNP recall 0.935 → 0.974 and indel recall 0.818 → 0.946 at
+  30× (0.940 → 0.979 and 0.818 → 0.949 at 50×), for one extra false positive in total** —
+  82 more true SNPs and 42 more true indels at 30×, precision flat to four decimals. The loss
+  report's upper bound was ≈0.97 and ≈0.94; the measurement lands on it, 2,008 true SNPs against
+  the bound's 2,006. **ng's indel recall now exceeds the production caller's on this benchmark**
+  (0.946 against its 0.930, quoted from the loss report's own run of `src/var_calling/`); its SNP
+  recall is still below (0.974 against 0.987). The ground moved exactly as computed: HG002's
+  repeat-classified bases 32,577 → 4,930, the report's own pair, and the three samples' ratios
+  6.6×/7.3×/7.0× to the digit. The satellite class grew from nothing to 180/172/102 bases —
+  a permanent refusal, since the calling floors cap a tract at 100 bp where the file allows 500.
+  New: `benchmarks/giab/src/score_ng_recall.sh`, which scores one results directory the way
+  `accuracy_dashboard.py` does so two can be compared.
+  [Report](doc/devel/reports/ng_str_routing_recovery_2026-09-02.md).
 - **Open:**
   - **⚠ Three tests in the two locus dumps still fail, and each says something different.**
     Both targets had been red since `8ffb0f84` (*"the live tandem-repeat scan is gone"*,

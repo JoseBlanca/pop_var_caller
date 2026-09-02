@@ -36,11 +36,29 @@ Each takes a coverage tier and an optional sample list, e.g.
     benchmarks/giab/src/run_ng_per_sample.sh 30x HG002
 
 Two things to hold against ng's numbers, both of which cost it recall and not
-precision. It does not build loci inside tandem repeats yet — about 6 bases in
-every 100 of these confident regions — so a truth variant inside a tract is
-unreachable for it and scores as a false negative. And nothing is fitted: no
-command writes a fitted parameters file yet, so every run is `--defaults`, with
-no base-quality calibration, contamination or inbreeding coefficient.
+precision. It does not build loci inside tandem repeats yet, so a truth variant
+inside one is unreachable for it and scores as a false negative. And nothing is
+fitted: no command writes a fitted parameters file yet, so every run is
+`--defaults`, with no base-quality calibration, contamination or inbreeding
+coefficient.
+
+**How much ground the first of those costs changed on 2026-09-02, and by about
+seven times.** A run used to ask the repeat catalog with the floors the *file*
+was stored at, so every row it held became a repeat tract of the run — 6 bases
+in every 100 of these confident regions. A run now routes on the floors it is
+given, defaulting to ng's measured stutter onsets, and a candidate below them is
+ordinary sequence that the SNP/indel caller handles. On HG002 that is 32,577
+bases against 4,930, and pooled over the three samples at 30x it took SNP recall
+from 0.935 to 0.974 and indel recall from 0.818 to 0.946, for one extra false
+positive. The five flags that set it are under "What counts as a repeat" in
+`call-from-alignments --help`, and every run records what it used in the
+parameters file it writes.
+
+    benchmarks/giab/src/score_ng_recall.sh 30x ng
+
+scores one results directory the way accuracy_dashboard.py does — per sample and
+class, TP/FP/FN with recall and precision. Two directories under the same
+coverage can be scored and compared, which is what a routing change needs.
 
 ng_missed_sites_probe.sh separates those two kinds of miss. It takes each
 caller's missed truth sites, hands ng exactly those bases, and reads from ng's

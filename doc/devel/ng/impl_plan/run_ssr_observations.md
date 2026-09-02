@@ -132,7 +132,7 @@ and the new default, the VCF is byte-identical to a pre-change run — the chang
 ground is generic, never what happens on it.
 *Depends:* B1. *Source:* spec §10.
 
-**B4. The recovery, measured.**  ☐
+**B4. The recovery, measured.**  ✅
 Re-run the GIAB per-sample benchmark at 30× and 50× with the new default routing and
 re-score (the loss report's own scripts). Expected from the upper bound: overall recall from
 0.935 toward ≈ 0.97 (SNPs) and 0.818 toward ≈ 0.94 (indels); record what is actually
