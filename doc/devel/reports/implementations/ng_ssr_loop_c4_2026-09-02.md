@@ -121,6 +121,11 @@ Three places could fix it, and they are not equivalent:
 the three that prevents the second record rather than removing it, and the region clip that
 created the seam landed there too.
 
+**And the shape of the duplicates says the routing would reach almost all of them: 57 of the 62
+at 30× are a SNP/indel record sitting exactly one base before a tract record** (25 of 28 on
+HG002, 15 of 15 on HG003, 17 of 19 on HG004). The remaining five are not adjacent in that way and
+would need looking at on their own.
+
 ## Validation
 
 The runs are the shipped release binary built from this branch, in the container. Scoring is
