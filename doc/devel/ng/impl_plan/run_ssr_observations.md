@@ -146,7 +146,7 @@ rows.
 
 ### Milestone C — the tract slot is filled, and the accounting is paid
 
-**C1. `SsrGenerator` reports its read-filter counts.**  ☐
+**C1. `SsrGenerator` reports its read-filter counts.**  ✅
 Override [`read_filter_counts`](../../../../src/ng/locus_generation/mod.rs) (default: empty)
 with the generator's own reader tallies, per read group. **Own commit, do not bundle** — the
 failure is silent under-reporting with every number plausible; the oracle is a test that
