@@ -89,7 +89,7 @@ that record's spelling before it is coded.
 
 ### Milestone A — the merge carries the locus kind (the seam; merge first)
 
-**A1. `ClosedLocus` and `CohortObservation` carry `LocusKind`.**  ☐
+**A1. `ClosedLocus` and `CohortObservation` carry `LocusKind`.**  ✅
 As [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) A1 wrote it, now delivered here
 (its ownership note points back): the closer has the kind in scope where it builds a
 `ClosedLocus` ([`close.rs:713-721`](../../../../src/ng/run/cohort_merge/close.rs)) and drops

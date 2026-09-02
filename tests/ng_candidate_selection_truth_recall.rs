@@ -77,6 +77,7 @@ use pop_var_caller::ng::calling::allele_candidates::generic::select_generic;
 use pop_var_caller::ng::calling::allele_candidates::{
     CandidateSelectionConfig, MaxCandidateAlleles, SelectionScratch,
 };
+use pop_var_caller::ng::locus_generation::LocusKind;
 use pop_var_caller::ng::run::cohort_merge::build::{
     AlleleSupport, CohortObservation, SampleSupport, SupportedAllele,
 };
@@ -233,6 +234,7 @@ fn observation_of(locus: &FixtureLocus) -> CohortObservation {
                 reads_composed_across_records: 0,
             })
             .collect(),
+        kind: LocusKind::Generic,
     }
 }
 

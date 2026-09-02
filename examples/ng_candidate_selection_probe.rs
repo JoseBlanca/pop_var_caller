@@ -248,6 +248,7 @@ fn restrict_to_first_samples(observation: &CohortObservation, samples: usize) ->
             .filter(|sample| sample.sample < samples)
             .cloned()
             .collect(),
+        kind: observation.kind.clone(),
     }
 }
 

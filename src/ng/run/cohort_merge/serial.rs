@@ -368,7 +368,7 @@ mod tests {
     use super::super::parallel::merge_cohort_in_parallel;
     use super::super::{MinAltObs, MinAltReadShare};
     use super::*;
-    use crate::ng::locus_generation::SequenceObservation;
+    use crate::ng::locus_generation::{LocusKind, SequenceObservation};
     use crate::ng::types::{ContigId, Position};
 
     /// The observations come out in genome order across several analysed regions, and each
@@ -1310,6 +1310,7 @@ mod tests {
             region: span,
             alleles: Vec::new(),
             per_sample: Vec::new(),
+            kind: LocusKind::Generic,
         }
     }
 

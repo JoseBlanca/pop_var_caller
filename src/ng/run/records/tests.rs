@@ -346,6 +346,7 @@ fn observed(alleles: &[&[u8]], per_sample: Vec<SampleSupport>) -> CohortObservat
         region: region(100, 100),
         alleles: alleles.iter().map(|bases| Box::from(*bases)).collect(),
         per_sample,
+        kind: LocusKind::Generic,
     }
 }
 

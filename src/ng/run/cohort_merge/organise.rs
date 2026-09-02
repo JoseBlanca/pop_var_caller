@@ -489,6 +489,7 @@ fn last_base_of(locus_span: GenomeRegion) -> GenomePosition {
 mod tests {
     use super::super::fixtures::{region, region_on};
     use super::*;
+    use crate::ng::locus_generation::LocusKind;
 
     /// A cohort locus over `region`. The organiser reads nothing but where a locus sits, so
     /// the allele table and the per-sample support are left empty: what these tests check is
@@ -498,6 +499,7 @@ mod tests {
             region,
             alleles: Vec::new(),
             per_sample: Vec::new(),
+            kind: LocusKind::Generic,
         }
     }
 

@@ -37,7 +37,7 @@ use ahash::AHashMap;
 use super::close::{ClosedLocus, LocusCloser, SampleMembers, Verdict, span_of};
 use super::{MaxCohortLocusSpan, MinAltReads};
 use crate::ng::locus_generation::{
-    ReadWitness, SampleLocusObservations, SequenceObservation, WitnessedLocusPositions,
+    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, WitnessedLocusPositions,
 };
 use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::pileup_record::ChainId;
@@ -985,6 +985,25 @@ pub struct CohortObservation {
     /// zeroed row, and it is the shape the walk hands over
     /// ([`SampleMembers`](super::close::SampleMembers)). Each entry names its own sample.
     pub per_sample: Vec<SampleSupport>,
+    /// What kind of stretch this is — a SNP/indel site ([`LocusKind::Generic`]) or a
+    /// repeat tract ([`LocusKind::Ssr`]), which carries the motif the tract's read model
+    /// needs and both reference flanks.
+    ///
+    /// **The kind was minted by the generator that produced every member of this locus**
+    /// and travelled here unchanged; the walk asserts the members agree on it
+    /// (`close.rs`). Without it the motif — and so the period, and so the repeat counts —
+    /// was dropped at assembly, and a caller handed a cohort observation could not tell a
+    /// tract from a stretch of ordinary sequence
+    /// (`doc/devel/ng/spec/run_ssr_observations.md` §4).
+    ///
+    /// **What the clone costs, per built locus.** [`LocusKind::Generic`] owns nothing, so
+    /// the SNP/indel path — the overwhelming majority of built loci — copies one
+    /// discriminant. [`LocusKind::Ssr`] copies an inline motif — `MAX_MOTIF_LEN` is 6, so
+    /// the bytes travel in the enum rather than on the heap — and allocates both flanks,
+    /// at most 15 bytes each at the tract generator's default flank width and shorter
+    /// where a contig end clamps one. Nothing is cloned for the loci the walk closes and
+    /// does not build.
+    pub kind: LocusKind,
 }
 
 impl CohortObservation {
@@ -1008,6 +1027,7 @@ impl CohortObservation {
             region: locus.region,
             alleles: alleles.distinct,
             per_sample,
+            kind: locus.kind.clone(),
         }
     }
 }
@@ -2061,12 +2081,12 @@ fn offset_within(locus_region: GenomeRegion, member_region: GenomeRegion) -> usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::locus_generation::LocusKind;
+    use crate::ng::locus_generation::{LocusKind, SsrDetail};
     use crate::ng::run::cohort_merge::close::LocusCloser;
     use crate::ng::run::cohort_merge::{
         MaxCohortLocusSpan, MinAltObs, MinAltReadShare, MinAltReads,
     };
-    use crate::ng::types::{ContigId, Position, ReadGroupId};
+    use crate::ng::types::{ContigId, Motif, Position, ReadGroupId};
 
     fn region_on(contig: u32, start: u64, end: u64) -> GenomeRegion {
         GenomeRegion {
@@ -2150,6 +2170,19 @@ mod tests {
                 .collect(),
             non_reference_reads: 0,
             verdict: Verdict::Build,
+            // Taken from the first observation these members hold, so that a tract
+            // fixture keeps its motif here instead of being flattened to generic. **Not
+            // the walk's rule** — the walk takes the kind from whichever observation
+            // starts earliest, and it can afford to because it asserts the members agree.
+            // A fixture can present members that disagree, and then this answers with the
+            // first sample's rather than refusing; nothing here tests that case, and the
+            // walk's own `a_locus_mixing_an_str_tract_and_a_generic_observation_is_refused`
+            // is what says it cannot arise. A fixture with no members has no observation
+            // to take a kind from at all.
+            kind: per_sample
+                .iter()
+                .find_map(|observations| observations.first())
+                .map_or(&LocusKind::Generic, |opening| &opening.kind),
         }
     }
 
@@ -3245,6 +3278,34 @@ mod tests {
             placed_left,
             ..sequence(bases)
         }
+    }
+
+    /// **The assembled locus states its kind, and a tract's motif and flanks survive the
+    /// assembly** (`run_ssr_observations.md` §4).
+    ///
+    /// Until this field existed the merge closed tract loci deliberately and then dropped
+    /// the motif at assembly, so nothing downstream could tell a repeat tract from
+    /// ordinary sequence — and with the motif went the period, and with the period the
+    /// repeat counts. The tract arm compares the whole payload rather than the variant, so
+    /// a kind rebuilt with an empty motif or without its flanks fails here.
+    #[test]
+    fn the_assembled_locus_carries_the_kind_the_generator_minted() {
+        let tract_detail = SsrDetail {
+            motif: Motif::new(b"AT").expect("a two-base motif"),
+            left_flank: Box::from(&b"CCCCCCCCCCCCCCC"[..]),
+            right_flank: Box::from(&b"GGGGGGGGGGGGGGG"[..]),
+        };
+        let tract = [SampleLocusObservations {
+            kind: LocusKind::Ssr(tract_detail.clone()),
+            ..member(region(10, 13), b"ATAT", b"ATATAT")
+        }];
+        let generic = [member(region(10, 13), b"ATAT", b"ATAT")];
+
+        let over_a_tract = CohortObservation::over(&closed_locus(region(10, 13), &[&tract]));
+        assert_eq!(over_a_tract.kind, LocusKind::Ssr(tract_detail));
+
+        let over_generic = CohortObservation::over(&closed_locus(region(10, 13), &[&generic]));
+        assert_eq!(over_generic.kind, LocusKind::Generic);
     }
 
     /// **At a sample with one record every sum is the mint's own** — nothing is divided,

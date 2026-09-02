@@ -1113,7 +1113,7 @@ fn compare_best_first(left: RankedAlternative<'_>, right: RankedAlternative<'_>)
 #[cfg(test)]
 pub(super) mod fixtures {
     use super::*;
-    use crate::ng::locus_generation::WitnessedLocusPositions;
+    use crate::ng::locus_generation::{LocusKind, WitnessedLocusPositions};
     use crate::ng::run::cohort_merge::build::{AlleleSupport, PartialObservation, SupportedAllele};
     use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
     use std::num::NonZeroU32;
@@ -1210,6 +1210,7 @@ pub(super) mod fixtures {
             },
             alleles: alleles.iter().map(|bases| Box::from(*bases)).collect(),
             per_sample,
+            kind: LocusKind::Generic,
         }
     }
 }

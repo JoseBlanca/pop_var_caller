@@ -167,6 +167,18 @@ pub struct ClosedLocus<'a> {
     /// organiser has to be told its span (spec §3.2, §6.1). A too-quiet one is dropped
     /// by whoever consumes this, not hidden by the walk.
     pub verdict: Verdict,
+    /// What kind of stretch the locus is — a SNP/indel site, or a repeat tract with its
+    /// motif and flanks. Every member carries one and the walk asserts they agree by
+    /// discriminant, so the locus states the shared kind once rather than leaving each
+    /// reader to take the head member's and re-argue why that is safe.
+    ///
+    /// **Borrowed from the observation that opened the locus, not cloned.** A closed
+    /// locus is produced for every locus the walk closes, including the ones judged
+    /// [`Verdict::TooQuiet`] and [`Verdict::Failed`]; a tract's kind boxes two flanks, so
+    /// copying it here would pay for that at every closed locus. The one clone happens
+    /// where the kind is kept — `CohortObservation::over`, which runs only on the loci
+    /// the caller builds.
+    pub kind: &'a LocusKind,
 }
 
 impl ClosedLocus<'_> {
@@ -720,6 +732,7 @@ impl<'a> Iterator for LocusCloser<'a> {
                 kind,
                 self.max_cohort_locus_span,
             ),
+            kind,
         })
     }
 }
@@ -1300,6 +1313,45 @@ mod tests {
         assert_eq!(closed[0].verdict, Verdict::TooQuiet);
     }
 
+    /// **A closed locus states the kind its members share, motif and flanks included.**
+    ///
+    /// The kind was in scope where the locus is built and was dropped, so everything past
+    /// the walk had to take the head member's and re-argue why that was the shared one
+    /// (`run_ssr_observations.md` §4). Asserting the whole [`LocusKind`] rather than its
+    /// discriminant is what makes this a test of the payload: the motif is what a tract's
+    /// read model needs, and a kind rebuilt as a bare `Ssr` with an empty motif would pass
+    /// a discriminant comparison.
+    #[test]
+    fn a_closed_locus_carries_the_kind_its_members_share() {
+        let tract = [str_observation(region(10, 40), 4)];
+        let generic = [observation(region(60, 60), 4)];
+
+        let over_a_tract: Vec<_> =
+            LocusCloser::over(&[&tract], max_span(100), keep_at(2)).collect();
+        assert_eq!(over_a_tract.len(), 1);
+        assert_eq!(over_a_tract[0].kind, &tract[0].kind);
+
+        let over_generic: Vec<_> =
+            LocusCloser::over(&[&generic], max_span(100), keep_at(2)).collect();
+        assert_eq!(over_generic.len(), 1);
+        assert_eq!(over_generic[0].kind, &LocusKind::Generic);
+    }
+
+    /// **The kind travels on a locus the caller refused, too.** A failed or too-quiet
+    /// locus is still handed out — it owns its ground and displaces what overlaps it — so
+    /// a reader that groups refusals by what kind of ground they sat on can do that.
+    #[test]
+    fn a_refused_locus_still_states_its_kind() {
+        let quiet_tract = [SampleLocusObservations {
+            kind: str_observation(region(10, 69), 0).kind,
+            ..all_reference_observation(region(10, 69), 9)
+        }];
+
+        let closed: Vec<_> = LocusCloser::over(&[&quiet_tract], max_span(10), keep_at(2)).collect();
+        assert_eq!(closed[0].verdict, Verdict::TooQuiet);
+        assert_eq!(closed[0].kind, &quiet_tract[0].kind);
+    }
+
     /// A bundle is exempt from the width bound for the same reason a tract is — spec
     /// §3.1's "the same holds for bundles".
     #[test]
@@ -1465,6 +1517,7 @@ mod tests {
             members: Vec::new(),
             non_reference_reads: 0,
             verdict: Verdict::TooQuiet,
+            kind: &LocusKind::Generic,
         };
         assert_eq!(at_the_ceiling.span(), 4);
     }

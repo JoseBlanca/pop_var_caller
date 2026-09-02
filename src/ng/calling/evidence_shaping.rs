@@ -526,6 +526,7 @@ mod tests {
             region: region(),
             alleles: sequences[..alleles].iter().map(|s| Box::from(*s)).collect(),
             per_sample,
+            kind: LocusKind::Generic,
         }
     }
 

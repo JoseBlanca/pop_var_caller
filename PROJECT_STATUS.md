@@ -19,7 +19,18 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **the STR path's two implementation plans are
+> - **Last completed task (2026-09-02):** **a cohort observation now states what kind of
+> ground it sits on** — step A1 of the
+> [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
+> `ng-ssr-observations`. The merge closed repeat-tract loci deliberately and then dropped the
+> tract's motif as it assembled the cohort's evidence, so nothing downstream could tell a
+> repeat tract from ordinary sequence; `ClosedLocus` and `CohortObservation` now carry the
+> kind, the closed one borrowing it and only a *built* locus paying the clone. Nothing reads
+> either field yet — the branch on the kind is the calling-loop plan's, and this plan's
+> Milestone A exists to unblock it.
+> [Impl report](doc/devel/reports/implementations/ng_ssr_observations_a1_2026-09-02.md).
+>
+> - **Earlier (2026-09-02):** **the STR path's two implementation plans are
 > written, for parallel execution on separate branches and worktrees**
 > ([observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md);
 > [loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md)).
@@ -3033,6 +3044,33 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     answered by measurement at E1 (2026-09-01): the merge thread's, still, because genotyping
     is 5–6% of a run at 63 samples; the parallelism went to the cover. Arch §8 records the
     closure; re-opens only on a large-cohort measurement that moves the share.
+
+#### Step 5/6 — STR observations through a run: routing, the tract slot, and the kind at the merge
+- **Status:** `implemented` — **A1 done** on branch `ng-ssr-observations`. Milestone A is the
+  seam the parallel calling-loop plan waits on; B (routing from user flags) and C (the tract
+  slot filled) follow.
+- **Plan:** [run_ssr_observations.md](doc/devel/ng/impl_plan/run_ssr_observations.md);
+  **Spec:** [run_ssr_observations.md](doc/devel/ng/spec/run_ssr_observations.md); the parallel
+  plan it seams with: [calling_loop_ssr.md](doc/devel/ng/impl_plan/calling_loop_ssr.md); what
+  prompted both: [the loss attribution](doc/devel/reports/ng_str_path_losses_2026-09-02.md).
+- **A1 done (the merge carries the locus kind):**
+  [close.rs](src/ng/run/cohort_merge/close.rs) — `ClosedLocus::kind`, borrowed from the
+  observation that opened the locus so a refused locus costs no clone;
+  [build.rs](src/ng/run/cohort_merge/build.rs) — `CohortObservation::kind`, cloned in
+  `CohortObservation::over`, which runs only on the loci the caller builds. The merge closed
+  tract loci deliberately and then dropped the motif at assembly, so nothing downstream could
+  tell a repeat tract from ordinary sequence. Three tests: the kind through the walk on both
+  kinds, the kind on a locus the walk refused, and the motif and both flanks surviving
+  assembly — each comparing the whole `LocusKind` rather than its discriminant, so a payload
+  rebuilt empty fails. No verdict moves and nothing yet reads either field.
+  [Impl report](doc/devel/reports/implementations/ng_ssr_observations_a1_2026-09-02.md).
+- **Open:**
+  - **⚠ `benches/psp_writer_perf.rs` panics under `cargo test --all-targets`** —
+    `index out of bounds: the len is 3300000 but the index is 3300000` at line 386, in
+    `psp_writer_phases/flush_block_one`, which walks its fixture until a block fills and runs
+    off the end when it does not. Confirmed pre-existing (same panic on the untouched tree) and
+    over production's `.psp` writer, so no ng step owns it — but it makes the plan's
+    `--all-targets` validation gate red for every step until somebody fixes it.
 
 ---
 

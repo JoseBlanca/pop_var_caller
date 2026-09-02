@@ -203,6 +203,7 @@ fn merge(per_sample: &[SampleLocusObservations]) -> CohortObservation {
         members,
         non_reference_reads: per_sample.iter().map(non_reference_of).sum(),
         verdict: Verdict::Build,
+        kind: &LocusKind::Generic,
     })
 }
 
