@@ -692,6 +692,8 @@ impl From<ShareShape> for FittedShape {
 /// to disagree.
 #[cfg(test)]
 pub(super) mod tests {
+    use crate::ng::repeat_catalog::StrRepeatCriteria;
+
     use super::super::tests::{THE_REFERENCE_A_RUN_FITTED_AGAINST, a_file_using_every_shape};
     use super::super::{
         ParametersFile, ParametersFileError, ReadsBehindEachCalibration, Warrant, WarrantedValue,
@@ -768,6 +770,7 @@ pub(super) mod tests {
             &projected.inbreeding_by_sample,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             file.fitted_from.census.clone(),
+            &StrRepeatCriteria::default(),
         );
         assert_eq!(written, file);
     }
@@ -815,6 +818,7 @@ pub(super) mod tests {
                 &projected.inbreeding_by_sample,
                 &THE_REFERENCE_A_RUN_FITTED_AGAINST,
                 file.fitted_from.census.clone(),
+                &StrRepeatCriteria::default(),
             );
             assert_eq!(
                 written
@@ -844,6 +848,7 @@ pub(super) mod tests {
             &projected.inbreeding_by_sample,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             read.fitted_from.census.clone(),
+            &StrRepeatCriteria::default(),
         );
         assert_eq!(written.to_toml(), text);
     }
@@ -1233,6 +1238,8 @@ mod the_north_star_round_trip {
     //! would be invisible here; `validate` refuses the contradiction instead.
 
     use std::collections::BTreeMap;
+
+    use crate::ng::repeat_catalog::StrRepeatCriteria;
 
     use super::super::tests::{
         THE_REFERENCE_A_RUN_FITTED_AGAINST, a_census_a_run_could_have_fitted_under,
@@ -1773,6 +1780,7 @@ mod the_north_star_round_trip {
             &run.inbreeding,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             a_census_a_run_could_have_fitted_under(),
+            &StrRepeatCriteria::default(),
         )
     }
 
@@ -1805,6 +1813,7 @@ mod the_north_star_round_trip {
             &back.inbreeding_by_sample,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             read.fitted_from.census.clone(),
+            &StrRepeatCriteria::default(),
         );
         assert_eq!(again, first, "and the parameters are the file again");
         // **Implied by the line above except in one place**: the shape's `PartialEq` compares
@@ -2029,6 +2038,7 @@ mod the_north_star_round_trip {
             &back.inbreeding_by_sample,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             file.fitted_from.census.clone(),
+            &StrRepeatCriteria::default(),
         );
         assert_eq!(again, file);
         assert_eq!(

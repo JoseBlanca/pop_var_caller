@@ -15,6 +15,7 @@ use crate::ng::locus_generation::LocusCounts;
 use crate::ng::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::ng::read::input::read_groups::{ReadGroups, build_read_groups};
 use crate::ng::region_typing::GenomeRegions;
+use crate::ng::repeat_catalog::StrRepeatCriteria;
 use crate::ng::run::AssemblyCheckOutcome;
 use crate::ng::run::callers::{CohortWalkTallies, SampleWalkTallies};
 use crate::ng::types::{ContigId, Ploidy, Position, ReadGroupId};
@@ -114,6 +115,7 @@ fn a_defaults_runs_parameters(read_groups: &ReadGroups) -> ParametersFile {
         &inbreeding.of_each_sample(read_groups),
         &ReferenceDigest([7; 16]),
         CensusIdentity::of_a_run_with_no_census(),
+        &StrRepeatCriteria::default(),
     )
 }
 

@@ -435,8 +435,56 @@ impl ParametersFile {
             ),
         );
 
+        // **Last, and absent where the run that wrote the file did not say** (spec §3.9). A file
+        // from a build older than this section, or one written by hand, has no such block, and a
+        // reader must not read that as the defaults.
+        if let Some(routing) = &self.repeat_routing {
+            section(&mut out, "repeat_routing");
+            note(
+                &mut out,
+                &[
+                    "What this run counted as a repeat. A tandem-repeat catalog is built below every floor a caller routes on, deliberately, so that a run can put its own line anywhere inside that gap by filtering the file rather than scanning the genome again. These are where this run put it: a stretch of reference clearing all of them went to the repeat-tract caller, and one that did not is ordinary sequence and went to the SNP and indel caller. Two runs over the same reference and the same catalog with different numbers here analysed different ground, and nothing else in this file would say so.",
+                    "",
+                    "`min_copies` is one floor per repeat-unit length, 1 to 6 in order, so the first entry is how many bases a homopolymer needs and the last how many hexamer copies. `min_purity` is how much of a tract has to match a perfect tiling of its unit. `max_str_len` is where a tract stops being callable and becomes a satellite, which neither caller speaks for.",
+                    "",
+                    "Five of the eight have flags on `call-from-alignments`, named as these keys are. The other three do not, and are written because a record that left them out would not say what the run actually asked the catalog for: `min_flank_bp` is pinned at the catalog's own floor, since tracts nearer than that to a contig's end were never written to the file; `min_score` gates a scanner's output and so gates nothing in a run that reads a catalog; `bundle_threshold` is how close two tracts have to be before they are one bundle rather than two loci.",
+                    "",
+                    "A run handed a parameters file whose numbers here differ from its own says so and calls on. Nothing is refused and nothing is demoted: the numbers in this file are as warranted as they ever were, and only the ground they are applied to has moved. What that costs is worth knowing — a tract the run admits that the fit's own selection did not is scored from strata fitted over other tracts, or from the stated defaults, and the warrants beside each number say which.",
+                ],
+            );
+            scalar(
+                &mut out,
+                "min_copies",
+                &a_toml_integer_list(routing.min_copies.iter().map(|&floor| u64::from(floor))),
+            );
+            scalar(&mut out, "min_period", &routing.min_period.to_string());
+            scalar(&mut out, "max_period", &routing.max_period.to_string());
+            scalar(&mut out, "max_str_len", &routing.max_str_len.to_string());
+            scalar(&mut out, "min_purity", &a_toml_purity(routing.min_purity));
+            scalar(&mut out, "min_flank_bp", &routing.min_flank_bp.to_string());
+            scalar(&mut out, "min_score", &routing.min_score.to_string());
+            scalar(
+                &mut out,
+                "bundle_threshold",
+                &routing.bundle_threshold.to_string(),
+            );
+        }
+
         out
     }
+}
+
+/// `[a, b, c]` — the shape the routing floors are written in.
+fn a_toml_integer_list(values: impl Iterator<Item = u64>) -> String {
+    let mut out = String::from("[");
+    for (index, value) in values.enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&value.to_string());
+    }
+    out.push(']');
+    out
 }
 
 // ---------------------------------------------------------------------
@@ -989,6 +1037,23 @@ fn a_toml_float(value: f64) -> String {
 /// in.
 fn a_toml_integer(count: u64) -> String {
     i64::try_from(count).unwrap_or(i64::MAX).to_string()
+}
+
+/// **A purity floor, written at its own width and not at a `f64`'s.**
+///
+/// The floor is a `f32`, and widening it before formatting spells the shipped 0.8 as
+/// `0.800000011920929` — every digit true of the `f64` it became and none of them anything a
+/// person typed. `{value:?}` on the `f32` gives the shortest string that reads back as the same
+/// `f32`, which is `0.8`, and it survives the trip through TOML's `f64`: parsing the shortest
+/// `f32` form as a `f64` and narrowing again cannot land on a different `f32`, because a `f64`
+/// carries more than twice a `f32`'s precision.
+///
+/// The three special values go through [`a_toml_float`], which names them as TOML spells them.
+fn a_toml_purity(value: f32) -> String {
+    if value.is_nan() || value.is_infinite() {
+        return a_toml_float(value.into());
+    }
+    format!("{value:?}")
 }
 
 // ---------------------------------------------------------------------

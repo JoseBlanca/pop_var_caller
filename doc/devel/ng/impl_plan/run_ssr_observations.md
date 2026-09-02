@@ -116,7 +116,7 @@ the message. **Own commit — a wrong value here routes wrongly genome-wide with
 crashing**; the oracle is B3's parity check.
 *Depends:* none (parallel to A). *Source:* spec §2.1, §2.3, §9.
 
-**B2. The parameters file records what the run routed with.**  ☐
+**B2. The parameters file records what the run routed with.**  ✅
 Documentation first: one additive section in
 [`../spec/parameters_file.md`](../spec/parameters_file.md) naming the routing-criteria
 record's TOML spelling, beside `[fitted_from]`'s conventions. Then the run's written file

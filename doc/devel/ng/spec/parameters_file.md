@@ -261,6 +261,59 @@ existing caller and never measured here.
 edit is a number the project has admitted is a guess; one that only appears in the source reads as
 a decision.
 
+### 3.9 What the run counted as a repeat
+
+**`[repeat_routing]` — the thresholds the run used to decide which stretches of the reference are
+repeat tracts and which are ordinary sequence** ([`run_ssr_observations.md`](run_ssr_observations.md)
+§2). A repeat catalog is built below every floor a caller routes on, deliberately, so a run picks
+its own line inside that gap; two runs over the same reference and the same catalog can therefore
+analyse different ground, and nothing else in this file would say so.
+
+**A property of the run, not of the fit — so it is a section of its own and not part of
+`[fitted_from]`.** `[fitted_from]` answers *where did these numbers come from*, and every mismatch
+in it either refuses the file or demotes it (§6). This answers *what did this run treat as a
+repeat*, which is the same kind of fact as the ploidy of §3.2: written so that a supplied file
+cannot be paired with a run that routed differently without the difference being on the record.
+
+**Eight values, spelled as the flags that set them.** Five have flags on
+`call-from-alignments` — `min_copies` (six integers, one per period 1 to 6), `min_period`,
+`max_period`, `max_str_len`, `min_purity`. Three do not, and are written anyway because a record
+that omitted them would not say what the run actually asked the catalog for: `min_flank_bp`, which
+is pinned at the catalog's own floor because the rows below it were never written; `min_score`,
+which gates a scanner's output and so gates nothing in a run that reads a file; and
+`bundle_threshold`, the distance within which two tracts are one bundle rather than two loci.
+
+```toml
+[repeat_routing]
+min_copies = [8, 6, 6, 6, 5, 4]
+min_period = 1
+max_period = 6
+max_str_len = 100
+min_purity = 0.8
+min_flank_bp = 15
+min_score = 0
+bundle_threshold = 15
+```
+
+**Absent means the file does not say**, which is §5's rule and not a new one: a file written by a
+build older than this section, or one a person wrote by hand, records no routing, and a reader must
+not read that as *the defaults*. It is a sixth row of §5's table.
+
+#### A difference is reported and never refused
+
+**Decided 2026-09-02 (owner)** — the ruling
+[`run_ssr_observations.md`](run_ssr_observations.md) §2.3 records: *"The user could supply any
+priors to the caller; it is their decision to use the same routing criteria or not."*
+
+So a run handed a parameters file whose `[repeat_routing]` differs from its own **says so and calls
+on**. Nothing refuses, and nothing is demoted to `Supplied` — unlike the census mismatch of §6,
+which demotes because the numbers were fitted elsewhere. These numbers were not: they are as
+warranted as they ever were, and only the ground they are applied to has moved.
+
+**What the user is taking on, in one sentence**, because the report cannot be read without it: a
+tract this run admits but the fit's own selection did not is scored from strata fitted over other
+loci, or from the stated defaults — and the per-cell warrants already label which.
+
 ---
 
 ## 4. Decision: TOML, not JSON
@@ -308,6 +361,7 @@ likely to cost a day. In one place:
 | a read group's error rate could not be fitted | scale 1.0, warrant `Defaulted` | read the 1.0 as a fitted answer |
 | a stratum was furnished from its period's curves | no length spectrum entry | fall back silently to the flat rung without saying so |
 | a read group has no reads in a stratum | no row for that (stratum × slippage group) | write a zero slip rate |
+| the file does not say what its run counted as a repeat | `[repeat_routing]` is absent (§3.9) | read it as the defaults |
 
 **The rule underneath all five rows:** `Option<T>` is absence, never a sentinel, and a warrant is
 carried rather than inferred from the value.

@@ -763,7 +763,13 @@ pub fn run_call_from_alignments(
 
     let read_groups = build_read_groups(&args.alignments)
         .map_err(|source| CallFromAlignmentsCliError::ReadGroups { source })?;
-    let numbers = run_parameters(args, &read_groups, &with_checksums, asked_ploidy)?;
+    let numbers = run_parameters(
+        args,
+        &read_groups,
+        &with_checksums,
+        asked_ploidy,
+        &segmentation.inputs().repeat_tract_criteria,
+    )?;
     // **The run's ploidy is the parameters', not the flag's.** A supplied file states the
     // ploidy its numbers were fitted at, and the records' `GT` has to be enumerated at the same
     // one the model scored at; `run_parameters` has already refused a flag that disagrees with
@@ -792,6 +798,10 @@ pub fn run_call_from_alignments(
         // file recorded, because a run writing its parameters out again writes back the terms it
         // read; see [`TheRunsNumbers::census`].
         numbers.census.clone(),
+        // **What this run counted as a repeat** (`parameters_file.md` §3.9) — taken from the
+        // segmentation rather than rebuilt from the flags, so the record cannot say one thing
+        // while the catalog was asked another.
+        &segmentation.inputs().repeat_tract_criteria,
     );
 
     let caller = AlignedFilesVariantCaller::open(
@@ -1194,6 +1204,7 @@ fn run_parameters(
     read_groups: &ReadGroups,
     with_checksums: &ReferenceInfo,
     ploidy: Ploidy,
+    routing: &StrRepeatCriteria,
 ) -> Result<TheRunsNumbers, CallFromAlignmentsCliError> {
     let Some(path) = &args.parameters else {
         // **The defaults run's warrants are a pure function of what it was told**, which is what
@@ -1224,6 +1235,19 @@ fn run_parameters(
             source,
         }
     })?;
+    // **A file written by a run that routed differently is reported and never refused** — the
+    // owner's ruling, `run_ssr_observations.md` §2.3 and `parameters_file.md` §3.9. Which
+    // stretches count as repeats is the user's to choose independently of where the numbers
+    // came from, so this changes nothing about the run: the numbers are as warranted as they
+    // ever were, and only the ground they are applied to has moved. What the operator is owed is
+    // knowing it happened, because a tract this run admits and the fit's selection did not is
+    // scored from strata fitted over other loci.
+    if let Some(axis) = file.routing_disagreement(routing) {
+        eprintln!(
+            "note: {} was written by a run that routed on a different {axis}; calling on",
+            path.display()
+        );
+    }
     let digest = ReferenceDigest::of(with_checksums)
         .map_err(|source| CallFromAlignmentsCliError::ReferenceNotDigested { source })?;
     let bound = file

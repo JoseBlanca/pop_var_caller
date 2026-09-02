@@ -513,6 +513,52 @@ pub struct ParametersFile {
     pub repeat_tracts: RepeatTracts,
     /// The numbers no fit produces, written out rather than left in the binary (spec §3.8).
     pub stated_constants: StatedConstants,
+    /// What the run counted as a repeat (spec §3.9).
+    ///
+    /// **Absent means the file does not say**, and a reader must not read that as *the
+    /// defaults* — §5's rule, and this is its sixth row. A file written by a build older than
+    /// this section, or written by hand, records no routing at all. Every run this build makes
+    /// writes one.
+    pub repeat_routing: Option<RepeatRouting>,
+}
+
+/// **The thresholds a run used to decide which stretches of the reference are repeat tracts**
+/// (spec §3.9; `run_ssr_observations.md` §2).
+///
+/// A repeat catalog is built below every floor a caller routes on, so a run picks its own line
+/// inside that gap and two runs over the same reference and the same catalog can analyse
+/// different ground. Nothing else in this file would say so.
+///
+/// **A property of the run and not of the fit**, like the ploidy of §3.2 — which is why it is a
+/// section of its own rather than part of `[fitted_from]`, whose every mismatch either refuses
+/// the file or demotes it. A routing difference does neither: the numbers are as warranted as
+/// they ever were, and only the ground they are applied to has moved.
+///
+/// **Five of the eight have flags on `call-from-alignments`**; the other three are written
+/// anyway, because a record that omitted them would not say what the run actually asked the
+/// catalog for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepeatRouting {
+    /// The fewest motif copies a tract needs, one per period 1 to 6 — `--min-copies`.
+    pub min_copies: [u32; 6],
+    /// The shortest repeat unit routed as a repeat — `--min-period`.
+    pub min_period: u8,
+    /// The longest — `--max-period`.
+    pub max_period: u8,
+    /// Longer than this and a tract is a satellite, which neither caller speaks for —
+    /// `--max-str-len`.
+    pub max_str_len: u64,
+    /// How much of a tract must match a perfect tiling of its motif, 0 to 1 — `--min-purity`.
+    pub min_purity: f32,
+    /// Sequence required each side of a tract. **No flag**: it is pinned at the catalog's own
+    /// floor, because the rows below that were never written and so cannot be asked for.
+    pub min_flank_bp: u64,
+    /// The floor on a scanner's alignment score. **No flag**, and it gates nothing in a run
+    /// that reads a catalog file rather than scanning: only a scanner produces the score.
+    pub min_score: i32,
+    /// Two tracts closer than this are one bundle rather than two loci. **No flag today.**
+    pub bundle_threshold: u64,
 }
 
 /// **One group of numbers in the file — one thing a fit either did or did not do.**
@@ -1313,6 +1359,7 @@ pub struct StatedConstants {
 mod tests {
     use super::*;
     use crate::ng::parameter_estimation::joint::loci::ReferenceDigest;
+    use crate::ng::repeat_catalog::StrRepeatCriteria;
 
     /// A plant whose name needs escaping and is not ASCII.
     ///
@@ -1711,6 +1758,10 @@ mod tests {
                     observations: None,
                 },
             },
+            // The shape, not a recommendation: what a run that routed on the catalog's own
+            // storage floors would record. Every field differs from at least one neighbour, so
+            // a writer that transposed two of them could not produce this file.
+            repeat_routing: Some(RepeatRouting::of(&StrRepeatCriteria::default())),
         }
     }
 

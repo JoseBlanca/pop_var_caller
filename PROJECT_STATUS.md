@@ -19,7 +19,18 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **a calling run now decides for itself what counts
+> - **Last completed task (2026-09-02):** **a run now writes down what it counted as a repeat**
+> — step B2 of the [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on
+> branch `ng-ssr-observations`. Since B1 made that a knob, two runs over the same reference and
+> the same catalog can analyse different ground, and nothing a run wrote said so. The parameters
+> file beside every VCF now carries a `[repeat_routing]` section — all eight thresholds, not
+> only the five with flags. A supplied file that recorded different ones gets a `note:` naming
+> the axis and **nothing is refused or demoted**: those numbers were fitted where they were
+> fitted, and only the ground they are applied to has moved (the owner's ruling, spec §2.3).
+> Settled in [`parameters_file.md`](doc/devel/ng/spec/parameters_file.md) §3.9 before it was
+> coded. [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b2_2026-09-02.md).
+>
+> - **Earlier (2026-09-02):** **a calling run now decides for itself what counts
 > as a repeat, and the answer is ng's measured floors rather than the catalog file's storage
 > floors** — step B1 of the
 > [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
@@ -33,7 +44,7 @@ Skills and agents are instructed to leave it untouched.
 > **Not yet measured on real data**: the recovery this predicts is B4's.
 > [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b1_2026-09-02.md).
 >
-> - **Earlier (2026-09-02):** **a cohort observation now states what kind of
+> - **Earlier still (2026-09-02):** **a cohort observation now states what kind of
 > ground it sits on, and Milestone A is on `main`** — step A1 of the
 > [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
 > `ng-ssr-observations`. The merge closed repeat-tract loci deliberately and then dropped the
@@ -3091,10 +3102,9 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     closure; re-opens only on a large-cohort measurement that moves the share.
 
 #### Step 5/6 — STR observations through a run: routing, the tract slot, and the kind at the merge
-- **Status:** `implemented` — **✅ MILESTONE A COMPLETE and merged to `main`**; **B1 done** on
-  branch `ng-ssr-observations`. B2 (the criteria on the record in the parameters file), B3
-  (routing parity and the no-regression pin) and B4 (the GIAB recovery, measured) remain in
-  Milestone B; C fills the tract slot.
+- **Status:** `implemented` — **✅ MILESTONE A COMPLETE and merged to `main`**; **B1 and B2
+  done** on branch `ng-ssr-observations`. B3 (routing parity and the no-regression pin) and B4
+  (the GIAB recovery, measured) remain in Milestone B; C fills the tract slot.
 - **Plan:** [run_ssr_observations.md](doc/devel/ng/impl_plan/run_ssr_observations.md);
   **Spec:** [run_ssr_observations.md](doc/devel/ng/spec/run_ssr_observations.md); the parallel
   plan it seams with: [calling_loop_ssr.md](doc/devel/ng/impl_plan/calling_loop_ssr.md); what
@@ -3125,6 +3135,20 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   is `Generic` and the longer is still a tract. **Mutation-tested**: restoring the old
   `StrRepeatCriteria::default()` fails three of the five.
   [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b1_2026-09-02.md).
+- **B2 done (the run writes down what it routed with):** a new
+  [§3.9](doc/devel/ng/spec/parameters_file.md) settles the record's TOML spelling first, then
+  `[repeat_routing]` on the file itself — all eight axes, not only the five with flags, because
+  a record leaving out the flank floor, the score floor and the bundling distance would not say
+  what the run actually asked the catalog for. **Optional on read and always written**: a
+  required section would make a file from an older build a parse error, which is the opposite of
+  the owner's *visible, never blocking*; absence is §5's own claim, *this file does not say*, and
+  never the defaults. A supplied file whose record differs is a `note:` line naming the axis and
+  **nothing is refused or demoted** — those numbers were fitted where they were fitted, and only
+  the ground they are applied to has moved. Six tests, and the end-to-end one moves all five
+  flags off every default, so a writer recording the catalog's floors or the calling defaults
+  fails; **mutation-tested** against exactly that. Both TOML goldens regenerated through their
+  own `--ignored` regenerators.
+  [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b2_2026-09-02.md).
 - **Open:**
   - **⚠ Three tests in the two locus dumps still fail, and each says something different.**
     Both targets had been red since `8ffb0f84` (*"the live tandem-repeat scan is gone"*,

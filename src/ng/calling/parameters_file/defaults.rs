@@ -453,6 +453,7 @@ mod tests {
     };
     use crate::ng::parameter_estimation::ssr::{RepeatCount, Stratum as SsrStratum, StratumKey};
     use crate::ng::read::input::read_groups::ReadGroups;
+    use crate::ng::repeat_catalog::StrRepeatCriteria;
     use crate::ng::types::{
         ErrorRate, ExpectedHeterozygosity, InbreedingF, Ploidy, ReadGroupId, SsrPeriod,
     };
@@ -968,6 +969,7 @@ mod tests {
             &declared.of_each_sample(&read_groups),
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             CensusIdentity::of_a_run_with_no_census(),
+            &StrRepeatCriteria::default(),
         );
 
         file.validate()
@@ -1132,6 +1134,7 @@ mod tests {
             // **A defaults run has no census**, which step F1 gave a name of its own; before it
             // this fixture handed over a census a *fitted* run could have had.
             CensusIdentity::of_a_run_with_no_census(),
+            &StrRepeatCriteria::default(),
         )
         .to_toml();
 

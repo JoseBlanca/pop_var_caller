@@ -18,9 +18,10 @@ use super::{
     ContaminationFittedFrom, ContaminationMeasurement, ContaminationRow, CurveReach, EvidenceCount,
     FORMAT_VERSION, Inbreeding, InbreedingRow, InputsFittedFrom, LevelOrigin, LevelSmoothing,
     OrdinarySitePrior, ParametersFile, PeriodLengthSpectrumRow, ReadGroupBatchRow, ReadGroupRow,
-    RepeatTracts, SampleBatchRow, SeedRung, SequencingBatches, ShareCurve, ShareCurveRung,
-    ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow, SlippageRow,
-    StatedConstants, StratumLengthSpectrumRow, SubstitutionRateRow, Warrant, WarrantedValue,
+    RepeatRouting, RepeatTracts, SampleBatchRow, SeedRung, SequencingBatches, ShareCurve,
+    ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow,
+    SlippageRow, StatedConstants, StratumLengthSpectrumRow, SubstitutionRateRow, Warrant,
+    WarrantedValue,
 };
 use crate::ng::calling::genotype_prior::SeedRegime;
 use crate::ng::calling::likelihood::{ContaminationView, ReadGroupCalibration};
@@ -39,6 +40,7 @@ use crate::ng::parameter_estimation::joint::ssr_fit::{LevelProvenance, ShareProv
 use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::read::input::read_groups::ReadGroups;
+use crate::ng::repeat_catalog::StrRepeatCriteria;
 use crate::ng::types::{ErrorRate, InbreedingF, ReadGroupId};
 
 /// **How much data stood behind each read group's base-quality multiplier** — one entry a read
@@ -320,6 +322,7 @@ impl ParametersFile {
         inbreeding_by_sample: &[Estimate<InbreedingF>],
         reference: &ReferenceDigest,
         census: CensusIdentity,
+        repeat_routing: &StrRepeatCriteria,
     ) -> Self {
         let read_group_count = run.read_group_count();
         let samples = read_groups.read_groups_per_sample();
@@ -394,6 +397,7 @@ impl ParametersFile {
                 alternative_concentration_total: run.prior_seed().alpha_alt_total(),
                 rung: run.prior_seed().regime().into(),
             },
+            repeat_routing: Some(RepeatRouting::of(repeat_routing)),
             repeat_tracts: repeat_tracts_of(run),
             stated_constants: StatedConstants {
                 // **Whatever this run scored under, and its warrant with it.** Until 2026-08-30
@@ -1389,6 +1393,7 @@ mod tests {
             &the_runs_inbreeding(),
             &A_REFERENCE,
             a_census(),
+            &StrRepeatCriteria::default(),
         )
     }
 
@@ -2260,6 +2265,7 @@ mod tests {
             &one_coefficient,
             &A_REFERENCE,
             a_census(),
+            &StrRepeatCriteria::default(),
         );
 
         assert_eq!(file.fitted_from.samples, vec![AWKWARD_SAMPLE.to_owned()]);
@@ -2357,6 +2363,7 @@ mod tests {
             &coefficients,
             &A_REFERENCE,
             a_census(),
+            &StrRepeatCriteria::default(),
         );
 
         for row in &file.base_quality_calibration.by_read_group {
@@ -2556,6 +2563,7 @@ mod tests {
             &another_fits_estimates,
             &A_REFERENCE,
             a_census(),
+            &StrRepeatCriteria::default(),
         );
     }
 
@@ -2576,6 +2584,7 @@ mod tests {
             &one_short,
             &A_REFERENCE,
             a_census(),
+            &StrRepeatCriteria::default(),
         );
     }
 
@@ -2687,6 +2696,8 @@ mod tests {
 /// three sources worked, and the one the format exists for did not.
 #[cfg(test)]
 mod one_writer_three_sources {
+    use crate::ng::repeat_catalog::StrRepeatCriteria;
+
     use super::super::tests::{THE_REFERENCE_A_RUN_FITTED_AGAINST, a_file_using_every_shape};
     use super::super::to_run_parameters::tests::{
         the_counts_the_projection_out_reads, the_files_read_groups,
@@ -2720,6 +2731,7 @@ mod one_writer_three_sources {
             &back.inbreeding_by_sample,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             supplied.fitted_from.census.clone(),
+            &StrRepeatCriteria::default(),
         );
 
         assert_eq!(written, supplied);
@@ -2743,6 +2755,7 @@ mod one_writer_three_sources {
             &back.inbreeding_by_sample,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             supplied.fitted_from.census.clone(),
+            &StrRepeatCriteria::default(),
         );
 
         let counts: Vec<(Warrant, Option<EvidenceCount>)> = written
@@ -2783,6 +2796,7 @@ mod one_writer_three_sources {
             &back.inbreeding_by_sample,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             CensusIdentity::of_a_run_with_no_census(),
+            &StrRepeatCriteria::default(),
         );
 
         assert!(of_a_run_with_none.fitted_from.census.terms.is_empty());
@@ -2841,6 +2855,7 @@ mod one_writer_three_sources {
             &read.from_file.inbreeding_by_sample,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             supplied.fitted_from.census.clone(),
+            &StrRepeatCriteria::default(),
         );
 
         assert_eq!(
@@ -2877,6 +2892,7 @@ mod one_writer_three_sources {
                 &again.from_file.inbreeding_by_sample,
                 &THE_REFERENCE_A_RUN_FITTED_AGAINST,
                 written.fitted_from.census.clone(),
+                &StrRepeatCriteria::default(),
             ),
             written
         );
@@ -2911,6 +2927,7 @@ mod one_writer_three_sources {
             &back.inbreeding_by_sample,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             supplied.fitted_from.census.clone(),
+            &StrRepeatCriteria::default(),
         );
 
         assert_eq!(

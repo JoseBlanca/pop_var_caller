@@ -308,3 +308,13 @@ bases_compared = 40122
 [stated_constants.repeat_tract_outlier_weight]
 value = 0.01
 warrant = "defaulted"
+
+[repeat_routing]
+min_copies = [5, 5, 4, 4, 4, 3]
+min_period = 1
+max_period = 6
+max_str_len = 500
+min_purity = 0.8
+min_flank_bp = 15
+min_score = 0
+bundle_threshold = 15

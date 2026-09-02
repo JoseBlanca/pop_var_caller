@@ -51,13 +51,15 @@ use std::collections::BTreeMap;
 
 use super::{
     BaseQualityCalibrationRow, CensusIdentity, CensusTerm, InbreedingRow, ParametersFile,
-    ParametersFileError, ReadGroupRow, RepeatTracts, RunParametersFromFile, StatedConstants,
-    SubstitutionRateRow, Warrant,
+    ParametersFileError, ReadGroupRow, RepeatRouting, RepeatTracts, RunParametersFromFile,
+    StatedConstants, SubstitutionRateRow, Warrant,
 };
 use crate::ng::parameter_estimation::Provenance;
 use crate::ng::parameter_estimation::joint::census::RecordingTerms;
 use crate::ng::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::ng::read::input::read_groups::{ReadGroup, ReadGroups};
+use crate::ng::region_typing::segment_criteria::SsrSegmentCriteria;
+use crate::ng::repeat_catalog::StrRepeatCriteria;
 
 #[cfg(test)]
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
@@ -70,7 +72,7 @@ use crate::ng::parameter_estimation::joint::loci::{
     BlockDigest, CatalogBuildSettings, CensusLociDigest, RegionSetDigest, SelectionTerms,
 };
 #[cfg(test)]
-use crate::ng::repeat_catalog::{StrRepeatCriteria, StratumCounts};
+use crate::ng::repeat_catalog::StratumCounts;
 #[cfg(test)]
 use crate::ng::tandem_repeat::ScanParams;
 #[cfg(test)]
@@ -195,6 +197,107 @@ pub(super) fn hex_digest(digest: &[u8; 16]) -> String {
             write!(hex, "{byte:02x}").expect("a string never fails");
             hex
         })
+}
+
+// ---------------------------------------------------------------------
+// What the run counted as a repeat (spec §3.9)
+// ---------------------------------------------------------------------
+
+impl RepeatRouting {
+    /// **What a run asked the repeat catalog for, as the file spells it.**
+    ///
+    /// Destructured without `..` on purpose, the same convention the census identity keeps
+    /// upstream: an axis added to the criteria stops this compiling rather than quietly
+    /// dropping out of the record, and an axis that drops out lets two runs that routed
+    /// differently write identical files.
+    #[must_use]
+    pub fn of(criteria: &StrRepeatCriteria) -> Self {
+        let StrRepeatCriteria {
+            classification,
+            min_flank_bp,
+            max_str_len_bp,
+        } = criteria;
+        let SsrSegmentCriteria {
+            periods,
+            min_copies,
+            min_purity,
+            min_score,
+            bundle_threshold,
+        } = classification;
+        Self {
+            min_copies: std::array::from_fn(|index| {
+                min_copies.for_period(u8::try_from(index + 1).expect("six periods fit a u8"))
+            }),
+            min_period: periods.min(),
+            max_period: periods.max(),
+            max_str_len: max_str_len_bp.get(),
+            min_purity: *min_purity,
+            min_flank_bp: min_flank_bp.get(),
+            min_score: *min_score,
+            bundle_threshold: *bundle_threshold,
+        }
+    }
+}
+
+impl ParametersFile {
+    /// **Which routing threshold this file's run and `asked` first differ on** — `None` where
+    /// they routed the same ground, and `None` where the file does not say.
+    ///
+    /// **Nothing here refuses and nothing is demoted**, which is what separates this from the
+    /// census comparison beside it (spec §3.9, the owner's ruling of 2026-09-02): a file fitted
+    /// under another census carries numbers fitted elsewhere, where a file written by a run that
+    /// routed differently carries numbers that are as warranted as they ever were. Only the
+    /// ground they are applied to has moved, and the caller's job is to say so.
+    ///
+    /// **A file with no `[repeat_routing]` answers `None`**, because it makes no claim to
+    /// disagree with — spec §5's rule that absence is not a value.
+    ///
+    /// The axes are compared in the order the file writes them, and the name returned is the
+    /// flag a person would move, so that a caller can quote it without a second table.
+    #[must_use]
+    pub fn routing_disagreement(&self, asked: &StrRepeatCriteria) -> Option<&'static str> {
+        let recorded = self.repeat_routing.as_ref()?;
+        let mine = RepeatRouting::of(asked);
+        // Exhaustive on purpose: an axis added to the record must be answered for here, or two
+        // runs that differ only on it would compare equal.
+        let RepeatRouting {
+            min_copies,
+            min_period,
+            max_period,
+            max_str_len,
+            min_purity,
+            min_flank_bp,
+            min_score,
+            bundle_threshold,
+        } = recorded;
+        if *min_copies != mine.min_copies {
+            return Some("--min-copies");
+        }
+        if *min_period != mine.min_period {
+            return Some("--min-period");
+        }
+        if *max_period != mine.max_period {
+            return Some("--max-period");
+        }
+        if *max_str_len != mine.max_str_len {
+            return Some("--max-str-len");
+        }
+        // Bit equality, not a tolerance: this is a recorded input rather than a fitted number,
+        // and a run either typed the same value or typed another one.
+        if min_purity.to_bits() != mine.min_purity.to_bits() {
+            return Some("--min-purity");
+        }
+        if *min_flank_bp != mine.min_flank_bp {
+            return Some("the flank floor");
+        }
+        if *min_score != mine.min_score {
+            return Some("the scanner score floor");
+        }
+        if *bundle_threshold != mine.bundle_threshold {
+            return Some("the bundling distance");
+        }
+        None
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -593,6 +696,9 @@ impl ParametersFile {
             ordinary_site_prior: _,
             repeat_tracts,
             stated_constants,
+            // Carries no warrant: it is what the run typed, not what a fit found, so there is
+            // nothing here for a demotion to weaken.
+            repeat_routing: _,
         } = &mut demoted;
         for BaseQualityCalibrationRow {
             read_group: _,
@@ -2061,5 +2167,130 @@ mod the_fourth_binding_demotes {
         // per-number exemption spec §2.1 says does not exist.
         assert_eq!(warrants.len(), 3 + 2 + 1 + 1 + 1);
         warrants
+    }
+}
+
+#[cfg(test)]
+mod what_the_run_counted_as_a_repeat {
+    use super::super::tests::a_file_using_every_shape;
+    use super::super::{ParametersFile, RepeatRouting};
+    use crate::ng::region_typing::TypedRegionConfig;
+    use crate::ng::repeat_catalog::StrRepeatCriteria;
+    use crate::ng::types::Bp;
+
+    /// The routing the fixture records — the catalog's own storage floors.
+    fn the_fixtures_routing() -> StrRepeatCriteria {
+        StrRepeatCriteria::default()
+    }
+
+    /// **Every axis of the criteria reaches the record.** A record that dropped one would let two
+    /// runs that routed differently write identical files, and the difference the whole section
+    /// exists to make visible would be invisible.
+    #[test]
+    fn the_record_carries_every_axis_the_catalog_was_asked_on() {
+        let asked = StrRepeatCriteria::from(&TypedRegionConfig::default());
+        let recorded = RepeatRouting::of(&asked);
+
+        assert_eq!(
+            recorded.min_copies,
+            [8, 6, 6, 6, 5, 4],
+            "ng's measured stutter onsets, one per period",
+        );
+        assert_eq!(recorded.min_period, asked.classification.periods.min());
+        assert_eq!(recorded.max_period, asked.classification.periods.max());
+        assert_eq!(recorded.max_str_len, asked.max_str_len_bp.get());
+        assert_eq!(recorded.min_purity, asked.classification.min_purity);
+        assert_eq!(recorded.min_flank_bp, asked.min_flank_bp.get());
+        assert_eq!(recorded.min_score, asked.classification.min_score);
+        assert_eq!(
+            recorded.bundle_threshold,
+            asked.classification.bundle_threshold
+        );
+    }
+
+    /// **A run that routed as the file's run did finds no disagreement**, which is the control
+    /// the eight cases below are read against.
+    #[test]
+    fn the_same_routing_is_no_disagreement() {
+        let file = a_file_using_every_shape();
+        assert_eq!(file.routing_disagreement(&the_fixtures_routing()), None);
+    }
+
+    /// **Each axis is named by the flag that moves it**, and each is tested on its own: a
+    /// comparison that stopped at the first field, or that compared the record against itself,
+    /// would pass with only one of these.
+    ///
+    /// The three axes with no flag are named in words rather than left unnamed, because a
+    /// difference there is a catalog to rebuild and a person still has to be told which one.
+    #[test]
+    fn each_axis_that_differs_names_itself() {
+        let file = a_file_using_every_shape();
+        let with = |change: fn(&mut StrRepeatCriteria)| {
+            let mut criteria = the_fixtures_routing();
+            change(&mut criteria);
+            file.routing_disagreement(&criteria)
+        };
+
+        assert_eq!(
+            with(|c| c.classification.min_copies =
+                crate::ng::region_typing::segment_criteria::MinCopies::default()),
+            Some("--min-copies"),
+        );
+        assert_eq!(
+            with(|c| c.classification.periods =
+                crate::ng::tandem_repeat::PeriodRange::new(2, 6).expect("a range")),
+            Some("--min-period"),
+        );
+        assert_eq!(
+            with(|c| c.classification.periods =
+                crate::ng::tandem_repeat::PeriodRange::new(1, 4).expect("a range")),
+            Some("--max-period"),
+        );
+        assert_eq!(with(|c| c.max_str_len_bp = Bp(100)), Some("--max-str-len"));
+        assert_eq!(
+            with(|c| c.classification.min_purity = 0.9),
+            Some("--min-purity"),
+        );
+        assert_eq!(with(|c| c.min_flank_bp = Bp(30)), Some("the flank floor"));
+        assert_eq!(
+            with(|c| c.classification.min_score = 30),
+            Some("the scanner score floor"),
+        );
+        assert_eq!(
+            with(|c| c.classification.bundle_threshold = 20),
+            Some("the bundling distance"),
+        );
+    }
+
+    /// **A file that does not say what it routed with disagrees with nothing** — spec §5's rule
+    /// that absence is not a value, and here the difference between *this file made no claim* and
+    /// *this file claims the defaults*. A file written by a build older than the section, or by
+    /// hand, is the case.
+    #[test]
+    fn a_file_with_no_routing_record_makes_no_claim_to_disagree_with() {
+        let mut file = a_file_using_every_shape();
+        file.repeat_routing = None;
+        assert_eq!(
+            file.routing_disagreement(&StrRepeatCriteria::from(&TypedRegionConfig::default())),
+            None,
+            "a run must not be told a file disagrees when the file said nothing",
+        );
+    }
+
+    /// **A routing difference does not touch a single warrant**, which is what separates it from
+    /// the census mismatch beside it: those numbers were fitted elsewhere, these were not, and
+    /// only the ground they are applied to has moved.
+    #[test]
+    fn a_routing_difference_leaves_every_number_as_warranted_as_it_was() {
+        let file = a_file_using_every_shape();
+        let mut routed_otherwise = the_fixtures_routing();
+        routed_otherwise.max_str_len_bp = Bp(100);
+        assert!(file.routing_disagreement(&routed_otherwise).is_some());
+
+        // The comparison is a question, not a step: nothing about the file moves when it is
+        // asked, so a caller that reports the difference and calls on is calling on the same
+        // numbers it would have used had it never asked.
+        let untouched: &ParametersFile = &file;
+        assert_eq!(untouched, &a_file_using_every_shape());
     }
 }

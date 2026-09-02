@@ -505,6 +505,7 @@ fn what_a_defaults_run_writes_reads_back_into_the_numbers_it_scored_with() {
         &inbreeding.of_each_sample(&read_groups),
         &reference,
         CensusIdentity::of_a_run_with_no_census(),
+        &StrRepeatCriteria::default(),
     );
     let directory = tempfile::tempdir().expect("a temporary directory");
     let vcf = directory.path().join("calls.vcf.gz");
@@ -566,6 +567,7 @@ fn a_defaults_runs_file_says_it_fitted_nothing() {
         &inbreeding.of_each_sample(&read_groups),
         &ReferenceDigest([7; 16]),
         CensusIdentity::of_a_run_with_no_census(),
+        &StrRepeatCriteria::default(),
     );
 
     let fitted = file.what_the_run_fitted();
@@ -1128,5 +1130,48 @@ fn a_tract_below_the_calling_floor_becomes_generic_ground_and_one_above_it_stays
         ),
         "ten copies clears the floor under either setting — the fixture moves one tract, not \
          both",
+    );
+}
+
+/// **The parameters file a run writes says what that run counted as a repeat**
+/// (`parameters_file.md` §3.9), and it says what this run typed rather than what the binary
+/// defaults to.
+///
+/// Two runs over the same reference and the same catalog with different floors here analyse
+/// different ground, and nothing else in the file would show it. The flags are moved away from
+/// every default before the run, so a writer that recorded `StrRepeatCriteria::default()`, or
+/// the calling defaults, or the catalog's own header, fails.
+#[test]
+fn the_written_parameters_file_records_what_this_run_counted_as_a_repeat() {
+    let (_reference_dir, _zeta_dir, _alpha_dir, mut args) = a_cohort_on_disk();
+    args.min_copies = crate::pop_var_caller_exp::cli::parsers::parse_min_copies("9,7,7,7,6,5")
+        .expect("six floors");
+    args.min_period = 2;
+    args.max_period = 5;
+    args.max_str_len = 64;
+    args.min_purity = 0.95;
+
+    run_call_from_alignments(&args).expect("the cohort runs");
+
+    let written = std::fs::read_to_string(beside_the_vcf(&args.output)).expect("it was written");
+    let file = ParametersFile::from_toml(&written).expect("what this run wrote, it can read");
+    let routing = file
+        .repeat_routing
+        .expect("every run this build makes records what it routed with");
+
+    assert_eq!(routing.min_copies, [9, 7, 7, 7, 6, 5]);
+    assert_eq!(routing.min_period, 2);
+    assert_eq!(routing.max_period, 5);
+    assert_eq!(routing.max_str_len, 64);
+    assert!((routing.min_purity - 0.95).abs() < 1e-6);
+    assert_eq!(
+        routing.min_flank_bp,
+        StrRepeatCriteria::default().min_flank_bp.get(),
+        "not a flag, and pinned at the floor the catalog was built at",
+    );
+
+    assert!(
+        written.contains("[repeat_routing]"),
+        "and it is a section a person can find and edit, not only a field serde knows",
     );
 }

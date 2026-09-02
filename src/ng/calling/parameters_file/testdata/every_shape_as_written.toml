@@ -298,3 +298,44 @@ substitution_rate_by_stratum = [
 # inherited from the existing caller and never measured here: the share of
 # repeat-tract reads that came from nowhere the model can explain
 repeat_tract_outlier_weight = { value = 0.01, warrant = "defaulted" }
+
+[repeat_routing]
+# What this run counted as a repeat. A tandem-repeat catalog is built below
+# every floor a caller routes on, deliberately, so that a run can put its own
+# line anywhere inside that gap by filtering the file rather than scanning the
+# genome again. These are where this run put it: a stretch of reference clearing
+# all of them went to the repeat-tract caller, and one that did not is ordinary
+# sequence and went to the SNP and indel caller. Two runs over the same
+# reference and the same catalog with different numbers here analysed different
+# ground, and nothing else in this file would say so.
+#
+# `min_copies` is one floor per repeat-unit length, 1 to 6 in order, so the
+# first entry is how many bases a homopolymer needs and the last how many
+# hexamer copies. `min_purity` is how much of a tract has to match a perfect
+# tiling of its unit. `max_str_len` is where a tract stops being callable and
+# becomes a satellite, which neither caller speaks for.
+#
+# Five of the eight have flags on `call-from-alignments`, named as these keys
+# are. The other three do not, and are written because a record that left them
+# out would not say what the run actually asked the catalog for: `min_flank_bp`
+# is pinned at the catalog's own floor, since tracts nearer than that to a
+# contig's end were never written to the file; `min_score` gates a scanner's
+# output and so gates nothing in a run that reads a catalog; `bundle_threshold`
+# is how close two tracts have to be before they are one bundle rather than two
+# loci.
+#
+# A run handed a parameters file whose numbers here differ from its own says so
+# and calls on. Nothing is refused and nothing is demoted: the numbers in this
+# file are as warranted as they ever were, and only the ground they are applied
+# to has moved. What that costs is worth knowing — a tract the run admits that
+# the fit's own selection did not is scored from strata fitted over other
+# tracts, or from the stated defaults, and the warrants beside each number say
+# which.
+min_copies = [5, 5, 4, 4, 4, 3]
+min_period = 1
+max_period = 6
+max_str_len = 500
+min_purity = 0.8
+min_flank_bp = 15
+min_score = 0
+bundle_threshold = 15
