@@ -124,7 +124,7 @@ carries it, and a supplied file's differing criteria are *visible, never blockin
 owner's ruling, spec §2.3. No comparison refuses anything.
 *Depends:* B1. *Source:* spec §2.3.
 
-**B3. Routing parity, and the no-regression pin.**  ☐
+**B3. Routing parity, and the no-regression pin.**  ✅
 Two tests against external oracles: the run's ground partition equals
 `ng_typed_region_dump`'s at the same criteria (the spec's standing oracle, kept as a fixture
 test on the committed synthetic reference); and on ground that is generic under both the old

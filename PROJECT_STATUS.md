@@ -19,7 +19,15 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **a run now writes down what it counted as a repeat**
+> - **Last completed task (2026-09-02):** **the routing change is pinned from both sides** —
+> step B3 of the [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
+> `ng-ssr-observations`. The run's ground partition is what `ng_typed_region_dump` computes for
+> the same reference at the same floors, which is what every routing number quoted from that
+> tool rests on; and where the routing did not move, one cohort called at both settings of the
+> switch writes **identical VCFs byte for byte**. Tests only, no source change.
+> [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b3_2026-09-02.md).
+>
+> - **Earlier (2026-09-02):** **a run now writes down what it counted as a repeat**
 > — step B2 of the [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on
 > branch `ng-ssr-observations`. Since B1 made that a knob, two runs over the same reference and
 > the same catalog can analyse different ground, and nothing a run wrote said so. The parameters
@@ -30,7 +38,7 @@ Skills and agents are instructed to leave it untouched.
 > Settled in [`parameters_file.md`](doc/devel/ng/spec/parameters_file.md) §3.9 before it was
 > coded. [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b2_2026-09-02.md).
 >
-> - **Earlier (2026-09-02):** **a calling run now decides for itself what counts
+> - **Earlier still (2026-09-02):** **a calling run now decides for itself what counts
 > as a repeat, and the answer is ng's measured floors rather than the catalog file's storage
 > floors** — step B1 of the
 > [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
@@ -3102,9 +3110,10 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     closure; re-opens only on a large-cohort measurement that moves the share.
 
 #### Step 5/6 — STR observations through a run: routing, the tract slot, and the kind at the merge
-- **Status:** `implemented` — **✅ MILESTONE A COMPLETE and merged to `main`**; **B1 and B2
-  done** on branch `ng-ssr-observations`. B3 (routing parity and the no-regression pin) and B4
-  (the GIAB recovery, measured) remain in Milestone B; C fills the tract slot.
+- **Status:** `implemented` — **✅ MILESTONE A COMPLETE and merged to `main`**; **B1, B2 and B3
+  done** on branch `ng-ssr-observations`. **B4 — the GIAB recovery measured against the loss
+  report's predicted ≈0.97 SNP / ≈0.94 indel recall — is all that remains before Checkpoint B**;
+  C fills the tract slot.
 - **Plan:** [run_ssr_observations.md](doc/devel/ng/impl_plan/run_ssr_observations.md);
   **Spec:** [run_ssr_observations.md](doc/devel/ng/spec/run_ssr_observations.md); the parallel
   plan it seams with: [calling_loop_ssr.md](doc/devel/ng/impl_plan/calling_loop_ssr.md); what
@@ -3149,6 +3158,18 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   fails; **mutation-tested** against exactly that. Both TOML goldens regenerated through their
   own `--ignored` regenerators.
   [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b2_2026-09-02.md).
+- **B3 done (routing parity, and the no-regression pin):** two tests, no source change. The run's
+  ground partition equals what `ng_typed_region_dump` computes for the same reference at the same
+  floors — the tool every quoted routing number comes from, and the two build their criteria and
+  resolve their ground separately, so either could drift with nothing failing — **and the
+  partition is exact**, every base in one region with no gap or overlap, which the tool cannot
+  say. Then: one cohort, two settings of the routing switch, **identical VCFs byte for byte**,
+  with every read on ground that is generic under both — a read over the moving homopolymer would
+  make the two runs legitimately differ. The fixture's own half is asserted first (3 typed
+  regions against 5, 126 called bases against 120, 2 records each), so the comparison cannot pass
+  on two identical runs or two empty files. **Mutation-tested**: restoring the old
+  `StrRepeatCriteria::default()` fails both.
+  [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b3_2026-09-02.md).
 - **Open:**
   - **⚠ Three tests in the two locus dumps still fail, and each says something different.**
     Both targets had been red since `8ffb0f84` (*"the live tandem-repeat scan is gone"*,

@@ -5,7 +5,7 @@ use super::*;
 use clap::Parser;
 use std::path::Path;
 
-use crate::ng::region_typing::RegionKind;
+use crate::ng::region_typing::{RegionKind, TypedRegion};
 use crate::ng::repeat_catalog::StrRepeatCriteria;
 use crate::ng::types::InbreedingF;
 
@@ -999,13 +999,7 @@ fn a_request_the_catalog_cannot_serve_names_the_flag_that_made_it() {
 /// 87–96, filler 97–136. Forty bases of filler each side is more than the 15 bp of flank the
 /// file requires and more than the 15 bp within which two tracts would be bundled together
 /// instead of being loci.
-fn a_reference_with_a_tract_on_each_side_of_the_calling_floor()
--> (tempfile::TempDir, CallFromAlignmentsArgs, ReferenceInfo) {
-    use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
-    use crate::ng::repeat_catalog::RepeatCatalogBuilder;
-    use crate::ng::tandem_repeat::ScanParams;
-    use std::io::Write;
-
+fn the_fixture_references_bases() -> Vec<u8> {
     let filler: Vec<u8> = b"CGTGCTG".iter().copied().cycle().take(40).collect();
     let mut bases = Vec::new();
     bases.extend_from_slice(&filler);
@@ -1014,7 +1008,17 @@ fn a_reference_with_a_tract_on_each_side_of_the_calling_floor()
     bases.extend(std::iter::repeat_n(b'A', 10));
     bases.extend_from_slice(&filler);
     assert_eq!(bases.len(), 136, "the fixture's own geometry");
+    bases
+}
 
+fn a_reference_with_a_tract_on_each_side_of_the_calling_floor()
+-> (tempfile::TempDir, CallFromAlignmentsArgs, ReferenceInfo) {
+    use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
+    use crate::ng::repeat_catalog::RepeatCatalogBuilder;
+    use crate::ng::tandem_repeat::ScanParams;
+    use std::io::Write;
+
+    let bases = the_fixture_references_bases();
     let directory = tempfile::tempdir().expect("a temporary directory");
     let fasta = directory.path().join("ref.fa");
     let header = ">chr1\n";
@@ -1174,4 +1178,221 @@ fn the_written_parameters_file_records_what_this_run_counted_as_a_repeat() {
         written.contains("[repeat_routing]"),
         "and it is a section a person can find and edit, not only a field serde knows",
     );
+}
+
+// ---------------------------------------------------------------------
+// Routing parity, and the no-regression pin
+// ---------------------------------------------------------------------
+
+/// **The run's ground partition is what the dump prints for the same reference at the same
+/// floors** — spec §10's standing oracle, kept here as a fixture test.
+///
+/// `examples/ng_typed_region_dump.rs` is what a person runs to ask *which known variants fall
+/// on ground the caller sends down the repeat path*, and every number quoted from it is a claim
+/// about a run. That only holds while the two ask the catalog the same question. They resolve
+/// their ground separately — the tool from a BED or from whole contigs, the run through
+/// `analysed_regions` — and they build their criteria separately, so either could drift with
+/// nothing failing.
+#[test]
+fn the_runs_ground_partition_is_the_dumps_at_the_same_floors() {
+    let (_directory, args, reference) =
+        a_reference_with_a_tract_on_each_side_of_the_calling_floor();
+    let bounds = vec![ContigBounds {
+        name: "chr1",
+        length: 136,
+    }];
+    let analysed = GenomeRegions::whole_contigs(&bounds);
+
+    for floors in [
+        StrRepeatCriteria::from(&TypedRegionConfig::default()),
+        StrRepeatCriteria::default(),
+    ] {
+        let mut asking_with = args.clone();
+        asking_with.min_copies = the_min_copies_of(&floors);
+        asking_with.min_period = floors.classification.periods.min();
+        asking_with.max_period = floors.classification.periods.max();
+        asking_with.max_str_len = floors.max_str_len_bp.get();
+        asking_with.min_purity = floors.classification.min_purity;
+
+        // The dump's own two lines, verbatim: open the catalog beside the reference, and walk
+        // it at these criteria over the analysed ground.
+        let catalog = RepeatCatalog::open_beside_reference(&args.reference, &reference)
+            .expect("the catalog opens");
+        let ground: Vec<_> = analysed.iter().collect();
+        let dumped: Vec<TypedRegion> = catalog
+            .genome_segments(&floors, ReadScope::Regions(&ground))
+            .expect("the dump walks")
+            .collect::<Result<_, _>>()
+            .expect("every region reads");
+
+        let run = segments_over(&asking_with, &analysed, &reference).expect("the run walks");
+        assert_eq!(
+            run.segments(),
+            dumped.as_slice(),
+            "the run and the dump disagree about the ground at {:?}",
+            floors.classification.min_copies,
+        );
+
+        // **And the partition is exact**, which the dump cannot say because it prints whatever
+        // it is handed. Every base of the contig is in exactly one region, in order.
+        let mut next = 1;
+        for region in run.segments() {
+            assert_eq!(
+                region.region.start.get(),
+                next,
+                "a gap or an overlap before {region:?}",
+            );
+            next = region.region.end.get() + 1;
+        }
+        assert_eq!(next, 137, "the partition stops short of the contig's end");
+    }
+}
+
+/// The six floors of `criteria`, in the shape the flag parses to.
+fn the_min_copies_of(criteria: &StrRepeatCriteria) -> MinCopies {
+    let floors: Vec<String> = (1..=6)
+        .map(|period| {
+            criteria
+                .classification
+                .min_copies
+                .for_period(period)
+                .to_string()
+        })
+        .collect();
+    crate::pop_var_caller_exp::cli::parsers::parse_min_copies(&floors.join(","))
+        .expect("six floors")
+}
+
+/// **Where the routing did not move, nothing about the run moved either** — spec §10's
+/// no-regression claim, and the other half of the change B1 made.
+///
+/// The reference holds a six-base run of `A` that is a repeat tract under the catalog's floors
+/// and ordinary sequence under ng's. **Every read here sits on the filler between the
+/// homopolymers**, which is ordinary sequence under both — so the two runs analyse the same
+/// ground *where there is any evidence*, and the VCF must be identical byte for byte. A run
+/// whose reads covered the six-base run would legitimately differ, which is why they do not.
+///
+/// This is what makes B1 a change of *which* ground is generic rather than a change of what
+/// happens on it — and a defect that made the criteria leak into the calling arithmetic, rather
+/// than into the routing alone, is what it would catch.
+#[test]
+fn where_the_routing_did_not_move_the_vcf_is_byte_identical() {
+    let (directory, mut args, _reference) =
+        a_reference_with_a_tract_on_each_side_of_the_calling_floor();
+
+    // One sample, reads over the filler at 5–34 and 101–130 only — never over either
+    // homopolymer, whose routing is the thing that moves between the two runs. Thirty bases
+    // because that is the shortest read the filters keep, and each is the reference with its
+    // fifteenth base flipped, so there is one variant to call rather than thirty.
+    let bases = the_fixture_references_bases();
+    let header = crate::ng::read::input::test_fixtures::header(
+        Some("coordinate"),
+        &[("chr1", 136, None)],
+        &[("rg1", Some("one"))],
+    );
+    let mut reads = Vec::new();
+    for start in [5usize, 101] {
+        for copy in 0..4 {
+            let mut observed = bases[start - 1..start + 29].to_vec();
+            observed[14] = if observed[14] == b'G' { b'T' } else { b'G' };
+            reads.push(a_read_showing(
+                &format!("r{start}-{copy}"),
+                start,
+                &observed,
+            ));
+        }
+    }
+    let (_bam_dir, bam) =
+        crate::ng::read::input::test_fixtures::indexed_named_bam(&header, &reads, "one.bam");
+    args.alignments = vec![bam];
+
+    // **The same file name in two directories**, because the VCF header names the parameters
+    // file beside it — two runs writing `calling.vcf` and `catalog.vcf` would differ on that
+    // line and on nothing else, which is a difference in what the test asked for rather than in
+    // what it is testing.
+    let vcf_of = |args: &CallFromAlignmentsArgs, into: &str| {
+        let mut args = args.clone();
+        let directory = directory.path().join(into);
+        std::fs::create_dir(&directory).expect("a directory to write into");
+        args.output = directory.join("calls.vcf");
+        run_call_from_alignments(&args).expect("the cohort runs");
+        (
+            std::fs::read(&args.output).expect("the VCF was written"),
+            args,
+        )
+    };
+
+    let (calling, at_the_calling_floors) = vcf_of(&args, "calling");
+
+    let mut asking_the_catalogs_floors = args.clone();
+    asking_the_catalogs_floors.min_copies = the_min_copies_of(&StrRepeatCriteria::default());
+    asking_the_catalogs_floors.max_str_len = StrRepeatCriteria::default().max_str_len_bp.get();
+    let (catalog, at_the_catalogs_floors) = vcf_of(&asking_the_catalogs_floors, "catalog");
+
+    // The fixture's own half: the two runs really did route differently, or this compares two
+    // identical runs and could not fail.
+    let partition_at = |args: &CallFromAlignmentsArgs| {
+        let bounds = vec![ContigBounds {
+            name: "chr1",
+            length: 136,
+        }];
+        segments_over(args, &GenomeRegions::whole_contigs(&bounds), &_reference)
+            .expect("the run walks")
+            .segments()
+            .iter()
+            .filter(|region| matches!(region.kind, RegionKind::SsrSegment(_)))
+            .count()
+    };
+    assert_eq!(
+        partition_at(&at_the_calling_floors),
+        1,
+        "only the ten-base run clears ng's period-1 floor of eight",
+    );
+    assert_eq!(
+        partition_at(&at_the_catalogs_floors),
+        2,
+        "both clear the catalog's floor of five, which is the difference under test",
+    );
+
+    // And there is something to compare: a header-only pair of files would be equal whatever
+    // the caller did with the reads.
+    let records = |vcf: &[u8]| {
+        String::from_utf8_lossy(vcf)
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .count()
+    };
+    assert!(
+        records(&calling) > 0,
+        "the fixture's reads produced no record, so this compares two headers",
+    );
+
+    assert_eq!(
+        String::from_utf8_lossy(&calling),
+        String::from_utf8_lossy(&catalog),
+        "the routing moved and the calls did not",
+    );
+}
+
+/// One 12-base read starting at 1-based `start`, showing `observed`.
+///
+/// `read_named_with_length` writes a run of `A`, which on this fixture's reference is twelve
+/// mismatches rather than one variant.
+fn a_read_showing(name: &str, start: usize, observed: &[u8]) -> noodles_sam::alignment::RecordBuf {
+    use noodles_sam::alignment::RecordBuf;
+    use noodles_sam::alignment::record::cigar::Op;
+    use noodles_sam::alignment::record::cigar::op::Kind;
+    use noodles_sam::alignment::record::{Flags, MappingQuality};
+    use noodles_sam::alignment::record_buf::{QualityScores, Sequence};
+
+    RecordBuf::builder()
+        .set_name(name.as_bytes())
+        .set_reference_sequence_id(0usize)
+        .set_flags(Flags::empty())
+        .set_mapping_quality(MappingQuality::new(60).expect("mapq in range"))
+        .set_alignment_start(noodles_core::Position::try_from(start).expect("a position"))
+        .set_cigar([Op::new(Kind::Match, observed.len())].into_iter().collect())
+        .set_sequence(Sequence::from(observed.to_vec()))
+        .set_quality_scores(QualityScores::from(vec![30u8; observed.len()]))
+        .build()
 }
