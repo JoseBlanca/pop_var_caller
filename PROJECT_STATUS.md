@@ -19,7 +19,30 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **the instrument for the tract QUAL experiment —
+> - **Last completed task (2026-09-02):** **is ng's quality score worth believing at a repeat
+> tract? — step D2, and Checkpoint D**
+> (step D2 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
+> [report](doc/devel/reports/ng_tract_qual_experiment_2026-09-02.md)). **No change to the
+> caller; the report takes no decision** — `calling_quality_ssr.md` does, and this is what it is
+> written from. **The failure spec §3.3 warned about does not appear.** On GIAB's tandem-repeat
+> benchmark at 30×, a tract record above QUAL 200 sits where the truth set carries no variant
+> **5 times in 2,882**; on the ordinary sequence of the same benchmark, same instrument, same
+> truth, ng's corrected SNP and indel quality is wrong **19 times in 10,272** — one in 580
+> against one in 540. In the middle of the range the tract score is the better of the two: at
+> QUAL 30–50 a tract record is wrong 9 times in 429 against ordinary sequence's 71 in 483. The
+> decision rule asked whether the tract quality reaches the standard the corrected SNP quality
+> reaches on the same benchmark; **it does.** **Two things it is not.** It is not Phred — QUAL
+> 200 claims one error in 10²⁰ and delivers one in 500, on both paths. And **it is not a gate**:
+> on ordinary sequence a threshold of 200 buys 14 precision points for 17 recall points, while
+> at a homopolymer tract precision peaks at 0.850 at QUAL 50 and falls back to 0.831 by QUAL
+> 200, within a point of the 0.825 it started at, having shed more than half the recall.
+> **And the simulator says the residual error is not slippage**: with the true slippage set to
+> 0.25 against the model's assumed 0.10, at 30× and at 100×, the observed error above QUAL 10 is
+> zero — mispricing costs alternative alleles nobody is called with (546 of 846 false alleles),
+> not wrong sites. Against the existing repeat-tract caller on the same ground at matched
+> precision, **ng recovers 2.9 times as many true alleles** (2,952 of 4,398 against 1,028).
+>
+> - **Earlier (2026-09-02):** **the instrument for the tract QUAL experiment —
 > step D1**
 > (step D1 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
 > [report](doc/devel/reports/implementations/ng_ssr_loop_d1_2026-09-02.md)). **No change to the

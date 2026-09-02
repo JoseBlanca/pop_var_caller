@@ -159,11 +159,12 @@ parameter provenance (fitted vs `Defaulted`). GIAB tract ground at 30×/50×; th
 simulator at settable slippage.
 *Depends:* C4. *Source:* spec §3.3.
 
-**D2. The runs and the written report.**  ☐
+**D2. The runs and the written report.**  ✅
 Run the harness; write the report with the decision rule's inputs filled in (does arm A
 reach the corrected SNP QUAL's standard on the same benchmark?). **Done is the report** —
 the decision and any arm-B design belong to `calling_quality_ssr.md`.
 *Depends:* D1. *Source:* spec §3.3 (the obligation, owner 2026-09-02).
+**Written:** [`ng_tract_qual_experiment_2026-09-02.md`](../../reports/ng_tract_qual_experiment_2026-09-02.md).
 
 > **Checkpoint D:** the QUAL report exists with calibration and sweep numbers per arm and
 > split. Pause — the owner reads this one before `calling_quality_ssr.md` is written.

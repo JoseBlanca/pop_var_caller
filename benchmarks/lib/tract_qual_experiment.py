@@ -354,7 +354,18 @@ def index_vcf(path: Path) -> None:
 
 
 def period_class_of(period: int) -> str:
-    """The split §3.3 asks for: a homopolymer, or a unit of two bases or more."""
+    """The split §3.3 asks for: a homopolymer, or a unit of two bases or more.
+
+    **Period 0 means the interval is not a repeat tract at all**, and comes back
+    as `generic`. That is how ng's SNP and indel quality is binned on the same
+    instrument as its tract quality: hand the ground BED the `generic` rows of a
+    typed-region dump with 0 in the period column. §3.3's decision rule asks
+    whether the tract quality reaches the standard the corrected SNP quality
+    reaches on the same benchmark, and this is what makes the two comparable —
+    one scorer, one truth set, one matching rule.
+    """
+    if period == 0:
+        return "generic"
     return "homopolymer" if period == 1 else "period2plus"
 
 
