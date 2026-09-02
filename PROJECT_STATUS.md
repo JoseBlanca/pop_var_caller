@@ -19,7 +19,28 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **an insertion at a region's last base belongs to
+> - **Last completed task (2026-09-02):** **the instrument for the tract QUAL experiment —
+> step D1**
+> (step D1 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_loop_d1_2026-09-02.md)). **No change to the
+> caller.** A scorer that bins a caller's records by QUAL against the share that really are at a
+> variant tract and sweeps a QUAL threshold for precision and recall, split by motif period; a
+> simulator that writes repeat tracts whose genotypes we chose, sequenced under a slippage we
+> set; and the drivers that build the tract ground and run the arms.
+> **Two things the build already settles about the runs.** The benchmark the plan names is too
+> small to answer the calibration question — ng writes **149 repeat-tract records pooled over
+> the three GIAB samples at 30×** — so the experiment also runs on GIAB's HG002 tandem-repeat
+> benchmark, 50,000 Tier intervals with 36,497 assembly-based truth records, where ng writes
+> **6,351 tract records at 30×**. And the fitted-against-defaulted split has one side on any
+> benchmark, because no command fits a parameters file: on the simulator it has two, since the
+> simulator writes the stutter model it drew the reads under as parameters-file rows.
+> **Two defects in the first version of the scorer, both fixed and both found by reading the
+> records it called false at high QUAL** — masking before left-alignment, and scoring a record
+> against its own span rather than its tract's. Together they put **105 records above QUAL 200
+> in the wrong column; the scorer as it stands puts 7 there**. Numbers are the instrument's own
+> validation; the experiment's answer is D2.
+>
+> - **Earlier (2026-09-02):** **an insertion at a region's last base belongs to
 > whatever follows, not to the SNP/indel path**
 > ([report](doc/devel/reports/implementations/ng_edge_insertion_2026-09-02.md)), which fixes the
 > duplication C4 measured. **Owner's ruling**: an insertion's anchor base is unchanged — it is

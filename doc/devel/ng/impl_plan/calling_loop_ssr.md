@@ -150,7 +150,7 @@ threads with tract records in the file. Update the benchmark dashboards' ng rows
 
 ### Milestone D — the QUAL experiment (a report, not a decision)
 
-**D1. The harness.**  ☐
+**D1. The harness.**  ✅
 Per arm — A the inherited fold, C production's caller as external comparator on the same
 ground (arm B exists only if A fails, designed later in `calling_quality_ssr.md`) —
 calibration (records binned by QUAL against the share truly variant) and the
