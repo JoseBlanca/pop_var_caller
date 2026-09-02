@@ -19,7 +19,135 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-01):** **the run driver's plan is finished — ng calls a cohort
+> - **Last completed task (2026-09-02):** **the STR path's two implementation plans are
+> written, for parallel execution on separate branches and worktrees**
+> ([observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md);
+> [loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md)).
+> Each turns its same-named spec into milestones with checkpoints, oracles and checkboxes.
+> **The parallel-work contract is explicit**: branch `ng-ssr-observations` in worktree
+> `../pop_var_caller-ssr-observations` against branch `ng-ssr-calling-loop` in
+> `../pop_var_caller-ssr-calling-loop`, a file-ownership table shared by both plans, changes
+> crossing only through `main`, and two named seams owned by the observations plan — the
+> `CohortObservation.kind` field (its Milestone A, merged to `main` first because the loop
+> plan's selection reads it) and the driver's temporary set-aside guard (its Milestone C,
+> replaced by the loop plan's dispatch after that checkpoint merges).
+> **Observations plan**: A the merge kind (the seam, alone, merged at once); B routing from
+> user flags with parity + no-regression pins and the measured GIAB recovery against the
+> predicted ≈0.97/≈0.94; C the tract slot filled with the two accounting debts paid and E2
+> invariance re-proven. **Loop plan**: A–B execute the existing selection plan's milestones
+> by reference (one set of checkboxes, there); C the dispatch, the record's tract inputs and
+> the first measured tract recall against the stated bar; D the QUAL experiment ending in a
+> report the owner reads before `calling_quality_ssr.md` is written; E discovery built,
+> pinned, measured, its default set by the report.
+> **Two design closures made upstream first, not in the plans**: the CLI spelling resolved in
+> spec 1 §9 (flat flags, `type-regions`' names), and the old selection plan's Milestone A and
+> branch notes marked superseded so nothing is built twice.
+>
+> - **Earlier (2026-09-02):** **the STR path's two closing specs are written —
+> observations through the run, and the calling loop's inventory**
+> ([spec 1](doc/devel/ng/spec/run_ssr_observations.md);
+> [spec 2](doc/devel/ng/spec/calling_loop_ssr.md)).
+> Both follow from the same session's loss attribution (next entry) and from three owner
+> rulings: **the catalog is a source of candidate STR loci only — an STR locus is what clears
+> the thresholds the user gives the caller**; the merge dropping the tract's motif is to be
+> fixed; and ng gets **its own STR caller — not a port** — on ng's likelihoods and priors.
+> **Spec 1** (`run_ssr_observations.md`) settles three changes in dependency order: the run
+> routes on user-set criteria defaulting to the measured calling floors (one line of plumbing —
+> `segments_over` already takes the criteria type; shippable first, recovers ~4 in 5 of the
+> lost truth variants with no new calling code); the walk's tract slot is filled with the
+> built `SsrGenerator` plus two accounting debts (the `read_filter_counts` override the F3
+> report booked, and the run report's wording surviving a filled slot); and `ClosedLocus`/
+> `CohortObservation` carry `LocusKind` — one field, not a second type (owner-confirmed).
+> Asking the catalog below its storage floors stays a refusal (built — those rows were never
+> written); **routing criteria that differ from a fitted parameters file's are the user's
+> decision, not a refusal** (owner's ruling) — the run records both sets and calls on, with
+> the per-cell warrants labelling what was scored from strata the fit never selected.
+> **Spec 2** (`calling_loop_ssr.md`) is the inventory with obligations: **the run already
+> instantiates the whole STR scoring machinery** — the genotyper is
+> `SummariseConditionLoop<StutterSubstitutionEmission, _>` (`call_from_alignments.rs:627`) and
+> the loop genotypes a tract end to end in its own tests given hand-supplied candidates
+> (`summarise_condition.rs:7623`) — so what is missing is exactly: `allele_candidates/ssr.rs`
+> (selection — the one unbuilt statistic, design settled in `candidate_alleles_ssr.md`), the
+> driver's branch on the observation's kind plus two unwired record inputs (`TractAnnotation`,
+> the tract FILTER verdicts), and the tract-QUAL decision — **which the owner ruled may only be
+> taken after an experiment observes the options** (spec 2 §3.3 states the risk: the fold's
+> QUAL leans entirely on the stutter model, and both the SNP path's depth inflation and
+> production's own bake-off say the naive answer has failed here before; the experiment's
+> arms, data, measurements and decision rule are specified, and it is parked in
+> `calling_bakeoffs.md`'s next-plans list until the STR loop's own plan carries it).
+> ⚑ `calling_quality.md` §8's "nothing in ng can score a tract yet" was half stale and now
+> carries a correction note. **STR allele discovery is in scope by the owner's ruling — built
+> and measured as part of this work** (spec 2 §3.5: how often it fires, alleles admitted and
+> surviving, and off-against-on accuracy on GIAB, the simulator and tomato at three reads; it
+> ships built-but-off and the measurement sets the default); the per-locus slippage re-fit
+> stays with the bake-offs plan; the fit-mode command is deferred future work by the owner's
+> ruling — no step of either spec or its plan — so first tract calls are `--defaults` with
+> `Defaulted` warrants.
+>
+> - **Earlier (2026-09-02):** **where ng loses the variants inside repeats — two
+> faults, and the bigger one is routing, not the missing repeat caller**
+> ([report](doc/devel/reports/ng_str_path_losses_2026-09-02.md)).
+> Measured at 30× and 50× on the GIAB per-sample benchmark, three samples pooled: 2,061 truth
+> SNPs and 330 truth indels, each placed in the typed region a run routes it to.
+> **⚑ On ordinary ground ng is the best of the three at indels and level with production at
+> SNPs** — indel recall 0.982 at both depths against production's 0.945/0.953 and freebayes'
+> 0.931/0.938; SNPs 0.984/0.989 against production's 0.987/0.988. **On repeat-routed ground it
+> is 0.000, exactly, at both depths**, where production is 0.855–0.990. So the whole deficit is
+> the ground it never builds a locus over, and it is not an evidence problem: the repeat locus
+> generator already reads 18–29 length-pinning reads a tract at 30×.
+> **⚑ The run classifies its ground with the floors the catalog FILE was stored at**
+> (`[5,5,4,4,4,3]`, 500 bp cap — `call_from_alignments.rs:845`) rather than ng's own calling
+> floors (`[8,6,6,6,5,4]`, 100 bp, measured as where a repeat starts to stutter). That puts
+> **about seven times too much reference sequence on the unbuilt path** — 32,577 bases of
+> HG002's 572,037 against 4,930, and 6.6/7.3/7.0× across the three samples — and about four
+> and a half times too many truth variants: **81 of the 103 lost SNPs and 42 of the 55 lost
+> indels sit in sequence the calling floors would leave on the working path**, and 45 of the 55
+> lost indels are in *bundles* — clusters that only collide because sub-threshold repeats were
+> admitted. Re-routing alone, an upper bound, is 0.935 → ~0.97 on SNPs and 0.818 → ~0.94 on
+> indels at 30×.
+> **Two thirds of what is lost is not a repeat-length variant at all**: 103 of the 158 are SNPs
+> beside a repeat.
+> **The rest of the chain, stage by stage**: region typing built; the repeat locus generator
+> built and working; **its slot in a run's generator set unfilled** (`walker.rs:1615,1617`) —
+> this is where the loci are lost; `CohortObservation` carries no locus kind
+> (`cohort_merge/build.rs:974`), so no motif reaches selection; repeat candidate selection
+> unwritten (`allele_candidates/ssr.rs` does not exist); evidence shaping, read likelihood,
+> genotyping and VCF emission all built. **Bundles have no path at all** and carry most of the
+> loss. New probe: `examples/ng_typed_region_dump.rs`.
+>
+> - **Earlier (2026-09-02):** **ng's calls scored against the production caller and
+> freebayes for the first time, on three benchmarks**
+> ([report](doc/devel/reports/ng_first_calling_benchmark_2026-09-02.md)).
+> ng runs with `--defaults` in every arm below — no command writes a fitted parameters file
+> yet — and **it does not build loci inside tandem repeats**, which is 6 bases in every 100 of
+> the GIAB confident regions and 5 in every 100 of the tomato benchmark.
+> **On human data, allele concordance against GIAB, three samples over seven depths, everything
+> gated at QUAL ≥ 30**: ng's SNP recall beats freebayes at every depth to 30× (0.664 against
+> 0.585 at 5×, 0.935 against 0.927 at 30×) and is level with it from 50× on; the production
+> caller is ahead of both by about five points from 30× (0.987). Indel recall puts ng last
+> everywhere and flat at 0.82 from 30×, where the other two reach 0.94 and 0.95. Precision is
+> within seven parts in a thousand across all three at every depth.
+> **⚑ The recall ceiling is the unbuilt repeat-tract path, and that is measured rather than
+> assumed.** Handing ng exactly the truth sites it missed at 300× and reading its own run
+> report: **of 128 missed SNPs it builds a locus at 11, and of 53 missed indel sites at 1.** On
+> the ground it does build it recovers 1,933 of the 1,944 truth SNPs within reach.
+> **⚑ Indel genotypes are wrong about one time in five** at sites ng found and the truth set
+> carries (78–81% concordant at 30×) — the production caller sits at the same place (77–80%)
+> and freebayes at one in fifty (95–99%). A defect shared with production, not introduced.
+> **The 63-accession tomato cohort ran**: one process, 295 s, 206,873 records at QUAL ≥ 30
+> against the production caller's 189,933 on the same samples and ground, sharing 178,464 ALT
+> alleles — 89.7% of production's set, 77.5% of ng's. **⚑ ng calls heterozygotes 23% more
+> often** (1.23 per kb per sample against 1.00, same accessions and ground), which on a largely
+> inbred panel is the direction to distrust; there is no truth set to settle it.
+> **freebayes has no tomato arm**: one process advances at about 33 kb of reference a minute on
+> 63 accessions, so the 8 Mb is a four-hour run, and splitting it twelve ways OOM-killed four
+> shards in the 16 GB container — every shard opens every CRAM. `run_freebayes.sh` now fails a
+> run with a dead shard instead of concatenating the survivors.
+> **Harness added**: `benchmarks/lib/run_ng.sh`, `benchmarks/giab/src/run_ng_per_sample.sh`,
+> `benchmarks/giab/src/ng_missed_sites_probe.sh`, ng wired into `compare_to_truth.sh` and into
+> the GIAB, shared and tomato dashboards.
+>
+> - **Earlier (2026-09-01):** **the run driver's plan is finished — ng calls a cohort
 > from the command line, and Milestone G is dropped**
 > ([plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
 > [G2 report](doc/devel/reports/implementations/ng_run_driver_g2_2026-09-01.md)).
