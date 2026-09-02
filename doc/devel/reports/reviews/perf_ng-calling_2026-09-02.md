@@ -96,6 +96,22 @@ Every row below is one run of `pop_var_caller_exp call-from-alignments` over
 every header line except `##commandline` and `##parametersFile`, which record the
 binary's path and the output's.
 
+**Every row of that table was taken with the machine otherwise idle, and the ratio is a
+fact about that.** The rows came from two back-to-back batches that agree with each
+other to within 5 s on the settings they share, so they are mutually comparable.
+Partway through the session two virtual machines appeared on the host and took about two
+cores; re-run under that load, the same two binaries alternated back to back, twice:
+
+| | wall | CPU | peak resident |
+|---|---:|---:|---:|
+| `f6d38ea9`, as shipped | 320.7 s, 273.8 s | 1004 s, 950 s | 1,217 MB, 1,233 MB |
+| this branch, nothing set | 214.4 s, 204.8 s | 845 s, 903 s | 1,708 MB, 1,815 MB |
+
+**1.50× and 1.34× rather than 1.82×**, on VCFs that again compare identical. That is what
+a change buying its time by overlapping reading across threads should do when there are
+fewer free cores to overlap on. **Quote the ratio with the machine state; the seconds
+alone are not portable between them.**
+
 **The trade is real and it is memory.** Of the 784 MB the last row holds above the
 first, about 500 MB is the wider round holding more observations at once, and about
 150 MB is mimalloc. Both are dial-able from the command line, and the round width's
