@@ -5,6 +5,7 @@ use super::*;
 use clap::Parser;
 use std::path::Path;
 
+use crate::ng::region_typing::RegionKind;
 use crate::ng::repeat_catalog::StrRepeatCriteria;
 use crate::ng::types::InbreedingF;
 
@@ -254,6 +255,11 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
         cohort_locus_builder_regions_len: None,
         threads: 0,
+        min_copies: MinCopies::default(),
+        min_period: DEFAULT_MIN_PERIOD,
+        max_period: DEFAULT_MAX_PERIOD,
+        max_str_len: DEFAULT_MAX_STR_LEN,
+        min_purity: DEFAULT_MIN_PURITY,
     }
 }
 
@@ -281,6 +287,11 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
         cohort_locus_builder_regions_len: None,
         threads: 0,
+        min_copies: MinCopies::default(),
+        min_period: DEFAULT_MIN_PERIOD,
+        max_period: DEFAULT_MAX_PERIOD,
+        max_str_len: DEFAULT_MAX_STR_LEN,
+        min_purity: DEFAULT_MIN_PURITY,
     };
 
     let refused = segments_over(
@@ -655,6 +666,11 @@ fn a_cohort_on_disk() -> (
         max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
         cohort_locus_builder_regions_len: None,
         threads: 0,
+        min_copies: MinCopies::default(),
+        min_period: DEFAULT_MIN_PERIOD,
+        max_period: DEFAULT_MAX_PERIOD,
+        max_str_len: DEFAULT_MAX_STR_LEN,
+        min_purity: DEFAULT_MIN_PURITY,
     };
     (reference_dir, zeta_dir, alpha_dir, args)
 }
@@ -814,4 +830,303 @@ fn a_small_cohort_gets_the_ceiling() {
 #[test]
 fn the_tomato_cohorts_width_is_the_one_that_was_measured() {
     assert_eq!(round_width_for(63).get(), 7_936);
+}
+
+// ---------------------------------------------------------------------
+// What this run counts as a repeat
+// ---------------------------------------------------------------------
+
+/// **The defaults are ng's calling floors, not the catalog's storage floors.**
+///
+/// This is the whole of the routing change. The run asked the catalog with
+/// `StrRepeatCriteria::default()`, which *is* what the file was built at, so every row the
+/// file held became an STR locus of the run — on the human benchmark about seven times more
+/// reference than ng's own floors would route. Parsed through clap rather than read off the
+/// struct, so a `default_value` that drifted from the library constant fails here.
+#[test]
+fn the_default_routing_is_the_calling_floors_and_not_the_catalogs() {
+    let asked = routing_criteria(&args_of(&a_defaults_run())).expect("the defaults make a range");
+
+    assert_eq!(
+        asked,
+        StrRepeatCriteria::from(&TypedRegionConfig::default()),
+        "the run's default policy is step 3's own, converted for a reader",
+    );
+    assert_ne!(
+        asked,
+        StrRepeatCriteria::default(),
+        "and it is not the catalog's, which is what the run used to ask with",
+    );
+
+    // Stated as the gap itself: at every period the run now needs strictly more copies than
+    // the file was written down at, which is the room the file exists to leave.
+    let catalog = StrRepeatCriteria::default();
+    for period in 1..=6 {
+        assert!(
+            asked.classification.min_copies.for_period(period)
+                > catalog.classification.min_copies.for_period(period),
+            "period {period}: the run asks for {} copies, the catalog holds from {}",
+            asked.classification.min_copies.for_period(period),
+            catalog.classification.min_copies.for_period(period),
+        );
+    }
+    assert!(
+        asked.max_str_len_bp.get() < catalog.max_str_len_bp.get(),
+        "and the satellite cap is the calling one, {} bp against the file's {}",
+        asked.max_str_len_bp.get(),
+        catalog.max_str_len_bp.get(),
+    );
+}
+
+/// **Every one of the five flags reaches the criteria the catalog is asked with.**
+///
+/// A flag that parsed and then went nowhere would route the whole genome on the defaults with
+/// nothing crashing and every number in the report plausible, which is why each is moved to a
+/// value nothing else in the run could produce and each is read back by itself.
+#[test]
+fn every_routing_flag_reaches_the_criteria_the_catalog_is_asked_with() {
+    let mut argv = a_defaults_run();
+    argv.extend([
+        "--min-copies",
+        "9,7,7,7,6,5",
+        "--min-period",
+        "2",
+        "--max-period",
+        "4",
+        "--max-str-len",
+        "60",
+        "--min-purity",
+        "0.95",
+    ]);
+    let asked = routing_criteria(&args_of(&argv)).expect("2..=4 is a range");
+
+    let floors: Vec<u32> = (1..=6)
+        .map(|period| asked.classification.min_copies.for_period(period))
+        .collect();
+    assert_eq!(floors, vec![9, 7, 7, 7, 6, 5]);
+    assert_eq!(asked.classification.periods.min(), 2);
+    assert_eq!(asked.classification.periods.max(), 4);
+    assert_eq!(asked.max_str_len_bp.get(), 60);
+    assert!((asked.classification.min_purity - 0.95).abs() < 1e-6);
+
+    assert_eq!(
+        asked.min_flank_bp.get(),
+        StrRepeatCriteria::default().min_flank_bp.get(),
+        "the flank floor is not a flag: the rows below the file's were never written",
+    );
+}
+
+/// **A period range the wrong way round is a message, not a panic.** Clap bounds each end to
+/// 1..=6 on its own, so this is the one way left to type a range that is not one.
+#[test]
+fn a_period_range_the_wrong_way_round_is_refused_before_the_catalog_is_opened() {
+    let mut argv = a_defaults_run();
+    argv.extend(["--min-period", "5", "--max-period", "3"]);
+
+    let refused = routing_criteria(&args_of(&argv)).expect_err("5..=3 is not a range");
+    assert!(
+        matches!(refused, CallFromAlignmentsCliError::PeriodRange { .. }),
+        "got {refused:?}",
+    );
+}
+
+/// **A run asking for repeats the file does not hold is told which flag to move.**
+///
+/// The catalog's own refusal names two numbers and no knob: *"period 1: catalog holds tracts
+/// of 5 copies and up, reader asked for 3"* leaves a person to work out which of five flags
+/// produced it. Each bounded axis maps to the flag that moves it.
+#[test]
+fn a_request_the_catalog_cannot_serve_names_the_flag_that_made_it() {
+    let path = Path::new("ref.fa.repeats.parquet");
+    let named = |refusal: CriteriaRefusal| match catalog_error_naming_the_flag(
+        RepeatCatalogError::CriteriaTooPermissive(refusal),
+        path,
+    ) {
+        CallFromAlignmentsCliError::RoutingBelowCatalog { flag, .. } => Some(flag),
+        CallFromAlignmentsCliError::Catalog { .. } => None,
+        other => panic!("expected a catalog refusal, got {other:?}"),
+    };
+
+    assert_eq!(
+        named(CriteriaRefusal::CopyFloor {
+            period: 1,
+            built: 5,
+            wanted: 3
+        }),
+        Some("--min-copies"),
+    );
+    assert_eq!(
+        named(CriteriaRefusal::PeriodRange {
+            built_min: 2,
+            built_max: 6,
+            wanted_min: 1,
+            wanted_max: 6,
+        }),
+        Some("--min-period"),
+        "the low end is the one outside what was built",
+    );
+    assert_eq!(
+        named(CriteriaRefusal::PeriodRange {
+            built_min: 1,
+            built_max: 4,
+            wanted_min: 1,
+            wanted_max: 6,
+        }),
+        Some("--max-period"),
+    );
+    assert_eq!(
+        named(CriteriaRefusal::MinFlank {
+            built: 30,
+            wanted: 15
+        }),
+        None,
+        "no flag moves the flank floor, so this is a catalog to rebuild and says so",
+    );
+}
+
+/// A one-contig reference holding two homopolymers and nothing else a repeat scanner can
+/// find, with the catalog a `repeat-catalog` run would have written beside it.
+///
+/// **The two tracts straddle the gap the catalog exists to leave.** The file is built at 5
+/// copies for period 1 and ng calls from 8, so a run of **6** `A`s is in the file and below
+/// the calling floor, and a run of **10** is above both. Everything between them and around
+/// them is `CGTGCTG` repeated — period 7, outside the 1..=6 the scanner looks for, and
+/// carrying no `A` at all, so neither tract can grow into its surroundings.
+///
+/// Positions, 1-based: filler 1–40, the six-base run 41–46, filler 47–86, the ten-base run
+/// 87–96, filler 97–136. Forty bases of filler each side is more than the 15 bp of flank the
+/// file requires and more than the 15 bp within which two tracts would be bundled together
+/// instead of being loci.
+fn a_reference_with_a_tract_on_each_side_of_the_calling_floor()
+-> (tempfile::TempDir, CallFromAlignmentsArgs, ReferenceInfo) {
+    use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
+    use crate::ng::repeat_catalog::RepeatCatalogBuilder;
+    use crate::ng::tandem_repeat::ScanParams;
+    use std::io::Write;
+
+    let filler: Vec<u8> = b"CGTGCTG".iter().copied().cycle().take(40).collect();
+    let mut bases = Vec::new();
+    bases.extend_from_slice(&filler);
+    bases.extend(std::iter::repeat_n(b'A', 6));
+    bases.extend_from_slice(&filler);
+    bases.extend(std::iter::repeat_n(b'A', 10));
+    bases.extend_from_slice(&filler);
+    assert_eq!(bases.len(), 136, "the fixture's own geometry");
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let fasta = directory.path().join("ref.fa");
+    let header = ">chr1\n";
+    std::fs::write(
+        &fasta,
+        format!("{header}{}\n", String::from_utf8_lossy(&bases)),
+    )
+    .expect("the reference writes");
+    let mut fai = std::fs::File::create(directory.path().join("ref.fa.fai")).expect("an index");
+    writeln!(
+        fai,
+        "chr1\t{}\t{}\t{}\t{}",
+        bases.len(),
+        header.len(),
+        bases.len(),
+        bases.len() + 1
+    )
+    .expect("the index writes");
+
+    // What `repeat-catalog` would have written: the file's own storage floors, which sit
+    // below every floor a caller routes on.
+    let catalog_path = directory.path().join("ref.fa.repeats.parquet");
+    let mut builder = RepeatCatalogBuilder::create(
+        &catalog_path,
+        StrRepeatCriteria::default(),
+        ScanParams::default(),
+    )
+    .expect("a catalog to build into");
+    let reference = read_reference_info_observing(
+        ReferenceSource::Fasta {
+            fasta: fasta.clone(),
+            fai: None,
+        },
+        &mut builder,
+    )
+    .expect("the reference reads");
+    builder.finish(&reference).expect("the catalog is written");
+
+    let mut args = args_of(&a_defaults_run());
+    args.reference = fasta;
+    args.catalog = Some(catalog_path);
+    (directory, args, reference)
+}
+
+/// **A repeat the catalog holds and this run's floors turn down becomes ordinary sequence, not
+/// a hole** (`run_ssr_observations.md` §2.2) — and that is the whole of what the routing change
+/// buys.
+///
+/// One switch, two settings, the same reference and the same catalog file. At the **catalog's**
+/// floors — what every run asked with until now — both homopolymers are repeat tracts, and on
+/// the human benchmark every truth variant on such ground was missed, because nothing calls a
+/// tract yet. At **ng's calling floors**, the six-base run is generic ground and goes to the
+/// SNP/indel caller, which finds variants there at 0.98 recall; the ten-base run is a tract
+/// under either setting, so this is a test of the floor and not of the plumbing.
+#[test]
+fn a_tract_below_the_calling_floor_becomes_generic_ground_and_one_above_it_stays_a_tract() {
+    let (_directory, calling_floors, reference) =
+        a_reference_with_a_tract_on_each_side_of_the_calling_floor();
+
+    // The same run asking with the file's own floors — which is what `StrRepeatCriteria::
+    // default()` is, and what this command passed before it had flags.
+    let mut catalog_floors = calling_floors.clone();
+    catalog_floors.min_copies =
+        crate::pop_var_caller_exp::cli::parsers::parse_min_copies("5,5,4,4,4,3")
+            .expect("the catalog's own table");
+    catalog_floors.max_str_len = StrRepeatCriteria::default().max_str_len_bp.get();
+
+    let bounds = vec![ContigBounds {
+        name: "chr1",
+        length: 136,
+    }];
+    let analysed = GenomeRegions::whole_contigs(&bounds);
+    let kind_covering = |args: &CallFromAlignmentsArgs, position: u64| {
+        let segmentation = segments_over(args, &analysed, &reference).expect("the catalog answers");
+        segmentation
+            .segments()
+            .iter()
+            .find(|segment| {
+                segment.region.start.get() <= position && position <= segment.region.end.get()
+            })
+            .map(|segment| segment.kind.clone())
+            .expect("the segments partition the contig, so every base is in one")
+    };
+
+    // The fixture is the claim's other half: if the six-base run were not a tract at the
+    // file's floors there would be nothing for the calling floors to turn down, and the
+    // assertion below would pass over a reference with no repeat in it at all.
+    assert!(
+        matches!(
+            kind_covering(&catalog_floors, 43),
+            RegionKind::SsrSegment(_)
+        ),
+        "the six-base run is in the catalog, which is what makes it a candidate",
+    );
+    assert!(
+        matches!(
+            kind_covering(&catalog_floors, 90),
+            RegionKind::SsrSegment(_)
+        ),
+        "and so is the ten-base run",
+    );
+
+    assert_eq!(
+        kind_covering(&calling_floors, 43),
+        RegionKind::Generic,
+        "six copies is below ng's period-1 floor of eight, so its bases go to the SNP/indel \
+         caller rather than becoming ground nobody speaks for",
+    );
+    assert!(
+        matches!(
+            kind_covering(&calling_floors, 90),
+            RegionKind::SsrSegment(_)
+        ),
+        "ten copies clears the floor under either setting — the fixture moves one tract, not \
+         both",
+    );
 }

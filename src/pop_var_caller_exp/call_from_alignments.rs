@@ -70,9 +70,13 @@ use crate::ng::reference_info::{
     ReferenceCheck, ReferenceInfo, ReferenceInfoCache, ReferenceInfoError,
     read_reference_verifying_or_creating_fai,
 };
-use crate::ng::region_typing::GenomeRegions;
+use crate::ng::region_typing::segment_criteria::{
+    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies, SsrSegmentCriteria,
+};
+use crate::ng::region_typing::{DEFAULT_MAX_STR_LEN, GenomeRegions, TypedRegionConfig};
 use crate::ng::repeat_catalog::{
-    ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria, sibling_catalog_path,
+    CriteriaRefusal, ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria,
+    sibling_catalog_path,
 };
 use crate::ng::run::cohort_merge::{
     CohortLocusBuilderRegionsLen, DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN,
@@ -82,7 +86,8 @@ use crate::ng::run::report::BoundsTheRunCalledUnder;
 use crate::ng::run::{
     AlignedFilesVariantCaller, AlignmentInputs, MergeParameters, RunError, RunReport, Segmentation,
 };
-use crate::ng::types::{DomainError, InbreedingF, Ploidy};
+use crate::ng::tandem_repeat::{PeriodRange, PeriodRangeError};
+use crate::ng::types::{Bp, DomainError, InbreedingF, MAX_MOTIF_LEN, Ploidy};
 use crate::ng::vcf::header::{HeaderContig, HeaderMetadataError, VcfHeaderMetadata};
 use crate::ng::vcf::writer::{VcfWriteError, VcfWriter};
 use crate::pop_var_caller::common::current_command_line;
@@ -211,6 +216,63 @@ pub struct CallFromAlignmentsArgs {
     /// through `RAYON_NUM_THREADS`.
     #[arg(long, default_value_t = 0)]
     pub threads: usize,
+
+    /// The fewest motif copies a tract needs before this run treats it as a repeat: six
+    /// comma-separated numbers, one per period 1 to 6. Any other count is refused.
+    ///
+    /// The default is the copy count at which each period starts to stutter, measured over a
+    /// tomato archive on 2026-08-10. Below its floor, a tract is ordinary sequence and the
+    /// SNP/indel caller handles it.
+    #[arg(
+        long,
+        value_parser = crate::pop_var_caller_exp::cli::parsers::parse_min_copies,
+        default_value = "8,6,6,6,5,4",
+        help_heading = "What counts as a repeat"
+    )]
+    pub min_copies: MinCopies,
+
+    /// The shortest repeat unit this run treats as a repeat. 1 puts homopolymers on the
+    /// repeat path.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MIN_PERIOD,
+        value_parser = clap::value_parser!(u8).range(1..=MAX_MOTIF_LEN as i64),
+        help_heading = "What counts as a repeat"
+    )]
+    pub min_period: u8,
+
+    /// The longest repeat unit this run treats as a repeat. Six is the longest the catalog
+    /// holds, and the longest a motif can be.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_PERIOD,
+        value_parser = clap::value_parser!(u8).range(1..=MAX_MOTIF_LEN as i64),
+        help_heading = "What counts as a repeat"
+    )]
+    pub max_period: u8,
+
+    /// A tract longer than this many bases is a satellite: neither caller speaks for it, and
+    /// the run report counts its ground as refused.
+    ///
+    /// A round number at the read-length limit rather than a measured one — with 150 bp reads
+    /// a read spans a tract plus an anchor each side only up to about 90 bp, so past 100 the
+    /// repeat path has nothing to offer.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_STR_LEN,
+        help_heading = "What counts as a repeat"
+    )]
+    pub max_str_len: u64,
+
+    /// How much of a tract must match a perfect tiling of its motif, from 0 to 1. Below this
+    /// the tract is ordinary sequence.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MIN_PURITY,
+        value_parser = crate::pop_var_caller_exp::cli::parsers::parse_min_purity,
+        help_heading = "What counts as a repeat"
+    )]
+    pub min_purity: f32,
 }
 
 /// Everything that can stop a run, rendered for a person at a terminal.
@@ -251,6 +313,37 @@ pub enum CallFromAlignmentsCliError {
         path: PathBuf,
         /// The reference it would be built from.
         reference: PathBuf,
+    },
+
+    /// The run's period range runs the wrong way round.
+    ///
+    /// Both ends are bounded to 1..=6 by clap, so this is reachable only by asking for a
+    /// narrowest period wider than the widest.
+    #[error("--min-period and --max-period do not make a range")]
+    PeriodRange {
+        /// Which way the range is wrong.
+        #[source]
+        source: PeriodRangeError,
+    },
+
+    /// This run asked for repeats the catalog was never built to hold.
+    ///
+    /// **Not a policy refusal**: the rows below the file's own floors were never written, so
+    /// the request cannot be served at all. Either move the named flag back up, or build a
+    /// catalog at floors low enough to answer it.
+    #[error(
+        "{flag} asks for repeats the catalog {} does not hold; raise it, or rebuild the catalog \
+         at lower floors",
+        path.display()
+    )]
+    RoutingBelowCatalog {
+        /// The flag whose value put the request outside the file.
+        flag: &'static str,
+        /// The catalog that was asked.
+        path: PathBuf,
+        /// Which axis, with both numbers.
+        #[source]
+        source: RepeatCatalogError,
     },
 
     /// The repeat catalog could not be used.
@@ -931,6 +1024,91 @@ fn analysed_regions(
     }
 }
 
+/// **What this run counts as a repeat**, built from the five flags that say so.
+///
+/// The catalog is a source of *candidates*: it is deliberately built below every calling
+/// floor, so that a caller can put its own line anywhere inside that gap by filtering the
+/// file rather than re-scanning the genome (`repeat_catalog.md` §4.1). Until this existed the
+/// run asked the file with [`StrRepeatCriteria::default()`], which *is* the file's own storage
+/// floors — so everything the file held became an STR locus of the run, and on the human
+/// benchmark that routed about seven times more reference to the repeat path than ng's own
+/// calling floors would (`run_ssr_observations.md` §2).
+///
+/// **The flank floor is not a flag**, because it is the one axis a reader cannot move
+/// downwards: the rows below the file's 15 bp were never written, so the request could not be
+/// served. It comes from the conversion, which is where that reasoning lives
+/// ([`StrRepeatCriteria::from`]).
+///
+/// The scan half of the [`TypedRegionConfig`] built here is unread: the conversion takes only
+/// the classification rules and the satellite cap, and this run detects nothing — it reads
+/// tracts a `repeat-catalog` run already found.
+fn routing_criteria(
+    args: &CallFromAlignmentsArgs,
+) -> Result<StrRepeatCriteria, CallFromAlignmentsCliError> {
+    // Both ends are already bounded to 1..=6 by clap, so the only way left to fail is a
+    // range the wrong way round.
+    let periods = PeriodRange::new(args.min_period, args.max_period)
+        .map_err(|source| CallFromAlignmentsCliError::PeriodRange { source })?;
+    Ok(StrRepeatCriteria::from(&TypedRegionConfig {
+        max_str_len: Bp(args.max_str_len),
+        criteria: SsrSegmentCriteria {
+            periods,
+            min_copies: args.min_copies,
+            min_purity: args.min_purity,
+            // Not a flag: the score floor gates the *scanner*'s output, and a catalog reader
+            // has no scanner. `SsrSegmentCriteria::default()`'s 0 rejects nothing.
+            ..SsrSegmentCriteria::default()
+        },
+        ..TypedRegionConfig::default()
+    }))
+}
+
+/// Render a catalog failure, naming the flag to move when the failure is that this run asked
+/// for more than the file holds.
+///
+/// **The refusal is real and it is not policy** — the rows below the file's floors were never
+/// written, so the request cannot be served (`run_ssr_observations.md` §2.3) — but on its own
+/// it names two numbers and no way to change either. A person who typed `--min-copies 3,3,3,3,3,3`
+/// should be told that flag, not left to infer which of five knobs produced *"period 1: catalog
+/// holds tracts of 5 copies and up, reader asked for 3"*.
+///
+/// **The flank floor has no flag and so has no arm here**: this run pins it at the catalog's
+/// own, so a catalog built at a wider flank than 15 bp is a file that has to be rebuilt, which
+/// is what the general catalog error already says.
+fn catalog_error_naming_the_flag(
+    source: RepeatCatalogError,
+    path: &Path,
+) -> CallFromAlignmentsCliError {
+    // Exhaustive on the refusal on purpose: a new bounded axis must not silently inherit the
+    // no-flag answer and leave a person hunting five knobs for the one they moved.
+    let flag = match &source {
+        RepeatCatalogError::CriteriaTooPermissive(refusal) => match refusal {
+            CriteriaRefusal::CopyFloor { .. } => Some("--min-copies"),
+            // Whichever end reaches outside what was built; `serves` checks the low end
+            // first, so a range outside at both ends names `--min-period`.
+            CriteriaRefusal::PeriodRange {
+                built_min,
+                wanted_min,
+                ..
+            } if wanted_min < built_min => Some("--min-period"),
+            CriteriaRefusal::PeriodRange { .. } => Some("--max-period"),
+            CriteriaRefusal::MinFlank { .. } => None,
+        },
+        _ => None,
+    };
+    match flag {
+        Some(flag) => CallFromAlignmentsCliError::RoutingBelowCatalog {
+            flag,
+            path: path.to_path_buf(),
+            source,
+        },
+        None => CallFromAlignmentsCliError::Catalog {
+            path: path.to_path_buf(),
+            source,
+        },
+    }
+}
+
 /// The run's segments: the analysed ground cut into the stretches each generator owns, drawn
 /// from the catalog.
 fn segments_over(
@@ -948,7 +1126,7 @@ fn segments_over(
             reference: args.reference.clone(),
         });
     }
-    let criteria = StrRepeatCriteria::default();
+    let criteria = routing_criteria(args)?;
     let catalog = RepeatCatalog::open_checking_against_reference(&path, with_checksums).map_err(
         |source| CallFromAlignmentsCliError::Catalog {
             path: path.clone(),
@@ -958,10 +1136,7 @@ fn segments_over(
     let spans: Vec<_> = analysed.iter().collect();
     let segments = catalog
         .genome_segments(&criteria, ReadScope::Regions(&spans))
-        .map_err(|source| CallFromAlignmentsCliError::Catalog {
-            path: path.clone(),
-            source,
-        })?;
+        .map_err(|source| catalog_error_naming_the_flag(source, &path))?;
     Segmentation::build(
         segments,
         analysed.clone(),

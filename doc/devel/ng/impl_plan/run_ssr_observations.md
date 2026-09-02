@@ -106,7 +106,7 @@ beyond constructors naming a kind.
 
 ### Milestone B — the routing policy is the caller's
 
-**B1. The criteria from flags, and the refusals.**  ☐
+**B1. The criteria from flags, and the refusals.**  ✅
 `call-from-alignments` gains `--min-copies`, `--min-period`, `--max-period`,
 `--max-str-len`, `--min-purity`, spelled as `type-regions` spells them, defaults the calling
 floors; `segments_over` builds its `StrRepeatCriteria` from them instead of `default()`

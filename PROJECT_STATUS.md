@@ -19,8 +19,22 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **a cohort observation now states what kind of
-> ground it sits on** — step A1 of the
+> - **Last completed task (2026-09-02):** **a calling run now decides for itself what counts
+> as a repeat, and the answer is ng's measured floors rather than the catalog file's storage
+> floors** — step B1 of the
+> [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
+> `ng-ssr-observations`. Five flags say it (`--min-copies`, `--min-period`, `--max-period`,
+> `--max-str-len`, `--min-purity`), named as `type-regions` names them. The file is built below
+> every calling floor on purpose so a caller can put its line inside that gap by filtering; the
+> run asked with the file's own floors, so everything in it became an STR locus and went to a
+> generator that does not exist yet — on the human benchmark about seven times more reference
+> than ng's floors would route. A candidate the run turns down is generic sequence, not a hole,
+> and that is what the step's end-to-end test measures on a fixture built to straddle the gap.
+> **Not yet measured on real data**: the recovery this predicts is B4's.
+> [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b1_2026-09-02.md).
+>
+> - **Earlier (2026-09-02):** **a cohort observation now states what kind of
+> ground it sits on, and Milestone A is on `main`** — step A1 of the
 > [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
 > `ng-ssr-observations`. The merge closed repeat-tract loci deliberately and then dropped the
 > tract's motif as it assembled the cohort's evidence, so nothing downstream could tell a
@@ -3077,9 +3091,10 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     closure; re-opens only on a large-cohort measurement that moves the share.
 
 #### Step 5/6 — STR observations through a run: routing, the tract slot, and the kind at the merge
-- **Status:** `implemented` — **A1 done** on branch `ng-ssr-observations`. Milestone A is the
-  seam the parallel calling-loop plan waits on; B (routing from user flags) and C (the tract
-  slot filled) follow.
+- **Status:** `implemented` — **✅ MILESTONE A COMPLETE and merged to `main`**; **B1 done** on
+  branch `ng-ssr-observations`. B2 (the criteria on the record in the parameters file), B3
+  (routing parity and the no-regression pin) and B4 (the GIAB recovery, measured) remain in
+  Milestone B; C fills the tract slot.
 - **Plan:** [run_ssr_observations.md](doc/devel/ng/impl_plan/run_ssr_observations.md);
   **Spec:** [run_ssr_observations.md](doc/devel/ng/spec/run_ssr_observations.md); the parallel
   plan it seams with: [calling_loop_ssr.md](doc/devel/ng/impl_plan/calling_loop_ssr.md); what
@@ -3095,6 +3110,21 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   assembly — each comparing the whole `LocusKind` rather than its discriminant, so a payload
   rebuilt empty fails. No verdict moves and nothing yet reads either field.
   [Impl report](doc/devel/reports/implementations/ng_ssr_observations_a1_2026-09-02.md).
+- **B1 done (the routing policy is the caller's):**
+  [call_from_alignments.rs](src/pop_var_caller_exp/call_from_alignments.rs) — `--min-copies`,
+  `--min-period`, `--max-period`, `--max-str-len` and `--min-purity`, named as `type-regions`
+  names them, defaulting to ng's measured calling floors; `routing_criteria` builds the
+  `StrRepeatCriteria` `segments_over` asks the catalog with, where it used to pass
+  `StrRepeatCriteria::default()` — **which is the floors the file is stored at**, so every row
+  the file held became an STR locus of the run. The flank floor stays pinned at the file's own
+  15 bp, because the rows below it were never written. **A request the file cannot serve now
+  names the flag that made it**, exhaustively over `CriteriaRefusal` so a new bounded axis is a
+  compile error rather than a silent no-flag answer. Five tests, and the end-to-end one is the
+  step's oracle: a 6-base and a 10-base homopolymer straddling the period-1 gap between the
+  file's floor of 5 and ng's of 8 — at the file's floors both are tracts, at ng's the shorter
+  is `Generic` and the longer is still a tract. **Mutation-tested**: restoring the old
+  `StrRepeatCriteria::default()` fails three of the five.
+  [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b1_2026-09-02.md).
 - **Open:**
   - **⚠ Three tests in the two locus dumps still fail, and each says something different.**
     Both targets had been red since `8ffb0f84` (*"the live tandem-repeat scan is gone"*,
