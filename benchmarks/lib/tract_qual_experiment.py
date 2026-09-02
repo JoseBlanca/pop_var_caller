@@ -30,7 +30,11 @@ callset — plus a third the same files can answer and the site-level two cannot
   recorded for these callsets.
 
 * **Genotype accuracy** — where the truth set and the caller both call a tract,
-  how often the caller's genotype is the truth's. Compared as multisets of
+  how often the caller's genotype is the truth's, reported two ways: as the two
+  tract SEQUENCES, and as the two repeat LENGTHS, which is how STR callers are
+  conventionally scored and which every caller here already emits as `REPCN`.
+  The two differ by 126 tracts of 6,058 on ng at 30x, so quoting only the first
+  understates the caller against its own field. Compared as multisets of
   allele sequences, so two files that order their ALT columns differently still
   agree and phase is ignored. Written only when `--genotype-out` asks for it.
 
@@ -734,6 +738,7 @@ class GenotypeCell:
     genotype_right: int = 0
     no_call: int = 0
     not_comparable: int = 0
+    right_as_lengths: int = 0
     truth_allele_never_offered: int = 0
     called_homozygous_truth_heterozygous: int = 0
     called_heterozygous_truth_homozygous: int = 0
@@ -765,7 +770,19 @@ class GenotypeCell:
         self.tracts_both_call += 1
         if called & expected:
             self.genotype_right += 1
+            self.right_as_lengths += 1
             return
+        # **The same tract scored the way STR callers conventionally are**: on the
+        # two repeat lengths rather than the two sequences. ng, HipSTR and the
+        # existing caller all emit a per-allele repeat count, and a call that gets
+        # both lengths right and one spelling wrong is right by that convention and
+        # wrong by this one. Both are real questions; reporting only the stricter
+        # one understates the caller against its own field. Measured on ng at 30x,
+        # the two differ by 126 tracts of 6,058.
+        if {tuple(sorted(len(one) for one in pair)) for pair in called} & {
+            tuple(sorted(len(one) for one in pair)) for pair in expected
+        }:
+            self.right_as_lengths += 1
         wanted = {sequence for pair in expected for sequence in pair}
         if any(sequence not in offered for sequence in wanted):
             self.truth_allele_never_offered += 1
@@ -914,7 +931,8 @@ SWEEP_HEADER = (
 GENOTYPE_HEADER = (
     "arm\tground\tdepth\tsample\tperiod_class\ttracts_truth_calls\t"
     "tracts_both_call\tgenotype_right\tno_call\tgenotype_accuracy\t"
-    "not_comparable\ttruth_allele_never_offered\tcalled_hom_truth_het\t"
+    "not_comparable\tright_as_lengths\tlength_accuracy\t"
+    "truth_allele_never_offered\tcalled_hom_truth_het\t"
     "called_het_truth_hom\twrong_some_other_way\n"
 )
 
@@ -1089,8 +1107,10 @@ def main() -> int:
                 f"{args.arm}\t{args.ground}\t{args.depth}\t{args.sample}\t"
                 f"{period_class}\t{cell.tracts_truth_calls}\t{cell.tracts_both_call}\t"
                 f"{cell.genotype_right}\t{cell.no_call}\t"
-                f"{ratio(cell.genotype_right, cell.tracts_both_call)}\t"
-                f"{cell.not_comparable}\t{cell.truth_allele_never_offered}\t"
+                f"{ratio(cell.genotype_right, cell.tracts_both_call - cell.not_comparable)}\t"
+                f"{cell.not_comparable}\t{cell.right_as_lengths}\t"
+                f"{ratio(cell.right_as_lengths, cell.tracts_both_call - cell.not_comparable)}\t"
+                f"{cell.truth_allele_never_offered}\t"
                 f"{cell.called_homozygous_truth_heterozygous}\t"
                 f"{cell.called_heterozygous_truth_homozygous}\t"
                 f"{cell.wrong_some_other_way}\n"

@@ -19,7 +19,36 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **the genotypes at a repeat tract, measured three
+> - **Last completed task (2026-09-02):** **two parameter values, no code, and ng's repeat-tract
+> genotypes get better by 0.6 points**
+> ([report](doc/devel/reports/ng_tract_genotype_improvement_2026-09-02.md); six parallel
+> investigations behind it in
+> [tract_genotype_investigation/](doc/devel/reports/tract_genotype_investigation/)).
+> On GIAB's HG002 tandem-repeat benchmark, fitting the slippage from HG002's own reads **and**
+> raising the repeat-tract outlier weight from 0.01 to 0.10 takes genotype accuracy from 0.8856
+> to **0.8907** at homopolymers and 0.9033 to **0.9095** at period 2+ at 30×, and from 0.8950 to
+> 0.8997 and 0.9132 to 0.9160 at 50×. Both changes are parameters a run can already be given.
+> **⚠ And the recommendation that started this work was wrong.** I said fitting the slippage was
+> the lever, on the strength of a simulator. On real reads a *flat* change to any of the three
+> stutter numbers is worth nothing — the shipped values already sit at the optimum, and over a
+> twenty-fold range of the slip share accuracy moves half a point while the two error classes
+> swing nine-fold and three-fold in opposite directions. It is a dial that trades one error for
+> the other. What the fit is worth is its per-stratum shape, a third of the gain; the larger half
+> is **the outlier weight, which nobody was looking at** — the bound on how far one read may pull
+> a genotype, inherited at 0.01 and never measured.
+> **Ruled out with numbers:** fitting the genotype prior (reaches 10 of 648 errors, risks 77
+> correct calls), a stricter candidate bar, a GQ floor, an allele-balance rule, and every other
+> constant in the read model. **HipSTR, which fits its stutter model per locus, is 0.3 points
+> behind ng at 30× and 0.9 ahead at 50×** on the tracts both reach, and its own median fitted slip
+> level is 0.04 against ng's fixed 0.05 — the median locus does not need fitting.
+> **Where the accuracy actually is: 407 of 648 errors are a sequence ng never offered**, and of
+> the 434 missing sequences, 268 were carried by no read, of which **46 are an alignment loss with
+> a legible mechanism** — reads plainly carry the sequence and ng's table does not, three of them
+> verifiable by hand. Also: 174 of those 268 are the reference *length* (the truth record is a
+> substitution), so scored on repeat length — how the field scores STRs and what every caller here
+> emits — ng is at 0.9185 and 0.9182 rather than 0.89 and 0.91.
+>
+> - **Earlier (2026-09-02):** **the genotypes at a repeat tract, measured three
 > times wrong before they were measured right**
 > ([report](doc/devel/reports/ng_tract_qual_experiment_2026-09-02.md) §5). **No change to the
 > caller.** Where the truth set and ng both call a tract on GIAB's tandem-repeat benchmark at
