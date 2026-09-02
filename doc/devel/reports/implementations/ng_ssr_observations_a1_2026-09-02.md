@@ -71,12 +71,30 @@ All run in the dev container (`./scripts/dev.sh`).
 
 - `cargo fmt --check` — clean.
 - `cargo clippy --all-targets --all-features -- -D warnings` — clean.
-- `cargo test --lib --tests --examples --all-features` — 5,911 passed, 0 failed, 14 ignored
-  in the lib suite; every integration and example target green.
+- `cargo test --lib --tests --examples --all-features --no-fail-fast` — 5,915 passed, 0
+  failed, 14 ignored in the library suite; every integration target green; **two example
+  targets red before this step and after it** (below).
 - The three new tests by name: 3 passed.
 
-**One pre-existing failure, not this step's and not fixed here.**
-`cargo test --all-targets` also builds the criterion benches, and `benches/psp_writer_perf.rs`
+**Two pre-existing failures, neither this step's and neither fixed here.**
+
+`examples/ng_generic_loci_dump.rs` (11 of 13 tests) and `examples/ng_ssr_loci_dump.rs` (all
+10) fail at fixture setup with
+`RepeatCatalogError::NotFound { path: ".../ref.fa.repeats.parquet" }`. Their `fixture` helper
+writes a FASTA and a BAM into a temporary directory and never builds a repeat catalog beside
+them, which stopped being optional at `8ffb0f84` (*"the live tandem-repeat scan is gone"*,
+2026-08-11): nothing scans a reference for tandem repeats at call time any more, so a dump
+over a reference with no catalog file has nowhere to read them from. Bisected — `bb27dd42`
+green, `8ffb0f84` red, and both targets red at `main`'s tip (`e270ce14`) without this step's
+commit.
+
+**One of the two is spec §10's own oracle for this milestone**: *"a tract cohort observation
+reaching a probe carries the same motif the generator minted, on real data (`ng_ssr_loci_dump`
+ground truth beside the merge's output)"*. That check cannot be run until the fixture builds a
+catalog. The unit tests added here pin the field on synthetic loci; the real-data
+confirmation is owed.
+**And a third, in the benches.** `cargo test --all-targets` also builds the criterion benches,
+and `benches/psp_writer_perf.rs`
 panics at line 386 — `index out of bounds: the len is 3300000 but the index is 3300000` — in
 `psp_writer_phases/flush_block_one`, which walks its fixture until the block fills and runs
 off the end when it does not. Confirmed pre-existing by stashing this step's edits and

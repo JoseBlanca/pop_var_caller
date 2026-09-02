@@ -3065,6 +3065,18 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   rebuilt empty fails. No verdict moves and nothing yet reads either field.
   [Impl report](doc/devel/reports/implementations/ng_ssr_observations_a1_2026-09-02.md).
 - **Open:**
+  - **⚠ Two example targets have been red since 2026-08-11, and one of them is this
+    milestone's own real-data oracle.** `examples/ng_generic_loci_dump.rs` (11 of 13 tests)
+    and `examples/ng_ssr_loci_dump.rs` (10 of 10) fail at fixture setup with
+    `RepeatCatalogError::NotFound { path: ".../ref.fa.repeats.parquet" }`: the fixture writes
+    a FASTA and a BAM into a temporary directory and builds no repeat catalog beside them,
+    which stopped being optional at `8ffb0f84` (*"the live tandem-repeat scan is gone"*) —
+    nothing scans a reference for repeats at call time any more. Bisected: `bb27dd42` green,
+    `8ffb0f84` red, still red at `main`'s tip. **Spec §10 names `ng_ssr_loci_dump` as the
+    check that a tract cohort observation carries the motif the generator minted on real
+    data**, so that confirmation is owed until the fixture builds a catalog. Fixing it is one
+    call to the catalog builder in the two `fixture` helpers; it belongs to whoever owns the
+    dumps, not to this plan's steps.
   - **⚠ `benches/psp_writer_perf.rs` panics under `cargo test --all-targets`** —
     `index out of bounds: the len is 3300000 but the index is 3300000` at line 386, in
     `psp_writer_phases/flush_block_one`, which walks its fixture until a block fills and runs
