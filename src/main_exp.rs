@@ -6,6 +6,21 @@
 
 use std::process;
 
+// The `mimalloc` global allocator, the same one `src/main.rs` installs and for
+// the same reason. A `#[global_allocator]` is per *binary*, not per crate, so
+// the `alloc-mimalloc` default feature does nothing for a binary that does not
+// declare one: without this line every `call-from-alignments` run — and every
+// number measured from one — used the system allocator while every probe in
+// `examples/` used mimalloc.
+//
+// It is worth its line here: a calling run frees far more blocks than it
+// allocates on the merge thread, because the observations it walks were
+// allocated by the sample sweeps and released as it passes them, and a
+// system allocator takes a lock per cross-thread free.
+#[cfg(feature = "alloc-mimalloc")]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use clap::Parser;
 use pop_var_caller::error_render::format_error_chain;
 use pop_var_caller::pop_var_caller_exp::{
