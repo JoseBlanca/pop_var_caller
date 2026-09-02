@@ -74,7 +74,10 @@ use crate::ng::region_typing::GenomeRegions;
 use crate::ng::repeat_catalog::{
     ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria, sibling_catalog_path,
 };
-use crate::ng::run::cohort_merge::{DEFAULT_MAX_COHORT_LOCUS_SPAN, MaxCohortLocusSpan};
+use crate::ng::run::cohort_merge::{
+    CohortLocusBuilderRegionsLen, DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN,
+    DEFAULT_MAX_COHORT_LOCUS_SPAN, MaxCohortLocusSpan,
+};
 use crate::ng::run::report::BoundsTheRunCalledUnder;
 use crate::ng::run::{
     AlignedFilesVariantCaller, AlignmentInputs, MergeParameters, RunError, RunReport, Segmentation,
@@ -185,6 +188,29 @@ pub struct CallFromAlignmentsArgs {
     /// callable at all.
     #[arg(long, default_value_t = DEFAULT_MAX_CANDIDATE_ALLELES.get(), help_heading = "Advanced")]
     pub max_candidate_alleles: u16,
+
+    /// How much reference one round of locus building covers, in bases. Chosen from the
+    /// cohort's size when it is not given.
+    ///
+    /// The run advances in rounds: it draws every sample's observations over the next stretch
+    /// of reference, then builds and calls the loci in it. A wider stretch means fewer rounds
+    /// and more of each sample's reading done at once — which is what the threads overlap —
+    /// and more observations held at once, which is what it costs in memory. Both scale with
+    /// the cohort, so a single number cannot be right at three samples and at three thousand.
+    /// Left unset, the run picks a width that holds one round's observations to a fixed
+    /// budget: about 8,000 bases at sixty-three samples, 500 at a thousand.
+    #[arg(long, help_heading = "Advanced")]
+    pub cohort_locus_builder_regions_len: Option<u32>,
+
+    /// How many threads to use. Zero means every core.
+    ///
+    /// What they parallelise is the reading: each round draws the cohort's samples at once,
+    /// and everything after — building the loci, calling them, writing the VCF — stays on one
+    /// thread in genome order, so the output does not depend on this number. The other two
+    /// subcommands take the same flag; before this one did, a run could only be narrowed
+    /// through `RAYON_NUM_THREADS`.
+    #[arg(long, default_value_t = 0)]
+    pub threads: usize,
 }
 
 /// Everything that can stop a run, rendered for a person at a terminal.
@@ -263,6 +289,16 @@ pub enum CallFromAlignmentsCliError {
          bound of zero would refuse every locus there is"
     )]
     MaxCohortLocusSpanIsZero {
+        /// What was asked for.
+        asked: u32,
+    },
+
+    /// A round that covers no ground.
+    #[error(
+        "--cohort-locus-builder-regions-len {asked}: a round covers at least one reference \
+         base, so a width of zero would never advance"
+    )]
+    CohortLocusBuilderRegionsLenIsZero {
         /// What was asked for.
         asked: u32,
     },
@@ -499,23 +535,93 @@ pub enum CallFromAlignmentsCliError {
 /// `<output>.tmp` and are renamed into place only once the last record is on disk, so a run that
 /// stops leaves its output path untouched — and leaves the `.tmp` beside it. Production's writer
 /// removes it on an abort and ng's has no such path yet, so clearing it is the operator's.
+/// How many observations one round may hold across the whole cohort, before the round's width
+/// is narrowed to keep to it.
+///
+/// **The thing that costs memory is the product, not the width.** A round holds roughly one
+/// observation per covered base per sample, so `width × samples` is what has to be bounded —
+/// and bounding it means the observations a round holds are about the same at three samples
+/// and at three thousand. At the ~600 bytes an observation runs to on the tomato benchmark,
+/// half a million of them is about 300 MB.
+const ROUND_OBSERVATION_BUDGET: u32 = 500_000;
+
+/// The widest round the budget allows, in reference bases, whatever the cohort.
+///
+/// **A ceiling because the gain saturates, not because the memory does.** Measured on four
+/// accessions over 400 kb of SL4.0: 3.41 s at 500 bases, 3.29 at 8,000, 3.18 at 32,000 and
+/// 3.22 at 64,000 — the last two are level, and 64,000 costs 407 MB of peak resident against
+/// 340. There is nothing to buy above this.
+const WIDEST_ROUND: u32 = 16_000;
+
+/// The round width a cohort of `samples` files gets when the command line names none.
+///
+/// **Why this is not one number.** The compiled-in default the merge carries
+/// ([`DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN`], 500 bases) was chosen on the merge reading
+/// pre-built `.psp` files, where a round costs a scan over records already in memory. A
+/// calling run draws its records out of one CRAM per sample instead, and its rounds are where
+/// that reading is overlapped across threads — so a narrow round pays a fan-out, a barrier
+/// and a thread wake-up per sample for a few microseconds of work each time, and the waste
+/// grows with the cohort.
+///
+/// Measured on the tomato benchmark, 63 accessions over the whole 8 Mb of SL4.0, 18 threads,
+/// with the VCF byte-identical at every width:
+///
+/// | round width | wall | peak resident |
+/// |---|---|---|
+/// | 500 | 193.2 s | 1,593 MB |
+/// | 2,000 | 157.8 s | 1,431 MB |
+/// | 8,000 | 115.3 s | 1,811 MB |
+///
+/// The rule gives 7,936 bases at that cohort size, 500 at a thousand samples — which is the
+/// merge's own default, so a cohort large enough to be memory-bound gets today's behaviour —
+/// and the ceiling at anything under 32 samples.
+///
+/// **It never changes an answer.** Where a round's edge falls decides only which observations
+/// are resident when a locus is built, not which loci exist or what they are called; the
+/// widths above were checked against one another byte for byte.
+fn round_width_for(samples: usize) -> CohortLocusBuilderRegionsLen {
+    let samples = u32::try_from(samples).unwrap_or(u32::MAX).max(1);
+    let width = (ROUND_OBSERVATION_BUDGET / samples)
+        .clamp(DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN, WIDEST_ROUND);
+    // PANIC-FREE: the clamp's lower bound is the merge's own default, which is non-zero.
+    CohortLocusBuilderRegionsLen(
+        NonZeroU32::new(width).expect("the clamp's floor is a non-zero constant"),
+    )
+}
+
 pub fn run_call_from_alignments(
     args: &CallFromAlignmentsArgs,
 ) -> Result<(), CallFromAlignmentsCliError> {
     // **Everything a person typed is judged before a byte is read.** Reading the reference and
     // opening a cohort of CRAMs is minutes; a number or a path that was never going to work
     // should cost none of them.
+    if args.threads > 0 {
+        // A failure here means a pool is already built, which in this binary means a second
+        // call in one process — the calls are unaffected, so it is not worth an error. Same
+        // reasoning, and the same line, as `estimate-contamination`.
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(args.threads)
+            .build_global();
+    }
+
     let asked_ploidy = ploidy_asked_for(args)?;
-    let merge_parameters = MergeParameters {
-        max_cohort_locus_span: MaxCohortLocusSpan(
-            NonZeroU32::new(args.max_cohort_locus_span).ok_or(
-                CallFromAlignmentsCliError::MaxCohortLocusSpanIsZero {
-                    asked: args.max_cohort_locus_span,
-                },
-            )?,
-        ),
-        ..MergeParameters::DEFAULT
-    };
+    let merge_parameters =
+        MergeParameters {
+            max_cohort_locus_span: MaxCohortLocusSpan(
+                NonZeroU32::new(args.max_cohort_locus_span).ok_or(
+                    CallFromAlignmentsCliError::MaxCohortLocusSpanIsZero {
+                        asked: args.max_cohort_locus_span,
+                    },
+                )?,
+            ),
+            cohort_locus_builder_regions_len: match args.cohort_locus_builder_regions_len {
+                Some(asked) => CohortLocusBuilderRegionsLen(NonZeroU32::new(asked).ok_or(
+                    CallFromAlignmentsCliError::CohortLocusBuilderRegionsLenIsZero { asked },
+                )?),
+                None => round_width_for(args.alignments.len()),
+            },
+            ..MergeParameters::DEFAULT
+        };
     let candidate_selection = CandidateSelectionConfig {
         max_candidate_alleles: MaxCandidateAlleles::new(args.max_candidate_alleles).ok_or(
             CallFromAlignmentsCliError::MaxCandidateAllelesTooSmall {
