@@ -79,16 +79,21 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use pop_var_caller::ng::alignment::emission::PerQualityEmission;
+use pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner;
 use pop_var_caller::ng::calling::allele_candidates::generic::select_generic;
+use pop_var_caller::ng::calling::allele_candidates::ssr::{SsrSelectionConfig, select_ssr};
 use pop_var_caller::ng::calling::allele_candidates::{
     CandidateSelectionConfig, DEFAULT_MAX_CANDIDATE_ALLELES, LocusSelection, MaxCandidateAlleles,
     SelectionScratch, SelectionVerdict,
 };
 use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
+use pop_var_caller::ng::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
 use pop_var_caller::ng::locus_generation::{
     GeneratorSet, GeneratorSlot, SampleLocusObservations, SampleLocusObservationsIterator,
     UnhandledReason,
 };
+use pop_var_caller::ng::locus_generation::{LocusGenerator, LocusKind};
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
 use pop_var_caller::ng::read::input::reference::OpenReference;
@@ -97,12 +102,14 @@ use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::{RegionKind, TypedRegion};
+use pop_var_caller::ng::region_typing::{RegionKind, TypedRegion, TypedRegionConfig};
+use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
 use pop_var_caller::ng::run::cohort_merge::build::CohortObservation;
 use pop_var_caller::ng::run::cohort_merge::close::{LocusCloser, Verdict};
 use pop_var_caller::ng::run::cohort_merge::{
     MaxCohortLocusSpan, MinAltObs, MinAltReadShare, MinAltReads,
 };
+use pop_var_caller::ng::types::{Bp, Ploidy};
 use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
 
 #[path = "shared/reference_check.rs"]
@@ -399,6 +406,192 @@ fn analysed_regions_of(
     Ok(regions)
 }
 
+// ============================ the repeat-tract arm ============================
+//
+// **Everything above narrows an ordinary locus; this narrows a repeat tract.** Same reads, same
+// merge, a different selector — `select_ssr` instead of `select_generic` — and a different
+// question, because a tract's alleles are ordered where a SNP's are not. What it prints is the
+// number `spec/candidate_alleles_ssr.md` §5 measured offline and this arm reproduces through the
+// shipped module: **candidate sequences per tract**, beside the partition of what selection did.
+//
+// **The tract slot is filled here, in the probe, and nowhere else.** No run builds a
+// `GeneratorSet` with it today; wiring one is the run driver's own plan. This is the arrangement
+// `examples/ng_ssr_loci_dump.rs` already uses, so the reads a tract sees here are the reads it
+// would see in a run.
+//
+// **The catalog is named rather than found beside the reference.** GRCh38's sits next to its
+// FASTA, but a reference under a read-only mount cannot have one written beside it, so the path
+// is an argument. A catalog built on another reference is refused by the reader's own check
+// against the contig table, not by anything here.
+
+/// What the tract arm counts over a cohort's repeat tracts.
+#[derive(Default)]
+struct TractTally {
+    /// Tracts the merge built a locus for.
+    loci: usize,
+    /// Candidate sequences kept, summed over loci — the reference included, since it is a
+    /// candidate the caller scores like any other.
+    candidates: usize,
+    /// Loci whose candidate list is everything that cleared the bar.
+    selected: usize,
+    /// Loci the cap cut, and how many alternatives it removed in total.
+    truncated: usize,
+    truncated_alternatives: u64,
+    /// Loci refused as not varying in whole motif units.
+    not_periodic: usize,
+    /// Loci that narrowed to the reference tract alone — a first-class outcome, not an error.
+    reference_only: usize,
+    /// Samples that carry a sequence the cap cut, summed over loci: each one is a genotype the
+    /// caller must emit as missing.
+    samples_made_uncallable: usize,
+    /// **Catalog tracts the merge refused to build a locus for**, because no sample's
+    /// non-reference reads reached its keep rule. Selection never sees one, and the caller
+    /// leaves it at the reference tract — so for the purpose of "how many sequences does a
+    /// tract carry", it is one candidate, not zero loci.
+    ///
+    /// It is counted because the denominator decides the headline number. Production's
+    /// offline scoring, which `spec/candidate_alleles_ssr.md` §5 quotes, emitted a candidate
+    /// set at **every** catalog tract; counting only the tracts that reached selection
+    /// compares a variant-enriched subset against the whole.
+    refused_by_merge: usize,
+}
+
+impl TractTally {
+    fn push(
+        &mut self,
+        narrowed: &pop_var_caller::ng::calling::allele_candidates::ssr::SsrLocusSelection,
+    ) {
+        let selection = &narrowed.selection;
+        self.loci += 1;
+        self.candidates += selection.alleles().len();
+        match selection.verdict() {
+            SelectionVerdict::Selected => self.selected += 1,
+            SelectionVerdict::Truncated { dropped } => {
+                self.truncated += 1;
+                self.truncated_alternatives += u64::from(dropped);
+            }
+            SelectionVerdict::NotPeriodic => self.not_periodic += 1,
+            _ => {}
+        }
+        if selection.alternative_allele_count() == 0 {
+            self.reference_only += 1;
+        }
+        self.samples_made_uncallable += selection
+            .unmatched()
+            .iter()
+            .filter(|leftover| leftover.genotype_must_be_missing())
+            .count();
+    }
+
+    fn report(&self) {
+        if self.loci == 0 {
+            println!("# no repeat tract was built — the merge kept none of the catalog's");
+            return;
+        }
+        let loci = self.loci as f64;
+        println!("# repeat tracts the merge built: {}", self.loci);
+        println!(
+            "candidates_per_tract\t{:.3}\t({} candidates over {} tracts, the reference counted)",
+            self.candidates as f64 / loci,
+            self.candidates,
+            self.loci
+        );
+        println!(
+            "selected\t{}\t{:.1}%",
+            self.selected,
+            100.0 * self.selected as f64 / loci
+        );
+        println!(
+            "truncated\t{}\t{:.1}%\t({} alternatives cut)",
+            self.truncated,
+            100.0 * self.truncated as f64 / loci,
+            self.truncated_alternatives
+        );
+        println!(
+            "not_periodic\t{}\t{:.1}%",
+            self.not_periodic,
+            100.0 * self.not_periodic as f64 / loci
+        );
+        println!(
+            "reference_only\t{}\t{:.1}%",
+            self.reference_only,
+            100.0 * self.reference_only as f64 / loci
+        );
+        println!(
+            "samples_made_uncallable\t{}\t(a sequence the cap cut that the sample itself earned)",
+            self.samples_made_uncallable
+        );
+        // **The same count over the denominator the offline scoring used.** Selection only
+        // ever sees a tract the merge built, so `candidates_per_tract` above is taken over a
+        // set already enriched for tracts that vary. A tract the merge refused is left at its
+        // reference sequence and carries exactly one candidate, so counting it costs nothing
+        // but a division — and the two numbers differ by enough to decide which one a spec
+        // figure is comparable with.
+        let catalog_tracts = self.loci + self.refused_by_merge;
+        println!(
+            "# catalog tracts the merge refused (no sample's non-reference reads reached its keep rule): {}",
+            self.refused_by_merge
+        );
+        println!(
+            "candidates_per_catalog_tract\t{:.3}\t({} candidates over {} tracts, a refused tract counted as the reference alone)",
+            (self.candidates + self.refused_by_merge) as f64 / catalog_tracts.max(1) as f64,
+            self.candidates + self.refused_by_merge,
+            catalog_tracts,
+        );
+    }
+}
+
+/// Walk one sample's reads over the catalog's tracts inside `analysed`, keeping every
+/// observation — the tract counterpart of [`walk_one_sample`].
+fn walk_one_sample_tracts(
+    fasta: &Path,
+    catalog_path: &Path,
+    cram: &Path,
+    analysed: &[GenomeRegion],
+    cache: &Arc<ReferenceInfoCache>,
+) -> Result<Vec<SampleLocusObservations>, Box<dyn std::error::Error>> {
+    let check = reference_check_from_env()?;
+    let (info, _verify) =
+        read_reference_verifying_or_creating_fai(cache, fasta.to_path_buf(), check)?;
+    let contigs = info.contig_list();
+    let catalog = RepeatCatalog::open_checking_against_reference(catalog_path, &info)?;
+
+    let reference = OpenReference::new(info);
+    let reads = SampleReads::open_only_sample(
+        &[cram.to_path_buf()],
+        &reference,
+        ReadFilterConfig::default(),
+        true,
+    )?;
+
+    let walk_config = TypedRegionConfig::default();
+    let mut generator = SsrGenerator::new(
+        WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()),
+        {
+            let fasta = fasta.to_path_buf();
+            let contigs = contigs.clone();
+            move || WindowedRefSeq::new(fasta.clone(), contigs.clone())
+        },
+        SsrUnitRobustAligner::new(PerQualityEmission::new()),
+        SsrGeneratorConfig::default(),
+        Bp(walk_config.criteria.bundle_threshold),
+    )?;
+
+    let criteria = StrRepeatCriteria::from(&walk_config);
+    let mut observations = Vec::new();
+    let mut walk = catalog.genome_segments(&criteria, ReadScope::Regions(analysed))?;
+    for region in walk.by_ref() {
+        let region = region?;
+        if let RegionKind::SsrSegment(segment) = &region.kind {
+            generator.begin_segment(region.region);
+            while let Some(locus) = generator.next_locus(segment, &reads)? {
+                observations.push(locus);
+            }
+        }
+    }
+    Ok(observations)
+}
+
 /// Walk one sample's reads over `analysed` and keep every observation, in coordinate order —
 /// `ng_cohort_merge_real_cost`'s pipeline, unchanged.
 fn walk_one_sample(
@@ -468,7 +661,234 @@ fn walk_one_sample(
     Ok(observations)
 }
 
-fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error::Error>> {
+/// The repeat-tract arm: walk the catalog's tracts inside `analysed`, merge them, and narrow each
+/// through the shipped [`select_ssr`].
+///
+/// **The ploidy is the caller's and there is no run to take it from here**, so the probe names it:
+/// `NG_REAL_PLOIDY`, defaulting to two. It is the one setting `SsrSelectionConfig` refuses to
+/// default, because a constant would write a diploid assumption where a polyploid region is in
+/// scope — and the tomato panel this probe is pointed at is diploid while the range the caller has
+/// to work over is not.
+fn run_tracts(
+    fasta: &Path,
+    crams: &Path,
+    catalog_path: &Path,
+    analysed: &[GenomeRegion],
+    cram_paths: &[PathBuf],
+    cache: &Arc<ReferenceInfoCache>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+
+    let _ = crams;
+    let copies: u8 = std::env::var("NG_REAL_PLOIDY")
+        .ok()
+        .map(|value| value.parse().expect("a positive copy number"))
+        .unwrap_or(2);
+    let mut config = SsrSelectionConfig::at_ploidy(Ploidy::try_new(copies)?);
+    // **`NG_TRACT_SHARE` moves the support share this arm runs under**, so the shipped value
+    // and the one `spec/candidate_alleles_ssr.md` §5 swept can be compared on one tract set
+    // rather than argued about. It is an environment knob on the probe and not a field anyone
+    // sets in a run: the shipping caller carries one share (see `SsrSelectionConfig::at_ploidy`).
+    if let Ok(raw) = std::env::var("NG_TRACT_SHARE") {
+        config.shared.min_allele_support.share =
+            MinAltReadShare::new(raw.parse().expect("a number")).expect("a fraction of one");
+    }
+    println!(
+        "# tract selection: ploidy {}, bar {:?}, cap {}, off-grid share {}",
+        config.ploidy,
+        config.shared.min_allele_support,
+        config.shared.max_candidate_alleles.get(),
+        config.max_off_grid_share.get()
+    );
+
+    let mut cohort: Vec<Vec<SampleLocusObservations>> = Vec::with_capacity(cram_paths.len());
+    for cram in cram_paths {
+        cohort.push(walk_one_sample_tracts(
+            fasta,
+            catalog_path,
+            cram,
+            analysed,
+            cache,
+        )?);
+    }
+    let per_sample_loci: usize = cohort.iter().map(Vec::len).sum();
+    println!("# tract loci the generators emitted, over all samples: {per_sample_loci}");
+
+    let all: Vec<&[SampleLocusObservations]> = cohort.iter().map(Vec::as_slice).collect();
+    let mut scratch = SelectionScratch::new();
+    let mut tally = TractTally::default();
+    let mut set_aside = 0_usize;
+    // **`NG_TRACT_DUMP=<path>` writes one row per (tract, candidate sequence)**, which is what
+    // turns "1.6 candidates a tract" into "and here is which tracts they are on". A tract the
+    // merge refused gets a single row with no bases, so the file carries the whole catalog set
+    // and a reader picking a denominator is not guessing at what is missing.
+    let mut dump = match std::env::var("NG_TRACT_DUMP") {
+        Ok(path) => {
+            let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+            writeln!(
+                out,
+                "contig\tstart\tend\tmotif\tperiod\tbuilt\tverdict\tcandidates\tallele\tkept\tcleared_bar\treads\tbest_share\tbases"
+            )?;
+            println!("# per-tract candidate dump written to {path}");
+            Some(out)
+        }
+        Err(_) => None,
+    };
+    // **`NG_TRACT_ROWS=<path>` writes the evidence itself, one row per (tract, sample,
+    // sequence)** — the reads a sample lent one spelling at one tract. It is what a checked-in
+    // differential fixture needs and the dump above cannot supply: production's own selector
+    // and ng's both consume exactly this, so a fixture built from it can be run through the
+    // two and their candidate sets compared.
+    //
+    // **A sequence is named by its index into the tract's allele table, not by its bases**, so
+    // this file stays small enough to check in; the bases are the `NG_TRACT_DUMP` file's
+    // `allele`/`bases` columns for the same locus, which is written from the same table in the
+    // same order.
+    let mut rows = match std::env::var("NG_TRACT_ROWS") {
+        Ok(path) => {
+            let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+            writeln!(out, "contig,start,end,sample,allele,reads")?;
+            println!("# per-sample tract evidence rows written to {path}");
+            Some(out)
+        }
+        Err(_) => None,
+    };
+    for locus in LocusCloser::over(&all, MaxCohortLocusSpan::DEFAULT, MinAltReads::DEFAULT) {
+        let motif = match &locus.kind {
+            LocusKind::Ssr(detail) => Some(detail.motif),
+            _ => None,
+        };
+        if locus.verdict != Verdict::Build {
+            // Refused by the merge, so selection never sees it and the caller leaves it at the
+            // reference tract. Counted, because the denominator is half of the headline number.
+            tally.refused_by_merge += 1;
+            if let (Some(out), Some(motif)) = (dump.as_mut(), motif) {
+                writeln!(
+                    out,
+                    "{}\t{}\t{}\t{}\t{}\t0\tRefusedByMerge\t1\t0\t1\t1\t0\t0.0000\t",
+                    locus.region.contig.0,
+                    locus.region.start.get(),
+                    locus.region.end.get(),
+                    String::from_utf8_lossy(motif.as_bytes()),
+                    motif.period(),
+                )?;
+            }
+            continue;
+        }
+        let observation = CohortObservation::over(&locus);
+        // A bundle is a repeat cluster with no clean flanks and nothing builds one today, but the
+        // kind exists and `select_ssr` refuses it by design — so it is counted here rather than
+        // handed over. `Generic` cannot appear: every region this arm walks came from the
+        // catalog's tract segments.
+        if !matches!(observation.kind, LocusKind::Ssr(_)) {
+            set_aside += 1;
+            continue;
+        }
+        let narrowed = select_ssr(&observation, &config, &mut scratch);
+        if let (Some(out), Some(motif)) = (dump.as_mut(), motif) {
+            // **Every allele the merge put in the table, not only the survivors**, and for
+            // each one the two facts that say where a true sequence was lost: whether some
+            // sample's reads cleared the support rule (`cleared_bar`), and whether selection
+            // kept it (`kept`). An allele the table never held is a loss upstream of
+            // selection; one that cleared the bar and was still dropped was cut by the
+            // per-sample top-`ploidy` rung cut, not by the bar; one that never cleared it is
+            // the bar's. Without the middle column those last two read alike.
+            let mut pooled: Vec<u32> = vec![0; observation.alleles.len()];
+            let mut best_share: Vec<f64> = vec![0.0; observation.alleles.len()];
+            let mut cleared_bar: Vec<bool> = vec![false; observation.alleles.len()];
+            for sample in &observation.per_sample {
+                let compared: u32 = sample
+                    .supported
+                    .iter()
+                    .map(|row| row.support.num_reads)
+                    .sum();
+                let mut here: Vec<u32> = vec![0; observation.alleles.len()];
+                for row in &sample.supported {
+                    here[row.allele] += row.support.num_reads;
+                }
+                for (at, reads) in here.iter().enumerate() {
+                    pooled[at] += reads;
+                    let share = f64::from(*reads) / f64::from(compared.max(1));
+                    if share > best_share[at] {
+                        best_share[at] = share;
+                    }
+                    // The run's own rule, asked of this sample's own reads — the same call
+                    // the shipped fold makes, so this column cannot drift from it.
+                    if config
+                        .shared
+                        .min_allele_support
+                        .reached_by(*reads, compared)
+                    {
+                        cleared_bar[at] = true;
+                    }
+                }
+            }
+            for (at, bases) in observation.alleles.iter().enumerate() {
+                writeln!(
+                    out,
+                    "{}\t{}\t{}\t{}\t{}\t1\t{:?}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}",
+                    observation.region.contig.0,
+                    observation.region.start.get(),
+                    observation.region.end.get(),
+                    String::from_utf8_lossy(motif.as_bytes()),
+                    motif.period(),
+                    narrowed.selection.verdict(),
+                    narrowed.selection.alleles().len(),
+                    at,
+                    u8::from(narrowed.selection.remap().candidate_for(at).is_some()),
+                    u8::from(cleared_bar[at]),
+                    pooled[at],
+                    best_share[at],
+                    String::from_utf8_lossy(bases),
+                )?;
+            }
+        }
+        if let Some(out) = rows.as_mut() {
+            for sample in &observation.per_sample {
+                // Read groups are pooled, as production's Stage-1 evidence is: its
+                // `seq_counts` is one entry per distinct sequence with a read total.
+                let mut pooled: Vec<u32> = vec![0; observation.alleles.len()];
+                for row in &sample.supported {
+                    pooled[row.allele] += row.support.num_reads;
+                }
+                for (at, reads) in pooled.iter().enumerate() {
+                    if *reads == 0 {
+                        continue;
+                    }
+                    writeln!(
+                        out,
+                        "{},{},{},{},{},{}",
+                        observation.region.contig.0,
+                        observation.region.start.get(),
+                        observation.region.end.get(),
+                        sample.sample,
+                        at,
+                        reads,
+                    )?;
+                }
+            }
+        }
+        tally.push(&narrowed);
+    }
+    if let Some(out) = dump.as_mut() {
+        out.flush()?;
+    }
+    if let Some(out) = rows.as_mut() {
+        out.flush()?;
+    }
+    tally.report();
+    if set_aside > 0 {
+        println!("set_aside_not_a_tract\t{set_aside}\t(bundles; nothing builds one today)");
+    }
+    Ok(())
+}
+
+fn run(
+    fasta: &Path,
+    crams: &Path,
+    bed: &Path,
+    catalog_path: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let limit_of = |name: &str| -> Option<usize> {
         std::env::var(name)
             .ok()
@@ -516,6 +936,10 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
         "# analysed bases: {}",
         analysed.iter().map(|region| region.len()).sum::<u64>()
     );
+
+    if let Some(catalog_path) = catalog_path {
+        return run_tracts(fasta, crams, catalog_path, &analysed, &cram_paths, &cache);
+    }
 
     let mut cohort: Vec<Vec<SampleLocusObservations>> = Vec::with_capacity(cram_paths.len());
     for cram in &cram_paths {
@@ -737,14 +1161,23 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 4 {
-        eprintln!("usage: ng_candidate_selection_probe <reference.fa> <cram-dir> <regions.bed>");
+    if args.len() != 4 && args.len() != 5 {
+        eprintln!(
+            "usage: ng_candidate_selection_probe <reference.fa> <cram-dir> <regions.bed> \
+             [repeats.parquet]\n\
+             \n\
+             With a catalog, the repeat-tract arm runs instead of the ordinary one: the catalog's \
+             tracts inside the BED are walked, merged and narrowed through `select_ssr`. Without \
+             it, the BED's intervals are walked as ordinary ground and swept through \
+             `select_generic`."
+        );
         return ExitCode::from(2);
     }
     match run(
         Path::new(&args[1]),
         Path::new(&args[2]),
         Path::new(&args[3]),
+        args.get(4).map(Path::new),
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

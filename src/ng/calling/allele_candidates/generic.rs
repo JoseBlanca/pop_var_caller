@@ -111,7 +111,9 @@ pub fn select_generic(
         sample_reads_per_rung: _,
         promoted_rungs: _,
         rung_is_promoted: _,
+        cap_cut_table_indices,
     } = scratch;
+    cap_cut_table_indices.clear();
     // Every alternative some sample's reads earned, in the merge table's own order — which is
     // also the order they are admitted in, so nothing has to sort it. Step C2's cap is what
     // first reorders this buffer, and it puts it back before admission.
@@ -140,6 +142,10 @@ pub fn select_generic(
             compare_best_first(alternative_of(left), alternative_of(right))
         });
         let dropped = ranked_table_indices.len() - allowed_alternatives;
+        // What the cap removed, kept rather than discarded: the leftover has to be told, because
+        // "this sample earned it and it is gone" is not the same question (see `leftover_of`).
+        cap_cut_table_indices.extend_from_slice(&ranked_table_indices[allowed_alternatives..]);
+        cap_cut_table_indices.sort_unstable();
         ranked_table_indices.truncate(allowed_alternatives);
         ranked_table_indices.sort_unstable();
         SelectionVerdict::Truncated {
@@ -168,6 +174,7 @@ pub fn select_generic(
                 observation.region,
                 &remap,
                 config.min_allele_support,
+                cap_cut_table_indices,
             )
         })
         .collect();

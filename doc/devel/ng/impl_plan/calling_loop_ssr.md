@@ -104,7 +104,7 @@ Milestone A is already on `main` (the parallel plan's Checkpoint A — verify be
 
 ### Milestone B — selection's differential, on real data
 
-**B1. Execute [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) Milestone E.**  ☐
+**B1. Execute [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) Milestone E.**  ✅
 Both ends: production's candidate set reproduced on the tomato fixture with its three
 replaced rules switched in; the measured HG002 numbers reproduced through the shipped module
 with them switched out. The probe's tract slot is filled inside the probe only — the run's

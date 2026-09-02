@@ -210,7 +210,7 @@ two modules have to agree on.
 
 ### Milestone E — the two ends of the differential, on real data
 
-**E1. Production's rules as a test-only arm.**  ☐
+**E1. Production's rules as a test-only arm.**  ✅
 In `#[cfg(test)]`, a re-implementation of production's three replaced rules — the clear-peak test,
 the cohort-summed depth gate, the same-length sibling bar — driving the same fold. **Not a field of
 `SsrSelectionConfig`:** the shipping binary carries one rule, and a configuration nobody should set
@@ -218,7 +218,7 @@ does not belong in it (arch, *Test & bench shape*). With the arm switched in, `s
 reproduce production's candidate set on a committed tomato fixture.
 *Depends:* D3. *Source:* arch *Test & bench shape*; spec §10.
 
-**E2. The probe's repeat-tract arm, and the HG002 numbers.**  ☐
+**E2. The probe's repeat-tract arm, and the HG002 numbers.**  ✅
 Give `examples/ng_candidate_selection_probe.rs` a `GeneratorSet` with the `Ssr` slot filled, as
 `examples/ng_ssr_loci_dump.rs` already does, so repeat tracts reach the merge and `select_ssr`. Then
 re-run spec §4.1's and §5's scoring against `benchmarks/ssr_hg002/truth/` **through the shipped

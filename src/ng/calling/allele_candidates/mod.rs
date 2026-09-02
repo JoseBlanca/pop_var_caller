@@ -32,6 +32,10 @@
 
 pub mod generic;
 pub mod ssr;
+/// The repeat-tract selector against production's, on a committed tomato fixture — spec §10's
+/// differential, which is a test and nothing else.
+#[cfg(test)]
+mod ssr_production_differential;
 
 use crate::ng::calling::CandidateAlleles;
 use crate::ng::run::cohort_merge::build::SupportedAllele;
@@ -284,6 +288,11 @@ pub struct UnmatchedSupport {
     /// it cleared the support rule for this sample — which the cap then cut.** Non-zero
     /// means this sample cannot be genotyped here; see
     /// [`genotype_must_be_missing`](Self::genotype_must_be_missing).
+    ///
+    /// **It is the cap and only the cap**, which is why [`leftover_of`] is handed the list of what
+    /// the cap removed rather than inferring it. The repeat-tract path drops alleles a third way —
+    /// its per-sample top-`ploidy` cut removes whole repeat lengths — and a sample that lost a
+    /// sequence that way is perfectly callable over what remains.
     ///
     /// **Why this is separate from [`num_reads`](Self::num_reads), and it is the whole
     /// point of the field.** Sequences are dropped two ways, and only one of them says
@@ -635,6 +644,10 @@ pub struct SelectionScratch {
     /// already claimed a length. It also comes out in ascending rung order for free, which is the
     /// order admission needs.
     rung_is_promoted: Vec<bool>,
+    /// **The merge-table indices the cap removed at this locus, ascending** — what
+    /// [`leftover_of`] is asked, rather than inferring it from "this sample earned it and it is
+    /// gone". Empty at every locus the cap did not bind at, which is almost all of them.
+    cap_cut_table_indices: Vec<u32>,
 }
 
 impl SelectionScratch {
@@ -668,6 +681,7 @@ impl SelectionScratch {
             sample_reads_per_rung,
             promoted_rungs,
             rung_is_promoted,
+            cap_cut_table_indices,
         } = self;
         per_allele.clear();
         per_allele.resize(table_len, AlleleSummary::default());
@@ -677,6 +691,7 @@ impl SelectionScratch {
         sample_reads_per_rung.clear();
         promoted_rungs.clear();
         rung_is_promoted.clear();
+        cap_cut_table_indices.clear();
     }
 
     /// How many alleles the buffers are currently sized for.
@@ -851,12 +866,23 @@ fn compared_reads_of(sample: &SampleSupport) -> u32 {
 /// and it only ever cuts alleles that already cleared the bar for *somebody* — but not necessarily
 /// for the sample being counted, which is why "cleared it for this sample" is the condition.
 ///
-/// **And asking that needs no list of what the cap cut.** A sample that cleared the bar for an
-/// allele is, by construction, a sample that put that allele among the cap's candidates — so an
-/// allele this sample earned and the remapping no longer holds can only have been cut by the cap.
-/// The test is therefore `dropped && this sample reached the bar`, asked with the same pooled
-/// reads and the same denominator the fold used, which is what [`one_run_per_allele`] and
-/// [`compared_reads_of`] exist to guarantee.
+/// **The cap's own list is passed in, and it used to be inferred.** The inference was: a sample
+/// that cleared the bar for an allele had, by construction, put that allele among the cap's
+/// candidates, so an allele this sample earned and the remapping no longer holds could only have
+/// been cut by the cap. **That is true on the ordinary path and false on the repeat-tract one**,
+/// where an allele is lost a third way: the per-sample top-`ploidy` cut drops whole repeat
+/// lengths, so a sample can have earned a sequence that admission dropped because its *length*
+/// was not promoted, with the cap never binding. Measured on HG002's 50,000-region Tier set at
+/// 300× before the list was passed: **72 samples came back uncallable at loci where the cap had
+/// cut nothing at all**, each of them a genotype that would have been emitted as missing for a
+/// reason that did not happen.
+///
+/// So `cut_by_the_cap` is the table indices the cap removed, ascending, and the test is
+/// `the cap cut it && this sample reached the bar` — the bar asked with the same pooled reads and
+/// the same denominator the fold used, which is what [`one_run_per_allele`] and
+/// [`compared_reads_of`] exist to guarantee. On the ordinary path the passed list is exactly the
+/// inferred one, so nothing there changes; what changed is that the guarantee no longer rests on
+/// an argument that holds on only one of the two paths.
 ///
 /// # Panics
 ///
@@ -872,7 +898,12 @@ fn leftover_of(
     locus: GenomeRegion,
     remap: &AlleleRemap,
     min_allele_support: MinAltReads,
+    cut_by_the_cap: &[u32],
 ) -> UnmatchedSupport {
+    debug_assert!(
+        cut_by_the_cap.is_sorted(),
+        "the cap's cut list is binary-searched, so it must be ascending"
+    );
     let compared_reads = compared_reads_of(sample);
     let mut leftover = UnmatchedSupport::default();
     for rows in one_run_per_allele(sample, locus) {
@@ -895,7 +926,9 @@ fn leftover_of(
             sample.sample
         );
         leftover.q_sum += mass;
-        if min_allele_support.reached_by(pooled_reads, compared_reads) {
+        let the_cap_cut_it =
+            u32::try_from(allele).is_ok_and(|allele| cut_by_the_cap.binary_search(&allele).is_ok());
+        if the_cap_cut_it && min_allele_support.reached_by(pooled_reads, compared_reads) {
             leftover.earned_reads_cut_by_the_cap = leftover
                 .earned_reads_cut_by_the_cap
                 .saturating_add(pooled_reads);
