@@ -5746,6 +5746,33 @@ mod records_handed_over_as_the_run_finishes_them {
         }
     }
 
+    /// One sample whose reads vary **inside** [`ground_with_a_tract_interleaved`]'s tract, so
+    /// the merge has a tract locus to build.
+    ///
+    /// Forty-five bases from chr1:25, so 25–69 — the whole 41–52 tract with the fifteen bases
+    /// of flank the generator fetches on each side, so its reads pin a repeat length rather
+    /// than coming back as partials. The changed base is at 45, inside the tract. Four reads,
+    /// where the merge's keep rule asks for two.
+    ///
+    /// **The mixed cohort does not vary there**, which is why its own set-aside count is zero
+    /// and why this fixture exists.
+    fn a_sample_varying_inside_the_tract() -> (TempDir, PathBuf) {
+        let mut bases = [b'A'; 45];
+        bases[20] = b'C';
+        let records: Vec<RecordBuf> = (0..4)
+            .map(|read| read_of(&format!("varies-r{read}"), 25, &bases))
+            .collect();
+        indexed_named_bam(
+            &header(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[("rg1", Some("varies"))],
+            ),
+            &records,
+            "varies.bam",
+        )
+    }
+
     /// **A cohort locus at a repeat tract is built, merged, and then not called** — the guard
     /// that stands until the calling loop learns to dispatch on the observation's kind
     /// (`run_ssr_observations.md` §5).
@@ -5766,23 +5793,7 @@ mod records_handed_over_as_the_run_finishes_them {
     fn a_tract_a_sample_varies_at_is_built_and_set_aside_uncalled() {
         let (_reference_dir, reference) = fixture_reference_from_its_index();
 
-        // Forty-five bases from chr1:25, so 25–69 — the whole 41–52 tract with the fifteen
-        // bases of flank the generator fetches on each side, so its reads pin a length rather
-        // than being partials. The changed base is at 45, inside the tract.
-        let mut bases = [b'A'; 45];
-        bases[20] = b'C';
-        let records: Vec<RecordBuf> = (0..4)
-            .map(|read| read_of(&format!("varies-r{read}"), 25, &bases))
-            .collect();
-        let (_bam_dir, bam) = indexed_named_bam(
-            &header(
-                Some("coordinate"),
-                &matching_contigs(),
-                &[("rg1", Some("varies"))],
-            ),
-            &records,
-            "varies.bam",
-        );
+        let (_bam_dir, bam) = a_sample_varying_inside_the_tract();
 
         let called = open_over_the_tract_ground_with(
             std::slice::from_ref(&bam),
@@ -5921,6 +5932,60 @@ mod records_handed_over_as_the_run_finishes_them {
                          {threads} at a {width}-base building region (repetition {repetition})",
                     );
                     assert_eq!(walk_tallies_of(&again), walk_tallies_of(&serial));
+                }
+            }
+        }
+    }
+
+    /// **The tract path is thread-invariant too, and on a cohort where it actually fires** —
+    /// C4's half of the E2 oracle.
+    ///
+    /// The sweep above runs the tract generator at every thread count, but no sample of that
+    /// cohort varies inside its tract, so the merge finds the tract too quiet to build and the
+    /// set-aside count is zero at every pool size: **a comparison of zeros, which any
+    /// implementation passes.** This runs the same sweep on the sample that does vary there, so
+    /// the file, the walk tallies and the set-aside count are compared at a value the tract
+    /// path produced.
+    ///
+    /// **What could go wrong here that the sweep above cannot see.** The tract generator holds
+    /// a cursor and its own reference accessors, one set per sample, and a run's walkers cross
+    /// threads under the merge's parallel cover. A generator that shared a window or a cursor
+    /// between workers would answer differently depending on which worker reached it first —
+    /// and what would move is the tract's own observation, which is exactly what the fixture
+    /// above holds constant at nothing.
+    #[test]
+    fn the_tract_path_is_byte_identical_at_every_thread_count() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_bam_dir, bam) = a_sample_varying_inside_the_tract();
+        let alone = [bam];
+
+        for merge in the_two_widths() {
+            let width = merge.cohort_locus_builder_regions_len.get();
+            let (serial_bytes, serial) = mixed_cohort_vcf_in_a_pool(1, &alone, &reference, merge);
+            assert_eq!(
+                serial.tract_loci_set_aside, 1,
+                "the fixture varies inside the tract, so a locus is built there and set aside \
+                 — without this the comparisons below are of zeros",
+            );
+            for threads in [2, 4, 8, 16] {
+                for repetition in 0..3 {
+                    let (bytes, again) =
+                        mixed_cohort_vcf_in_a_pool(threads, &alone, &reference, merge);
+                    assert_eq!(
+                        bytes, serial_bytes,
+                        "the VCF differs between a pool of 1 and a pool of {threads} at a \
+                         {width}-base building region (repetition {repetition})",
+                    );
+                    assert_eq!(
+                        again.tract_loci_set_aside, serial.tract_loci_set_aside,
+                        "the tract loci set aside at a pool of {threads}",
+                    );
+                    assert_eq!(
+                        walk_tallies_of(&again),
+                        walk_tallies_of(&serial),
+                        "the walk tallies at a pool of {threads} — the tract generator's own \
+                         read-filter counts among them",
+                    );
                 }
             }
         }
