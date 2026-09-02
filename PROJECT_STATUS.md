@@ -19,8 +19,8 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **routing on ng's own floors recovered four in five
-> of the variants the repeat path was losing, and the caller was not touched to do it** — step
+> - **Last completed task (2026-09-02):** **routing on ng's own floors cut the truth variants
+> this caller misses from 195 to 71, and the caller was not touched to do it** — step
 > B4, which completes Milestone B of the
 > [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
 > `ng-ssr-observations`. On the GIAB per-sample benchmark at 30×, pooled over the three samples:
