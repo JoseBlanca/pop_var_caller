@@ -3390,7 +3390,7 @@ mod tests {
 
     fn observation(bases: &[u8], group: u32, reads: u32) -> SequenceObservation {
         SequenceObservation {
-            bases: bases.to_vec(),
+            bases: bases.to_vec().into_boxed_slice(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(group),
             num_obs: reads,
@@ -3414,7 +3414,7 @@ mod tests {
                 start: Position(position),
                 end: Position(position + reference.len() as u64 - 1),
             },
-            reference_bases: reference.to_vec(),
+            reference_bases: reference.to_vec().into_boxed_slice(),
             observations,
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
@@ -3630,7 +3630,7 @@ mod tests {
                 start: Position(200),
                 end: Position(211),
             },
-            reference_bases: b"ATGATGATGATG".to_vec(),
+            reference_bases: b"ATGATGATGATG".to_vec().into_boxed_slice(),
             observations,
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
@@ -3649,7 +3649,7 @@ mod tests {
                 start: Position(100),
                 end: Position(111),
             },
-            reference_bases: b"ATATATATATAT".to_vec(),
+            reference_bases: b"ATATATATATAT".to_vec().into_boxed_slice(),
             observations,
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,

@@ -950,7 +950,7 @@ pub fn decode_record_body(
 ) -> Result<DecodedRecordBody, RecordDecodeError> {
     let mut body = FieldReader::new(bytes);
 
-    let reference_bases: Vec<u8> = body.read_length_prefixed(REFERENCE_BASES)?.into();
+    let reference_bases: Box<[u8]> = body.read_length_prefixed(REFERENCE_BASES)?.into();
 
     let declared_observations = body.read_count(OBSERVATION_COUNT, LEAST_BYTES_PER_OBSERVATION)?;
     let residual_at = body.read_varint(RESIDUAL_OBSERVATION)?;
@@ -976,7 +976,7 @@ pub fn decode_record_body(
     let mut named_elsewhere: Vec<ChainId> = Vec::new();
     let mut one_list: Vec<ChainId> = Vec::new();
     for at in 0..declared_observations {
-        let bases: Vec<u8> = body.read_length_prefixed(OBSERVATION_BASES)?.into();
+        let bases: Box<[u8]> = body.read_length_prefixed(OBSERVATION_BASES)?.into();
         let read_witness = body.read_witness()?;
         let read_group = ReadGroupId(body.read_u32(READ_GROUP)?);
         let num_obs = body.read_u32(READS_SHOWING_THE_SEQUENCE)?;
@@ -2149,10 +2149,10 @@ mod tests {
     fn a_rich_record() -> SampleLocusObservations {
         SampleLocusObservations {
             region: a_region(90_667_287, 90_667_293),
-            reference_bases: b"ACGTACG".to_vec(),
+            reference_bases: b"ACGTACG".to_vec().into_boxed_slice(),
             observations: vec![
                 SequenceObservation {
-                    bases: b"ACGTACG".to_vec(),
+                    bases: b"ACGTACG".to_vec().into_boxed_slice(),
                     read_witness: ReadWitness::Complete,
                     read_group: ReadGroupId(1),
                     num_obs: 137,
@@ -2164,7 +2164,7 @@ mod tests {
                     chain_ids: Vec::new(),
                 },
                 SequenceObservation {
-                    bases: b"ACGTACGTACGTAC".to_vec(),
+                    bases: b"ACGTACGTACGTAC".to_vec().into_boxed_slice(),
                     read_witness: a_witness_with_a_hole(),
                     read_group: ReadGroupId(7),
                     num_obs: 3,
@@ -2176,7 +2176,7 @@ mod tests {
                     chain_ids: Vec::new(),
                 },
                 SequenceObservation {
-                    bases: b"".to_vec(),
+                    bases: Box::from(&b""[..]),
                     read_witness: ReadWitness::Partial {
                         positions: WitnessedLocusPositions::one_run_from_offset_and_length(4, 2)
                             .expect("one run of two positions"),
@@ -2345,7 +2345,7 @@ mod tests {
     fn a_record_with_no_observations_round_trips_and_needs_no_reference() {
         let written = SampleLocusObservations {
             region: a_region(1_000, 1_000),
-            reference_bases: b"ACGT".to_vec(),
+            reference_bases: b"ACGT".to_vec().into_boxed_slice(),
             observations: Vec::new(),
             reads_without_observation: 4,
             reads_discarded_by_cap: 0,
@@ -2528,8 +2528,8 @@ mod tests {
     #[test]
     fn a_long_non_acgt_sequence_round_trips_through_a_multi_byte_length_prefix() {
         let mut written = a_rich_record();
-        written.reference_bases = vec![b'N'; 300];
-        written.observations[0].bases = (0u8..=255).collect::<Vec<_>>();
+        written.reference_bases = vec![b'N'; 300].into_boxed_slice();
+        written.observations[0].bases = (0u8..=255).collect::<Vec<_>>().into_boxed_slice();
         let (decoded, bytes) = round_trip(&written);
         assert_eq!(decoded.record, written);
         assert_eq!(decoded.bytes_read, bytes.len());
@@ -3089,14 +3089,14 @@ mod tests {
     fn the_least_an_observation_and_a_run_can_cost_is_what_the_bounds_say() {
         let empty = SampleLocusObservations {
             region: a_region(1, 1),
-            reference_bases: b"".to_vec(),
+            reference_bases: Box::from(&b""[..]),
             observations: Vec::new(),
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
             kind: LocusKind::Generic,
         };
         let cheapest_observation = SequenceObservation {
-            bases: b"".to_vec(),
+            bases: Box::from(&b""[..]),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
             num_obs: 0,
@@ -3359,7 +3359,7 @@ mod tests {
             .prop_map(
                 |(bases, run, group, obs, forward, steps, mapq, mapq_squared, left)| {
                     SequenceObservation {
-                        bases: bases,
+                        bases: bases.into_boxed_slice(),
                         read_witness: match run.and_then(|(start, length)| {
                             WitnessedLocusPositions::one_run_from_offset_and_length(start, length)
                         }) {
@@ -3391,7 +3391,7 @@ mod tests {
         ) {
             let written = SampleLocusObservations {
                 region: a_region(1_000, 1_001),
-                reference_bases: reference,
+                reference_bases: reference.into_boxed_slice(),
                 observations,
                 reads_without_observation: without,
                 reads_discarded_by_cap: capped,
@@ -3464,7 +3464,7 @@ mod tests {
                 start: Position(90_667_300),
                 end: Position(90_667_300),
             },
-            reference_bases: b"A".to_vec(),
+            reference_bases: b"A".to_vec().into_boxed_slice(),
             observations: Vec::new(),
             reads_without_observation: 9,
             reads_discarded_by_cap: 3,
@@ -3473,7 +3473,7 @@ mod tests {
         a_position_where_every_read_agreed
             .observations
             .push(SequenceObservation {
-                bases: b"A".to_vec(),
+                bases: b"A".to_vec().into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(1),
                 num_obs: 31,
@@ -3491,7 +3491,7 @@ mod tests {
             start: Position(90_670_000),
             end: Position(90_670_011),
         };
-        tract.reference_bases = b"ATATATATATAT".to_vec();
+        tract.reference_bases = b"ATATATATATAT".to_vec().into_boxed_slice();
         tract.kind = LocusKind::Ssr(SsrDetail {
             motif: Motif::new(b"AT").expect("a dinucleotide is a motif"),
             left_flank: b"GGCC".to_vec().into_boxed_slice(),
@@ -3573,7 +3573,7 @@ mod tests {
         nineteen_reads_varied
             .observations
             .push(SequenceObservation {
-                bases: b"ACGTACT".to_vec(),
+                bases: b"ACGTACT".to_vec().into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(1),
                 num_obs: 19,
@@ -3611,7 +3611,7 @@ mod tests {
         let mut live_reads = a_live_set_reader();
         let mut varying = a_rich_record();
         varying.observations.push(SequenceObservation {
-            bases: b"ACGTACT".to_vec(),
+            bases: b"ACGTACT".to_vec().into_boxed_slice(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(1),
             num_obs: 19,
@@ -3654,7 +3654,7 @@ mod tests {
                 start: Position(1_040),
                 end: Position(1_046),
             },
-            reference_bases: b"ACGTACG".to_vec(),
+            reference_bases: b"ACGTACG".to_vec().into_boxed_slice(),
             observations: Vec::new(),
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
@@ -4225,7 +4225,7 @@ mod tests {
         record.observations.truncate(lists.len());
         while record.observations.len() < lists.len() {
             let mut more = record.observations[0].clone();
-            more.bases = vec![b'T'; record.observations.len()];
+            more.bases = vec![b'T'; record.observations.len()].into_boxed_slice();
             record.observations.push(more);
         }
         for (observation, ids) in record.observations.iter_mut().zip(lists) {
@@ -4848,7 +4848,7 @@ mod tests {
                     start: Position(base + forward),
                     end: Position(base + forward + span - 1),
                 },
-                reference_bases: vec![b'A'; span as usize],
+                reference_bases: vec![b'A'; span as usize].into_boxed_slice(),
                 observations: Vec::new(),
                 reads_without_observation: 1,
                 reads_discarded_by_cap: 0,
@@ -4924,7 +4924,7 @@ mod tests {
         for read in 0..300u32 {
             deep.observations.push(SequenceObservation {
                 // Not the reference's own bases, so every one of these reads is non-reference.
-                bases: b"ACGTACT".to_vec(),
+                bases: b"ACGTACT".to_vec().into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(read % 7),
                 num_obs: 1,
@@ -5008,7 +5008,8 @@ mod tests {
             // record is visible here and not only in a property test that happens to differ.
             record.reference_bases = (0..span)
                 .map(|offset| b"ACGT"[((index as u64 + offset) % 4) as usize])
-                .collect::<Vec<_>>();
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
             if index % 4 == 0 {
                 record.observations[0].bases = record.reference_bases.clone();
             }

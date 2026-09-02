@@ -97,9 +97,9 @@ pub(super) mod fixtures {
     ) -> SampleLocusObservations {
         SampleLocusObservations {
             region,
-            reference_bases: reference_bases.to_vec(),
+            reference_bases: Box::from(reference_bases),
             observations: vec![SequenceObservation {
-                bases: observed_bases.to_vec(),
+                bases: Box::from(observed_bases),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),
                 num_obs: 3,
@@ -169,7 +169,7 @@ pub(super) mod fixtures {
         // counts complete observations only — which is why it can go on an existing record.
         let mut deletion = member(region(305, 330), &[b'A'; 26], b"A");
         let mut ran_out = deletion.observations[0].clone();
-        ran_out.bases = b"AAAAAT".to_vec();
+        ran_out.bases = Box::from(&b"AAAAAT"[..]);
         ran_out.num_obs = 2;
         ran_out.chain_ids = vec![4, 5];
         ran_out.q_sum = crate::ng::types::SummedLogError::from_nats(-4.5);

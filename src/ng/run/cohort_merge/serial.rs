@@ -905,7 +905,7 @@ mod tests {
                         let end = at_base + bases - 1;
                         let width = usize::try_from(end - at_base + 1).expect("small");
                         records.push(SampleLocusObservations {
-                            reference_bases: vec![b'A'; width],
+                            reference_bases: vec![b'A'; width].into_boxed_slice(),
                             ..member(region_on(contig, at_base, end), b"A", b"T")
                         });
                         at_base = end + 1 + draw.next(6);

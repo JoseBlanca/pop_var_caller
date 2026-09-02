@@ -141,7 +141,7 @@ const DEFAULT_GRID_BP: u32 = 10_000;
 fn as_an_ng_record_with_synthesised_fields(
     record: &PileupRecord,
 ) -> Option<SampleLocusObservations> {
-    let reference_bases: Vec<u8> = record.alleles.first()?.seq.clone();
+    let reference_bases: Box<[u8]> = record.alleles.first()?.seq.clone().into_boxed_slice();
     let span = u64::try_from(reference_bases.len()).ok()?;
     if span == 0 {
         return None;
@@ -152,7 +152,7 @@ fn as_an_ng_record_with_synthesised_fields(
         .iter()
         .enumerate()
         .map(|(at, allele)| SequenceObservation {
-            bases: allele.seq.clone(),
+            bases: allele.seq.clone().into_boxed_slice(),
             read_witness: a_witness_for(start, at, span),
             read_group: ReadGroupId(
                 ((start + at as u64) % READ_GROUPS_IN_THE_CORPUS as u64) as u32,
@@ -927,7 +927,7 @@ fn check_against_the_prototype(
         "record {at}: reference span, against the prototype"
     );
     assert_eq!(
-        read_back.reference_bases.as_slice(),
+        read_back.reference_bases.as_ref(),
         from_prototype
             .alleles
             .first()
@@ -961,7 +961,7 @@ fn check_against_the_prototype(
             chain_ids,
         } = observation;
         assert_eq!(
-            bases.as_slice(),
+            bases.as_ref(),
             allele.seq.as_slice(),
             "record {at}, allele {which}: sequence, against the prototype"
         );
@@ -1199,10 +1199,10 @@ mod tests {
                 start: Position(100),
                 end: Position(103),
             },
-            reference_bases: b"ACGT".to_vec(),
+            reference_bases: b"ACGT".to_vec().into_boxed_slice(),
             observations: vec![
                 SequenceObservation {
-                    bases: b"ACGT".to_vec(),
+                    bases: b"ACGT".to_vec().into_boxed_slice(),
                     read_witness: ReadWitness::Complete,
                     read_group: ReadGroupId(0),
                     num_obs: 4,
@@ -1214,7 +1214,7 @@ mod tests {
                     chain_ids: vec![7, 9, 11],
                 },
                 SequenceObservation {
-                    bases: b"ACCT".to_vec(),
+                    bases: b"ACCT".to_vec().into_boxed_slice(),
                     read_witness: ReadWitness::Partial {
                         positions: WitnessedLocusPositions::from_half_open_runs([(0, 1), (3, 4)])
                             .expect("two runs with a gap between them"),
@@ -1576,7 +1576,7 @@ mod tests {
                 r.region.end = Position(r.region.end.0 + 1)
             }),
             ("record 0: reference bases", |r| {
-                r.reference_bases = b"AAAA".to_vec()
+                r.reference_bases = b"AAAA".to_vec().into_boxed_slice()
             }),
             ("record 0: locus kind", |r| r.kind = LocusKind::SsrBundle),
             ("record 0: reads without observation", |r| {
@@ -1589,7 +1589,7 @@ mod tests {
                 r.observations.pop();
             }),
             ("observation 0: bases", |r| {
-                r.observations[0].bases = b"TTTT".to_vec()
+                r.observations[0].bases = b"TTTT".to_vec().into_boxed_slice()
             }),
             ("observation 1: read witness", |r| {
                 r.observations[1].read_witness = ReadWitness::Complete
@@ -1653,13 +1653,13 @@ mod tests {
                 r.region.end = Position(r.region.end.0 + 1)
             }),
             ("record 0: reference bases", |r, _| {
-                r.reference_bases = b"AAAA".to_vec()
+                r.reference_bases = b"AAAA".to_vec().into_boxed_slice()
             }),
             ("record 0: allele count", |r, _| {
                 r.observations.pop();
             }),
             ("allele 1: sequence", |r, _| {
-                r.observations[1].bases = b"AAAA".to_vec()
+                r.observations[1].bases = b"AAAA".to_vec().into_boxed_slice()
             }),
             ("allele 0: chain ids", |_, p| {
                 p.alleles[0].chain_ids.push(99)

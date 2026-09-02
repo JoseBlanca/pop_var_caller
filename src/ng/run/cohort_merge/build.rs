@@ -1683,7 +1683,7 @@ fn partials_of_sample(
             partials.push(PartialObservation {
                 witnessed_in_locus,
                 read_group: sequence.read_group,
-                bases: sequence.bases.clone().into_boxed_slice(),
+                bases: sequence.bases.clone(),
                 num_reads: sequence.num_obs,
                 q_sum: sequence.q_sum.nats(),
             });
@@ -2086,7 +2086,7 @@ mod tests {
     /// at a fixed value rather than varied.
     fn sequence(bases: &[u8]) -> SequenceObservation {
         SequenceObservation {
-            bases: bases.to_vec(),
+            bases: Box::from(bases),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
             num_obs: 3,
@@ -2119,7 +2119,7 @@ mod tests {
         );
         SampleLocusObservations {
             region,
-            reference_bases: reference_bases.to_vec(),
+            reference_bases: Box::from(reference_bases),
             observations: vec![sequence(observed_bases)],
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
@@ -2394,7 +2394,7 @@ mod tests {
     #[should_panic(expected = "reference bases for a")]
     fn a_member_whose_reference_does_not_cover_its_region_is_refused() {
         let malformed_member = [SampleLocusObservations {
-            reference_bases: b"AC".to_vec(),
+            reference_bases: Box::from(&b"AC"[..]),
             ..member(region(10, 14), b"ACGTA", b"A")
         }];
         let locus = closed_locus(region(10, 14), &[&malformed_member]);

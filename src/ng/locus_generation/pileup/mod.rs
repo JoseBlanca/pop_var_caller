@@ -121,7 +121,6 @@ mod open_record;
 /// so which reads survive a cap is a fact about the reads and not about the container
 /// that happens to hold them.
 mod read_sampling;
-mod record_pool;
 mod witnessed_ref;
 
 /// Production's own end-to-end suite, copied verbatim and run against the copy —
@@ -248,9 +247,9 @@ mod chain_renaming_tests {
                 start: Position(position),
                 end: Position(position),
             },
-            reference_bases: b"A".to_vec(),
+            reference_bases: Box::from(&b"A"[..]),
             observations: vec![SequenceObservation {
-                bases: b"A".to_vec(),
+                bases: Box::from(&b"A"[..]),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),
                 num_obs: 1,

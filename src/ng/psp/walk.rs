@@ -1795,7 +1795,7 @@ mod tests {
             let mut record = a_record(0, 1 + step * 100, 1);
             let differs = step.is_multiple_of(3);
             if differs {
-                record.observations[0].bases = b"N".to_vec();
+                record.observations[0].bases = Box::new(*b"N");
             }
             varies.push(differs);
             writer.push(&record).expect("in order");

@@ -704,9 +704,9 @@ mod tests {
             .expect("a fixture region fits in memory");
         SampleLocusObservations {
             region,
-            reference_bases: vec![b'A'; width],
+            reference_bases: vec![b'A'; width].into_boxed_slice(),
             observations: vec![SequenceObservation {
-                bases: b"C".to_vec(),
+                bases: Box::from(&b"C"[..]),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),
                 num_obs: 3,

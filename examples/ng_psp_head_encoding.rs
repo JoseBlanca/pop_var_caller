@@ -129,7 +129,7 @@ fn put_head(
 /// One production record as an ng record. `None` for a record with no reference allele, which
 /// has no span and which the record encoder refuses.
 fn as_an_ng_record(record: &PileupRecord) -> Option<SampleLocusObservations> {
-    let reference_bases: Vec<u8> = record.alleles.first()?.seq.clone();
+    let reference_bases: Box<[u8]> = record.alleles.first()?.seq.clone().into_boxed_slice();
     let span = u64::try_from(reference_bases.len()).ok()?;
     if span == 0 {
         return None;
@@ -139,7 +139,7 @@ fn as_an_ng_record(record: &PileupRecord) -> Option<SampleLocusObservations> {
         .alleles
         .iter()
         .map(|allele| SequenceObservation {
-            bases: allele.seq.clone(),
+            bases: allele.seq.clone().into_boxed_slice(),
             // Production has no witness and no read group; every read is treated as having
             // spanned the locus, which is what makes the head's read count comparable.
             read_witness: ReadWitness::Complete,

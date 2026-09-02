@@ -165,9 +165,6 @@ pub(super) fn try_ordinary_column(
     open_records: &OpenPileupRecordTable,
     reference: &dyn RefSeq,
     scratch: &mut FastColumnScratch,
-    // **The record this column is filled into — G1.** A retired record if the merge has
-    // handed one back, a fresh one otherwise; either way every field below is written.
-    records: &mut super::record_pool::RecordPool,
     max_snp_column_depth: usize,
     may_have_mate_overlap: bool,
 ) -> Result<FastColumn, WalkerError> {
@@ -349,77 +346,42 @@ pub(super) fn try_ordinary_column(
         .observations
         .sort_unstable_by_key(|o| (o.base, o.read_group.0));
 
-    // **The record is filled, not built — G1.** What comes out of the pool holds the
-    // previous locus's values in buffers of the previous locus's size; every field below
-    // is overwritten, and the buffers are reused where they are already big enough. At
-    // three reads a position that is four heap allocations this column no longer makes:
-    // the reference base, the observation list, and each observation's bases and chain
-    // ids.
-    let mut record = records.take();
-    record.region = GenomeRegion {
-        contig: ContigId(chrom_id),
-        start: Position(u64::from(walker_pos)),
-        end: Position(u64::from(walker_pos)),
-    };
-    record.reference_bases.clear();
-    record.reference_bases.push(ref_base);
-    // A read that produced no observation did not reach this path — every entry in
-    // `reads` carries a `Match` — and the depth cap is gated out above.
-    record.reads_without_observation = 0;
-    record.reads_discarded_by_cap = 0;
-    record.kind = LocusKind::Generic;
-
-    // **Slots past this column's count go back to the pool, not to the allocator.** A
-    // locus carries one or two observations at three reads a position and the count moves
-    // between them constantly, so shortening the list by dropping the surplus would free
-    // two buffers and allocate them again at the next locus that needed the slot — churn
-    // on exactly the fluctuation that is most common.
-    while record.observations.len() > scratch.observations.len() {
-        // PANIC-FREE: the loop runs only while the list is longer than the target.
-        let surplus = record
-            .observations
-            .pop()
-            .expect("the list is longer than the target, so it is not empty");
-        records.put_observation(surplus);
-    }
-    for (at, o) in scratch.observations.iter_mut().enumerate() {
-        o.chain_ids.sort_unstable();
-        o.chain_ids.dedup();
-        if at == record.observations.len() {
-            record.observations.push(records.take_observation());
-        }
-        // PANIC-FREE: the line above grows the list to `at + 1` when it is short.
-        let slot = &mut record.observations[at];
-        // **The two buffers are taken out, cleared and put back in an exhaustive struct
-        // literal.** Assigning field by field would reuse the buffers just as well and
-        // would let a field added to `SequenceObservation` arrive here holding the
-        // *previous locus's* value, silently. Naming every field means a new one stops
-        // the build instead.
-        let mut bases = std::mem::take(&mut slot.bases);
-        bases.clear();
-        bases.push(o.base);
-        // Copied rather than taken: the scratch keeps its own vector, so the next column
-        // pushes into a buffer that is already the right size instead of growing one from
-        // empty — which is where a third of this lane's allocator time went.
-        let mut chain_ids = std::mem::take(&mut slot.chain_ids);
-        chain_ids.clear();
-        chain_ids.extend_from_slice(&o.chain_ids);
-        *slot = SequenceObservation {
-            bases,
-            read_witness: ReadWitness::Complete,
-            read_group: o.read_group,
-            num_obs: o.num_obs,
-            num_fwd: o.fwd,
-            // Rounded once, here, where the sum is finished — not per read. See
-            // `SummedLogError::from_nats`.
-            q_sum: SummedLogError::from_nats(o.q_sum),
-            mapq_sum: o.mapq_sum,
-            mapq_sum_sq: o.mapq_sum_sq,
-            placed_left: o.placed_left,
-            chain_ids,
-        };
-    }
+    let observations = scratch
+        .observations
+        .iter_mut()
+        .map(|o| {
+            o.chain_ids.sort_unstable();
+            o.chain_ids.dedup();
+            SequenceObservation {
+                bases: vec![o.base].into_boxed_slice(),
+                read_witness: ReadWitness::Complete,
+                read_group: o.read_group,
+                num_obs: o.num_obs,
+                num_fwd: o.fwd,
+                // Rounded once, here, where the sum is finished — not per read. See
+                // `SummedLogError::from_nats`.
+                q_sum: SummedLogError::from_nats(o.q_sum),
+                mapq_sum: o.mapq_sum,
+                mapq_sum_sq: o.mapq_sum_sq,
+                placed_left: o.placed_left,
+                chain_ids: std::mem::take(&mut o.chain_ids),
+            }
+        })
+        .collect();
 
     super::column_census::FAST_COLUMNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Ok(FastColumn::Emitted(record))
+    Ok(FastColumn::Emitted(SampleLocusObservations {
+        region: GenomeRegion {
+            contig: ContigId(chrom_id),
+            start: Position(u64::from(walker_pos)),
+            end: Position(u64::from(walker_pos)),
+        },
+        reference_bases: vec![ref_base].into_boxed_slice(),
+        observations,
+        // A read that produced no observation did not reach this path — every entry in
+        // `reads` carries a `Match` — and the depth cap is gated out above.
+        reads_without_observation: 0,
+        reads_discarded_by_cap: 0,
+        kind: LocusKind::Generic,
+    }))
 }

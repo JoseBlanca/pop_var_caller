@@ -1360,7 +1360,7 @@ mod tally {
             .into_iter()
             .map(
                 |((bases, read_witness, read_group), support)| SequenceObservation {
-                    bases: bases.into_vec(),
+                    bases,
                     read_witness,
                     read_group,
                     num_obs: support.num_obs,

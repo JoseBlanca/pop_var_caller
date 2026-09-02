@@ -2821,7 +2821,7 @@ mod tests {
 
     fn observation(bases: &[u8], group: u32, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
-            bases: bases.to_vec(),
+            bases: Box::from(bases),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(group),
             num_obs,
@@ -2847,7 +2847,7 @@ mod tests {
                 start: Position(start),
                 end: Position(start + reference_bases.len().max(1) as u64 - 1),
             },
-            reference_bases: reference_bases.to_vec(),
+            reference_bases: Box::from(reference_bases),
             observations,
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,

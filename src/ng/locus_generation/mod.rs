@@ -27,9 +27,7 @@ use crate::ng::read::input::{IngestError, SampleReads};
 use crate::ng::ref_seq::RefSeqError;
 use crate::ng::region_typing::segment_criteria::{Motif, SsrSegment};
 use crate::ng::region_typing::{RegionKind, TypedRegion};
-use crate::ng::types::{
-    ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId, SummedLogError,
-};
+use crate::ng::types::{GenomePosition, GenomeRegion, Position, ReadGroupId, SummedLogError};
 use crate::pileup_record::ChainId;
 
 /// One sample's locus: the stretch of genome it covers, and what that sample's reads
@@ -46,7 +44,7 @@ pub struct SampleLocusObservations {
     pub region: GenomeRegion,
     /// The reference (REF) bases over `region` — what a wider-span projection needs
     /// when samples merge.
-    pub reference_bases: Vec<u8>,
+    pub reference_bases: Box<[u8]>,
     /// The distinct sequences the reads showed, each with its support. **Observations,
     /// not alleles** — they become alleles when something calls them.
     pub observations: Vec<SequenceObservation>,
@@ -63,34 +61,6 @@ pub struct SampleLocusObservations {
 }
 
 impl SampleLocusObservations {
-    /// A record holding nothing, for a pool to hand to a fill site that overwrites every
-    /// field — **G1.**
-    ///
-    /// **Not a meaningful locus, and it never becomes one by accident.** Its region names
-    /// contig 0 at position 0, which no walk emits; the only caller is
-    /// [`RecordPool::take`](crate::ng::locus_generation::pileup::record_pool) when nothing
-    /// has been handed back yet, and every fill site rebuilds the record from an exhaustive
-    /// struct literal before it leaves. It exists so a fill site needs no branch for the
-    /// first locus of a walk.
-    ///
-    /// Deliberately **not** a `Default` impl: `Default` is reachable from anywhere and
-    /// would make an empty record look like a legitimate value to construct.
-    #[must_use]
-    pub(crate) fn empty_shell() -> Self {
-        Self {
-            region: GenomeRegion {
-                contig: ContigId(0),
-                start: Position(0),
-                end: Position(0),
-            },
-            reference_bases: Vec::new(),
-            observations: Vec::new(),
-            reads_without_observation: 0,
-            reads_discarded_by_cap: 0,
-            kind: LocusKind::Generic,
-        }
-    }
-
     /// Read depth at each position of `region`, in order — **derived, not stored**.
     ///
     /// A [`Complete`](ReadWitness::Complete) observation counts its `num_obs` at every
@@ -325,7 +295,7 @@ impl SampleLocusObservations {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SequenceObservation {
     /// The observed bases — allele content, in **read** coordinates.
-    pub bases: Vec<u8>,
+    pub bases: Box<[u8]>,
     /// How much of the locus a read of this sequence spanned. **Part of the
     /// identity**: a [`Complete`](ReadWitness::Complete) and an
     /// [`Partial`](ReadWitness::Partial) run of the same `bases` are different
@@ -398,30 +368,6 @@ pub struct SequenceObservation {
 }
 
 impl SequenceObservation {
-    /// An observation holding nothing, for a fill site to overwrite — **G1.**
-    ///
-    /// Its only caller is the record fill in
-    /// [`fast_column`](super::locus_generation::pileup), growing a recycled record's
-    /// observation list when this locus has more observations than the last one did. Like
-    /// [`SampleLocusObservations::empty_shell`], it is not a `Default` impl, because an
-    /// observation of nothing is not a value anything should be able to construct by
-    /// accident.
-    #[must_use]
-    pub(crate) fn empty_shell() -> Self {
-        Self {
-            bases: Vec::new(),
-            read_witness: ReadWitness::Complete,
-            read_group: ReadGroupId(0),
-            num_obs: 0,
-            num_fwd: 0,
-            q_sum: SummedLogError::from_nats(0.0),
-            mapq_sum: 0,
-            mapq_sum_sq: 0,
-            placed_left: 0,
-            chain_ids: Vec::new(),
-        }
-    }
-
     /// Whether these reads showed the reference's own bases over `reference_bases`.
     ///
     /// **The one place the comparison is written** — a byte comparison, which is all it
@@ -1218,7 +1164,7 @@ mod tests {
     /// fields are irrelevant to the depth derivation, so they are fixed.
     fn obs(bases: &[u8], read_witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
-            bases: bases.to_vec(),
+            bases: Box::from(bases),
             read_witness,
             read_group: ReadGroupId(0),
             num_obs,
@@ -1234,7 +1180,7 @@ mod tests {
     fn locus(region: GenomeRegion, observed: Vec<SequenceObservation>) -> SampleLocusObservations {
         SampleLocusObservations {
             region,
-            reference_bases: b"".to_vec(),
+            reference_bases: Box::from(&b""[..]),
             observations: observed,
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
@@ -1699,9 +1645,9 @@ mod tests {
     fn a_locus_of_each_kind_can_be_built() {
         let generic = SampleLocusObservations {
             region: region(100, 100),
-            reference_bases: b"A".to_vec(),
+            reference_bases: Box::from(&b"A"[..]),
             observations: vec![SequenceObservation {
-                bases: b"T".to_vec(),
+                bases: Box::from(&b"T"[..]),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),
                 num_obs: 9,
@@ -1721,7 +1667,7 @@ mod tests {
 
         let ssr = SampleLocusObservations {
             region: region(10_442, 10_461),
-            reference_bases: b"ATATATATATATATATATAT".to_vec(),
+            reference_bases: Box::from(&b"ATATATATATATATATATAT"[..]),
             observations: Vec::new(),
             reads_without_observation: 3,
             reads_discarded_by_cap: 0,
@@ -1737,7 +1683,7 @@ mod tests {
 
         let bundle = SampleLocusObservations {
             region: region(200, 260),
-            reference_bases: b"N".to_vec(),
+            reference_bases: Box::from(&b"N"[..]),
             observations: Vec::new(),
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
@@ -1752,7 +1698,7 @@ mod tests {
     #[test]
     fn same_bases_differ_by_read_witness() {
         let complete = SequenceObservation {
-            bases: b"ATATAT".to_vec(),
+            bases: Box::from(&b"ATATAT"[..]),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
             num_obs: 1,
@@ -1966,7 +1912,7 @@ mod tests {
         let half_the_locus =
             ReadWitness::from_left(3, LocusLen::from_positions(6)).expect("a three-position run");
         let l = SampleLocusObservations {
-            reference_bases: b"ATATAT".to_vec(),
+            reference_bases: Box::from(&b"ATATAT"[..]),
             ..locus(
                 region(1, 6),
                 vec![
@@ -1997,7 +1943,7 @@ mod tests {
         observed: Vec<SequenceObservation>,
     ) -> SampleLocusObservations {
         SampleLocusObservations {
-            reference_bases: reference_bases.to_vec(),
+            reference_bases: Box::from(reference_bases),
             ..locus(region, observed)
         }
     }
