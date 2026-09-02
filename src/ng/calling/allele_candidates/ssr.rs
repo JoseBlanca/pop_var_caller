@@ -330,6 +330,7 @@ pub(super) fn build_ladder(
         sample_reads_per_rung: _,
         promoted_rungs: _,
         rung_is_promoted: _,
+        cap_cut_table_indices: _,
     } = scratch;
     // **Asserted empty rather than emptied here.** `reset_for` already clears the ladder, and the
     // fold calls it, so a `clear()` on this line would be a second owner of one rule — and being
@@ -832,8 +833,10 @@ pub(super) fn admit_promoted_sequences(
         ranked_table_indices,
         ladder,
         rung_is_promoted,
+        cap_cut_table_indices,
         ..
     } = scratch;
+    cap_cut_table_indices.clear();
     assert_eq!(
         rung_is_promoted.len(),
         ladder.rung_count(),
@@ -868,6 +871,10 @@ pub(super) fn admit_promoted_sequences(
             super::compare_best_first(alternative_of(left), alternative_of(right))
         });
         let dropped = ranked_table_indices.len() - allowed_alternatives;
+        // Kept, not discarded: on this path an allele is lost three ways — the bar, the
+        // per-sample top-`ploidy` cut, and the cap — and only the third may no-call a sample.
+        cap_cut_table_indices.extend_from_slice(&ranked_table_indices[allowed_alternatives..]);
+        cap_cut_table_indices.sort_unstable();
         ranked_table_indices.truncate(allowed_alternatives);
         ranked_table_indices.sort_unstable();
         SelectionVerdict::Truncated {
@@ -897,6 +904,7 @@ pub(super) fn admit_promoted_sequences(
                 observation.region,
                 &remap,
                 config.shared.min_allele_support,
+                cap_cut_table_indices,
             )
         })
         .collect();
@@ -1074,7 +1082,11 @@ pub(super) fn locus_is_periodic(
 /// kind at the driver's dispatch, so reaching here with a `Generic` or bundle locus is a routing
 /// bug, and the alternative — scoring a SNP against a stutter model — is a confident wrong answer
 /// rather than a crash.
-pub(super) fn select_ssr(
+/// **Public because the measurement calls it.** `examples/ng_candidate_selection_probe.rs`'s
+/// repeat-tract arm runs the shipped selector over real reads, so a number it prints is a number
+/// the caller itself would produce rather than a re-derivation of one (spec §10). The run
+/// driver's dispatch will be the second caller.
+pub fn select_ssr(
     observation: &CohortObservation,
     config: &SsrSelectionConfig,
     scratch: &mut SelectionScratch,
@@ -2932,5 +2944,51 @@ mod tests {
                 "candidate {candidate:?} came from merge allele {table_index}"
             );
         }
+    }
+
+    /// **A sample that earned a sequence the *cut* removed must still be callable** — only the
+    /// **cap** makes a sample uncallable, and on this path an allele can be dropped for a third
+    /// reason the ordinary path does not have.
+    ///
+    /// The shared leftover infers "the cap cut it" from "this sample earned it and it is gone",
+    /// and on the ordinary path that inference holds: an allele a sample earned always cleared
+    /// the bar, so it was always a candidate for the cap. **Here it does not.** The top-`ploidy`
+    /// cut removes whole rungs, so a sample can have earned a sequence that admission dropped
+    /// because its length was not promoted — with the cap never binding at all.
+    ///
+    /// This locus has one sample with four lengths, all earned, and two copies. The cap is 32 and
+    /// cuts nothing. The two unpromoted lengths must not make the sample uncallable.
+    #[test]
+    fn a_sequence_dropped_by_the_ploidy_cut_does_not_make_a_sample_uncallable() {
+        let observation = tract_of(
+            &[b"ATATAT", b"ATATATAT", b"ATATATATAT", b"ATATATATATAT"],
+            b"AT",
+            vec![sample_showing(
+                0,
+                vec![
+                    row(0, 30, -30.0),
+                    row(1, 30, -30.0),
+                    row(2, 5, -5.0),
+                    row(3, 5, -5.0),
+                ],
+            )],
+        );
+        let selection = selected(&observation, 2);
+        assert_eq!(
+            selection.verdict(),
+            SelectionVerdict::Selected,
+            "the cap of 32 cuts nothing here"
+        );
+        assert_eq!(
+            admitted_bases(&selection),
+            vec![b"ATATAT".to_vec(), b"ATATATAT".to_vec()],
+            "two copies, so the five-read lengths are not promoted"
+        );
+        assert!(
+            !selection.unmatched()[0].genotype_must_be_missing(),
+            "no allele was cut by the cap, so no sample is uncallable — the ploidy cut is not \
+             the cap, and a genotype thrown away here is thrown away for a reason that did not \
+             happen"
+        );
     }
 }

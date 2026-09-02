@@ -85,3 +85,7 @@ benchmarks/tomato2/*
 !benchmarks/tomato2/src/
 !benchmarks/tomato2/regions_n160_200kb.bed
 !benchmarks/tomato2/README.md
+# SSR tomato benchmark: the ng repeat catalog is derived from the reference and
+# is large. It cannot live beside the reference the way GRCh38's does, because
+# `$HOME/genomes` is mounted read-only, so it is built here instead.
+benchmarks/ssr_tomato1/catalog/
