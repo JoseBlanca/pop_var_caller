@@ -19,7 +19,18 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **nomination is complete — ng decides which repeat
+> - **Last completed task (2026-09-02):** **every spelling of a promoted repeat length now stands
+> on its own reads**
+> (step D1 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_selection_d1_2026-09-02.md)).
+> A promoted length says the length is worth calling over; it does not say which sequences at that
+> length are. Each one now faces the same support bar the SNP/indel path asks, with no privileged
+> representative — where the existing STR caller promotes the length's best-supported sequence
+> unconditionally and makes any sibling clear three further gates, one of which demands **three
+> distinct samples with no cohort-size clamp**, so below three samples a second spelling can never
+> be promoted at all. The reference tract is admitted first and asked nothing.
+>
+> - **Earlier (2026-09-02):** **nomination is complete — ng decides which repeat
 > lengths a tract is worth calling over**
 > (step C2 and Checkpoint C of
 > [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
@@ -2935,10 +2946,10 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 ---
 
 #### Candidate alleles at a repeat tract (step 6, STR path) — the ladder, nomination, admission
-- **Status:** fixes-applied — **Milestones B and C complete, at Checkpoint C**: the ladder, the
-  per-sample length histogram, each sample's nomination, the `±1` rescue and the cohort's union
-  are proven on hand-built loci, and the adjacent-length heterozygote test is green. Milestone D —
-  sequence admission, periodicity and the outputs — is next. Branch
+- **Status:** fixes-applied — **Milestones B and C complete and D1 landed**: the ladder, the
+  per-sample length histogram, nomination with its `±1` rescue and union, and the admission of the
+  sequences on a promoted rung are all proven on hand-built loci. D2, the periodicity verdict, is
+  next, and it carries a decision for the owner (below). Branch
   `ng-ssr-calling-loop`, worktree `../pop_var_caller-ssr-calling-loop`, from `main` at `55f9c7de`.
   Runs beside `ng-ssr-observations`, which owns the merge, the walker and the run report; this
   branch owns `calling/` and edits none of those.
@@ -2955,7 +2966,8 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Impl reports:** [B1](doc/devel/reports/implementations/ng_ssr_selection_b1_2026-09-02.md),
   [B2](doc/devel/reports/implementations/ng_ssr_selection_b2_2026-09-02.md),
   [C1](doc/devel/reports/implementations/ng_ssr_selection_c1_2026-09-02.md),
-  [C2](doc/devel/reports/implementations/ng_ssr_selection_c2_2026-09-02.md).
+  [C2](doc/devel/reports/implementations/ng_ssr_selection_c2_2026-09-02.md),
+  [D1](doc/devel/reports/implementations/ng_ssr_selection_d1_2026-09-02.md).
 - **C1 done (nomination, per sample) — and the test spec §13 calls the one production cannot pass
   is green.** A sample with 150 reads at ten repeats and 150 at eleven promotes **both**: nothing
   here reads a neighbour, where production nominates a length only if its reads exceed both

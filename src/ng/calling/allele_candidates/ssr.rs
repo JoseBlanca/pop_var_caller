@@ -15,9 +15,10 @@
 //!
 //! **Under construction, in the order `doc/devel/ng/impl_plan/candidate_alleles_ssr.md` sets.**
 //! This file holds the ladder (its step B1), the path's configuration and the per-sample length
-//! histogram (B2), and nomination — each sample's own repeat counts, the `±1` rescue and the
-//! cohort's union (C1, C2). Sequence admission, periodicity and the entry point `select_ssr` are
-//! the steps after those, and nothing outside this module calls anything here yet.
+//! histogram (B2), nomination — each sample's own repeat counts, the `±1` rescue and the cohort's
+//! union (C1, C2) — and the admission of the sequences on a promoted rung (D1). The periodicity
+//! verdict, the two numbers the genotype prior takes and the entry point `select_ssr` are the
+//! steps after those, and nothing outside this module calls anything here yet.
 //!
 //! **Which is why a non-test build expects everything here to be dead.** The expectation rather
 //! than an `allow`, so that the first real caller — `select_ssr`, which the steps after this one
@@ -26,10 +27,15 @@
 //! failing when it is wrong.
 #![cfg_attr(not(test), expect(dead_code))]
 
-use super::{CandidateSelectionConfig, MaxCandidateAlleles, SelectionScratch};
+use super::{
+    AlleleRemap, CandidateSelectionConfig, LocusSelection, MaxCandidateAlleles, SelectionScratch,
+    SelectionVerdict,
+};
+use crate::ng::calling::CandidateAlleles;
+use crate::ng::locus_generation::{LocusKind, SsrDetail};
 use crate::ng::run::cohort_merge::MinAltReadShare;
 use crate::ng::run::cohort_merge::build::{CohortObservation, SampleSupport};
-use crate::ng::types::{GenomeRegion, Motif, Ploidy};
+use crate::ng::types::{AlleleId, GenomeRegion, Motif, Ploidy};
 
 /// **One locus's observed tract sequences, grouped by how many repeats they carry.**
 ///
@@ -759,6 +765,139 @@ pub(super) fn promote_rungs_for_cohort(
             rung_is_promoted[rung as usize] = true;
         }
     }
+}
+
+/// **Admit the sequences on the promoted rungs that some sample's reads earned** — the last of
+/// nomination's three passes, and the one that turns rungs back into sequences (spec §5;
+/// arch §3.2).
+///
+/// # Every spelling stands on its own reads
+///
+/// A promoted rung says *this length is worth calling over*; it does not say which sequences at
+/// that length are. Each one faces the shared support rule asked of the **sequence** — the same
+/// `max(2 reads, share × a sample's spanning reads)` the ordinary path asks, already folded into
+/// the per-allele summaries by [`summarise_alleles`](super::summarise_alleles).
+///
+/// **No representative is privileged and no recurrence term applies.** Production promotes the
+/// rung's best-supported sequence unconditionally and makes any sibling clear three further
+/// gates — 8 reads, **3 distinct samples**, and a tenth of the rung's reads
+/// ([`candidate_set.rs:169-191`](../../../../src/ssr/cohort/candidate_set.rs)). The three-sample
+/// term has no cohort-size clamp, so **below three samples no second spelling can ever be
+/// promoted** and the mechanism is simply absent. Spec §5 measures what that costs at the class
+/// it matters for: at a heterozygote whose two copies are the same length spelled differently —
+/// 296 of HG002's 695 heterozygous tracts — production offers both at 35.1% of them and this rule
+/// at 86.1%, against a ceiling of 93.6% set by what some read actually carried.
+///
+/// # The reference tract is admitted first and asked nothing
+///
+/// It is exempt from the bar *and* from the promotion test (spec §5, §7), so a tract whose reads
+/// all sit somewhere else still yields a table the caller can use. It is seeded structurally
+/// rather than by reading whether it passed, which it may well have.
+///
+/// # The cap, and the leftover the tract likelihood does not read
+///
+/// Above the cap the list is cut to the best-ranked by [`compare_best_first`](super::compare_best_first)
+/// and the locus is still called — the shared rule, and here the cap is
+/// [`DEFAULT_MAX_CANDIDATE_ALLELES_SSR`] rather than the ordinary path's six.
+///
+/// **The leftover is filled although this path's likelihood never reads its pool.** Spec §8 is
+/// explicit that a read no candidate explains is already carried by the junk term, spread over the
+/// tract lengths the stutter model can reach — so `q_sum` here is computed and unread. What *is*
+/// read is the other count: [`UnmatchedSupport::earned_reads_cut_by_the_cap`](super::UnmatchedSupport::earned_reads_cut_by_the_cap),
+/// which says this sample carried a length the locus is no longer called over and must therefore
+/// be emitted as missing. That rule is the same on both paths, so the leftover is built by the
+/// same [`leftover_of`](super::leftover_of) and not by a second walk.
+///
+/// # Panics
+///
+/// On an empty allele table, and on a promotion flag list that is not this ladder's. Both are
+/// caller bugs whose symptom is a wrong candidate list rather than a crash (spec §8).
+pub(super) fn admit_promoted_sequences(
+    observation: &CohortObservation,
+    detail: &SsrDetail,
+    config: &SsrSelectionConfig,
+    scratch: &mut SelectionScratch,
+) -> LocusSelection {
+    assert!(
+        !observation.alleles.is_empty(),
+        "a cohort locus always holds at least its reference allele, and the repeat tract at {} \
+         holds none",
+        observation.region
+    );
+    let SelectionScratch {
+        per_allele,
+        ranked_table_indices,
+        ladder,
+        rung_is_promoted,
+        ..
+    } = scratch;
+    assert_eq!(
+        rung_is_promoted.len(),
+        ladder.rung_count(),
+        "the promotion flags run parallel to the ladder's rungs, one each, at {}",
+        observation.region
+    );
+
+    // Every alternative that sits on a promoted rung *and* some sample's reads earned, in the
+    // merge table's own order — which is the order it is admitted in, so nothing has to sort it
+    // unless the cap reorders it below.
+    ranked_table_indices.clear();
+    ranked_table_indices.extend(
+        (1..observation.alleles.len())
+            .filter(|&index| {
+                rung_is_promoted[ladder.rung_of_table_index(index)]
+                    && per_allele[index].cleared_the_bar()
+            })
+            .map(|index| {
+                u32::try_from(index).expect("a merge table narrower than four billion alleles")
+            }),
+    );
+
+    let allowed_alternatives = usize::from(config.shared.max_candidate_alleles.alternatives());
+    let verdict = if ranked_table_indices.len() <= allowed_alternatives {
+        SelectionVerdict::Selected
+    } else {
+        let alternative_of = |table_index: u32| super::RankedAlternative {
+            summary: per_allele[table_index as usize],
+            bases: &observation.alleles[table_index as usize],
+        };
+        ranked_table_indices.sort_unstable_by(|&left, &right| {
+            super::compare_best_first(alternative_of(left), alternative_of(right))
+        });
+        let dropped = ranked_table_indices.len() - allowed_alternatives;
+        ranked_table_indices.truncate(allowed_alternatives);
+        ranked_table_indices.sort_unstable();
+        SelectionVerdict::Truncated {
+            dropped: u32::try_from(dropped).expect("a merge table narrower than four billion"),
+        }
+    };
+
+    let mut alleles = CandidateAlleles::new(
+        observation.alleles[0].clone(),
+        LocusKind::Ssr(detail.clone()),
+    );
+    let mut remap = AlleleRemap::with_all_dropped(observation.alleles.len());
+    remap.admit(0, AlleleId::REFERENCE);
+    for &table_index in ranked_table_indices.iter() {
+        let table_index = table_index as usize;
+        let candidate = alleles.admit(observation.alleles[table_index].clone());
+        remap.admit(table_index, candidate);
+    }
+
+    let covering_samples = observation.per_sample.len();
+    let leftovers = observation
+        .per_sample
+        .iter()
+        .map(|sample| {
+            super::leftover_of(
+                sample,
+                observation.region,
+                &remap,
+                config.shared.min_allele_support,
+            )
+        })
+        .collect();
+    LocusSelection::new(alleles, verdict, leftovers, remap, covering_samples)
 }
 
 #[cfg(test)]
@@ -1915,6 +2054,245 @@ mod tests {
             scratch.rung_is_promoted,
             vec![true],
             "one rung, and none of the first locus's three left behind"
+        );
+    }
+
+    // ---- D1: which sequences on a promoted rung are admitted ----
+
+    /// A tract detail with `motif` and short flanks — everything `LocusKind::Ssr` needs.
+    fn detail_of(motif: &[u8]) -> SsrDetail {
+        SsrDetail {
+            motif: Motif::new(motif).expect("a motif within the period range"),
+            left_flank: Box::from(b"CCCCC".as_slice()),
+            right_flank: Box::from(b"GGGGG".as_slice()),
+        }
+    }
+
+    /// Run the whole tract narrowing on `observation`: fold, ladder, nomination, admission.
+    fn admitted_over(
+        observation: &CohortObservation,
+        ploidy: u8,
+        floor: u32,
+        share: f64,
+        cap: u16,
+    ) -> LocusSelection {
+        let rule = support_rule_of(floor, share);
+        let copies = Ploidy::try_new(ploidy).expect("at least one copy");
+        let config = SsrSelectionConfig {
+            shared: CandidateSelectionConfig {
+                min_allele_support: rule,
+                max_candidate_alleles: MaxCandidateAlleles::new(cap).expect("a cap of two or more"),
+            },
+            ..SsrSelectionConfig::at_ploidy(copies)
+        };
+        let mut scratch = SelectionScratch::new();
+        summarise_alleles(observation, rule, &mut scratch);
+        build_ladder(observation, &dinucleotide(), &mut scratch);
+        promote_rungs_for_cohort(observation, &config, &mut scratch);
+        admit_promoted_sequences(observation, &detail_of(b"AT"), &config, &mut scratch)
+    }
+
+    /// The surviving sequences, in candidate-id order.
+    fn admitted_bases(selection: &LocusSelection) -> Vec<Vec<u8>> {
+        selection.alleles().iter().map(<[u8]>::to_vec).collect()
+    }
+
+    /// **Both spellings of one promoted length are admitted, each on its own reads** — the class
+    /// production cannot reach below three samples, and the reason this rule replaced its
+    /// sibling gates.
+    ///
+    /// One sample, two sequences of five repeats differing by an interior base, plus the
+    /// reference at four. Production would promote the rung's best-supported sequence and make
+    /// the other clear 8 reads, **3 distinct samples** and a tenth of the rung — the three-sample
+    /// term has no cohort-size clamp, so at one sample the second spelling can never be promoted.
+    #[test]
+    fn both_spellings_of_a_promoted_length_are_admitted() {
+        let observation = locus_of(
+            &[b"ATATATAT", b"ATATATATAT", b"ATATATATAG"],
+            vec![sample_showing(
+                0,
+                vec![row(0, 4, -4.0), row(1, 9, -9.0), row(2, 9, -9.0)],
+            )],
+        );
+        let selection = admitted_over(&observation, 2, 2, 0.0, 32);
+        assert_eq!(
+            admitted_bases(&selection),
+            vec![
+                b"ATATATAT".to_vec(),
+                b"ATATATATAT".to_vec(),
+                b"ATATATATAG".to_vec()
+            ],
+            "the reference, and both five-repeat spellings on their own reads"
+        );
+        assert_eq!(selection.verdict(), SelectionVerdict::Selected);
+    }
+
+    /// **A sequence on a rung nobody promoted is not admitted, however many reads it has.**
+    ///
+    /// The rungs decide which lengths are in play and the bar decides which spellings on them
+    /// are; a sequence has to pass both. Here the sample resolves its two copies at three and
+    /// four repeats, so the six-repeat sequence stays out even though its reads clear the bar
+    /// comfortably.
+    #[test]
+    fn a_sequence_on_an_unpromoted_rung_is_not_admitted() {
+        let observation = locus_of(
+            &[b"ATATAT", b"ATATATAT", b"ATATATATATAT"],
+            vec![sample_showing(
+                0,
+                vec![row(0, 20, -20.0), row(1, 20, -20.0), row(2, 9, -9.0)],
+            )],
+        );
+        let selection = admitted_over(&observation, 2, 2, 0.0, 32);
+        assert_eq!(
+            admitted_bases(&selection),
+            vec![b"ATATAT".to_vec(), b"ATATATAT".to_vec()],
+            "nine reads at six repeats, on a rung two copies had already accounted for"
+        );
+    }
+
+    /// A sequence on a promoted rung that no sample's reads earned is not admitted — the rung is
+    /// a length, not a licence for every spelling at it.
+    #[test]
+    fn a_sequence_below_the_bar_on_a_promoted_rung_is_not_admitted() {
+        let observation = locus_of(
+            &[b"ATATATAT", b"ATATATATAT", b"ATATATATAG"],
+            vec![sample_showing(
+                0,
+                vec![row(0, 4, -4.0), row(1, 20, -20.0), row(2, 1, -1.0)],
+            )],
+        );
+        let selection = admitted_over(&observation, 2, 2, 0.0, 32);
+        assert_eq!(
+            admitted_bases(&selection),
+            vec![b"ATATATAT".to_vec(), b"ATATATATAT".to_vec()],
+            "one read against a floor of two, on a rung that was promoted"
+        );
+    }
+
+    /// **The reference tract is admitted first and is asked nothing** — not the bar, not the
+    /// promotion test.
+    ///
+    /// Here every read sits at five repeats and the reference at four is promoted by nobody and
+    /// earned by no one. It is still candidate 0, so the locus yields a table the caller can use.
+    #[test]
+    fn the_reference_tract_is_admitted_although_no_read_reached_it() {
+        let observation = locus_of(
+            &[b"ATATATAT", b"ATATATATAT"],
+            vec![sample_showing(0, vec![row(1, 20, -20.0)])],
+        );
+        let selection = admitted_over(&observation, 1, 2, 0.0, 32);
+        assert_eq!(
+            admitted_bases(&selection),
+            vec![b"ATATATAT".to_vec(), b"ATATATATAT".to_vec()]
+        );
+        assert_eq!(
+            selection.remap().candidate_for(0),
+            Some(AlleleId::REFERENCE)
+        );
+    }
+
+    /// Above the cap the list is cut to the best-ranked and the locus is **still called**, with
+    /// the count of cut alternatives reported.
+    #[test]
+    fn above_the_cap_the_worst_ranked_sequences_are_cut_and_the_locus_is_still_called() {
+        let observation = locus_of(
+            &[b"ATATATAT", b"ATATATATAT", b"ATATATATAG", b"ATATATATAC"],
+            vec![sample_showing(
+                0,
+                vec![
+                    row(0, 4, -4.0),
+                    row(1, 30, -30.0),
+                    row(2, 20, -20.0),
+                    row(3, 10, -10.0),
+                ],
+            )],
+        );
+        let selection = admitted_over(&observation, 2, 2, 0.0, 3);
+        assert_eq!(
+            selection.verdict(),
+            SelectionVerdict::Truncated { dropped: 1 },
+            "three alleles counting the reference, so one of the three spellings is cut"
+        );
+        assert_eq!(
+            admitted_bases(&selection),
+            vec![
+                b"ATATATAT".to_vec(),
+                b"ATATATATAT".to_vec(),
+                b"ATATATATAG".to_vec()
+            ],
+            "the ten-read spelling is the one cut, and the survivors keep the merge's order"
+        );
+    }
+
+    /// **A sample whose own sequence the cap cut must be emitted as missing**, and the count that
+    /// says so is filled here — the one part of the shared leftover this path's likelihood reads.
+    ///
+    /// Three samples, each homozygous for a different spelling of five repeats, at 60, 40 and 10
+    /// reads. **All three are homozygous on purpose**: the cap's first ranking key is the largest
+    /// share of one sample's reads, so with a heterozygote in the fixture the ranking turns on
+    /// that share rather than on the read totals, and which sample loses its allele stops being
+    /// obvious from the numbers. Homozygous everywhere, all three shares are 1.0 and the cohort
+    /// read total decides — so the ten-read sample is the one cut, and the one flagged.
+    #[test]
+    fn a_sample_whose_earned_sequence_the_cap_cut_is_marked_uncallable() {
+        let observation = locus_of(
+            &[b"ATATATAT", b"ATATATATAT", b"ATATATATAG", b"ATATATATAC"],
+            vec![
+                sample_showing(0, vec![row(1, 60, -60.0)]),
+                sample_showing(1, vec![row(2, 40, -40.0)]),
+                sample_showing(2, vec![row(3, 10, -10.0)]),
+            ],
+        );
+        let selection = admitted_over(&observation, 2, 2, 0.0, 3);
+        assert_eq!(
+            selection.verdict(),
+            SelectionVerdict::Truncated { dropped: 1 }
+        );
+        let leftovers = selection.unmatched();
+        assert!(!leftovers[0].genotype_must_be_missing());
+        assert!(!leftovers[1].genotype_must_be_missing());
+        assert!(
+            leftovers[2].genotype_must_be_missing(),
+            "the third sample's own ten reads were on the sequence the cap cut"
+        );
+    }
+
+    /// The candidate table is the tract's own kind, carrying the motif and flanks the read model
+    /// needs — not `Generic`, which would send the locus down the SNP/indel scoring arm.
+    #[test]
+    fn the_candidate_table_carries_the_tracts_kind() {
+        let observation = locus_of(
+            &[b"ATATATAT", b"ATATATATAT"],
+            vec![sample_showing(0, vec![row(0, 9, -9.0), row(1, 9, -9.0)])],
+        );
+        let selection = admitted_over(&observation, 2, 2, 0.0, 32);
+        match selection.alleles().kind() {
+            LocusKind::Ssr(detail) => assert_eq!(detail.motif.as_bytes(), b"AT"),
+            other => panic!("a repeat tract's table must be Ssr, not {other:?}"),
+        }
+    }
+
+    /// A tract where every rung was promoted and every sequence earned still admits them in the
+    /// **merge table's** order, which is the order that reaches the VCF's ALT column.
+    #[test]
+    fn the_admitted_order_is_the_merge_tables_and_not_the_ladders() {
+        // Merge order is 6, 3, 4 repeats; the ladder's order is 3, 4, 6.
+        let observation = locus_of(
+            &[b"ATATATATATAT", b"ATATAT", b"ATATATAT"],
+            vec![
+                sample_showing(0, vec![row(1, 20, -20.0), row(2, 20, -20.0)]),
+                sample_showing(1, vec![row(0, 20, -20.0)]),
+            ],
+        );
+        let selection = admitted_over(&observation, 2, 2, 0.0, 32);
+        assert_eq!(
+            admitted_bases(&selection),
+            vec![
+                b"ATATATATATAT".to_vec(),
+                b"ATATAT".to_vec(),
+                b"ATATATAT".to_vec()
+            ],
+            "the reference first, then the merge's indices 1 and 2 in that order"
         );
     }
 }

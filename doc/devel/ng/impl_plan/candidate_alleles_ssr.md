@@ -180,7 +180,7 @@ one production cannot pass — a sample with 150 reads at count 10 and 150 at 11
 
 ### Milestone D — admission, periodicity, and the outputs
 
-**D1. Sequence admission within a promoted rung.**  ☐
+**D1. Sequence admission within a promoted rung.**  ✅
 Every sequence on a promoted rung faces the shared support rule, asked of the sequence: no
 privileged representative, no recurrence term. Then the shared cap and truncation, the shared
 leftover, and the reference tract admitted first and exempt from both.
