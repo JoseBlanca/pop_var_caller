@@ -3065,18 +3065,25 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   rebuilt empty fails. No verdict moves and nothing yet reads either field.
   [Impl report](doc/devel/reports/implementations/ng_ssr_observations_a1_2026-09-02.md).
 - **Open:**
-  - **⚠ Two example targets have been red since 2026-08-11, and one of them is this
-    milestone's own real-data oracle.** `examples/ng_generic_loci_dump.rs` (11 of 13 tests)
-    and `examples/ng_ssr_loci_dump.rs` (10 of 10) fail at fixture setup with
-    `RepeatCatalogError::NotFound { path: ".../ref.fa.repeats.parquet" }`: the fixture writes
-    a FASTA and a BAM into a temporary directory and builds no repeat catalog beside them,
-    which stopped being optional at `8ffb0f84` (*"the live tandem-repeat scan is gone"*) —
-    nothing scans a reference for repeats at call time any more. Bisected: `bb27dd42` green,
-    `8ffb0f84` red, still red at `main`'s tip. **Spec §10 names `ng_ssr_loci_dump` as the
-    check that a tract cohort observation carries the motif the generator minted on real
-    data**, so that confirmation is owed until the fixture builds a catalog. Fixing it is one
-    call to the catalog builder in the two `fixture` helpers; it belongs to whoever owns the
-    dumps, not to this plan's steps.
+  - **⚠ Three tests in the two locus dumps still fail, and each says something different.**
+    Both targets had been red since `8ffb0f84` (*"the live tandem-repeat scan is gone"*,
+    2026-08-11): their fixtures write a FASTA and a BAM into a temporary directory and built
+    no repeat catalog beside them, which stopped being optional when nothing scanned a
+    reference for repeats at call time any more. Building one in each fixture takes them from
+    21 failures to 3, and **the three that remain are behaviour, not setup**:
+    `ng_ssr_loci_dump::a_cap_above_the_depth_is_invisible_and_a_cap_below_it_bites` asks for a
+    30 bp flank against a 15 bp bundle threshold and is refused by the generator's own
+    cross-config check — a fixture that has to choose one of the two numbers;
+    `ng_generic_loci_dump::only_the_rows_that_departed_from_the_reference_carry_a_chain_id`
+    finds a chain id on a whole-footprint reference match; and
+    `a_deletion_across_a_region_boundary_keeps_the_support_a_single_region_walk_gives` finds
+    the same rows carrying **different chain ids** depending on where the regions were cut —
+    every other field identical. The last is the one worth looking at first: chain ids are how
+    a read is linked across records, and a cut-dependent one is a determinism claim.
+  - **⚠ Spec §10's real-data oracle for the merge's kind is still owed**: *"a tract cohort
+    observation reaching a probe carries the same motif the generator minted, on real data
+    (`ng_ssr_loci_dump` ground truth beside the merge's output)"*. A1's tests pin the field on
+    synthetic loci only.
   - **⚠ `benches/psp_writer_perf.rs` panics under `cargo test --all-targets`** —
     `index out of bounds: the len is 3300000 but the index is 3300000` at line 386, in
     `psp_writer_phases/flush_block_one`, which walks its fixture until a block fills and runs

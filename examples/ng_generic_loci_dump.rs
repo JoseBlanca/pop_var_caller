@@ -926,6 +926,10 @@ mod tests {
         let fasta = dir.path().join("ref.fa");
         let bam = dir.path().join("sample.bam");
         write_fasta(&fasta, &bases);
+        // The catalog the dump routes its ground with. A real reference gets one from a
+        // `repeat-catalog` run; a fixture written here has no such run behind it, and since the
+        // live tandem-repeat scan was removed there is no other way to find a repeat.
+        crate::catalog_regions::build_catalog_beside(&fasta);
         write_bam(&bam, bases.len(), reads, read_groups);
         (dir, fasta, bam)
     }

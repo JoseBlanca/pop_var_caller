@@ -468,6 +468,10 @@ mod tests {
         let fasta = dir.path().join("ref.fa");
         let bam = dir.path().join("sample.bam");
         write_fasta(&fasta, &contig);
+        // The catalog the dump reads its tracts from. A real reference gets one from a
+        // `repeat-catalog` run; a fixture written here has no such run behind it, and since the
+        // live tandem-repeat scan was removed there is no other way to find a repeat.
+        crate::catalog_regions::build_catalog_beside(&fasta);
 
         let reads = vec![
             // Four identical reads spanning tract1 + both its flanks (21..74) → complete "AC"×12.
@@ -503,6 +507,10 @@ mod tests {
         let fasta = dir.path().join("ref.fa");
         let bam = dir.path().join("sample.bam");
         write_fasta(&fasta, &contig);
+        // The catalog the dump reads its tracts from. A real reference gets one from a
+        // `repeat-catalog` run; a fixture written here has no such run behind it, and since the
+        // live tandem-repeat scan was removed there is no other way to find a repeat.
+        crate::catalog_regions::build_catalog_beside(&fasta);
 
         let reads = vec![
             in_read_group(read(&contig, "c0", 21, 54), "rg0"),
