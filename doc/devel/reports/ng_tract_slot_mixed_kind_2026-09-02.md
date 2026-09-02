@@ -30,8 +30,22 @@ clamps an observation's **start** to its segment (`clamp.contains(locus.region.s
 anchor plus the run it covers, so a read with a deletion anchored on the last base of a generic
 stretch produces an observation that reaches into whatever comes next.
 
+**And the crossing is deliberate, not an oversight — there is a test that asserts it.**
+`the_halo_keeps_the_support_that_lies_past_the_region_end` (`pileup/generator.rs`) walks a
+region of 1–100 with a read carrying a 40-base deletion anchored at 99, and asserts the emitted
+observation spans **1–139**: thirty-nine bases past the region it was handed. Its reason is
+good — a record keeps the evidence lying beyond the boundary, so a long deletion is called at
+full depth rather than at half of it. So the merge's comment and this test contradict each
+other, and the test is the one describing the code.
+
 Nothing noticed, because until C2 the tract slot was unfilled: there was no tract observation
 for the straddling generic one to chain with.
+
+**The chromosome-end analogy, and why it does not save us.** A deletion cannot run past the end
+of a chromosome, because no read can align there — the *data* forbids it, and no code has to.
+A segment end has no such protection: the reference continues, so the record's fetch succeeds
+and the footprint is whatever the CIGAR says. The invariant the merge relies on is enforced by
+the input at a contig end and by nothing at all at a segment end.
 
 At the position the run aborted on, the routing is:
 
@@ -71,7 +85,17 @@ and it is the reason I am not recommending it.
 **(b) Clip a generic observation's footprint at its segment's end.** This makes the assertion's
 argument true instead of removing it. Cost: a deletion straddling a tract edge loses its tail,
 so the SNP/indel path's calls change at every tract boundary — and B3's byte-identity pin would
-fail, which is that pin doing its job on a different change rather than an objection.
+fail, which is that pin doing its job on a different change rather than an objection. It also
+contradicts `the_halo_keeps_the_support_that_lies_past_the_region_end`, which would have to be
+rewritten rather than deleted.
+
+**What that clip would and would not give up, measured.** The obvious worry is that clipping at
+*every* segment end would cut long deletions in ordinary sequence too. It would not, because
+**two generic segments are never adjacent**: the classification merges an unbroken generic run
+into one region, so a generic segment's neighbour is always a typed one. Over 400 kb of chr1 at
+the calling floors — 457 typed regions, 229 of them generic — there are **zero** adjacent
+generic pairs. So the only reach a clip removes is reach into a tract, a bundle or a satellite:
+exactly the ground the SNP/indel path should not be speaking for.
 
 **(c) The tract's ground is the tract's** — drop a generic observation that reaches into a
 tract outright. Loses the whole deletion rather than its tail.
