@@ -314,7 +314,7 @@ fn deletion_record_has_extended_ref_span() {
     let del = anchor
         .observations
         .iter()
-        .find(|a| a.bases.as_ref() == b"A")
+        .find(|a| a.bases.as_slice() == b"A")
         .expect("DEL allele = anchor only");
     assert_eq!(del.num_obs, 1);
 }
@@ -403,7 +403,7 @@ fn deletion_record_does_not_double_count_ref_reads() {
     let del = anchor
         .observations
         .iter()
-        .find(|a| a.bases.as_ref() == b"C")
+        .find(|a| a.bases.as_slice() == b"C")
         .expect("DEL allele = anchor base only");
     assert_eq!(del.num_obs, 1, "DEL: 1 obs from r2");
 }
@@ -643,7 +643,7 @@ fn paired_mates_with_overlapping_positions_share_chain_id() {
     assert!(
         rec1.observations
             .iter()
-            .all(|observation| observation.bases.as_ref() != b"A"),
+            .all(|observation| observation.bases.as_slice() != b"A"),
         "neither mate matched the reference, so there is no reference observation: {:?}",
         rec1.observations,
     );
@@ -976,12 +976,12 @@ fn mate_overlap_disagree_winner_bq_scaled_by_0_8() {
     let ref_allele = rec
         .observations
         .iter()
-        .find(|a| a.bases.as_ref() == b"A")
+        .find(|a| a.bases.as_slice() == b"A")
         .expect("REF allele present");
     let snp_allele = rec
         .observations
         .iter()
-        .find(|a| a.bases.as_ref() == b"G")
+        .find(|a| a.bases.as_slice() == b"G")
         .expect("SNP allele present");
     assert_eq!(ref_allele.num_obs, 1);
     assert_eq!(snp_allele.num_obs, 1);

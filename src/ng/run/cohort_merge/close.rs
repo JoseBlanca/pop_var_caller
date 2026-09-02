@@ -761,7 +761,7 @@ mod tests {
 
     fn sequence(bases: &[u8], num_obs: u32) -> SequenceObservation {
         SequenceObservation {
-            bases: Box::from(bases),
+            bases: bases.to_vec(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
             num_obs,
@@ -787,7 +787,7 @@ mod tests {
         let width = region.len().max(1) as usize;
         SampleLocusObservations {
             region,
-            reference_bases: vec![b'A'; width].into_boxed_slice(),
+            reference_bases: vec![b'A'; width],
             observations: vec![sequence(&vec![b'C'; width], non_reference_reads)],
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
@@ -810,7 +810,7 @@ mod tests {
         let width = region.len().max(1) as usize;
         SampleLocusObservations {
             region,
-            reference_bases: vec![b'A'; width].into_boxed_slice(),
+            reference_bases: vec![b'A'; width],
             observations: vec![
                 sequence(&vec![b'C'; width], non_reference_reads),
                 sequence(&vec![b'A'; width], reference_reads),
@@ -833,7 +833,7 @@ mod tests {
         // in silently from a base expression.
         SampleLocusObservations {
             region,
-            reference_bases: vec![b'A'; width].into_boxed_slice(),
+            reference_bases: vec![b'A'; width],
             observations: vec![sequence(&vec![b'A'; width], reference_reads)],
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
@@ -1381,7 +1381,7 @@ mod tests {
     fn a_locus_at_the_coordinate_ceiling_is_judged_on_its_true_width() {
         let at_the_ceiling = [SampleLocusObservations {
             region: region(u64::MAX - 3, u64::MAX),
-            reference_bases: Box::from(&b"AAAA"[..]),
+            reference_bases: b"AAAA".to_vec(),
             observations: vec![sequence(b"CCCC", 5)],
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,

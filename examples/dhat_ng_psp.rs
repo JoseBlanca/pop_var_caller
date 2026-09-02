@@ -119,7 +119,7 @@ fn a_record(position: u64, depth: u64, live: &mut Vec<ChainId>) -> SampleLocusOb
             start: Position(position),
             end: Position(position),
         },
-        reference_bases: Box::from(&b"A"[..]),
+        reference_bases: b"A".to_vec(),
         observations,
         reads_without_observation: (position % 7) as u32,
         reads_discarded_by_cap: (position % 3) as u32,
@@ -130,7 +130,7 @@ fn a_record(position: u64, depth: u64, live: &mut Vec<ChainId>) -> SampleLocusOb
 fn an_observation(bases: &[u8], reads: &[ChainId], group: u32) -> SequenceObservation {
     let num_obs = reads.len() as u32;
     SequenceObservation {
-        bases: Box::from(bases),
+        bases: bases.to_vec(),
         read_witness: ReadWitness::Complete,
         read_group: ReadGroupId(group),
         num_obs,

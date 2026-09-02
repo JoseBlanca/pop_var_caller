@@ -116,7 +116,7 @@ fn showed(bases: &[u8], reads: u32) -> SequenceObservation {
 /// folded over the read groups whose reads reached it.
 fn showed_from(bases: &[u8], reads: u32, read_group: ReadGroupId) -> SequenceObservation {
     SequenceObservation {
-        bases: bases.to_vec().into_boxed_slice(),
+        bases: bases.to_vec(),
         read_witness: ReadWitness::Complete,
         read_group,
         num_obs: reads,
@@ -133,7 +133,7 @@ fn showed_from(bases: &[u8], reads: u32, read_group: ReadGroupId) -> SequenceObs
 fn sample_locus(observations: Vec<SequenceObservation>) -> SampleLocusObservations {
     SampleLocusObservations {
         region: region(),
-        reference_bases: Box::from(b"A".as_slice()),
+        reference_bases: b"A".to_vec(),
         observations,
         reads_without_observation: 0,
         reads_discarded_by_cap: 0,
@@ -179,7 +179,7 @@ fn merge(per_sample: &[SampleLocusObservations]) -> CohortObservation {
         locus
             .observations
             .iter()
-            .filter(|observation| observation.bases.as_ref() != b"A")
+            .filter(|observation| observation.bases.as_slice() != b"A")
             .map(|observation| observation.num_obs)
             .sum()
     };
@@ -802,7 +802,7 @@ fn tract_repeat_counts() -> Vec<NonZeroU32> {
 /// emission's charge, and neither the repeat-tract row nor its emission model touches it.
 fn tract_reads(repeats: u32, reads: u32) -> SequenceObservation {
     SequenceObservation {
-        bases: tract_bases(repeats).into_boxed_slice(),
+        bases: tract_bases(repeats),
         read_witness: ReadWitness::Complete,
         read_group: ReadGroupId(0),
         num_obs: reads,

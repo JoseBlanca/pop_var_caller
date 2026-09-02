@@ -997,7 +997,7 @@ mod tests {
             right_flank: Box::from(b"TTTAAA".as_slice()),
         };
         let seen = [SequenceObservation {
-            bases: Box::from(b"ATAT".as_slice()),
+            bases: b"ATAT".to_vec(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
             num_obs: 5,

@@ -1356,12 +1356,11 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
         windowed_coverage: _,
     } = record;
 
-    let reference_bases: Box<[u8]> = alleles
+    let reference_bases: Vec<u8> = alleles
         .first()
         .expect("production creates alleles[0] with the record")
         .seq
-        .clone()
-        .into_boxed_slice();
+        .clone();
 
     let mut drops = ProjectionDrops::default();
     let mut observations: Vec<SequenceObservation> = Vec::with_capacity(alleles.len());
@@ -1385,7 +1384,7 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
         chain_ids.sort_unstable();
         chain_ids.dedup();
         observations.push(SequenceObservation {
-            bases: allele.seq.clone().into_boxed_slice(),
+            bases: allele.seq.clone(),
             read_witness: ReadWitness::Complete,
             read_group: PROJECTED_READ_GROUP,
             num_obs,
@@ -3454,8 +3453,7 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
 fn the_census_counts_a_hole_and_the_positions_inside_it() {
     fn observation(runs: &[(u16, u16)], num_obs: u32) -> SequenceObservation {
         SequenceObservation {
-            bases: vec![b'A'; runs.iter().map(|(s, e)| usize::from(e - s)).sum()]
-                .into_boxed_slice(),
+            bases: vec![b'A'; runs.iter().map(|(s, e)| usize::from(e - s)).sum()],
             read_witness: ReadWitness::Partial {
                 positions: WitnessedLocusPositions::from_half_open_runs(runs.iter().copied())
                     .expect("a non-empty set of runs"),
@@ -3478,7 +3476,7 @@ fn the_census_counts_a_hole_and_the_positions_inside_it() {
                 start: Position(1),
                 end: Position(10),
             },
-            reference_bases: vec![b'A'; 10].into_boxed_slice(),
+            reference_bases: vec![b'A'; 10],
             observations,
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
@@ -3661,7 +3659,7 @@ fn the_projection_says_everything_a_record_says() {
         locus.observations,
         vec![
             SequenceObservation {
-                bases: Box::from(&b"AAGT"[..]),
+                bases: b"AAGT".to_vec(),
                 read_witness: ReadWitness::Complete,
                 read_group: PROJECTED_READ_GROUP,
                 num_obs: 2,
@@ -3673,7 +3671,7 @@ fn the_projection_says_everything_a_record_says() {
                 chain_ids: vec![4, 9],
             },
             SequenceObservation {
-                bases: Box::from(&b"ACGT"[..]),
+                bases: b"ACGT".to_vec(),
                 read_witness: ReadWitness::Complete,
                 read_group: PROJECTED_READ_GROUP,
                 num_obs: 7,

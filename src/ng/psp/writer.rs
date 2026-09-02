@@ -664,10 +664,9 @@ pub(crate) mod tests_support {
     }
 
     pub(crate) fn a_record(contig: u32, start: u64, span: u64) -> SampleLocusObservations {
-        let bases: Box<[u8]> = (0..span)
+        let bases: Vec<u8> = (0..span)
             .map(|offset| b"ACGT"[((start + offset) % 4) as usize])
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+            .collect::<Vec<_>>();
         SampleLocusObservations {
             region: GenomeRegion {
                 contig: ContigId(contig),
@@ -2159,8 +2158,8 @@ mod tests {
             let bases: Vec<u8> = (0..8_000u64)
                 .map(|i| b"ACGT"[((i * 7 + i / 3 + i * i / 5) % 4) as usize])
                 .collect();
-            record.reference_bases = bases.clone().into_boxed_slice();
-            record.observations[0].bases = bases.into_boxed_slice();
+            record.reference_bases = bases.clone();
+            record.observations[0].bases = bases;
             record
         };
 

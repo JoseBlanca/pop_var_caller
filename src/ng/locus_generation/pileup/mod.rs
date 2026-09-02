@@ -247,9 +247,9 @@ mod chain_renaming_tests {
                 start: Position(position),
                 end: Position(position),
             },
-            reference_bases: Box::from(&b"A"[..]),
+            reference_bases: b"A".to_vec(),
             observations: vec![SequenceObservation {
-                bases: Box::from(&b"A"[..]),
+                bases: b"A".to_vec(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),
                 num_obs: 1,

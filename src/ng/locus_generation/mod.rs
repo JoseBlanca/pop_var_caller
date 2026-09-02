@@ -44,7 +44,7 @@ pub struct SampleLocusObservations {
     pub region: GenomeRegion,
     /// The reference (REF) bases over `region` — what a wider-span projection needs
     /// when samples merge.
-    pub reference_bases: Box<[u8]>,
+    pub reference_bases: Vec<u8>,
     /// The distinct sequences the reads showed, each with its support. **Observations,
     /// not alleles** — they become alleles when something calls them.
     pub observations: Vec<SequenceObservation>,
@@ -295,7 +295,7 @@ impl SampleLocusObservations {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SequenceObservation {
     /// The observed bases — allele content, in **read** coordinates.
-    pub bases: Box<[u8]>,
+    pub bases: Vec<u8>,
     /// How much of the locus a read of this sequence spanned. **Part of the
     /// identity**: a [`Complete`](ReadWitness::Complete) and an
     /// [`Partial`](ReadWitness::Partial) run of the same `bases` are different
@@ -1164,7 +1164,7 @@ mod tests {
     /// fields are irrelevant to the depth derivation, so they are fixed.
     fn obs(bases: &[u8], read_witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
-            bases: Box::from(bases),
+            bases: bases.to_vec(),
             read_witness,
             read_group: ReadGroupId(0),
             num_obs,
@@ -1180,7 +1180,7 @@ mod tests {
     fn locus(region: GenomeRegion, observed: Vec<SequenceObservation>) -> SampleLocusObservations {
         SampleLocusObservations {
             region,
-            reference_bases: Box::from(&b""[..]),
+            reference_bases: b"".to_vec(),
             observations: observed,
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
@@ -1645,9 +1645,9 @@ mod tests {
     fn a_locus_of_each_kind_can_be_built() {
         let generic = SampleLocusObservations {
             region: region(100, 100),
-            reference_bases: Box::from(&b"A"[..]),
+            reference_bases: b"A".to_vec(),
             observations: vec![SequenceObservation {
-                bases: Box::from(&b"T"[..]),
+                bases: b"T".to_vec(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),
                 num_obs: 9,
@@ -1667,7 +1667,7 @@ mod tests {
 
         let ssr = SampleLocusObservations {
             region: region(10_442, 10_461),
-            reference_bases: Box::from(&b"ATATATATATATATATATAT"[..]),
+            reference_bases: b"ATATATATATATATATATAT".to_vec(),
             observations: Vec::new(),
             reads_without_observation: 3,
             reads_discarded_by_cap: 0,
@@ -1683,7 +1683,7 @@ mod tests {
 
         let bundle = SampleLocusObservations {
             region: region(200, 260),
-            reference_bases: Box::from(&b"N"[..]),
+            reference_bases: b"N".to_vec(),
             observations: Vec::new(),
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
@@ -1698,7 +1698,7 @@ mod tests {
     #[test]
     fn same_bases_differ_by_read_witness() {
         let complete = SequenceObservation {
-            bases: Box::from(&b"ATATAT"[..]),
+            bases: b"ATATAT".to_vec(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
             num_obs: 1,
@@ -1912,7 +1912,7 @@ mod tests {
         let half_the_locus =
             ReadWitness::from_left(3, LocusLen::from_positions(6)).expect("a three-position run");
         let l = SampleLocusObservations {
-            reference_bases: Box::from(&b"ATATAT"[..]),
+            reference_bases: b"ATATAT".to_vec(),
             ..locus(
                 region(1, 6),
                 vec![
@@ -1943,7 +1943,7 @@ mod tests {
         observed: Vec<SequenceObservation>,
     ) -> SampleLocusObservations {
         SampleLocusObservations {
-            reference_bases: Box::from(reference_bases),
+            reference_bases: reference_bases.to_vec(),
             ..locus(region, observed)
         }
     }

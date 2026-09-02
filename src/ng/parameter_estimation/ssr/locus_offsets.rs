@@ -443,7 +443,7 @@ mod tests {
                 start: Position(1_000),
                 end: Position(1_000 + reference_bases.len().max(1) as u64 - 1),
             },
-            reference_bases: Box::from(reference_bases),
+            reference_bases: reference_bases.to_vec(),
             observations,
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
@@ -458,7 +458,7 @@ mod tests {
     /// One read's worth of observation, at whatever length it showed.
     fn observation(bases: &[u8], num_obs: u32) -> SequenceObservation {
         SequenceObservation {
-            bases: Box::from(bases),
+            bases: bases.to_vec(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
             num_obs,

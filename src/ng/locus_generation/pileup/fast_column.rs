@@ -353,7 +353,7 @@ pub(super) fn try_ordinary_column(
             o.chain_ids.sort_unstable();
             o.chain_ids.dedup();
             SequenceObservation {
-                bases: vec![o.base].into_boxed_slice(),
+                bases: vec![o.base],
                 read_witness: ReadWitness::Complete,
                 read_group: o.read_group,
                 num_obs: o.num_obs,
@@ -376,7 +376,7 @@ pub(super) fn try_ordinary_column(
             start: Position(u64::from(walker_pos)),
             end: Position(u64::from(walker_pos)),
         },
-        reference_bases: vec![ref_base].into_boxed_slice(),
+        reference_bases: vec![ref_base],
         observations,
         // A read that produced no observation did not reach this path — every entry in
         // `reads` carries a `Match` — and the depth cap is gated out above.

@@ -2094,10 +2094,9 @@ mod tests {
     /// nothing held it; the claim was not merely unheld but unachievable.*
     fn a_record(contig: u32, start: u64, span: u64) -> SampleLocusObservations {
         debug_assert!(span > 0, "a record covers at least one reference base");
-        let bases: Box<[u8]> = (0..span)
+        let bases: Vec<u8> = (0..span)
             .map(|offset| b"ACGT"[((start + offset) % 4) as usize])
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+            .collect::<Vec<_>>();
         SampleLocusObservations {
             region: GenomeRegion {
                 contig: ContigId(contig),
@@ -3908,7 +3907,7 @@ mod tests {
         let mut enormous = a_record(0, 500, 1);
         enormous.observations = (0..4_000u32)
             .map(|read| SequenceObservation {
-                bases: vec![b"ACGT"[(read % 4) as usize]; 24].into_boxed_slice(),
+                bases: vec![b"ACGT"[(read % 4) as usize]; 24],
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(read % 7),
                 num_obs: 1,
@@ -4384,9 +4383,7 @@ mod tests {
         let mut bulky = a_record(0, start, 1);
         bulky.observations = (0..4u32)
             .map(|read| SequenceObservation {
-                bases: bases[read as usize * 12..(read as usize + 1) * 12]
-                    .to_vec()
-                    .into_boxed_slice(),
+                bases: bases[read as usize * 12..(read as usize + 1) * 12].to_vec(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(read),
                 num_obs: 1 + read,
@@ -4739,7 +4736,7 @@ mod tests {
         let mut wide = a_record(0, start, 1);
         wide.observations = (0..observations)
             .map(|read| SequenceObservation {
-                bases: vec![b"ACGT"[(read % 4) as usize]; 16].into_boxed_slice(),
+                bases: vec![b"ACGT"[(read % 4) as usize]; 16],
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(read % 7),
                 num_obs: 1,
@@ -4811,7 +4808,7 @@ mod tests {
         let mut enormous = a_record(0, 500, 1);
         enormous.observations = (0..40_000u32)
             .map(|read| SequenceObservation {
-                bases: vec![b"ACGT"[(read % 4) as usize]; 16].into_boxed_slice(),
+                bases: vec![b"ACGT"[(read % 4) as usize]; 16],
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(read % 7),
                 num_obs: 1,
@@ -5432,7 +5429,7 @@ mod tests {
         let mut enormous = a_record(0, 500, 1);
         enormous.observations = (0..2_600u32)
             .map(|read| SequenceObservation {
-                bases: vec![b"ACGT"[(read % 4) as usize]; 12].into_boxed_slice(),
+                bases: vec![b"ACGT"[(read % 4) as usize]; 12],
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(read % 7),
                 num_obs: 1,

@@ -1078,7 +1078,7 @@ impl OpenPileupRecord {
                     mapq_sum_sq,
                 } = observation.support;
                 SequenceObservation {
-                    bases: observation.key.bases.into_boxed_slice(),
+                    bases: observation.key.bases,
                     read_witness: observation.key.read_witness,
                     read_group: observation.key.read_group,
                     num_obs,
@@ -1104,8 +1104,7 @@ impl OpenPileupRecord {
                 .first_mut()
                 .expect("alleles[0] is created with the record and never evicted")
                 .seq,
-        )
-        .into_boxed_slice();
+        );
         alleles.clear();
         let storage = RecordStorage {
             alleles,

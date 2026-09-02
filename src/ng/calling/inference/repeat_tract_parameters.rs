@@ -1682,7 +1682,7 @@ mod tests {
     /// One observation of a tract, seen by `reads` reads that spanned the whole of it.
     fn spanning(bases: &[u8], reads: u32, read_group: u32) -> SequenceObservation {
         SequenceObservation {
-            bases: bases.to_vec().into_boxed_slice(),
+            bases: bases.to_vec(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(read_group),
             num_obs: reads,

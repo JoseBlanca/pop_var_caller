@@ -2403,7 +2403,7 @@ mod tests {
     /// emission model touches it. Zeroing it here would change no number below.
     fn tract_reads(repeats: u32, reads: u32) -> SequenceObservation {
         SequenceObservation {
-            bases: tract_bases(repeats).into_boxed_slice(),
+            bases: tract_bases(repeats),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
             num_obs: reads,
@@ -2432,7 +2432,7 @@ mod tests {
                 crate::ng::locus_generation::LocusLen::from_positions(u64::from(covered) + 4),
             )
             .expect("a reach that covers part of the locus"),
-            bases: bases.into_boxed_slice(),
+            bases: bases,
             read_group: ReadGroupId(0),
             num_obs: reads,
             num_fwd: reads / 2,

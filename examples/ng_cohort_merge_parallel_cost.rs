@@ -95,9 +95,9 @@ fn record_at(position: u64, observed: &[u8]) -> SampleLocusObservations {
             start: Position(position),
             end: Position(position),
         },
-        reference_bases: Box::from(&b"A"[..]),
+        reference_bases: b"A".to_vec(),
         observations: vec![SequenceObservation {
-            bases: Box::from(observed),
+            bases: observed.to_vec(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
             num_obs: 3,
