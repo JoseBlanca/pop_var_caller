@@ -191,6 +191,10 @@ class TractGround:
             for contig, intervals in self._by_contig.items()
         }
 
+    def intervals_by_contig(self) -> dict[str, list[TractInterval]]:
+        """Every tract of the ground, by contig — what a batched reference read needs."""
+        return self._by_contig
+
     def tract_at(self, contig: str, start: int, end: int) -> TractInterval | None:
         """The tract this span touches, or `None` if none does.
 
@@ -267,36 +271,173 @@ class VcfRecord:
         return None
 
 
-    def genotype_of(self, column: int) -> tuple[str, ...] | None:
-        """This record's genotype at one sample column, as its allele sequences.
-
-        A pair of sequences rather than a pair of indices, so two callers whose
-        ALT columns list the same alleles in different orders still compare —
-        and so a genotype can be compared across two files that were never
-        going to agree on an index. Sorted, because a genotype is a multiset:
-        `0/1` and `1/0` are one genotype and phase is not this scorer's
-        question.
+    def genotype_indices(self, column: int) -> tuple[int, ...] | None:
+        """This record's genotype at one sample column, as allele indices.
 
         `None` where the sample is not called (`./.`), where the record has no
         such column, or where an index names an allele the record does not
-        carry — the last being a malformed record rather than a no-call, and
-        one this returns rather than guesses at.
+        carry — the last being a malformed record rather than a no-call.
         """
         if column >= len(self.samples):
             return None
         genotype = self.samples[column].split(":", 1)[0]
         if genotype in (".", "./.", ".|."):
             return None
-        alleles = [self.ref.upper(), *[one.upper() for one in self.alt.split(",")]]
+        allele_count = 1 + len(self.alt.split(","))
         called = []
         for index in genotype.replace("|", "/").split("/"):
             if index == ".":
                 return None
             try:
-                called.append(alleles[int(index)])
-            except (ValueError, IndexError):
+                position = int(index)
+            except ValueError:
                 return None
-        return tuple(sorted(called))
+            if position >= allele_count:
+                return None
+            called.append(position)
+        return tuple(called)
+
+    def allele_bases(self, index: int) -> str:
+        """The bases of one of this record's alleles, the reference at index 0."""
+        if index == 0:
+            return self.ref.upper()
+        return self.alt.split(",")[index - 1].upper()
+
+
+def tract_reference_bases(
+    reference: Path, ground: TractGround, work: Path
+) -> dict[tuple[str, int, int], tuple[int, str]]:
+    """Every tract's reference bases, in one `samtools faidx` call.
+
+    **The reference is opened because nothing else can settle the comparison.**
+    Two sides describe one tract with records at different positions and over
+    different spans — and the truth set writes a two-allele heterozygote as two
+    phased records where the caller writes one multi-allelic record. The only
+    representation both can be brought into is the tract's own sequence, and
+    building that needs the bases between the records.
+
+    One batched call rather than one a tract: 20,000 regions is 20,000
+    subprocesses the other way.
+
+    **The window reaches [`ANCHOR_PAD`] bases either side of the tract**, because
+    a left-aligned insertion at a repeat's first base is anchored on the base
+    *before* it. Without the pad every such record falls outside the window and
+    the tract is scored as incomparable — measured, that was 3,354 of 3,648
+    homopolymer tracts.
+
+    Returned with each window's own first position rather than the tract's, so
+    a tract at a contig's very start — where the pad is clipped — still indexes
+    correctly instead of shifting every allele by one.
+    """
+    regions = work / "tract_regions.txt"
+    keys: list[tuple[tuple[str, int, int], int]] = []
+    with open(regions, "w", encoding="utf-8") as handle:
+        for contig, intervals in sorted(ground.intervals_by_contig().items()):
+            for one in intervals:
+                # BED is half-open and zero-based, so `one.start` is already the
+                # one-based position of the base *before* the tract.
+                first = max(1, one.start + 1 - ANCHOR_PAD)
+                keys.append(((contig, one.start, one.end), first))
+                handle.write(f"{contig}:{first}-{one.end + ANCHOR_PAD}\n")
+    completed = subprocess.run(
+        ["samtools", "faidx", str(reference), "-r", str(regions)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(f"samtools faidx failed:\n{completed.stderr.strip()}")
+    bases: dict[tuple[str, int, int], tuple[int, str]] = {}
+    current: list[str] = []
+    index = -1
+    for line in completed.stdout.splitlines():
+        if line.startswith(">"):
+            if index >= 0:
+                key, first = keys[index]
+                bases[key] = (first, "".join(current).upper())
+            current = []
+            index += 1
+        else:
+            current.append(line)
+    if index >= 0:
+        key, first = keys[index]
+        bases[key] = (first, "".join(current).upper())
+    return bases
+
+
+def haplotypes_over_tract(
+    records: list[VcfRecord],
+    genotypes: list[tuple[int, ...]],
+    tract: tuple[int, int],
+    reference: str,
+    phased: bool,
+) -> set[tuple[str, ...]] | None:
+    """Every tract sequence pair this side's records could describe.
+
+    A **set** of pairs, because an unphased side with several records does not
+    say which allele sits on which copy: every assignment is returned and the
+    two sides agree if any pair is shared. A phased side returns the one pair
+    its phase names.
+
+    **Only the records carrying a non-reference allele on a copy are applied to
+    it**, and that is what makes the common shape work rather than be refused.
+    A truth set writes a two-allele heterozygote as two records at the same
+    position — `AGT -> A` phased `0|1` and `AGTGTGT -> A` phased `1|0`. As
+    edits they overlap and cannot both be applied; as haplotypes they do not,
+    because each copy takes a non-reference allele from exactly one of them.
+    Refusing on the records' spans alone threw out 1,412 of this benchmark's
+    tracts, which are precisely the two-allele heterozygotes.
+
+    `None` where a copy really does need two overlapping edits at once, or where
+    a record reaches outside the window — a refusal rather than a guess.
+    """
+    start, end = tract
+    for record in records:
+        if record.pos < start or record.end > end:
+            return None
+    copies = len(genotypes[0])
+    if any(len(one) != copies for one in genotypes):
+        return None
+
+    def sequence(assignment: list[int]) -> tuple[str, ...] | None:
+        built = []
+        for copy in range(copies):
+            applied = [
+                (record, genotypes[index][(copy + assignment[index]) % copies])
+                for index, record in enumerate(records)
+            ]
+            applied = [(record, allele) for record, allele in applied if allele != 0]
+            applied.sort(key=lambda pair: pair[0].pos)
+            for (left, _), (right, _) in zip(applied, applied[1:]):
+                if left.end >= right.pos:
+                    return None
+            out = []
+            cursor = start
+            for record, allele in applied:
+                out.append(reference[cursor - start : record.pos - start])
+                out.append(record.allele_bases(allele))
+                cursor = record.end + 1
+            out.append(reference[cursor - start :])
+            built.append("".join(out))
+        return tuple(sorted(built))
+
+    if phased or len(records) == 1:
+        one = sequence([0] * len(records))
+        return None if one is None else {one}
+    # Unphased with several records: every way of rotating each record's called
+    # alleles across the copies, with the first held fixed so one assignment is
+    # not counted twice.
+    pairs: set[tuple[str, ...]] = set()
+    for mask in range(copies ** (len(records) - 1)):
+        assignment = [0] * len(records)
+        remaining = mask
+        for index in range(1, len(records)):
+            assignment[index] = remaining % copies
+            remaining //= copies
+        one = sequence(assignment)
+        if one is not None:
+            pairs.add(one)
+    return pairs or None
 
 
 def sample_columns_of(path: Path) -> list[str]:
@@ -592,64 +733,72 @@ class GenotypeCell:
     tracts_both_call: int = 0
     genotype_right: int = 0
     no_call: int = 0
+    not_comparable: int = 0
+    truth_allele_never_offered: int = 0
     called_homozygous_truth_heterozygous: int = 0
     called_heterozygous_truth_homozygous: int = 0
     wrong_some_other_way: int = 0
-    truth_allele_never_offered: int = 0
 
-    def score(
+    def score_haplotypes(
         self,
-        called: tuple[str, ...],
-        expected: tuple[str, ...],
+        called: set[tuple[str, ...]],
+        expected: set[tuple[str, ...]],
         offered: frozenset[str],
     ) -> None:
-        """Charge one comparison to the right counters.
+        """Charge one tract to the right counter.
 
-        `offered` is every allele the caller's record listed — its REF and its
-        whole ALT column, whether or not this sample was given a copy. **A wrong
-        genotype whose truth allele is not in it is the ceiling on what a
-        discovery round can fix**: the allele was never on the table, so no
-        genotype over that table could have been right. A wrong genotype whose
-        alleles were all offered is a different failure, and adding more alleles
-        cannot help it.
+        Each side offers every tract-sequence pair its records could describe —
+        one pair where the phase is known, several where it is not — and they
+        agree if any pair is shared.
+
+        **The four wrong-answer counters partition the errors by what would have
+        to change to fix them**:
+
+        - `truth_allele_never_offered` — a sequence the truth carries is not
+          among the ones the caller's records name, so no genotype over that set
+          could have been right. **This is candidate selection's**, and it is
+          the ceiling on what a wider set can buy.
+        - the three below are errors made over a set that *did* hold the right
+          sequences, so they are the genotyper's: the likelihood and the prior
+          picked the wrong pair from a set containing the right one.
         """
         self.tracts_both_call += 1
-        if called == expected:
+        if called & expected:
             self.genotype_right += 1
             return
-        if any(allele not in offered for allele in expected):
+        wanted = {sequence for pair in expected for sequence in pair}
+        if any(sequence not in offered for sequence in wanted):
             self.truth_allele_never_offered += 1
-        called_homozygous = len(set(called)) == 1
-        truth_homozygous = len(set(expected)) == 1
-        if called_homozygous and not truth_homozygous:
+            return
+        homozygous_call = all(len(set(pair)) == 1 for pair in called)
+        homozygous_truth = all(len(set(pair)) == 1 for pair in expected)
+        if homozygous_call and not homozygous_truth:
             self.called_homozygous_truth_heterozygous += 1
-        elif truth_homozygous and not called_homozygous:
+        elif homozygous_truth and not homozygous_call:
             self.called_heterozygous_truth_homozygous += 1
         else:
             self.wrong_some_other_way += 1
 
 
-def best_record_per_tract(
+def records_by_tract(
     records: list[VcfRecord], ground: TractGround
-) -> dict[tuple[str, int, int], VcfRecord]:
-    """One record a tract — the highest-QUAL one where a caller wrote several.
+) -> dict[tuple[str, int, int, int], list[VcfRecord]]:
+    """Every record a tract holds, by tract — **all of them, not the best one**.
 
-    **A tract is the unit here for the same reason it is the calibration's**: a
-    genotype at a repeat tract is a statement about that tract's two lengths,
-    and a caller that spelled it across two records has still made one such
-    statement. Ties on QUAL keep the earlier record, so the choice is a
-    function of the file rather than of the dictionary's order.
+    A tract can carry several records a side and they are not alternatives: the
+    truth set writes a two-allele heterozygote as two phased records where the
+    caller writes one multi-allelic record, and a tract can hold a substitution
+    at one end and a length change at the other. Keeping one a tract compares
+    different events and calls the result a genotype error.
     """
-    best: dict[tuple[str, int, int], VcfRecord] = {}
+    out: dict[tuple[str, int, int, int], list[VcfRecord]] = {}
     for record in records:
         tract = ground.tract_at(record.contig, record.pos, record.end)
         if tract is None:
             continue
-        key = (record.contig, tract.start, tract.end)
-        held = best.get(key)
-        if held is None or record.qual > held.qual:
-            best[key] = record
-    return best
+        key = (record.contig, tract.start, tract.end, tract.period)
+        out.setdefault(key, []).append(record)
+    return out
 
 
 def compare_genotypes(
@@ -658,45 +807,93 @@ def compare_genotypes(
     ground: TractGround,
     query_column: int,
     truth_column: int,
+    tract_bases: dict[tuple[str, int, int], tuple[int, str]],
 ) -> dict[str, GenotypeCell]:
-    """How often the caller's genotype at a tract is the truth's.
+    """How often the caller says the tract holds what the truth says it holds.
 
     **This is the question a discovery round moves, and the site-level ones are
     not.** Admitting an allele that was hiding under stutter does not usually
     add a variant site — the site was already variant — it turns a homozygote
-    into the heterozygote it really is. A measurement that counts sites cannot
-    see that at all, and a precision-and-recall sweep over alleles sees only
-    half of it (the allele appears; whether the sample was given a copy is a
-    different fact).
+    into the heterozygote it really is. A calibration that counts sites cannot
+    see that at all, and the threshold sweep sees only half of it.
 
-    Scored where **both sides call the tract**, because a genotype the caller
-    did not write is a recall question and is already counted as one. The
-    genotypes are compared as multisets of allele sequences, so two files that
-    order their ALT columns differently still agree, and phase is ignored.
+    **Compared as the tract's own two sequences, rebuilt from the reference.**
+    Nothing shorter works, and three attempts at something shorter each gave a
+    wrong answer on this benchmark's own tandem-repeat ground:
+
+    - **Allele strings, as written.** Two records describing one event over
+      different spans — `AGT -> A` against `AGTGTGT -> A,AGTGT` — do not share a
+      string, and `bcftools norm` does not bring them together because it trims
+      each record against its own ALT column. 324 of 6,303 tracts read as
+      genotype errors that were only a difference of spelling.
+    - **Padding both records to their union span.** Fixes that pair and still
+      fails wherever the two sides put their records at different places in the
+      tract, because the span between them is in neither record's REF.
+    - **One record a tract a side.** Throws away 1,711 tracts of 6,303, and the
+      1,412 of them where the truth writes two phased records against the
+      caller's one multi-allelic record are exactly the two-allele
+      heterozygotes — the class most worth measuring.
+
+    So each side's records are laid on the tract's reference bases and the two
+    resulting sequences compared. A side whose records leave the phase open
+    offers every assignment, and the two agree if any pair is shared.
     """
-    truth_by_tract = best_record_per_tract(truth, ground)
-    query_by_tract = best_record_per_tract(query, ground)
+    truth_by_tract = records_by_tract(truth, ground)
+    query_by_tract = records_by_tract(query, ground)
     cells: dict[str, GenotypeCell] = {}
-    for key, truth_record in truth_by_tract.items():
-        tract = ground.tract_at(truth_record.contig, truth_record.pos, truth_record.end)
-        if tract is None:
-            continue
-        cell = cells.setdefault(period_class_of(tract.period), GenotypeCell())
-        expected = truth_record.genotype_of(truth_column)
-        if expected is None:
+    for key, truth_records in truth_by_tract.items():
+        contig, start, end, period = key
+        cell = cells.setdefault(period_class_of(period), GenotypeCell())
+        truth_genotypes = [record.genotype_indices(truth_column) for record in truth_records]
+        if any(one is None for one in truth_genotypes):
             continue
         cell.tracts_truth_calls += 1
-        query_record = query_by_tract.get(key)
-        if query_record is None:
+        query_records = query_by_tract.get(key)
+        if query_records is None:
             continue
-        called = query_record.genotype_of(query_column)
-        if called is None:
+        query_genotypes = [record.genotype_indices(query_column) for record in query_records]
+        if any(one is None for one in query_genotypes):
             cell.no_call += 1
             continue
-        offered = frozenset(
-            [query_record.ref.upper(), *[one.upper() for one in query_record.alt.split(",")]]
+        window_bases = tract_bases.get((contig, start, end))
+        if window_bases is None:
+            cell.tracts_both_call += 1
+            cell.not_comparable += 1
+            continue
+        first, reference = window_bases
+
+        # **A truth record is phased where its own genotype separator says so**,
+        # and this truth set writes `0|1`. An unphased side offers every
+        # assignment instead.
+        truth_phased = all("|" in record.samples[truth_column] for record in truth_records)
+        window = (first, first + len(reference) - 1)
+        expected = haplotypes_over_tract(
+            truth_records,
+            [one for one in truth_genotypes if one is not None],
+            window,
+            reference,
+            truth_phased,
         )
-        cell.score(called, expected, offered)
+        called = haplotypes_over_tract(
+            query_records,
+            [one for one in query_genotypes if one is not None],
+            window,
+            reference,
+            False,
+        )
+        if expected is None or called is None:
+            cell.tracts_both_call += 1
+            cell.not_comparable += 1
+            continue
+
+        offered = frozenset(
+            reference[: record.pos - window[0]]
+            + record.allele_bases(index)
+            + reference[record.end - window[0] + 1 :]
+            for record in query_records
+            for index in range(1 + len(record.alt.split(",")))
+        )
+        cell.score_haplotypes(called, expected, offered)
     return cells
 
 
@@ -717,8 +914,8 @@ SWEEP_HEADER = (
 GENOTYPE_HEADER = (
     "arm\tground\tdepth\tsample\tperiod_class\ttracts_truth_calls\t"
     "tracts_both_call\tgenotype_right\tno_call\tgenotype_accuracy\t"
-    "called_hom_truth_het\tcalled_het_truth_hom\twrong_some_other_way\t"
-    "truth_allele_never_offered\n"
+    "not_comparable\ttruth_allele_never_offered\tcalled_hom_truth_het\t"
+    "called_het_truth_hom\twrong_some_other_way\n"
 )
 
 
@@ -852,6 +1049,7 @@ def main() -> int:
                     ground,
                     query_samples.index(wanted),
                     truth_samples.index(in_truth),
+                    tract_reference_bases(args.reference, ground, work),
                 )
                 genotype_note = (
                     f"query {wanted} against truth {in_truth}"
@@ -892,9 +1090,10 @@ def main() -> int:
                 f"{period_class}\t{cell.tracts_truth_calls}\t{cell.tracts_both_call}\t"
                 f"{cell.genotype_right}\t{cell.no_call}\t"
                 f"{ratio(cell.genotype_right, cell.tracts_both_call)}\t"
+                f"{cell.not_comparable}\t{cell.truth_allele_never_offered}\t"
                 f"{cell.called_homozygous_truth_heterozygous}\t"
                 f"{cell.called_heterozygous_truth_homozygous}\t"
-                f"{cell.wrong_some_other_way}\t{cell.truth_allele_never_offered}\n"
+                f"{cell.wrong_some_other_way}\n"
             )
         append_rows(args.genotype_out, GENOTYPE_HEADER, genotype_rows)
         print(f"  genotypes: {genotype_note}", file=sys.stderr)

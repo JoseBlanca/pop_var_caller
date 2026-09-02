@@ -29,13 +29,11 @@ further takes the 2 points back** — precision peaks at 0.850 at QUAL 50 and fa
 QUAL 200, within a point of the 0.825 it started at, having shed more than half the recall. At
 period 2 and above the gate never buys more than 0.2 points at all.
 
-**And the quality score is not where ng is weak at a tract — the genotypes are** (§5, added after
-the owner asked for it). Where the truth set and ng both call a tract on the tandem-repeat
-benchmark at 30×, the genotype is right 0.771 of the time at homopolymers and 0.628 at period 2
-and above, and going to 50× moves those to 0.782 and 0.630. **In 58 of every 100 wrong
-homopolymer genotypes one of the truth's alleles is not in ng's ALT column at all**, so no
-genotype over that table could have been right. That is the ceiling on what a wider candidate set
-could buy, and it is what Milestone E is aimed at.
+**The genotypes are a separate question and §5 answers it** (added after the owner asked). Where
+the truth set and ng both call a tract on the tandem-repeat benchmark at 30×, the genotype is
+right 0.886 of the time at homopolymers and 0.903 at period 2 and above. **Six of every ten
+remaining errors are an allele ng never put on the table**, which is the ceiling on what a wider
+candidate set can buy — 6.9 and 6.5 points — and what Milestone E is aimed at.
 
 ---
 
@@ -150,62 +148,86 @@ with `AC=0`. The other 700 are alleles a sample was given and the truth set does
 
 ---
 
-## 5. The genotypes, which none of the above measures — and where ng is actually weak
+## 5. The genotypes, which none of the above measures
 
-**Added after the owner asked for it, and it changes what the rest of this report is worth.**
-QUAL is a claim about the site; every number above is about whether a variant is there at all.
-At a repeat tract the interesting answer is *which two lengths*, and that is a different
-question. Scored where the truth set and ng both call the tract, genotypes compared as multisets
-of allele sequences after left-alignment:
+**Added after the owner asked for it. The first three versions of this measurement were wrong,
+and the corrections are recorded below because each of them looked plausible.** QUAL is a claim
+about the site; every number above is about whether a variant is there at all. At a repeat tract
+the interesting answer is *which two lengths*, and that is a different question.
 
-| ground | depth | period | tracts both call | genotype right | accuracy |
+**Compared as the tract's own two sequences**, rebuilt from the reference by laying each side's
+records on it — see [the instrument](../../../benchmarks/lib/tract_qual_experiment.py)'s
+`compare_genotypes`. Scored where the truth set and ng both call the tract; a tract whose records
+cannot be laid on it (a copy needing two overlapping edits at once) is counted apart and left out
+of the denominator.
+
+| ground | depth | period | comparable tracts | genotype right | accuracy |
 |---|---|---|---:|---:|---:|
-| tandem repeat | 30× | homopolymer | 3 648 | 2 813 | **0.771** |
-| | | period 2+ | 2 655 | 1 668 | **0.628** |
-| | 50× | homopolymer | 3 678 | 2 875 | 0.782 |
-| | | period 2+ | 2 684 | 1 691 | 0.630 |
-| per-sample | 30× | homopolymer | 116 | 110 | 0.948 |
-| | | period 2+ | 40 | 33 | 0.825 |
-| simulator, slippage 0.10 | 30× | period 2+ | 1 682 | 1 598 | 0.950 |
-| simulator, slippage 0.25 | 30× | period 2+ | 1 683 | 1 367 | 0.812 |
+| tandem repeat | 30× | homopolymer | 3 515 | 3 113 | **0.886** |
+| | | period 2+ | 2 543 | 2 297 | **0.903** |
+| | 50× | homopolymer | 3 542 | 3 170 | 0.895 |
+| | | period 2+ | 2 570 | 2 347 | 0.913 |
+| per-sample | 30× | homopolymer | 116 | 113 | 0.974 |
+| | | period 2+ | 35 | 34 | 0.971 |
+| simulator, slippage 0.10 | 30× | period 2+ | 1 682 | 1 680 | 0.999 |
+| simulator, slippage 0.25 | 30× | period 2+ | 1 683 | 1 569 | 0.932 |
+| simulator, slippage 0.25, true slippage supplied | 30× | period 2+ | 1 677 | 1 660 | **0.990** |
 
-**This is where ng is weak at a tract, and neither the calibration nor the sweep sees it.** On
-real tandem repeats it gets the genotype right at 0.63 to 0.77 while its site-level recall on the
-same ground is 0.69 to 0.81 and its quality score is well calibrated. **More depth barely helps**:
-30× to 50× moves homopolymers 0.771 to 0.782 and period 2+ 0.628 to 0.630.
+Between 3 and 4 tracts in 100 are not comparable at either depth (133 and 112 at 30×).
 
-**The existing repeat-tract caller is worse on the same ground and calls half as many tracts.**
-At period 2+ and 30× it is right at 0.579 on 1,222 tracts, with 478 more no-called, against ng's
-0.628 on 2,655.
+**Against the existing repeat-tract caller at period 2 and above, the two are level on accuracy
+and not on reach**: 0.913 on 1,181 tracts against ng's 0.903 on 2,543. Its homopolymer row is 31
+tracts, because its catalog holds motif periods 2 to 6 and no homopolymers at all.
 
-### Why the wrong genotypes are wrong, and it is the number Milestone E needs
+**And the slippage numbers matter here where they barely moved anything else.** On the simulator
+at a true slippage of 0.25 against the model's assumed 0.10, handing the caller the model the
+reads were drawn under takes period-2+ genotype accuracy from 0.932 to 0.990 — where the same
+switch moved site-level precision by five points and recall by none (§7).
 
-Of ng's wrong genotypes at 30×, split by what went wrong:
+### What the remaining errors are, and what each would take to fix
 
-| period | wrong | called homozygous, truth heterozygous | truth allele **never offered** |
-|---|---:|---:|---:|
-| homopolymer | 835 | 76 | **487** |
-| period 2+ | 987 | 51 | **612** |
+Comparable errors at 30×, a partition by what would have to change:
 
-**In 58 of every 100 wrong homopolymer genotypes and 62 of every 100 at period 2+, one of the
-truth's alleles is not in ng's ALT column at all.** The allele was never on the table, so no
-genotype over that table could have been right. That is the ceiling on what a wider candidate set
-could buy: up to 13 points of homopolymer genotype accuracy and 23 points at period 2+.
+| period | errors | a truth sequence was **never offered** | called heterozygous, truth homozygous | called homozygous, truth heterozygous | other |
+|---|---:|---:|---:|---:|---:|
+| homopolymer | 402 | **242** | 86 | 27 | 47 |
+| period 2+ | 246 | **165** | 51 | 14 | 16 |
 
-**It is a ceiling and not a forecast, for one reason worth stating.** A discovery round can only
-admit a sequence some read showed; a truth allele no read carried is out of its reach as much as
-it is out of selection's, and the selection work already measured three quarters of its own
-misses to be of that kind
-([`ng_ssr_selection_e2_2026-09-02.md`](implementations/ng_ssr_selection_e2_2026-09-02.md)).
+**Six errors in ten are an allele the caller never put on the table**, so no genotype over that
+table could have been right. That is the ceiling on what a wider candidate set can buy: **6.9
+points of homopolymer genotype accuracy and 6.5 at period 2+**. It is a ceiling and not a
+forecast — a discovery round can only admit a sequence some read showed, and over this same
+ground the selection dump says where the missing sequences go: of 434 missing true sequences,
+**268 were carried by no read at all**, 61 cleared the support bar and were dropped by the
+per-sample top-`ploidy` cut, 59 sat at a tract the merge refused, and 46 were refused by the
+support bar. **Only the 61 are what a discovery round is aimed at**; a bar sweep reaches the 46.
 
-**And the simulator cannot measure any of this.** At a correct model its
-`truth_allele_never_offered` count is **0** at every tract — every truth allele was offered, so
-its remaining errors are genotyping errors and not missing alleles. That is also what closes the
-gap between the simulator's 0.95 and real data's 0.63: **the missing-allele problem is a
-real-data problem this simulator does not reproduce**, because its alleles are drawn within three
-repeats of the reference and its reads carry nothing else. So a measurement of what discovery
-*buys* has to be made on real reads; the simulator can only measure what it *costs* — alleles
-admitted in error, which show up as `called_heterozygous_truth_homozygous`.
+**The second-largest class is a warning for that work.** 86 homopolymer errors and 51 at period
+2+ are ng calling a heterozygote where the truth is homozygous — a second allele that is not
+there. A discovery round adds alleles, so it can only enlarge this class, and it is already twice
+the size of the class it is meant to fix. The simulator says what drives it: at a true slippage
+of 0.25 it is 106 of the 114 period-2+ errors, and supplying the true slippage cuts it to 7.
+
+### How this measurement was got wrong three times
+
+Recorded because each attempt gave a plausible number and two of them reached a report.
+
+1. **Allele strings as written**, after `bcftools norm`. Two records describing one event over
+   different spans — `AGT → A` against `AGTGTGT → A,AGTGT` — share no string, because
+   normalisation trims each record against its own ALT column. **324 of 6,303 tracts read as
+   genotype errors that were only a difference of spelling**, and the reported accuracy was
+   0.771 and 0.628 against the true 0.886 and 0.903.
+2. **Padding both records to their union span.** Fixes that pair, and still fails wherever the
+   two sides put their records at different places in the tract, because the span between them is
+   in neither record's REF.
+3. **One record a tract a side**, discarding the rest. Throws away 1,711 tracts of 6,303 — and
+   1,412 of those are the truth set writing a two-allele heterozygote as two phased records
+   against ng's one multi-allelic record, which is the class most worth measuring.
+
+The rule that works: lay each side's non-reference edits on the tract's reference bases, one copy
+at a time, and compare the resulting sequences. Three hand-checkable cases pin it — two phased
+truth records against one multi-allelic call agree, a genuinely different call does not, and one
+event written over two spans agrees.
 
 ---
 
@@ -303,6 +325,6 @@ existing caller here is the SNP and indel caller at its `high-recall` preset, no
   and nothing here says what to do about them.
 - **Cohorts.** Every ground here is one sample or three. QUAL is a cohort claim, and what it
   does at fifty samples or a thousand is unmeasured.
-- **Why ng's tract genotypes are wrong when the allele *was* offered** — 348 of 835 wrong
-  homopolymer genotypes at 30×. That is not a quality question and this instrument does not
+- **Why ng's tract genotypes are wrong when the allele *was* offered** — 160 of 402 comparable
+  homopolymer errors at 30×. That is not a quality question and this instrument does not
   separate its causes.
