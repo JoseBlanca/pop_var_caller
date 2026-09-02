@@ -525,6 +525,13 @@ whole correction was built for.
 
 ## 8. Repeat tracts are not in this document
 
+> **Correction, 2026-09-02 — the first sentence below is half stale.** The repeat-tract
+> read-likelihood row is written and the loop genotypes a tract end to end in its own tests,
+> given a hand-supplied candidate set; the candidate path is the half still unwritten.
+> [`calling_loop_ssr.md`](calling_loop_ssr.md) carries the current inventory; this section's
+> *reasoning* — why the artifact tests are wrong for a tract, and where the tract's quality
+> design belongs — stands unchanged.
+
 **Nothing in ng can score a tract yet.** The repeat-tract read-likelihood row and the repeat-tract
 candidate path are both unwritten, and [`calling_loop.md`](../impl_plan/calling_loop.md) names them
 as its own blocker. A quality for a tract has nothing to be a quality *of*.

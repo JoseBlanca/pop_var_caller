@@ -178,6 +178,13 @@ no-op re-fit and a double-paid table are both silent; the two instrumented tests
 
 ### Milestone E — discovery (Q3's one mechanism)
 
+> **2026-09-02 — ownership note.** The STR loop's spec now carries discovery's build and its
+> measurement as part of the STR caller's own scope
+> ([`calling_loop_ssr.md`](../spec/calling_loop_ssr.md) §3.5, owner's ruling), sequenced
+> after tract selection and the driver branch. This milestone's design and F3's report shape
+> are what that work builds to — one implementation, whichever plan schedules it first;
+> coordinate before starting either.
+
 **E1. `discovery.rs` — the mechanism.**  ☐
 From spec §4.1's description (never the GPL tree): after convergence, retrace what the model
 explains as slippage; admit a tract length clearing **both halves** of the bar (`min_reads = 2`,
@@ -252,6 +259,15 @@ now; HG002 (should pay) and tomato at 3 reads (should be dangerous) apart, once 
   an owner once step 6 exists.
 - **Whether a whole-cohort scorer can carry inbreeding** — the spec's recorded follow-up if a
   joint arm wins at `F = 0`; a spec question, not a plan step.
+- **The tract QUAL calibration experiment** —
+  [`calling_loop_ssr.md`](../spec/calling_loop_ssr.md) §3.3's obligation (owner, 2026-09-02):
+  before the repeat-tract site quality is designed, observe the arms' behaviour — the
+  inherited fold, a tract-specific correction, production's emission decision as comparator —
+  on GIAB tract ground at 30×/50× and on the STR simulator, reporting calibration and a QUAL
+  threshold sweep per arm, split by period and by parameter provenance. Runs once the STR
+  loop's driver branch emits tract records; **belongs as a step of the STR loop's own
+  implementation plan when that is written**, and is parked here so it is not dropped before
+  then.
 - **Q4–Q7's instrument-and-tune items** — the `passes` distribution, the cost crossover, the
   one-sample skip, the flat-first-pass count — cheap runs the loop's instruments already
   support, schedulable independently.

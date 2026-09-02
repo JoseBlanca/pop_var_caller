@@ -92,6 +92,10 @@ built without a field `CohortObservation` does not carry.*
 
 ## Branch and merge
 
+> **2026-09-02:** superseded for execution — Milestones B–E now run on the STR loop plan's
+> branch and worktree ([`calling_loop_ssr.md`](calling_loop_ssr.md) §Branch), in parallel
+> with the observations plan that delivers Milestone A.
+
 - **Branch** `ng-candidate-alleles-ssr`, from `main` after `ng-candidate-alleles` has merged. No
   worktree.
 - **Conflict surface:** `calling/allele_candidates/mod.rs` (the scratch gains fields) and the two
@@ -102,6 +106,12 @@ built without a field `CohortObservation` does not carry.*
 ## The steps
 
 ### Milestone A — the merge carries the locus kind
+
+> **2026-09-02 — ownership note.** This milestone is now delivered by the observations plan
+> ([`run_ssr_observations.md`](run_ssr_observations.md) Milestone A, against
+> [`../spec/run_ssr_observations.md`](../spec/run_ssr_observations.md) §4), which runs in
+> parallel with the STR loop plan and merges this change to `main` first. Do not build it
+> twice: when that checkpoint has merged, flip A1 here and start at Milestone B.
 
 **A1. `ClosedLocus` and `CohortObservation` carry `LocusKind`.**  ☐
 The closer already has the kind in scope where it builds a `ClosedLocus`
