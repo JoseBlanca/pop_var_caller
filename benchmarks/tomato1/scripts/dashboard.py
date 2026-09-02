@@ -7,33 +7,48 @@
 # ]
 # ///
 
-# Marimo dashboard comparing the three SNP callers (pop_var_caller,
-# freebayes, GATK) on the tomato cohort test set. Toggle between the
-# single-sample and cohort variants of the test.
+# Marimo dashboard comparing the SNP callers — pop_var_caller ("ours"),
+# freebayes, GATK, and ng — on the tomato cohort test set. Toggle between the
+# single-sample and cohort variants of the test, and pick which callers to
+# compare.
 #
 # Recommended invocation (no global marimo install needed):
 #
-#   uvx marimo edit --sandbox tmp/tomato_cohort_test/scripts/dashboard.py
+#   uvx marimo edit --sandbox benchmarks/tomato1/scripts/dashboard.py
 #
 # To serve as a read-only app instead of opening the editor:
 #
-#   uvx marimo run --sandbox tmp/tomato_cohort_test/scripts/dashboard.py
+#   uvx marimo run --sandbox benchmarks/tomato1/scripts/dashboard.py
 #
-# Measures (added one at a time):
-#   1. Variant agreement — 3-way Venn + counts table at (CHROM, POS,
-#      REF, ALT) granularity. No PASS / QUAL filter applied; multi-
-#      allelic records are split per ALT; `*` (gVCF spanning deletion)
-#      is skipped. NB: indel calls aren't normalised, so the same
-#      indel may show as discordant if callers anchored it on
-#      different REF bases. Add `bcftools norm` upstream if that
-#      matters for a measure.
-#   2. Pairwise QUAL hexbins on shared variants — three 2D density
-#      plots (ours-vs-fb, ours-vs-gatk, fb-vs-gatk) with a log colour
-#      scale and a y=x reference line; bounded by the QUAL-cap slider.
-#   3. Per-caller QUAL distributions — three vertically stacked
-#      histograms sharing the same x-axis (0..cap) and bin edges;
-#      independent y-axes (callers can differ by an order of magnitude
-#      in record count); y-scale linear or log via radio toggle.
+# There is no truth set for tomato. This dashboard is about **agreement**, not
+# accuracy: which calls the callers share, and how their confidences relate.
+# Accuracy lives in the GIAB benchmarks.
+#
+# Measures:
+#   0. Inputs — each VCF's size, record count and sample count. **Read the
+#      sample counts before anything else**: a VCF built from a different
+#      number of accessions is not comparable with the others, and a stale one
+#      is the likeliest reason two callers seem to disagree wildly.
+#   1. Variant agreement — per-caller totals, pairwise overlap, and the
+#      shared/exclusive split, at (CHROM, POS, REF, ALT) granularity. No
+#      PASS / QUAL filter applied; multi-allelic records are split per ALT;
+#      `*` (gVCF spanning deletion) is skipped. NB: indel calls aren't
+#      normalised, so the same indel may show as discordant if callers
+#      anchored it on different REF bases. Add `bcftools norm` upstream if
+#      that matters for a measure. A Venn is drawn when two or three callers
+#      are selected.
+#   2. Pairwise QUAL hexbins on shared variants — one 2D density plot per
+#      caller pair, log colour scale, y=x reference line; bounded by the
+#      QUAL-cap slider.
+#   3. Per-caller QUAL distributions — one histogram per selected caller,
+#      sharing the same x-axis (0..cap) and bin edges; independent y-axes
+#      (callers can differ by an order of magnitude in record count);
+#      y-scale linear or log via radio toggle.
+#
+# One thing to hold against ng's record count: it does not build loci inside
+# tandem repeats yet — about 5 bases in every 100 of this benchmark's ground —
+# so calls the others make there have no ng counterpart to agree with. Its run
+# report (results/ng/cohort.log) says how much ground that was.
 
 import marimo
 
@@ -63,7 +78,7 @@ def _(mo):
 def _(mo):
     mode = mo.ui.radio(
         options=["single", "cohort"],
-        value="single",
+        value="cohort",
         label="Test set",
     )
     mode
@@ -72,42 +87,103 @@ def _(mo):
 
 @app.cell
 def _(Path, mode):
-    # tmp/tomato_cohort_test/scripts/dashboard.py -> tmp/tomato_cohort_test/
+    # benchmarks/tomato1/scripts/dashboard.py -> benchmarks/tomato1/
     test_dir = Path(__file__).resolve().parent.parent
     results = test_dir / "results"
     sample = "SRR17274057"
     if mode.value == "single":
-        vcf_paths = {
+        all_vcf_paths = {
             "ours": results / "ours" / f"single_{sample}.vcf",
             "freebayes": results / "freebayes" / f"single_{sample}.vcf",
             "gatk": results / "gatk" / f"single_{sample}.vcf",
+            "ng": results / "ng" / f"single_{sample}.vcf",
         }
     else:
-        vcf_paths = {
+        all_vcf_paths = {
             "ours": results / "ours" / "cohort" / "cohort.vcf",
             "freebayes": results / "freebayes" / "cohort.vcf",
             "gatk": results / "gatk" / "cohort" / "cohort.vcf",
+            "ng": results / "ng" / "cohort.vcf",
         }
-    return (vcf_paths,)
+    present_paths = {n: p for n, p in all_vcf_paths.items() if p.exists()}
+    return all_vcf_paths, present_paths
 
 
 @app.cell
-def _(mo, vcf_paths):
-    missing = {name: p for name, p in vcf_paths.items() if not p.exists()}
-    if missing:
-        miss_md = "\n".join(f"- **{name}**: `{p}`" for name, p in missing.items())
-        inputs_view = mo.callout(
-            mo.md(f"### Missing VCFs\n\n{miss_md}\n\nRun the corresponding `run_*` script first."),
-            kind="danger",
+def _(gzip):
+    def vcf_shape(path):
+        """(record count, sample count) of a VCF, without loading it whole.
+
+        The sample count is what makes two result files comparable or not, and
+        it is invisible in the filename — a cohort VCF left over from a run
+        with fewer accessions looks exactly like a current one.
+        """
+        opener = gzip.open if str(path).endswith(".gz") else open
+        records = 0
+        samples = 0
+        with opener(path, "rt") as fh:
+            for line in fh:
+                if line.startswith("##"):
+                    continue
+                if line.startswith("#CHROM"):
+                    samples = max(len(line.rstrip("\n").split("\t")) - 9, 0)
+                    continue
+                if line.strip():
+                    records += 1
+        return records, samples
+
+    return (vcf_shape,)
+
+
+@app.cell
+def _(all_vcf_paths, mo, present_paths, vcf_shape):
+    shapes = {n: vcf_shape(p) for n, p in present_paths.items()}
+    _absent = [n for n in all_vcf_paths if n not in present_paths]
+
+    _rows = "\n".join(
+        f"| {n} | `{present_paths[n].name}` | "
+        f"{present_paths[n].stat().st_size / 1e6:.1f} MB | "
+        f"{shapes[n][0]:,} | {shapes[n][1]} |"
+        for n in present_paths
+    )
+    _sample_counts = {s for _, s in shapes.values()}
+    _warn = ""
+    if len(_sample_counts) > 1:
+        _warn = (
+            "\n\n> **These VCFs do not hold the same accessions.** "
+            f"The sample counts present are {sorted(_sample_counts)}. A file "
+            "built from fewer accessions carries fewer segregating sites, so "
+            "the agreement counts below are measuring the sample sets as much "
+            "as the callers. Re-run the short caller on the full set before "
+            "reading anything into its exclusive calls."
         )
-    else:
-        present_md = "\n".join(
-            f"- **{name}**: `{p}` ({p.stat().st_size / 1e6:.2f} MB)"
-            for name, p in vcf_paths.items()
+    _miss = ""
+    if _absent:
+        _miss = "\n\nNot present (run its `benchmarks/lib/run_*.sh` first): " + ", ".join(
+            f"`{n}`" for n in _absent
         )
-        inputs_view = mo.md(f"### Inputs\n\n{present_md}")
+    inputs_view = mo.md(
+        "### 0. Inputs\n\n"
+        "| caller | file | size | records | samples |\n|---|---|---:|---:|---:|\n"
+        + _rows
+        + _warn
+        + _miss
+    )
     inputs_view
-    return inputs_view, missing
+    return inputs_view, shapes
+
+
+@app.cell
+def _(mo, present_paths):
+    # Which callers to compare. Defaults to everything present, but the Venn
+    # below only draws for two or three — deselect to get one.
+    caller_sel = mo.ui.multiselect(
+        options=list(present_paths.keys()),
+        value=list(present_paths.keys()),
+        label="callers to compare",
+    )
+    caller_sel
+    return (caller_sel,)
 
 
 @app.cell
@@ -177,107 +253,104 @@ def _(gzip):
 
 
 @app.cell
-def _(missing, variant_keys, vcf_paths):
-    # Cell short-circuits when inputs are missing so downstream cells
-    # don't crash on a half-built dashboard.
-    if missing:
-        sets: dict[str, set] = {}
-    else:
-        sets = {name: variant_keys(p) for name, p in vcf_paths.items()}
+def _(caller_sel, present_paths, variant_keys):
+    sets = {n: variant_keys(present_paths[n]) for n in caller_sel.value}
     return (sets,)
 
 
 @app.cell
-def _(sets: dict[str, set]):
-    # `ours`, `fb`, `gk` are always defined (possibly empty) so the
-    # cell's return contract holds regardless of whether the VCFs
-    # were found upstream.
-    ours = sets.get("ours", set())
-    fb = sets.get("freebayes", set())
-    gk = sets.get("gatk", set())
-    agreement_counts = {
-        "in_all_3": len(ours & fb & gk),
-        "ours_and_freebayes_only": len(ours & fb - gk),
-        "ours_and_gatk_only": len(ours & gk - fb),
-        "freebayes_and_gatk_only": len(fb & gk - ours),
-        "only_ours": len(ours - fb - gk),
-        "only_freebayes": len(fb - ours - gk),
-        "only_gatk": len(gk - ours - fb),
-        "total_ours": len(ours),
-        "total_freebayes": len(fb),
-        "total_gatk": len(gk),
-    }
-    return agreement_counts, fb, gk, ours
+def _(mo, sets: dict[str, set]):
+    # Three things, in the order they answer a reader's questions: how many
+    # calls each caller made, how much of each pair is shared, and how the
+    # selected callers split into shared / exclusive.
+    _names = list(sets)
+    if len(_names) < 2:
+        counts_view = mo.md("_Select at least two callers._")
+    else:
+        _totals = "\n".join(f"| {n} | {len(sets[n]):,} |" for n in _names)
 
+        _pairs = []
+        for _i, _a in enumerate(_names):
+            for _b in _names[_i + 1:]:
+                _shared = len(sets[_a] & sets[_b])
+                _union = len(sets[_a] | sets[_b])
+                _pairs.append(
+                    f"| {_a} ∩ {_b} | {_shared:,} | "
+                    f"{_shared / len(sets[_a]):.1%} | "
+                    f"{_shared / len(sets[_b]):.1%} | "
+                    f"{_shared / _union:.1%} |"
+                )
 
-@app.cell
-def _(agreement_counts, mo):
-    # 7 Venn regions + 3 totals, rendered as a markdown table so it
-    # works in app/run mode too.
-    c = agreement_counts
-    denom = max(c["in_all_3"], 1)
-    rows = [
-        ("In all 3 callers", c["in_all_3"], "100% of triple-agreement baseline"),
-        ("ours ∩ freebayes (not gatk)", c["ours_and_freebayes_only"], f"{c['ours_and_freebayes_only'] / denom:.1%}"),
-        ("ours ∩ gatk (not freebayes)", c["ours_and_gatk_only"], f"{c['ours_and_gatk_only'] / denom:.1%}"),
-        ("freebayes ∩ gatk (not ours)", c["freebayes_and_gatk_only"], f"{c['freebayes_and_gatk_only'] / denom:.1%}"),
-        ("only ours", c["only_ours"], f"{c['only_ours'] / denom:.1%}"),
-        ("only freebayes", c["only_freebayes"], f"{c['only_freebayes'] / denom:.1%}"),
-        ("only gatk", c["only_gatk"], f"{c['only_gatk'] / denom:.1%}"),
-        ("— totals —", "", ""),
-        ("ours (any membership)", c["total_ours"], ""),
-        ("freebayes (any membership)", c["total_freebayes"], ""),
-        ("gatk (any membership)", c["total_gatk"], ""),
-    ]
-    table_md = "| set | count | ratio vs all-3 |\n|---|---:|---:|\n"
-    for name, count, ratio in rows:
-        table_md += f"| {name} | {count} | {ratio} |\n"
-    counts_view = mo.md(
-        f"### 1. Variant agreement\n\n"
-        f"_(key: CHROM, POS, REF, ALT; multi-allelic split per ALT)_\n\n"
-        f"{table_md}"
-    )
+        _all_shared = set.intersection(*(sets[n] for n in _names))
+        _excl = []
+        for _n in _names:
+            _others = set.union(*(sets[m] for m in _names if m != _n))
+            _excl.append(f"| only {_n} | {len(sets[_n] - _others):,} |")
+
+        counts_view = mo.md(
+            "### 1. Variant agreement\n\n"
+            "_(key: CHROM, POS, REF, ALT; multi-allelic split per ALT; no "
+            "PASS/QUAL filter beyond what each runner already applied)_\n\n"
+            "**Calls made**\n\n| caller | variants |\n|---|---:|\n" + _totals + "\n\n"
+            "**Pairwise overlap** — the same shared count read as a share of "
+            "each caller's own set, then of their union (Jaccard).\n\n"
+            "| pair | shared | of left | of right | of union |\n"
+            "|---|---:|---:|---:|---:|\n" + "\n".join(_pairs) + "\n\n"
+            "**Shared and exclusive across the whole selection**\n\n"
+            "| set | variants |\n|---|---:|\n"
+            f"| in all {len(_names)} | {len(_all_shared):,} |\n" + "\n".join(_excl)
+        )
     counts_view
     return (counts_view,)
 
 
 @app.cell
-def _(fb, gk, ours):
+def _(mo, sets: dict[str, set]):
     import matplotlib.pyplot as plt
     from matplotlib.patches import Patch
-    from matplotlib_venn import venn3
 
-    labels = ("pop_var_caller", "freebayes", "gatk")
-    fig, ax = plt.subplots(figsize=(8, 6))
-    v = venn3([ours, fb, gk], set_labels=labels, ax=ax)
-    ax.set_title("Variant agreement — (CHROM, POS, REF, ALT)")
-    # Build a colour-keyed legend out of the venn patches so each
-    # caller's circle colour matches a row in the legend (the set
-    # labels matplotlib_venn draws next to the circles can be hard
-    # to associate at a glance).
-    patch_ids = ("100", "010", "001")  # ours, freebayes, gatk (A,B,C order)
-    handles = [
-        Patch(
-            facecolor=v.get_patch_by_id(pid).get_facecolor(),
-            edgecolor="black",
-            label=lbl,
+    _names = list(sets)
+    if len(_names) == 3:
+        from matplotlib_venn import venn3
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        v = venn3([sets[n] for n in _names], set_labels=tuple(_names), ax=ax)
+        ax.set_title("Variant agreement — (CHROM, POS, REF, ALT)")
+        # A colour-keyed legend built from the venn patches, because the set
+        # labels matplotlib_venn draws beside the circles are hard to
+        # associate at a glance.
+        _handles = [
+            Patch(
+                facecolor=v.get_patch_by_id(pid).get_facecolor(),
+                edgecolor="black",
+                label=lbl,
+            )
+            for pid, lbl in zip(("100", "010", "001"), _names)
+            if v.get_patch_by_id(pid) is not None
+        ]
+        ax.legend(handles=_handles, loc="upper left", bbox_to_anchor=(0.0, 1.0))
+        venn_view = fig
+    elif len(_names) == 2:
+        from matplotlib_venn import venn2
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        venn2([sets[n] for n in _names], set_labels=tuple(_names), ax=ax)
+        ax.set_title("Variant agreement — (CHROM, POS, REF, ALT)")
+        venn_view = fig
+    else:
+        venn_view = mo.md(
+            "_A Venn is drawn for two or three callers; the table above covers "
+            "any number._"
         )
-        for pid, lbl in zip(patch_ids, labels)
-        if v.get_patch_by_id(pid) is not None
-    ]
-    ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.0, 1.0))
-    fig
-    return Patch, ax, fig, handles, labels, patch_ids, plt, v, venn3
+    venn_view
+    return (plt, venn_view)
 
 
 @app.cell
-def _(missing, variant_quals, vcf_paths):
-    # Per-caller QUAL maps. Same shape as `sets` upstream but mapping
-    # the variant key to its QUAL float rather than just membership.
-    if missing:
-        quals: dict[str, dict] = {}
-    else:
-        quals = {name: variant_quals(p) for name, p in vcf_paths.items()}
+def _(caller_sel, present_paths, variant_quals):
+    # Per-caller QUAL maps. Same shape as `sets` upstream but mapping the
+    # variant key to its QUAL float rather than just membership.
+    quals = {n: variant_quals(present_paths[n]) for n in caller_sel.value}
     return (quals,)
 
 
@@ -288,14 +361,12 @@ def _(mo, quals):
     # by a handful of very-high-QUAL outliers. Default value is the
     # 95th percentile of pooled QUALs — focuses on the bulk while
     # still showing some tail. Re-drawn live as the slider moves.
-    if quals:
-        all_quals = sorted(q for caller in quals.values() for q in caller.values())
+    all_quals = sorted(q for caller in quals.values() for q in caller.values())
+    if all_quals:
         data_max = float(all_quals[-1])
         p95 = float(all_quals[int(len(all_quals) * 0.95)])
     else:
-        # Inert defaults so the widget still renders when VCFs are
-        # missing upstream.
-        all_quals = []
+        # Inert defaults so the widget still renders when nothing is selected.
         data_max = 100.0
         p95 = 100.0
     # ~500 slider positions across the data range — gives smooth
@@ -317,25 +388,31 @@ def _(mo, quals):
 
 @app.cell
 def _(mo, plt, qual_cap, quals):
-    # Three pairwise hexbins of QUAL on the variants both callers
-    # called. Hexbin (vs scatter) handles the 10⁴-record cohort
-    # output cleanly; log colour scale so dense ridges and sparse
-    # tails are both readable. A red y=x reference line shows where
-    # the two callers would agree on confidence — for callers using
-    # different QUAL conventions (we know freebayes / GATK / ours all
-    # define -10·log10 P over slightly different events), the bulk
-    # rarely sits on the diagonal; the *slope* and *spread* matter.
+    # Pairwise hexbins of QUAL on the variants both callers called, one panel
+    # per pair. Hexbin (vs scatter) handles the 10⁵-record cohort output
+    # cleanly; log colour scale so dense ridges and sparse tails are both
+    # readable. A red y=x reference line shows where the two callers would
+    # agree on confidence — each caller defines QUAL as −10·log10 P over a
+    # slightly different event, so the bulk rarely sits on the diagonal and it
+    # is the *slope* and *spread* that carry the information.
     #
-    # `plt` is dependency-injected from the Venn cell, which already
-    # owns the matplotlib import — marimo enforces single-definition
-    # for every name across cells.
-    if not quals:
-        hex_view = mo.md("_(QUAL hexbins unavailable until all three VCFs exist.)_")
+    # `plt` is dependency-injected from the Venn cell, which already owns the
+    # matplotlib import — marimo enforces single-definition for every name.
+    _names = list(quals)
+    _pairs = [
+        (a, b) for i, a in enumerate(_names) for b in _names[i + 1:]
+    ]
+    if not _pairs:
+        hex_view = mo.md("_Select at least two callers._")
     else:
         cap = float(qual_cap.value)
-        pairs = [("ours", "freebayes"), ("ours", "gatk"), ("freebayes", "gatk")]
-        hex_fig, hex_axes = plt.subplots(1, 3, figsize=(18, 5.5))
-        for hex_ax, (a, b) in zip(hex_axes, pairs):
+        _ncol = min(3, len(_pairs))
+        _nrow = (len(_pairs) + _ncol - 1) // _ncol
+        hex_fig, hex_axes = plt.subplots(
+            _nrow, _ncol, figsize=(6 * _ncol, 5.5 * _nrow), squeeze=False
+        )
+        _flat = [hex_axes[r][c] for r in range(_nrow) for c in range(_ncol)]
+        for hex_ax, (a, b) in zip(_flat, _pairs):
             qa = quals[a]
             qb = quals[b]
             all_shared = set(qa) & set(qb)
@@ -368,6 +445,8 @@ def _(mo, plt, qual_cap, quals):
             )
             hex_fig.colorbar(hb, ax=hex_ax, label="count (log)")
             hex_ax.legend(loc="upper left", fontsize=8)
+        for _spare in _flat[len(_pairs):]:
+            _spare.set_axis_off()
         hex_fig.suptitle(
             f"2. Pairwise QUAL agreement on shared variants  (cap = {cap:.0f})",
             y=1.02,
@@ -395,26 +474,28 @@ def _(mo):
 
 @app.cell
 def _(mo, plt, qual_cap, qual_yscale, quals):
-    # Per-caller QUAL distributions. Three panels stacked vertically,
-    # all sharing the same x-axis (0..cap) and bin edges so bar
-    # positions line up across rows; y-axes are independent because
-    # callers can differ by an order of magnitude in record count
-    # (freebayes typically emits many more low-QUAL sites than the
-    # others) and a shared y would squash the smaller panels.
-    if not quals:
-        dist_view = mo.md("_(QUAL distributions unavailable until all three VCFs exist.)_")
+    # Per-caller QUAL distributions. One panel per caller stacked vertically,
+    # all sharing the same x-axis (0..cap) and bin edges so bar positions line
+    # up across rows; y-axes are independent because callers can differ by an
+    # order of magnitude in record count (freebayes typically emits many more
+    # low-QUAL sites than the others) and a shared y would squash the smaller
+    # panels.
+    _callers = list(quals)
+    if not _callers:
+        dist_view = mo.md("_Select at least one caller._")
     else:
         dist_cap = float(qual_cap.value)
         n_bins = 50
         bin_edges = [dist_cap * i / n_bins for i in range(n_bins + 1)]
-        callers = ("ours", "freebayes", "gatk")
         dist_fig, dist_axes = plt.subplots(
-            len(callers), 1,
-            figsize=(10, 8),
+            len(_callers), 1,
+            figsize=(10, 2.7 * len(_callers)),
             sharex=True,
             sharey=False,
+            squeeze=False,
         )
-        for dist_ax, _name in zip(dist_axes, callers):
+        for _row, _name in zip(dist_axes, _callers):
+            dist_ax = _row[0]
             _values = [q for q in quals[_name].values() if q <= dist_cap]
             _total = len(quals[_name])
             dist_ax.hist(_values, bins=bin_edges, color="steelblue", edgecolor="white")
@@ -429,8 +510,8 @@ def _(mo, plt, qual_cap, qual_yscale, quals):
                 fontsize=9,
                 bbox=dict(facecolor="white", edgecolor="none", alpha=0.7),
             )
-        dist_axes[-1].set_xlabel("QUAL")
-        dist_axes[-1].set_xlim(0.0, dist_cap)
+        dist_axes[-1][0].set_xlabel("QUAL")
+        dist_axes[-1][0].set_xlim(0.0, dist_cap)
         dist_fig.suptitle(
             f"3. Per-caller QUAL distributions  "
             f"(cap = {dist_cap:.0f}, {n_bins} bins, y={qual_yscale.value})",

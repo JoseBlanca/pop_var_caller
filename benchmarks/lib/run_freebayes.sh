@@ -20,6 +20,24 @@
 #   EXTRA_ARGS      appended verbatim to the freebayes command line
 #   PARALLEL=1      cohort only: fan out per-BED-region via
 #                   freebayes-parallel + GNU parallel (needs both on PATH)
+#   SHARD_BY_CONTIG=1
+#                   cohort only: the same idea without those two tools —
+#                   one freebayes process per contig in the BED, run at
+#                   once, then concatenated in reference order. Targets are
+#                   disjoint, so the callset is the one a single run gives.
+#                   freebayes has no threading of its own and a large cohort
+#                   is slow: the 63-accession tomato benchmark over 8 Mb runs
+#                   at about 33 kb of reference a minute, four hours end to
+#                   end.
+#                   **Memory is the limit on the shard count, not cores.**
+#                   Every shard opens every CRAM, so resident memory scales
+#                   with the number of shards: 12 shards over that cohort in
+#                   the 16 GB dev container had 4 of the 12 OOM-killed, and
+#                   the concatenated result was silently short. This runner
+#                   refuses that outcome — a dead shard fails the run — but
+#                   choose a shard count the box has memory for, or raise
+#                   DEV_MEM. Sharding by contig gives no control over that
+#                   count: it is however many contigs the BED names.
 #   THREADS         worker count when PARALLEL=1 (default 4)
 #   DRY_RUN=1       print commands instead of running them
 
@@ -104,7 +122,13 @@ run_cohort() {
     echo "regions   : $BED ($(wc -l < "$BED") intervals)"
     echo "ploidy    : $PLOIDY"
     echo "min QUAL  : $MIN_QUAL (records below are dropped pre-write)"
-    echo "mode      : $([[ "$PARALLEL" == "1" ]] && echo "parallel (threads=$THREADS)" || echo "single-threaded")"
+    if [[ "$PARALLEL" == "1" ]]; then
+        echo "mode      : parallel (freebayes-parallel, threads=$THREADS)"
+    elif [[ "${SHARD_BY_CONTIG:-0}" == "1" ]]; then
+        echo "mode      : sharded ($(cut -f1 "$BED" | sort -u | wc -l | tr -d ' ') contigs, one process each)"
+    else
+        echo "mode      : single-threaded"
+    fi
     echo "output    : $out_vcf"
     echo
 
@@ -136,6 +160,47 @@ run_cohort() {
             "${BENCH_CRAMS[@]}" \
             2> >(tee "$log" >&2) \
           | awk -v min="$MIN_QUAL" "$FILTER_AWK" > "$out_vcf"
+    elif [[ "${SHARD_BY_CONTIG:-0}" == "1" ]]; then
+        # One process per contig named in the BED. Every process sees the same
+        # cohort and a disjoint slice of the ground, so concatenating their
+        # records in reference order gives the callset a single run would.
+        local shard_dir="$OUT_DIR/shards"
+        mkdir -p "$shard_dir"
+        local contigs
+        contigs=$(cut -f1 "$BED" | sort -u)
+        if [[ "${DRY_RUN:-0}" == "1" ]]; then
+            local c1
+            c1=$(head -1 <<<"$contigs")
+            printf 'DRY-RUN: (one such process per contig; %s shown)\n' "$c1"
+            printf 'DRY-RUN:'
+            printf ' %q' "$FREEBAYES_BIN" -f "$REFERENCE" \
+                -t "$shard_dir/$c1.bed" -p "$PLOIDY" $EXTRA_ARGS "${BENCH_CRAMS[@]}"
+            printf ' > %q\n' "$shard_dir/$c1.vcf"
+            return 0
+        fi
+        local contig pids=()
+        for contig in $contigs; do
+            awk -v c="$contig" '$1==c' "$BED" > "$shard_dir/$contig.bed"
+        done
+        for contig in $contigs; do
+            # shellcheck disable=SC2086
+            ( "$FREEBAYES_BIN" -f "$REFERENCE" -t "$shard_dir/$contig.bed" \
+                -p "$PLOIDY" $EXTRA_ARGS "${BENCH_CRAMS[@]}" \
+                > "$shard_dir/$contig.vcf" 2> "$shard_dir/$contig.log" ) &
+            pids+=($!)
+        done
+        local pid shard_failed=0
+        for pid in "${pids[@]}"; do wait "$pid" || shard_failed=1; done
+        (( shard_failed == 0 )) || {
+            echo "at least one freebayes shard failed; see $shard_dir/*.log" >&2; exit 1; }
+        local first
+        first=$(head -1 <<<"$contigs")
+        grep '^#' "$shard_dir/$first.vcf" > "$out_vcf.tmp"
+        for contig in $contigs; do
+            grep -v '^#' "$shard_dir/$contig.vcf" >> "$out_vcf.tmp"
+        done
+        awk -v min="$MIN_QUAL" "$FILTER_AWK" "$out_vcf.tmp" > "$out_vcf"
+        rm -f "$out_vcf.tmp"
     else
         if [[ "${DRY_RUN:-0}" == "1" ]]; then
             printf 'DRY-RUN:'

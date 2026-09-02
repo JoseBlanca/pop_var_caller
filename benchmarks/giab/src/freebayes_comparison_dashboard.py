@@ -7,22 +7,37 @@
 #     "pyarrow",
 # ]
 # ///
-"""GIAB per_sample accuracy — freebayes vs ours (high-recall preset).
+"""GIAB per_sample accuracy — the production caller, freebayes, and ng.
 
 Run it:
 
     uv run marimo run  benchmarks/giab/src/freebayes_comparison_dashboard.py   # app view
     uv run marimo edit benchmarks/giab/src/freebayes_comparison_dashboard.py   # notebook
 
-It compares two callers, per coverage tier, split by SNP vs indel:
+It compares three callers, per coverage tier, split by SNP vs indel:
   ours-high-recall : results/per_sample/<cov>/high-recall/{sample}.vcf
                      (BAQ off, DUST off, allele-balance filter on)
   freebayes        : results/per_sample/<cov>/freebayes/{sample}.vcf
                      (QUAL >= 30, matching our caller's --min-qual default)
+  ng               : results/per_sample/<cov>/ng/{sample}.vcf
+                     (QUAL >= 30, same gate; alignments -> VCF in one process)
+
+**What to hold against ng before reading its numbers.** It is the experimental
+caller and this is its first end-to-end benchmark. Two things it does not yet
+do, both of which cost it recall rather than precision:
+
+  * It does not call inside tandem repeats. Every repeat tract in the BED is
+    counted as ground it cannot speak for and reported at the end of the run —
+    about 6 bases in every 100 of these confident regions. Truth indels inside
+    those tracts are unreachable for it and score as false negatives.
+  * Nothing is fitted. There is no command that writes a fitted parameters
+    file yet, so every run is `--defaults`: no base-quality calibration, no
+    contamination, no inbreeding coefficient.
 
 Generate the inputs first:
   PRESET=high-recall benchmarks/giab/src/run_ours_per_sample.sh <COV>
   benchmarks/giab/src/run_freebayes_per_sample.sh <COV>
+  benchmarks/giab/src/run_ng_per_sample.sh <COV>
 
 Evaluation is IDENTICAL to accuracy_dashboard.py (so the numbers line up):
 for each (sample, class) the truth and query VCFs are both restricted to the
@@ -82,11 +97,14 @@ def _():
     # out-of-range), so the two "ours" rows should coincide — the check that the
     # filter does no harm on clean human data. Generate the OFF row with:
     #   PRESET=high-recall NO_PARALOG=1 benchmarks/giab/src/run_ours_per_sample.sh <COV>
+    # "ng" is the experimental caller, run with --defaults and gated at QUAL >= 30:
+    #   benchmarks/giab/src/run_ng_per_sample.sh <COV>
     # A subdir is skipped if it holds no per-sample VCFs.
     CALLERS = {
         "ours (paralog filter on)": "high-recall",
         "ours (paralog filter off)": "high-recall-noparalog",
         "freebayes": "freebayes",
+        "ng": "ng",
     }
 
     BED_OF = {s: f"{s}_bench_azar_merged_100.bed" for s in SAMPLES}
@@ -262,18 +280,28 @@ def _(RESULTS_DIR, cmp_df, mo):
 @app.cell
 def _(cmp_df, mo):
     mo.vstack([
-        mo.md("# freebayes vs ours (high-recall) — GIAB per_sample"),
+        mo.md("# ours (high-recall) vs freebayes vs ng — GIAB per_sample"),
         mo.md(
             "Cohort totals (HG002+HG003+HG004 summed), per coverage tier, "
             "split by variant class. precision = TP/(TP+FP), recall = "
-            "TP/(TP+FN), F1 = harmonic mean. freebayes is QUAL ≥ 30 gated; "
-            "both **ours** rows are the high-recall preset (BAQ off, DUST off, "
-            "allele-balance filter on) and differ ONLY in the hidden-paralog "
+            "TP/(TP+FN), F1 = harmonic mean. freebayes and **ng** are QUAL ≥ 30 "
+            "gated; both **ours** rows are the high-recall preset (BAQ off, DUST "
+            "off, allele-balance filter on) and differ ONLY in the hidden-paralog "
             "filter — **paralog filter on** (default) vs **off** "
             "(`--no-paralog-filter`). On GIAB the filter is expected to be inert "
             "(single-sample, no seg-dups; high-depth samples rejected as "
             "out-of-range), so the two ours rows should coincide — the check "
             "that the filter does no harm on clean human data."
+        ),
+        mo.md(
+            "**ng** is the experimental caller, one process from alignments to "
+            "VCF, run with `--defaults` — nothing is fitted, because no command "
+            "writes a fitted parameters file yet. It also does not call inside "
+            "tandem repeats: about 6 bases in every 100 of these confident "
+            "regions are repeat tract, and a truth indel inside one is "
+            "unreachable for it and counts here as a false negative. So read "
+            "its indel recall as a floor set by an unbuilt part of the caller, "
+            "not as a genotyping result."
         ),
         mo.md("## SNPs"),
         mo.ui.table(cmp_df.filter(cmp_df["class"] == "snps"), selection=None),
@@ -296,16 +324,19 @@ def _(alt, cmp_df, mo):
     ORDER = [
         "ours (paralog filter on)",
         "freebayes",
+        "ng",
         "ours (paralog filter off)",
     ]
     COLORS = {
         "ours (paralog filter on)": "#1f77b4",
         "freebayes": "#ff7f0e",
+        "ng": "#d62728",
         "ours (paralog filter off)": "#2ca02c",
     }
     DASHES = {
         "ours (paralog filter on)": [1, 0],
         "freebayes": [1, 0],
+        "ng": [1, 0],
         "ours (paralog filter off)": [6, 3],
     }
 
@@ -374,15 +405,83 @@ def _(cmp_df, mo, pl):
             .round(4)
             .alias("F1_delta(on-off)")
         )
+    if "ng" in cols and ours_on in cols:
+        wide = wide.with_columns(
+            (pl.col("ng") - pl.col(ours_on)).round(4).alias("F1_delta(ng-ours)")
+        )
+    if "ng" in cols and "freebayes" in cols:
+        wide = wide.with_columns(
+            (pl.col("ng") - pl.col("freebayes")).round(4).alias("F1_delta(ng-fb)")
+        )
     mo.vstack([
-        mo.md("## F1 head-to-head (ours − freebayes, and paralog on − off)"),
+        mo.md("## F1 head-to-head"),
         mo.ui.table(wide, selection=None),
         mo.md(
             "_`F1_delta(ours-fb)` > 0 = ours (paralog on) beats freebayes. "
             "`F1_delta(on-off)` should be ~0 everywhere — the paralog filter is "
-            "inert on GIAB._"
+            "inert on GIAB. `F1_delta(ng-ours)` and `F1_delta(ng-fb)` > 0 = ng "
+            "ahead of that caller; ng's indel row carries the repeat tracts it "
+            "does not call yet._"
         ),
     ])
+    return
+
+
+@app.cell
+def _(RESULTS_DIR, mo, pl):
+    # Why a caller missed what it missed: did it look at the site and not call
+    # it, or never build a locus there at all? The table above cannot tell
+    # those apart, and for ng they are worth very different amounts — it does
+    # not build loci inside tandem repeats yet, so a truth variant inside one
+    # is unreachable by construction rather than genotyped wrong.
+    #
+    # Written by benchmarks/giab/src/ng_missed_sites_probe.sh, which takes each
+    # caller's missed truth sites, hands ng exactly those bases, and reads how
+    # many loci ng's own run report says it built there.
+    _probe_path = RESULTS_DIR / "ng_missed_sites.tsv"
+    if _probe_path.exists():
+        _probe = pl.read_csv(str(_probe_path), separator="\t")
+        probe_df = (
+            _probe.group_by(["coverage", "caller", "class"])
+            .agg(
+                pl.col("missed_sites").sum().alias("missed"),
+                pl.col("loci_built").sum().alias("looked_at"),
+            )
+            .with_columns(
+                (pl.col("missed") - pl.col("looked_at")).alias("never_built"),
+            )
+            .with_columns(
+                (100 * pl.col("never_built") / pl.col("missed"))
+                .round(1)
+                .alias("never_built_%"),
+            )
+            .sort(["class", "coverage", "caller"])
+        )
+    else:
+        probe_df = pl.DataFrame()
+    probe_view = mo.vstack([
+        mo.md("## Where the misses come from"),
+        mo.md(
+            "A missed truth variant can mean two things, and the accuracy "
+            "table scores them alike. Either the caller built a locus at that "
+            "position and did not call the variant — a genotyping miss — or it "
+            "never built a locus there at all, so nothing about its "
+            "genotyping is being measured. ng does not build loci inside "
+            "tandem repeats yet, which is the second kind.\n\n"
+            "`missed` is that caller's own false negatives at that coverage, "
+            "summed over HG002/3/4. `looked_at` is how many loci **ng** builds "
+            "when handed exactly those positions, and `never_built` is the "
+            "rest. The locus count is ng's in every row, so the production "
+            "caller's row reads differently: it says how much of that caller's "
+            "residual miss list also lies on ground ng cannot reach — whether "
+            "the two are failing on the same ground or on different ground."
+        ),
+        mo.ui.table(probe_df, selection=None) if probe_df.height else mo.md(
+            "_No probe data. Generate it with_ "
+            "`benchmarks/giab/src/ng_missed_sites_probe.sh 300x`."
+        ),
+    ])
+    probe_view
     return
 
 
@@ -439,7 +538,7 @@ def _(
     # QUAL box statistics per (coverage, caller, class, TP/FP). TP/FP come from
     # bcftools isec vs the GIAB truth (same normalize as the concordance above):
     # 0003 = query-side of shared (TP), 0001 = query-only (FP).
-    _BOX_CALLERS = {"freebayes": "freebayes", "ours": "high-recall"}
+    _BOX_CALLERS = {"freebayes": "freebayes", "ours": "high-recall", "ng": "ng"}
 
     def _covx(name):
         stem = name[:-1] if name.endswith("x") else name
@@ -531,7 +630,7 @@ def _(
 def _(alt, mo, pl, qbox_df):
     def _plot():
         cov_order = list(qbox_df.sort("cov_x")["coverage"].unique(maintain_order=True))
-        dom, rng = ["freebayes", "ours"], ["#ff7f0e", "#1f77b4"]
+        dom, rng = ["freebayes", "ours", "ng"], ["#ff7f0e", "#1f77b4", "#d62728"]
         ysc = alt.Scale(type="log", domain=[10, 10000], clamp=True)
 
         def _panel(status, cls, col_title, ytitle, legend):
@@ -603,7 +702,7 @@ def _(
 ):
     # Per-sample genotype concordance for TP variants: isec vs truth, then compare
     # the GT on the query side (0003) to the truth side (0002), phase-insensitive.
-    _BOX_CALLERS = {"freebayes": "freebayes", "ours": "high-recall"}
+    _BOX_CALLERS = {"freebayes": "freebayes", "ours": "high-recall", "ng": "ng"}
 
     def _covx(name):
         stem = name[:-1] if name.endswith("x") else name
@@ -711,7 +810,7 @@ def _(
 def _(alt, mo, gtbox_df):
     def _plot():
         cov_order = list(gtbox_df.sort("cov_x")["coverage"].unique(maintain_order=True))
-        dom, rng = ["freebayes", "ours"], ["#ff7f0e", "#1f77b4"]
+        dom, rng = ["freebayes", "ours", "ng"], ["#ff7f0e", "#1f77b4", "#d62728"]
         ysc = alt.Scale(domain=[50, 100])
         base = alt.Chart(gtbox_df).encode(
             x=alt.X("coverage:O", sort=cov_order, title="coverage"),

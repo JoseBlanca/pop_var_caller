@@ -5,8 +5,8 @@
 #
 #   benchmarks/lib/compare_to_truth.sh <bench.config.sh> <query.vcf>...
 #
-# With no query VCFs it defaults to the three single-sample caller
-# outputs under OUT_ROOT (ours / gatk / freebayes), skipping any absent.
+# With no query VCFs it defaults to the four single-sample caller
+# outputs under OUT_ROOT (ours / gatk / freebayes / ng), skipping any absent.
 #
 # Method (bcftools): both query and truth are restricted to the BED,
 # left-aligned and biallelic-split (`norm -m -any`), then class-filtered
@@ -35,16 +35,16 @@ bench_preflight "$BED" "$REFERENCE" "${REFERENCE}.fai"
 
 CLASSES="${CLASSES:-snps indels}"
 
-# Default query set: the three single-sample caller outputs.
+# Default query set: the four single-sample caller outputs.
 queries=("$@")
 if (( ${#queries[@]} == 0 )); then
     base="$(bench_sample_base "$(bench_single_cram)")"
-    for c in ours gatk freebayes; do
+    for c in ours gatk freebayes ng; do
         q="$OUT_ROOT/$c/single_${base}.vcf"
         [[ -f "$q" ]] && queries+=("$q")
     done
     if (( ${#queries[@]} == 0 )); then
-        echo "no query VCFs given and none found under $OUT_ROOT/{ours,gatk,freebayes}/" >&2
+        echo "no query VCFs given and none found under $OUT_ROOT/{ours,gatk,freebayes,ng}/" >&2
         echo "run the callers first, or pass VCF paths explicitly." >&2
         exit 1
     fi
@@ -96,7 +96,7 @@ for cls in $CLASSES; do
     truth_norm="$TMP/truth.$cls.vcf.gz"
     normalize "$TRUTH_VCF" "$cls" "$truth_norm" -f PASS
     for q in "${queries[@]}"; do
-        name="$(basename "$(dirname "$q")")"   # ours / gatk / freebayes
+        name="$(basename "$(dirname "$q")")"   # ours / gatk / freebayes / ng
         [[ "$name" == "$BENCH_NAME" || -z "$name" ]] && name="$(basename "$q" .vcf)"
         q_norm="$TMP/query.$name.$cls.vcf.gz"
         normalize "$q" "$cls" "$q_norm"

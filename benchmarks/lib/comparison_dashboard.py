@@ -115,7 +115,7 @@ def _(mo):
     # Precision / recall are meaningless at the gate=0 emission (every
     # caller dumps a low-QUAL tail). Score them on the *confident* calls:
     # drop everything below this QUAL. 1000 is a sensible common cutoff
-    # for all three SNP callers at this depth.
+    # for every SNP caller at this depth.
     cutoff_sel = mo.ui.slider(
         start=0, stop=15000, step=50, value=1000, show_value=True,
         label="QUAL cutoff for precision / recall / F1",
@@ -162,10 +162,14 @@ def _():
     from matplotlib.patches import Circle
 
     # Stable colour per caller, shared with the perf dashboard's intent.
+    # "ng" is the experimental caller: one process from alignments to VCF, run
+    # with --defaults (nothing fitted) and calling nothing inside tandem
+    # repeats, so its recall carries the repeat tracts it does not build yet.
     PALETTE = {
         "ours":      "#1f77b4",  # blue
         "gatk":      "#9467bd",  # purple
         "freebayes": "#d62728",  # red
+        "ng":        "#2ca02c",  # green
     }
 
     def _bar_labels(ax, bars):

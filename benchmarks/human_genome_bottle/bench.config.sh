@@ -55,3 +55,10 @@ HC_EXTRA="${HC_EXTRA:--stand-call-conf 0}"      # GATK HaplotypeCaller: emit low
 VARCALL_EXTRA="${VARCALL_EXTRA:---min-qual 0 --no-complexity-filter}"
 GATK_HEAP="${GATK_HEAP:-4g}"
 GATK_COMBINE_HEAP="${GATK_COMBINE_HEAP:-8g}"
+
+# ng needs a tandem-repeat catalog built from this reference, and the reference
+# lives on a read-only mount ($HOME/genomes), so the catalog cannot go beside
+# it. Keep it with the CRAMs, which is where tomato1 keeps its own and which
+# git already ignores. benchmarks/lib/run_ng.sh builds it if it is not there
+# (about 100 s on GRCh38).
+NG_CATALOG="${NG_CATALOG:-$BENCH_DIR/crams/$(basename "$REFERENCE").repeats.parquet}"

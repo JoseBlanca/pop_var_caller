@@ -25,3 +25,9 @@ THREADS="${THREADS:-4}"
 MIN_QUAL="${MIN_QUAL:-30}"
 GATK_HEAP="${GATK_HEAP:-4g}"
 GATK_COMBINE_HEAP="${GATK_COMBINE_HEAP:-8g}"
+
+# ng needs a tandem-repeat catalog built from this reference, and the reference
+# lives on a read-only mount ($HOME/genomes), so the catalog cannot go beside
+# it. It is kept with the CRAMs, which git already ignores;
+# benchmarks/lib/run_ng.sh builds it there if it is not present.
+NG_CATALOG="${NG_CATALOG:-$BENCH_DIR/crams/S_lycopersicum_chromosomes.4.00.repeats.parquet}"
