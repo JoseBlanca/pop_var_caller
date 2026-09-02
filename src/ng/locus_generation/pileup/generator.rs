@@ -1157,20 +1157,6 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
         }
     }
 
-    /// Offer a finished record back, so the next column is filled into it — **G1.**
-    ///
-    /// **A record offered before the first chromosome is walked is let go**, because
-    /// there is no walker yet to hold it and the pool lives on the walker — one is minted
-    /// per chromosome, and the pool crosses chromosome boundaries with the chain-id
-    /// allocator. That case is the first draw of a run and costs the allocations of one
-    /// locus.
-    pub fn recycle(&mut self, record: SampleLocusObservations) {
-        match self.chromosome.as_mut() {
-            Some(chromosome) => chromosome.walker.recycle(record),
-            None => drop(record),
-        }
-    }
-
     /// Point the walk at `region`, minting the chromosome's walker and cursor first if this
     /// is the first region on it.
     ///
@@ -1399,10 +1385,6 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> LocusGenerat
         reads: &SampleReads,
     ) -> Result<Option<SampleLocusObservations>, LocusGenerationError> {
         PileupGenerator::next_locus(self, reads)
-    }
-
-    fn recycle(&mut self, record: SampleLocusObservations) {
-        PileupGenerator::recycle(self, record);
     }
 
     /// **The only way these ten counters are reachable once the generator is boxed.**

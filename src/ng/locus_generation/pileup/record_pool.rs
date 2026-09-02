@@ -34,10 +34,24 @@
 //! allows without ever growing. Anything above that would be holding buffers against a
 //! demand that does not exist.
 
-use crate::ng::locus_generation::SampleLocusObservations;
+use crate::ng::locus_generation::{SampleLocusObservations, SequenceObservation};
 
 /// How many retired records one walk keeps. See the module note.
 pub(super) const RECORDS_KEPT: usize = 2;
+
+/// How many spare observation slots one walk keeps, over and above those sitting inside
+/// the retired records.
+///
+/// **A record's observation count moves from locus to locus and the slots must not churn
+/// with it.** At three reads a position a locus carries one or two observations, and a
+/// refill that simply shortened the list to this locus's count would free the surplus
+/// slot's two buffers and allocate them again at the next locus that needed it — undoing,
+/// on exactly the fluctuation that is most common, what the pool exists to do. Surplus
+/// slots come here instead.
+///
+/// Eight because it is comfortably above the observation count of an ordinary column
+/// (distinct bases times read groups) and small enough that holding it is free.
+const OBSERVATION_SLOTS_KEPT: usize = 8;
 
 /// Retired locus records, waiting to be filled again.
 ///
@@ -46,6 +60,8 @@ pub(super) const RECORDS_KEPT: usize = 2;
 #[derive(Debug, Default)]
 pub(super) struct RecordPool {
     kept: Vec<SampleLocusObservations>,
+    /// Observation slots surplus to the record being filled, kept with their buffers.
+    slots: Vec<SequenceObservation>,
 }
 
 impl RecordPool {
@@ -53,7 +69,23 @@ impl RecordPool {
     pub(super) fn new() -> Self {
         Self {
             kept: Vec::with_capacity(RECORDS_KEPT),
+            slots: Vec::with_capacity(OBSERVATION_SLOTS_KEPT),
         }
+    }
+
+    /// Keep an observation slot a refill no longer needs, with its buffers. Refused, and
+    /// dropped, past the bound — for the reason [`put`](Self::put) refuses.
+    pub(super) fn put_observation(&mut self, observation: SequenceObservation) {
+        if self.slots.len() < OBSERVATION_SLOTS_KEPT {
+            self.slots.push(observation);
+        }
+    }
+
+    /// An observation slot to fill: a kept one if there is one, a fresh one otherwise.
+    pub(super) fn take_observation(&mut self) -> SequenceObservation {
+        self.slots
+            .pop()
+            .unwrap_or_else(SequenceObservation::empty_shell)
     }
 
     /// Offer a finished record back. **Refused, and dropped, once the pool is full.**

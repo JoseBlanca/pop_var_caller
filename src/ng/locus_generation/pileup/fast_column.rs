@@ -369,14 +369,24 @@ pub(super) fn try_ordinary_column(
     record.reads_discarded_by_cap = 0;
     record.kind = LocusKind::Generic;
 
-    // Slots past this column's observation count belong to the record's previous locus
-    // and are dropped; the ones that remain are refilled in place.
-    record.observations.truncate(scratch.observations.len());
+    // **Slots past this column's count go back to the pool, not to the allocator.** A
+    // locus carries one or two observations at three reads a position and the count moves
+    // between them constantly, so shortening the list by dropping the surplus would free
+    // two buffers and allocate them again at the next locus that needed the slot — churn
+    // on exactly the fluctuation that is most common.
+    while record.observations.len() > scratch.observations.len() {
+        // PANIC-FREE: the loop runs only while the list is longer than the target.
+        let surplus = record
+            .observations
+            .pop()
+            .expect("the list is longer than the target, so it is not empty");
+        records.put_observation(surplus);
+    }
     for (at, o) in scratch.observations.iter_mut().enumerate() {
         o.chain_ids.sort_unstable();
         o.chain_ids.dedup();
         if at == record.observations.len() {
-            record.observations.push(SequenceObservation::empty_shell());
+            record.observations.push(records.take_observation());
         }
         // PANIC-FREE: the line above grows the list to `at + 1` when it is short.
         let slot = &mut record.observations[at];
