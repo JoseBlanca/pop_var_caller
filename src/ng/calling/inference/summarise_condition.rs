@@ -2207,20 +2207,25 @@ fn assemble_genotype_likelihood_table<SsrEmissionScratch>(
 ///
 /// Three loops, one inside the next, and **ng ships with the outer two switched off**:
 ///
-/// 1. the **discovery round**, which would add tract lengths the converged posteriors are
-///    explaining as slippage (§4.1) — `DiscoveryMode::Off` by default;
+/// 1. the **discovery round** of spec §2's pseudocode (§4.1) — structurally a loop here, and
+///    permanently a single pass: milestone E1 found the eligible set reads no posterior, so
+///    discovery's built setting runs as a **pre-pass inside candidate selection** before this
+///    arm is ever called (`DiscoveryMode::BeforeTheLoop`;
+///    `doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md` §6.5), and the loop it
+///    reaches is this one, over a table already widened;
 /// 2. the **slippage round**, which re-fits this locus's slippage numbers from its own
 ///    reads and rebuilds the table under them (§5.1) — built, and `max_rounds = 0` by
 ///    default, which is the frozen setting: the round's body never runs;
 /// 3. the **frequency loop**, the innermost, and the only one that repeats at the shipped
 ///    configuration ([`run_frequency_loop`]).
 ///
-/// **Discovery's loop is written with a body that runs once**, rather than left out and added
-/// later, because what it will need is a place to re-enter from: its body ends in an
-/// unconditional `break`, and that — not the configuration — is what makes it run once.
-/// Validation is the second lock rather than the first: a *run* that asks for discovery is
-/// refused before it can reach a [`RunnableCallingLoopConfig`], so no run arrives here
-/// expecting rounds it will not get. **The slippage round is the built one**: it reads
+/// **Discovery's loop is written with a body that runs once**: its body ends in an
+/// unconditional `break`, and that — not the configuration — is what makes it run once. E1's
+/// pre-pass finding made that permanent rather than provisional — a round here would look at
+/// the same evidence selection already looked at and admit nothing, which an E1 test asserts.
+/// Validation is the second lock: the two round-wrapped discovery modes are refused before
+/// they can reach a [`RunnableCallingLoopConfig`], so no run arrives here expecting rounds it
+/// will not get. **The slippage round is the one with a live body**: it reads
 /// `config.slippage_refit`, and at zero rounds — the shipped default — its body is one
 /// comparison and a `break`, with no table rebuilt and no read attributed.
 ///
@@ -2286,9 +2291,10 @@ where
     #[expect(
         clippy::never_loop,
         reason = "the discovery round of spec §2's pseudocode is structurally present and \
-                  switched off at the shipped configuration: its body is what \
-                  calling_bakeoffs.md fills in, and its unconditional `break` is what makes \
-                  it run once. The slippage round inside it genuinely loops now — its body is \
+                  permanently a single pass: discovery's built setting is a pre-pass in \
+                  candidate selection (E1's finding — the eligible set reads no posterior), \
+                  so no mode fills this body, and its unconditional `break` is what makes it \
+                  run once. The slippage round inside it genuinely loops now — its body is \
                   built — so this expectation is the outer loop's alone"
     )]
     fn call_locus(

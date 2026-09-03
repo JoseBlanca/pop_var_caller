@@ -16,17 +16,23 @@
 //! - **the slippage round**, which re-fits how often a read gains or loses a whole repeat
 //!   from the locus's own reads and runs the frequency loop again on the new numbers
 //!   ([`SlippageRefitConfig`], `max_rounds` 0);
-//! - **the discovery round**, which looks at what the converged answer is explaining as
-//!   slippage and admits the tract lengths that recur too often in one sample to be slippage
-//!   ([`DiscoveryConfig`], [`DiscoveryMode::Off`]).
+//! - **allele discovery**, which admits the tract lengths that recur too often in one sample
+//!   to be slippage ([`DiscoveryConfig`], [`DiscoveryMode::Off`]). **Its built setting is not
+//!   a round here at all**: building the decision half (milestone E1) showed the eligible set
+//!   is a function of the observations and the candidate table alone — no posterior enters it
+//!   — so discovery runs as a **pre-pass inside candidate selection**
+//!   ([`DiscoveryMode::BeforeTheLoop`], wired in
+//!   [`select_ssr`](crate::ng::calling::allele_candidates::ssr::select_ssr);
+//!   `doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md` §6.5).
 //!
 //! Both are built as configurations of one code path rather than as three implementations,
 //! which is what makes *frozen*, *pulled back part way* and *free* three values instead of
 //! three code paths to keep in step (`doc/devel/ng/spec/calling_em_loop.md` §5.1).
 //!
 //! **The slippage round's body is built** — the arithmetic in [`slippage_refit`], the round
-//! itself in the loop's driver — and a non-zero `max_rounds` now validates. **Discovery's is
-//! not, and a run that asks for it is still refused** — see [`CallingLoopConfig::validate`].
+//! itself in the loop's driver — and a non-zero `max_rounds` now validates. **So is
+//! discovery's pre-pass**, and [`DiscoveryMode::BeforeTheLoop`] validates with it. **The two
+//! round-wrapped discovery settings are still refused** — see [`CallingLoopConfig::validate`].
 //! The refusal is not advisory: [`LocusGenotyper::call_locus`] takes a
 //! [`RunnableCallingLoopConfig`], which has one constructor and it is the check, so a setting
 //! this caller will not honour cannot reach the loop at all.
@@ -296,30 +302,49 @@ impl Default for SlippageRefitConfig {
     }
 }
 
-/// Whether the loop may **add** alleles a locus's converged answer suggests it missed, and
-/// against what.
+/// Whether a locus may gain alleles its selection missed, and **where the looking happens**.
 ///
 /// A repeat tract can hide a real allele under stutter: a short allele in a sample that also
-/// carries a long one looks exactly like a contraction slip. After the loop converges, the
-/// model's own attribution can be retraced — where it says *this read slipped*, the tract
-/// length that read implies is counted per sample, and a length that recurs past a bar is
-/// admitted as a candidate (spec §4.1).
+/// carries a long one looks exactly like a contraction slip, and a diploid sample's nomination
+/// puts forward at most two lengths, so a third never reaches the table however many reads
+/// carry it (spec §4.1).
 ///
-/// **The middle setting may be the answer, which is why there are three.** Discovering
-/// against frequencies held fixed at what one convergence produced makes each round a single
-/// scoring pass rather than a whole convergence, and a final convergence at the end puts back
-/// what that gives up.
+/// **Building the decision half (milestone E1) changed what the settings mean here**
+/// (`doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md` §6.5, superseding spec
+/// §4.1's "look against the converged posteriors"). ng's tract locus generator realigns every
+/// read before the caller sees it, so an observation's bases *are* the tract sequence a
+/// retrace would imply — the eligible set is a function of the observations and the candidate
+/// table alone, and no posterior enters it. Two consequences, both pinned by
+/// [`discovery`]'s tests:
+///
+/// - a round over the same evidence can only fire once — with the first round's admissions on
+///   the table, a second finds nothing — so wrapping rounds around the loop buys nothing;
+/// - the looking needs no loop at all: it runs as a **pre-pass inside candidate selection**
+///   ([`BeforeTheLoop`](Self::BeforeTheLoop), wired in
+///   [`select_ssr`](crate::ng::calling::allele_candidates::ssr::select_ssr)), with no second
+///   convergence and no append-only emission store.
+///
+/// The two round-wrapped settings below are kept as values so the spec's three-way comparison
+/// stays sayable, and both are refused at validation: their premise is the one E1 retired,
+/// and honouring them as the pre-pass would report one arm under another's name.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub enum DiscoveryMode {
     /// **The default.** The alleles a locus is called over are settled before the first pass
     /// and do not change during it.
     #[default]
     Off,
-    /// Converge once, hold the frequencies at what that produced, and discover against them
-    /// — each round is a scoring pass. Converge once more at the end on the final allele set.
+    /// **The built setting.** Discover before the loop runs at all, inside candidate
+    /// selection: a tract sequence one sample showed with reads clearing the bar is admitted
+    /// as a candidate, its reads counted in `AD` rather than the per-sample leftover, and the
+    /// loop then runs once over the widened table.
+    BeforeTheLoop,
+    /// Converge once, hold the frequencies at what that produced, and discover against them —
+    /// each round a scoring pass. **Refused at validation**: E1 showed the frequencies play no
+    /// part in the eligible set, so this arm is the pre-pass at the cost of an extra
+    /// convergence.
     AgainstFrozenFrequencies,
-    /// Converge fully on every round. The most expensive setting, and the one the spec's
-    /// pseudocode writes out.
+    /// Converge fully on every round — the spec §4.1 pseudocode. **Refused at validation**,
+    /// for the same reason with more convergences.
     AgainstFullConvergence,
 }
 
@@ -328,6 +353,7 @@ impl std::fmt::Display for DiscoveryMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Off => "no allele discovery",
+            Self::BeforeTheLoop => "discovering alleles before the loop, in candidate selection",
             Self::AgainstFrozenFrequencies => {
                 "discovering alleles against frozen allele frequencies"
             }
@@ -336,24 +362,27 @@ impl std::fmt::Display for DiscoveryMode {
     }
 }
 
-/// Discovering alleles from the calling: whether, against what, and how much evidence a
-/// length needs.
+/// Discovering alleles from the calling: whether, where, and how much evidence a length
+/// needs.
 ///
-/// Off by default, and the reason is a cost-against-benefit judgement rather than a
-/// mechanical objection. **The cost is certain and paid at every locus** — a round is a whole
-/// extra run of the loop, because the lengths it looks for are the ones the *converged*
-/// answer is explaining as slippage, so a locus where nothing is found still pays to
-/// establish that. **The benefit is unmeasured**: nothing on this project's data says how
-/// often an allele is actually hidden under stutter (spec §4, §12's question 3).
+/// Off by default, and the reason is that **the benefit is unmeasured**: nothing on this
+/// project's data says how often an allele is actually hidden under stutter (spec §4, §12's
+/// question 3, and the count the plan's Milestone E was aimed at is owed a re-derivation —
+/// research doc §6.5). The cost argument that used to sit beside it is gone: the built
+/// setting is a pre-pass in candidate selection, one walk over the merge's rows per tract,
+/// not a second convergence.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct DiscoveryConfig {
-    /// Whether discovery runs at all, and against what. Defaults to [`DiscoveryMode::Off`].
+    /// Whether discovery runs at all, and where. Defaults to [`DiscoveryMode::Off`].
     pub mode: DiscoveryMode,
     /// How much evidence one sample must show before a length is admitted. Defaults to
     /// [`DEFAULT_DISCOVERY_BAR`] — 2 reads or 15% of that sample's tract-spanning reads,
     /// whichever is more.
     pub bar: MinAltReads,
-    /// The runaway guard — a round that admits nothing already ends the loop.
+    /// The runaway guard of the round-wrapped modes — a round that admits nothing already
+    /// ends the loop. **Inert for [`DiscoveryMode::BeforeTheLoop`]**, which fires once by
+    /// construction: the pre-pass is not a loop, and E1's own test is that a second pass
+    /// over the same evidence admits nothing.
     ///
     /// Defaults to [`DEFAULT_DISCOVERY_MAX_ROUNDS`] (4), **which is this step's own number
     /// and inherited from nowhere** — see the constant for why, and for why it is soft.
@@ -377,6 +406,25 @@ impl DiscoveryConfig {
     #[must_use]
     pub fn is_off(&self) -> bool {
         matches!(self.mode, DiscoveryMode::Off)
+    }
+
+    /// **The bar candidate selection's discovery pre-pass applies, or `None` where no
+    /// pre-pass runs** — what the run driver hands to
+    /// [`SsrSelectionConfig::discovery`](crate::ng::calling::allele_candidates::ssr::SsrSelectionConfig::discovery).
+    ///
+    /// `Some` only for [`DiscoveryMode::BeforeTheLoop`]. The two round-wrapped modes answer
+    /// `None` — they name looking that would happen inside the loop, not in selection — but a
+    /// driver never sees them: they are refused at [`CallingLoopConfig::validate`], and the
+    /// driver reads this off a [`RunnableCallingLoopConfig`].
+    #[inline]
+    #[must_use]
+    pub fn pre_pass_bar(&self) -> Option<MinAltReads> {
+        match self.mode {
+            DiscoveryMode::BeforeTheLoop => Some(self.bar),
+            DiscoveryMode::Off
+            | DiscoveryMode::AgainstFrozenFrequencies
+            | DiscoveryMode::AgainstFullConvergence => None,
+        }
     }
 }
 
@@ -443,14 +491,16 @@ impl CallingLoopConfig {
     /// are no longer refused here because they are no longer *expressible*, held instead by
     /// [`MinAltReads`] and by [`NonZeroU32`].
     ///
-    /// **A setting whose body is not built yet.** Discovery ships as a value with no
-    /// implementation behind it; the machinery arrives with the measurements that decide its
-    /// default (`doc/devel/ng/impl_plan/calling_bakeoffs.md`). Until then a run that asks for
-    /// it is stopped here, because the alternative — accepting the setting and running the
-    /// loop without discovery anyway — would report a measurement of an arm that was never
-    /// run. **The slippage re-fit's body is built** (the tract-accuracy program's L3,
-    /// `doc/devel/ng/research/tract_accuracy_program_report.md`), so a non-zero `max_rounds`
-    /// is now a setting this caller honours and validates.
+    /// **A setting whose body is not built.** The two round-wrapped discovery modes are
+    /// values with no implementation behind them, and E1's finding is that none is coming:
+    /// the eligible set reads no posterior, so a round around the loop admits nothing the
+    /// built pre-pass does not (research doc §6.5, superseding spec §4.1's premise). A run
+    /// that asks for one is stopped here, because the alternative — accepting the setting and
+    /// running the pre-pass or nothing in its place — would report a measurement of an arm
+    /// that was never run. **The slippage re-fit's body is built** (the tract-accuracy
+    /// program's L3, `doc/devel/ng/research/tract_accuracy_program_report.md`), so a non-zero
+    /// `max_rounds` validates; **so is discovery's pre-pass** (its L7), so
+    /// [`DiscoveryMode::BeforeTheLoop`] validates too.
     ///
     /// **Range refusals come first**, so a configuration that is both out of range and
     /// unbuilt hears about the range: that half is the caller's to fix today, where the other
@@ -489,12 +539,15 @@ impl CallingLoopConfig {
                 },
             );
         }
-        // The one not-yet-built setting comes last, so a configuration that is *both*
-        // out of range and unbuilt is told about the range first.
-        if !self.discovery.is_off() {
-            return Err(CallingLoopConfigError::DiscoveryNotBuilt {
-                mode: self.discovery.mode,
-            });
+        // The not-built settings come last, so a configuration that is *both* out of range
+        // and unbuilt is told about the range first. Off runs trivially; the pre-pass is the
+        // built arm, wired in candidate selection and handed its bar by the run driver.
+        match self.discovery.mode {
+            DiscoveryMode::Off | DiscoveryMode::BeforeTheLoop => {}
+            mode @ (DiscoveryMode::AgainstFrozenFrequencies
+            | DiscoveryMode::AgainstFullConvergence) => {
+                return Err(CallingLoopConfigError::DiscoveryNotBuilt { mode });
+            }
         }
         Ok(RunnableCallingLoopConfig(self))
     }
@@ -576,11 +629,14 @@ pub enum CallingLoopConfigError {
          {threshold}"
     )]
     RoundConvergenceThresholdOutOfRange { threshold: f64 },
-    /// Allele discovery was asked for and its body is not built.
+    /// A round-wrapped discovery mode was asked for, and no such round is built — the built
+    /// setting is the selection pre-pass, [`DiscoveryMode::BeforeTheLoop`].
     #[error(
-        "`discovery.mode` asked for {mode}, which is not built yet; it ships off, and \
-         accepting this setting would run the loop without discovery and report it as the \
-         discovery arm"
+        "`discovery.mode` asked for {mode}, which is not built: discovery's eligible set reads \
+         no posterior, so a round wrapped around the loop admits nothing the pre-pass does not \
+         (research doc tract_genotype_accuracy_2026-09-03 §6.5) — ask for discovering alleles \
+         before the loop instead, and accepting this setting as it stands would run one arm \
+         and report it as another"
     )]
     DiscoveryNotBuilt { mode: DiscoveryMode },
 }
@@ -710,9 +766,11 @@ mod tests {
         );
     }
 
-    /// The one setting whose body is not built — discovery — is refused by name, **not run as
-    /// the default**; the slippage re-fit's body is built, so a non-zero round count now
-    /// validates.
+    /// A setting whose body is not built is refused by name, **not run as the default**; the
+    /// settings whose bodies are built validate. Two settings have crossed that line here —
+    /// the slippage re-fit's rounds (`SlippageRefitNotBuilt`, retired when its body landed)
+    /// and now discovery's pre-pass, which is [`DiscoveryMode::BeforeTheLoop`]. What remains
+    /// refused is the pair of round-wrapped discovery modes, whose premise E1 retired.
     ///
     /// **Silently honouring the default instead is the failure the refusal exists to stop**,
     /// and it is worse than a crash: a measurement harness would set discovery on, get the
@@ -720,12 +778,17 @@ mod tests {
     /// then agree exactly, which reads as a finding.
     #[test]
     fn a_setting_whose_body_is_not_built_is_refused_rather_than_ignored() {
-        // The re-fit's rounds are the setting that used to be refused here
-        // (`SlippageRefitNotBuilt`, retired when the body was built): asking for three rounds
-        // is now a configuration this caller runs.
+        // The re-fit's rounds were the first setting refused here and then built: asking for
+        // three rounds is a configuration this caller runs.
         let mut refitting = CallingLoopConfig::default();
         refitting.slippage_refit.max_rounds = 3;
         assert!(refitting.validate().is_ok());
+
+        // Discovery's pre-pass is the second: built in candidate selection (`select_ssr`'s
+        // discovery pre-pass), so asking for it validates.
+        let mut discovering_before_the_loop = CallingLoopConfig::default();
+        discovering_before_the_loop.discovery.mode = DiscoveryMode::BeforeTheLoop;
+        assert!(discovering_before_the_loop.validate().is_ok());
 
         for mode in [
             DiscoveryMode::AgainstFrozenFrequencies,
@@ -736,6 +799,35 @@ mod tests {
             assert_eq!(
                 discovering.validate(),
                 Err(CallingLoopConfigError::DiscoveryNotBuilt { mode })
+            );
+        }
+    }
+
+    /// **What the driver reads off a validated configuration**: the pre-pass mode hands
+    /// selection its bar, and every other mode hands it nothing — off means off, and the
+    /// refused modes never reach a driver at all.
+    #[test]
+    fn only_the_pre_pass_mode_hands_selection_a_bar() {
+        let mut config = DiscoveryConfig::DEFAULT;
+        assert_eq!(config.pre_pass_bar(), None, "off runs no pre-pass");
+
+        config.mode = DiscoveryMode::BeforeTheLoop;
+        assert_eq!(
+            config.pre_pass_bar(),
+            Some(DEFAULT_DISCOVERY_BAR),
+            "the pre-pass carries discovery's own bar, not selection's"
+        );
+
+        for mode in [
+            DiscoveryMode::AgainstFrozenFrequencies,
+            DiscoveryMode::AgainstFullConvergence,
+        ] {
+            config.mode = mode;
+            assert_eq!(
+                config.pre_pass_bar(),
+                None,
+                "a round-wrapped mode names looking inside the loop, not in selection — and \
+                 validation refuses it before any driver could ask"
             );
         }
     }
@@ -818,8 +910,10 @@ mod tests {
         }
     }
 
-    /// With both outer loops asked for at once, discovery — the one whose body is not built —
-    /// is the refusal reported; the re-fit's rounds no longer stand in its way.
+    /// With both outer settings asked for at once, a round-wrapped discovery mode — the one
+    /// whose body is not built — is the refusal reported; the re-fit's rounds no longer stand
+    /// in its way. And the pair a bake-off arm would actually set — re-fit rounds plus the
+    /// pre-pass — is a configuration this caller runs.
     ///
     /// **This is the case a measurement harness hits first**, since a bake-off arm sets both.
     /// While both bodies were unbuilt the re-fit was the one reported; building it moved the
@@ -834,6 +928,12 @@ mod tests {
             Err(CallingLoopConfigError::DiscoveryNotBuilt {
                 mode: DiscoveryMode::AgainstFullConvergence
             })
+        );
+
+        both.discovery.mode = DiscoveryMode::BeforeTheLoop;
+        assert!(
+            both.validate().is_ok(),
+            "re-fit rounds plus the discovery pre-pass are both built, so the pair validates"
         );
     }
 

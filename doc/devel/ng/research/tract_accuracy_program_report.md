@@ -811,4 +811,31 @@ risk, named: every admitted length can only enlarge the spurious-het class (214 
   adopted λ 0.20); the bar is that flips stay net-positive on both period classes at both
   depths with the spurious class's growth smaller than the never-offered class's shrinkage.
 
-*(build to follow; measurements after the runs they quote)*
+**Results (written after the runs they quote; arm `l7_discovery`, `tmp/tract_program/l7_arm/`).**
+
+The wiring landed as E1's findings direct: the pre-pass runs inside `select_ssr` over the
+merge's own support rows (a support row *is* a complete realigned observation), per sample
+against the shipped bar (2 reads AND 15% of that sample's spanning reads, never pooled across
+samples), admitted alleles face the shared cap and truncation rules, and a new
+`DiscoveryMode::BeforeTheLoop` names the setting while the two posterior-round modes stay
+refused. Off is proven byte-identical (`CONTROL-OFF-IDENTICAL`); 6,061 lib tests, fmt, clippy
+green; switch `NG_TRACT_DISCOVERY=1` (parameters-file plumbing owed on a keep).
+
+Measured against the adopted baseline:
+
+| | 30× | 50× |
+|---|---|---|
+| accuracy (hom / p2+) | 0.9026 / 0.8974 (+0.11 / +0.04) | 0.9186 / 0.9074 (+0.13 / +0.03) |
+| flips | 31: **11 right-gains** (10 never-offered, 1 silent) against 4 leaving right | 21: **10 right-gains** against 2 leaving (both to spurious) |
+| never-offered | −23 (369 → 346) | −17 |
+| spurious het | **unchanged** (214) | +2 |
+| wrong-other | +19 — errors converted from never-offered into offered-but-mis-genotyped | +7 |
+
+**The bar is met on every clause**: net-positive both period classes both depths (hom +5 /
+p2+ +2 at 30×; +6 / +2 at 50×), and the spurious class's growth (0 and 2) is far under the
+never-offered shrinkage (23 and 17). The pre-registered ceiling was 61; discovery reached 25
+of those tracts outright (11 + 14 converted) — the rest stay cut by the bar or mis-genotyped
+over the enlarged set, which is the next lever family's territory, not this one's.
+
+**Verdict: default-candidate, pending the tomato behavioural gate below and the owner's
+sign-off.**

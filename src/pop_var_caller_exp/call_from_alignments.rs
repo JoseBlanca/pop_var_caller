@@ -53,8 +53,8 @@ use crate::ng::calling::allele_candidates::{
     CandidateSelectionConfig, DEFAULT_MAX_CANDIDATE_ALLELES, MaxCandidateAlleles,
 };
 use crate::ng::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
-use crate::ng::calling::inference::CallingLoopConfig;
 use crate::ng::calling::inference::summarise_condition::SummariseConditionLoop;
+use crate::ng::calling::inference::{CallingLoopConfig, DiscoveryMode};
 use crate::ng::calling::likelihood::MAX_PLOIDY_COPIES;
 use crate::ng::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
 use crate::ng::calling::parameters_file::{
@@ -124,9 +124,28 @@ const NG_SLIPPAGE_REFIT_ROUNDS: &str = "NG_SLIPPAGE_REFIT_ROUNDS";
 /// [`NG_SLIPPAGE_REFIT_ROUNDS`] applies: an arm's spelling, owed real plumbing on a keep.
 const NG_SLIPPAGE_REFIT_FREE: &str = "NG_SLIPPAGE_REFIT_FREE";
 
+/// **The tract-accuracy program's measurement switch for allele discovery** (lever L7): run
+/// the discovery pre-pass at every repeat tract, admitting the tract sequences one sample
+/// showed too often for slippage to explain — 2 reads **and** 15% of that sample's spanning
+/// reads, the shipped bar.
+///
+/// Absent is the shipped default — no discovery, selection untouched. `1` asks for
+/// [`DiscoveryMode::BeforeTheLoop`], the pre-pass inside candidate selection that milestone
+/// E1's finding put there (`doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md`
+/// §6.5); anything else set is refused before a read is decoded, for the reason the other
+/// switches give: a measurement switch that fell back silently would report the plain
+/// selection as the discovery arm.
+///
+/// **An environment variable by design, not an oversight**: there is no parameters-file key
+/// for this yet, deliberately — the arm is enabled per run while the program measures it, and
+/// a *keep* verdict owes this switch proper parameters-file plumbing before the experiment
+/// spelling is retired.
+const NG_TRACT_DISCOVERY: &str = "NG_TRACT_DISCOVERY";
+
 /// The calling-loop configuration this run asks for: the shipped defaults, with the slippage
-/// re-fit's round count read once from [`NG_SLIPPAGE_REFIT_ROUNDS`] and its pull-backs
-/// zeroed where [`NG_SLIPPAGE_REFIT_FREE`] asks for the free setting.
+/// re-fit's round count read once from [`NG_SLIPPAGE_REFIT_ROUNDS`], its pull-backs
+/// zeroed where [`NG_SLIPPAGE_REFIT_FREE`] asks for the free setting, and the discovery
+/// pre-pass switched on where [`NG_TRACT_DISCOVERY`] asks for it.
 fn calling_loop_config_for_this_run()
 -> Result<crate::ng::calling::inference::RunnableCallingLoopConfig, CallFromAlignmentsCliError> {
     let mut config = CallingLoopConfig::DEFAULT;
@@ -163,6 +182,23 @@ fn calling_loop_config_for_this_run()
         Err(std::env::VarError::NotUnicode(value)) => {
             return Err(CallFromAlignmentsCliError::CallingLoopSettings(format!(
                 "{NG_SLIPPAGE_REFIT_FREE} is set but is not text: {value:?}"
+            )));
+        }
+    }
+    match std::env::var(NG_TRACT_DISCOVERY) {
+        Ok(value) if value.trim() == "1" => {
+            config.discovery.mode = DiscoveryMode::BeforeTheLoop;
+        }
+        Ok(value) => {
+            return Err(CallFromAlignmentsCliError::CallingLoopSettings(format!(
+                "{NG_TRACT_DISCOVERY} accepts only 1 (run the discovery pre-pass at every \
+                 repeat tract), not {value:?}"
+            )));
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(value)) => {
+            return Err(CallFromAlignmentsCliError::CallingLoopSettings(format!(
+                "{NG_TRACT_DISCOVERY} is set but is not text: {value:?}"
             )));
         }
     }
