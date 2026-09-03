@@ -532,6 +532,15 @@ the widen-recovery test forced the all-Match restriction and stand green.
 not a parameter), and per rule 7 the *default* claim owes the tomato behavioural gate and
 the owner's sign-off at Checkpoint 1, alongside the composed slate.
 
+**P2 re-derived on the fixed caller** (probe rebuilt, dump regenerated, control asserted;
+`tmp/tract_program/l4_p2_tracts.tsv`): the never-offered class is 369 (was 463). The
+never-tabled pool falls 313 → 203; tracts where 2+ raw reads carry a length the table lacks
+fall **114 → 30**; right-length-wrong-letters falls 88 → 63 — the fix consumed over half the
+realigner surface, and 100 of the remaining length-absent tracts have no raw carrier at all
+(the evidence limit, stable). **The top-ploidy cut rises 42 → 61**: truth alleles that now
+survive into the table are being cut by the per-sample ploidy rung — discovery's (L7's)
+reachable class grew back to its old size, and its gate is re-armed with that number.
+
 ---
 
 *Sections L1–L3 and L5–L7 are opened as the program reaches them.*
