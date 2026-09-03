@@ -230,9 +230,11 @@ impl SampleObservationGatherer {
     /// gathering the same sample twice produce the same bytes apart from the header's
     /// timestamp (spec §12.1).
     ///
-    /// **⚠ An existing file at `path` is truncated** — [`PspWriter::create`]'s contract. A
-    /// caller that must not destroy a finished psp checks for one first
-    /// (`generate-psps` does, plan step C3).
+    /// **⚠ An existing file at `path` is truncated** — [`PspWriter::create`]'s contract, so a
+    /// caller that must not destroy a finished psp has to keep it out of the way itself.
+    /// `generate-psps` writes each sample beside its psp and renames once the file is whole,
+    /// which is what stops a stopped re-walk from destroying the psp it was replacing;
+    /// refusing an overwrite outright is plan step C3's.
     ///
     /// # Errors
     ///

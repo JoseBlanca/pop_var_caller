@@ -199,7 +199,7 @@ reads: the same sample gathered twice gives byte-identical files but the header 
 
 ### Milestone C — `generate-psps`
 
-**C1. ☐ The subcommand.**
+**C1. ✅ The subcommand.**
 Reference, catalog, one `--alignment` per sample, optional BED, `--output-dir`; assembles
 reference/segmentation exactly as `call_from_alignments.rs` does (reuse `segments_over`,
 `analysed_regions`, `build_read_groups`), then one gatherer per sample. Refusals shared with

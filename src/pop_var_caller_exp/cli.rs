@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 
 use super::call_from_alignments::CallFromAlignmentsArgs;
 use super::estimate_contamination::EstimateContaminationArgs;
+use super::generate_psps::GeneratePspsArgs;
 use super::repeat_catalog::RepeatCatalogArgs;
 use super::typed_regions::TypedRegionsArgs;
 
@@ -46,6 +47,24 @@ pub enum PopVarCallerExpCommand {
     /// still set aside is a repeat cluster too tangled to have clean flanks;
     /// its ground is charged to `not built yet` and reported at the end.
     CallFromAlignments(CallFromAlignmentsArgs),
+
+    /// Walk each sample's alignment files once and store what they showed as a psp,
+    /// one file per sample, calling nothing.
+    ///
+    /// A psp holds one sample's evidence: what its reads showed at every position of the
+    /// ground you asked for — the alleles, their support, which reads carried them — in
+    /// the form the caller reads. This is psp mode's first stage, and a sample walked here
+    /// can join any later cohort without being read again: adding a sample re-walks that
+    /// sample only, and a failed sample is one sample to re-run.
+    ///
+    /// Samples are walked one at a time, in the order given. There is no thread knob:
+    /// each sample's walk is independent, so a cohort is spread by running this command
+    /// once per sample rather than by threading one invocation.
+    ///
+    /// Each psp is named for the sample its reads declare, inside --output-dir. Two things
+    /// this stage does not do yet: it writes no census beside the psp (the file a
+    /// parameters fit reads), and it does not refuse to overwrite a psp already there.
+    GeneratePsps(GeneratePspsArgs),
 
     /// Estimate, for each sample in a panel of alignments, what share of its
     /// reads came from another individual, and write the answers as JSON.

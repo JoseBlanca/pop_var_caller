@@ -19,7 +19,24 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-03):** **psp-mode Milestone B is complete — the walk stage
+> - **Last completed task (2026-09-03):** **psp mode has a command line — `generate-psps`
+> walks each sample once and writes its psp** (branch `ng-psp-mode`, plan step C1;
+> [report](doc/devel/reports/implementations/ng_psp_mode_c1_2026-09-03.md),
+> [review](doc/devel/reports/reviews/ng_psp_mode_c1_2026-09-03.md),
+> [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-03_v5.md)). On a tomato slice it
+> writes one psp of 914,715 bytes in 3.0 s. The eight-checklist review ran **41 mutations and
+> 21 survived**, finding two live defects: the psp's file name was built from the `@RG SM`
+> tag with nothing checking it (a sample called `../elsewhere` would write outside
+> `--output-dir`), and a re-walk of a failed sample truncated the psp it was replacing before
+> writing — so a second failure destroyed the good file too. Both fixed: names are refused at
+> the door, and each walk goes to `<sample>.psp.partial` and is renamed only once whole.
+> Command tests went from 12 to 24. Two prerequisites landed first: `ng::run`'s shared test
+> fixtures, and the ground assembly (which stretch of genome a run walks, cut into segments)
+> lifted out of `call-from-alignments` so both modes compute it from one copy — which is what
+> makes psp mode's cohort-agreement check meaningful. Next: C2's per-sample report and C3's
+> refusal to overwrite a finished psp.
+>
+> - **Earlier (2026-09-03):** **psp-mode Milestone B is complete — the walk stage
 > is provably the walk, in bytes** (branch `ng-psp-mode`, at Checkpoint B;
 > [B2+B3 report](doc/devel/reports/implementations/ng_psp_mode_b2_b3_2026-09-03.md),
 > [review](doc/devel/reports/reviews/ng_psp_mode_b2_b3_2026-09-03.md),
@@ -3715,8 +3732,16 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     closure; re-opens only on a large-cohort measurement that moves the share.
 
 #### Psp mode — the walk to a psp+census, and calling from a cohort of psps
-- **Status:** `fixes-applied` — **Milestone B complete on branch `ng-psp-mode`, at
-  Checkpoint B: B1 (the gatherer), B2 (the file is the walk) and B3 (byte identity) built,
+- **Status:** `fixes-applied` — **Milestone C under way: `generate-psps` exists** (C1 built,
+  reviewed and committed; C2's per-sample report and C3's overwrite refusal next). The walk
+  stage has a command line: `pop_var_caller_exp generate-psps --reference … --catalog …
+  --alignment … --output-dir …` walks each sample once and writes `<sample>.psp`. On a tomato
+  slice: one psp, 914,715 bytes, 3.0 s. Two prerequisites landed first — `ng::run`'s shared
+  test fixtures (`70385f5b`, the carry-forward from B1/B2) and the **ground assembly lifted
+  out of direct mode into `run_ground.rs`** (`f00d56e9`), which is what C1's "reuse
+  `segments_over`/`analysed_regions`" required; direct mode's 88 command tests pass untouched
+  and its refusals render identically, being carried transparently.
+  **Milestone B before it, at Checkpoint B: B1 (the gatherer), B2 (the file is the walk) and B3 (byte identity) built,
   reviewed and committed.** The walk stage is provable on real reads: one tomato accession
   over 200 kb of SL4.0 through the real catalog gives 183,807 records that are equal field
   for field between the psp and the walk (1,217 of them repeat tracts), header equal, and a
@@ -3734,7 +3759,12 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   reviewed, fixed): the header carries spec §6.1 minus the deliberately dropped record
   count; `format_version` stays (1,0).
 - **Impl reports:** [B1](doc/devel/reports/implementations/ng_psp_mode_b1_2026-09-03.md),
-  [B2+B3](doc/devel/reports/implementations/ng_psp_mode_b2_b3_2026-09-03.md);
+  [B2+B3](doc/devel/reports/implementations/ng_psp_mode_b2_b3_2026-09-03.md),
+  [C1](doc/devel/reports/implementations/ng_psp_mode_c1_2026-09-03.md);
+  **C1 review:** [C1](doc/devel/reports/reviews/ng_psp_mode_c1_2026-09-03.md) (41 mutations
+  run, 21 survived; two live defects — a psp path built from the `@RG SM` tag unchecked, and a
+  stopped re-walk truncating the psp it was replacing) and its
+  [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-03_v5.md);
   **latest reviews:** [B1](doc/devel/reports/reviews/ng_psp_mode_b1_2026-09-03.md) (1 Blocker —
   a swallowed walk error sealed a psp every reader accepts, mutation-proven — 4 Majors, 12
   Minors), [B2+B3](doc/devel/reports/reviews/ng_psp_mode_b2_b3_2026-09-03.md) (3 Majors: a

@@ -11,6 +11,7 @@
 pub mod call_from_alignments;
 pub mod cli;
 pub mod estimate_contamination;
+pub mod generate_psps;
 pub mod repeat_catalog;
 pub mod run_ground;
 pub mod typed_regions;
@@ -22,5 +23,6 @@ pub use cli::{Cli, PopVarCallerExpCommand};
 pub use estimate_contamination::{
     EstimateContaminationArgs, EstimateContaminationCliError, run_estimate_contamination,
 };
+pub use generate_psps::{GeneratePspsArgs, GeneratePspsCliError, run_generate_psps};
 pub use repeat_catalog::{RepeatCatalogArgs, RepeatCatalogCliError, run_repeat_catalog};
 pub use typed_regions::{TypedRegionsArgs, TypedRegionsCliError, run_typed_regions};
