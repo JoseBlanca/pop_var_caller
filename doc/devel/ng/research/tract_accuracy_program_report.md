@@ -358,4 +358,99 @@ every tract found its dump entry. Per-tract table `tmp/tract_program/p2_tracts.t
 
 ---
 
-*Sections L1–L7 are opened as the program reaches them.*
+## L4 — the realigner: what the reads are taken to say
+
+Status: **diagnosed** — moved first in the order (owner's approval 2026-09-03); the fix
+direction is a design decision now with the owner
+
+**Pre-registration (written before any code is read or changed).**
+
+This is a defect hunt in an existing component, not a build. The tract locus generator
+realigns every read against the locus (`src/ng/locus_generation/ssr.rs`, using the unit-slip
+whole-read aligner `src/ng/alignment/ssr_best_path_unit_slip.rs` — the bake-off's winner),
+and the merge's allele table holds the spellings it produces. Three hand-verified cases show
+those spellings corrupted (`tract_genotype_accuracy_2026-09-03.md` §6.2): a leading base
+dropped (`chr3:33,877,690`), an interruption inside the tract discarded (`chr3:37,126,860`),
+a one-read sequencing-error spelling kept over the true spelling carried by 12 reads of 14
+(`chr11:37,147,255`).
+
+targets: the aligner-vs-realigner disagreement surface Stage 0 measured —
+  **202 never-offered tracts** (88 where the table holds the truth's length in the wrong
+  letters + 114 where 2+ raw reads carry a length the table never held) and
+  **74 spurious-side tracts** (65 where ng called a length no raw read spells + 9
+  spelling-only differences), out of the 834 errors at 30×.
+ceiling: **276 tracts**, and it will not be reached — the surface includes legitimate
+  re-spellings (the realigner is allowed to disagree with BWA) and evidence limits; the
+  ceiling is the size of the territory, not the expected win. No number smaller than the
+  three verified cases is possible.
+bar:
+  - **default** (the fix ships) if a defect is found and fixing it flips more tracts right
+    than wrong on both period classes at both depths, reported as verdict flips per rule 3,
+    with the tomato behavioural gate run before it lands (a realigner change moves every
+    run's records, not a parameter);
+  - **discard** (the surface is legitimate disagreement) if case reading attributes the
+    202+74 to correct re-spelling and evidence limits, with the count of read cases beside
+    the verdict.
+
+**Plan, as the program states it:** reproduce `chr3:33,877,690` in isolation — the reads
+through the tract locus generator, watching where the sequence is lost — fix, then re-run
+P2's attribution and the baseline pair. Any fix goes through the full plan-driven loop
+(implement → review → apply fixes → commit).
+
+**Diagnosis (written after the runs it quotes; the fix awaits the owner's design ruling).**
+
+All three §6.2 cases are reproduced and understood, and they split into two mechanisms. Both
+are junction events, and both defeat the delimiter the same way: the winning alignment
+re-spells the read toward a pure motif run, destroying the non-motif evidence.
+
+**Mechanism 1 — a real flank indel beside the junction (`chr3:33,877,690`).** The truth (and
+BWA, and ng's own SNP path, which calls it correctly as `GT→G` het) put a one-base deletion
+in the left flank's `TTT` and a `C` at the tract's first base. Reproduced end-to-end with a
+one-interval run of the candidate probe (table holds `A×11`, `A×10`; 16 reads on the corrupt
+spelling), then in a unit test against the exact 15-base window (kept `#[ignore]`d red as
+`a_flank_indel_beside_the_junction_does_not_eat_the_tract_edge`). Two independent causes:
+
+- the flank-side **junction guard** (7 columns here) makes the honest path's gap-open
+  **unreachable** — a real indel within the guard window is inexpressible, the same failure
+  the 4n flank ban was rejected for, recreated inside the guard's window;
+- even unguarded, the cost structure prefers the corruption: a whole-unit slip open is
+  ≈ −2.9 nats against the flank gap-open's ≈ −10.4, so "flank mismatch + tract contraction"
+  beats "flank deletion + tract substitution" by ≈ 7.5 nats. The isolated-aligner test with
+  no flank indel (`a_substitution_at_a_homopolymer_edge_stays_in_the_tract`, committed green)
+  shows the substitution alone survives; it is the adjacent real indel that flips the path.
+
+The end result double-counts the deletion (once as the SNP path's flank indel, once as a
+tract contraction) and vanishes the `C` — it reaches no path at all.
+
+**Mechanism 2 — the flank is itself a repeat (`chr3:37,126,860`, `chr11:37,147,255`).** Both
+tracts are poly-A runs whose right neighbour is a sub-floor repeat the typing left as flank
+(`(AAAG)×5`, `(GA)×5.5`). The truth's variant is one extra unit of that neighbour,
+left-aligned into the tract span — inside the tract by the project's own convention. The
+delimiter's "anchor" is five copies of a motif, so the inserted unit is absorbed into flank
+matches for almost nothing, and the honest in-tract insertion is *also* inside the
+tract-side guard window (these variants are junction events by construction). At
+`chr11:37,147,255` the absorption even shifts the measured run: ng calls 13 A's on a 14-A
+reference tract, homozygous.
+
+**Sizes, on the baseline's 463 never-offered tracts** (probe run recorded in
+`tmp/tract_program/l4_shapes.tsv`):
+
+- **232 of 463** miss a truth sequence that is *not* a pure run of the tract's motif — the
+  shape the delimiter cannot keep. Of the 88 right-length/wrong-letters tracts, 87 are this
+  shape.
+- The pool where the reads demonstrably carry what the table lacks: **117 tracts**
+  (87 right-length + 30 length-absent with 2+ raw carriers, both interrupted), plus up to
+  84 pure-length tracts with 2+ raw carriers where the delimiter re-measures the carried
+  length, plus P1's 74 spurious-side cases.
+- 110 of 463 have three or more reads carrying an input-alignment indel inside a 15-base
+  flank — mechanism 1's reach.
+- A crude "flank looks repeaty" flag does **not** separate errors from correct calls
+  (0.60 among never-offered against 0.53 among right tracts): the discriminator is the
+  variant engaging the junction, not the flank's texture.
+
+*(fix options and the decision are with the owner — the section resumes when a direction is
+ruled)*
+
+---
+
+*Sections L1–L3 and L5–L7 are opened as the program reaches them.*
