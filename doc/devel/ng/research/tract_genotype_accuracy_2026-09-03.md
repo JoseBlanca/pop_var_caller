@@ -179,6 +179,44 @@ change — so scored on length, three quarters of that bucket is not a bucket. *
 rule on which is the headline.** Both are in `genotype.tsv` (`genotype_accuracy` and
 `length_accuracy`).
 
+### 3.4b ⚠ A fifth way it is still wrong: the window admits variants outside the tract
+
+**Found 2026-09-03, after the numbers below were written. They are not corrected here, because
+correcting them needs the scorer changed and re-run.**
+
+§3.3's window reaches one base either side of the tract so that a left-aligned insertion, which is
+anchored on the base *before* the repeat, can be compared. **That same pad admits truth variants
+that lie outside the tract and belong to the SNP/indel path**, and ng's tract record — whose REF
+is the tract — cannot express them. The tract is then scored wrong for a variant it was never
+asked to call.
+
+Two cases, printed whole:
+
+- `chr1:14,722,151-14,722,162`, a 12-base poly-A. The truth carries two records on one haplotype:
+  `A → T` inside the tract and `AAG → A` at 14,722,161, whose deleted bases run one past the
+  tract's end. ng's record reproduces the substitution exactly — its haplotype is
+  `CAAAAAAATAAG` against the truth's `CAAAAAAATAAA`, **identical but for the base outside the
+  tract**. Scored wrong.
+- `chr1:150,329,038-150,329,047`, a 10-base poly-T. The truth's only record is `C → T` at
+  150,329,037, the anchor base *before* the tract, which ng's tract path cannot express at all.
+
+**How big it is.** Of the 407 errors §4 attributes to "a truth sequence was never offered", 179
+are cases where ng offered the right tract *length* and not the spelling — and in **111 of those
+179 the merge's table held the truth's spelling and selection kept it as a candidate**. A kept
+candidate that the record then cannot express is this artefact and not a selection failure. So
+**§4's 407 is overstated by up to 111, and the genotype accuracy in §4 is understated again**, in
+the same direction as the three errors §3.2 records.
+
+**What is genuinely missing at those tracts**, once the 111 are set aside: 68 where no read was
+reported with that spelling — the tract aligner, and the same class as §4's alignment losses — and
+6 that the support bar dropped, each carried by one or two reads.
+
+**The fix is not a one-liner and that is why it is recorded rather than applied.** The pad has to
+admit a truth record whose *anchor* falls outside the tract while its *effect* is inside, and
+refuse one whose changed bases lie outside — and a record like `AAG → A` straddles both. Settle
+this together with §3.4's sequence-versus-length question, since both are about what a tract
+genotype is a claim about.
+
 ### 3.5 Two defects in existing tooling, found and not fixed
 
 - `benchmarks/ssr_hg002/src/ng_tract_candidate_recall.py` keeps a truth record only where its REF
@@ -212,7 +250,9 @@ rule on which is the headline.** Both are in `genotype.tsv` (`genotype_accuracy`
 | called homozygous, truth heterozygous | 27 | 14 |
 | wrong some other way, over a set that held the right alleles | 47 | 16 |
 
-**Six errors in ten are decided before the model is consulted.** Where those missing sequences go,
+**Six errors in ten are decided before the model is consulted — but see §3.4b: up to 111 of the
+407 are the instrument's boundary artefact rather than a missing candidate.** Where the missing
+sequences go,
 over the same ground at 30× — 434 missing true sequences:
 
 | | |
