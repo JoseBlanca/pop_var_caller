@@ -738,6 +738,42 @@ the fixed caller and re-measure", not "build the fit-mode command around the old
 
 ---
 
+## L5 + L6 — the fitted per-stratum rows, re-measured on the fixed caller
+
+Status: **measured to verdicts, 2026-09-03** (the owner's ruling 5: "re-measure and decide
+then")
+
+The pre-pass fit was rerun end to end with only the caller's observations changed: the
+candidate dump regenerated under the current binary (the pre-L4 dump kept beside it as
+`tier_30x_candidates.pre_l4.tsv`; the dump moved), the extractor and fit scripts unchanged
+(`tmp/agent_slippage/`, pad 15). The fresh rates keep the old fit's shape — homopolymer level
+0.0029 at 8 repeats rising to 0.0957 at 30 (old: 0.0039 → 0.088) — so the rates were not
+stale in any way that matters. Swept as rows on the shipped defaults
+(`tmp/tract_program/l6_arms/`):
+
+| vs shipped defaults | 30× | 50× |
+|---|---|---|
+| homopolymer | **−0.29** (spurious 128 → 148) | **−0.48** (16 right → spurious) |
+| period 2+ | **+0.26** (collapsed 20 → 11) | +0.02 |
+
+**The stale-rows hypothesis is refuted**: the homopolymer-selling trade persists with rates
+fitted from the fixed caller's own observations. Low fitted homopolymer levels make one-unit
+reads strong evidence, and post-L4 those reads are spelled faithfully — the constant 0.10,
+wrong as a rate, is doing junk-absorption work at homopolymers that the fitted truth undoes.
+
+**L6 verdict: optional, never default** — the program's rule 8 named the fitted-slippage
+shape as the standing example of optional, and the measurement sharpens the sentence: *right
+for a run that cares about period-2+ collapsed heterozygotes (it halves them at 30×), at the
+price of homopolymer spurious heterozygotes; wrong as a constant.* The rows route
+(`--parameters` with appended rows) already serves that run; **the fit-mode command build is
+deferred** until something wants it enough to own it.
+
+**L5 verdict: discard** — a finer stratification is more of the same direction: the gradient
+the fit measures is real (0.003 → 0.096 over the homopolymer range) and shipping it is what
+loses, so keying the model more finely on it has no case the rows did not already test.
+
+---
+
 ## The tomato behavioural gate (rule 7), for the λ = 0.20 candidate
 
 **Run 2026-09-03** on the 63-accession tomato cohort (the `tomato1` bench slice, ~2 Mb, ~3
