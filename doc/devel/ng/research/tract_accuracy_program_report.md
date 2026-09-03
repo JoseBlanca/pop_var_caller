@@ -795,6 +795,33 @@ is no longer called het** at 3× (0.068 → 0.062), and tract QUALs sit about a 
 
 ---
 
+## The program's close — every lever holds a verdict (2026-09-03)
+
+**The shipped defaults after all rulings**: the input-alignment spelling (L4), the outlier
+weight at 0.20 (L1's re-sweep), the discovery pre-pass on (L7). Discarded loudly: the junk
+shape (dominated), the read-independence caps (premise measured false, unbuilt), the
+per-locus slippage re-fit as a default (+1 tract; machinery kept frozen), finer stutter
+keying (more of the direction that loses). Optional: fitted per-stratum rows, for a run that
+trades homopolymer spurious hets for period-2+ collapsed ones.
+
+**The final baseline, which is a fresh `--defaults` run** (proven byte-identical to the
+measured `l7_discovery` arm):
+
+| | 30× homopolymer | 30× period 2+ | 50× homopolymer | 50× period 2+ |
+|---|---:|---:|---:|---:|
+| program start (P0) | 0.8796 | 0.8692 | 0.8938 | 0.8780 |
+| **program close** | **0.9026** | **0.8974** | **0.9186** | **0.9074** |
+| gain (points) | +2.30 | +2.82 | +2.48 | +2.94 |
+
+Errors at 30×: 834 → **660**. What remains, by owner: 346 never-offered (about 100 with no
+read carrying the truth at all — the evidence limit, per the L4-baseline re-derivation; the
+rest split across the support bar and genuinely mis-spelled reads), 214 spurious
+heterozygotes (184 of them the duplication-shaped wall, routed to future cohort-level
+signals), 55 collapsed, 45 wrong-other. Both tomato gates passed; every adopted default was
+measured as verdict flips at both depths.
+
+---
+
 ## Checkpoint 1 — the owner's rulings (2026-09-03)
 
 1. **λ = 0.20 adopted as the shipped default** (gate passed; the 1-in-11 tract-het trade at
