@@ -83,8 +83,26 @@ use crate::ng::types::{LogProb, ReadGroupId};
 /// twenty-two of them at a homopolymer — so every read's emission has a floor of roughly
 /// `weight / lengths` under it, whatever genotype is being scored. **A floor on the emission is
 /// a cap on how much one read can pull a genotype**: past it, a read being more surprising buys
-/// no more evidence. freebayes does that job with a read-dependence factor and GATK with a
-/// Phred-45 cap; this is the only thing in ng doing it at a tract.
+/// no more evidence. **This is the only thing in ng doing that job at a tract.**
+///
+/// **GATK does the same job with a different shape**, and its own documentation states the
+/// motive better than a paraphrase would: without it *"the read would contribute 5 * Q30 evidence
+/// in favour of its 5-mismatch haplotype compared to reference, potentially enough to make a call
+/// off that single read"*, and with it *"the maximum evidence against any haplotype that this
+/// (and any) read could contribute"* is the stated quality
+/// (`phredScaledGlobalReadMismappingRate`, default 45,
+/// [`LikelihoodEngineArgumentCollection.java:109`](../../../../gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/haplotypecaller/LikelihoodEngineArgumentCollection.java);
+/// applied per read against its own best allele by `AlleleLikelihoods::normalizeLikelihoods`).
+/// **GATK's is relative to the read's best allele and ng's is absolute**, which is the one
+/// structural difference between them.
+///
+/// **freebayes does not do this job and an earlier version of this comment said it did.** Its
+/// read-dependence factor (`-D`, default 0.9) multiplies the summed log-probability of the reads
+/// a genotype does *not* explain by `(1 + (n - 1) * 0.9) / n`
+/// ([`DataLikelihood.cpp:148`](../../../../freebayes/src/DataLikelihood.cpp)) — an aggregate
+/// discount for reads not being independent, worth at most a tenth however many reads there are,
+/// and it never bounds one read. What bounds a read there is the read's own base quality
+/// (`prodQout += log(1 - qual)`), which is per-read evidence rather than a stated constant.
 ///
 /// **Where the floor sits against the stutter distribution is the whole effect.** At 0.01 the
 /// floor is 4.6 x 10^-4, five times *below* the chance of a read slipping two whole repeats
