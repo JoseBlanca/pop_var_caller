@@ -313,7 +313,20 @@ fn bench_writer_phases(c: &mut Criterion) {
     // only writer-state introspection used here — it is `#[doc(hidden)]`
     // and exists only so benches can align with the auto-flush
     // boundary deterministically.
+    //
+    // Both sub-benches need the byte cap to be the ONLY block cut, so
+    // they build their writers with `new_with_block_layout` and a
+    // genomic window no record position can cross (`u32::MAX`; 0 is
+    // clamped to 1, which is a cut at every record). With the default
+    // 5 kb window and these 1-bp-apart fixtures, the writer cuts a
+    // block every 5,000 records: steady-state would time hidden
+    // flushes, and the flush-only prime loop below would exhaust its
+    // records — the projection resets at every window cut, so it can
+    // never reach the 16 MiB cap (measured 2026-09-03: 49 projected
+    // bytes left after all 3.3 M records) — and index one past the
+    // fixture's end.
     const TARGET_BYTES: usize = 16 * 1024 * 1024;
+    const WINDOW_NO_CUT_BP: u32 = u32::MAX;
 
     let mut group = c.benchmark_group("psp_writer_phases");
     group.sample_size(10);
@@ -336,7 +349,13 @@ fn bench_writer_phases(c: &mut Criterion) {
     group.bench_function("write_record_steady_100k", |b| {
         b.iter_batched(
             || {
-                let mut w = PspWriter::new(io::sink(), phase_header.clone()).expect("writer new");
+                let mut w = PspWriter::new_with_block_layout(
+                    io::sink(),
+                    phase_header.clone(),
+                    TARGET_BYTES,
+                    WINDOW_NO_CUT_BP,
+                )
+                .expect("writer new");
                 for r in &phase_records[..WARMUP_NO_FLUSH] {
                     w.write_record(r).expect("warmup write_record");
                 }
@@ -364,14 +383,20 @@ fn bench_writer_phases(c: &mut Criterion) {
     group.bench_function("flush_block_one", |b| {
         b.iter_batched(
             || {
-                let mut w = PspWriter::new(io::sink(), phase_header.clone()).expect("writer new");
+                let mut w = PspWriter::new_with_block_layout(
+                    io::sink(),
+                    phase_header.clone(),
+                    TARGET_BYTES,
+                    WINDOW_NO_CUT_BP,
+                )
+                .expect("writer new");
                 let mut idx = 0usize;
                 // Prime up to and including the record that pushes
                 // projected_bytes >= TARGET. After the loop, the
                 // writer's open block has projected_bytes >= TARGET,
                 // so the body's first write_record will trigger
-                // exactly one auto-flush (the pre-check at
-                // writer.rs:113 fires before append).
+                // exactly one auto-flush (the byte-cap pre-check in
+                // `write_record` fires before append).
                 while idx < phase_records.len() {
                     w.write_record(&phase_records[idx]).expect("prime");
                     idx += 1;
@@ -379,6 +404,12 @@ fn bench_writer_phases(c: &mut Criterion) {
                         break;
                     }
                 }
+                assert!(
+                    idx < phase_records.len(),
+                    "the prime loop must stop on the byte cap with records to spare, \
+                     or the body below has nothing to write; projected={:?}",
+                    w.current_block_projected_bytes()
+                );
                 (w, idx)
             },
             |(mut w, idx)| {
