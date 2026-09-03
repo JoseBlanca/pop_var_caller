@@ -1102,12 +1102,8 @@ mod tests {
     fn a_substitution_at_a_homopolymer_edge_stays_in_the_tract() {
         // The exact window the run hands the aligner: 15-base flanks (the default
         // bundle-threshold margin), the reference's own bases.
-        let (reference, geometry) = frame(
-            b"TTCTAGTTTTAGTTT",
-            b"AAAAAAAAAAA",
-            b"CTAAAAACCATTTTT",
-            b"A",
-        );
+        let (reference, geometry) =
+            frame(b"TTCTAGTTTTAGTTT", b"AAAAAAAAAAA", b"CTAAAAACCATTTTT", b"A");
         let read = b"TTCTAGTTTTAGTTTCAAAAAAAAAACTAAAAACCATTTTT";
         let span = measure(read, &reference, &geometry, &StutterModel::hipstr_shipped());
         assert_eq!(span.measured_length(), Some(11), "span: {span:?}");
@@ -1127,28 +1123,29 @@ mod tests {
     /// whole-unit tract contraction, reporting a bare 10-`A` run — which is exactly what
     /// ng's candidate table held, and it costs the truth its candidacy at this locus.
     ///
-    /// Ignored, deliberately red: the flank-side [`JunctionGuard`] makes the honest path's
-    /// gap-open UNREACHABLE (the deletion sits 1–3 columns from the junction, inside the
-    /// 7-column guard this flank gets), and even unguarded, a whole-unit slip (≈ −2.9 nats)
-    /// under-prices the flank gap-open (≈ −10.4). The fix is the tract-accuracy program's
-    /// L4 decision (`doc/devel/ng/research/tract_accuracy_program_report.md`); un-ignore
-    /// with it.
+    /// **This aligner reads the tract one unit short there, and that is pinned, not
+    /// aspired away.** The flank-side [`JunctionGuard`] makes the honest path's gap-open
+    /// UNREACHABLE (the deletion sits 1–3 columns from the junction, inside the 7-column
+    /// guard this flank gets), and even unguarded a whole-unit slip (≈ −2.9 nats)
+    /// under-prices the flank gap-open (≈ −10.4), so the `C` is absorbed into the flank as
+    /// a mismatch and the loss priced as a tract contraction. The pipeline compensates one
+    /// level up: a complete observation's bases come from the read's input alignment
+    /// (`locus_generation::ssr::tract_span_from_input`, the tract-accuracy program's L4
+    /// fix), and this aligner keeps only the anchoring and completeness verdicts. If this
+    /// assertion ever starts failing, the aligner's junction behaviour changed — re-read
+    /// L4 before deciding which behaviour is right.
     #[test]
-    #[ignore = "L4: junction-adjacent real variation is inexpressible under the guard — fix pending the program's L4 decision"]
-    fn a_flank_indel_beside_the_junction_does_not_eat_the_tract_edge() {
-        let (reference, geometry) = frame(
-            b"TTCTAGTTTTAGTTT",
-            b"AAAAAAAAAAA",
-            b"CTAAAAACCATTTTT",
-            b"A",
-        );
+    fn a_flank_indel_beside_the_junction_is_read_short_and_the_pipeline_compensates() {
+        let (reference, geometry) =
+            frame(b"TTCTAGTTTTAGTTT", b"AAAAAAAAAAA", b"CTAAAAACCATTTTT", b"A");
         let read = b"TTCTAGTTTTAGTTCAAAAAAAAAACTAAAAACCATTTTT";
         let span = measure(read, &reference, &geometry, &StutterModel::hipstr_shipped());
-        assert_eq!(span.measured_length(), Some(11), "span: {span:?}");
+        // One unit short, the C outside the span — the pinned corruption.
+        assert_eq!(span.measured_length(), Some(10), "span: {span:?}");
         let observed = span.observed_span().expect("a measured span");
         assert_eq!(
             &read[observed.start as usize..observed.end as usize],
-            b"CAAAAAAAAAA"
+            b"AAAAAAAAAA"
         );
     }
 

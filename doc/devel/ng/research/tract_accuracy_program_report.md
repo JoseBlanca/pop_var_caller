@@ -448,8 +448,89 @@ reference tract, homozygous.
   (0.60 among never-offered against 0.53 among right tracts): the discriminator is the
   variant engaging the junction, not the flank's texture.
 
-*(fix options and the decision are with the owner — the section resumes when a direction is
-ruled)*
+**The decided arm (owner delegated the direction, 2026-09-03: "use your own criterium").**
+Of the three directions — (a) spell the observation from the read's input alignment over the
+tract span, (b) guard/pricing revision for corroborated flank indels, (c) compound-locus
+typing — the build is **(a)**, chosen because it is the only one that reaches both mechanisms
+at once, all three verified cases spell correctly under it, and it is judged by measurement
+(verdict flips) rather than argument. (b) fixes mechanism 1 only; (c) is the structural
+answer to mechanism 2 but moves the catalog, the ground and every benchmark, and stays a
+follow-up informed by (a)'s residue.
+
+**What (a) changes, precisely:** for a **complete** observation (the delimiter still rules
+completeness, anchoring, the widen-and-retry, and the quality gate), the observation's bases
+come from the read's own input alignment mapped over the tract's reference span, with the
+settled junction conventions — an insertion at a boundary belongs to what follows, so a
+left-junction insertion is the tract's and a right-junction insertion is the flank's. Where
+the input alignment cannot serve (its aligned footprint does not bracket the tract plus one
+base each side), the delimiter's own spelling stands, and partial observations are untouched.
+Ordinary stutter reads spell identically under both (BWA left-aligns an in-tract indel to
+the tract, so the span's content is unchanged); the two differ exactly where the delimiter
+re-spells junction variation — the 232-tract shape.
+
+**Bar for the arm:** verdict flips against the P0 baseline, net-positive on both period
+classes at both depths, with the spurious-heterozygote class not enlarged beyond what the
+fixed tracts justify; then the tomato behavioural gate before any default claim.
+
+**Results (written after the runs they quote; arm `l4_input_spelling`, callsets
+`tmp/tract_program/l4_arm/`).**
+
+| | 30× homopolymer | 30× period 2+ | 50× homopolymer | 50× period 2+ |
+|---|---:|---:|---:|---:|
+| baseline | 0.8796 | 0.8692 | 0.8938 | 0.8780 |
+| **input spelling** | **0.8981** | **0.8964** | **0.9114** | **0.9052** |
+| gain (points) | +1.85 | +2.72 | +1.76 | +2.72 |
+
+Errors fall from 834 to 679 at 30× and from 761 to 610 at 50×. **The flips, which are the
+bar** (30×: 384 tracts changed verdict; join of the two `--verdicts-out` dumps):
+
+- **197 tracts turn right**: 82 never-offered, 48 spurious heterozygotes, 48 wrong-some-other-way,
+  13 collapsed heterozygotes, 6 previously silent or incomparable.
+- **108 tracts leave right**: 59 become spurious heterozygotes (55 of them homopolymers),
+  24 never-offered, 22 fall silent (no record at all), 3 other.
+- Net by period class: homopolymer **+50**, period 2+ **+39**; at 50× **+51** and **+43**
+  (sums match the arm's genotype-right deltas, +89 and +94). Both classes positive at both
+  depths — the bar's first clause holds.
+- The spurious-het class ends at 238 against the baseline's 225 (+13 net at 30×, +18 at
+  50×) while total errors fall by 155 — within what the fixed tracts justify, and the 59
+  created cases are recorded as L1's inheritance below.
+
+**The counter-arm, built and rejected by measurement** (`l4_v2`,
+`tmp/tract_program/l4_arm2/`): deferring reference-spelling inputs back to the delimiter — to
+repair loci where the mapper places an ambiguous indel outside the tract
+(`chr1:194,220,455`, where the same one-base contraction arrives spelled at three different
+positions across reads) — nets only +50 tracts right against v1's +89, because at twice as
+many loci the mapper's reference account is exactly right and the delimiter re-corrupts it:
+at `chr1:104,262,346` every read carries a truth-confirmed flank deletion (`GC→G` hom), and
+the deferral re-absorbs it as a spurious one-unit tract contraction — the original
+double-count, resurrected. The deferral is reverted and the case pinned in the code comment.
+
+**What the fix is, finally:** a complete observation's bases come from the read's input
+alignment mapped over the tract span (junction conventions: an inserted run at a junction
+belongs to the tract iff left-alignment cannot carry it across), taken only from reads whose
+CIGAR carries an indel (an all-Match CIGAR is how a mapper spells a collapsed long allele —
+the delimiter's one irreplaceable rescue, kept), and never in the widen-and-retry arm. The
+delimiter still rules completeness, anchoring, quality, and partials. Validation:
+6,034 lib tests, fmt, clippy all green in the container; the production-parity fixture and
+the widen-recovery test forced the all-Match restriction and stand green.
+
+**The residue, named so the next levers can claim it:**
+
+- **59 tracts right→spurious-het** (30×): junk-shaped spellings near the true allele that
+  the emission now misassigns — several are reads whose mapper account carries a stray
+  junction mismatch bundled with the indel. This is L1's territory (junk mass near the
+  called allele), and these tracts join its pre-registered target pool.
+- **22 tracts right→silent**: junction insertions of foreign bases that the convention
+  correctly expels from the tract but no path then owns (`chr1:163,385,956`: truth `T→TA`
+  after the tract's last base; the baseline's tract record happened to carry it). The
+  routing crack between the tract and generic paths at a region's first base — the mirror
+  of main's `b6309954` — is a follow-up defect, not a spelling question.
+- 26 never-offered tracts become silent rather than right — wrong either way, but silence
+  is invisible to a record-level reader; same routing crack.
+
+**Verdict: default-candidate.** The fix ships on this branch as behaviour (a defect fix,
+not a parameter), and per rule 7 the *default* claim owes the tomato behavioural gate and
+the owner's sign-off at Checkpoint 1, alongside the composed slate.
 
 ---
 
