@@ -676,6 +676,33 @@ that changes what they do* sections above, and steps 0, 2, 3 and 6 of the pass �
 each of which compares the draft against the reader's own quoted words instead of
 asking the writer how they feel about it.
 
+### 2026-09-03 — a probe's feeding arms reported in the probe's own shorthand
+
+Summarising why buffer reuse is not the main fix for the merge's scaling:
+
+> ❌ "not the fix, because with records made outside its clock entirely the merge machinery
+> scales at 3.75×; it's building the records (the decode's work) that doesn't scale."
+>
+> Owner: *"Bad writting, I don't understand."*
+
+> ✅ "The probe can feed the merge two ways. Fed the way a real run does — each record built at
+> the moment the merge asks for it — eight threads make the merge 2.2× faster. Fed records
+> that were all built beforehand and only handed over, eight threads make it 3.75× faster. So
+> the merge's own work spreads over threads fine; what refuses to scale is *building the
+> records* — and in a real run, building a record is decoding reads."
+
+Three failures, all in one sentence:
+
+1. **"Outside its clock" is the probe's own idiom** — it names when the stopwatch starts, a
+   detail of my measuring device the reader never saw. The plain phrase is *records built
+   beforehand and only handed over*.
+2. **"The merge machinery" was never separated from "the merge".** The whole point was the
+   contrast between the merge's coordination work and the record construction inside it, and
+   the sentence used two undefined nouns to carry a contrast it never stated.
+3. **A number was attached to an arm of an experiment, not to a thing.** "Scales at 3.75×"
+   is meaningless until the reader knows what was fed differently between the 2.2× and the
+   3.75×. The repair states both arms, what differs, and only then the two numbers.
+
 ## Sources
 
 The diagnosis is not project-specific and the external literature is unusually

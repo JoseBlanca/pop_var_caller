@@ -720,6 +720,23 @@ fn report_where_the_time_went(calling_seconds: f64, setup_seconds: f64, compress
         "# merge working windows: {} ({} held no locus); the merge's own wall clock: {:.1} ms",
         counted.regions, counted.regions_with_no_locus, counted.merge_wall_ms,
     );
+    // **The drawing's two sides, which tell a poor spread from inflated work.** The wall above
+    // (`cover_ms`) is what the run waited; this is what the samples' own drawing was busy,
+    // summed across threads. Busy near the one-thread run's busy with a wall far above
+    // busy ÷ threads is a spread problem — the per-sweep wait for the slowest sample, or idle
+    // workers; busy far above the one-thread run's is the parallel work itself inflating —
+    // contention, and where it lives is the next question, not this counter's.
+    println!(
+        "# of the drawing: {:.1} ms the samples' own drawing summed over threads, which spread \
+         perfectly over {} threads would be {:.1} ms of wall, against {:.1} ms measured; \
+         {} cover sweeps over {} working windows",
+        counted.cover_busy_ms,
+        counted.threads,
+        counted.cover_busy_ms / counted.threads as f64,
+        counted.cover_ms,
+        counted.cover_sweeps,
+        counted.regions,
+    );
 
     // The two rates this probe exists to produce. Both are stable where a share is not: a
     // share moves with the cohort because the locus count does, and neither of these does.
