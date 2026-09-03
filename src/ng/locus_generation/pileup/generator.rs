@@ -825,6 +825,14 @@ pub struct PileupGenerator<R: RawRefSeq + EvictableRefSeq + ContigTable, P: Read
     /// The region [`begin_segment`](Self::begin_segment) was given, before the walker has
     /// been pointed at it.
     current_region: Option<GenomeRegion>,
+    /// Whether the base before `current_region`'s first base is repeat-path ground —
+    /// told by the dispatcher through
+    /// [`begin_segment_after_repeat_ground`](super::super::LocusGenerator::begin_segment_after_repeat_ground),
+    /// which is the only caller that can know (a region cannot see its own neighbour).
+    /// `false` after a plain `begin_segment`. What it arms:
+    /// [`WalkerState`](super::genome_walk)'s junction claim on an insertion anchored one
+    /// base before the region.
+    region_adjoins_repeat_ground: bool,
     /// The walker and the sample's cursor, for as long as the run stays on one chromosome.
     /// Minted by the first `next_locus` on each, and rebuilt at every boundary — nothing in
     /// a cursor survives a chromosome change (`spec/alignment_cursor.md` §4).
@@ -914,6 +922,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
             config,
             counts: PileupGeneratorCounts::default(),
             current_region: None,
+            region_adjoins_repeat_ground: false,
             chromosome: None,
             walk: None,
             retired_cursor_counts: CursorCounts::default(),
@@ -997,6 +1006,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
     pub fn begin_segment(&mut self, region: GenomeRegion) {
         self.end_walk();
         self.current_region = Some(region);
+        self.region_adjoins_repeat_ground = false;
     }
 
     /// End the region walk in flight, if any: fold its counters into the run's totals and
@@ -1205,7 +1215,14 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
             .as_mut()
             .expect("the chromosome walk was just ensured")
             .walker;
-        walker.move_to_region(region, stop_after)?;
+        // The junction claim is armed only when the dispatcher said the base before this
+        // region is repeat ground — a `region.start` of 1 cannot have one, and a start
+        // past `u32::MAX` cannot be walked at all.
+        let junction_start = (self.region_adjoins_repeat_ground
+            && region.start.get() > 1
+            && region.start.get() <= u64::from(u32::MAX))
+        .then(|| region.start.get() as u32);
+        walker.move_to_region(region, stop_after, junction_start)?;
         // **After the move, not before**, so a region that could not be reached leaves no
         // half-open walk behind for `end_walk` to fold.
         let chain_ids_at_open = walker.chain_id_counters();
@@ -1377,6 +1394,18 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> LocusGenerat
 {
     fn begin_segment(&mut self, region: GenomeRegion) {
         PileupGenerator::begin_segment(self, region);
+    }
+
+    /// The one generator that acts on the neighbour fact — it arms the walker's junction
+    /// claim (see `region_adjoins_repeat_ground`); every other implementation keeps the
+    /// trait's default, which drops the flag.
+    fn begin_segment_after_repeat_ground(
+        &mut self,
+        region: GenomeRegion,
+        adjoins_repeat_ground: bool,
+    ) {
+        PileupGenerator::begin_segment(self, region);
+        self.region_adjoins_repeat_ground = adjoins_repeat_ground;
     }
 
     fn next_locus(

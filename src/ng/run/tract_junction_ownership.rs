@@ -20,12 +20,14 @@
 //! so the file compiles and runs without reaching into the test modules of files
 //! under active change.
 //!
-//! **The mirror case is known-broken and deliberately not pinned here**: an
-//! insertion anchored on the *tract's last* base whose spelling the junction
-//! convention hands to the right flank is expelled by the tract path and never seen
-//! by the generic walk — no path owns it
+//! The mirror junction is pinned here too: an insertion anchored on the *tract's
+//! last* base whose spelling the convention hands to the right flank was, until the
+//! junction claim landed, expelled by the tract path and never seen by the generic
+//! walk — no path owned it
 //! (`doc/devel/ng/research/tract_accuracy_program_report.md` §L4, "right→silent").
-//! A test for it belongs with the fix.
+//! The claim (`open_record.rs`, `claimed_junction_insertion`) re-homes it onto the
+//! flank's first base, and the two right-junction tests below pin both sides of the
+//! line.
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -500,6 +502,145 @@ fn a_deletion_across_flank_and_tract_is_two_loci_each_with_its_own_allele() {
         alternative_lengths(tract),
         vec![TRACT.len() - 2],
         "its one alternative is the tract one repeat unit short — the deleted first unit",
+    );
+    assert_called_homozygous_alternative(tract, "the tract locus");
+}
+
+/// **The mirror junction: an insertion between the tract's last base and the right
+/// flank, spelling bases foreign to both, is genotyped by the SNP/indel path
+/// alone.**
+///
+/// The read's cigar anchors the two inserted `G`s on chr1:52 — the tract's own
+/// last base. The junction convention hands the event to the flank (`G` differs
+/// from the tract's last base `T`, so left-alignment cannot carry it into the
+/// tract), and the flank is SNP/indel territory — but the anchor sits one base
+/// *before* the generic region that starts at chr1:53, so the walker's records
+/// there were discarded by the region clamp and no path genotyped the event
+/// (`doc/devel/ng/research/tract_accuracy_program_report.md` §L4,
+/// "right→silent"). The fix re-homes it: the generic walk claims an insertion
+/// anchored on the base before its region's first base whenever that base is
+/// repeat ground and the tract has refused the spelling, and the record spells
+/// the inserted bases before the region's first base — one variant locus at
+/// chr1:53, reference `C` against `GGC`.
+#[test]
+fn a_foreign_insertion_at_the_tracts_last_base_is_genotyped_by_the_snp_indel_path_alone() {
+    let (_reference_dir, reference) = junction_reference();
+    let sequence = [chr1_window(25, 52), b"GG".to_vec(), chr1_window(53, 69)].concat();
+    let (_bam_dir, bam) = a_sample_of(
+        |name| {
+            junction_read(
+                &name,
+                &[(Kind::Match, 28), (Kind::Insertion, 2), (Kind::Match, 17)],
+                sequence.clone(),
+            )
+        },
+        "right_foreign_insertion.bam",
+    );
+
+    let called = called_over(&bam, &reference);
+
+    let variants = variant_loci(&called);
+    assert_eq!(
+        variants.len(),
+        1,
+        "the insertion is genotyped exactly once, and the run called variants at {:?}",
+        variants
+            .iter()
+            .map(|locus| locus.region)
+            .collect::<Vec<_>>(),
+    );
+    let flank = variants[0];
+    assert_eq!(
+        (flank.region.start.get(), flank.region.end.get()),
+        (TRACT_SPAN.1 + 1, TRACT_SPAN.1 + 1),
+        "the one variant locus is the flank's first base",
+    );
+    assert!(
+        matches!(flank.alleles().kind(), LocusKind::Generic),
+        "and it was called through the SNP/indel path, its candidates saying {:?}",
+        flank.alleles().kind(),
+    );
+    assert_eq!(
+        flank
+            .alleles()
+            .iter()
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>(),
+        vec![b"C".to_vec(), b"GGC".to_vec()],
+        "the inserted bases go down before the flank's first base — the only spelling \
+         that keeps the anchor base out of the tract's ground",
+    );
+    assert_called_homozygous_alternative(flank, "the flank locus");
+    assert!(
+        called
+            .iter()
+            .all(|locus| locus.region.end.get() < TRACT_SPAN.0
+                || locus.region.start.get() > TRACT_SPAN.1),
+        "no called locus claims any tract base — the tract's reads spell its reference \
+         exactly, so the tract stays quiet — and the loci are {:?}",
+        called.iter().map(|locus| locus.region).collect::<Vec<_>>(),
+    );
+}
+
+/// **The complement at the same junction, pinned so the fix above cannot
+/// over-claim**: an inserted repeat unit (`AT`) anchored on the tract's last base
+/// is the tract's, and the SNP/indel path must not touch it.
+///
+/// The inserted run's last base `T` equals the tract's last base, so
+/// left-alignment carries the insertion into the tract — it is the same allele a
+/// mapper would spell at the left junction, a tract one unit longer. The two
+/// junction rules are exact complements: every insertion on this line is owned by
+/// one path and only one, whichever base it is anchored on. A run that genotyped
+/// this one on both paths would repeat, at the right junction, the doubled-indel
+/// defect the left junction's rule closed.
+///
+/// What actually keeps it single, measured by mutation: the read preparer
+/// left-aligns the insertion to the tract's *left* edge before the walk ever sees
+/// it, so it arrives where the tract already owns it — disabling the claim rule's
+/// byte comparison changes nothing here. The test pins the outcome, whichever of
+/// the two mechanisms is doing the work.
+#[test]
+fn a_repeat_extending_insertion_at_the_tracts_last_base_is_the_tracts_alone() {
+    let (_reference_dir, reference) = junction_reference();
+    let sequence = [chr1_window(25, 52), b"AT".to_vec(), chr1_window(53, 69)].concat();
+    let (_bam_dir, bam) = a_sample_of(
+        |name| {
+            junction_read(
+                &name,
+                &[(Kind::Match, 28), (Kind::Insertion, 2), (Kind::Match, 17)],
+                sequence.clone(),
+            )
+        },
+        "right_unit_insertion.bam",
+    );
+
+    let called = called_over(&bam, &reference);
+
+    let variants = variant_loci(&called);
+    assert_eq!(
+        variants.len(),
+        1,
+        "the extra unit is genotyped exactly once, and the run called variants at {:?}",
+        variants
+            .iter()
+            .map(|locus| locus.region)
+            .collect::<Vec<_>>(),
+    );
+    let tract = variants[0];
+    assert_eq!(
+        (tract.region.start.get(), tract.region.end.get()),
+        TRACT_SPAN,
+        "the one variant locus is the tract's own span",
+    );
+    assert!(
+        matches!(tract.alleles().kind(), LocusKind::Ssr(_)),
+        "and it was called through the tract path, its candidates saying {:?}",
+        tract.alleles().kind(),
+    );
+    assert_eq!(
+        alternative_lengths(tract),
+        vec![TRACT.len() + 2],
+        "the tract's alternative is one repeat unit longer than its reference",
     );
     assert_called_homozygous_alternative(tract, "the tract locus");
 }

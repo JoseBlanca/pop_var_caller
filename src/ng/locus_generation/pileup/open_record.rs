@@ -1516,6 +1516,12 @@ impl OpenPileupRecordTable {
     /// Returns `true` when the record actually widened; `false` when `new_end_exclusive` was
     /// already covered (no-op). Callers use the bool to count real widen events without
     /// conflating them with fresh `open_new` calls.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one step of the walk, called from one place, and every argument is a \
+                  different thing the walk holds — the same reasoning as `process_position`, \
+                  which hands most of them down"
+    )]
     fn widen(
         &mut self,
         key: u32,
@@ -1524,6 +1530,7 @@ impl OpenPileupRecordTable {
         active_reads: &ActiveReads,
         contributors: &[ReadContribution],
         region_end: Option<u32>,
+        junction: Option<JunctionAtRegionStart>,
     ) -> Result<bool, WalkerError> {
         // Split-borrow so the fetch can write into `widen_bases_buf` while
         // `rec` holds a mutable borrow of `records`. `max_record_span` is
@@ -1620,6 +1627,7 @@ impl OpenPileupRecordTable {
             active_reads,
             contributors,
             region_end,
+            junction,
         );
 
         Ok(true)
@@ -1769,7 +1777,9 @@ impl OpenPileupRecordTable {
 /// satisfies them; new callers must too):
 /// 1. Every event's anchor lies inside the record's footprint
 ///    (`event.anchor_pos() >= record_pos`), **except** a `Deletion`, which
-///    `events_overlapping` may return anchored before the record.
+///    `events_overlapping` may return anchored before the record, and a claimed
+///    junction insertion anchored exactly one base before it, which
+///    [`window_of_read`] admits so its bases can be spelled as the record's prefix.
 /// 2. Events are sorted by anchor position, non-decreasing.
 /// 3. At a tied anchor, events appear in the order
 ///    `Match → Insertion → Deletion`. The Match must come first
@@ -1835,7 +1845,10 @@ pub(super) fn apply_events_into(
 
     for ev in events {
         debug_assert!(
-            ev.anchor_pos() >= record_pos || matches!(ev, ReadEvent::Deletion { .. }),
+            ev.anchor_pos() >= record_pos
+                || matches!(ev, ReadEvent::Deletion { .. })
+                || (matches!(ev, ReadEvent::Insertion { .. })
+                    && ev.anchor_pos().saturating_add(1) == record_pos),
             "apply_events_into: event anchor {} below record_pos {}",
             ev.anchor_pos(),
             record_pos,
@@ -1890,21 +1903,33 @@ pub(super) fn apply_events_into(
                 consumed_until = consumed_until.max(offset + 1);
             }
             ReadEvent::Insertion { seq, .. } => {
-                // Insertion sits AFTER the anchor base; the anchor
-                // base itself is unchanged (in the ref-matching
-                // sense). Emit the anchor base if not already
-                // emitted, then append the inserted bases.
-                if offset < ref_len && offset >= consumed_until {
-                    allele_seq.push(ref_seq[offset as usize]);
-                }
-                // **Unless the inserted bases are past the region's last base**, where they
-                // are ground this walk was not given. The anchor base above is still emitted:
-                // the read did witness it, and it matches, which is all this region can say
-                // about that read. See [`inserted_past_the_regions_last_base`].
-                if !inserted_past_the_regions_last_base(ev, region_end) {
+                if ev.anchor_pos().saturating_add(1) == record_pos {
+                    // **A junction insertion re-homed onto the record's first base** (see
+                    // [`claimed_junction_insertion`] — `window_of_read` admits no other
+                    // insertion anchored before the record). Its anchor base belongs to
+                    // the repeat ground before this region, so only the inserted bases
+                    // are this record's to spell, and they go down *before* the first
+                    // base — whose own `Match` still emits it, `consumed_until`
+                    // untouched.
                     allele_seq.extend_from_slice(seq);
+                } else {
+                    // Insertion sits AFTER the anchor base; the anchor
+                    // base itself is unchanged (in the ref-matching
+                    // sense). Emit the anchor base if not already
+                    // emitted, then append the inserted bases.
+                    if offset < ref_len && offset >= consumed_until {
+                        allele_seq.push(ref_seq[offset as usize]);
+                    }
+                    // **Unless the inserted bases are past the region's last base**, where
+                    // they are ground this walk was not given. The anchor base above is
+                    // still emitted: the read did witness it, and it matches, which is all
+                    // this region can say about that read. See
+                    // [`inserted_past_the_regions_last_base`].
+                    if !inserted_past_the_regions_last_base(ev, region_end) {
+                        allele_seq.extend_from_slice(seq);
+                    }
+                    consumed_until = consumed_until.max(offset + 1);
                 }
-                consumed_until = consumed_until.max(offset + 1);
             }
             ReadEvent::Deletion {
                 anchor_ref_pos,
@@ -2173,6 +2198,12 @@ fn fold_read_into_record(
 /// Reads are taken in **`read_id` order**, not `folded_reads` iteration order: that map is
 /// an `AHashMap` with a per-process seed, and bucket *creation* order decides the emitted
 /// allele order, so working in hash order would make the output differ run to run.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one step of the walk, called from one place, and every argument is a \
+              different thing the walk holds — the same reasoning as `process_position`, \
+              which hands most of them down"
+)]
 fn refold_live_reads(
     rec: &mut OpenPileupRecord,
     allele_seq_buf: &mut Vec<u8>,
@@ -2181,6 +2212,7 @@ fn refold_live_reads(
     active_reads: &ActiveReads,
     contributors: &[ReadContribution],
     region_end: Option<u32>,
+    junction: Option<JunctionAtRegionStart>,
 ) {
     // Already ascending: `folded_reads` is ordered by `read_id`, so the sort this used to
     // run is gone. The ids are still copied out rather than iterated in place, because the
@@ -2221,9 +2253,7 @@ fn refold_live_reads(
         } = folded_reads
             .get(read_id)
             .expect("the id came from this record's own fold state");
-        let window = active
-            .cursor
-            .events_overlapping(rec_pos, rec_end, &active.read);
+        let window = window_of_read(active, rec_pos, rec_end, junction);
 
         apply_events_into(
             allele_seq_buf,
@@ -2457,6 +2487,103 @@ fn inserted_past_the_regions_last_base(event: &ReadEvent, region_end: Option<u32
     matches!(event, ReadEvent::Insertion { .. }) && region_end == Some(event.anchor_pos())
 }
 
+/// **The junction at a region's first base**: the walked region begins immediately after
+/// repeat-path ground — a tract, bundle or satellite ends on the base before it — and
+/// `repeat_last_base` is that ground's last reference base, the byte the junction
+/// convention compares an insertion's spelling against. `None` wherever the region's
+/// left edge is anything else: a contig start, a requested-region edge, or a walk that
+/// was never pointed at a region. Resolved once per region by the walker (the reference
+/// is at hand there and not at region begin) and read by [`claimed_junction_insertion`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct JunctionAtRegionStart {
+    /// The region's first reference position, 1-based.
+    pub(super) first_base: u32,
+    /// The reference base at `first_base - 1` — the repeat ground's last base.
+    pub(super) repeat_last_base: u8,
+}
+
+/// **Whether this event is a junction insertion this region must claim** — the mirror of
+/// [`inserted_past_the_regions_last_base`], for the region that *begins* beside the
+/// repeat rather than the one that ends beside it.
+///
+/// # The same convention, read from the other side
+///
+/// A mapper anchors an insertion on the base before the inserted run, so an insertion
+/// between a repeat tract's last base and the flank after it is anchored **inside the
+/// tract's ground** — one base before this region's first. Who owns its bases is settled
+/// by the spelling convention the tract path applies at its right junction
+/// (`locus_generation/ssr.rs`, `tract_span_from_input`): the insertion is the tract's
+/// when its last inserted base equals the tract's last base, because left-alignment can
+/// carry it into the repeat; otherwise it is the flank's. This predicate is the exact
+/// complement of that rule, so every insertion on the line is owned by one path and only
+/// one: claim it here exactly when the repeat path refuses it.
+///
+/// # Why the claim has to reach across the region's edge
+///
+/// Without it the event is **nobody's**: the anchor sits outside this region, so the
+/// record it opened was discarded by the generator's region clamp, and the repeat path
+/// had already expelled the spelling — measured on HG002's benchmark ground at 30× as 22
+/// tracts whose right answer went silent and 26 more whose allele was never offered
+/// (`doc/devel/ng/research/tract_accuracy_program_report.md` §L4). The claim re-homes
+/// the event onto the region's **first base**: the record covers that base alone, and
+/// [`apply_events_into`] spells the inserted bases before it — the only spelling that
+/// keeps the emitted locus off the repeat's ground.
+///
+/// # The byte comparison is the convention restated, not the working gate
+///
+/// The generic path's read preparer **left-aligns** every read it admits, and
+/// left-alignment is what actually moves a repeat-extending insertion away from this
+/// junction: spelled leftmost, it anchors at the repeat's *left* edge, where the existing
+/// rules already route it. Measured end to end, disabling the byte check changes no
+/// answer on this module's fixtures — an insertion whose last base equals the repeat's
+/// last base does not reach the walk anchored here. The check stays because this
+/// predicate states who owns the event, and an ownership rule that silently leaned on an
+/// upstream normalizer would break the day a read reaches the walk unnormalized.
+fn claimed_junction_insertion(event: &ReadEvent, junction: Option<JunctionAtRegionStart>) -> bool {
+    let Some(junction) = junction else {
+        return false;
+    };
+    let ReadEvent::Insertion { seq, .. } = event else {
+        return false;
+    };
+    event.anchor_pos().saturating_add(1) == junction.first_base
+        && seq.last() != Some(&junction.repeat_last_base)
+}
+
+/// The events of `read` that fold into a record at `[rec_pos, rec_end)`: everything
+/// overlapping the footprint and — when the record sits on a junction's first base — the
+/// junction insertion the region claims from the base before it
+/// ([`claimed_junction_insertion`]).
+///
+/// The widened query starts one base early, so it also returns events that are **not**
+/// this record's: a `Match` on the repeat's last base, or an insertion there whose
+/// spelling belongs to the repeat. Those are filtered back out; a `Deletion` is kept
+/// whole whatever its anchor, which is the promise `events_overlapping` already makes
+/// for the ordinary window.
+fn window_of_read(
+    active: &super::active_read_set::ActiveRead,
+    rec_pos: u32,
+    rec_end: u32,
+    junction: Option<JunctionAtRegionStart>,
+) -> super::cigar_cursor::EventsOverlapping {
+    let Some(junction) = junction.filter(|junction| junction.first_base == rec_pos) else {
+        return active
+            .cursor
+            .events_overlapping(rec_pos, rec_end, &active.read);
+    };
+    let mut window = active
+        .cursor
+        .events_overlapping(rec_pos - 1, rec_end, &active.read);
+    window.retain(|ev| match ev {
+        ReadEvent::Deletion { .. } => true,
+        ReadEvent::Match { .. } => ev.anchor_pos() >= rec_pos,
+        ReadEvent::Insertion { .. } => {
+            ev.anchor_pos() >= rec_pos || claimed_junction_insertion(ev, Some(junction))
+        }
+    });
+    window
+}
+
 /// A record's footprint end, stopped at the region's last base.
 ///
 /// `region_end` is 1-based inclusive and the ends here are exclusive, so the bound is
@@ -2490,6 +2617,9 @@ pub(super) fn process_position(
     reference: &dyn RefSeq,
     // The last reference position the walk's region owns — see `WalkerState::region_end`.
     region_end: Option<u32>,
+    // The junction at the region's first base, if the region begins beside repeat ground —
+    // see `WalkerState::junction`.
+    junction: Option<JunctionAtRegionStart>,
 ) -> Result<ProcessOutcome, WalkerError> {
     let mut affected: Vec<u32> = Vec::new();
     let mut widen_count: u64 = 0;
@@ -2498,7 +2628,17 @@ pub(super) fn process_position(
     // possibly widens it) or opens a fresh one.
     for contrib in contributors {
         for ev in &contrib.events_at_pos {
-            let event_start = ev.anchor_pos();
+            // **A claimed junction insertion is re-homed onto the region's first base**
+            // (`claimed_junction_insertion`): its anchor belongs to the repeat ground
+            // before this region, so the record it opens or joins covers the region's
+            // first base instead — one base, the insertion's own footprint — and the
+            // fold spells the inserted bases before it. Every other event keeps its
+            // anchor.
+            let event_start = if claimed_junction_insertion(ev, junction) {
+                ev.anchor_pos().saturating_add(1)
+            } else {
+                ev.anchor_pos()
+            };
             if inserted_past_the_regions_last_base(ev, region_end) {
                 continue;
             }
@@ -2543,6 +2683,7 @@ pub(super) fn process_position(
                         active_reads,
                         contributors,
                         region_end,
+                        junction,
                     )?
                 {
                     widen_count += 1;
@@ -2643,17 +2784,21 @@ pub(super) fn process_position(
             // carrying either one falls back to the cursor, which is the same work as
             // before — mate-overlap reconciliation is the case that pays for its own
             // window.
+            // **And never for a record on a junction's first base**: its window carries a
+            // claimed insertion anchored one base *before* it (`window_of_read`), which
+            // `events_at_pos` at the record's own position cannot hold — reusing it here
+            // would re-fold the carrying read without its insertion and quietly overwrite
+            // the observation that had it.
             let reuse_events_at_pos = !contrib.bq_zero_in_window
                 && contrib.bq_override_at_walker_pos.is_none()
                 && rec_pos == walker_pos
                 && rec_end == walker_pos.saturating_add(1)
+                && junction.is_none_or(|junction| junction.first_base != rec_pos)
                 && active_read.cursor.spans_only_its_anchors();
             let mut window_events = if reuse_events_at_pos {
                 super::cigar_cursor::EventsOverlapping::new()
             } else {
-                active_read
-                    .cursor
-                    .events_overlapping(rec_pos, rec_end, &active_read.read)
+                window_of_read(active_read, rec_pos, rec_end, junction)
             };
             if contrib.bq_zero_in_window {
                 for ev in &mut window_events {
@@ -3345,7 +3490,7 @@ mod tests {
         rec.alleles.push(OpenAllele::new(b"T".to_vec()));
         rec.alleles[1].support.num_obs = 1;
         // Now widen to span 3 ("ACG").
-        t.widen(1, 4, &f, &active, &[], None).unwrap();
+        t.widen(1, 4, &f, &active, &[], None, None).unwrap();
         let rec = t.records.get(&1).unwrap();
         assert_eq!(rec.alleles[0].seq, b"ACG", "the REF bucket grows");
         assert_eq!(
@@ -4107,6 +4252,7 @@ mod tests {
                 &active,
                 &reference,
                 None,
+                None,
             )
             .expect("the fixture walks cleanly");
         }
@@ -4169,6 +4315,7 @@ mod tests {
             &active,
             &reference,
             None,
+            None,
         )
         .expect("opens");
 
@@ -4195,6 +4342,7 @@ mod tests {
             &[],
             &active,
             &reference,
+            None,
             None,
         )
         .expect("widens");
@@ -4473,6 +4621,7 @@ mod tests {
             &active,
             &reference,
             None,
+            None,
         )
         .expect("opens");
         let shortie_id = read_id_of(&active, "shortie");
@@ -4509,6 +4658,7 @@ mod tests {
             &[],
             &active,
             &reference,
+            None,
             None,
         )
         .expect("widens");
@@ -4583,6 +4733,7 @@ mod tests {
                 &active,
                 &reference,
                 None,
+                None,
             )
             .expect("the fixture walks cleanly");
         }
@@ -4656,6 +4807,7 @@ mod tests {
             &active,
             &reference,
             Some(9),
+            None,
         )
         .expect("the fixture walks cleanly");
         let alleles_of = |table: &OpenPileupRecordTable| -> Vec<Vec<u8>> {
@@ -4688,6 +4840,7 @@ mod tests {
             &active,
             &reference,
             Some(10),
+            None,
         )
         .expect("the fixture walks cleanly");
         assert_eq!(
@@ -4741,6 +4894,7 @@ mod tests {
             &[],
             &active,
             &reference,
+            None,
             None,
         )
         .expect("the fixture walks cleanly");
@@ -4824,6 +4978,7 @@ mod tests {
             &[],
             &active,
             &reference,
+            None,
             None,
         )
         .expect("walks");
@@ -4949,6 +5104,7 @@ mod tests {
             &active,
             &reference,
             None,
+            None,
         )
         .expect("the fixture walks cleanly");
 
@@ -5002,6 +5158,7 @@ mod tests {
             &[],
             &active,
             &reference,
+            None,
             None,
         )
         .expect("walks");
@@ -5142,6 +5299,7 @@ mod tests {
                 &active,
                 &reference,
                 None,
+                None,
             )
             .expect("the fixture walks cleanly");
         }
@@ -5214,6 +5372,7 @@ mod tests {
                 std::slice::from_ref(&holey_id),
                 &active,
                 &reference,
+                None,
                 None,
             )
             .expect("the fixture walks cleanly");
@@ -5351,6 +5510,7 @@ mod tests {
                 &active,
                 &reference,
                 None,
+                None,
             )
             .expect("the fixture walks cleanly");
         }
@@ -5444,6 +5604,7 @@ mod tests {
             &active,
             &reference,
             None,
+            None,
         )
         .expect("opens");
         let holed_id = read_id_of(&active, "holed");
@@ -5470,6 +5631,7 @@ mod tests {
             &[],
             &active,
             &reference,
+            None,
             None,
         )
         .expect("widens");
@@ -5542,6 +5704,7 @@ mod tests {
                 &[],
                 &active,
                 &reference,
+                None,
                 None,
             )
             .expect("the fixture walks cleanly");
