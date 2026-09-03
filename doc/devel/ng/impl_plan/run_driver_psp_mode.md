@@ -56,20 +56,21 @@ settled 2026-08-30; direct mode completed 2026-09-01 and is this plan's oracle.
   refusal is the behaviour), the trailer's contents, the block byte ceiling's default
   (`psp_file_format.md` §12 q2).
 
-## Questions routed upstream (owner / spec — none blocks step 1)
+## Questions routed upstream — two ruled, one pending
 
-1. **The record count cannot live in the header** (spec §6.1 lists it there): the format
-   writes the header before the first record and never rewrites it
-   (`PspWriter::create` / worker-count invariance, spec §6.3). It already exists in
-   `WriteStats` and the block count in the footer. *Recommendation: amend §6.1 to route the
-   count to the footer or drop it; Milestone A builds the header without it.*
+1. **The record count is dropped from the header** (owner, 2026-09-03; spec §6.1 amended).
+   The census identity's count travels beside the header — `PileupIdentity::of_header`
+   already takes it as its own argument, supplied by `WriteStats` — so Milestone A builds
+   the header without it.
 2. **§6.3 (no boundary digest, no `writer_version`) still awaits the owner's ruling** — the
    spec says so itself. This plan proceeds under the decision as written; a reversal touches
    Milestone A only.
-3. **§11 q2 has no proposed samples-in-flight default**, and §9 rules that a tuning constant
-   appearing in the implementation is a defect. `generate-psps` therefore takes an explicit
-   `--samples-in-flight` flag; its provisional default (the thread count) is flagged at
-   Checkpoint C for the owner to keep or replace with q2's sweep.
+3. **The walk's concurrency is ruled** (owner, 2026-09-03; spec §5.2 and §11 q2 amended):
+   `generate-psps` processes its samples **one at a time, in the order given** — no
+   samples-in-flight knob, no in-process fan-out. Each sample's generation is independent,
+   so a cohort is parallelised by running invocations, typically one sample each. That
+   independence is the critical difference from direct mode, which must hold every sample
+   open at one shared frontier; the walk stage never does.
 
 ## Principles (how the order was chosen)
 
@@ -178,11 +179,11 @@ reference/segmentation exactly as `call_from_alignments.rs` does (reuse `segment
 direct mode (the five pre-open checks). *Depends:* B1. *Source:* spec §2, §5.2; the agreed
 names (`run_driver_direct_mode.md` l.108).
 
-**C2. ☐ Samples in flight, as an explicit knob.**
-The cross-sample loop runs `--samples-in-flight` gatherers at once (spec §5.2's chosen
-parallelism); default provisional (upstream item 3). A finished sample prints its
-`WriteStats`; the run ends with a per-sample report line. *Depends:* C1. *Source:* spec
-§5.2 l.589-594; §11 q2.
+**C2. ☐ Samples one at a time, and a per-sample report.**
+The loop over samples is sequential, in the order given (owner's ruling 2026-09-03, spec
+§5.2) — no concurrency knob; a cohort is parallelised by running invocations. A finished
+sample prints its `WriteStats`; the run ends with a per-sample report line. *Depends:* C1.
+*Source:* spec §5.2; §11 q2 (walk half, answered).
 
 **C3. ☐ An interrupted run leaves nothing that reads as whole.**
 Kill-mid-write fixture at the command level: the half-written file is refused as interrupted
@@ -190,8 +191,7 @@ Kill-mid-write fixture at the command level: the half-written file is refused as
 `--force`-less rerun refuses to overwrite finished files. *Depends:* C1. *Source:* spec §8
 (l.1000-1004); `psp_file_format.md` §10.
 
-> **Checkpoint C: a cohort of psps from the command line. Owner rules on the
-> samples-in-flight default. Pause for review.**
+> **Checkpoint C: a cohort of psps from the command line. Pause for review.**
 
 ### Milestone D — the psp source, and one calling tail for both modes
 
@@ -305,6 +305,6 @@ The command's report names both; a census that cannot be written fails the sampl
   byte-for-byte census equality, `generate-census`.
 - **psp-mode performance** (after the first measured run): the cheap-numbers read (spec
   §3.3/§10), the shared contig list (§7.2/§10), leasing through `spare`, §11 q7's psp half,
-  and q2's samples-in-flight sweep.
+  and q2's remaining callers-in-flight half.
 - **The trailer's contents** — opaque bytes until something needs them
   (`psp_file_format.md` §3.4).

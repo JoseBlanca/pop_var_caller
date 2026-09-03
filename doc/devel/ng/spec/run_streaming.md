@@ -576,7 +576,13 @@ gatherer accumulated: concretely, `CensusWriter::finish()` returning the sample'
 ([`src/ng/parameter_estimation/joint/census.rs:1928,2378,1378`](../../../../src/ng/parameter_estimation/joint/census.rs)).
 
 **The walk stage is a loop over samples**, one gatherer each. **Several samples are walked at
-once, one worker each, and each sample's own walk is serial** (owner's decision). The loop below is that loop with its concurrency set to one:
+once, one worker each, and each sample's own walk is serial** (owner's decision). **And the
+first implementation runs that loop at concurrency one** (owner's ruling, 2026-09-03): samples
+are processed one at a time, in the order given, and a cohort is parallelised by running
+invocations — typically one sample each — because each sample's generation is independent of
+every other's. That independence is the critical difference from direct mode, which must hold
+every sample open at one shared frontier; the walk stage never has to. The in-process fan-out
+below remains what the arrangement permits, and its knob is §11 question 2's:
 
 ```
 for each sample:
@@ -717,7 +723,12 @@ merge — and not a second cut through the genome. Which axis is worth building 
   built from different reads — which is the whole point of naming it
   ([`Freshness`, `:106-127`](../../../../src/ng/parameter_estimation/joint/census_file.rs) turns the
   comparison into *use it*, *rebuild it*, or *refuse*).
-- **How many records the file holds.** The second half of that identity, for the same reason.
+- ~~How many records the file holds~~ — **dropped from the header (owner's ruling,
+  2026-09-03).** The identity's second half travels *beside* the header rather than inside it:
+  `PileupIdentity::of_header` already takes the count as its own argument, and the writer's
+  `WriteStats` supplies it at the one moment a census is built from a walk. A header written
+  before the first record cannot carry a count without being rewritten, and rewriting is what
+  §6.3's invariance argument rules out.
 - **When the file was written.** Never compared — it is what makes §12's byte-identity oracle
   read *"identical apart from the timestamp"* rather than *"identical"*, so it is a field the
   comparison deliberately skips rather than an omission.
@@ -1087,10 +1098,11 @@ measured yet (§11, questions 2 and 7).
    segments and their length distribution over the existing catalog file at both floors, tomato
    and human — a filter over a stored file, not a genome scan.
 2. **The two concurrency defaults: samples in flight for the walk, callers in flight for the two
-   callers.** — OPEN; no value proposed. They buy different things and cost differently — a sample
-   in flight costs tens of megabytes (§7.1), a caller in flight costs one locus — so one default
-   will not serve both. **Settled by:** sweeping each on the tomato slices and on HG002, wall time
-   and peak resident, with the output required identical at every setting.
+   callers.** — the walk half is **ANSWERED** (owner, 2026-09-03): `generate-psps` processes its
+   samples one at a time, and a cohort is parallelised by running invocations — no in-process
+   fan-out and no default owed (§5.2). The callers-in-flight half stays OPEN; no value proposed —
+   a caller in flight costs one locus. **Settled by:** sweeping it on the tomato slices and on
+   HG002, wall time and peak resident, with the output required identical at every setting.
 3. **Does splitting one sample's walk across workers scale?** — OPEN. It is not on the default
    path, and it is the measurement question 8 turns on. **Settled by:** driving one gatherer at 1, 2, 4, 8, 16 workers on a tomato slice
    and HG002 — wall time, peak resident, observations identical to serial. Production's is 1.81×
