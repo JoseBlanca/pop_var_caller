@@ -19,7 +19,25 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-03):** **psp mode has a command line — `generate-psps`
+> - **Last completed task (2026-09-03):** **psp-mode Milestone C is complete — a cohort of
+> psps from the command line** (branch `ng-psp-mode`, at Checkpoint C; steps C2+C3:
+> [report](doc/devel/reports/implementations/ng_psp_mode_c2_c3_2026-09-03.md),
+> [review](doc/devel/reports/reviews/ng_psp_mode_c2_c3_2026-09-03.md),
+> [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-03_v6.md)). `generate-psps` now says
+> what each walk produced and what ground it could speak for — on a tomato accession,
+> *193,603 loci stored, 914,715 bytes; 311 of 318 typed regions, 199,672 of 200,000 bases
+> walked, 99.8%*, with the 328 bases it could not store named as clusters of repeats too close
+> together to have clean flanks — and refuses to replace a psp without `--force`, checking
+> every sample before walking any. The review (20 mutations, 15 surviving) caught three claims
+> that were wrong rather than untested: the report called loci "observations", which the crate
+> reserves for what a locus *contains*; it took its shares over the ground asked for rather
+> than the ground walked, the same arithmetic `run/report.rs` records printing 200.0% once;
+> and the split that was supposed to make the report a value a test can hold was undone by a
+> bare `println!` inside it. The report now reuses the sibling's own `describe`/`share_of`
+> wording and arithmetic. Next: Milestone D — the psp-backed source, and lifting the calling
+> tail so both modes drive one body.
+>
+> - **Earlier (2026-09-03):** **psp mode has a command line — `generate-psps`
 > walks each sample once and writes its psp** (branch `ng-psp-mode`, plan step C1;
 > [report](doc/devel/reports/implementations/ng_psp_mode_c1_2026-09-03.md),
 > [review](doc/devel/reports/reviews/ng_psp_mode_c1_2026-09-03.md),
@@ -3732,11 +3750,14 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     closure; re-opens only on a large-cohort measurement that moves the share.
 
 #### Psp mode — the walk to a psp+census, and calling from a cohort of psps
-- **Status:** `fixes-applied` — **Milestone C under way: `generate-psps` exists** (C1 built,
-  reviewed and committed; C2's per-sample report and C3's overwrite refusal next). The walk
+- **Status:** `fixes-applied` — **Milestone C complete, at Checkpoint C: a cohort of psps
+  from the command line.** The walk
   stage has a command line: `pop_var_caller_exp generate-psps --reference … --catalog …
-  --alignment … --output-dir …` walks each sample once and writes `<sample>.psp`. On a tomato
-  slice: one psp, 914,715 bytes, 3.0 s. Two prerequisites landed first — `ng::run`'s shared
+  --alignment … --output-dir …` walks each sample once and writes `<sample>.psp`, says what
+  ground it spoke for, and refuses to replace a psp without `--force`. On a tomato slice:
+  193,603 loci stored, 914,715 bytes, ~3 s, *311 of 318 typed regions, 199,672 of 200,000
+  bases walked*. A walk goes to `<sample>.psp.<pid>.partial` and is renamed only once whole,
+  so a stopped re-walk leaves the psp it was replacing intact. Two prerequisites landed first — `ng::run`'s shared
   test fixtures (`70385f5b`, the carry-forward from B1/B2) and the **ground assembly lifted
   out of direct mode into `run_ground.rs`** (`f00d56e9`), which is what C1's "reuse
   `segments_over`/`analysed_regions`" required; direct mode's 88 command tests pass untouched
@@ -3760,11 +3781,16 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   count; `format_version` stays (1,0).
 - **Impl reports:** [B1](doc/devel/reports/implementations/ng_psp_mode_b1_2026-09-03.md),
   [B2+B3](doc/devel/reports/implementations/ng_psp_mode_b2_b3_2026-09-03.md),
-  [C1](doc/devel/reports/implementations/ng_psp_mode_c1_2026-09-03.md);
-  **C1 review:** [C1](doc/devel/reports/reviews/ng_psp_mode_c1_2026-09-03.md) (41 mutations
+  [C1](doc/devel/reports/implementations/ng_psp_mode_c1_2026-09-03.md),
+  [C2+C3](doc/devel/reports/implementations/ng_psp_mode_c2_c3_2026-09-03.md);
+  **C reviews:** [C1](doc/devel/reports/reviews/ng_psp_mode_c1_2026-09-03.md) (41 mutations
   run, 21 survived; two live defects — a psp path built from the `@RG SM` tag unchecked, and a
-  stopped re-walk truncating the psp it was replacing) and its
-  [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-03_v5.md);
+  stopped re-walk truncating the psp it was replacing),
+  [C2+C3](doc/devel/reports/reviews/ng_psp_mode_c2_c3_2026-09-03.md) (20 mutations, 15
+  survived; the report called loci "observations" and took its shares over the ground asked
+  for rather than the ground walked — the arithmetic `run/report.rs` records printing 200.0%
+  once); **fixes:** [C1](doc/devel/reports/reviews/fixes_applied_2026-09-03_v5.md),
+  [C2+C3](doc/devel/reports/reviews/fixes_applied_2026-09-03_v6.md);
   **latest reviews:** [B1](doc/devel/reports/reviews/ng_psp_mode_b1_2026-09-03.md) (1 Blocker —
   a swallowed walk error sealed a psp every reader accepts, mutation-proven — 4 Majors, 12
   Minors), [B2+B3](doc/devel/reports/reviews/ng_psp_mode_b2_b3_2026-09-03.md) (3 Majors: a

@@ -24,6 +24,7 @@
 //! `run_driver_psp_mode.md`; until then a psp written here is a complete record of the
 //! sample's observations and the fit still has to be fed from elsewhere.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -31,8 +32,9 @@ use clap::Args;
 use thiserror::Error;
 
 use crate::fasta::ContigList;
+use crate::ng::locus_generation::LocusCounts;
 use crate::ng::locus_generation::pileup::PileupGeneratorConfig;
-use crate::ng::psp::WriterProvenance;
+use crate::ng::psp::{WriteStats, WriterProvenance};
 use crate::ng::read::ReadFilterConfig;
 use crate::ng::read::input::read_groups::{
     ReadGroupError, ReadGroups, SampleReadGroups, build_read_groups,
@@ -46,6 +48,7 @@ use crate::ng::region_typing::DEFAULT_MAX_STR_LEN;
 use crate::ng::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
+use crate::ng::run::report::{describe, plural, share_of};
 use crate::ng::run::{RunError, SampleObservationGatherer, SampleWalkInputs};
 use crate::ng::types::MAX_MOTIF_LEN;
 use crate::pop_var_caller::common::{current_command_line, rfc3339_now};
@@ -103,6 +106,15 @@ pub struct GeneratePspsArgs {
     /// giving every one of them the same `--regions`.
     #[arg(long)]
     pub regions: Option<PathBuf>,
+
+    /// Overwrite psps that are already in `--output-dir`.
+    ///
+    /// Without it a run refuses as soon as it finds one, before walking anything: a psp is
+    /// hours of decoding, and silently replacing one because a command was re-typed is not a
+    /// thing a person can undo. **The refusal comes before the first sample is walked**, so a
+    /// cohort is never left half-replaced.
+    #[arg(long)]
+    pub force: bool,
 
     /// Build a `.bai`/`.crai` beside any alignment file that has none.
     #[arg(long, help_heading = "Advanced")]
@@ -248,6 +260,22 @@ pub enum GeneratePspsCliError {
         stamp: String,
     },
 
+    /// A psp for this sample is already in the output directory.
+    ///
+    /// **Refused before anything is walked**, and never overwritten by accident: the file is
+    /// a walk that already happened, and re-typing a command is not a reason to spend it.
+    /// `--force` is how a person says they mean it.
+    #[error(
+        "{sample} already has a psp at {}; pass --force to walk it again and replace it",
+        path.display()
+    )]
+    PspAlreadyThere {
+        /// The individual whose psp is already there.
+        sample: String,
+        /// The file that would be replaced.
+        path: PathBuf,
+    },
+
     /// One sample's walk stopped, and that sample has no psp.
     ///
     /// **Names the sample and the file it would have been**, because the loop walks samples
@@ -265,6 +293,139 @@ pub enum GeneratePspsCliError {
         #[source]
         source: RunError,
     },
+}
+
+/// What one sample's walk produced.
+pub struct SampleWalkOutcome {
+    /// The individual walked.
+    pub sample: String,
+    /// The psp now on disk.
+    pub psp: PathBuf,
+    /// What the store wrote: **loci**, blocks, bytes. `WriteStats::records` counts psp
+    /// records, and one record is a locus with its observations inside it — so this is not a
+    /// count of observations, which is several times larger.
+    pub stats: WriteStats,
+    /// What the walk met: segments dispatched, handled, and the two kinds of refused.
+    pub counts: LocusCounts,
+}
+
+/// **What the walk stage has to say about itself when it finishes.**
+///
+/// Held as a value rather than printed where it is computed, so that what a run says is
+/// something a test can hold — `call-from-alignments` splits its own report the same way,
+/// having found that the printing was the one part of it a mutation could change with the
+/// suite still green.
+pub struct WalkReport {
+    /// The ground every sample was walked over, named as a person would name it —
+    /// `chr1:1-100`, or how many intervals and the first and last of them.
+    pub ground: String,
+    /// How many bases of it were asked for.
+    pub analysed_bases: u64,
+    /// One entry per sample, in the order they were walked.
+    pub samples: Vec<SampleWalkOutcome>,
+}
+
+impl SampleWalkOutcome {
+    /// **The bases this walk was actually handed**, which is not always the bases asked for.
+    ///
+    /// A repeat tract is typed and walked whole even where a BED cuts one (spec §4.2), so the
+    /// three parts can sum past the ask — measured in the sibling report's own review, a BED
+    /// of 120 bases inside two tracts charged 240 and dividing by the 120 printed *200.0%*.
+    /// Every share is of this sum, so the parts add to a hundred by construction.
+    #[must_use]
+    pub fn bases_walked(&self) -> u64 {
+        self.counts.regions_handled_bp
+            + self.counts.unhandled_not_implemented_bp
+            + self.counts.unhandled_out_of_scope_bp
+    }
+
+    /// The one line that says what this sample's walk produced — **shared by the progress
+    /// note printed as the sample finishes and by the report at the end**, so the two cannot
+    /// come to say different things about one walk.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let counts = &self.counts;
+        let walked = self.bases_walked();
+        let mut line = String::new();
+        let _ = write!(
+            line,
+            "{}: {} loci stored, {} bytes at {}",
+            self.sample,
+            self.stats.records,
+            self.stats.bytes,
+            self.psp.display(),
+        );
+        let _ = write!(
+            line,
+            "; spoke for {} of {} typed region{} ({} of {} bases walked, {})",
+            counts.regions_handled,
+            counts.regions_in,
+            plural(counts.regions_in),
+            counts.regions_handled_bp,
+            walked,
+            share_of(counts.regions_handled_bp, walked),
+        );
+        if counts.unhandled_not_implemented_bp > 0 {
+            let _ = write!(
+                line,
+                "; not stored — clusters of repeats too close together to have clean flanks: {} bases ({})",
+                counts.unhandled_not_implemented_bp,
+                share_of(counts.unhandled_not_implemented_bp, walked),
+            );
+        }
+        if counts.unhandled_out_of_scope_bp > 0 {
+            let _ = write!(
+                line,
+                "; not stored — tandem arrays longer than this run types as callable: {} bases ({})",
+                counts.unhandled_out_of_scope_bp,
+                share_of(counts.unhandled_out_of_scope_bp, walked),
+            );
+        }
+        line
+    }
+}
+
+impl WalkReport {
+    /// The lines a person reads at the end of a run.
+    ///
+    /// **Two things every line is about**: how much of the ground this walk could speak for,
+    /// and how much it stored. A segment the walk met but has no generator for is *not*
+    /// silence — it is analysed ground this build cannot yet describe, and a psp that omits
+    /// it looks exactly like one where nothing was there. So what a sample could not cover is
+    /// named by its two kinds rather than left to a subtraction, and every share is of the
+    /// ground the walk was handed rather than of the ground asked for
+    /// ([`SampleWalkOutcome::bases_walked`]).
+    #[must_use]
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::with_capacity(self.samples.len() + 3);
+        lines.push(format!(
+            "walked {} sample{} over {} — {} bases asked for",
+            self.samples.len(),
+            plural(self.samples.len() as u64),
+            self.ground,
+            self.analysed_bases,
+        ));
+        for outcome in &self.samples {
+            let walked = outcome.bases_walked();
+            if walked != self.analysed_bases {
+                lines.push(format!(
+                    "  (a typed region is walked whole, so {} spoke for {walked} bases; its shares are of that)",
+                    outcome.sample,
+                ));
+            }
+            lines.push(format!("  {}", outcome.line()));
+        }
+        lines.push(format!(
+            "{} psp{}, {} bytes in total",
+            self.samples.len(),
+            plural(self.samples.len() as u64),
+            self.samples
+                .iter()
+                .map(|outcome| outcome.stats.bytes)
+                .sum::<u64>(),
+        ));
+        lines
+    }
 }
 
 /// This command's flags, as the shared ground assembly asks for them.
@@ -294,6 +455,24 @@ fn ground_request(args: &GeneratePspsArgs) -> run_ground::GroundRequest<'_> {
 /// the first sample whose walk stops ends the run naming that sample — with every earlier
 /// sample's psp finished on disk, and nothing left at the stopped sample's own path.
 pub fn run_generate_psps(args: &GeneratePspsArgs) -> Result<(), GeneratePspsCliError> {
+    let report = walk_every_sample(args)?;
+    for line in report.lines() {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// The walk itself: every sample of this run, one at a time, and what each produced.
+///
+/// **Split from the printing** so what a run says about itself is a value a test can hold,
+/// rather than something only a terminal ever sees — the same split
+/// `call-from-alignments` makes, and for the reason its own note records: the report was the
+/// one part of that command a mutation could change with the whole suite still green.
+///
+/// # Errors
+///
+/// As [`run_generate_psps`].
+fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePspsCliError> {
     // **Everything a person typed is judged before a byte is read**, the same order direct
     // mode uses: reading a reference and opening a cohort of CRAMs is minutes, and a path or
     // a number that was never going to work should cost none of them. So the output
@@ -313,7 +492,26 @@ pub fn run_generate_psps(args: &GeneratePspsArgs) -> Result<(), GeneratePspsCliE
     let read_groups = build_read_groups(&args.alignments)
         .map_err(|source| GeneratePspsCliError::ReadGroups { source })?;
     for sample in read_groups.read_groups_per_sample() {
-        refuse_a_sample_name_that_is_not_a_file_name(sample.sample.as_ref())?;
+        let name = sample.sample.as_ref();
+        refuse_a_sample_name_that_is_not_a_file_name(name)?;
+        // **Every sample's psp is checked before any sample is walked**, so a cohort whose
+        // second psp is already there does not lose its first sample's hours before saying so.
+        let psp = psp_path_for(&args.output_dir, name);
+        // `try_exists` rather than `exists`: the second answers "no" both when there is no
+        // file and when this process cannot tell, and replacing a psp because its directory
+        // was briefly unreadable is the failure this check exists to prevent.
+        let already_there = psp
+            .try_exists()
+            .map_err(|source| GeneratePspsCliError::OutputDir {
+                path: psp.clone(),
+                source,
+            })?;
+        if !args.force && already_there {
+            return Err(GeneratePspsCliError::PspAlreadyThere {
+                sample: name.to_string(),
+                path: psp,
+            });
+        }
     }
 
     let cache = Arc::new(ReferenceInfoCache::new());
@@ -353,6 +551,8 @@ pub fn run_generate_psps(args: &GeneratePspsArgs) -> Result<(), GeneratePspsCliE
 
     // **The samples are walked one at a time, in the order given** (spec §5.2). Nothing here
     // holds two samples' files open at once, which is the property psp mode exists for.
+    let mut walked: Vec<SampleWalkOutcome> =
+        Vec::with_capacity(read_groups.read_groups_per_sample().len());
     for sample in read_groups.read_groups_per_sample() {
         let files = alignment_files_of(sample, &read_groups);
         let psp_path = psp_path_for(&args.output_dir, sample.sample.as_ref());
@@ -362,8 +562,15 @@ pub fn run_generate_psps(args: &GeneratePspsArgs) -> Result<(), GeneratePspsCliE
         // psp at the first byte and leave a refused stump if the re-walk stopped too. The
         // writer's own doc hands that choice to the caller ("write to a new path and rename
         // if that matters"); it matters here.
-        let while_writing = psp_path.with_extension("psp.partial");
-        let walk = || -> Result<(), RunError> {
+        // **Unique to this process**, because this command's own advice is to walk a cohort
+        // by running one invocation per sample — and two invocations that named the same
+        // sample would otherwise interleave into one scratch file and both rename it into
+        // place. With a name of its own each writes its own file, and the rename is atomic,
+        // so the loser replaces the winner's psp with an equally whole one instead of a
+        // shredded one. It is not a lock: the existence check below is advisory, and two
+        // invocations racing on one sample is still a thing not to do.
+        let while_writing = psp_path.with_extension(format!("psp.{}.partial", std::process::id()));
+        let walk = || -> Result<(WriteStats, LocusCounts), RunError> {
             let gatherer = SampleObservationGatherer::open(
                 SampleWalkInputs {
                     alignments: &files,
@@ -375,27 +582,47 @@ pub fn run_generate_psps(args: &GeneratePspsArgs) -> Result<(), GeneratePspsCliE
                 Arc::clone(&segmentation),
                 provenance.clone(),
             )?;
-            gatherer.write_psp(&while_writing).map(|_| ())
+            gatherer.write_psp(&while_writing)
         };
-        let stopped = walk().err();
-        if let Some(source) = stopped {
-            // The stump says nothing a reader wants and its name is not a psp's; leaving it
-            // would put a file in the output directory that no later run should ever open.
-            let _ = std::fs::remove_file(&while_writing);
-            return Err(GeneratePspsCliError::Walk {
-                sample: sample.sample.to_string(),
-                path: psp_path,
-                source,
-            });
-        }
+        let produced = match walk() {
+            Ok(produced) => produced,
+            Err(source) => {
+                // The stump says nothing a reader wants and its name is not a psp's; leaving
+                // it would put a file in the output directory no later run should ever open.
+                let _ = std::fs::remove_file(&while_writing);
+                return Err(GeneratePspsCliError::Walk {
+                    sample: sample.sample.to_string(),
+                    path: psp_path,
+                    source,
+                });
+            }
+        };
         std::fs::rename(&while_writing, &psp_path).map_err(|source| {
             GeneratePspsCliError::OutputDir {
                 path: psp_path.clone(),
                 source,
             }
         })?;
+        let (stats, counts) = produced;
+        let outcome = SampleWalkOutcome {
+            sample: sample.sample.to_string(),
+            psp: psp_path,
+            stats,
+            counts,
+        };
+        // **Said as each sample finishes, not only at the end**: a cohort of sixty is an hour
+        // or more, and a command that says nothing until it is done cannot be told from a
+        // hung one. **To stderr**, so a shell capturing the report gets the report and a
+        // person watching gets the progress — and in the same words, because both come from
+        // `SampleWalkOutcome::line`.
+        eprintln!("{}", outcome.line());
+        walked.push(outcome);
     }
-    Ok(())
+    Ok(WalkReport {
+        ground: describe(&analysed, &contigs),
+        analysed_bases: analysed.iter().map(|region| region.len()).sum(),
+        samples: walked,
+    })
 }
 
 /// Refuse a sample whose name cannot be the file name of its own psp.

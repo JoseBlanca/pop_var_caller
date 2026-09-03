@@ -206,19 +206,50 @@ reference/segmentation exactly as `call_from_alignments.rs` does (reuse `segment
 direct mode (the five pre-open checks). *Depends:* B1. *Source:* spec §2, §5.2; the agreed
 names (`run_driver_direct_mode.md` l.108).
 
-**C2. ☐ Samples one at a time, and a per-sample report.**
+**C2. ✅ Samples one at a time, and a per-sample report.**
 The loop over samples is sequential, in the order given (owner's ruling 2026-09-03, spec
 §5.2) — no concurrency knob; a cohort is parallelised by running invocations. A finished
 sample prints its `WriteStats`; the run ends with a per-sample report line. *Depends:* C1.
 *Source:* spec §5.2; §11 q2 (walk half, answered).
 
-**C3. ☐ An interrupted run leaves nothing that reads as whole.**
+**C3. ✅ An interrupted run leaves nothing that reads as whole.**
 Kill-mid-write fixture at the command level: the half-written file is refused as interrupted
 (the format already guarantees it; the command's exit and message are what this pins), and a
 `--force`-less rerun refuses to overwrite finished files. *Depends:* C1. *Source:* spec §8
 (l.1000-1004); `psp_file_format.md` §10.
 
 > **Checkpoint C: a cohort of psps from the command line. Pause for review.**
+>
+> **Reached 2026-09-03.** `pop_var_caller_exp generate-psps` walks a cohort and writes one psp
+> per sample. On one tomato accession over two 100 kb intervals: **193,603 loci stored,
+> 914,715 bytes, about 3 s**, and the run says what ground it spoke for —
+> *311 of 318 typed regions, 199,672 of 200,000 bases walked, 99.8%*, with the 328 bases it
+> could not store named as *clusters of repeats too close together to have clean flanks*.
+>
+> **What C3 settled about a run that stops**: each sample is walked into
+> `<sample>.psp.<pid>.partial` and renamed only once whole, so a stopped walk leaves nothing
+> at the sample's own path and a stopped **re-walk** leaves the psp it was replacing intact.
+> Without `--force` a run refuses as soon as it finds a psp already there — before walking
+> anything, so a cohort is never left half-replaced.
+>
+> **Two prerequisites landed inside this milestone, both recorded rather than silent:**
+> `ng::run`'s shared test fixtures (`70385f5b`, the carry-forward from B1 and B2), and the
+> **ground assembly lifted out of direct mode** into `src/pop_var_caller_exp/run_ground.rs`
+> (`f00d56e9`) — which is what C1's "reuse `segments_over`/`analysed_regions`" required, and
+> what makes §6.2's cohort-agreement check meaningful: both modes now compute the segmentation
+> inputs from one copy.
+>
+> **Carried into Milestone D:**
+> - the reference-open block is still duplicated verbatim between the two commands (22 lines);
+>   `run_ground`'s own doc already claims to own it;
+> - the five repeat-routing `#[arg]` blocks are byte-identical in both commands —
+>   `#[command(flatten)]` over the existing `RepeatRouting` would delete both copies and both
+>   `ground_request`s (deferred at Medium confidence: no third consumer is coming, and the
+>   drift hazard is closed by a whole-struct comparison plus per-flag tests);
+> - the on-disk cohort fixture is duplicated between the two commands' test modules;
+> - the read filters and the five locus-generator knobs are hard-coded in **both** commands and
+>   invisible at either surface — four of the five are recoverable from no field of the psp.
+>   Whether they become flags is the owner's call, not a step's.
 
 ### Milestone D — the psp source, and one calling tail for both modes
 

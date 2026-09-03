@@ -352,8 +352,16 @@ fn a_stopped_rewalk_does_not_destroy_the_psp_it_was_replacing() {
     rewalk.alignments = vec![broken];
     rewalk.reference = args.reference.clone();
     rewalk.catalog = args.catalog.clone();
+    // **`--force`, or this never reaches the walk at all**: zeta's psp is already there, so
+    // without it the run stops at the overwrite check and this test would prove nothing about
+    // what a stopped *walk* leaves. (It did exactly that until the check landed.)
+    rewalk.force = true;
 
-    run_generate_psps(&rewalk).expect_err("the re-walk's file has no index");
+    let stopped = run_generate_psps(&rewalk).expect_err("the re-walk's file has no index");
+    assert!(
+        matches!(stopped, GeneratePspsCliError::Walk { .. }),
+        "the re-walk must fail in the walk, not at the door: {stopped:?}",
+    );
 
     assert_eq!(
         std::fs::read(&zeta_psp).expect("zeta's psp is still on disk"),
@@ -573,6 +581,7 @@ fn a_cohort_on_disk() -> (
         alignments: vec![zeta, alpha],
         output_dir: reference_dir.path().join("psps"),
         regions: None,
+        force: false,
         build_index_if_missing: false,
         min_copies: MinCopies::default(),
         min_period: DEFAULT_MIN_PERIOD,
@@ -786,4 +795,383 @@ fn a_file_holding_several_of_a_samples_read_groups_is_listed_once() {
         1,
         "zeta's three read groups live in one file, so the walk opens one: {files:?}",
     );
+}
+
+// ---------------------------------------------------------------------
+// C2 — what the run says about itself
+// ---------------------------------------------------------------------
+
+/// **The report names every sample, what it stored, and how much of the ground it could
+/// speak for.** The lines are a value rather than something only a terminal sees, so this
+/// can hold them.
+#[test]
+fn the_report_says_what_each_sample_stored_and_how_much_ground_it_covered() {
+    let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
+
+    let report = walk_every_sample(&args).expect("the cohort walks");
+    let lines = report.lines();
+
+    assert_eq!(
+        report.samples.len(),
+        2,
+        "one outcome per sample: {:?}",
+        report.samples.iter().map(|o| &o.sample).collect::<Vec<_>>(),
+    );
+    let whole = lines.join("\n");
+    for sample in ["zeta", "alpha"] {
+        assert!(
+            whole.contains(sample),
+            "the report names {sample}, and got:\n{whole}",
+        );
+    }
+    assert!(
+        whole.contains("bases asked for"),
+        "and says over how much ground, and got:\n{whole}",
+    );
+
+    // The sample with reads stored observations; the empty one stored none — and the report
+    // says so rather than reporting one number for the cohort.
+    let zeta = report
+        .samples
+        .iter()
+        .find(|outcome| outcome.sample == "zeta")
+        .expect("zeta walked");
+    let alpha = report
+        .samples
+        .iter()
+        .find(|outcome| outcome.sample == "alpha")
+        .expect("alpha walked");
+    assert!(zeta.stats.records > 0, "zeta has reads");
+    assert_eq!(alpha.stats.records, 0, "alpha has none");
+    assert!(
+        zeta.counts.regions_handled > 0,
+        "and the ground it spoke for is counted: {:?}",
+        zeta.counts,
+    );
+}
+
+/// **The report's per-sample line carries the numbers, not just the name.** A line that named
+/// a sample and said nothing measurable about it would pass a `contains` check while telling
+/// a person nothing.
+#[test]
+fn the_reports_sample_line_carries_what_that_sample_stored() {
+    let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
+
+    let report = walk_every_sample(&args).expect("the cohort walks");
+    let zeta = report
+        .samples
+        .iter()
+        .find(|outcome| outcome.sample == "zeta")
+        .expect("zeta walked");
+    let line = report
+        .lines()
+        .into_iter()
+        .find(|line| line.contains("zeta"))
+        .expect("zeta has a line");
+
+    assert!(
+        line.contains(&zeta.stats.records.to_string()),
+        "its observation count is in its line: {line}",
+    );
+    assert!(
+        line.contains(&zeta.stats.bytes.to_string()),
+        "and how big its psp is: {line}",
+    );
+    assert!(
+        line.contains(&zeta.counts.regions_handled.to_string()),
+        "and how many segments it spoke for: {line}",
+    );
+}
+
+// ---------------------------------------------------------------------
+// C3 — a psp already there, and what a stopped run leaves
+// ---------------------------------------------------------------------
+
+/// **A second run refuses rather than replacing a psp**, naming the sample, the file and the
+/// flag that means it.
+#[test]
+fn a_rerun_refuses_to_replace_a_psp_that_is_already_there() {
+    let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
+    run_generate_psps(&args).expect("the cohort walks");
+    let zeta_psp = psp_path_for(&args.output_dir, "zeta");
+    let first = std::fs::read(&zeta_psp).expect("zeta's psp is on disk");
+
+    let refused = run_generate_psps(&args).expect_err("zeta's psp is already there");
+    match &refused {
+        GeneratePspsCliError::PspAlreadyThere { sample, path } => {
+            assert_eq!(sample, "zeta");
+            assert_eq!(path, &zeta_psp);
+        }
+        other => panic!("expected a refusal to replace, got {other:?}"),
+    }
+    assert!(
+        crate::error_render::format_error_chain(&refused).contains("--force"),
+        "and the message says how to mean it",
+    );
+    assert_eq!(
+        std::fs::read(&zeta_psp).expect("still there"),
+        first,
+        "and the psp it refused to replace is untouched",
+    );
+}
+
+/// **The refusal comes before any sample is walked.** A cohort whose *second* psp is already
+/// there must not spend the first sample's walk before saying so.
+#[test]
+fn the_refusal_comes_before_the_first_sample_is_walked() {
+    let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
+    std::fs::create_dir_all(&args.output_dir).expect("the output directory");
+    // Only alpha's psp is there, and alpha is walked second.
+    std::fs::write(psp_path_for(&args.output_dir, "alpha"), b"not really a psp")
+        .expect("a file in the way");
+
+    let refused = run_generate_psps(&args).expect_err("alpha's psp is already there");
+    assert!(
+        matches!(refused, GeneratePspsCliError::PspAlreadyThere { .. }),
+        "{refused:?}",
+    );
+    assert!(
+        !psp_path_for(&args.output_dir, "zeta").exists(),
+        "zeta is named first and must not have been walked",
+    );
+}
+
+/// **`--force` is how a person says they mean it**, and then the psp is replaced.
+#[test]
+fn force_replaces_a_psp_that_is_already_there() {
+    let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
+    std::fs::create_dir_all(&args.output_dir).expect("the output directory");
+    let zeta_psp = psp_path_for(&args.output_dir, "zeta");
+    std::fs::write(&zeta_psp, b"not really a psp").expect("a file in the way");
+
+    let mut forced = a_cohort_on_disk().3;
+    forced.reference = args.reference.clone();
+    forced.catalog = args.catalog.clone();
+    forced.alignments = args.alignments.clone();
+    forced.output_dir = args.output_dir.clone();
+    forced.force = true;
+
+    run_generate_psps(&forced).expect("--force replaces it");
+    PspReader::open(&zeta_psp).expect("what is there now is a whole psp");
+}
+
+/// **A file that is not a whole psp is refused by a reader, whatever it is called.** The
+/// format guarantees it; what this pins is that the command's own output directory is not a
+/// place where a half-written file can masquerade as a finished one.
+#[test]
+fn a_truncated_psp_is_refused_as_interrupted() {
+    let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
+    run_generate_psps(&args).expect("the cohort walks");
+
+    let zeta_psp = psp_path_for(&args.output_dir, "zeta");
+    let whole = std::fs::read(&zeta_psp).expect("zeta's psp is on disk");
+    assert!(whole.len() > 64, "the fixture psp has a body to cut");
+    std::fs::write(&zeta_psp, &whole[..whole.len() / 2]).expect("cut it in half");
+
+    PspReader::open(&zeta_psp).expect_err("half a psp is not a psp");
+}
+
+/// **A stopped walk leaves nothing in the output directory that a later run could open** —
+/// no psp at the sample's own path, and no scratch file beside it either.
+#[test]
+fn a_stopped_walk_leaves_no_file_at_the_samples_path_or_beside_it() {
+    use crate::ng::read::input::test_fixtures::{header, matching_contigs, named_bam};
+
+    let (_reference_dir, _zeta_dir, _alpha_dir, mut args) = a_cohort_on_disk();
+    let (_beta_dir, beta) = named_bam(
+        &header(
+            Some("coordinate"),
+            &matching_contigs(),
+            &[("rg9", Some("beta"))],
+        ),
+        &[],
+        "beta.bam",
+    );
+    args.alignments.push(beta);
+
+    // A scratch file from an earlier stopped run of this same process, so the cleanup has
+    // something to remove: beta stops inside `open`, before a walk of its own creates one.
+    std::fs::create_dir_all(&args.output_dir).expect("the output directory");
+    let stale = psp_path_for(&args.output_dir, "beta")
+        .with_extension(format!("psp.{}.partial", std::process::id()));
+    std::fs::write(&stale, b"a stopped walk's leavings").expect("a stale partial");
+
+    run_generate_psps(&args).expect_err("beta's file has no index");
+
+    assert!(
+        !stale.exists(),
+        "the stopped sample's scratch file was cleared, and got {stale:?}",
+    );
+    let left: Vec<String> = std::fs::read_dir(&args.output_dir)
+        .expect("the output directory")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with("beta"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the stopped sample left nothing behind, and got {left:?}",
+    );
+}
+
+/// **Every number the per-sample line prints is the number it claims to be**, checked on a
+/// walk outcome built by hand so that no two of them are equal — the command's own fixture
+/// covers all of its ground, which makes a swap of the two region counts invisible.
+///
+/// Three of these eight were asserted before; mutations that swapped the region counts,
+/// blanked the denominator or deleted the uncovered-ground clause all passed.
+#[test]
+fn the_per_sample_line_prints_the_numbers_it_names() {
+    let outcome = SampleWalkOutcome {
+        sample: "zeta".to_string(),
+        psp: PathBuf::from("psps/zeta.psp"),
+        stats: crate::ng::psp::WriteStats {
+            records: 41,
+            blocks: 3,
+            bytes: 6007,
+        },
+        counts: crate::ng::locus_generation::LocusCounts {
+            regions_in: 17,
+            regions_handled: 11,
+            regions_handled_bp: 500,
+            loci_emitted: 41,
+            unhandled_not_implemented: 4,
+            unhandled_not_implemented_bp: 300,
+            unhandled_out_of_scope: 2,
+            unhandled_out_of_scope_bp: 200,
+        },
+    };
+    let line = outcome.line();
+
+    assert_eq!(
+        outcome.bases_walked(),
+        1_000,
+        "the whole is the three parts' sum, not the ground asked for",
+    );
+    assert!(line.contains("41 loci stored"), "{line}");
+    assert!(line.contains("6007 bytes"), "{line}");
+    assert!(line.contains("psps/zeta.psp"), "{line}");
+    assert!(
+        line.contains("spoke for 11 of 17 typed regions"),
+        "handled before dispatched, in that order: {line}",
+    );
+    assert!(
+        line.contains("500 of 1000 bases walked, 50.0%"),
+        "the share's denominator is the ground the walk was handed: {line}",
+    );
+    assert!(
+        line.contains("clean flanks: 300 bases (30.0%)"),
+        "the ground no generator is built for yet is named and sized: {line}",
+    );
+    assert!(
+        line.contains("callable: 200 bases (20.0%)"),
+        "and so is the ground no caller will ever speak for: {line}",
+    );
+}
+
+/// **A walk that covered everything says so by saying nothing about what it did not.** The
+/// two clauses are conditional, so a clean run's line is not two zeros a reader must skip.
+#[test]
+fn a_walk_that_covered_its_whole_ground_carries_no_uncovered_clause() {
+    let outcome = SampleWalkOutcome {
+        sample: "zeta".to_string(),
+        psp: PathBuf::from("psps/zeta.psp"),
+        stats: crate::ng::psp::WriteStats {
+            records: 41,
+            blocks: 3,
+            bytes: 6007,
+        },
+        counts: crate::ng::locus_generation::LocusCounts {
+            regions_in: 11,
+            regions_handled: 11,
+            regions_handled_bp: 1_000,
+            loci_emitted: 41,
+            ..Default::default()
+        },
+    };
+    let line = outcome.line();
+
+    assert!(line.contains("1000 of 1000 bases walked, 100.0%"), "{line}");
+    assert!(!line.contains("not stored"), "nothing to report: {line}");
+}
+
+/// **The shares are of the ground the walk was handed, not of the ground asked for.** A
+/// typed region is walked whole even where a BED cuts one, so the two totals differ — and
+/// dividing by the ask is how the sibling report once printed 200.0%.
+#[test]
+fn the_shares_are_of_the_ground_the_walk_was_handed() {
+    let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
+    let report = walk_every_sample(&args).expect("the cohort walks");
+
+    for outcome in &report.samples {
+        let counts = &outcome.counts;
+        assert_eq!(
+            outcome.bases_walked(),
+            counts.regions_handled_bp
+                + counts.unhandled_not_implemented_bp
+                + counts.unhandled_out_of_scope_bp,
+            "the whole is the three parts' own sum",
+        );
+        assert!(
+            counts.regions_handled_bp <= outcome.bases_walked(),
+            "so no share can exceed one hundred per cent",
+        );
+    }
+}
+
+/// **The report names the ground it walked**, so a psp found later can be matched to the run
+/// that made it. The sibling report records this same omission being found once already.
+#[test]
+fn the_report_names_the_ground_it_walked() {
+    let (reference_dir, _zeta_dir, _alpha_dir, mut args) = a_cohort_on_disk();
+    let bed = reference_dir.path().join("ground.bed");
+    std::fs::write(&bed, "chr1\t0\t10\n").expect("a bed on disk");
+    args.regions = Some(bed);
+
+    let report = walk_every_sample(&args).expect("the cohort walks");
+    let opening = report.lines().first().cloned().expect("a first line");
+
+    assert!(
+        opening.contains("chr1"),
+        "the ground is named by its chromosome, and got: {opening}",
+    );
+}
+
+/// **The refusal names the sample that is actually blocked**, not the first one in the run.
+/// With only the second sample's psp in the way, naming the first would send a person to the
+/// wrong file.
+#[test]
+fn the_refusal_names_the_sample_whose_psp_is_in_the_way() {
+    let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
+    std::fs::create_dir_all(&args.output_dir).expect("the output directory");
+    std::fs::write(psp_path_for(&args.output_dir, "alpha"), b"not really a psp")
+        .expect("a file in the way");
+
+    let refused = run_generate_psps(&args).expect_err("alpha's psp is already there");
+    match &refused {
+        GeneratePspsCliError::PspAlreadyThere { sample, path } => {
+            assert_eq!(
+                sample, "alpha",
+                "zeta is walked first but is not the blocked one"
+            );
+            assert_eq!(path, &psp_path_for(&args.output_dir, "alpha"));
+        }
+        other => panic!("expected a refusal to replace, got {other:?}"),
+    }
+}
+
+/// **The flag the refusal tells a person to type is the flag that exists.** Nothing else ties
+/// the message's `--force` to the argument's own spelling.
+#[test]
+fn the_flag_the_refusal_names_is_the_flag_clap_answers_to() {
+    let mut argv = a_walk();
+    argv.push("--force");
+    let args = args_of(&argv);
+
+    assert!(args.force, "clap answers to the flag the refusal names");
 }

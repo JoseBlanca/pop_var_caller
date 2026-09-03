@@ -436,7 +436,7 @@ impl<'a> RunReport<'a> {
 /// One interval is named whole; several are the first and the last with the count between them,
 /// which is what a person needs to tell one BED from another at a glance. A run over every base
 /// of every contig says so rather than listing them.
-fn describe(analysed: &GenomeRegions, contigs: &ContigList) -> String {
+pub(crate) fn describe(analysed: &GenomeRegions, contigs: &ContigList) -> String {
     let mut spans = analysed.iter();
     let Some(first) = spans.next() else {
         return "nothing".to_owned();
@@ -468,7 +468,7 @@ fn name_of(region: GenomeRegion, contigs: &ContigList) -> String {
 }
 
 /// The `s` that makes a count read, or nothing where the count is one.
-fn plural(n: u64) -> &'static str {
+pub(crate) fn plural(n: u64) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
@@ -477,7 +477,7 @@ fn plural(n: u64) -> &'static str {
 /// **A percentage and not a natural frequency, and the reason is the range.** These shares run
 /// from a few bases in a hundred million to nearly all of the ground, and *6.0%* reads where
 /// *6 bases in every 100* does not once the numerator is 40 million.
-fn share_of(n: u64, whole: u64) -> String {
+pub(crate) fn share_of(n: u64, whole: u64) -> String {
     if whole == 0 {
         return "—".to_owned();
     }
