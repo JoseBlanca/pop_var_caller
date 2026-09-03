@@ -186,13 +186,18 @@ fn calling_loop_config_for_this_run()
         }
     }
     match std::env::var(NG_TRACT_DISCOVERY) {
+        // The pre-pass has been the shipped default since the owner adopted L7 (2026-09-03),
+        // so `1` restates the default and `0` is the measurement arm that switches it off.
         Ok(value) if value.trim() == "1" => {
             config.discovery.mode = DiscoveryMode::BeforeTheLoop;
         }
+        Ok(value) if value.trim() == "0" => {
+            config.discovery.mode = DiscoveryMode::Off;
+        }
         Ok(value) => {
             return Err(CallFromAlignmentsCliError::CallingLoopSettings(format!(
-                "{NG_TRACT_DISCOVERY} accepts only 1 (run the discovery pre-pass at every \
-                 repeat tract), not {value:?}"
+                "{NG_TRACT_DISCOVERY} accepts 1 (the discovery pre-pass, the shipped \
+                 default) or 0 (off, the measurement arm), not {value:?}"
             )));
         }
         Err(std::env::VarError::NotPresent) => {}

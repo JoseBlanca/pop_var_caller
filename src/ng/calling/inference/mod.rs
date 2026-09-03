@@ -373,7 +373,13 @@ impl std::fmt::Display for DiscoveryMode {
 /// not a second convergence.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct DiscoveryConfig {
-    /// Whether discovery runs at all, and where. Defaults to [`DiscoveryMode::Off`].
+    /// Whether discovery runs at all, and where. Defaults to
+    /// [`DiscoveryMode::BeforeTheLoop`] — **the shipped setting since the owner's adoption
+    /// of 2026-09-03** (the tract-accuracy program's L7,
+    /// `doc/devel/ng/research/tract_accuracy_program_report.md`): measured at +0.11/+0.04
+    /// points at 30× and +0.13/+0.03 at 50× with the spurious-heterozygote class enlarged by
+    /// 0 and 2 tracts, and behaviourally inert on the 63-accession tomato cohort at ~3 reads
+    /// (2 records of 228,852 changed, both coherent admissions).
     pub mode: DiscoveryMode,
     /// How much evidence one sample must show before a length is admitted. Defaults to
     /// [`DEFAULT_DISCOVERY_BAR`] — 2 reads or 15% of that sample's tract-spanning reads,
@@ -393,10 +399,11 @@ pub struct DiscoveryConfig {
 }
 
 impl DiscoveryConfig {
-    /// Off, with the bar and the runaway guard already set to what a run switching it on
-    /// would want.
+    /// The pre-pass, at the shipped bar — what every run gets since the L7 adoption; a run
+    /// that wants discovery off says so (`NG_TRACT_DISCOVERY=0` until the parameters-file
+    /// key this switch owes exists).
     pub const DEFAULT: Self = Self {
-        mode: DiscoveryMode::Off,
+        mode: DiscoveryMode::BeforeTheLoop,
         bar: DEFAULT_DISCOVERY_BAR,
         max_rounds: non_zero_default(DEFAULT_DISCOVERY_MAX_ROUNDS),
     };
@@ -736,12 +743,12 @@ mod tests {
         );
         assert_eq!(config.slippage_refit.level_pull_back_slipped_reads, 20.0);
         assert_eq!(config.slippage_refit.round_convergence_threshold, 1e-3);
-        assert!(config.discovery.is_off());
-        assert_eq!(config.discovery.mode, DiscoveryMode::Off);
+        assert!(!config.discovery.is_off());
+        assert_eq!(config.discovery.mode, DiscoveryMode::BeforeTheLoop);
 
-        // **Off is the mode, not a zeroed guard.** Every other field is already what a run
-        // switching discovery on would want, so turning the mode on cannot leave a loop that
-        // runs no rounds and reports finding nothing.
+        // **The pre-pass is the shipped mode since the L7 adoption (2026-09-03)**, and the
+        // guard fields stay what a round-wrapped mode would want, so no combination of
+        // switches can leave a loop that runs no rounds and reports finding nothing.
         assert_eq!(config.discovery.bar.floor.get(), 2); // HipSTR's read floor
         assert_eq!(config.discovery.bar.share.get(), 0.15); // HipSTR's share of one sample
         assert_eq!(config.discovery.max_rounds.get(), 4); // twice the one or two expected
@@ -809,14 +816,17 @@ mod tests {
     #[test]
     fn only_the_pre_pass_mode_hands_selection_a_bar() {
         let mut config = DiscoveryConfig::DEFAULT;
-        assert_eq!(config.pre_pass_bar(), None, "off runs no pre-pass");
-
-        config.mode = DiscoveryMode::BeforeTheLoop;
         assert_eq!(
             config.pre_pass_bar(),
             Some(DEFAULT_DISCOVERY_BAR),
-            "the pre-pass carries discovery's own bar, not selection's"
+            "the shipped default IS the pre-pass since the L7 adoption, carrying \
+             discovery's own bar rather than selection's"
         );
+
+        config.mode = DiscoveryMode::Off;
+        assert_eq!(config.pre_pass_bar(), None, "off runs no pre-pass");
+
+        config.mode = DiscoveryMode::BeforeTheLoop;
 
         for mode in [
             DiscoveryMode::AgainstFrozenFrequencies,

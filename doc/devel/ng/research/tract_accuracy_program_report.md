@@ -660,9 +660,12 @@ already does with one number. The caps' own pre-registered ceilings concur: the 
 factor is bounded by a tenth of the unexplained mass, and a per-read floor bounds one read
 where these classes are many.
 
-**The number for the ruling: 0 clustered of 238, with 4 ambiguous.** If the owner rules the
-discard, the family is closed unbuilt; if not, arm (a) (the one-line discount, swept) is the
-cheapest measurement to run first.
+**The number for the ruling: 0 clustered of 238, with 4 ambiguous.**
+
+**VERDICT: discard, unbuilt — ruled by the owner 2026-09-03** after the plain-language
+account: the evidence behind the errors carries no photocopy signature, so a cap or a
+discount cannot single it out and can only weaken all read evidence uniformly, which the
+tuned λ already does with one number.
 
 ---
 
@@ -837,7 +840,9 @@ never-offered shrinkage (23 and 17). The pre-registered ceiling was 61; discover
 of those tracts outright (11 + 14 converted) — the rest stay cut by the bar or mis-genotyped
 over the enlarged set, which is the next lever family's territory, not this one's.
 
-**Verdict: default-candidate, pending the owner's sign-off — the tomato gate passed.**
+**VERDICT: default — adopted by the owner 2026-09-03.** `DiscoveryMode::BeforeTheLoop` is
+the shipped setting; `NG_TRACT_DISCOVERY=0` is the measurement arm until the owed
+parameters-file key exists. The tomato gate had passed:
 On the 63-accession cohort at ~3 reads (`tmp/tract_program/tomato_gate_l7/`), discovery on
 against off changes **2 records of 228,852** and nothing else, byte for byte: at
 `SL4.0ch06:22,887,980` and `SL4.0ch08:30,899,713` one interruption-carrying spelling is
