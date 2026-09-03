@@ -19,7 +19,30 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-03):** **where a parallel calling run's time goes — and the
+> - **Last completed task (2026-09-03):** **the psp-mode wiring plan is written**
+> ([impl plan](doc/devel/ng/impl_plan/run_driver_psp_mode.md)) — the build order for
+> `SampleObservationGatherer` + `generate-psps` (walk to psp + census, one file per sample) and
+> `PspVariantCaller` + `call-from-psps`, seven milestones A–G ending at spec §12.3's mode
+> equivalence: the psp route's VCF **byte-identical** to direct mode's. Grounded in a code
+> survey: the store (`src/ng/psp/`, plan A–H ✅) and direct mode are done and **the wiring is
+> the whole gap** — nothing outside `src/ng/psp/` calls `PspWriter`/`PspReader`; the plug
+> points are the blanket `ObservationSource` impl for any observation iterator
+> (`observation_cache.rs:98`), `PspWriter::push` taking exactly the walker's record type, and
+> the source-agnostic calling tail (`callers.rs:705+`) to be lifted off
+> `AlignedFilesVariantCaller` (plan step D2, its own byte-identity-guarded commit).
+> **Three questions routed upstream, none blocking step 1**: spec §6.1 lists the record count
+> in a header the format writes before the first record (recommend: route it to the footer or
+> drop it); §6.3's no-digest decision still awaits the owner's ruling; §11 q2 has no
+> samples-in-flight default, so `generate-psps` takes an explicit flag with a provisional
+> default flagged at Checkpoint C. **A real header gap the survey found**: the built `Header`
+> carries none of §6.1's run-checkable fields — no analysed regions, no segmentation inputs,
+> no read-group table, no reach ceiling — so Milestone A grows them *before* any file is
+> written anywhere, while extending the header is still free. The fit stage, census-from-psp,
+> §7.12's census equality and `generate-census` hand to a named follow-on plan; the
+> cheap-numbers read, contig-list sharing and leasing go to a psp-mode performance plan after
+> the first measured run.
+>
+> - **Earlier (2026-09-03):** **where a parallel calling run's time goes — and the
 > merge-timing feature un-broken**
 > ([finding](doc/devel/ng/research/cohort_merge_parallel_cost_2026-09-03.md), on branch
 > `ng-merge-parallel-cost`; widens the 2026-08-28 merge-only finding to the whole run).
