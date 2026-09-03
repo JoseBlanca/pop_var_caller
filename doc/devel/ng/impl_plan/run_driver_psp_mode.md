@@ -131,17 +131,17 @@ criteria), as typed TOML sections — they are what §6.2's refusals compare, an
 `SegmentationInputs` is the operand type. Round-trip and map-order-independence tests extend
 the existing ones. *Depends:* —. *Source:* spec §6.1, §6.2; `psp_file_format.md` §3.1.
 
-**A2. ☐ The sample's read-group table in the header.**
+**A2. ✅ The sample's read-group table in the header.**
 `@RG ID`, library, and the walk-local identifier per group (spec §6.1), so calling can merge
 tables into a run-wide numbering (§6.2) without opening blocks. *Depends:* A1 (same encode
 path). *Source:* spec §6.1 l.676-732, §6.2 l.759-763.
 
-**A3. ☐ The observation reach ceiling (`max_record_span`).**
+**A3. ✅ The observation reach ceiling (`max_record_span`).**
 The header field `psp_file_format.md` §11 owes and `cohort_merge.md` §13 routed here; the
 reader exposes it, nothing consumes it yet (E4 does). *Depends:* A1. *Source:*
 `psp_file_format.md` §3.1 l.183-196, §11; spec §6.1.
 
-**A4. ☐ Read filters and the command line into `WriterProvenance`.**
+**A4. ✅ Read filters and the command line into `WriterProvenance`.**
 The applied read-filter settings recorded as provenance parameters — recorded, never
 compared (goal 4). *Depends:* —. *Source:* spec §6.1.
 
