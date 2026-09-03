@@ -643,4 +643,58 @@ program, connected to the existing hidden-paralog census work.
 
 ---
 
-*Sections L2–L3 and L5–L7 are opened as the program reaches them.*
+## L2 — read-independence: n agreeing reads are not n pieces of evidence
+
+Status: **premise measured false — discard proposed to the owner (their lever), for the
+Checkpoint 1 sitting; nothing built**
+
+The lever family (the identical-observation discount, the freebayes-style aggregate factor,
+the GATK-style per-read cap, the beta-binomial) exists to stop reads that share an origin
+from counting as independent evidence. P1 measured the premise directly, twice: on the P0
+baseline, **0 of 225** spurious-heterozygote tracts show a strand or duplicate-family
+clustering signal; re-measured on the L4 baseline, **0 of 238** show clustering alone and
+only 4 show clustering beside persistence. The reads behind the spurious class sit on both
+strands at independent start positions — they are exactly as independent as real evidence,
+so a discount can only reweigh good and bad evidence alike, which is the strength dial λ
+already does with one number. The caps' own pre-registered ceilings concur: the aggregate
+factor is bounded by a tenth of the unexplained mass, and a per-read floor bounds one read
+where these classes are many.
+
+**The number for the ruling: 0 clustered of 238, with 4 ambiguous.** If the owner rules the
+discard, the family is closed unbuilt; if not, arm (a) (the one-line discount, swept) is the
+cheapest measurement to run first.
+
+---
+
+## L3 — stutter-em: the locus's own slippage
+
+Status: pre-registered
+
+**Pre-registration (written 2026-09-03, before the re-fit body is built).**
+
+The calling loop's per-locus slippage re-fit is designed and refused-at-runtime today
+(`calling_em_loop.md` §5.1; `SlippageRefitConfig`, 50 pseudo-counts, 20 slipped reads,
+`SlippageRefitNotBuilt`). This lever builds the body inside the existing interface and sweeps
+the three designed pull-back settings. **Scope ruling (owner, 2026-09-03): slippage only** —
+the per-locus λ re-fit that could share this machinery was examined and set aside (L1's
+section records why).
+
+targets: the locus-real spurious heterozygotes whose 300× share is **under 0.30** — the band
+  a pulled-back re-fit can plausibly explain as locus-specific slippage. On the L4 baseline:
+  **60 tracts** (46 homopolymer, 14 period 2+), 31 of them exactly one unit off. The
+  ≥0.30-share wall (128 tracts) is explicitly not claimed — the pull-back cannot and should
+  not reach it.
+ceiling: **60**, and part of the 44 collapsed heterozygotes if a locus fitted *below* its
+  stratum re-arms real one-unit hets.
+bar: flips against the L4-plus-λ0.20 baseline once the slate fixes λ (or against L4-λ0.05
+  with λ re-swept jointly if the slate is still open when L3 runs — rule 6 either way);
+  net-positive both period classes both depths; the simulator run (its slippage is settable,
+  so the re-fit must recover a planted per-locus rate on it — the mechanism check rule 5
+  requires); the 242-tract subset scored directly per the plan; and the interaction with
+  fitted per-stratum rows (L6) measured at stage end.
+
+*(build to follow; measurements after the runs they quote)*
+
+---
+
+*Sections L5–L7 are opened as the program reaches them.*
