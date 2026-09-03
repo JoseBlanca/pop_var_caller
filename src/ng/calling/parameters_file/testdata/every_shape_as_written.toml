@@ -295,9 +295,11 @@ substitution_rate_by_stratum = [
 [stated_constants]
 # The numbers no fit produces, written out so that what a run inherited is
 # visible and editable rather than buried in the binary.
-# inherited from the existing caller and never measured here: the share of
-# repeat-tract reads that came from nowhere the model can explain
-repeat_tract_outlier_weight = { value = 0.01, warrant = "defaulted" }
+# the share of repeat-tract reads that came from nowhere the model can explain.
+# Not measured: this value was chosen by sweeping it against genotype accuracy
+# on one human sample, so it is a stated constant rather than an estimate of
+# that share
+repeat_tract_outlier_weight = { value = 0.05, warrant = "defaulted" }
 
 [repeat_routing]
 # What this run counted as a repeat. A tandem-repeat catalog is built below

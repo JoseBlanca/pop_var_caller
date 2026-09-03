@@ -900,10 +900,17 @@ mod origins {
         "this is the caller's own constant"
     );
 
-    /// The repeat-tract outlier weight, where a run inherited it rather than being handed one.
+    /// The repeat-tract outlier weight, where a run took the stated constant rather than being
+    /// handed one.
+    ///
+    /// **It says "not measured" while naming what chose it**, because both are true and a reader
+    /// deciding whether to edit the number needs both: it was picked by a sweep against genotype
+    /// accuracy on one human sample, and it is still not an estimate of the share it is named for
+    /// — read literally that share is nearer 1 in 200.
     pub const OUTLIER_WEIGHT: &str = concat!(
-        "inherited from the existing caller and never measured here: the share of ",
-        "repeat-tract reads that came from nowhere the model can explain"
+        "the share of repeat-tract reads that came from nowhere the model can explain. Not ",
+        "measured: this value was chosen by sweeping it against genotype accuracy on one human ",
+        "sample, so it is a stated constant rather than an estimate of that share"
     );
 
     /// A repeat-tract substitution rate that nothing could be fitted for.
@@ -1950,7 +1957,7 @@ mod tests {
             ),
             (
                 "repeat_tract_outlier_weight",
-                "inherited from the existing caller and never measured here",
+                "chosen by sweeping it against genotype accuracy",
                 &text,
             ),
         ] {

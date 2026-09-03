@@ -2295,9 +2295,9 @@ mod tests {
     /// It is one run-wide constant, so it cannot enter a tract's per-`(read group, candidate)`
     /// warrant without marking every tract of every run as defaulted; reported once per run it
     /// says the same true thing and erases nothing. The value is the read likelihood's own
-    /// constant rather than a second spelling of 0.01.
+    /// constant rather than a second spelling of it.
     #[test]
-    fn the_run_states_the_outlier_weight_it_inherited() {
+    fn the_run_states_the_outlier_weight_it_took() {
         let groups = two_samples_one_of_them_two_read_groups();
         let (rates, totals) = three_calibrated_read_groups();
         let run = RunParameters::assemble(
@@ -2317,11 +2317,11 @@ mod tests {
             report.repeat_tract_outlier_weight(),
             RepeatTractOutlierWeight::defaulted()
         );
-        assert_eq!(report.repeat_tract_outlier_weight().value(), 0.01);
+        assert_eq!(report.repeat_tract_outlier_weight().value(), 0.05);
         assert_eq!(
             report.repeat_tract_outlier_weight().provenance(),
             Provenance::Defaulted,
-            "no fit produces this number, so a run that was handed none inherited it"
+            "no fit produces this number, so a run that was handed none took the stated constant"
         );
 
         // **And a supplied one reaches both the report and the scoring path.** Spec §3.8 puts

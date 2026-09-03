@@ -19,7 +19,21 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-03):** **the research handoff for repeat-tract accuracy**
+> - **Last completed task (2026-09-03):** **the repeat-tract outlier weight ships at 0.05, not
+> 0.01** (owner's decision). It is the share of a tract's reads the stutter model cannot explain,
+> and what it really does is put a floor under every read's emission — **a cap on how far one read
+> may pull a genotype**, the job freebayes does with a read-dependence factor and GATK with a
+> Phred-45 cap, and the only thing in ng doing it at a tract. At 0.01 the floor sat *below* the
+> chance of a read slipping two whole repeats, so two-repeat slip products scored as real evidence
+> for a second allele; at 0.05 they do not. Measured end to end through `--defaults` on GIAB's
+> HG002 tandem-repeat benchmark at 30×: genotype accuracy **0.8856 → 0.8881** at homopolymers and
+> **0.9033 → 0.9059** at period 2+, with spurious heterozygotes down from 88 to 77.
+> **Its warrant stays `Defaulted`** — read literally, the share it is named for measures 1 in 2,300
+> at homopolymers and 1 in 209 at period 2+, so this is a stated constant chosen by a sweep and not
+> an estimate. **It owes a per-period sweep and a check at three reads a position on the tomato
+> panel**, neither of which one human sample at 30× and 50× can give.
+>
+> - **Earlier (2026-09-03):** **the research handoff for repeat-tract accuracy**
 > ([doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md](doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md)).
 > Written to be read by somebody starting fresh: how the numbers are produced and on which ground,
 > **the genotype-coding trap that produced two wrong reports** (GIAB writes a two-allele

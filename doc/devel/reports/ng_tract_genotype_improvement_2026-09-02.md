@@ -177,6 +177,17 @@ bucket. §1's second table is that measure.
 
 ## 6. What to do
 
+0. **Done, 2026-09-03 (owner's decision): the shipped `DEFAULT_OUTLIER_WEIGHT` is 0.05**, taken
+   at the conservative end of the plateau rather than the 0.10 that scored best, because 0.05
+   moves least far from what the reads themselves suggest while taking about three quarters of the
+   gain. Measured end to end through `--defaults` rather than through a parameters file, at 30× on
+   this benchmark: homopolymer genotype accuracy **0.8856 → 0.8881**, period 2+ **0.9033 →
+   0.9059**; scored on repeat length, 0.9147 → 0.9166 and 0.9127 → 0.9150. **Its warrant stays
+   `Defaulted`** — it is a stated constant chosen by a sweep, not an estimate of the share it is
+   named for, and `likelihood/ssr.rs` says so at the constant. **What it still owes**: a sweep per
+   motif period, and a check at three reads a position on the tomato panel, neither of which this
+   benchmark can give.
+
 1. **Adopt the two parameter changes** — but note that the fitted slippage came from HG002's own
    reads, so it is a fit for this sample and this chemistry, not a shipped default. What it argues
    for is the **fit-mode command** (spec §3.4, deferred): the machinery to produce a parameters

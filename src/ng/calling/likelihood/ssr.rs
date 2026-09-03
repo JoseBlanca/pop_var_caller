@@ -74,13 +74,61 @@ use crate::ng::parameter_estimation::Provenance;
 use crate::ng::types::{LogProb, ReadGroupId};
 
 /// How often a read at a repeat tract came from somewhere other than this individual's copies
-/// of it — **inherited from production at 0.01 and declared inherited, not fitted.**
+/// of it — **0.05, chosen by a sweep against genotype accuracy, and it is not a measurement of
+/// that share.**
 ///
-/// Production sets it here ([`em.rs`](../../../../src/ssr/cohort/em.rs)) and ng keeps the
-/// number. It has no source in the parameters fit — nothing measures it — and spec §1.2
-/// requires that be said rather than left blank, so this is a named constant awaiting a
-/// measurement rather than a finding.
-pub const DEFAULT_OUTLIER_WEIGHT: f64 = 0.01;
+/// # What it does, which is not what its name says
+///
+/// The junk term spreads this weight evenly over every tract length the model can reach — about
+/// twenty-two of them at a homopolymer — so every read's emission has a floor of roughly
+/// `weight / lengths` under it, whatever genotype is being scored. **A floor on the emission is
+/// a cap on how much one read can pull a genotype**: past it, a read being more surprising buys
+/// no more evidence. freebayes does that job with a read-dependence factor and GATK with a
+/// Phred-45 cap; this is the only thing in ng doing it at a tract.
+///
+/// **Where the floor sits against the stutter distribution is the whole effect.** At 0.01 the
+/// floor is 4.6 x 10^-4, five times *below* the chance of a read slipping two whole repeats
+/// (2.4 x 10^-3), so such a read scores as real evidence for a second allele. At 0.05 the floor
+/// is 2.3 x 10^-3 — level with that slip — so a two-repeat slip product carries almost no
+/// evidence either way, which is the intended behaviour and the change that moves the numbers
+/// below.
+///
+/// # Why 0.05, and what that number is worth
+///
+/// **Measured**, on GIAB's HG002 tandem-repeat benchmark at 30x, 20,204 typed tracts, one full
+/// run a setting scored against the assembly-based truth
+/// (`doc/devel/reports/ng_tract_genotype_improvement_2026-09-02.md` §5.2):
+///
+/// | weight | homopolymer | period 2+ | heterozygote called for a homozygous truth |
+/// |---|---|---|---|
+/// | 0.01, the inherited value | 0.8851 | 0.9037 | 88 |
+/// | **0.05** | **0.8881** | **0.9059** | 77 |
+/// | 0.10 | 0.8892 | 0.9059 | 73 |
+/// | 0.20 | 0.8887 | 0.9051 | 70 |
+/// | 0.30 | 0.8891 | 0.9043 | 63 |
+///
+/// The curve is flat from 0.05 to 0.30 at homopolymers and falls away above 0.10 at period 2 and
+/// above, so what the sweep really says is **"not 0.01"**. 0.05 is the owner's choice of the
+/// conservative end of that plateau (2026-09-03): it takes about three quarters of the available
+/// gain while moving least far from the value the reads themselves suggest.
+///
+/// # What is still open, and why this is not called fitted
+///
+/// **The literal reading of this number disagrees with the sweep.** Read as what it is named —
+/// the share of reads nothing explains — it measures 1 in 2,300 at homopolymers and 1 in 209 at
+/// period 2 and above, which is both far below 0.05 and ordered the opposite way to what the
+/// sweep prefers. So the constant is doing a job nobody named it for, and its warrant stays
+/// `Defaulted`: a stated constant, not an estimate.
+///
+/// **Three things it has not been tested against**, all of them inside the range this caller is
+/// committed to (`doc/devel/ng/spec/design_principles.md` §0): a second individual, a cohort, and
+/// low depth. A floor under every read's emission behaves very differently at three reads a tract
+/// than at thirty, and the sweep was run at 30x and 50x on one sample. **Sweeping it per motif
+/// period, and on the tomato panel at three reads, is the work this constant owes.**
+///
+/// Production's value, which ng carried until now, is 0.01
+/// ([`em.rs`](../../../../src/ssr/cohort/em.rs)).
+pub const DEFAULT_OUTLIER_WEIGHT: f64 = 0.05;
 
 /// **The outlier weight this run scored with, and whether the run was handed it or inherited
 /// it.**
@@ -1408,7 +1456,7 @@ mod tests {
         // And the copy weights really are what the fixture claims: a row whose weights summed
         // to the ploidy rather than to one would be about seven nats away from this.
         assert!(
-            (row[0].0 - (-11.882_884)).abs() < 1e-5,
+            (row[0].0 - (-11.465_325)).abs() < 1e-5,
             "the fixture moved: {}",
             row[0].0
         );
