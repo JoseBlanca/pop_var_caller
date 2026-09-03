@@ -735,4 +735,27 @@ the fixed caller and re-measure", not "build the fit-mode command around the old
 
 ---
 
-*Sections L5–L7 are opened as the program reaches them.*
+## The tomato behavioural gate (rule 7), for the λ = 0.20 candidate
+
+**Run 2026-09-03** on the 63-accession tomato cohort (the `tomato1` bench slice, ~2 Mb, ~3
+reads a position), both arms on the current binary, one cohort invocation each, the 0.20 arm
+replaying the 0.05 run's own parameters file with only the outlier weight edited
+(`tmp/tract_program/tomato_gate/`). No truth set — what moved:
+
+| | λ = 0.05 | λ = 0.20 |
+|---|---:|---:|
+| generic records | 227,881 | 227,881 — **identical**, as the dial must leave them |
+| tract records | 966 | 938 (−28, 3 in 100) |
+| het share among tract sample-genotypes | 0.068 | 0.062 |
+| hom-alt / hom-ref / no-call | 0.094 / 0.752 / 0.086 | 0.099 / 0.752 / 0.088 |
+| tract QUAL quartiles | 247 / 568 / 1,585 | 198 / 453 / 1,181 |
+
+**No breakage shape**: no no-call surge, no record collapse, no het wipe-out at 3 reads. The
+cost side for the owner's standing conservatism question: about **1 tract heterozygote in 11
+is no longer called het** at 3× (0.068 → 0.062), and tract QUALs sit about a fifth lower.
+
+---
+
+*Sections L5–L7 are opened as the program reaches them; L5 is folded into the re-fit-the-
+strata follow-up the L3 section names, and L7's gate numbers (61 reachable, spurious at 238)
+are in the Checkpoint 1 slate.*
