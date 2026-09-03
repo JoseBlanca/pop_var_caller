@@ -114,7 +114,7 @@ and kept as the program's fixed baseline; the 30× run checked against the sweep
 output to the instrument (`--verdicts-out`: tract, verdict, error class) so any two arms
 crosstab with a join — rule 3 needs it on every arm and today it lives in scratch.
 
-**P1. What the spurious-allele reads have in common.** ☐
+**P1. What the spurious-allele reads have in common.** ✅
 At the ~225 spurious-heterozygote tracts, pull the reads carrying the spurious length and ask:
 do they share a strand? a start position? a duplicate family? and does the same length persist
 in the 300× alignment at the same share? **This is the measurement that aims the whole
