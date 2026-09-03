@@ -11,15 +11,35 @@
 #     --fall-off F         how fast two-repeat slips fall off (default 0.05)
 #     --rows FILE          slippage rows written elsewhere, e.g. a fit's output
 #     --outlier W          the repeat-tract outlier weight (default: the run's own 0.01)
+#     --concentration C    the fallback length-spectrum concentration — how much
+#                          prior belief, in chromosomes, is spread over a tract's
+#                          candidate lengths (default: the run's own 1.0). **This
+#                          is the only thing on the tract path that moves the
+#                          het/hom balance**: the genotype row is a marginalised
+#                          Dirichlet-multinomial, so with K candidates the share
+#                          of prior mass on heterozygous genotypes is
+#                          (K-1)C / (K(C+1)) — 42% at K=6, C=1, rising toward
+#                          (K-1)/K as C grows and falling to nothing as C -> 0.
 #     --coverage C         30x (default) or 50x
 #     --out DIR            where to put the run (default: tmp/tract_sweep/<label>)
 #
 # This is the instrument behind
 # `doc/devel/reports/ng_tract_genotype_improvement_2026-09-02.md` §2. Its result:
 # no flat stutter setting beats the shipped one, a fitted per-stratum set is
-# worth about a sixth of a point, and the outlier weight — the bound on how far
+# worth about a fifth of a point, and the outlier weight — the bound on how far
 # one read may pull a genotype, inherited at 0.01 and never measured — is worth
 # about four tenths.
+#
+# **Three of these settings are the same dial.** The slip share, the outlier
+# weight and the length-spectrum concentration all trade a spurious heterozygote
+# against a collapsed one, and each is at or beside its own peak on this
+# benchmark. A fourth point on any of them is not worth a run; what is left is
+# not a mis-set balance between the two error classes.
+#
+# **A parameters file written before a shipped default moved cannot be replayed
+# unedited**: the run refuses a value that disagrees with the built-in while
+# claiming `defaulted`. Pass `--outlier` with the value that file carries, or
+# with the current default, and say which in the label.
 #
 # THE CONTROL, and run it first after any change here: with no options at all
 # the run must be BYTE-IDENTICAL to the `--defaults` run, because it is handed
@@ -54,7 +74,7 @@ PYTHON=$(command -v python3 > /dev/null && echo python3 || echo "uv run --no-pro
 
 LABEL="${1:?a label for this setting, e.g. outlier0.10}"; shift
 SHARE=""; BASE=""; SLOPE=""; SHORTER=0.50; FALLOFF=0.05; ROWS=""; OUTLIER=""
-COVERAGE=30x; OUT=""
+CONCENTRATION=""; COVERAGE=30x; OUT=""
 while (( $# )); do
     case "$1" in
         --share) SHARE="$2"; shift 2 ;;
@@ -64,6 +84,7 @@ while (( $# )); do
         --fall-off) FALLOFF="$2"; shift 2 ;;
         --rows) ROWS="$2"; shift 2 ;;
         --outlier) OUTLIER="$2"; shift 2 ;;
+        --concentration) CONCENTRATION="$2"; shift 2 ;;
         --coverage) COVERAGE="$2"; shift 2 ;;
         --out) OUT="$2"; shift 2 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -107,6 +128,16 @@ if [[ -n "$OUTLIER" ]]; then
         echo "the outlier weight was not set" >&2; exit 1; }
 else
     cp "$DEFAULTS_PARAMETERS" "$OUT/parameters.toml"
+fi
+
+if [[ -n "$CONCENTRATION" ]]; then
+    # Same rule as the outlier weight: a value somebody typed says `supplied`,
+    # so a run cannot report a number we chose as one it inherited.
+    sed -i.bak "s|^fallback_length_spectrum_concentration = .*|fallback_length_spectrum_concentration = { value = $CONCENTRATION, warrant = \"supplied\" }|" \
+        "$OUT/parameters.toml"
+    rm -f "$OUT/parameters.toml.bak"
+    grep -q "value = $CONCENTRATION, warrant = \"supplied\"" "$OUT/parameters.toml" || {
+        echo "the length-spectrum concentration was not set" >&2; exit 1; }
 fi
 
 if [[ -n "$SHARE" || -n "$BASE" || -n "$ROWS" ]]; then
