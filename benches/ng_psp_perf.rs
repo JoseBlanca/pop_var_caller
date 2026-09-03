@@ -343,6 +343,16 @@ fn a_header(shape: &CorpusShape, records: u64) -> Header {
             length: contig_length,
             md5: None,
         }],
+        read_groups: vec![pop_var_caller::ng::psp::ReadGroupIdentity {
+            id: "bench".to_string(),
+            library: "bench".to_string(),
+            walk_local_id: pop_var_caller::ng::types::ReadGroupId(0),
+        }],
+        // The widest span the generator *accepts* (its ceiling, not its default cap) — a
+        // true bound on this corpus, and a bound is all the field promises.
+        observation_reach_ceiling_bp: Bp(u64::from(
+            pop_var_caller::ng::locus_generation::pileup::MAX_RECORD_SPAN_CEILING,
+        )),
         segmentation_inputs: pop_var_caller::ng::run::SegmentationInputs {
             catalog: pop_var_caller::ng::repeat_catalog::RepeatCatalogHeader::no_catalog(
                 "ng_psp_perf",

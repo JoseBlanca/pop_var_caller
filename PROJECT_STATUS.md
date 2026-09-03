@@ -3661,31 +3661,40 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     closure; re-opens only on a large-cohort measurement that moves the share.
 
 #### Psp mode — the walk to a psp+census, and calling from a cohort of psps
-- **Status:** `fixes-applied` — **Milestone A in flight on branch `ng-psp-mode`; A1 landed,
-  reviewed and fixed 2026-09-03.** The psp header now carries the run's identity checks as one typed field,
-  `Header.segmentation_inputs: SegmentationInputs` — the analysed regions (the cross-cohort
-  check) and the repeat catalog identity + routing criteria (the file-against-run check),
-  recorded whole so a refusal can name the field that differs. `format_version` stays (1,0)
-  because no written psp predates the fields. A2 (read-group table), A3 (`max_record_span`),
-  A4 (read filters into provenance) remain before Checkpoint A.
+- **Status:** `fixes-applied` — **Milestone A complete on branch `ng-psp-mode` (A1 committed
+  as 114efe24; A2+A3+A4 landed, reviewed and fixed 2026-09-03 as one deliberately bundled
+  loop); at Checkpoint A, paused for the owner.** The psp header now carries the whole of
+  spec §6.1 minus the deliberately dropped record count: the analysed regions + catalog
+  identity + routing criteria as `Header.segmentation_inputs` (recorded whole so a refusal
+  names the differing field), the read-group table (`@RG ID`, library, walk-local number —
+  what lets separately-walked samples join one cohort), the observation reach ceiling, and
+  the read filters as provenance parameters. `format_version` stays (1,0) because no written
+  psp predates the fields.
 - **Plan:** [run_driver_psp_mode.md](doc/devel/ng/impl_plan/run_driver_psp_mode.md) (milestones
   A–G; three upstream questions all ruled by the owner 2026-09-03);
   **Spec:** [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §6.1–§6.3;
   **Arch:** [run_streaming.md](doc/devel/ng/arch/run_streaming.md) §4.
 - **Code:** [src/ng/psp/segmentation_section.rs](src/ng/psp/segmentation_section.rs) (the
   `[segmentation]` section: wire types, checked-constructor decode, two-sided rules),
-  [src/ng/psp/header.rs](src/ng/psp/header.rs) (the field; `check_contigs` split out so the
-  reader validates contigs before span resolution),
-  [src/regions.rs](src/regions.rs) (`RegionSet::from_genomic_order_spans` — refuses a
-  non-normalized list rather than re-sorting it, because a re-normalized set would compare
-  unequal to the set it records).
-- **Impl report:** [A1](doc/devel/reports/implementations/ng_psp_mode_a1_2026-09-03.md).
-- **Latest review:** [A1 review](doc/devel/reports/reviews/ng_psp_mode_a1_2026-09-03.md)
-  (9 categories, 12 mutations run / 5 survived, 1 Blocker + 6 Majors — all applied or
-  routed); **Latest fixes-applied:**
-  [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-03.md). The review's M5 caught the
-  step editing frozen `src/regions.rs`; the constructor moved into ng's own `GenomeRegions`
-  (which now owns its span storage) and the production file is byte-identical again.
+  [src/ng/psp/header.rs](src/ng/psp/header.rs) (`ReadGroupIdentity`, the reach ceiling,
+  the generic `record_parameters` seam; `check_contigs` split out so the reader validates
+  contigs before span resolution),
+  [src/ng/read/filtering.rs](src/ng/read/filtering.rs)
+  (`ReadFilterConfig::provenance_parameters`, exhaustively destructured;
+  `READ_FILTER_PROVENANCE_KEYS`),
+  [src/ng/region_typing/mod.rs](src/ng/region_typing/mod.rs) (`GenomeRegions` owns its span
+  storage; `from_normalized_spans` refuses a non-normalized list rather than re-sorting it,
+  because a re-normalized set would compare unequal to the set it records).
+- **Impl reports:** [A1](doc/devel/reports/implementations/ng_psp_mode_a1_2026-09-03.md),
+  [A2+A3+A4](doc/devel/reports/implementations/ng_psp_mode_a2_a3_a4_2026-09-03.md).
+- **Latest reviews:** [A1](doc/devel/reports/reviews/ng_psp_mode_a1_2026-09-03.md) (12
+  mutations / 5 survived; the Blocker was a fixture whose defaults let a
+  default-substituting decode pass; M5 caught the step editing frozen `src/regions.rs` —
+  reverted byte-identical, the constructor moved into ng),
+  [A2+A3+A4](doc/devel/reports/reviews/ng_psp_mode_a2_a3_a4_2026-09-03.md) (9 mutations / 6
+  survived; the Blocker was a filter-provenance test blind on four of six values);
+  **fixes-applied:** [A1](doc/devel/reports/reviews/fixes_applied_2026-09-03.md),
+  [A2–A4](doc/devel/reports/reviews/fixes_applied_2026-09-03_v2.md).
 - **Open:**
   - **Header headroom halved at the fragmented-assembly corner**: 30,000 digest-carrying
     scaffolds now encode to 10,798,518 bytes of the 16,777,187-byte body ceiling (measured by

@@ -77,6 +77,100 @@ pub struct ReadFilterConfig {
     pub mismatch_bq_floor: BaseQual,
 }
 
+/// Every provenance key [`ReadFilterConfig::provenance_parameters`] can write, so a
+/// caller replacing an earlier recording can clear the whole family first — the key set
+/// shrinks when the mismatch filter turns off, and a stale floor beside an `"off"` is
+/// exactly the misreading the conditional key exists to prevent.
+pub const READ_FILTER_PROVENANCE_KEYS: [&str; 6] = [
+    "read-filter-min-mapq",
+    "read-filter-min-read-length-bp",
+    "read-filter-drop-qc-fail",
+    "read-filter-drop-duplicates",
+    "read-filter-max-read-mismatch-fraction",
+    "read-filter-mismatch-bq-floor",
+];
+
+/// How an off filter is spelled in the header: a value, not an absent key — an absent
+/// key would read as "unrecorded", which is a different fact.
+const OFF: &str = "off";
+
+impl ReadFilterConfig {
+    /// This policy as psp-header provenance parameters — recorded, never compared
+    /// (spec `run_streaming.md` §6.1): the census names the psp it was built from by
+    /// digesting the header, filters included, so a header that omitted them could not
+    /// tell a census built from filtered reads apart from one built from all of them.
+    ///
+    /// One key per **configurable** filter, each readable by eye; an off filter is the
+    /// string `"off"`. The one absent-when-meaningless key is the mismatch base-quality
+    /// floor, which exists only while the mismatch-fraction filter is on. The
+    /// unconditional drops — secondary, supplementary and unmapped records, and a read
+    /// whose CIGAR will not decode — are not settings, so no key records them.
+    pub fn provenance_parameters(&self) -> Vec<(String, crate::ng::psp::ParameterValue)> {
+        use crate::ng::psp::ParameterValue;
+
+        // Exhaustive, so a filter added to this policy fails to compile here rather
+        // than going unrecorded — which would make two differently-filtered walks
+        // digest identically in the census, silently.
+        let Self {
+            min_mapq,
+            min_read_length,
+            drop_qc_fail,
+            drop_duplicate,
+            max_read_mismatch_fraction,
+            mismatch_bq_floor,
+        } = *self;
+
+        let mut entries = vec![
+            (
+                "read-filter-min-mapq".to_string(),
+                match min_mapq {
+                    Some(quality) => ParameterValue::Integer(i64::from(quality.get())),
+                    None => ParameterValue::String(OFF.to_string()),
+                },
+            ),
+            (
+                "read-filter-min-read-length-bp".to_string(),
+                match min_read_length {
+                    // A length is written as a number while one fits TOML's signed
+                    // integer, and as its own digits in a string past that —
+                    // unreachable from any real configuration, but a writer must never
+                    // build a header its own reader refuses.
+                    Some(length) => match i64::try_from(length.get()) {
+                        Ok(length) => ParameterValue::Integer(length),
+                        Err(_) => ParameterValue::String(length.get().to_string()),
+                    },
+                    None => ParameterValue::String(OFF.to_string()),
+                },
+            ),
+            (
+                "read-filter-drop-qc-fail".to_string(),
+                ParameterValue::Boolean(drop_qc_fail),
+            ),
+            (
+                "read-filter-drop-duplicates".to_string(),
+                ParameterValue::Boolean(drop_duplicate),
+            ),
+        ];
+        match max_read_mismatch_fraction {
+            Some(fraction) => {
+                entries.push((
+                    "read-filter-max-read-mismatch-fraction".to_string(),
+                    ParameterValue::Float(crate::ng::psp::header::wire_float_of(fraction.get())),
+                ));
+                entries.push((
+                    "read-filter-mismatch-bq-floor".to_string(),
+                    ParameterValue::Integer(i64::from(mismatch_bq_floor.get())),
+                ));
+            }
+            None => entries.push((
+                "read-filter-max-read-mismatch-fraction".to_string(),
+                ParameterValue::String(OFF.to_string()),
+            )),
+        }
+        entries
+    }
+}
+
 impl Default for ReadFilterConfig {
     fn default() -> Self {
         Self {
@@ -370,9 +464,111 @@ pub(in crate::ng::read) fn verdict_on_aligned_read(
 mod tests {
     use super::*;
     use crate::bam::alignment_input::FLAG_PAIRED;
+    use crate::ng::psp::ParameterValue;
     use crate::ng::ref_seq::InMemoryRefSeq;
     use crate::ng::types::ReadGroupId;
     use crate::pileup::walker::CigarOp;
+
+    /// Every configurable filter lands under its own key with its **exact** value, from
+    /// a policy whose two booleans differ — so transposing the qc-fail and duplicate
+    /// sources, or nudging any number, fails here rather than passing everywhere (a
+    /// mutation pass found exactly that: four value mutations survived a test that
+    /// pinned only two of the six).
+    #[test]
+    fn provenance_parameters_pin_every_filter_value() {
+        let policy = ReadFilterConfig {
+            min_mapq: Some(MapQual(17)),
+            min_read_length: Some(Bp(31)),
+            drop_qc_fail: true,
+            drop_duplicate: false,
+            max_read_mismatch_fraction: Some(
+                MismatchFraction::try_new(0.25).expect("a quarter is in [0, 1]"),
+            ),
+            mismatch_bq_floor: BaseQual(13),
+        };
+        let entries: std::collections::BTreeMap<String, ParameterValue> =
+            policy.provenance_parameters().into_iter().collect();
+
+        assert_eq!(
+            entries.get("read-filter-min-mapq"),
+            Some(&ParameterValue::Integer(17))
+        );
+        assert_eq!(
+            entries.get("read-filter-min-read-length-bp"),
+            Some(&ParameterValue::Integer(31))
+        );
+        assert_eq!(
+            entries.get("read-filter-drop-qc-fail"),
+            Some(&ParameterValue::Boolean(true))
+        );
+        assert_eq!(
+            entries.get("read-filter-drop-duplicates"),
+            Some(&ParameterValue::Boolean(false))
+        );
+        assert_eq!(
+            entries.get("read-filter-max-read-mismatch-fraction"),
+            Some(&ParameterValue::Float(0.25))
+        );
+        assert_eq!(
+            entries.get("read-filter-mismatch-bq-floor"),
+            Some(&ParameterValue::Integer(13))
+        );
+        assert_eq!(entries.len(), 6, "six keys, nothing extra");
+        for key in entries.keys() {
+            assert!(
+                READ_FILTER_PROVENANCE_KEYS.contains(&key.as_str()),
+                "{key} is missing from the published key family"
+            );
+        }
+    }
+
+    /// An off filter is spelled `"off"`, never omitted — an absent key would read as
+    /// "unrecorded", a different fact — and the one deliberate omission is the
+    /// base-quality floor beside an off mismatch filter, which would invite misreading.
+    #[test]
+    fn provenance_parameters_spell_an_off_filter_rather_than_omitting_it() {
+        let all_off = ReadFilterConfig {
+            min_mapq: None,
+            min_read_length: None,
+            max_read_mismatch_fraction: None,
+            ..ReadFilterConfig::default()
+        };
+        let entries: std::collections::BTreeMap<String, ParameterValue> =
+            all_off.provenance_parameters().into_iter().collect();
+        for key in [
+            "read-filter-min-mapq",
+            "read-filter-min-read-length-bp",
+            "read-filter-max-read-mismatch-fraction",
+        ] {
+            assert_eq!(
+                entries.get(key),
+                Some(&ParameterValue::String("off".to_string())),
+                "{key} must say off, not vanish"
+            );
+        }
+        assert!(
+            !entries.contains_key("read-filter-mismatch-bq-floor"),
+            "a floor beside an off mismatch filter would invite misreading"
+        );
+        assert_eq!(entries.len(), 5, "five keys while the floor is meaningless");
+    }
+
+    /// A length past TOML's signed integer is recorded as its own digits in a string —
+    /// unreachable from any real policy, but a wrapping-cast regression here would
+    /// record a negative length silently.
+    #[test]
+    fn a_read_length_past_toml_integers_is_recorded_as_its_own_digits() {
+        let policy = ReadFilterConfig {
+            min_read_length: Some(Bp(u64::MAX)),
+            ..ReadFilterConfig::default()
+        };
+        let entries: std::collections::BTreeMap<String, ParameterValue> =
+            policy.provenance_parameters().into_iter().collect();
+        assert_eq!(
+            entries.get("read-filter-min-read-length-bp"),
+            Some(&ParameterValue::String("18446744073709551615".to_string()))
+        );
+    }
 
     #[test]
     fn default_config_reproduces_the_production_filter_policy() {

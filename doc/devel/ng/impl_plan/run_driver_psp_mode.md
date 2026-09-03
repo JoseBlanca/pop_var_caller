@@ -125,7 +125,7 @@ settled 2026-08-30; direct mode completed 2026-09-01 and is this plan's oracle.
 
 ### Milestone A — the header carries what the run will check (format, no wiring)
 
-**A1. ☐ Typed header fields for the run's identity checks.**
+**A1. ✅ Typed header fields for the run's identity checks.**
 `Header` gains the analysed regions and the segmentation inputs (catalog identity + routing
 criteria), as typed TOML sections — they are what §6.2's refusals compare, and
 `SegmentationInputs` is the operand type. Round-trip and map-order-independence tests extend

@@ -2656,6 +2656,8 @@ mod tests {
             segmentation_inputs:
                 crate::ng::psp::segmentation_section::segmentation_inputs_for_tests(&contigs),
             contigs,
+            read_groups: crate::ng::psp::header::read_groups_for_tests(),
+            observation_reach_ceiling_bp: crate::ng::types::Bp(4_000),
             writer: WriterProvenance {
                 tool: "ng".to_string(),
                 version: "0.1.0".to_string(),

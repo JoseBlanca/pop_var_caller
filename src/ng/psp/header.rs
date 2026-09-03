@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use super::{PspReadError, PspWriteError};
 use crate::ng::psp::segmentation_section::{self, WireSegmentation};
 use crate::ng::run::segments::SegmentationInputs;
-use crate::ng::types::Bp;
+use crate::ng::types::{Bp, ReadGroupId};
 
 /// A file's own account of how it was written: everything a reader needs before it touches
 /// a block, and the only part of the file that is plain text.
@@ -46,6 +46,28 @@ pub struct Header {
     ///
     /// [`ContigId`]: crate::ng::types::ContigId
     pub contigs: Vec<ContigIdentity>,
+    /// The sample's read groups, **in the order that defines the file's
+    /// [`ReadGroupId`]s** — entry `i` is the read group this walk numbered `i`, and every
+    /// observation in the file carries these walk-local numbers.
+    ///
+    /// **Without this table, no cohort can be assembled from separately-walked samples
+    /// at all** (spec `run_streaming.md` §6.1): a gatherer sees one sample's files, so it
+    /// numbers that sample's read groups from zero, and every sample's first read group
+    /// comes back as identifier 0. The calling stage reads every file's table at open and
+    /// merges them into one run-wide numbering (§6.2) — which is what lets a sample be
+    /// walked once and joined to any cohort later.
+    pub read_groups: Vec<ReadGroupIdentity>,
+    /// The widest reference span any observation in this file can have, in bases — the
+    /// locus generator's own cap
+    /// ([`PileupGeneratorConfig::max_record_span`](crate::ng::locus_generation::pileup::PileupGeneratorConfig::max_record_span)),
+    /// known before the first record because it is a setting, not a measurement.
+    ///
+    /// **A sizing fact, not a correctness fact** (`psp_file_format.md` §3.1): a cohort
+    /// reader can size its observation cache up front, taking the maximum over its
+    /// files, instead of growing it — and a forward reader never needs it at all, so
+    /// nothing refuses on it. `cohort_merge.md` §13 is the consumer; it reads this at
+    /// open (plan step E4).
+    pub observation_reach_ceiling_bp: Bp,
     /// What produced the file and what it ran with.
     pub writer: WriterProvenance,
     /// The ground the sample was analysed over, and what the segmentation that shaped
@@ -102,6 +124,34 @@ pub struct ContigIdentity {
     pub md5: Option<[u8; 16]>,
 }
 
+/// One read group as the header records it: what the alignment file called it, which
+/// library its reads came from, and the number this walk gave it.
+///
+/// The three things spec `run_streaming.md` §6.1 asks the table to carry, and no more:
+/// the sample is the header's own `sample` field (one psp, one sample), and the file the
+/// group was declared in is a path, which the header records only as provenance
+/// basenames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadGroupIdentity {
+    /// The `@RG ID`, verbatim. **A label, never an identity** — the SAM specification
+    /// makes it unique within its file and says nothing across files, so two entries of
+    /// this table may share one `id` when a sample was sequenced across files
+    /// (`read_groups.md` §4). Identity is [`walk_local_id`](Self::walk_local_id).
+    pub id: String,
+    /// The library the group's reads came from — `@RG LB`, or the name the walk
+    /// synthesized when the file declared none. The parameters fit keys its per-library
+    /// error rates on groupings of this.
+    pub library: String,
+    /// The number this walk gave the group — **walk-local**, as the name says: every
+    /// psp numbers its own read groups from zero, so these collide across files by
+    /// construction and the calling stage renumbers them at open (spec §6.2).
+    ///
+    /// **Also this entry's position in the table** — entry `i` carries number `i`, a
+    /// rule checked on both sides — so the number a person reads beside an `@RG ID`
+    /// and the number the code derives from order cannot disagree.
+    pub walk_local_id: ReadGroupId,
+}
+
 /// What produced the file, in a form that reproduces a run on any host without recording
 /// the producer's directory layout or username.
 #[derive(Debug, Clone, PartialEq)]
@@ -144,6 +194,24 @@ pub enum ParameterValue {
     Float(f64),
     Boolean(bool),
     String(String),
+}
+
+impl WriterProvenance {
+    /// Put a batch of settings into [`parameters`](Self::parameters), each under its own
+    /// key — the seam through which a walk records what it ran with (spec
+    /// `run_streaming.md` §6.1: recorded, never compared).
+    ///
+    /// **Insert-only**: a key already present is overwritten, a key not in `entries` is
+    /// left standing. A caller replacing an earlier recording whose key set may have
+    /// shrunk — the read filters' conditional floor, say — clears its own keys first
+    /// (the producer of the entries names them, e.g.
+    /// [`READ_FILTER_PROVENANCE_KEYS`](crate::ng::read::READ_FILTER_PROVENANCE_KEYS)).
+    pub fn record_parameters(
+        &mut self,
+        entries: impl IntoIterator<Item = (String, ParameterValue)>,
+    ) {
+        self.parameters.extend(entries);
+    }
 }
 
 /// How this file encodes what it holds. **Every value here is the writer's choice,
@@ -695,7 +763,25 @@ fn check_rules(header: &Header) -> Result<(), BrokenRule> {
         return Err(BrokenRule::new("sample", "is empty"));
     }
     check_basename("reference.name", &header.reference.name)?;
+    if header.observation_reach_ceiling_bp.get() == 0 {
+        return Err(BrokenRule::new(
+            "observation-reach-ceiling-bp",
+            "is zero; an observation covers at least one base, so no record could exist \
+             under this ceiling",
+        ));
+    }
+    if header.observation_reach_ceiling_bp.get() > MAX_TOML_INTEGER {
+        return Err(BrokenRule::new(
+            "observation-reach-ceiling-bp",
+            format!(
+                "is {}; a TOML integer is signed, so a header cannot carry more than \
+                 {MAX_TOML_INTEGER}",
+                header.observation_reach_ceiling_bp.get()
+            ),
+        ));
+    }
     check_contigs(&header.contigs)?;
+    check_read_groups(&header.read_groups)?;
     check_basename("writer.input-reference", &header.writer.input_reference)?;
     for input in &header.writer.input_alignments {
         check_basename("writer.input-alignments", input)?;
@@ -762,6 +848,71 @@ fn check_contigs(contigs: &[ContigIdentity]) -> Result<(), BrokenRule> {
                 ),
             ));
         }
+    }
+    Ok(())
+}
+
+/// The read-group table's rules: the table exists, its identifiers are the walk's own
+/// numbering from zero in order, and its strings cannot forge a line in the header's
+/// text.
+///
+/// **A duplicated `@RG ID` is legal here**, deliberately: SAM makes the id unique only
+/// within one file, so a sample sequenced across files may carry two entries with one
+/// `id` and different libraries. What *calling* refuses is a table it cannot merge —
+/// that refusal is the calling stage's (spec §6.2), because it is about assembling a
+/// cohort, not about this file being well-formed.
+fn check_read_groups(read_groups: &[ReadGroupIdentity]) -> Result<(), BrokenRule> {
+    if read_groups.is_empty() {
+        return Err(BrokenRule::new(
+            "read-group",
+            "is empty; a sample's reads come from at least one read group, and a table \
+             with none cannot be renumbered at calling",
+        ));
+    }
+    for (position, group) in read_groups.iter().enumerate() {
+        // A table of more than u32::MAX read groups cannot exist: each entry costs
+        // header bytes and the body ceiling is reached long before.
+        if group.walk_local_id.get() != position as u32 {
+            return Err(BrokenRule::new(
+                "read-group.walk-local-id",
+                format!(
+                    "entry {position} carries identifier {}; the identifiers are the \
+                     walk's own numbering from zero, in table order",
+                    group.walk_local_id.get()
+                ),
+            ));
+        }
+        if group.id.is_empty() {
+            return Err(BrokenRule::new("read-group.id", "is empty"));
+        }
+        // Control characters only — not all whitespace, because SAM allows a space in
+        // an @RG ID and a library name, and refusing one would refuse real archives.
+        // A space cannot forge a header line; a newline or control character can.
+        check_no_control_characters("read-group.id", &group.id)?;
+        if group.library.is_empty() {
+            return Err(BrokenRule::new(
+                "read-group.library",
+                format!("of read group {:?} is empty", group.id),
+            ));
+        }
+        check_no_control_characters("read-group.library", &group.library)?;
+    }
+    Ok(())
+}
+
+/// A string that may legitimately hold spaces (SAM allows them in `@RG` values) but
+/// must not hold what could rewrite the header's text: a newline lands in the body as
+/// further lines, and any control character is nothing an alignment header can carry.
+fn check_no_control_characters(field: &str, value: &str) -> Result<(), BrokenRule> {
+    if value.chars().any(char::is_control) {
+        return Err(BrokenRule::new(
+            field.to_string(),
+            format!(
+                "{value:?} holds a control character; an alignment header cannot carry \
+                 one, and a newline would land in this header's text as lines no field \
+                 declares"
+            ),
+        ));
     }
     Ok(())
 }
@@ -939,6 +1090,21 @@ fn check_encoding(name: &FieldName, encoding: FieldEncoding) -> Result<(), Broke
 // `Bp`, a `FieldEncoding` — and these carry what TOML has, which is strings, integers and
 // tables. Every field is a value before it is a table, because TOML requires it.
 
+/// An `f32` widened for TOML through its own shortest decimal, so the header shows
+/// `0.93` rather than `0.9300000071525574`.
+///
+/// Exact both ways: `Display` on an `f32` prints the shortest decimal that reads back
+/// to the same `f32`, and that decimal's nearest `f64` narrows back to it.
+///
+// PANIC-FREE: `f64`'s parser accepts every string `f32`'s `Display` produces — `NaN`
+// and `inf` included — so the expect cannot fire on any input, even the test-only path
+// that serialises a rule-breaking header.
+pub(crate) fn wire_float_of(value: f32) -> f64 {
+    format!("{value}")
+        .parse()
+        .expect("a float's own Display re-parses")
+}
+
 /// Every MD5 travels as 32 lowercase hex characters, which is what a SAM `@SQ M5` is.
 pub(crate) fn hex_of(digest: [u8; 16]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -970,15 +1136,33 @@ pub(crate) fn digest_of(field: &str, spelled: &str) -> Result<[u8; 16], BrokenRu
 struct WireHeader {
     format_version: String,
     sample: String,
+    // A bare value, so it must sit with the other top-level scalars, before the first
+    // table opens.
+    observation_reach_ceiling_bp: u64,
     reference: WireReference,
     #[serde(default)]
     contig: Vec<WireContig>,
+    #[serde(default)]
+    read_group: Vec<WireReadGroup>,
     writer: WireWriter,
     // Before the manifest, deliberately: the manifest's field declarations close the
     // body, so tests (and people) can cut a body at `[[manifest.field]]` and keep every
     // other section intact.
     segmentation: WireSegmentation,
     manifest: WireManifest,
+}
+
+/// One `[[read-group]]` row: the `@RG ID`, the library, and the walk-local number.
+///
+/// `walk-local-id` is also the row's position — redundancy checked on both sides, like
+/// the header's declared length against its sentinel — so the number a person reads
+/// beside an id and the number the code derives from order cannot disagree.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct WireReadGroup {
+    id: String,
+    library: String,
+    walk_local_id: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1054,6 +1238,8 @@ impl From<&Header> for WireHeader {
             sample,
             reference,
             contigs,
+            read_groups,
+            observation_reach_ceiling_bp,
             segmentation_inputs,
             writer,
             manifest,
@@ -1061,6 +1247,7 @@ impl From<&Header> for WireHeader {
         WireHeader {
             format_version: format!("{}.{}", format_version.0, format_version.1),
             sample: sample.clone(),
+            observation_reach_ceiling_bp: observation_reach_ceiling_bp.get(),
             reference: WireReference {
                 name: reference.name.clone(),
                 md5: reference.md5.map(hex_of),
@@ -1071,6 +1258,14 @@ impl From<&Header> for WireHeader {
                     name: contig.name.clone(),
                     length: contig.length,
                     md5: contig.md5.map(hex_of),
+                })
+                .collect(),
+            read_group: read_groups
+                .iter()
+                .map(|group| WireReadGroup {
+                    id: group.id.clone(),
+                    library: group.library.clone(),
+                    walk_local_id: group.walk_local_id.get(),
                 })
                 .collect(),
             writer: WireWriter {
@@ -1144,6 +1339,15 @@ impl WireHeader {
                 })
             })
             .collect::<Result<Vec<_>, BrokenRule>>()?;
+        let read_groups = self
+            .read_group
+            .into_iter()
+            .map(|group| ReadGroupIdentity {
+                id: group.id,
+                library: group.library,
+                walk_local_id: ReadGroupId(group.walk_local_id),
+            })
+            .collect();
         // The contig rules run before the segmentation section is resolved, because the
         // section anchors each analysed span to this list by name — resolving against a
         // duplicated or zero-length contig would report the span as broken when the
@@ -1155,8 +1359,10 @@ impl WireHeader {
         Ok(Header {
             format_version,
             sample: self.sample,
+            observation_reach_ceiling_bp: Bp(self.observation_reach_ceiling_bp),
             reference,
             contigs,
+            read_groups,
             segmentation_inputs,
             writer: WriterProvenance {
                 tool: self.writer.tool,
@@ -1392,6 +1598,27 @@ fn encoding_of(field: &WireFieldSpec) -> Result<FieldEncoding, BrokenRule> {
     }
     Ok(encoding)
 }
+/// A read-group table for tests: two groups, two libraries, in walk order.
+///
+/// Two rather than one, so a round trip that dropped or reordered rows fails; the
+/// values are non-defaults with the id and the library visibly different strings, so a
+/// decode that read one column into the other cannot pass.
+#[cfg(test)]
+pub(crate) fn read_groups_for_tests() -> Vec<ReadGroupIdentity> {
+    vec![
+        ReadGroupIdentity {
+            id: "SRR7279481".to_string(),
+            library: "tomato-pe-1".to_string(),
+            walk_local_id: ReadGroupId(0),
+        },
+        ReadGroupIdentity {
+            id: "SRR7279481.L2".to_string(),
+            library: "tomato-pe-2".to_string(),
+            walk_local_id: ReadGroupId(1),
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1415,7 +1642,7 @@ mod tests {
                 md5: None,
             },
         ];
-        Header {
+        let mut header = Header {
             format_version: FORMAT_VERSION,
             sample: "SRR7279481".to_string(),
             reference: ReferenceIdentity {
@@ -1424,6 +1651,8 @@ mod tests {
             },
             segmentation_inputs: segmentation_section::segmentation_inputs_for_tests(&contigs),
             contigs,
+            read_groups: read_groups_for_tests(),
+            observation_reach_ceiling_bp: Bp(4_000),
             writer: WriterProvenance {
                 tool: "ng".to_string(),
                 version: "0.1.0".to_string(),
@@ -1442,7 +1671,13 @@ mod tests {
                     .expect("a valid RFC 3339 stamp"),
             },
             manifest: a_manifest(),
-        }
+        };
+        // Through the real A4 path, so the recorded filters in every test's header are
+        // what `provenance_parameters` writes, not a hand-kept copy of it.
+        header.writer.record_parameters(
+            crate::ng::read::ReadFilterConfig::default().provenance_parameters(),
+        );
+        header
     }
 
     /// **One field per encoding the format has — all eight**, so anything that walks the
@@ -1591,6 +1826,38 @@ mod tests {
         assert_eq!(header_bytes, bytes.len());
     }
 
+    /// Two entries sharing one `@RG ID` are **accepted** — deliberately, and pinned so
+    /// a later "obvious" uniqueness tightening cannot land quietly. SAM makes the id
+    /// unique only within one file; a sample sequenced across two files may declare
+    /// `ID:1` in each, and refusing that would refuse real archives the walk handles
+    /// fine. The table calling cannot *merge* is the calling stage's refusal (spec
+    /// §6.2), not this file's.
+    #[test]
+    fn two_read_groups_sharing_an_rg_id_round_trip() {
+        let mut written = a_written_header();
+        written.read_groups[1].id = written.read_groups[0].id.clone();
+        assert_ne!(
+            written.read_groups[0].library, written.read_groups[1].library,
+            "the fixture's two libraries stay distinct, so the rows stay distinguishable"
+        );
+        let bytes = written.encode().expect("a shared @RG ID encodes");
+        let (read_back, _) = decoded(&bytes).expect("and decodes");
+        assert_eq!(read_back, written);
+    }
+
+    /// A space in an `@RG ID` or a library name is legal — SAM allows it, and real
+    /// archives carry it — so the control-character rule must not widen into the
+    /// whitespace rule the contig names use. A widened rule would refuse real files.
+    #[test]
+    fn a_read_group_id_with_a_space_round_trips() {
+        let mut written = a_written_header();
+        written.read_groups[0].id = "HiSeq 2000 lane 3".to_string();
+        written.read_groups[0].library = "prep A".to_string();
+        let bytes = written.encode().expect("a spaced @RG ID encodes");
+        let (read_back, _) = decoded(&bytes).expect("and decodes");
+        assert_eq!(read_back, written);
+    }
+
     /// The default run's shape — analysed regions covering whole contigs — encodes and
     /// decodes through the full header path. The shared fixture deliberately uses proper
     /// sub-spans, so without this a `>` → `>=` regression in the span-end rule would
@@ -1713,6 +1980,7 @@ mod tests {
         let mut at_the_edge = a_written_header();
         at_the_edge.contigs[0].length = MAX_TOML_INTEGER;
         at_the_edge.manifest.genomic_block_size_bp = Bp(MAX_TOML_INTEGER);
+        at_the_edge.observation_reach_ceiling_bp = Bp(MAX_TOML_INTEGER);
         let bytes = at_the_edge
             .encode()
             .expect("the widest TOML integer encodes");
@@ -1759,6 +2027,22 @@ mod tests {
             "steps-per-unit = 4096",
             "encoding = \"fixed-width-integer\"",
             "width-bytes = 4",
+            // The observation reach ceiling, value and all (the fixture's 4,000).
+            "observation-reach-ceiling-bp = 4000",
+            // The read-group table: the row marker and each row's three keys, with the
+            // first row's values pinned whole.
+            "[[read-group]]",
+            "id = \"SRR7279481\"",
+            "library = \"tomato-pe-1\"",
+            "walk-local-id = 0",
+            "walk-local-id = 1",
+            // The read filters, as the fixture's provenance records them.
+            "read-filter-min-mapq = ",
+            "read-filter-min-read-length-bp = ",
+            "read-filter-drop-qc-fail = ",
+            "read-filter-drop-duplicates = ",
+            "read-filter-max-read-mismatch-fraction = ",
+            "read-filter-mismatch-bq-floor = ",
             // The segmentation section: an analysed span, a routing criterion spelled
             // as the short decimal a person would write, and the catalog's identity.
             "[[segmentation.analysed-region]]",
@@ -1857,19 +2141,15 @@ mod tests {
     /// the version into major and minor is **for**, and it only means something if a minor
     /// that actually added something still reads.
     ///
-    /// The key added here is the one spec §3.1 says the header will gain: the observation
-    /// reach ceiling. Before this test the module refused it as a damaged file, because the
-    /// wire types were `deny_unknown_fields` and the only later-minor fixture added nothing.
+    /// (The key this test first used — the observation reach ceiling — has since been
+    /// added for real, so the unknown key is now an invented one.)
     #[test]
     fn a_later_minor_that_added_a_key_still_reads() {
         let mut written = a_written_header();
         let bytes = written.encode().expect("a valid header encodes");
         let body = body_of(&bytes)
             .replace("format-version = \"1.0\"", "format-version = \"1.4\"")
-            .replace(
-                "sample = ",
-                "observation-reach-ceiling-bp = 4000\nsample = ",
-            );
+            .replace("sample = ", "a-key-a-later-minor-added = 4000\nsample = ");
 
         written.format_version = (1, 4);
         let (read_back, _) = decoded(&framed(&body)).expect("a later minor of this major reads");
@@ -2159,6 +2439,56 @@ mod tests {
                         FieldEncoding::FixedPoint { steps_per_unit: 0 }
                 }),
                 "1/0",
+            ),
+            (
+                "an observation reach ceiling of zero",
+                Box::new(|header| header.observation_reach_ceiling_bp = Bp(0)),
+                "no record could exist",
+            ),
+            (
+                "an observation reach ceiling wider than a TOML integer",
+                Box::new(|header| header.observation_reach_ceiling_bp = Bp(MAX_TOML_INTEGER + 1)),
+                "a TOML integer is signed",
+            ),
+            (
+                "a read-group table with no entries",
+                Box::new(|header| header.read_groups.clear()),
+                "renumbered at calling",
+            ),
+            (
+                "a read-group identifier out of walk order",
+                Box::new(|header| header.read_groups[1].walk_local_id = ReadGroupId(7)),
+                "the walk's own numbering from zero",
+            ),
+            (
+                // The boundary case the row above cannot see: entry 1 repeating
+                // identifier 0 is what two zero-numbered walks pasted together look
+                // like, and a check loosened from `!=` to `>` would accept it.
+                "a read-group identifier repeating zero",
+                Box::new(|header| header.read_groups[1].walk_local_id = ReadGroupId(0)),
+                "the walk's own numbering from zero",
+            ),
+            (
+                "an empty @RG ID",
+                Box::new(|header| header.read_groups[0].id = String::new()),
+                "read-group.id",
+            ),
+            (
+                "an @RG ID holding a newline",
+                Box::new(|header| header.read_groups[0].id = "rg\nforged = 1".to_string()),
+                "holds a control character",
+            ),
+            (
+                // A second control character besides the newline, so the rule cannot
+                // quietly narrow to newline-only.
+                "an @RG ID holding a tab",
+                Box::new(|header| header.read_groups[0].id = "rg\tlane".to_string()),
+                "holds a control character",
+            ),
+            (
+                "a library name holding a newline",
+                Box::new(|header| header.read_groups[0].library = "lib\nforged = 1".to_string()),
+                "holds a control character",
             ),
             (
                 "a segmentation recording no analysed ground at all",

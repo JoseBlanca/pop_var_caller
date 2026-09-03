@@ -94,7 +94,8 @@ pub use header::{
     DEFAULT_LOOK_BACK_WINDOW_LOG, FIXED_INTEGER_WIDTHS_BYTES, FORMAT_VERSION, FieldEncoding,
     FieldName, FieldShape, FieldSpec, HEAD_MAGIC, HEAD_SENTINEL, HEADER_FRAMING_BYTES, Header,
     IEEE_FLOAT_WIDTHS_BYTES, MAX_HEADER_BODY_BYTES, MAX_LOOK_BACK_WINDOW_LOG,
-    MIN_LOOK_BACK_WINDOW_LOG, Manifest, ParameterValue, ReferenceIdentity, WriterProvenance,
+    MIN_LOOK_BACK_WINDOW_LOG, Manifest, ParameterValue, ReadGroupIdentity, ReferenceIdentity,
+    WriterProvenance,
 };
 pub use index::{
     BlockIndexEntry, IndexDecodeError, IndexEntryField, checksum_index, decode_index, encode_index,
@@ -934,6 +935,8 @@ mod tests {
             segmentation_inputs:
                 crate::ng::psp::segmentation_section::segmentation_inputs_for_tests(&contigs),
             contigs,
+            read_groups: crate::ng::psp::header::read_groups_for_tests(),
+            observation_reach_ceiling_bp: crate::ng::types::Bp(4_000),
             writer: WriterProvenance {
                 tool: "ng".to_string(),
                 version: "0.1.0".to_string(),

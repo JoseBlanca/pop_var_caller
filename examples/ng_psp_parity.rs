@@ -273,6 +273,18 @@ fn an_ng_header(
             md5: None,
         },
         contigs,
+        // The production file's reads all land under one walk-local read group, which
+        // is what this example's record building does with them.
+        read_groups: vec![pop_var_caller::ng::psp::ReadGroupIdentity {
+            id: parsed.sample.clone(),
+            library: parsed.sample.clone(),
+            walk_local_id: pop_var_caller::ng::types::ReadGroupId(0),
+        }],
+        // The widest span the generator *accepts* (its ceiling, not its default cap) — a
+        // true bound on this corpus, and a bound is all the field promises.
+        observation_reach_ceiling_bp: Bp(u64::from(
+            pop_var_caller::ng::locus_generation::pileup::MAX_RECORD_SPAN_CEILING,
+        )),
         segmentation_inputs,
         writer: WriterProvenance {
             tool: "ng_psp_parity".to_string(),
@@ -645,6 +657,8 @@ fn check_everything_the_store_holds_that_is_not_a_record(
         sample,
         reference,
         contigs,
+        read_groups,
+        observation_reach_ceiling_bp,
         segmentation_inputs,
         writer,
         manifest,
@@ -659,6 +673,14 @@ fn check_everything_the_store_holds_that_is_not_a_record(
     assert_eq!(
         *contigs, handed.contigs,
         "the contig list read back — every name, length and md5"
+    );
+    assert_eq!(
+        *read_groups, handed.read_groups,
+        "the read-group table read back — every id, library and walk-local number"
+    );
+    assert_eq!(
+        *observation_reach_ceiling_bp, handed.observation_reach_ceiling_bp,
+        "the observation reach ceiling read back"
     );
     assert_eq!(
         *segmentation_inputs, handed.segmentation_inputs,

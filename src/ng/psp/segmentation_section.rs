@@ -23,7 +23,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ng::psp::header::{BrokenRule, ContigIdentity, MAX_TOML_INTEGER, digest_of, hex_of};
+use crate::ng::psp::header::{
+    BrokenRule, ContigIdentity, MAX_TOML_INTEGER, digest_of, hex_of, wire_float_of,
+};
 use crate::ng::reference_info::ContigInfo;
 use crate::ng::region_typing::GenomeRegions;
 use crate::ng::region_typing::segment_criteria::{MinCopies, SsrSegmentCriteria};
@@ -271,22 +273,6 @@ impl WireCatalog {
                 .collect(),
         }
     }
-}
-
-/// An `f32` widened for TOML through its own shortest decimal, so the header shows
-/// `0.93` rather than `0.9300000071525574`.
-///
-/// Exact both ways: `Display` on an `f32` prints the shortest decimal that reads back
-/// to the same `f32`, and that decimal's nearest `f64` narrows back to it.
-///
-/// The `expect` cannot fire on any input: `f64`'s parser accepts every string `f32`'s
-/// `Display` produces — `NaN` and `inf` included — so even the test-only path that
-/// serialises a rule-breaking header (the rules refuse non-finite values on every
-/// honest encode) parses back here.
-fn wire_float_of(value: f32) -> f64 {
-    format!("{value}")
-        .parse()
-        .expect("a float's own Display re-parses")
 }
 
 // ---------------------------------------------------------------------
