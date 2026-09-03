@@ -414,10 +414,9 @@ mod tests {
     use std::collections::BTreeMap;
     use tempfile::TempDir;
 
-    /// One generic segment per fixture contig — the whole of the fixture reference's ground,
-    /// so every read the BAM fixtures place is on the walk.
-    fn segmentation() -> Arc<Segmentation> {
-        let bounds = [
+    /// The two fixture contigs, as the fixture reference declares them.
+    fn fixture_bounds() -> [ContigBounds<'static>; 2] {
+        [
             ContigBounds {
                 name: "chr1",
                 length: 100,
@@ -426,29 +425,20 @@ mod tests {
                 name: "chr2",
                 length: 200,
             },
-        ];
-        let segments = vec![
-            TypedRegion {
-                region: GenomeRegion {
-                    contig: ContigId(0),
-                    start: Position(1),
-                    end: Position(100),
-                },
-                kind: RegionKind::Generic,
-            },
-            TypedRegion {
-                region: GenomeRegion {
-                    contig: ContigId(1),
-                    start: Position(1),
-                    end: Position(200),
-                },
-                kind: RegionKind::Generic,
-            },
-        ];
+        ]
+    }
+
+    /// A segmentation over `segments`, analysing `analysed`, under the catalog header and
+    /// criteria every fixture here shares — **the one copy of that scaffold**, so a change
+    /// to `Segmentation::build` or to the catalog header's fields touches one site.
+    fn build_segmentation(
+        segments: Vec<TypedRegion>,
+        analysed: GenomeRegions,
+    ) -> Arc<Segmentation> {
         Arc::new(
             Segmentation::build(
                 segments.into_iter().map(Ok),
-                GenomeRegions::whole_contigs(&bounds),
+                analysed,
                 RepeatCatalogHeader {
                     contigs: Vec::new(),
                     reference_md5: [7; 16],
@@ -461,6 +451,27 @@ mod tests {
                 PathBuf::from("/genomes/test.catalog.parquet"),
             )
             .expect("a clean stream builds"),
+        )
+    }
+
+    /// A whole-contig generic segment.
+    fn generic_segment(contig: u32, length: u64) -> TypedRegion {
+        TypedRegion {
+            region: GenomeRegion {
+                contig: ContigId(contig),
+                start: Position(1),
+                end: Position(length),
+            },
+            kind: RegionKind::Generic,
+        }
+    }
+
+    /// One generic segment per fixture contig — the whole of the fixture reference's ground,
+    /// so every read the BAM fixtures place is on the walk.
+    fn segmentation() -> Arc<Segmentation> {
+        build_segmentation(
+            vec![generic_segment(0, 100), generic_segment(1, 200)],
+            GenomeRegions::whole_contigs(&fixture_bounds()),
         )
     }
 
@@ -578,9 +589,13 @@ mod tests {
             .expect("build index");
     }
 
-    fn open_gatherer(
+    /// A gatherer over `segmentation` at the unusual settings — **the one place those
+    /// settings are spelled**, so the "every setting differs from its default" discipline
+    /// cannot drift between the tests that rely on it.
+    fn open_gatherer_over(
         alignments: &[PathBuf],
         reference: &OpenReference,
+        segmentation: Arc<Segmentation>,
     ) -> Result<SampleObservationGatherer, RunError> {
         SampleObservationGatherer::open(
             SampleWalkInputs {
@@ -590,29 +605,37 @@ mod tests {
                 locus_generator_settings: unusual_locus_generator_settings(),
                 build_index_if_missing: false,
             },
-            segmentation(),
+            segmentation,
             provenance(),
         )
     }
 
-    /// The same fixture through the bare chain direct mode builds — the oracle every
-    /// gatherer walk is compared against, at chosen filter and generator settings.
+    /// The same, over the module's shared two-contig ground.
+    fn open_gatherer(
+        alignments: &[PathBuf],
+        reference: &OpenReference,
+    ) -> Result<SampleObservationGatherer, RunError> {
+        open_gatherer_over(alignments, reference, segmentation())
+    }
+
+    /// A fixture walk through the bare chain direct mode builds — the oracle a gatherer's
+    /// yield is compared against, over whatever ground and settings the caller names.
     fn direct_walk(
         paths: &[PathBuf],
         reference: &OpenReference,
+        segmentation: Arc<Segmentation>,
         read_filters: ReadFilterConfig,
         settings: PileupGeneratorConfig,
     ) -> Vec<SampleLocusObservations> {
-        let shared = segmentation();
         let reads = SampleReads::open_only_sample(paths, reference, read_filters, false)
             .expect("the direct open");
         let generators = generic_path_generators(
             &WalkReference::of(reference).expect("bases"),
             settings,
-            shared.inputs(),
+            segmentation.inputs(),
         )
         .expect("generators");
-        SampleLocusObservationsIterator::new(RunSegments::of(shared), reads, generators)
+        SampleLocusObservationsIterator::new(RunSegments::of(segmentation), reads, generators)
             .collect::<Result<_, _>>()
             .expect("a clean walk")
     }
@@ -717,18 +740,21 @@ mod tests {
         let unusual = direct_walk(
             &paths,
             &reference,
+            segmentation(),
             unusual_read_filters(),
             unusual_locus_generator_settings(),
         );
         let default_filters = direct_walk(
             &paths,
             &reference,
+            segmentation(),
             ReadFilterConfig::default(),
             unusual_locus_generator_settings(),
         );
         let default_generator = direct_walk(
             &paths,
             &reference,
+            segmentation(),
             unusual_read_filters(),
             PileupGeneratorConfig::default(),
         );
@@ -770,6 +796,7 @@ mod tests {
         let walked = direct_walk(
             &paths,
             &reference,
+            segmentation(),
             unusual_read_filters(),
             unusual_locus_generator_settings(),
         );
@@ -897,6 +924,53 @@ mod tests {
         assert_eq!(read_back, expected);
     }
 
+    /// **Gathering the same sample twice gives byte-identical files** (spec §12.1) — the
+    /// walk is serial and deterministic and nothing in the gatherer reads a clock, so the
+    /// file is a pure function of its inputs. The timestamp §12.1 exempts is the caller's
+    /// to supply; with the fixture's fixed one, identity holds over the *whole* file,
+    /// timestamp included — a stronger check than the exemption needs.
+    #[test]
+    fn gathering_the_same_sample_twice_gives_identical_bytes() {
+        let (_reference_dir, reference) = fixture_reference(true);
+        let (_a_dir, bam_a) = bam_with_library("NA12878", "libA", "a.bam");
+        let paths = vec![bam_a];
+        let psp_dir = TempDir::new().expect("a scratch dir");
+
+        let first_psp = psp_dir.path().join("first.psp");
+        let second_psp = psp_dir.path().join("second.psp");
+        let (first_stats, _) = open_gatherer(&paths, &reference)
+            .expect("opens")
+            .write_psp(&first_psp)
+            .expect("the first gather writes");
+        let (second_stats, _) = open_gatherer(&paths, &reference)
+            .expect("opens again")
+            .write_psp(&second_psp)
+            .expect("the second gather writes");
+
+        assert!(
+            first_stats.records > 0,
+            "the fixture must yield records, or identical empty files prove nothing",
+        );
+        assert_eq!(first_stats.records, second_stats.records);
+        let first_bytes = std::fs::read(&first_psp).expect("read the first file");
+        let second_bytes = std::fs::read(&second_psp).expect("read the second file");
+        assert_eq!(
+            first_bytes, second_bytes,
+            "two gathers of one sample must be the same bytes",
+        );
+
+        // **And the timestamp is the caller's**, which is what makes the comparison above
+        // mean anything: a gatherer that stamped its own clock instead would pass it
+        // whenever two gathers land in the same second, and produce irreproducible files
+        // the moment they straddle one.
+        let reader = PspReader::open(&first_psp).expect("the first file opens");
+        assert_eq!(
+            reader.header().writer.created,
+            provenance().created,
+            "the file must carry the caller's timestamp, not one the gatherer minted",
+        );
+    }
+
     /// A walk that fails mid-file must surface the failure, not seal the psp: a swallowed
     /// error here would leave a footer-complete file every reader accepts, holding none of
     /// the sample's records — the one failure shape the format cannot catch after the fact.
@@ -1014,6 +1088,167 @@ mod tests {
             RunError::OpeningSample { sample, .. } => assert_eq!(sample, "NA12878"),
             other => panic!("expected OpeningSample, got {other:?}"),
         }
+    }
+
+    /// **Analysed-but-empty ground round-trips** (spec §12.9): a walk over ground with no
+    /// reads writes a psp with zero records, and the file still knows what ground was
+    /// analysed — which is what lets a reader tell "analysed, nothing there" from "never
+    /// looked", the distinction the header's analysed regions exist for.
+    #[test]
+    fn analysed_but_empty_ground_round_trips() {
+        let (_reference_dir, reference) = fixture_reference(true);
+        // Every read the fixture BAM holds is on chr1; the analysed ground is chr2 alone.
+        let (_a_dir, bam_a) = bam_with_library("NA12878", "libA", "a.bam");
+        let analysed = GenomeRegions::from_normalized_spans(
+            vec![crate::regions::Region {
+                chrom_id: 1,
+                start: 1,
+                end: 200,
+            }],
+            &fixture_bounds(),
+        )
+        .expect("one whole-contig span is normalized");
+        let chr2_only_ground = build_segmentation(vec![generic_segment(1, 200)], analysed.clone());
+
+        let psp_dir = TempDir::new().expect("a scratch dir");
+        let psp_path = psp_dir.path().join("NA12878.psp");
+        let (stats, counts) =
+            open_gatherer_over(std::slice::from_ref(&bam_a), &reference, chr2_only_ground)
+                .expect("opens")
+                .write_psp(&psp_path)
+                .expect("an empty walk still writes a whole file");
+
+        assert_eq!(stats.records, 0);
+        assert_eq!(counts.regions_in, 1, "chr2's one segment was dispatched");
+        assert_eq!(
+            counts.regions_handled, 1,
+            "and it was genuinely handed to a generator rather than skipped for holding \
+             no reads — the psp is byte-identical either way, so only the tally can tell \
+             \"analysed, nothing there\" from \"never looked\"",
+        );
+        assert_eq!(counts.loci_emitted, 0);
+
+        let mut reader = PspReader::open(&psp_path).expect("an empty psp is whole, not refused");
+        assert_eq!(
+            reader.header().segmentation_inputs.analysed_regions,
+            analysed,
+            "the file records the ground that was analysed and found empty",
+        );
+        assert_eq!(
+            reader
+                .records()
+                .expect("the walk over no blocks starts")
+                .count(),
+            0,
+        );
+    }
+
+    /// **Ground with a repeat tract in it gathers and round-trips** — the segmentation
+    /// routes a tract segment to the tract generator, and whatever the walk yields over it,
+    /// the file reads back equal to the walk. The guard asserts tract-kind records are
+    /// actually in the stream, so this cannot silently degrade into a generic-only test.
+    ///
+    /// **Limitation: the fixture reference is a homopolymer**, so this round trip cannot see
+    /// a store defect that is left/right-symmetric — a flank swap, a byte reversal — because
+    /// the tract's two flanks are identical bytes here (measured: a mutant swapping them on
+    /// write passed this test). That class is pinned where the sequence differs:
+    /// `psp::record`'s `every_locus_kind_round_trips` uses asymmetric flanks, and
+    /// `examples/ng_psp_gather_oracle.rs` runs on real sequence.
+    #[test]
+    fn tract_bearing_ground_round_trips_the_walk() {
+        use crate::ng::locus_generation::LocusKind;
+        use crate::ng::region_typing::segment_criteria::SsrSegment;
+        use crate::ng::types::Motif;
+
+        let (_reference_dir, reference) = fixture_reference(true);
+        // Reads crossing the declared tract at 41-52: one anchored before it, one over it,
+        // one after — the middle read is what gives the tract generator its evidence.
+        let records = vec![
+            read_named_with_length_in_read_group("t-r0", 0, 10, 30, "rg1"),
+            read_named_with_length_in_read_group("t-r1", 0, 35, 30, "rg1"),
+            read_named_with_length_in_read_group("t-r2", 0, 60, 30, "rg1"),
+        ];
+        let (_bam_dir, bam) = bam_in_read_group("NA12878", "libA", "rg1", "tract.bam", records);
+
+        let chr1 = |start: u64, end: u64| GenomeRegion {
+            contig: ContigId(0),
+            start: Position(start),
+            end: Position(end),
+        };
+        let segments = vec![
+            TypedRegion {
+                region: chr1(1, 40),
+                kind: RegionKind::Generic,
+            },
+            TypedRegion {
+                region: chr1(41, 52),
+                kind: RegionKind::SsrSegment(
+                    SsrSegment::new("chr1".into(), 41, 52, Motif::new(b"AT").unwrap(), 1.0)
+                        .expect("a twelve-base AT tract inside the contig"),
+                ),
+            },
+            TypedRegion {
+                region: chr1(53, 100),
+                kind: RegionKind::Generic,
+            },
+        ];
+        let tract_ground = build_segmentation(
+            segments,
+            GenomeRegions::whole_contigs(&fixture_bounds()[..1]),
+        );
+        let open_over_tract_ground = || {
+            open_gatherer_over(
+                std::slice::from_ref(&bam),
+                &reference,
+                Arc::clone(&tract_ground),
+            )
+            .expect("opens")
+        };
+
+        let psp_dir = TempDir::new().expect("a scratch dir");
+        let psp_path = psp_dir.path().join("NA12878.psp");
+        let (stats, _counts) = open_over_tract_ground()
+            .write_psp(&psp_path)
+            .expect("the tract walk writes");
+
+        let walked: Vec<SampleLocusObservations> = open_over_tract_ground()
+            .collect::<Result<_, _>>()
+            .expect("a clean walk");
+        assert!(
+            walked
+                .iter()
+                .any(|observation| matches!(observation.kind, LocusKind::Ssr(_))),
+            "the tract must put tract-kind records on the walk, or this fixture is \
+             generic-only and proves nothing about the tract path",
+        );
+        assert_eq!(stats.records, walked.len() as u64);
+
+        // **And over tract ground too, the gatherer is the bare chain** — the equality the
+        // real-data oracle's in-memory side rests on, which until now was pinned only over
+        // generic segments.
+        assert_eq!(
+            walked,
+            direct_walk(
+                std::slice::from_ref(&bam),
+                &reference,
+                Arc::clone(&tract_ground),
+                unusual_read_filters(),
+                unusual_locus_generator_settings(),
+            ),
+        );
+
+        let read_back: Vec<SampleLocusObservations> = PspReader::open(&psp_path)
+            .expect("a finished psp opens")
+            .records()
+            .expect("the walk starts")
+            .map(|streamed| {
+                streamed
+                    .expect("a clean read")
+                    .record
+                    .expect("records() builds every body")
+            })
+            .collect();
+        assert_eq!(read_back, walked);
     }
 
     #[test]

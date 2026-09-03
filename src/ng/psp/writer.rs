@@ -24,6 +24,14 @@ use super::{PspWriteError, footer, index};
 use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::types::{GenomePosition, GenomeRegion};
 
+/// The header-parameter key under which a writer records the zstd level it compressed at.
+///
+/// **Named because three sites must spell it identically**: `create` writes it, `append`
+/// reads it back to match bytes already in the file, and anything comparing a header it
+/// built against a header read back has to add it. A rename that reached only some of them
+/// would look like a store defect rather than a typo.
+pub const ZSTD_COMPRESSION_LEVEL_KEY: &str = "zstd-compression-level";
+
 /// What one finished file cost, handed back by [`PspWriter::finish`].
 ///
 /// **Counts of what was written, not of what was offered**: a record the writer refused is not
@@ -100,7 +108,7 @@ impl PspWriter {
         // learn what those bytes were written at. `block.rs`'s own doc assigns this to F3 by
         // name.
         header.writer.parameters.insert(
-            "zstd-compression-level".to_string(),
+            ZSTD_COMPRESSION_LEVEL_KEY.to_string(),
             crate::ng::psp::header::ParameterValue::Integer(i64::from(
                 super::block::ZSTD_COMPRESSION_LEVEL,
             )),
@@ -273,7 +281,7 @@ impl PspWriter {
     ) -> Result<BlockCompressor, super::HeaderRefusal> {
         use crate::ng::psp::header::ParameterValue;
 
-        let level = match header.writer.parameters.get("zstd-compression-level") {
+        let level = match header.writer.parameters.get(ZSTD_COMPRESSION_LEVEL_KEY) {
             Some(ParameterValue::Integer(recorded)) => {
                 i32::try_from(*recorded).map_err(|_| super::HeaderRefusal::LevelPastAnyLevel {
                     recorded: *recorded,

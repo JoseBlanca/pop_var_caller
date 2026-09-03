@@ -19,7 +19,22 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-03):** **psp-mode step B1 is built, reviewed and committed —
+> - **Last completed task (2026-09-03):** **psp-mode Milestone B is complete — the walk stage
+> is provably the walk, in bytes** (branch `ng-psp-mode`, at Checkpoint B;
+> [B2+B3 report](doc/devel/reports/implementations/ng_psp_mode_b2_b3_2026-09-03.md),
+> [review](doc/devel/reports/reviews/ng_psp_mode_b2_b3_2026-09-03.md),
+> [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-03_v4.md)). B2's oracle on real
+> reads: one tomato accession over 200 kb of SL4.0 through the real catalog gives **183,807
+> records equal field for field between the psp and the walk** (1,217 of them repeat tracts),
+> header equal; B3: **a second gather is byte-identical**, 948,689 bytes
+> ([`examples/ng_psp_gather_oracle.rs`](examples/ng_psp_gather_oracle.rs), whose module doc
+> records the run). The six-agent review's Majors: a gatherer stamping its own clock passed
+> byte-identity vacuously (the two gathers land in one second) — now pinned by asserting the
+> file carries the caller's timestamp; and the harness itself panicked on a mistyped
+> `NG_SAMPLES` and could drop a sample from its own oracle through a failing directory entry.
+> Next: Milestone C, `generate-psps`.
+>
+> - **Earlier (2026-09-03):** **psp-mode step B1 is built, reviewed and committed —
 > `SampleObservationGatherer`, psp mode's walk stage** (branch `ng-psp-mode`;
 > [B1 report](doc/devel/reports/implementations/ng_psp_mode_b1_2026-09-03.md),
 > [review](doc/devel/reports/reviews/ng_psp_mode_b1_2026-09-03.md),
@@ -3700,9 +3715,15 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     closure; re-opens only on a large-cohort measurement that moves the share.
 
 #### Psp mode — the walk to a psp+census, and calling from a cohort of psps
-- **Status:** `fixes-applied` — **Milestone B under way on branch `ng-psp-mode`: B1 built,
-  reviewed (nine agents, 23 mutants run / 10 survived — all closed by the applied fixes) and
-  committed; B2 and B3 next.** Checkpoint A passed (owner, 2026-09-03; the three rulings are recorded in the
+- **Status:** `fixes-applied` — **Milestone B complete on branch `ng-psp-mode`, at
+  Checkpoint B: B1 (the gatherer), B2 (the file is the walk) and B3 (byte identity) built,
+  reviewed and committed.** The walk stage is provable on real reads: one tomato accession
+  over 200 kb of SL4.0 through the real catalog gives 183,807 records that are equal field
+  for field between the psp and the walk (1,217 of them repeat tracts), header equal, and a
+  second gather byte-identical at 948,689 bytes
+  ([`examples/ng_psp_gather_oracle.rs`](examples/ng_psp_gather_oracle.rs)). Two review
+  rounds: nine agents on B1 (23 mutants / 10 survived), six on B2+B3 (6 mutants / 2
+  survived) — every survivor closed. Checkpoint A passed (owner, 2026-09-03; the three rulings are recorded in the
   plan's Checkpoint A note): `SegmentationInputs` lifted to `src/ng/segmentation_inputs.rs`
   with the `ng::run` re-export kept (`a1fdab11` — nothing in `src/ng/psp/` imports from
   `ng::run` any more), and the no-version-bump reason recorded in spec §6.1. B1 =
@@ -3712,15 +3733,16 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   provenance), `write_psp` draining the walk into a `PspWriter`. Milestone A (complete,
   reviewed, fixed): the header carries spec §6.1 minus the deliberately dropped record
   count; `format_version` stays (1,0).
-- **Impl report (B1):**
-  [B1](doc/devel/reports/implementations/ng_psp_mode_b1_2026-09-03.md);
-  **latest review:** [B1](doc/devel/reports/reviews/ng_psp_mode_b1_2026-09-03.md) (1 Blocker —
+- **Impl reports:** [B1](doc/devel/reports/implementations/ng_psp_mode_b1_2026-09-03.md),
+  [B2+B3](doc/devel/reports/implementations/ng_psp_mode_b2_b3_2026-09-03.md);
+  **latest reviews:** [B1](doc/devel/reports/reviews/ng_psp_mode_b1_2026-09-03.md) (1 Blocker —
   a swallowed walk error sealed a psp every reader accepts, mutation-proven — 4 Majors, 12
-  Minors; the applied-settings gap and the triplicated bundle-threshold rule are the two to
-  remember); **fixes-applied:**
-  [B1](doc/devel/reports/reviews/fixes_applied_2026-09-03_v3.md) (everything applied; carried
-  forward: B2's fixtures must include a repeat-tract segment, and the run-level shared
-  test-fixture module lands with B2).
+  Minors), [B2+B3](doc/devel/reports/reviews/ng_psp_mode_b2_b3_2026-09-03.md) (3 Majors: a
+  gatherer stamping its own clock passed byte-identity vacuously; the harness panicked on a
+  mistyped env count and could drop a sample from its own oracle);
+  **fixes-applied:** [B1](doc/devel/reports/reviews/fixes_applied_2026-09-03_v3.md),
+  [B2+B3](doc/devel/reports/reviews/fixes_applied_2026-09-03_v4.md) — everything applied in
+  both.
 - **Plan:** [run_driver_psp_mode.md](doc/devel/ng/impl_plan/run_driver_psp_mode.md) (milestones
   A–G; three upstream questions all ruled by the owner 2026-09-03);
   **Spec:** [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §6.1–§6.3;
@@ -3751,6 +3773,11 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     scaffolds now encode to 10,798,518 bytes of the 16,777,187-byte body ceiling (measured by
     the worst-case test's own print, 2026-09-03) — about 46,000 scaffolds fit; a
     100,000-scaffold draft is refused loudly at write. The ceiling is one constant if it binds.
+  - **Carried out of Checkpoint B:** the run-level shared test-fixture module (deferred at
+    B1 and again at B2 — the gatherer is the fifth consumer of fixtures `callers.rs` keeps
+    private to its own test module), and a fixed home for the real CRAM slice the oracle
+    runs on (today `tmp/tomato_slice/`, untracked, 83 MB — copied from the main checkout
+    because a worktree's container cannot see it).
   - ~~For Checkpoint A (review M6): where `SegmentationInputs` should live~~ — ruled and
     done (`a1fdab11`): lifted to `src/ng/segmentation_inputs.rs`, `ng::run` re-export kept.
   - ~~For Checkpoint A (review Mi9): record the no-version-bump ruling~~ — recorded in the

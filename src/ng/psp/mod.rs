@@ -108,7 +108,7 @@ pub use record::{
 };
 pub use trailer::{FileAfterAFailedReplacement, TrailerReplacementFailure, replace_trailer};
 pub use walk::{RecordIter, SelectiveRecordIter};
-pub use writer::{PspWriter, WriteStats};
+pub use writer::{PspWriter, WriteStats, ZSTD_COMPRESSION_LEVEL_KEY};
 
 // ---------------------------------------------------------------------
 // Inspecting a file without opening it as a reader

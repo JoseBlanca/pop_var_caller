@@ -170,18 +170,32 @@ Arch §3.3's object: constructed from one sample's alignment files, the shared
 Serial within the sample (spec §5.2; §11 q3 is off the default path). *Depends:* A1-A4 (the
 header it writes). *Source:* spec §5.2 l.571-643; arch §3.3 l.432-469.
 
-**B2. ☐ The gatherer's oracle: the file reads back as the walk streamed.**
+**B2. ✅ The gatherer's oracle: the file reads back as the walk streamed.**
 On the shared run fixtures **and** one real CRAM slice: gather to a psp, read it back, and
 compare record-for-record, field-for-field against the same sample walked directly in
 memory. This is the plan's north star for the walk stage. *Depends:* B1. *Source:* spec §2
 (direct mode is the oracle); §12.9 (an analysed-but-empty ground round-trips).
 
-**B3. ☐ Worker-count/schedule invariance, end to end.**
+**B3. ✅ Worker-count/schedule invariance, end to end.**
 The format-level byte-identity test (`writer.rs:1394`) re-made through the gatherer on real
 reads: the same sample gathered twice gives byte-identical files but the header timestamp.
 *Depends:* B1. *Source:* spec §12.1, §6.3.
 
 > **Checkpoint B: a sample's psp is provably the walk, in bytes. Pause for review.**
+>
+> **Reached 2026-09-03.** Both oracles are green on real reads — one tomato accession
+> (`SRR7279481.p1.bench.cram`) over 200 kb of SL4.0 through the real catalog: **183,807
+> records, all equal field for field between the file and the walk, header equal; 1,217 of
+> them repeat tracts; a second gather byte-identical (948,689 bytes)**
+> (`examples/ng_psp_gather_oracle.rs`, which records the run). At fixture scale, 16 tests
+> cover the header, the failure paths, the applied-vs-recorded settings, §12.9's
+> analysed-but-empty round trip, tract ground, and byte identity.
+>
+> **Carried into Milestone C:**
+> - the run-level shared test-fixture module (deferred at B1, deferred again at B2 — the
+>   gatherer is the fifth consumer of fixtures `callers.rs` keeps private);
+> - the real slice the oracle runs on lives in `tmp/tomato_slice/` (untracked, 83 MB);
+>   a fixed home for it is C1's to decide when `generate-psps` gets its own runs.
 
 ### Milestone C — `generate-psps`
 
