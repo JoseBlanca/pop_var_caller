@@ -19,7 +19,28 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-03):** **the psp-mode wiring plan is written**
+> - **Last completed task (2026-09-03):** **psp-mode Milestone A is built, reviewed and
+> committed — the psp header now records everything a calling run will check** (branch
+> `ng-psp-mode`, commits 114efe24 + 918eec89;
+> [A1 report](doc/devel/reports/implementations/ng_psp_mode_a1_2026-09-03.md),
+> [A2–A4 report](doc/devel/reports/implementations/ng_psp_mode_a2_a3_a4_2026-09-03.md)).
+> Spec §6.1 is complete in `Header` minus the deliberately dropped record count: the analysed
+> regions + catalog identity + routing criteria as one typed `SegmentationInputs` field
+> (recorded whole, so a §6.2 refusal names the field that differs), the read-group table
+> (`@RG ID`, library, walk-local number — what lets separately-walked samples join one
+> cohort), the observation reach ceiling, and the read filters as provenance parameters
+> (`ReadFilterConfig::provenance_parameters`, exhaustively destructured so a new filter cannot
+> go unrecorded). `format_version` stays (1,0) — nothing written outside tests predates the
+> fields. Each step ran the full implement→review→fix loop: 2 nine-agent reviews, 21
+> mutations run / 11 survived / all closed; the A1 review also caught the step editing frozen
+> `src/regions.rs` (ruling 2026-07-16) — reverted byte-identical, the constructor moved into
+> ng's own `GenomeRegions`, which now owns its span storage. Measured: 30,000 digest-carrying
+> scaffolds encode to 10,798,518 bytes of the 16,777,187-byte header ceiling (headroom halved;
+> ~46,000 scaffolds fit). **At Checkpoint A, paused for the owner** — pending there: the
+> typed-fields confirmation, `SegmentationInputs`' module home once psp and run become
+> mutually dependent (Milestone B), and recording the no-version-bump ruling.
+>
+> - **Earlier (2026-09-03):** **the psp-mode wiring plan is written**
 > ([impl plan](doc/devel/ng/impl_plan/run_driver_psp_mode.md)) — the build order for
 > `SampleObservationGatherer` + `generate-psps` (walk to psp + census, one file per sample) and
 > `PspVariantCaller` + `call-from-psps`, seven milestones A–G ending at spec §12.3's mode
