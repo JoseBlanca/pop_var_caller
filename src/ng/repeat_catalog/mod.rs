@@ -312,6 +312,26 @@ pub struct RepeatCatalogHeader {
 }
 
 impl RepeatCatalogHeader {
+    /// The identity of **no catalog at all**: an empty contig table, a zero reference
+    /// digest, default criteria and scan weights, and only `tool_version` naming who
+    /// made the file.
+    ///
+    /// **A sentinel for synthetic files, not a value a real run produces** — every
+    /// `generate-psps` run reads a real catalog. Benches and examples that write a psp
+    /// without one record this so the header's catalog section says truthfully that no
+    /// catalog shaped the segmentation. Two files built with this compare *equal* on
+    /// catalog identity, which is exactly right for two files that both had none.
+    pub fn no_catalog(tool_version: impl Into<String>) -> Self {
+        Self {
+            contigs: Vec::new(),
+            longest_tract_bp: Vec::new(),
+            reference_md5: [0; 16],
+            built_under: StrRepeatCriteria::default(),
+            scan: ScanParams::default(),
+            tool_version: tool_version.into(),
+        }
+    }
+
     /// How far outside a requested stretch a row can sit and still change the answer inside
     /// it: the contig's longest tract, plus the bundle radius the reader is asking with.
     ///

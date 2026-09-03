@@ -3660,6 +3660,43 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     is 5–6% of a run at 63 samples; the parallelism went to the cover. Arch §8 records the
     closure; re-opens only on a large-cohort measurement that moves the share.
 
+#### Psp mode — the walk to a psp+census, and calling from a cohort of psps
+- **Status:** `fixes-applied` — **Milestone A in flight on branch `ng-psp-mode`; A1 landed,
+  reviewed and fixed 2026-09-03.** The psp header now carries the run's identity checks as one typed field,
+  `Header.segmentation_inputs: SegmentationInputs` — the analysed regions (the cross-cohort
+  check) and the repeat catalog identity + routing criteria (the file-against-run check),
+  recorded whole so a refusal can name the field that differs. `format_version` stays (1,0)
+  because no written psp predates the fields. A2 (read-group table), A3 (`max_record_span`),
+  A4 (read filters into provenance) remain before Checkpoint A.
+- **Plan:** [run_driver_psp_mode.md](doc/devel/ng/impl_plan/run_driver_psp_mode.md) (milestones
+  A–G; three upstream questions all ruled by the owner 2026-09-03);
+  **Spec:** [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §6.1–§6.3;
+  **Arch:** [run_streaming.md](doc/devel/ng/arch/run_streaming.md) §4.
+- **Code:** [src/ng/psp/segmentation_section.rs](src/ng/psp/segmentation_section.rs) (the
+  `[segmentation]` section: wire types, checked-constructor decode, two-sided rules),
+  [src/ng/psp/header.rs](src/ng/psp/header.rs) (the field; `check_contigs` split out so the
+  reader validates contigs before span resolution),
+  [src/regions.rs](src/regions.rs) (`RegionSet::from_genomic_order_spans` — refuses a
+  non-normalized list rather than re-sorting it, because a re-normalized set would compare
+  unequal to the set it records).
+- **Impl report:** [A1](doc/devel/reports/implementations/ng_psp_mode_a1_2026-09-03.md).
+- **Latest review:** [A1 review](doc/devel/reports/reviews/ng_psp_mode_a1_2026-09-03.md)
+  (9 categories, 12 mutations run / 5 survived, 1 Blocker + 6 Majors — all applied or
+  routed); **Latest fixes-applied:**
+  [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-03.md). The review's M5 caught the
+  step editing frozen `src/regions.rs`; the constructor moved into ng's own `GenomeRegions`
+  (which now owns its span storage) and the production file is byte-identical again.
+- **Open:**
+  - **Header headroom halved at the fragmented-assembly corner**: 30,000 digest-carrying
+    scaffolds now encode to 10,798,518 bytes of the 16,777,187-byte body ceiling (measured by
+    the worst-case test's own print, 2026-09-03) — about 46,000 scaffolds fit; a
+    100,000-scaffold draft is refused loudly at write. The ceiling is one constant if it binds.
+  - **For Checkpoint A (review M6):** where `SegmentationInputs` should live once psp and run
+    depend on each other (Milestone B adds the run→psp arrow); candidate: lift to
+    `src/ng/segmentation_inputs.rs`, keep the `ng::run` re-export.
+  - **For Checkpoint A (review Mi9):** record the ruling that the required `[segmentation]`
+    section lands in format 1.0 unbumped because no psp outside tests predates it.
+
 #### Step 5/6 — STR observations through a run: routing, the tract slot, and the kind at the merge
 - **Status:** `implemented` — **✅ THE WHOLE PLAN COMPLETE: milestones A, B and C, all twelve
   steps, merged to `main`** (owner's ruling, 2026-09-02). **A run now produces repeat-tract

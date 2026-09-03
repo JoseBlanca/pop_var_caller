@@ -2641,6 +2641,11 @@ mod tests {
     /// refused, twice over.
     #[test]
     fn the_fields_a_writer_declares_survive_a_header_round_trip() {
+        let contigs = vec![ContigIdentity {
+            name: "SL4.0ch01".to_string(),
+            length: 90_863_682,
+            md5: None,
+        }];
         let header = Header {
             format_version: FORMAT_VERSION,
             sample: "SRR7279481".to_string(),
@@ -2648,11 +2653,9 @@ mod tests {
                 name: "S_lycopersicum_chromosomes.4.00.fa".to_string(),
                 md5: None,
             },
-            contigs: vec![ContigIdentity {
-                name: "SL4.0ch01".to_string(),
-                length: 90_863_682,
-                md5: None,
-            }],
+            segmentation_inputs:
+                crate::ng::psp::segmentation_section::segmentation_inputs_for_tests(&contigs),
+            contigs,
             writer: WriterProvenance {
                 tool: "ng".to_string(),
                 version: "0.1.0".to_string(),

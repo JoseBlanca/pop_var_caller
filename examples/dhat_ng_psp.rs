@@ -152,6 +152,7 @@ fn a_corpus(shape: &CorpusShape) -> Vec<SampleLocusObservations> {
 }
 
 fn a_header(shape: &CorpusShape) -> Header {
+    let contig_length = shape.records + 1_024;
     Header {
         format_version: FORMAT_VERSION,
         sample: "dhat".to_string(),
@@ -161,9 +162,19 @@ fn a_header(shape: &CorpusShape) -> Header {
         },
         contigs: vec![ContigIdentity {
             name: "chr1".to_string(),
-            length: shape.records + 1_024,
+            length: contig_length,
             md5: None,
         }],
+        segmentation_inputs: pop_var_caller::ng::run::SegmentationInputs {
+            catalog: pop_var_caller::ng::repeat_catalog::RepeatCatalogHeader::no_catalog("dhat"),
+            repeat_tract_criteria: pop_var_caller::ng::repeat_catalog::StrRepeatCriteria::default(),
+            analysed_regions: pop_var_caller::ng::region_typing::GenomeRegions::whole_contigs(&[
+                pop_var_caller::regions::ContigBounds {
+                    name: "chr1",
+                    length: contig_length as u32,
+                },
+            ]),
+        },
         writer: WriterProvenance {
             tool: "dhat_ng_psp".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),

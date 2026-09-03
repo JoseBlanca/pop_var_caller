@@ -40,8 +40,9 @@ use std::path::Path;
 
 use crate::ng::tandem_repeat::{RepeatInterval, ScanParams, find_tandem_repeats};
 use crate::ng::types::{Bp, ContigId, GenomeRegion, Position};
-use crate::regions::{BedError, ContigBounds, RegionSet};
+use crate::regions::{BedError, ContigBounds, Region, RegionSet};
 use segment_criteria::{RejectionCounts, SsrSegment, SsrSegmentCriteria};
+use thiserror::Error;
 
 // ---------------------------------------------------------------------
 // What to walk
@@ -50,13 +51,16 @@ use segment_criteria::{RejectionCounts, SsrSegment, SsrSegmentCriteria};
 /// The set of genome regions to walk — sorted, non-overlapping, coalesced,
 /// clamped, in genomic order.
 ///
-/// **Wraps production's `RegionSet` read-only; reimplements nothing.** That type
+/// **Built through production's `RegionSet`; reimplements no parsing.** That type
 /// already parses BED, coalesces overlapping and adjacent spans, clamps to contig
 /// lengths, resolves names against the contig table, and drops zero-length
 /// contigs — and it is the same code the production caller's `--regions` runs, so
 /// ng and production agree on what a BED *means* by construction rather than by
-/// coincidence. `src/regions.rs` is not edited (spec Revision): this wrapper adds
-/// ng's width and ng's names, and nothing else.
+/// coincidence. `src/regions.rs` is not edited (spec Revision): this type reads
+/// `RegionSet`'s output through its public accessors and owns the resulting span
+/// list, which is what lets ng add its own constructor
+/// ([`from_normalized_spans`](Self::from_normalized_spans), for spans a psp header
+/// recorded) without touching the frozen file.
 ///
 /// **A user BED is not a special case**, which `regions.rs` settled first: *"'Whole
 /// genome' is not a special case — it is the region set whose every region covers
@@ -75,7 +79,9 @@ use segment_criteria::{RejectionCounts, SsrSegment, SsrSegmentCriteria};
 /// production author had already made the same call for the same reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenomeRegions {
-    inner: RegionSet,
+    /// In genomic order, non-overlapping, with at least one base between two spans
+    /// of one contig — the shape every constructor here guarantees.
+    spans: Vec<Region>,
 }
 
 impl GenomeRegions {
@@ -86,7 +92,7 @@ impl GenomeRegions {
     /// are never asked about" without a guard of its own).
     pub fn whole_contigs(contigs: &[ContigBounds]) -> Self {
         Self {
-            inner: RegionSet::whole_contigs(contigs),
+            spans: RegionSet::whole_contigs(contigs).regions().to_vec(),
         }
     }
 
@@ -99,30 +105,135 @@ impl GenomeRegions {
     /// inside them.
     pub fn from_bed_path(bed: &Path, contigs: &[ContigBounds]) -> Result<Self, BedError> {
         Ok(Self {
-            inner: RegionSet::from_bed_path(bed, contigs)?,
+            spans: RegionSet::from_bed_path(bed, contigs)?.regions().to_vec(),
         })
+    }
+
+    /// Rebuild the set from spans this pipeline recorded — a psp header's account of
+    /// the regions its sample was analysed over.
+    ///
+    /// **The spans must already be normalized**: in `(chrom_id, start)` order, and
+    /// with at least one base between two spans of one contig, which is the shape
+    /// every set this type hands out has (overlapping or touching spans are coalesced
+    /// at construction). A list that is not normalized was not written by this
+    /// pipeline, so it is refused rather than re-normalized — silently re-sorting it
+    /// would make the rebuilt set compare unequal to the set that was recorded, in a
+    /// check whose whole job is that comparison.
+    ///
+    /// An empty list builds an empty set, matching [`whole_contigs`](Self::whole_contigs)
+    /// over zero-length contigs; whether emptiness is acceptable is the caller's rule.
+    ///
+    /// # Errors
+    ///
+    /// [`SpanSetError`]: a span naming a contig index off the list
+    /// ([`UnknownContig`](SpanSetError::UnknownContig)), an empty or inverted span
+    /// ([`InvalidSpan`](SpanSetError::InvalidSpan)), a span past its contig's end
+    /// ([`SpanBeyondContig`](SpanSetError::SpanBeyondContig)), or a list out of order
+    /// or with overlapping/touching spans
+    /// ([`NotNormalized`](SpanSetError::NotNormalized)).
+    pub fn from_normalized_spans(
+        spans: Vec<Region>,
+        contigs: &[ContigBounds],
+    ) -> Result<Self, SpanSetError> {
+        let mut previous_span: Option<Region> = None;
+        for span in &spans {
+            let Some(bounds) = contigs.get(span.chrom_id as usize) else {
+                return Err(SpanSetError::UnknownContig {
+                    chrom_id: span.chrom_id,
+                    contig_count: contigs.len(),
+                });
+            };
+            if span.start < 1 || span.end < span.start {
+                return Err(SpanSetError::InvalidSpan {
+                    start: span.start,
+                    end: span.end,
+                });
+            }
+            if span.end > bounds.length {
+                return Err(SpanSetError::SpanBeyondContig {
+                    name: bounds.name.to_string(),
+                    end: span.end,
+                    contig_length: bounds.length,
+                });
+            }
+            if let Some(previous_span) = previous_span {
+                // `previous_span.end + 1` in u64 so an end at `u32::MAX` cannot
+                // overflow — the same guard production's own coalescing takes.
+                let in_order = previous_span.chrom_id < span.chrom_id
+                    || (previous_span.chrom_id == span.chrom_id
+                        && (span.start as u64) > previous_span.end as u64 + 1);
+                if !in_order {
+                    return Err(SpanSetError::NotNormalized {
+                        chrom_id: span.chrom_id,
+                        start: span.start,
+                    });
+                }
+            }
+            previous_span = Some(*span);
+        }
+        Ok(Self { spans })
     }
 
     /// The regions, in genomic order, as ng's [`GenomeRegion`].
     ///
     /// The `u32` → `u64` widening lives here and only here (above).
     pub fn iter(&self) -> impl Iterator<Item = GenomeRegion> + '_ {
-        self.inner.iter().map(|r| GenomeRegion {
+        self.spans.iter().map(|r| GenomeRegion {
             contig: ContigId(r.chrom_id),
             start: Position(u64::from(r.start)),
             end: Position(u64::from(r.end)),
         })
     }
 
+    /// The spans exactly as stored — production's own `u32` shape, for a consumer
+    /// that records them rather than walks them (the psp header).
+    pub fn spans(&self) -> &[Region] {
+        &self.spans
+    }
+
     /// How many regions there are.
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.spans.len()
     }
 
     /// Whether there is nothing to ask about.
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.spans.is_empty()
     }
+}
+
+/// Why a recorded list of spans could not be believed as a [`GenomeRegions`]
+/// ([`GenomeRegions::from_normalized_spans`]). These describe stored data — a file's
+/// own account of the regions it covers — so each names the first span that broke
+/// the rule.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum SpanSetError {
+    /// A span's `chrom_id` does not index the contig list the set is being rebuilt
+    /// against.
+    #[error("a span names contig index {chrom_id}, and the contig list has {contig_count} entries")]
+    UnknownContig { chrom_id: u32, contig_count: usize },
+
+    /// `start < 1` or `end < start` — no 1-based inclusive span looks like this.
+    #[error("the span {start}-{end} is empty or inverted; spans are 1-based inclusive")]
+    InvalidSpan { start: u32, end: u32 },
+
+    /// The span reaches past its contig's recorded end.
+    #[error("a span ends at {end} on contig `{name}`, which is {contig_length} bases long")]
+    SpanBeyondContig {
+        name: String,
+        end: u32,
+        contig_length: u32,
+    },
+
+    /// The list is out of `(chrom_id, start)` order, or two spans of one contig
+    /// overlap or touch — a shape this pipeline never writes, so the list is not
+    /// one of ours.
+    #[error(
+        "the span starting at {start} on contig index {chrom_id} is out of order, or \
+         overlaps or touches the span before it"
+    )]
+    NotNormalized { chrom_id: u32, start: u32 },
 }
 
 // ---------------------------------------------------------------------
@@ -993,7 +1104,155 @@ pub(crate) fn fill_generic_gaps(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use segment_criteria::DEFAULT_BUNDLE_THRESHOLD;
+
+    fn two_contigs() -> Vec<ContigBounds<'static>> {
+        vec![
+            ContigBounds {
+                name: "chr1",
+                length: 1000,
+            },
+            ContigBounds {
+                name: "chr2",
+                length: 500,
+            },
+        ]
+    }
+
+    /// A normalized list — the shape every constructor of this type hands out —
+    /// rebuilds span for span, so a stored set compares equal to the set it recorded.
+    #[test]
+    fn from_normalized_spans_rebuilds_a_normalized_set_exactly() {
+        let spans = vec![
+            Region {
+                chrom_id: 0,
+                start: 10,
+                end: 20,
+            },
+            Region {
+                chrom_id: 0,
+                start: 22,
+                end: 30,
+            },
+            Region {
+                chrom_id: 1,
+                start: 1,
+                end: 500,
+            },
+        ];
+        let rebuilt = GenomeRegions::from_normalized_spans(spans.clone(), &two_contigs())
+            .expect("a normalized list rebuilds");
+        assert_eq!(rebuilt.spans(), spans.as_slice());
+    }
+
+    /// Every way a recorded list can fail to be one of ours is refused, not repaired.
+    #[test]
+    fn from_normalized_spans_refuses_what_this_pipeline_never_writes() {
+        let span = |chrom_id, start, end| Region {
+            chrom_id,
+            start,
+            end,
+        };
+        let refused = |spans: Vec<Region>| {
+            GenomeRegions::from_normalized_spans(spans, &two_contigs())
+                .expect_err("a malformed list is refused")
+        };
+
+        assert!(matches!(
+            refused(vec![span(2, 1, 10)]),
+            SpanSetError::UnknownContig { chrom_id: 2, .. }
+        ));
+        assert!(matches!(
+            refused(vec![span(0, 0, 10)]),
+            SpanSetError::InvalidSpan { .. }
+        ));
+        assert!(matches!(
+            refused(vec![span(0, 10, 5)]),
+            SpanSetError::InvalidSpan { .. }
+        ));
+        assert!(matches!(
+            refused(vec![span(0, 1, 1001)]),
+            SpanSetError::SpanBeyondContig { .. }
+        ));
+        // Out of order across contigs, out of order within one, touching, overlapping:
+        // each is a list normalization would have changed, so none was written by us.
+        assert!(matches!(
+            refused(vec![span(1, 1, 10), span(0, 1, 10)]),
+            SpanSetError::NotNormalized { .. }
+        ));
+        assert!(matches!(
+            refused(vec![span(0, 20, 30), span(0, 1, 10)]),
+            SpanSetError::NotNormalized { .. }
+        ));
+        assert!(matches!(
+            refused(vec![span(0, 1, 10), span(0, 11, 20)]),
+            SpanSetError::NotNormalized { .. }
+        ));
+        assert!(matches!(
+            refused(vec![span(0, 1, 10), span(0, 5, 20)]),
+            SpanSetError::NotNormalized { .. }
+        ));
+    }
+
+    /// A span ending exactly at `u32::MAX` must not overflow the touching-spans check.
+    #[test]
+    fn from_normalized_spans_survives_a_span_ending_at_the_coordinate_ceiling() {
+        let huge = [ContigBounds {
+            name: "chr1",
+            length: u32::MAX,
+        }];
+        let spans = vec![
+            Region {
+                chrom_id: 0,
+                start: 1,
+                end: u32::MAX,
+            },
+            Region {
+                chrom_id: 0,
+                start: 5,
+                end: 10,
+            },
+        ];
+        assert!(matches!(
+            GenomeRegions::from_normalized_spans(spans, &huge),
+            Err(SpanSetError::NotNormalized { .. })
+        ));
+    }
+
+    proptest! {
+        /// Whatever the BED parser's own normalization hands out, `from_normalized_spans`
+        /// accepts and returns unchanged — the two definitions of "normalized" cannot
+        /// drift apart. The BED text is synthesized from random raw spans so the
+        /// normalizer sees overlaps, touching spans and out-of-order lines.
+        #[test]
+        fn from_normalized_spans_accepts_every_normalized_set(
+            raw in proptest::collection::vec((0usize..2, 1u32..900, 1u32..120), 1..12)
+        ) {
+            let contigs = two_contigs();
+            let bed_text: String = raw
+                .iter()
+                .map(|&(contig, raw_start, span_bases)| {
+                    // A span must *start* inside its contig (the parser only clamps an
+                    // overhanging end), so the raw draw is folded into the contig.
+                    let start_1based = 1 + (raw_start - 1) % contigs[contig].length;
+                    // BED is 0-based half-open; the parser clamps an overhanging end.
+                    format!(
+                        "{}\t{}\t{}\n",
+                        contigs[contig].name,
+                        start_1based - 1,
+                        start_1based - 1 + span_bases
+                    )
+                })
+                .collect();
+            let normalized = RegionSet::from_bed_reader(bed_text.as_bytes(), &contigs)
+                .expect("synthesized BED lines parse");
+            let rebuilt =
+                GenomeRegions::from_normalized_spans(normalized.regions().to_vec(), &contigs)
+                    .expect("the normalizer's output is normalized by definition");
+            prop_assert_eq!(rebuilt.spans(), normalized.regions());
+        }
+    }
 
     /// **A base under two repeats is one base.** The pre-screen leaves intersecting tracts
     /// in place — it removes period-multiple re-detections of *one* tract, not two different

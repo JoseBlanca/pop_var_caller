@@ -397,6 +397,14 @@ impl MinCopies {
             .copied()
             .unwrap_or(self.for_wider_periods)
     }
+
+    /// The minimum for a period above the table — the value `for_period` falls back
+    /// to. Named so a serializer recording the table does not have to probe it with
+    /// a sentinel period.
+    #[inline]
+    pub fn for_wider_periods(&self) -> u32 {
+        self.for_wider_periods
+    }
 }
 
 impl Default for MinCopies {

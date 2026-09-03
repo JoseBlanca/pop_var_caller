@@ -72,6 +72,7 @@ pub(crate) mod header;
 pub(crate) mod index;
 pub(crate) mod reader;
 pub(crate) mod record;
+pub(crate) mod segmentation_section;
 pub(crate) mod trailer;
 pub(crate) mod walk;
 pub(crate) mod writer;
@@ -918,6 +919,11 @@ mod tests {
     /// The same tomato-shaped header the encoder's own tests use, trimmed to what a file
     /// needs.
     fn a_header() -> Header {
+        let contigs = vec![ContigIdentity {
+            name: "SL4.0ch01".to_string(),
+            length: 90_863_682,
+            md5: Some([0x1b; 16]),
+        }];
         Header {
             format_version: FORMAT_VERSION,
             sample: "SRR7279481".to_string(),
@@ -925,11 +931,9 @@ mod tests {
                 name: "S_lycopersicum_chromosomes.4.00.fa".to_string(),
                 md5: Some([0x0a; 16]),
             },
-            contigs: vec![ContigIdentity {
-                name: "SL4.0ch01".to_string(),
-                length: 90_863_682,
-                md5: Some([0x1b; 16]),
-            }],
+            segmentation_inputs:
+                crate::ng::psp::segmentation_section::segmentation_inputs_for_tests(&contigs),
+            contigs,
             writer: WriterProvenance {
                 tool: "ng".to_string(),
                 version: "0.1.0".to_string(),

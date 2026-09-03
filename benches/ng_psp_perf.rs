@@ -330,6 +330,7 @@ fn check_the_corpus_is_the_shape_it_claims(shape: &CorpusShape, built: &[SampleL
 /// The header these stores carry: one contig long enough for the corpus, and the grid this shape
 /// cuts blocks on.
 fn a_header(shape: &CorpusShape, records: u64) -> Header {
+    let contig_length = records + 1_024;
     Header {
         format_version: FORMAT_VERSION,
         sample: "bench".to_string(),
@@ -339,9 +340,21 @@ fn a_header(shape: &CorpusShape, records: u64) -> Header {
         },
         contigs: vec![ContigIdentity {
             name: "chr1".to_string(),
-            length: records + 1_024,
+            length: contig_length,
             md5: None,
         }],
+        segmentation_inputs: pop_var_caller::ng::run::SegmentationInputs {
+            catalog: pop_var_caller::ng::repeat_catalog::RepeatCatalogHeader::no_catalog(
+                "ng_psp_perf",
+            ),
+            repeat_tract_criteria: pop_var_caller::ng::repeat_catalog::StrRepeatCriteria::default(),
+            analysed_regions: pop_var_caller::ng::region_typing::GenomeRegions::whole_contigs(&[
+                pop_var_caller::regions::ContigBounds {
+                    name: "chr1",
+                    length: contig_length as u32,
+                },
+            ]),
+        },
         writer: WriterProvenance {
             tool: "ng_psp_perf".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),

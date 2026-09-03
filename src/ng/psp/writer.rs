@@ -623,6 +623,18 @@ pub(crate) mod tests_support {
     /// A tomato-shaped header, with the block grid small enough that a handful of records cut
     /// several blocks.
     pub(crate) fn a_header(genomic_block_size_bp: u64) -> Header {
+        let contigs = vec![
+            ContigIdentity {
+                name: "SL4.0ch01".to_string(),
+                length: 90_863_682,
+                md5: Some([0x1b; 16]),
+            },
+            ContigIdentity {
+                name: "SL4.0ch02".to_string(),
+                length: 53_473_368,
+                md5: Some([0x2c; 16]),
+            },
+        ];
         let mut header = Header {
             format_version: FORMAT_VERSION,
             sample: "SRR7279481".to_string(),
@@ -630,18 +642,9 @@ pub(crate) mod tests_support {
                 name: "S_lycopersicum_chromosomes.4.00.fa".to_string(),
                 md5: Some([0x0a; 16]),
             },
-            contigs: vec![
-                ContigIdentity {
-                    name: "SL4.0ch01".to_string(),
-                    length: 90_863_682,
-                    md5: Some([0x1b; 16]),
-                },
-                ContigIdentity {
-                    name: "SL4.0ch02".to_string(),
-                    length: 53_473_368,
-                    md5: Some([0x2c; 16]),
-                },
-            ],
+            segmentation_inputs:
+                crate::ng::psp::segmentation_section::segmentation_inputs_for_tests(&contigs),
+            contigs,
             writer: WriterProvenance {
                 tool: "ng".to_string(),
                 version: "0.1.0".to_string(),

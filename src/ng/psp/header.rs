@@ -21,6 +21,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::{PspReadError, PspWriteError};
+use crate::ng::psp::segmentation_section::{self, WireSegmentation};
+use crate::ng::run::segments::SegmentationInputs;
 use crate::ng::types::Bp;
 
 /// A file's own account of how it was written: everything a reader needs before it touches
@@ -46,6 +48,11 @@ pub struct Header {
     pub contigs: Vec<ContigIdentity>,
     /// What produced the file and what it ran with.
     pub writer: WriterProvenance,
+    /// The ground the sample was analysed over, and what the segmentation that shaped
+    /// its observations was computed from — the operands of a calling run's
+    /// compatibility checks (spec `run_streaming.md` §6.1, §6.2). The wire shape is
+    /// [`crate::ng::psp::segmentation_section`]'s.
+    pub segmentation_inputs: SegmentationInputs,
     /// How this file encodes what it holds.
     pub manifest: Manifest,
 }
@@ -414,7 +421,7 @@ pub const FORMAT_VERSION: (u16, u16) = (1, 0);
 /// in Rust — a contig's length and the genomic block size — and the `toml` crate will
 /// *serialise* a value above this that its own parser then refuses. So the rule belongs in
 /// [`check_rules`] with the others, or the writer produces a file its own reader rejects.
-const MAX_TOML_INTEGER: u64 = i64::MAX as u64;
+pub(crate) const MAX_TOML_INTEGER: u64 = i64::MAX as u64;
 
 /// The smallest look-back window zstd will accept, as its exponent: 2^10 bytes.
 pub const MIN_LOOK_BACK_WINDOW_LOG: u8 = 10;
@@ -468,13 +475,18 @@ pub const DEFAULT_BLOCK_BYTE_CEILING: Option<u32> = None;
 /// The rules are written once and checked on both sides: the writer refuses to produce a
 /// file that breaks one, and the reader refuses to believe a file that does. Two copies of
 /// one rule are two things that can disagree.
-struct BrokenRule {
-    field: String,
-    reason: String,
+///
+/// `pub(crate)` because the segmentation section of the header lives in its own file
+/// ([`crate::ng::psp::segmentation_section`]) and reports its broken rules in the same
+/// shape.
+#[derive(Debug)]
+pub(crate) struct BrokenRule {
+    pub(crate) field: String,
+    pub(crate) reason: String,
 }
 
 impl BrokenRule {
-    fn new(field: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub(crate) fn new(field: impl Into<String>, reason: impl Into<String>) -> Self {
         BrokenRule {
             field: field.into(),
             reason: reason.into(),
@@ -683,15 +695,39 @@ fn check_rules(header: &Header) -> Result<(), BrokenRule> {
         return Err(BrokenRule::new("sample", "is empty"));
     }
     check_basename("reference.name", &header.reference.name)?;
+    check_contigs(&header.contigs)?;
+    check_basename("writer.input-reference", &header.writer.input_reference)?;
+    for input in &header.writer.input_alignments {
+        check_basename("writer.input-alignments", input)?;
+    }
+    for (name, value) in &header.writer.parameters {
+        if let ParameterValue::Float(number) = value
+            && !number.is_finite()
+        {
+            return Err(BrokenRule::new(
+                "writer.parameters",
+                format!("{name} is {number}, which has no TOML spelling"),
+            ));
+        }
+    }
 
-    if header.contigs.is_empty() {
+    segmentation_section::check_segmentation(&header.segmentation_inputs, &header.contigs)?;
+    check_manifest(&header.manifest)
+}
+
+/// The contig-list rules, split out of [`check_rules`] because the reader needs them
+/// **before** the rest: the segmentation section anchors its analysed spans to this
+/// list by name, so a duplicated or broken contig has to be refused as what it is,
+/// not as the span-resolution failure it would cause two lines later.
+fn check_contigs(contigs: &[ContigIdentity]) -> Result<(), BrokenRule> {
+    if contigs.is_empty() {
         return Err(BrokenRule::new(
             "contig",
             "is empty; a psp's coordinates mean nothing without the contig list they index",
         ));
     }
-    let mut seen = std::collections::HashSet::with_capacity(header.contigs.len());
-    for contig in &header.contigs {
+    let mut seen = std::collections::HashSet::with_capacity(contigs.len());
+    for contig in contigs {
         if contig.name.trim().is_empty() {
             return Err(BrokenRule::new("contig.name", "is empty"));
         }
@@ -727,23 +763,7 @@ fn check_rules(header: &Header) -> Result<(), BrokenRule> {
             ));
         }
     }
-
-    check_basename("writer.input-reference", &header.writer.input_reference)?;
-    for input in &header.writer.input_alignments {
-        check_basename("writer.input-alignments", input)?;
-    }
-    for (name, value) in &header.writer.parameters {
-        if let ParameterValue::Float(number) = value
-            && !number.is_finite()
-        {
-            return Err(BrokenRule::new(
-                "writer.parameters",
-                format!("{name} is {number}, which has no TOML spelling"),
-            ));
-        }
-    }
-
-    check_manifest(&header.manifest)
+    Ok(())
 }
 
 /// A path recorded in the header must be a basename.
@@ -920,11 +940,11 @@ fn check_encoding(name: &FieldName, encoding: FieldEncoding) -> Result<(), Broke
 // tables. Every field is a value before it is a table, because TOML requires it.
 
 /// Every MD5 travels as 32 lowercase hex characters, which is what a SAM `@SQ M5` is.
-fn hex_of(digest: [u8; 16]) -> String {
+pub(crate) fn hex_of(digest: [u8; 16]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn digest_of(field: &str, spelled: &str) -> Result<[u8; 16], BrokenRule> {
+pub(crate) fn digest_of(field: &str, spelled: &str) -> Result<[u8; 16], BrokenRule> {
     let wrong = || {
         BrokenRule::new(
             field,
@@ -954,6 +974,10 @@ struct WireHeader {
     #[serde(default)]
     contig: Vec<WireContig>,
     writer: WireWriter,
+    // Before the manifest, deliberately: the manifest's field declarations close the
+    // body, so tests (and people) can cut a body at `[[manifest.field]]` and keep every
+    // other section intact.
+    segmentation: WireSegmentation,
     manifest: WireManifest,
 }
 
@@ -1022,15 +1046,26 @@ struct WireFieldSpec {
 
 impl From<&Header> for WireHeader {
     fn from(header: &Header) -> Self {
+        // Exhaustive, so a field added to `Header` in a later step fails to compile
+        // here, on the encode side — not only in the decode literal, where a default
+        // could be filled in without the writer ever recording the field.
+        let Header {
+            format_version,
+            sample,
+            reference,
+            contigs,
+            segmentation_inputs,
+            writer,
+            manifest,
+        } = header;
         WireHeader {
-            format_version: format!("{}.{}", header.format_version.0, header.format_version.1),
-            sample: header.sample.clone(),
+            format_version: format!("{}.{}", format_version.0, format_version.1),
+            sample: sample.clone(),
             reference: WireReference {
-                name: header.reference.name.clone(),
-                md5: header.reference.md5.map(hex_of),
+                name: reference.name.clone(),
+                md5: reference.md5.map(hex_of),
             },
-            contig: header
-                .contigs
+            contig: contigs
                 .iter()
                 .map(|contig| WireContig {
                     name: contig.name.clone(),
@@ -1039,21 +1074,20 @@ impl From<&Header> for WireHeader {
                 })
                 .collect(),
             writer: WireWriter {
-                tool: header.writer.tool.clone(),
-                version: header.writer.version.clone(),
-                subcommand: header.writer.subcommand.clone(),
-                input_alignments: header.writer.input_alignments.clone(),
-                input_reference: header.writer.input_reference.clone(),
-                command_line: header.writer.command_line.clone(),
-                created: header.writer.created,
-                parameters: header.writer.parameters.clone(),
+                tool: writer.tool.clone(),
+                version: writer.version.clone(),
+                subcommand: writer.subcommand.clone(),
+                input_alignments: writer.input_alignments.clone(),
+                input_reference: writer.input_reference.clone(),
+                command_line: writer.command_line.clone(),
+                created: writer.created,
+                parameters: writer.parameters.clone(),
             },
             manifest: WireManifest {
-                genomic_block_size_bp: header.manifest.genomic_block_size_bp.get(),
-                block_byte_ceiling: header.manifest.block_byte_ceiling,
-                look_back_window_log: header.manifest.look_back_window_log,
-                field: header
-                    .manifest
+                genomic_block_size_bp: manifest.genomic_block_size_bp.get(),
+                block_byte_ceiling: manifest.block_byte_ceiling,
+                look_back_window_log: manifest.look_back_window_log,
+                field: manifest
                     .fields
                     .iter()
                     .map(|field| {
@@ -1068,6 +1102,7 @@ impl From<&Header> for WireHeader {
                     })
                     .collect(),
             },
+            segmentation: WireSegmentation::from_inputs(segmentation_inputs, contigs),
         }
     }
 }
@@ -1109,12 +1144,20 @@ impl WireHeader {
                 })
             })
             .collect::<Result<Vec<_>, BrokenRule>>()?;
+        // The contig rules run before the segmentation section is resolved, because the
+        // section anchors each analysed span to this list by name — resolving against a
+        // duplicated or zero-length contig would report the span as broken when the
+        // contig is. `check_rules` runs the same checks again afterwards; one function,
+        // called twice, cannot disagree with itself.
+        check_contigs(&contigs)?;
+        let segmentation_inputs = self.segmentation.into_inputs(&contigs)?;
 
         Ok(Header {
             format_version,
             sample: self.sample,
             reference,
             contigs,
+            segmentation_inputs,
             writer: WriterProvenance {
                 tool: self.writer.tool,
                 version: self.writer.version,
@@ -1360,6 +1403,18 @@ mod tests {
     /// A header that says what a real tomato run says, minus the eleven contigs the shape of
     /// these tests does not need.
     fn a_written_header() -> Header {
+        let contigs = vec![
+            ContigIdentity {
+                name: "SL4.0ch00".to_string(),
+                length: 9_643_250,
+                md5: Some([0x1b; 16]),
+            },
+            ContigIdentity {
+                name: "SL4.0ch01".to_string(),
+                length: 90_863_682,
+                md5: None,
+            },
+        ];
         Header {
             format_version: FORMAT_VERSION,
             sample: "SRR7279481".to_string(),
@@ -1367,18 +1422,8 @@ mod tests {
                 name: "S_lycopersicum_chromosomes.4.00.fa".to_string(),
                 md5: Some([0x0a; 16]),
             },
-            contigs: vec![
-                ContigIdentity {
-                    name: "SL4.0ch00".to_string(),
-                    length: 9_643_250,
-                    md5: Some([0x1b; 16]),
-                },
-                ContigIdentity {
-                    name: "SL4.0ch01".to_string(),
-                    length: 90_863_682,
-                    md5: None,
-                },
-            ],
+            segmentation_inputs: segmentation_section::segmentation_inputs_for_tests(&contigs),
+            contigs,
             writer: WriterProvenance {
                 tool: "ng".to_string(),
                 version: "0.1.0".to_string(),
@@ -1546,6 +1591,21 @@ mod tests {
         assert_eq!(header_bytes, bytes.len());
     }
 
+    /// The default run's shape — analysed regions covering whole contigs — encodes and
+    /// decodes through the full header path. The shared fixture deliberately uses proper
+    /// sub-spans, so without this a `>` → `>=` regression in the span-end rule would
+    /// refuse every whole-genome run while the suite stayed green.
+    #[test]
+    fn a_whole_genome_header_round_trips() {
+        let mut written = a_written_header();
+        let bounds = segmentation_section::contig_bounds_of(&written.contigs);
+        written.segmentation_inputs.analysed_regions =
+            crate::ng::region_typing::GenomeRegions::whole_contigs(&bounds);
+        let bytes = written.encode().expect("a whole-genome ground encodes");
+        let (read_back, _) = decoded(&bytes).expect("and decodes");
+        assert_eq!(read_back, written);
+    }
+
     /// The second half of `decode`'s return is **where block 0 begins**, and on a real file
     /// that is not the end of the buffer. A header alone cannot tell the two apart: the
     /// round-trip fixture's correct answer and its buffer length are the same number, so
@@ -1699,6 +1759,36 @@ mod tests {
             "steps-per-unit = 4096",
             "encoding = \"fixed-width-integer\"",
             "width-bytes = 4",
+            // The segmentation section: an analysed span, a routing criterion spelled
+            // as the short decimal a person would write, and the catalog's identity.
+            "[[segmentation.analysed-region]]",
+            "min-purity = 0.93",
+            "[segmentation.catalog.scan]",
+            "[segmentation.catalog.built-under]",
+            "[[segmentation.catalog.contig]]",
+            "tool-version = \"trf-port-0.9.1\"",
+            // Every key the section writes, pinned by name: a round trip cannot catch a
+            // serde field rename, and a renamed key orphans every file already written.
+            "contig = ",
+            "start = ",
+            "end = ",
+            "period-min = ",
+            "period-max = ",
+            "min-copies-by-period = ",
+            "min-copies-for-wider-periods = ",
+            "min-score = ",
+            "bundle-threshold-bp = ",
+            "min-flank-bp = ",
+            "max-str-len-bp = ",
+            "reference-md5 = ",
+            "match-reward = ",
+            "mismatch-penalty = ",
+            "min-copies = ",
+            "length = ",
+            "offset = ",
+            "line-bases = ",
+            "line-width = ",
+            "longest-tract-bp = ",
         ] {
             assert!(body.contains(expected), "{expected:?} missing from: {body}");
         }
@@ -1876,12 +1966,22 @@ mod tests {
                 md5: Some([(scaffold % 256) as u8; 16]),
             })
             .collect();
+        // The segmentation section grows with the assembly too — an analysed span and a
+        // catalog row per scaffold — so rebuilding it here makes this the whole
+        // header's worst case, not just the contig list's.
+        fragmented.segmentation_inputs =
+            segmentation_section::segmentation_inputs_for_tests(&fragmented.contigs);
 
         let bytes = fragmented.encode().expect("a fragmented assembly encodes");
         assert!(
             bytes.len() > 1024 * 1024,
             "the fixture must exceed the old 1 MiB cap to be testing anything; it is {} bytes",
             bytes.len()
+        );
+        eprintln!(
+            "30,000 scaffolds with digests, segmentation included: {} bytes of a {} ceiling",
+            bytes.len(),
+            MAX_HEADER_BODY_BYTES
         );
         let (read_back, _) = decoded(&bytes).expect("and decodes");
         assert_eq!(read_back.contigs.len(), 30_000);
@@ -2060,6 +2160,29 @@ mod tests {
                 }),
                 "1/0",
             ),
+            (
+                "a segmentation recording no analysed ground at all",
+                Box::new(|header| {
+                    header.segmentation_inputs.analysed_regions =
+                        crate::ng::region_typing::GenomeRegions::whole_contigs(&[])
+                }),
+                "records the ground",
+            ),
+            (
+                "a catalog contig name holding a newline",
+                Box::new(|header| {
+                    header.segmentation_inputs.catalog.contigs[0].name =
+                        "evil\nfabricated-key = \"x\"".to_string()
+                }),
+                "holds whitespace or a control character",
+            ),
+            (
+                "a catalog tool version holding a newline",
+                Box::new(|header| {
+                    header.segmentation_inputs.catalog.tool_version = "trf\nport".to_string()
+                }),
+                "holds whitespace or a control character",
+            ),
         ];
 
         for (what, break_it, expected) in broken {
@@ -2097,6 +2220,43 @@ mod tests {
                  {expected_of_the_reader:?}"
             );
         }
+    }
+
+    /// The segmentation section's rules fire through the whole header path on both
+    /// sides — the writer refuses to produce the file and the reader refuses to believe
+    /// it. The section's own tests cover each rule; this pins the wiring.
+    #[test]
+    fn a_broken_segmentation_section_is_refused_by_writer_and_reader_alike() {
+        // Writer side: analysed spans built against a longer contig list than the
+        // header declares.
+        let mut broken = a_written_header();
+        let a_third_contig = ContigIdentity {
+            name: "SL4.0ch02".to_string(),
+            length: 1_000_000,
+            md5: None,
+        };
+        let mut three = broken.contigs.clone();
+        three.push(a_third_contig);
+        broken.segmentation_inputs = segmentation_section::segmentation_inputs_for_tests(&three);
+        let refused = refusal(
+            broken.encode(),
+            "the writer must refuse a span outside the file's contig list",
+        );
+        assert!(
+            refused.to_string().contains("segmentation.analysed-region"),
+            "got {refused}"
+        );
+
+        // Reader side: the same file-level fact, met in a file — a span naming a contig
+        // the header does not declare.
+        let body = toml::to_string_pretty(&WireHeader::from(&a_written_header()))
+            .expect("encodes")
+            .replace("contig = \"SL4.0ch00\"", "contig = \"SL4.0ch09\"");
+        let refused = refusal(
+            decoded(&framed(&body)),
+            "the reader must refuse a span naming an undeclared contig",
+        );
+        assert!(refused.to_string().contains("SL4.0ch09"), "got {refused}");
     }
 
     /// An MD5 is 32 **lowercase** hex characters, which is what a SAM `@SQ M5` is. The

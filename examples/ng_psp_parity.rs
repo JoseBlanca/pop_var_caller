@@ -239,6 +239,32 @@ fn an_ng_header(
     grid_bp: u32,
 ) -> Header {
     let parsed = production.header();
+    let contigs: Vec<ContigIdentity> = parsed
+        .chromosomes
+        .iter()
+        .map(|chromosome| ContigIdentity {
+            name: chromosome.name.clone(),
+            length: u64::from(chromosome.length),
+            md5: as_an_md5(&chromosome.md5),
+        })
+        .collect();
+    // The production file records no segmentation, so the section says what this
+    // example truly did: the whole of every contig, under the default criteria, from
+    // no catalog (an empty catalog table with a zero digest).
+    let bounds: Vec<pop_var_caller::regions::ContigBounds> = contigs
+        .iter()
+        .map(|contig| pop_var_caller::regions::ContigBounds {
+            name: &contig.name,
+            length: contig.length.min(u64::from(u32::MAX)) as u32,
+        })
+        .collect();
+    let segmentation_inputs = pop_var_caller::ng::run::SegmentationInputs {
+        catalog: pop_var_caller::ng::repeat_catalog::RepeatCatalogHeader::no_catalog(
+            "ng_psp_parity",
+        ),
+        repeat_tract_criteria: pop_var_caller::ng::repeat_catalog::StrRepeatCriteria::default(),
+        analysed_regions: pop_var_caller::ng::region_typing::GenomeRegions::whole_contigs(&bounds),
+    };
     Header {
         format_version: FORMAT_VERSION,
         sample: parsed.sample.clone(),
@@ -246,15 +272,8 @@ fn an_ng_header(
             name: parsed.reference.clone(),
             md5: None,
         },
-        contigs: parsed
-            .chromosomes
-            .iter()
-            .map(|chromosome| ContigIdentity {
-                name: chromosome.name.clone(),
-                length: u64::from(chromosome.length),
-                md5: as_an_md5(&chromosome.md5),
-            })
-            .collect(),
+        contigs,
+        segmentation_inputs,
         writer: WriterProvenance {
             tool: "ng_psp_parity".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -626,6 +645,7 @@ fn check_everything_the_store_holds_that_is_not_a_record(
         sample,
         reference,
         contigs,
+        segmentation_inputs,
         writer,
         manifest,
     } = ng.header();
@@ -639,6 +659,10 @@ fn check_everything_the_store_holds_that_is_not_a_record(
     assert_eq!(
         *contigs, handed.contigs,
         "the contig list read back — every name, length and md5"
+    );
+    assert_eq!(
+        *segmentation_inputs, handed.segmentation_inputs,
+        "the segmentation inputs read back — analysed regions, criteria and catalog"
     );
     assert_eq!(*manifest, handed.manifest, "the manifest read back");
     // **The provenance is compared in two halves, because `create` adds to it.** It records the
