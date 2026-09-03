@@ -24,10 +24,12 @@
 //! which is what makes *frozen*, *pulled back part way* and *free* three values instead of
 //! three code paths to keep in step (`doc/devel/ng/spec/calling_em_loop.md` §5.1).
 //!
-//! **Their bodies are not built yet, and a run that asks for one is refused** — see
-//! [`CallingLoopConfig::validate`]. The refusal is not advisory: [`LocusGenotyper::call_locus`]
-//! takes a [`RunnableCallingLoopConfig`], which has one constructor and it is the check, so a
-//! setting this caller will not honour cannot reach the loop at all.
+//! **The slippage round's body is built** — the arithmetic in [`slippage_refit`], the round
+//! itself in the loop's driver — and a non-zero `max_rounds` now validates. **Discovery's is
+//! not, and a run that asks for it is still refused** — see [`CallingLoopConfig::validate`].
+//! The refusal is not advisory: [`LocusGenotyper::call_locus`] takes a
+//! [`RunnableCallingLoopConfig`], which has one constructor and it is the check, so a setting
+//! this caller will not honour cannot reach the loop at all.
 //!
 //! ## What is deliberately not configured here
 //!
@@ -49,6 +51,7 @@
 
 pub mod discovery;
 pub mod repeat_tract_parameters;
+pub(crate) mod slippage_refit;
 pub mod summarise_condition;
 
 use std::num::NonZeroU32;
@@ -440,12 +443,14 @@ impl CallingLoopConfig {
     /// are no longer refused here because they are no longer *expressible*, held instead by
     /// [`MinAltReads`] and by [`NonZeroU32`].
     ///
-    /// **A setting whose body is not built yet.** The slippage re-fit and discovery ship as
-    /// values with no implementation behind them; the machinery arrives with the measurements
-    /// that decide their defaults (`doc/devel/ng/impl_plan/calling_bakeoffs.md`). Until then
-    /// a run that asks for either is stopped here, because the alternative — accepting the
-    /// setting and running the frozen loop anyway — would report a measurement of the arm
-    /// that was never run.
+    /// **A setting whose body is not built yet.** Discovery ships as a value with no
+    /// implementation behind it; the machinery arrives with the measurements that decide its
+    /// default (`doc/devel/ng/impl_plan/calling_bakeoffs.md`). Until then a run that asks for
+    /// it is stopped here, because the alternative — accepting the setting and running the
+    /// loop without discovery anyway — would report a measurement of an arm that was never
+    /// run. **The slippage re-fit's body is built** (the tract-accuracy program's L3,
+    /// `doc/devel/ng/research/tract_accuracy_program_report.md`), so a non-zero `max_rounds`
+    /// is now a setting this caller honours and validates.
     ///
     /// **Range refusals come first**, so a configuration that is both out of range and
     /// unbuilt hears about the range: that half is the caller's to fix today, where the other
@@ -484,13 +489,8 @@ impl CallingLoopConfig {
                 },
             );
         }
-        // The two not-yet-built settings come last, so a configuration that is *both*
+        // The one not-yet-built setting comes last, so a configuration that is *both*
         // out of range and unbuilt is told about the range first.
-        if !refit.is_frozen() {
-            return Err(CallingLoopConfigError::SlippageRefitNotBuilt {
-                rounds: refit.max_rounds,
-            });
-        }
         if !self.discovery.is_off() {
             return Err(CallingLoopConfigError::DiscoveryNotBuilt {
                 mode: self.discovery.mode,
@@ -550,7 +550,7 @@ impl Default for RunnableCallingLoopConfig {
 /// rather than asserted — everything else in `calling/` panics, because everything else it
 /// refuses is a wiring mistake (`doc/devel/ng/spec/calling_em_loop.md` §8).
 ///
-/// `PartialEq` but not `Eq`: three of the five variants carry the offending `f64` verbatim,
+/// `PartialEq` but not `Eq`: three of the four variants carry the offending `f64` verbatim,
 /// including the not-a-number that may be why it was refused.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[non_exhaustive]
@@ -576,13 +576,6 @@ pub enum CallingLoopConfigError {
          {threshold}"
     )]
     RoundConvergenceThresholdOutOfRange { threshold: f64 },
-    /// Per-locus slippage re-fitting was asked for and its body is not built.
-    #[error(
-        "per-locus slippage re-fitting is not built yet, and `slippage_refit.max_rounds` \
-         asked for {rounds}; it ships frozen at zero rounds, and accepting this setting would \
-         run the frozen loop and report it as the re-fitted arm"
-    )]
-    SlippageRefitNotBuilt { rounds: u32 },
     /// Allele discovery was asked for and its body is not built.
     #[error(
         "`discovery.mode` asked for {mode}, which is not built yet; it ships off, and \
@@ -717,21 +710,22 @@ mod tests {
         );
     }
 
-    /// The two settings whose bodies are not built are refused by name, **not run as the
-    /// default**.
+    /// The one setting whose body is not built — discovery — is refused by name, **not run as
+    /// the default**; the slippage re-fit's body is built, so a non-zero round count now
+    /// validates.
     ///
-    /// **Silently honouring the default instead is the failure this exists to stop**, and it
-    /// is worse than a crash: a measurement harness would set the re-fit on, get the frozen
-    /// loop's answers back, and report them as the re-fitted arm's. The two arms would then
-    /// agree exactly, which reads as a finding.
+    /// **Silently honouring the default instead is the failure the refusal exists to stop**,
+    /// and it is worse than a crash: a measurement harness would set discovery on, get the
+    /// plain loop's answers back, and report them as the discovery arm's. The two arms would
+    /// then agree exactly, which reads as a finding.
     #[test]
     fn a_setting_whose_body_is_not_built_is_refused_rather_than_ignored() {
+        // The re-fit's rounds are the setting that used to be refused here
+        // (`SlippageRefitNotBuilt`, retired when the body was built): asking for three rounds
+        // is now a configuration this caller runs.
         let mut refitting = CallingLoopConfig::default();
         refitting.slippage_refit.max_rounds = 3;
-        assert_eq!(
-            refitting.validate(),
-            Err(CallingLoopConfigError::SlippageRefitNotBuilt { rounds: 3 })
-        );
+        assert!(refitting.validate().is_ok());
 
         for mode in [
             DiscoveryMode::AgainstFrozenFrequencies,
@@ -824,23 +818,22 @@ mod tests {
         }
     }
 
-    /// With both outer loops asked for at once, the slippage re-fit is the one reported.
+    /// With both outer loops asked for at once, discovery — the one whose body is not built —
+    /// is the refusal reported; the re-fit's rounds no longer stand in its way.
     ///
-    /// **This is the case a measurement harness hits first**, since a bake-off arm sets both
-    /// — and swapping the two checks changes what a run is told while leaving every other
-    /// test green, which is measured: the swap survived a sixteen-mutation battery.
-    ///
-    /// The tie-break itself is arbitrary and is pinned rather than argued: what matters is
-    /// that it is stable, so an operator fixing one refusal does not find the other waiting
-    /// in a different order next time.
+    /// **This is the case a measurement harness hits first**, since a bake-off arm sets both.
+    /// While both bodies were unbuilt the re-fit was the one reported; building it moved the
+    /// refusal to the setting that still has none, which is what a harness needs to hear.
     #[test]
-    fn both_unbuilt_settings_at_once_report_the_slippage_refit() {
+    fn both_outer_settings_at_once_report_the_unbuilt_discovery() {
         let mut both = CallingLoopConfig::default();
         both.slippage_refit.max_rounds = 3;
         both.discovery.mode = DiscoveryMode::AgainstFullConvergence;
         assert_eq!(
             both.validate(),
-            Err(CallingLoopConfigError::SlippageRefitNotBuilt { rounds: 3 })
+            Err(CallingLoopConfigError::DiscoveryNotBuilt {
+                mode: DiscoveryMode::AgainstFullConvergence
+            })
         );
     }
 
@@ -879,16 +872,6 @@ mod tests {
             }
         );
         assert!(refusal.to_string().contains("-7.5"), "{refusal}");
-
-        let mut rounds = CallingLoopConfig::default();
-        rounds.slippage_refit.max_rounds = 3;
-        assert!(
-            rounds
-                .validate()
-                .expect_err("not built")
-                .to_string()
-                .contains("asked for 3")
-        );
     }
 
     /// **Four things `validate` used to refuse are now values nobody can write**, and that is
@@ -916,9 +899,8 @@ mod tests {
     /// own reads set its slippage numbers outright, and a range check that refused it would
     /// make one of the three settings the design compares unreachable.
     ///
-    /// The shape it is checked in is the one a measurement would use: free *and* frozen, so
-    /// the configuration is valid on the range check and refused only by the not-yet-built
-    /// rule, which is the honest answer today.
+    /// The shape it is checked in is the one a measurement uses: free **with rounds on**,
+    /// which is HipSTR's setting and now a configuration this caller runs.
     #[test]
     fn zero_pull_back_is_the_free_setting_and_passes_the_range_check() {
         let mut free = CallingLoopConfig::default();
@@ -927,20 +909,17 @@ mod tests {
         free.slippage_refit.level_pull_back_slipped_reads = 0.0;
         assert!(free.validate().is_ok());
 
-        // And with rounds on, it is refused for being unbuilt rather than out of range.
+        // And with rounds on — the shape a measurement arm actually sets — it still runs.
         free.slippage_refit.max_rounds = 1;
-        assert_eq!(
-            free.validate(),
-            Err(CallingLoopConfigError::SlippageRefitNotBuilt { rounds: 1 })
-        );
+        assert!(free.validate().is_ok());
     }
 
     /// A configuration that is both out of range and not-yet-built is told about the range
     /// first, because that half is the caller's to fix today.
     ///
     /// **Checked across every range refusal, not at one example.** Each of the three is
-    /// crossed with both unbuilt settings at once, so the ordering is pinned as a property
-    /// rather than by a single pairing.
+    /// crossed with the unbuilt setting, so the ordering is pinned as a property rather than
+    /// by a single pairing.
     #[test]
     fn an_out_of_range_value_outranks_a_setting_that_is_not_built() {
         /// One way to put a value out of range, named so a failure says which.
@@ -963,7 +942,8 @@ mod tests {
         for (which, break_it) in out_of_range {
             let mut config = CallingLoopConfig::default();
             break_it(&mut config);
-            // Both unbuilt settings asked for at the same time.
+            // The unbuilt setting asked for at the same time — and re-fit rounds beside it,
+            // which are a built setting and must not change what is reported.
             config.slippage_refit.max_rounds = 2;
             config.discovery.mode = DiscoveryMode::AgainstFullConvergence;
 
@@ -971,12 +951,8 @@ mod tests {
                 .validate()
                 .expect_err("this configuration is refused");
             assert!(
-                !matches!(
-                    refusal,
-                    CallingLoopConfigError::SlippageRefitNotBuilt { .. }
-                        | CallingLoopConfigError::DiscoveryNotBuilt { .. }
-                ),
-                "the {which} problem should outrank the unbuilt settings, got {refusal}"
+                !matches!(refusal, CallingLoopConfigError::DiscoveryNotBuilt { .. }),
+                "the {which} problem should outrank the unbuilt setting, got {refusal}"
             );
         }
     }

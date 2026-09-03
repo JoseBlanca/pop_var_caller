@@ -693,7 +693,45 @@ bar: flips against the L4-plus-λ0.20 baseline once the slate fixes λ (or again
   requires); the 242-tract subset scored directly per the plan; and the interaction with
   fitted per-stratum rows (L6) measured at stage end.
 
-*(build to follow; measurements after the runs they quote)*
+**Results (written after the runs they quote; arms under `tmp/tract_program/l3_arms/`).**
+
+The re-fit body is built inside the designed interface (`slippage_refit.rs`, the round driver
+in `summarise_condition.rs`; production's formulas with the pull-backs as settings, the
+spec's posterior-weighted attribution in place of production's hard assignment; granularity
+mirrored from `em.rs` — one pooled count set per locus, one level multiplier, per-cell shape
+pull-back — with the deviations documented at the module head). 6,060 lib tests, fmt, clippy
+green. **Two identity controls hold**: frozen (`rounds = 0`) is byte-identical to the L4 arm,
+and rounds switched on at `--defaults` is byte-identical too — every cell is a shipped
+constant there, outside the re-fit, so the rounds measure and adopt nothing. The re-fit
+therefore engages only above fitted per-stratum rows, which folds the planned L3×L6
+interaction into the measurement by construction.
+
+On the fitted rows (`fitted_slippage_hg002_30x.toml`), 30×:
+
+| arm (λ 0.05) | homopolymer | period 2+ | spurious het | collapsed het |
+|---|---:|---:|---:|---:|
+| fitted rows, frozen | 0.8932 | 0.8983 | 175 + 94 | 21 + 7 |
+| + re-fit, designed pull-backs (50/20, ≤3 rounds) | 0.8934 | 0.8986 | 172 + 93 | 23 + 7 |
+| + re-fit, free (HipSTR's zero pull-back) | 0.8950 | 0.8927 | 135 + 88 | 46 + 26 |
+
+**The pulled-back re-fit is a near-no-op: 7 verdict flips of 6,993, net +1 tract**
+(4 spurious hets fixed against 2 new collapsed and 1 silenced); at λ 0.20 the same
+(+0.02 / 0.00). The free setting is the EM degeneracy the pull-back exists to prevent,
+measured: collapsed hets double and period 2+ loses 0.56 points.
+
+**Verdict proposed: discard as a default** — the owner's lever, so the number goes to the
+Checkpoint 1 sitting: **+1 net tract of 6,993 at the designed settings**. The machinery stays
+built and frozen at zero rounds (building it was the spec's own requirement — §12's Q2 is now
+answered), with the env switch remaining experiment-only.
+
+**A finding that re-aims L6, recorded here because this measurement produced it:** the fitted
+per-stratum rows themselves — worth +0.18 before L4 — now **cost homopolymers 0.4–0.5
+points** against plain defaults (64 flips: 28 right→spurious at homopolymers against
+16 collapsed fixed and 10 silent tracts recovered; net ≈ −4). Two readings, unresolved: the
+corrected observations no longer carry the corruption the low fitted rates were fitted on —
+**the rows are stale, measured on the pre-L4 caller's observations** — or low per-stratum
+rates genuinely over-trust one-unit reads. L6's real question is now "re-fit the strata on
+the fixed caller and re-measure", not "build the fit-mode command around the old rows".
 
 ---
 

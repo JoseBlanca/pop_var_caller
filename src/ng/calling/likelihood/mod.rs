@@ -1769,6 +1769,14 @@ impl<ModelScratch> SsrRowScratch<ModelScratch> {
         &mut self.emissions
     }
 
+    /// The whole cache to read — what the slippage re-fit copies out per row, because this
+    /// one buffer is reused across rows and only the last row's emissions survive a table
+    /// build. Meaningful between a row's fill and the next row's
+    /// [`prepare_emissions`](Self::prepare_emissions).
+    pub fn emissions(&self) -> &[f64] {
+        &self.emissions
+    }
+
     /// The decayed junk weights of the current locus, for the row to clear and refill —
     /// meaningful only after the row has filled it for this locus, which it does exactly where
     /// the junk decay is below 1.0.
