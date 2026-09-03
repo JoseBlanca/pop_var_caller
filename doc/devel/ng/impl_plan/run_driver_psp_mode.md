@@ -56,16 +56,17 @@ settled 2026-08-30; direct mode completed 2026-09-01 and is this plan's oracle.
   refusal is the behaviour), the trailer's contents, the block byte ceiling's default
   (`psp_file_format.md` §12 q2).
 
-## Questions routed upstream — two ruled, one pending
+## Questions routed upstream — all three ruled (owner, 2026-09-03)
 
-1. **The record count is dropped from the header** (owner, 2026-09-03; spec §6.1 amended).
+1. **The record count is dropped from the header** (spec §6.1 amended).
    The census identity's count travels beside the header — `PileupIdentity::of_header`
    already takes it as its own argument, supplied by `WriteStats` — so Milestone A builds
    the header without it.
-2. **§6.3 (no boundary digest, no `writer_version`) still awaits the owner's ruling** — the
-   spec says so itself. This plan proceeds under the decision as written; a reversal touches
-   Milestone A only.
-3. **The walk's concurrency is ruled** (owner, 2026-09-03; spec §5.2 and §11 q2 amended):
+2. **§6.3 confirmed: no boundary digest, no `writer_version`** (spec §6.3 and arch §4/§6
+   amended) — a cohort whose files cut their blocks in different places must never be
+   refused; alignment is a property same-block-size files get from the coordinate grid by
+   construction, never one a run demands.
+3. **The walk's concurrency is ruled** (spec §5.2 and §11 q2 amended):
    `generate-psps` processes its samples **one at a time, in the order given** — no
    samples-in-flight knob, no in-process fan-out. Each sample's generation is independent,
    so a cohort is parallelised by running invocations, typically one sample each. That

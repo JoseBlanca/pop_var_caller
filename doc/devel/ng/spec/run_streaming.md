@@ -773,11 +773,15 @@ numbering from the tables it read and every sample's identifiers are remapped in
 refused is a table that cannot be merged — two read groups in one sample sharing an `@RG ID`, or a
 sample whose table is absent — because neither can be renumbered without guessing.
 
-### 6.3 The header does not describe where the psp's blocks fall — **owner's ruling wanted**
+### 6.3 The header does not describe where the psp's blocks fall — **ruled, 2026-09-03**
 
 **Decision: the header carries no digest of the file's block boundaries, and no `writer_version`
-field.** This is the one decision in this document nobody has ruled on, and it is flagged here
-because it gives something up.
+field.** Confirmed by the owner 2026-09-03, with the reason stated stronger than this section
+had it: a cohort whose files cut their blocks in different places **must not be refused**. In
+the production caller, psps cut at the same points were more memory-efficient; whether that
+holds in ng is unmeasured, and either way alignment is a property files may have — the
+coordinate-grid cut (`psp_file_format.md` §4.1) gives it to same-block-size files by
+construction — never one a run demands.
 
 **What such a digest would be for.** If the calling stage merged the cohort in lockstep — block *k*
 of every sample covering the same stretch of genome, so no sample's data ever waited for another's

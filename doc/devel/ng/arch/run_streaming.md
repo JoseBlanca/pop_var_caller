@@ -709,8 +709,8 @@ pub struct PspHeader {
 }
 ```
 
-**No `BlockBoundariesDigest`, no `writer_version` — dropped, spec §6.3, flagged there for the
-owner.** No code path looks at two samples' blocks together, so boundary equality has no
+**No `BlockBoundariesDigest`, no `writer_version` — dropped, spec §6.3, ruled by the owner
+2026-09-03: files whose blocks fall in different places must never be refused.** No code path looks at two samples' blocks together, so boundary equality has no
 consumer; format versioning belongs to the encoding spec. The one restriction the encoding spec
 inherits: block cuts are a function of the observation stream alone, so the file is byte-identical
 across worker counts (spec §6.3, §12.1).
@@ -921,8 +921,9 @@ the merge, and §8 below records them as still owed.
   consumers impossible to desynchronise — spec §5.2.
 - **The psp reader serves segments; blocks exist only inside the writer and reader** — spec §3.3;
   their sizing is wholly the encoding spec's — spec §6.3, §10.
-- **The header carries no boundary digest and no writer version** — spec §6.3, **flagged for the
-  owner as a reversal of an earlier draft**.
+- **The header carries no boundary digest and no writer version** — spec §6.3, ruled by the
+  owner 2026-09-03: block alignment across files is a property a cohort may have, never one a
+  run demands.
 - **Eight refusal variants, eight axes**, and each one compares a different pair of things.
   `NoAlignmentFiles` asks whether the run has a cohort at all; `ParametersAreForAnotherCohort`
   compares the parameters to the run; `NotEnoughFileDescriptors` compares the run to the process;
