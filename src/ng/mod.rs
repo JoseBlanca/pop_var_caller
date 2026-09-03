@@ -69,6 +69,7 @@ pub mod reference_info;
 pub mod region_typing;
 pub mod repeat_catalog;
 pub mod run;
+pub mod segmentation_inputs;
 pub mod tandem_repeat;
 pub mod types;
 pub mod vcf;

@@ -17,6 +17,12 @@ use crate::ng::types::GenomeRegion;
 
 use super::RunError;
 
+/// Re-exported from its own module so `ng::run`'s call sites keep their import path.
+/// [`SegmentationInputs`] moved to a top-level home when the psp header started carrying it
+/// ([`crate::ng::psp`]) — an interchange type both stages hold belongs to neither
+/// (`doc/devel/ng/impl_plan/run_driver_psp_mode.md`, Checkpoint A).
+pub use crate::ng::segmentation_inputs::SegmentationInputs;
+
 /// The run's segments, in genome order, beside the values they were computed from.
 ///
 /// **Held whole rather than streamed**, because every sample needs the same list and the
@@ -122,58 +128,6 @@ impl std::fmt::Debug for Segmentation {
             .field("segments", &self.segments.len())
             .field("analysed_regions", &self.analysed_regions.len())
             .finish_non_exhaustive()
-    }
-}
-
-/// The values a segmentation is a function of.
-///
-/// Two different questions are asked of this record, and each mode asks a different one
-/// (spec §6.2): whether a stored file was written over the same ground the run analyses, and
-/// whether it was written under the same catalog and the same repeat-tract criteria. Both
-/// refusals name the field that differs, because "these two disagree" leaves a user nothing to
-/// fix.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SegmentationInputs {
-    /// The catalog file's own header, **reused whole rather than restated**: it already
-    /// carries the whole-reference digest, the criteria the catalog was built under, the
-    /// scan weights and the tool version.
-    pub catalog: RepeatCatalogHeader,
-    /// The criteria the *reader* asked with, which is what decides where a segment ends: which
-    /// repeat periods count, how pure a tract must be, how close two tracts must be to be
-    /// bundled.
-    ///
-    /// Not the same value as `catalog.built_under`: the catalog is built below every floor a
-    /// reader might ask with, so that a reader filters rather than re-scans.
-    pub repeat_tract_criteria: StrRepeatCriteria,
-    /// The regions the run was asked to analyse — the field a user actually changes between
-    /// runs, and the one compared across a cohort of stored files.
-    pub analysed_regions: GenomeRegions,
-}
-
-impl SegmentationInputs {
-    /// The name of the first field that differs, or `None` when the two agree.
-    ///
-    /// **A name rather than a `bool`**: a refusal that says only "these two segmentations
-    /// differ" leaves the user nothing to act on (spec §6.1). The names are written to be read
-    /// inside a sentence — arch §5's refusal renders them as "written under a different
-    /// {field}" — so they are noun phrases in the user's vocabulary, not field identifiers.
-    ///
-    /// **The order is the order a person should fix them in**, and it is deliberate: the
-    /// catalog carries the reference's identity, so a catalog difference makes the other two
-    /// comparisons meaningless. Criteria come next because they decide where segments end;
-    /// the analysed regions last, because they are the one a user changes on purpose.
-    #[must_use]
-    pub fn first_difference(&self, other: &Self) -> Option<&'static str> {
-        if self.catalog != other.catalog {
-            return Some("repeat catalog");
-        }
-        if self.repeat_tract_criteria != other.repeat_tract_criteria {
-            return Some("set of repeat-tract criteria");
-        }
-        if self.analysed_regions != other.analysed_regions {
-            return Some("set of analysed regions");
-        }
-        None
     }
 }
 
@@ -352,84 +306,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // first_difference
-    // -----------------------------------------------------------------
-
-    fn inputs() -> SegmentationInputs {
-        SegmentationInputs {
-            catalog: header(),
-            repeat_tract_criteria: StrRepeatCriteria::default(),
-            analysed_regions: GenomeRegions::whole_contigs(&contigs()),
-        }
-    }
-
-    fn with_other_catalog(mut inputs: SegmentationInputs) -> SegmentationInputs {
-        inputs.catalog.reference_md5 = [9; 16];
-        inputs
-    }
-
-    fn with_other_criteria(mut inputs: SegmentationInputs) -> SegmentationInputs {
-        inputs.repeat_tract_criteria = unusual_criteria();
-        inputs
-    }
-
-    fn with_other_regions(mut inputs: SegmentationInputs) -> SegmentationInputs {
-        inputs.analysed_regions = GenomeRegions::whole_contigs(&contigs()[..1]);
-        inputs
-    }
-
-    #[test]
-    fn identical_inputs_have_no_first_difference() {
-        assert_eq!(inputs().first_difference(&inputs()), None);
-    }
-
-    #[test]
-    fn a_different_catalog_is_named() {
-        assert_eq!(
-            inputs().first_difference(&with_other_catalog(inputs())),
-            Some("repeat catalog"),
-        );
-    }
-
-    #[test]
-    fn different_repeat_tract_criteria_are_named() {
-        assert_eq!(
-            inputs().first_difference(&with_other_criteria(inputs())),
-            Some("set of repeat-tract criteria"),
-        );
-    }
-
-    #[test]
-    fn different_analysed_regions_are_named() {
-        assert_eq!(
-            inputs().first_difference(&with_other_regions(inputs())),
-            Some("set of analysed regions"),
-        );
-    }
-
-    /// **When two inputs differ at once, the catalog is what the person is told about.**
-    ///
-    /// Only a fixture differing in two fields can see the order at all, and the order is
-    /// load-bearing: the catalog carries the reference's identity, so under a different
-    /// catalog the other two comparisons are about different genomes. A run told "a different
-    /// set of analysed regions" would be sent to change `--regions`, which cannot help.
-    #[test]
-    fn the_catalog_is_named_before_the_criteria_and_the_regions() {
-        let other = with_other_regions(with_other_criteria(with_other_catalog(inputs())));
-
-        assert_eq!(inputs().first_difference(&other), Some("repeat catalog"));
-    }
-
-    /// And with the catalog agreeing, the criteria are named before the regions — they decide
-    /// where a segment ends, where the regions only decide which ground is looked at.
-    #[test]
-    fn the_criteria_are_named_before_the_regions() {
-        let other = with_other_regions(with_other_criteria(inputs()));
-
-        assert_eq!(
-            inputs().first_difference(&other),
-            Some("set of repeat-tract criteria"),
-        );
-    }
+    // `SegmentationInputs::first_difference` is tested where the type now lives
+    // (`crate::ng::segmentation_inputs`).
 }

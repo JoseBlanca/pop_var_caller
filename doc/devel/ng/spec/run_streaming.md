@@ -733,6 +733,11 @@ merge — and not a second cut through the genome. Which axis is worth building 
   read *"identical apart from the timestamp"* rather than *"identical"*, so it is a field the
   comparison deliberately skips rather than an omission.
 
+**These fields joined the header without a format-version bump** (owner's ruling, 2026-09-03):
+no psp outside the test suite predates them, so the only file a missing-field refusal can reach
+is a pre-ruling scratch file, and refusing it with a message naming the missing field is the
+accepted behaviour.
+
 **The census is the header's first consumer, and it is already built.** `PileupIdentity::of_header`
 takes the psp header's bytes and a record count and says only this: two psps with the same header
 and the same record count get the same identity and no others do — *"which bytes exactly is the

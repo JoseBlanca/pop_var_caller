@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{PspReadError, PspWriteError};
 use crate::ng::psp::segmentation_section::{self, WireSegmentation};
-use crate::ng::run::segments::SegmentationInputs;
+use crate::ng::segmentation_inputs::SegmentationInputs;
 use crate::ng::types::{Bp, ReadGroupId};
 
 /// A file's own account of how it was written: everything a reader needs before it touches

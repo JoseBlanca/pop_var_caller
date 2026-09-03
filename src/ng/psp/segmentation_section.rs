@@ -30,7 +30,7 @@ use crate::ng::reference_info::ContigInfo;
 use crate::ng::region_typing::GenomeRegions;
 use crate::ng::region_typing::segment_criteria::{MinCopies, SsrSegmentCriteria};
 use crate::ng::repeat_catalog::{RepeatCatalogHeader, StrRepeatCriteria};
-use crate::ng::run::segments::SegmentationInputs;
+use crate::ng::segmentation_inputs::SegmentationInputs;
 use crate::ng::tandem_repeat::{PeriodRange, ScanParams};
 use crate::ng::types::{Bp, MAX_MOTIF_LEN};
 use crate::regions::{ContigBounds, Region};

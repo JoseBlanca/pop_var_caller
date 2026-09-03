@@ -147,6 +147,18 @@ compared (goal 4). *Depends:* —. *Source:* spec §6.1.
 
 > **Checkpoint A: the header holds §6.1 minus the record count (routed upstream, item 1).
 > Owner confirms the typed-fields shape and the §6.3 stance. Pause for review.**
+>
+> **Passed (owner, 2026-09-03), three rulings recorded:**
+>
+> 1. **The typed-fields shape stands** — the catalog is recorded whole in the
+>    `[segmentation]` section. Measured: 30,000 digest-carrying scaffolds encode to
+>    10,798,518 bytes of the 16,777,187-byte header ceiling.
+> 2. **`SegmentationInputs` moves to its own top-level module** (`src/ng/segmentation_inputs.rs`)
+>    as Milestone B's first commit, with the `ng::run` re-export kept so no call site churns —
+>    psp and run become mutually dependent in B, and the lift resolves the direction.
+> 3. **No format-version bump for Milestone A's required header fields.** The reason: no psp
+>    outside the test suite predates them, so the only file a missing-field refusal can reach
+>    is a pre-A1 scratch file, and refusing it with a missing-field message is accepted.
 
 ### Milestone B — the gatherer: one sample's walk into a psp
 
