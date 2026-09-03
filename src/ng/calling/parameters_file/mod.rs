@@ -99,7 +99,7 @@
 //! substitution_rate_by_stratum = [ … ]
 //!
 //! [stated_constants]               # §3.8 — the numbers no fit produces
-//! repeat_tract_outlier_weight = { value = 0.01, warrant = "defaulted" }
+//! repeat_tract_outlier_weight = { value = 0.05, warrant = "defaulted" }
 //! ```
 //!
 //! # Three conventions the whole tree keeps
@@ -1345,7 +1345,8 @@ pub struct StatedConstants {
     /// from the existing caller and never measured here.
     ///
     /// **It carries a warrant because it has two reachable states and spec §8 requires them
-    /// apart.** `defaulted` says the run inherited 0.01 from `likelihood/ssr.rs`; `supplied`
+    /// apart.** `defaulted` says the run took the stated constant from `likelihood/ssr.rs`;
+    /// `supplied`
     /// says somebody wrote a number here and the run scored under it, which spec §3.8 calls the
     /// whole point of writing it down. Without the warrant a run reports an edited guess as the
     /// project's own constant, and spec §2.1's wholesale demotion of a mismatched file has
@@ -1358,6 +1359,7 @@ pub struct StatedConstants {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
     use crate::ng::parameter_estimation::joint::loci::ReferenceDigest;
     use crate::ng::repeat_catalog::StrRepeatCriteria;
 
@@ -1753,7 +1755,7 @@ mod tests {
             },
             stated_constants: StatedConstants {
                 repeat_tract_outlier_weight: WarrantedValue {
-                    value: 0.01,
+                    value: DEFAULT_OUTLIER_WEIGHT,
                     warrant: Warrant::Defaulted,
                     observations: None,
                 },
@@ -2603,7 +2605,7 @@ length_spectrum_by_period = []
 substitution_rate_by_stratum = []
 
 [stated_constants]
-repeat_tract_outlier_weight = { value = 0.01, warrant = "defaulted" }
+repeat_tract_outlier_weight = { value = 0.05, warrant = "defaulted" }
 "#;
         let file: ParametersFile = toml::from_str(text).expect("the documented inline form parses");
 

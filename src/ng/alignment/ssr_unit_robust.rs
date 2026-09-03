@@ -1091,6 +1091,64 @@ mod tests {
         assert_eq!(span.measured_length(), Some(12));
     }
 
+    /// **The `chr3:33,877,690` shape — a substitution at a long homopolymer's first base,
+    /// under the model the run actually uses.** The true allele spells the 11-base poly-A
+    /// tract as `C` + 10 `A`s: same length, substituted first base. At 30× on HG002, 10 of
+    /// 23 reads carry it and ng's candidate table held a bare 10-`A` run — the `C` pushed
+    /// out of the tract and the length read one unit short (tract-accuracy program, L4).
+    /// The flanks and tract are the reference's own bases at that locus; the model is
+    /// `hipstr_shipped`, which is what `--defaults` hands this aligner.
+    #[test]
+    fn a_substitution_at_a_homopolymer_edge_stays_in_the_tract() {
+        // The exact window the run hands the aligner: 15-base flanks (the default
+        // bundle-threshold margin), the reference's own bases.
+        let (reference, geometry) =
+            frame(b"TTCTAGTTTTAGTTT", b"AAAAAAAAAAA", b"CTAAAAACCATTTTT", b"A");
+        let read = b"TTCTAGTTTTAGTTTCAAAAAAAAAACTAAAAACCATTTTT";
+        let span = measure(read, &reference, &geometry, &StutterModel::hipstr_shipped());
+        assert_eq!(span.measured_length(), Some(11), "span: {span:?}");
+        let observed = span.observed_span().expect("a measured span");
+        assert_eq!(
+            &read[observed.start as usize..observed.end as usize],
+            b"CAAAAAAAAAA"
+        );
+    }
+
+    /// **The same locus, as the 30× reads actually spell it.** Every variant read at
+    /// `chr3:33,877,690` carries the allele as a one-base deletion in the left flank's
+    /// `TTT` run plus the `C`: `...TTCTAGTTTTAGTT | CAAAAAAAAAA | CTAAA...`. The honest
+    /// account is a flank deletion, a mismatched `C` at the tract's first column, and ten
+    /// matched `A`s — tract `CAAAAAAAAAA`, same length as the reference's. The rival path
+    /// absorbs the `C` into the flank as a mismatch and prices the missing base as a
+    /// whole-unit tract contraction, reporting a bare 10-`A` run — which is exactly what
+    /// ng's candidate table held, and it costs the truth its candidacy at this locus.
+    ///
+    /// **This aligner reads the tract one unit short there, and that is pinned, not
+    /// aspired away.** The flank-side [`JunctionGuard`] makes the honest path's gap-open
+    /// UNREACHABLE (the deletion sits 1–3 columns from the junction, inside the 7-column
+    /// guard this flank gets), and even unguarded a whole-unit slip (≈ −2.9 nats)
+    /// under-prices the flank gap-open (≈ −10.4), so the `C` is absorbed into the flank as
+    /// a mismatch and the loss priced as a tract contraction. The pipeline compensates one
+    /// level up: a complete observation's bases come from the read's input alignment
+    /// (`locus_generation::ssr::tract_span_from_input`, the tract-accuracy program's L4
+    /// fix), and this aligner keeps only the anchoring and completeness verdicts. If this
+    /// assertion ever starts failing, the aligner's junction behaviour changed — re-read
+    /// L4 before deciding which behaviour is right.
+    #[test]
+    fn a_flank_indel_beside_the_junction_is_read_short_and_the_pipeline_compensates() {
+        let (reference, geometry) =
+            frame(b"TTCTAGTTTTAGTTT", b"AAAAAAAAAAA", b"CTAAAAACCATTTTT", b"A");
+        let read = b"TTCTAGTTTTAGTTCAAAAAAAAAACTAAAAACCATTTTT";
+        let span = measure(read, &reference, &geometry, &StutterModel::hipstr_shipped());
+        // One unit short, the C outside the span — the pinned corruption.
+        assert_eq!(span.measured_length(), Some(10), "span: {span:?}");
+        let observed = span.observed_span().expect("a measured span");
+        assert_eq!(
+            &read[observed.start as usize..observed.end as usize],
+            b"AAAAAAAAAA"
+        );
+    }
+
     /// A genuine whole-unit expansion is measured at its own length — the guard must not touch the
     /// slip route.
     #[test]

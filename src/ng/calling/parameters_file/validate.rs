@@ -825,8 +825,8 @@ impl ParametersFile {
         // has nowhere to put them. **The state worth catching is the third one**: a person doing
         // what `doc/devel/ng/spec/parameters_file.md` §7's third bullet invites — copy the file
         // your run wrote and change one line — changes the number and leaves
-        // `warrant = "defaulted"` above it. That says *this run
-        // inherited 0.01* beside a number that is not 0.01, and the file's own header names the
+        // `warrant = "defaulted"` above it. That says *this run took the built-in constant*
+        // beside a number that is not the built-in constant, and the file's own header names the
         // fix ("change its warrant to supplied and delete its observations"), so the refusal
         // says it too.
         match weight.warrant {
@@ -2090,8 +2090,11 @@ mod tests {
             assert!(problem.contains("nothing fits this number"), "{problem}");
         }
 
+        // **Derived from the constant, never written out.** A literal here would silently stop
+        // testing anything the day somebody set the default to that literal — which is exactly
+        // what happened when the default moved from 0.01 to 0.05 on 2026-09-03.
         let (field, problem) = refused(|file| {
-            file.stated_constants.repeat_tract_outlier_weight.value = 0.05;
+            file.stated_constants.repeat_tract_outlier_weight.value = DEFAULT_OUTLIER_WEIGHT * 2.0;
         });
         assert!(field.ends_with("repeat_tract_outlier_weight"), "{field}");
         assert!(

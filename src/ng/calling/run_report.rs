@@ -127,7 +127,7 @@ impl RunParameterReport {
     /// precisely because both are ways of a read not coming from this individual's two copies.
     ///
     /// **Nothing in the parameter fit measures it**, so it carries its warrant rather than a
-    /// bare number: `Defaulted` where the run took the inherited 0.01, and `Supplied` where a
+    /// bare number: `Defaulted` where the run took the stated constant, and `Supplied` where a
     /// parameters file gave it one (`doc/devel/ng/spec/parameters_file.md` §3.8, which puts it
     /// in that file so a person can change it). Those two are the only states it reaches.
     ///

@@ -1872,7 +1872,7 @@ mod tests {
         let locus = gathered.locus_parameters(&alleles, &contexts, &[]);
 
         assert_eq!(locus.outlier_weight, DEFAULT_OUTLIER_WEIGHT);
-        assert_eq!(locus.outlier_weight, 0.01);
+        assert_eq!(locus.outlier_weight, 0.05);
         assert!(locus.contamination.is_none());
         assert_eq!(gathered.weakest_warrant(), Provenance::FittedHere);
 

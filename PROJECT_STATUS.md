@@ -19,7 +19,152 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **an insertion at a region's last base belongs to
+> - **Last completed task (2026-09-03):** **the repeat-tract genotype comparison was wrong in two
+> ways at once, and every number resting on it is re-measured**
+> ([research handoff](doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md) §3.4b–§3.4c).
+> **No change to the caller** — the callsets are the same files; the scorer is not.
+> The comparison rebuilds each side's two chromosome copies from the reference and its VCF lines,
+> and two settings govern that. **It collected lines from only one base out**, so a truth set that
+> describes one event with several lines — at `chr1:150,329,038` GIAB writes four, from five bases
+> before the tract — had its own haplotype rebuilt from a fragment and ng was scored wrong for a
+> call that reconstructs the identical DNA; 173 of the 648 wrong tracts have a truth line within
+> ten bases that was left out, against 208 of the 5,410 right ones. **And it compared one base
+> past the tract's end**, so at `chr1:9,955,404` ng reproduced the truth's insertion exactly, also
+> called a SNP one base outside, and was charged for it — 46 of the 648 errors. **The rule now:
+> collect from ten bases out, compare over the tract's own bases**, with a second column scoring
+> the tract plus ten bases of flank because only that can see a boundary variant ng genuinely
+> misses. Two alternatives were measured and rejected: refusing every tract where a change reaches
+> outside it raises the headline 4.7 points and **corrects not one verdict**, and comparing over a
+> real flank breaks 62 tracts for every 13 it fixes at ten bases, because it charges a tract for
+> the caller's neighbouring SNPs.
+> **What moved.** Genotype accuracy at 30× is **0.877 at homopolymers and 0.867 at period 2+**
+> against the 0.886 and 0.903 last reported, on 6,687 comparable tracts against 6,058 — every rule
+> that compares more tracts gives a lower number, because the tracts the old rule refused are the
+> ones ng gets wrong. Uncomparable tracts fall from 245 in 6,303 to **7 in 6,694**. The two
+> parameter changes are worth +0.5 points rather than +0.6. **HipSTR reverses**: ng is 1.9 points
+> ahead at 30× (0.8998 against 0.8806) where it was level, and level at 50× where it was 0.9
+> behind — ng was the arm the old rule penalised, because ng writes SNP-path records beside a
+> tract and HipSTR writes none. **The QUAL half is untouched**: calibration and sweep re-derive
+> byte-identically, 68 and 52 rows, so Checkpoint D's answer stands as measured.
+> **⚠ And the diagnosis that started this was itself wrong — the fifth wrong measurement of this
+> quantity, and the first to err *for* the caller.** The previous entry's §3.4b named two tracts as
+> instrument artefacts and sized the class at 111. Both descriptions were wrong: at
+> `chr1:14,722,151` **ng is genuinely wrong**, deleting two bases inside the tract where the truth
+> deletes one inside and one outside. And the 111 reproduce exactly as a count but **at most 10 of
+> them turn right under any of six candidate rules** — they are real disagreements, so §4's "never
+> offered" count was not overstated. **The standing check this leaves**: treat any proposed
+> correction that raises the headline as suspect until it is shown to correct verdicts rather than
+> to drop tracts.
+> **Seven hand-checkable shapes now pin the scorer** — `benchmarks/lib/tract_qual_experiment.py
+> --self-test`, run by the experiment driver before it scores anything, each checked against a
+> mutation of the code it covers. `RESCORE_ONLY=1` on the driver re-derives every published number
+> from the callsets already on disk, generating nothing.
+>
+> - **Earlier (2026-09-03):** **the repeat-tract outlier weight ships at 0.05, not
+> 0.01** (owner's decision). It is the share of a tract's reads the stutter model cannot explain,
+> and what it really does is put a floor under every read's emission — **a cap on how far one read
+> may pull a genotype**, the job freebayes does with a read-dependence factor and GATK with a
+> Phred-45 cap, and the only thing in ng doing it at a tract. At 0.01 the floor sat *below* the
+> chance of a read slipping two whole repeats, so two-repeat slip products scored as real evidence
+> for a second allele; at 0.05 they do not. Measured end to end through `--defaults` on GIAB's
+> HG002 tandem-repeat benchmark at 30×: genotype accuracy **0.8771 → 0.8796** at homopolymers and
+> **0.8665 → 0.8692** at period 2+, with spurious heterozygotes down from 141 to 129
+> (re-scored 2026-09-03; the figures first published here were 0.8856 → 0.8881 and 0.9033 →
+> 0.9059, from the comparison the entry above corrects).
+> **Its warrant stays `Defaulted`** — read literally, the share it is named for measures 1 in 2,300
+> at homopolymers and 1 in 209 at period 2+, so this is a stated constant chosen by a sweep and not
+> an estimate. **It owes a per-period sweep and a check at three reads a position on the tomato
+> panel**, neither of which one human sample at 30× and 50× can give.
+>
+> - **Earlier (2026-09-03):** **the research handoff for repeat-tract accuracy**
+> ([doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md](doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md)).
+> Written to be read by somebody starting fresh: how the numbers are produced and on which ground,
+> **the genotype-coding trap that has now produced five wrong measurements** (GIAB writes a
+> two-allele heterozygote as two phased records where ng writes one multi-allelic record — 1,412
+> tracts of 6,303 — and four other ways the comparison goes wrong, each measured), every lever
+> tried with what it was worth, what the six investigations found, and what to do next.
+> **Both decisions it raised are now settled** (entry above): a tract genotype is scored letter for
+> letter with the repeat length beside it — the 3-point gap that made this a live question was the
+> comparison reaching one base past the tract, and with that fixed the two answers differ by 0.4
+> points. Checkpoint D remains uncleared.
+>
+> - **Earlier (2026-09-02):** **two parameter values, no code, and ng's repeat-tract
+> genotypes get better by 0.6 points**
+> ([report](doc/devel/reports/ng_tract_genotype_improvement_2026-09-02.md); six parallel
+> investigations behind it in
+> [tract_genotype_investigation/](doc/devel/reports/tract_genotype_investigation/)).
+> On GIAB's HG002 tandem-repeat benchmark, fitting the slippage from HG002's own reads **and**
+> raising the repeat-tract outlier weight from 0.01 to 0.10 takes genotype accuracy from 0.8771
+> to **0.8823** at homopolymers and 0.8665 to **0.8725** at period 2+ at 30×, and from 0.8916 to
+> 0.8954 and 0.8767 to 0.8788 at 50× (re-scored 2026-09-03). Both changes are parameters a run can already be given.
+> **⚠ And the recommendation that started this work was wrong.** I said fitting the slippage was
+> the lever, on the strength of a simulator. On real reads a *flat* change to any of the three
+> stutter numbers is worth nothing — the shipped values already sit at the optimum, and over a
+> twenty-fold range of the slip share accuracy moves half a point while the two error classes
+> swing nine-fold and three-fold in opposite directions. It is a dial that trades one error for
+> the other. What the fit is worth is its per-stratum shape, a third of the gain; the larger half
+> is **the outlier weight, which nobody was looking at** — the bound on how far one read may pull
+> a genotype, inherited at 0.01 and never measured.
+> **Ruled out with numbers:** fitting the genotype prior (reaches 10 of the old comparison's 648
+> errors, risks 77 correct calls), a stricter candidate bar, a GQ floor, an allele-balance rule,
+> and every other constant in the read model. **HipSTR, which fits its stutter model per locus, is
+> 1.9 points behind ng at 30× and level at 50×** on the tracts both reach (re-scored 2026-09-03;
+> first published as 0.3 behind and 0.9 ahead), and its own median fitted slip level is 0.04
+> against ng's fixed 0.05 — the median locus does not need fitting.
+> **Where the accuracy actually is: 464 of 852 errors are a sequence ng never offered.** The
+> follow-through — 434 missing sequences, of which 268 carried by no read and 46 an alignment loss
+> — **has not been re-derived** and its script carries two known defects, so read it as a shape;
+> the three alignment losses verified by hand do stand, having been read off the reads and the
+> candidate table rather than off the genotype comparison.
+>
+> - **Earlier (2026-09-02):** **the genotypes at a repeat tract, measured three
+> times wrong before they were measured right**
+> ([report](doc/devel/reports/ng_tract_qual_experiment_2026-09-02.md) §5). **No change to the
+> caller.** Where the truth set and ng both call a tract on GIAB's tandem-repeat benchmark at
+> 30×, ng's genotype is right **0.877 of the time at homopolymers and 0.867 at period 2 and
+> above** (0.892 and 0.877 at 50×; re-scored 2026-09-03, first published as 0.886 and 0.903); the
+> existing repeat-tract caller reaches under half as many tracts, 1,230 against ng's 2,823.
+> **⚠ An earlier version of this entry said 0.771 and 0.628, and that was the instrument and
+> not the caller**: comparing allele strings makes two records describing one event over
+> different spans read as a disagreement, and 324 tracts in 6,303 were counted as genotype
+> errors that were only a difference of spelling. Two further attempts were also wrong; §5
+> records all three, because each gave a plausible number.
+> **Five of every ten remaining errors are an allele ng never put on the table** — 245 of 475
+> comparable homopolymer errors — which is the ceiling on what a wider candidate set can buy:
+> 6.3 points at homopolymers and 7.8 at period 2+. Over the same ground the selection dump says
+> where the missing sequences go: of 434, **268 were carried by no read at all**, 61 were cut by
+> the per-sample top-`ploidy` rule (what a discovery round is aimed at), 59 sat at a tract the
+> merge refused, 46 were refused by the support bar.
+> **And the second-largest class is a warning for Milestone E**: 141 homopolymer errors are ng
+> calling a heterozygote where the truth is homozygous, which a discovery round can only enlarge.
+> **The slippage numbers move genotypes where they moved nothing else** — on the simulator at a
+> true slippage of 0.25 against the assumed 0.10, supplying the true model takes period-2+
+> genotype accuracy from 0.932 to 0.990.
+>
+> - **Earlier (2026-09-02):** **is ng's quality score worth believing at a repeat tract? —
+> step D2, and Checkpoint D**
+> - **Earlier (2026-09-02):** **the instrument for the tract QUAL experiment —
+> step D1**
+> (step D1 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
+> [report](doc/devel/reports/implementations/ng_ssr_loop_d1_2026-09-02.md)). **No change to the
+> caller.** A scorer that bins a caller's records by QUAL against the share that really are at a
+> variant tract and sweeps a QUAL threshold for precision and recall, split by motif period; a
+> simulator that writes repeat tracts whose genotypes we chose, sequenced under a slippage we
+> set; and the drivers that build the tract ground and run the arms.
+> **Two things the build already settles about the runs.** The benchmark the plan names is too
+> small to answer the calibration question — ng writes **149 repeat-tract records pooled over
+> the three GIAB samples at 30×** — so the experiment also runs on GIAB's HG002 tandem-repeat
+> benchmark, 50,000 Tier intervals with 36,497 assembly-based truth records, where ng writes
+> **6,351 tract records at 30×**. And the fitted-against-defaulted split has one side on any
+> benchmark, because no command fits a parameters file: on the simulator it has two, since the
+> simulator writes the stutter model it drew the reads under as parameters-file rows.
+> **Two defects in the first version of the scorer, both fixed and both found by reading the
+> records it called false at high QUAL** — masking before left-alignment, and scoring a record
+> against its own span rather than its tract's. Together they put **105 records above QUAL 200
+> in the wrong column; the scorer as it stands puts 7 there**. Numbers are the instrument's own
+> validation; the experiment's answer is D2.
+>
+> - **Earlier (2026-09-02):** **an insertion at a region's last base belongs to
 > whatever follows, not to the SNP/indel path**
 > ([report](doc/devel/reports/implementations/ng_edge_insertion_2026-09-02.md)), which fixes the
 > duplication C4 measured. **Owner's ruling**: an insertion's anchor base is unchanged — it is

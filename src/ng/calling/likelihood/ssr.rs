@@ -74,13 +74,83 @@ use crate::ng::parameter_estimation::Provenance;
 use crate::ng::types::{LogProb, ReadGroupId};
 
 /// How often a read at a repeat tract came from somewhere other than this individual's copies
-/// of it — **inherited from production at 0.01 and declared inherited, not fitted.**
+/// of it — **0.05, chosen by a sweep against genotype accuracy, and it is not a measurement of
+/// that share.**
 ///
-/// Production sets it here ([`em.rs`](../../../../src/ssr/cohort/em.rs)) and ng keeps the
-/// number. It has no source in the parameters fit — nothing measures it — and spec §1.2
-/// requires that be said rather than left blank, so this is a named constant awaiting a
-/// measurement rather than a finding.
-pub const DEFAULT_OUTLIER_WEIGHT: f64 = 0.01;
+/// # What it does, which is not what its name says
+///
+/// The junk term spreads this weight evenly over every tract length the model can reach — about
+/// twenty-two of them at a homopolymer — so every read's emission has a floor of roughly
+/// `weight / lengths` under it, whatever genotype is being scored. **A floor on the emission is
+/// a cap on how much one read can pull a genotype**: past it, a read being more surprising buys
+/// no more evidence. **This is the only thing in ng doing that job at a tract.**
+///
+/// **GATK does the same job with a different shape**, and its own documentation states the
+/// motive better than a paraphrase would: without it *"the read would contribute 5 * Q30 evidence
+/// in favour of its 5-mismatch haplotype compared to reference, potentially enough to make a call
+/// off that single read"*, and with it *"the maximum evidence against any haplotype that this
+/// (and any) read could contribute"* is the stated quality
+/// (`phredScaledGlobalReadMismappingRate`, default 45,
+/// [`LikelihoodEngineArgumentCollection.java:109`](../../../../gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/haplotypecaller/LikelihoodEngineArgumentCollection.java);
+/// applied per read against its own best allele by `AlleleLikelihoods::normalizeLikelihoods`).
+/// **GATK's is relative to the read's best allele and ng's is absolute**, which is the one
+/// structural difference between them.
+///
+/// **freebayes does not do this job and an earlier version of this comment said it did.** Its
+/// read-dependence factor (`-D`, default 0.9) multiplies the summed log-probability of the reads
+/// a genotype does *not* explain by `(1 + (n - 1) * 0.9) / n`
+/// ([`DataLikelihood.cpp:148`](../../../../freebayes/src/DataLikelihood.cpp)) — an aggregate
+/// discount for reads not being independent, worth at most a tenth however many reads there are,
+/// and it never bounds one read. What bounds a read there is the read's own base quality
+/// (`prodQout += log(1 - qual)`), which is per-read evidence rather than a stated constant.
+///
+/// **Where the floor sits against the stutter distribution is the whole effect.** At 0.01 the
+/// floor is 4.6 x 10^-4, five times *below* the chance of a read slipping two whole repeats
+/// (2.4 x 10^-3), so such a read scores as real evidence for a second allele. At 0.05 the floor
+/// is 2.3 x 10^-3 — level with that slip — so a two-repeat slip product carries almost no
+/// evidence either way, which is the intended behaviour and the change that moves the numbers
+/// below.
+///
+/// # Why 0.05, and what that number is worth
+///
+/// **Measured**, on GIAB's HG002 tandem-repeat benchmark at 30x, 20,204 typed tracts, one full
+/// run a setting scored against the assembly-based truth
+/// (`doc/devel/reports/ng_tract_genotype_improvement_2026-09-02.md` §5.2). **Re-scored
+/// 2026-09-03** after the genotype comparison was corrected — the runs are the same, the scorer
+/// is not, and the earlier version of this table was produced by a comparison that charged a
+/// tract for variants outside it:
+///
+/// | weight | homopolymer | period 2+ | heterozygote called for a homozygous truth (homopolymer) |
+/// |---|---|---|---|
+/// | 0.01, the inherited value | 0.8771 | 0.8665 | 141 |
+/// | **0.05** | **0.8796** | **0.8692** | 129 |
+/// | 0.10 | 0.8808 | 0.8692 | 124 |
+/// | 0.20 | 0.8806 | 0.8685 | 118 |
+/// | 0.30 | 0.8802 | 0.8677 | 108 |
+///
+/// The curve is flat from 0.05 to 0.30 at homopolymers and falls away above 0.10 at period 2 and
+/// above, so what the sweep really says is **"not 0.01"**. 0.05 is the owner's choice of the
+/// conservative end of that plateau (2026-09-03): at period 2 and above it takes the whole of the
+/// available gain, at homopolymers about two thirds of it, and it moves least far from the value
+/// the reads themselves suggest.
+///
+/// # What is still open, and why this is not called fitted
+///
+/// **The literal reading of this number disagrees with the sweep.** Read as what it is named —
+/// the share of reads nothing explains — it measures 1 in 2,300 at homopolymers and 1 in 209 at
+/// period 2 and above, which is both far below 0.05 and ordered the opposite way to what the
+/// sweep prefers. So the constant is doing a job nobody named it for, and its warrant stays
+/// `Defaulted`: a stated constant, not an estimate.
+///
+/// **Three things it has not been tested against**, all of them inside the range this caller is
+/// committed to (`doc/devel/ng/spec/design_principles.md` §0): a second individual, a cohort, and
+/// low depth. A floor under every read's emission behaves very differently at three reads a tract
+/// than at thirty, and the sweep was run at 30x and 50x on one sample. **Sweeping it per motif
+/// period, and on the tomato panel at three reads, is the work this constant owes.**
+///
+/// Production's value, which ng carried until now, is 0.01
+/// ([`em.rs`](../../../../src/ssr/cohort/em.rs)).
+pub const DEFAULT_OUTLIER_WEIGHT: f64 = 0.05;
 
 /// **The outlier weight this run scored with, and whether the run was handed it or inherited
 /// it.**
@@ -1408,7 +1478,7 @@ mod tests {
         // And the copy weights really are what the fixture claims: a row whose weights summed
         // to the ploidy rather than to one would be about seven nats away from this.
         assert!(
-            (row[0].0 - (-11.882_884)).abs() < 1e-5,
+            (row[0].0 - (-11.465_325)).abs() < 1e-5,
             "the fixture moved: {}",
             row[0].0
         );

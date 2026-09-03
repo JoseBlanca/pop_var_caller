@@ -923,8 +923,12 @@ pub(super) fn admit_promoted_sequences(
 ///
 /// The period is at least one base — [`Motif::new`] refuses an empty unit — so this cannot divide
 /// by zero.
+///
+/// **`pub(crate)` for the discovery round**, which asks the same question of a sequence no
+/// candidate holds ([`inference::discovery`](crate::ng::calling::inference::discovery)) and must
+/// get the ladder's answer rather than a second floor division.
 #[inline]
-fn repeat_count_of_bases(bases: &[u8], motif: &Motif) -> u32 {
+pub(crate) fn repeat_count_of_bases(bases: &[u8], motif: &Motif) -> u32 {
     (bases.len() / motif.period()) as u32
 }
 

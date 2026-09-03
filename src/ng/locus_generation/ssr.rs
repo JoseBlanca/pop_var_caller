@@ -522,6 +522,113 @@ mod read_region {
         r_start..r_end.min(read_len).max(r_start)
     }
 
+    /// The read-coordinate span of the tract per the read's **own input alignment** — what
+    /// the mapper said the read's account of the tract's reference positions is.
+    ///
+    /// # Why a complete observation is spelled from here and not from the delimiter
+    ///
+    /// The delimiter re-aligns the window under a stutter-priced model, and that model makes
+    /// a whole-unit slip far cheaper (≈ −2.9 nats at the shipped rates) than an out-of-frame
+    /// gap (≈ −10.4), so wherever the true variant sits at a junction — a real flank indel
+    /// beside the tract, or a unit of a neighbouring repeat left-aligned into it — the
+    /// winning re-alignment re-spells the read toward a pure motif run and the non-motif
+    /// evidence is destroyed. Measured on the HG002 tandem-repeat benchmark at 30×: 232 of
+    /// the 463 tracts whose true sequence was never offered as a candidate miss a spelling
+    /// that is not a pure motif run (tract-accuracy program, L4;
+    /// `doc/devel/ng/research/tract_accuracy_program_report.md`). The input aligner has no
+    /// cheap-slip incentive, so its account keeps interruptions and junction variation; the
+    /// delimiter keeps the jobs it is uniquely right for — anchoring, complete-versus-partial,
+    /// the widen-and-retry for clipped long alleles — and rules *whether* the read measures
+    /// the tract; this function only rules *what the measured tract says*.
+    ///
+    /// # The junction convention
+    ///
+    /// An inserted run at a junction belongs to the tract **iff left-alignment cannot move it
+    /// across that junction** — the same left-align-first convention the truth comparison
+    /// uses, applied symmetrically:
+    ///
+    /// - at the **left** junction (anchored between the flank's last base and the tract's
+    ///   first), the insertion is the tract's unless its last base equals the flank base
+    ///   beside it — then left-alignment carries it into the flank and it is flank content;
+    /// - at the **right** junction, the insertion is the flank's unless its last base equals
+    ///   the tract's last base — then left-alignment carries it into the tract. This is how a
+    ///   simulator or mapper that *right*-anchors an expansion (`M I M`) still measures at the
+    ///   expanded length.
+    ///
+    /// Insertions strictly inside the tract are the tract's wherever the mapper put them; a
+    /// deletion needs no rule, because it contributes no bases either way.
+    ///
+    /// `None` when the read's aligned footprint does not bracket the tract plus one base on
+    /// each side — a clipped or partial read — and the caller falls back to the delimiter's
+    /// own spelling, which is the only account such a read has. **The caller also asks only
+    /// for reads whose CIGAR carries an indel**: an all-Match CIGAR is how a mapper spells a
+    /// collapsed long allele (the length change hidden as flank mismatches), and rescuing
+    /// that shape is the delimiter's one irreplaceable job — `classify_read` states the rule
+    /// beside the call.
+    pub(super) fn tract_span_from_input(
+        cigar: &[CigarOp],
+        seq: &[u8],
+        fp: Footprint,
+        tract_start: u32,
+        tract_len: u32,
+        flank_base_before: u8,
+        tract_last_base: u8,
+    ) -> Option<Range<usize>> {
+        let tract_end = tract_start + tract_len; // exclusive
+        if fp.ref_start + 1 > tract_start || fp.ref_end < tract_end + 1 {
+            return None;
+        }
+        let mut ref_cur = fp.ref_start;
+        let mut read_cur = fp.leading_clip as usize;
+        let mut start: Option<usize> = None;
+        let mut end: Option<usize> = None;
+        for op in cigar {
+            match op {
+                CigarOp::Match(n) | CigarOp::SeqMatch(n) | CigarOp::SeqMismatch(n) => {
+                    if start.is_none() && (ref_cur..ref_cur + n).contains(&tract_start) {
+                        start = Some(read_cur + (tract_start - ref_cur) as usize);
+                    }
+                    if end.is_none() && tract_end > ref_cur && tract_end <= ref_cur + n {
+                        end = Some(read_cur + (tract_end - ref_cur) as usize);
+                    }
+                    ref_cur += n;
+                    read_cur += *n as usize;
+                }
+                CigarOp::Deletion(n) | CigarOp::Skip(n) => {
+                    if start.is_none() && (ref_cur..ref_cur + n).contains(&tract_start) {
+                        start = Some(read_cur);
+                    }
+                    if end.is_none() && tract_end > ref_cur && tract_end <= ref_cur + n {
+                        end = Some(read_cur);
+                    }
+                    ref_cur += n;
+                }
+                CigarOp::Insertion(n) => {
+                    let count = *n as usize;
+                    let last_inserted = seq.get(read_cur + count - 1).copied()?;
+                    if start.is_none()
+                        && ref_cur == tract_start
+                        && last_inserted != flank_base_before
+                    {
+                        start = Some(read_cur);
+                    }
+                    if ref_cur == tract_end
+                        && end == Some(read_cur)
+                        && last_inserted == tract_last_base
+                    {
+                        end = Some(read_cur + count);
+                    }
+                    read_cur += count;
+                }
+                CigarOp::SoftClip(_) | CigarOp::HardClip(_) | CigarOp::Padding(_) => {}
+            }
+        }
+        match (start, end) {
+            (Some(from), Some(to)) if from <= to && to <= seq.len() => Some(from..to),
+            _ => None,
+        }
+    }
+
     /// Whether a delimited tract looks truncated by the extraction window rather than by the
     /// read genuinely ending — the long-allele recovery trigger. A side is window-bounded when
     /// [`extract_region`] did not reach the read edge there; the tract is suspicious when a
@@ -667,7 +774,7 @@ mod read_region {
 mod classify {
     use super::read_region::{
         MIN_REGION_Q1, extract_region, flank_truncated, passes_quality_gate, read_footprint,
-        widen_region,
+        tract_span_from_input, widen_region,
     };
     use super::{RepeatDelimiter, SsrLocus};
     use crate::ng::alignment::{
@@ -738,6 +845,13 @@ mod classify {
     /// allele) — widen the slice and re-delimit, giving up as `WindowTruncated` if it stays
     /// truncated. A complete tract is quality-gated; **partials are kept as lower bounds**
     /// without the gate (spec §3, the new behaviour production discards).
+    ///
+    /// **A complete observation's bases come from the read's input alignment where it can
+    /// serve** ([`tract_span_from_input`]), and from the delimiter's own span only as the
+    /// fallback for reads the input alignment does not carry across the tract (clips, long
+    /// alleles). The delimiter still decides completeness, anchoring and the widen-and-retry;
+    /// what it must not decide is the spelling, because its stutter-priced re-alignment
+    /// re-spells junction variation toward a pure motif run (tract-accuracy program, L4).
     pub(super) fn classify_read<A: RepeatDelimiter>(
         read: &AlignedRead,
         locus: &SsrLocus,
@@ -779,8 +893,42 @@ mod classify {
         // is*, not *whether the read is good enough to be counted*, which is a separate question
         // and is what turns the span into an observation.
         if let Some(tract) = tract_needing_no_alignment(read, &region, locus, reference) {
-            return complete_or_low_quality(read, &region, &tract, qual_buffer);
+            let tract = to_usize(&tract);
+            return complete_or_low_quality(
+                read,
+                region.start + tract.start..region.start + tract.end,
+                qual_buffer,
+            );
         }
+
+        // **The read's own input alignment, mapped over the tract's reference positions —
+        // but only where that alignment actually says something.** A CIGAR with an
+        // insertion or deletion is the mapper's genome-wide claim about where the read's
+        // length variation sits, and it is information the delimiter's window-local,
+        // stutter-priced re-alignment destroys at junctions (see `tract_span_from_input`).
+        // An all-Match CIGAR claims nothing the bases don't: it is exactly how a mapper
+        // spells a collapsed long allele — the length change hidden as flank mismatches —
+        // and rescuing that read is what the delimiter and its widen-and-retry are *for*,
+        // so an indel-free read is left entirely to them.
+        let input_span = if left > 0
+            && right > 0
+            && read
+                .cigar
+                .iter()
+                .any(|op| matches!(op, CigarOp::Insertion(_) | CigarOp::Deletion(_)))
+        {
+            tract_span_from_input(
+                &read.cigar,
+                &read.seq,
+                fp,
+                window_start + left as u32,
+                locus.segment.tract_len() as u32,
+                reference[left - 1],
+                reference[left + locus.segment.tract_len() as usize - 1],
+            )
+        } else {
+            None
+        };
 
         let span = delimit(aligner, read, &region, reference, context, align_scratch);
         match span {
@@ -788,19 +936,41 @@ mod classify {
                 if flank_truncated(&region, &to_usize(&tract), read_len, left, right) =>
             {
                 // A complete tract whose flanks look eaten by the window: widen and retry.
+                // **The delimiter's own spelling, always** — a read in this arm is the
+                // mapper-collapsed long allele whose input alignment is exactly the account
+                // not to trust.
                 let wide = widen_region(region, read_len, left, right);
                 let wspan = delimit(aligner, read, &wide, reference, context, align_scratch);
                 match wspan {
                     RepeatSpan::Between(wtract)
                         if !flank_truncated(&wide, &to_usize(&wtract), read_len, left, right) =>
                     {
-                        complete_or_low_quality(read, &wide, &wtract, qual_buffer)
+                        let wtract = to_usize(&wtract);
+                        complete_or_low_quality(
+                            read,
+                            wide.start + wtract.start..wide.start + wtract.end,
+                            qual_buffer,
+                        )
                     }
                     _ => Classified::NoObservation(NoObservationReason::WindowTruncated),
                 }
             }
             RepeatSpan::Between(tract) => {
-                complete_or_low_quality(read, &region, &tract, qual_buffer)
+                let tract = to_usize(&tract);
+                // **The input spelling wins whenever it is available — including when it
+                // reads as the reference.** The alternative — deferring reference-spelling
+                // inputs to the delimiter — was built and measured (arm `l4_v2`,
+                // tract-accuracy program L4): it repaired the handful of loci where a
+                // mapper places an ambiguous indel outside the tract span
+                // (`chr1:194,220,455`) and re-broke twice as many where the mapper's
+                // reference account of the tract is exactly right — at
+                // `chr1:104,262,346` every read carries a flank-`C` deletion the truth
+                // confirms (`GC→G`, hom), the input span correctly reads eleven reference
+                // `T`s, and the delimiter re-absorbs the flank deletion as a spurious
+                // one-unit contraction, double-counting the deleted base.
+                let spelled =
+                    input_span.unwrap_or(region.start + tract.start..region.start + tract.end);
+                complete_or_low_quality(read, spelled, qual_buffer)
             }
             // **An empty one-sided span is a read outside the locus, not a lower bound of
             // zero** — and `partial` is where that is decided, in one place.
@@ -927,21 +1097,19 @@ mod classify {
         range.start as usize..range.end as usize
     }
 
-    /// A complete tract, if it clears the base-quality gate; else `LowQuality`. `tract` is
-    /// relative to the `region` slice.
+    /// A complete tract, if it clears the base-quality gate; else `LowQuality`. `tract` is in
+    /// **absolute read coordinates** — the callers translate whichever frame they hold
+    /// (region-relative for the delimiter's spans, absolute already for the input-alignment
+    /// span), so this function cannot be handed a range in the wrong frame silently.
     fn complete_or_low_quality(
         read: &AlignedRead,
-        region: &Range<usize>,
-        tract: &Range<u64>,
+        tract: Range<usize>,
         qual_buffer: &mut Vec<u8>,
     ) -> Classified {
-        let region_seq = &read.seq[region.clone()];
-        let region_qual = &read.qual[region.clone()];
-        let tract = to_usize(tract);
-        let tract_qual = &region_qual[tract.clone()];
+        let tract_qual = &read.qual[tract.clone()];
         if passes_quality_gate(tract_qual, MIN_REGION_Q1, qual_buffer) {
             Classified::Observed {
-                bases: region_seq[tract].into(),
+                bases: read.seq[tract].into(),
                 read_witness: ReadWitness::Complete,
                 q_sum: ln_p_err_sum(tract_qual),
             }
@@ -1126,6 +1294,102 @@ mod classify {
                 }
                 other => panic!("expected a complete observation, got {other:?}"),
             }
+        }
+
+        // A homopolymer frame for the input-alignment spelling tests: 6-base flanks around
+        // a 6-base poly-A. The left flank ends in `T` and the right flank starts with `C`,
+        // so neither continues the run and every junction rule below tests what it claims.
+        const FRAME_A: &[u8] = b"GGGTTTAAAAAACCCGGG";
+
+        fn locus_a() -> SsrLocus {
+            SsrLocus {
+                segment: SsrSegment::new("chr1".into(), 7, 12, Motif::new(b"A").unwrap(), 1.0)
+                    .unwrap(),
+                tract_with_margin_bases: FRAME_A.into(),
+                margin_start: Position(1),
+            }
+        }
+
+        fn classify_at_a(read: &AlignedRead) -> Classified {
+            let aligner = SsrFlatGapAligner::new(PerQualityEmission::new());
+            let stutter = StutterModel::hipstr_shipped();
+            let mut scratch = ViterbiScratch::new();
+            let mut qual_buffer = Vec::new();
+            classify_read(
+                read,
+                &locus_a(),
+                &aligner,
+                &stutter,
+                &mut scratch,
+                &mut qual_buffer,
+            )
+        }
+
+        fn observed_bases(classified: Classified) -> Vec<u8> {
+            match classified {
+                Classified::Observed {
+                    bases,
+                    read_witness: ReadWitness::Complete,
+                    ..
+                } => bases.into_vec(),
+                other => panic!("expected a complete observation, got {other:?}"),
+            }
+        }
+
+        /// **The `chr3:33,877,690` shape, at unit-test size: a real flank deletion beside
+        /// the junction plus a substituted first tract base.** The mapper spells it as a
+        /// one-base deletion in the flank and a `C` against the tract's first `A`; the
+        /// honest tract account is `CAAAAA` — same length as the reference's, substituted
+        /// edge. The delimiter's stutter-priced re-alignment absorbs the `C` into the flank
+        /// and reports a bare 5-`A` run instead (the L4 defect, sized at 232 of 463
+        /// never-offered tracts on HG002 at 30×); the input-alignment spelling keeps it.
+        #[test]
+        fn a_flank_deletion_beside_the_junction_keeps_the_tract_edge() {
+            let mut read = read(b"GGGTTCAAAAACCCGGG", 40);
+            read.cigar = vec![CigarOp::Match(5), CigarOp::Deletion(1), CigarOp::Match(12)];
+            assert_eq!(observed_bases(classify_at_a(&read)), b"CAAAAA");
+        }
+
+        /// A right-anchored whole-unit expansion (`M I M`, the simulator's and some mappers'
+        /// spelling) measures at the expanded length: the inserted `A`s left-align into the
+        /// tract, so they are the tract's.
+        #[test]
+        fn a_right_anchored_expansion_is_the_tracts() {
+            let mut read = read(b"GGGTTTAAAAAAAACCCGGG", 40);
+            read.cigar = vec![CigarOp::Match(12), CigarOp::Insertion(2), CigarOp::Match(6)];
+            assert_eq!(observed_bases(classify_at_a(&read)), b"AAAAAAAA");
+        }
+
+        /// A right-junction insertion that cannot left-align into the tract (its last base
+        /// is not the tract's) is flank content and stays out of the observation. The tract
+        /// carries a substitution so the input account is non-reference and the junction
+        /// rule — not the reference-deferral to the delimiter — is what decides.
+        #[test]
+        fn a_right_junction_foreign_insertion_is_the_flanks() {
+            let mut read = read(b"GGGTTTAACAAAGGCCCGGG", 40);
+            read.cigar = vec![CigarOp::Match(12), CigarOp::Insertion(2), CigarOp::Match(6)];
+            assert_eq!(observed_bases(classify_at_a(&read)), b"AACAAA");
+        }
+
+        /// A left-junction insertion that cannot left-align into the flank belongs to the
+        /// tract — the boundary convention: an insertion at a junction goes with what
+        /// follows, unless left-alignment carries it across.
+        #[test]
+        fn a_left_junction_foreign_insertion_is_the_tracts() {
+            let mut read = read(b"GGGTTTAGAAAAAACCCGGG", 40);
+            read.cigar = vec![CigarOp::Match(6), CigarOp::Insertion(2), CigarOp::Match(12)];
+            assert_eq!(observed_bases(classify_at_a(&read)), b"AGAAAAAA");
+        }
+
+        /// A left-junction insertion whose bases left-align into the flank (`TT` beside a
+        /// flank ending in `T`) is flank content, and the tract reads without it. The tract
+        /// carries a substitution so the input account is non-reference and the junction
+        /// rule — not the reference-deferral to the delimiter — is what decides.
+        #[test]
+        fn a_left_junction_flank_run_insertion_is_the_flanks() {
+            let mut read = read(b"GGGTTTTTAACAAACCCGGG", 40);
+            read.cigar = vec![CigarOp::Match(6), CigarOp::Insertion(2), CigarOp::Match(12)];
+            assert_eq!(observed_bases(classify_at_a(&read)), b"AACAAA");
         }
 
         /// A read whose tract quality is below the gate is `LowQuality`, not an observation.

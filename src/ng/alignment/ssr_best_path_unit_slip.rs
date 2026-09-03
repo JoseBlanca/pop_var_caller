@@ -717,6 +717,30 @@ mod tests {
         );
     }
 
+    /// **The `chr3:33,877,690` shape — a substitution at a long homopolymer's first base.**
+    /// The true allele spells the 11-base poly-A tract as `C` + 10 `A`s: same length,
+    /// substituted first base. At 30× on HG002, 10 of 23 reads carry it and ng's candidate
+    /// table held a bare 10-`A` run instead — the `C` pushed out of the tract and the length
+    /// read one unit short (tract-accuracy program, L4). The flanks and tract here are the
+    /// reference's own bases at that locus.
+    #[test]
+    fn a_substitution_at_a_homopolymer_edge_stays_in_the_tract() {
+        let (reference, geometry) = frame(
+            b"GGCAATTCTAGTTTTAGTTT",
+            b"AAAAAAAAAAA",
+            b"CTAAAAACCATTTTTTTGAA",
+            b"A",
+        );
+        let read = b"GGCAATTCTAGTTTTAGTTTCAAAAAAAAAACTAAAAACCATTTTTTTGAA";
+        let span = measure(read, &reference, &geometry, &contraction_biased());
+        assert_eq!(span.measured_length(), Some(11), "span: {span:?}");
+        let observed = span.observed_span().expect("a measured span");
+        assert_eq!(
+            &read[observed.start as usize..observed.end as usize],
+            b"CAAAAAAAAAA"
+        );
+    }
+
     /// **Mandatory property 3 — the shared model, and direction asymmetry.** Algorithm 4 reads
     /// the passed `StutterModel`; a contraction-biased model makes a one-unit contraction
     /// *cheaper to enter* than a one-unit expansion. Verified at the cost level, since that is
