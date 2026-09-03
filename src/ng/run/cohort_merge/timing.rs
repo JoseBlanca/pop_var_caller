@@ -148,6 +148,102 @@ impl Stopwatch {
     pub fn add_to(self, _counter: &Counter) {}
 }
 
+/// How many shards a [`ShardedCounter`] spreads its total over — enough for every worker of
+/// the pools these measurements run on to have its own; a pool wider than this shares by
+/// modulo, which contends less the wider it is spread.
+#[cfg(feature = "merge-timing")]
+const COUNTER_SHARDS: usize = 16;
+
+/// One shard of a [`ShardedCounter`], alone on its cache line so no two shards contend.
+///
+/// 128 bytes rather than 64 because the widest prefetch-pair granularity in current use is
+/// two lines; the cost is bytes in a static, once.
+#[cfg(feature = "merge-timing")]
+#[repr(align(128))]
+#[derive(Debug)]
+struct PaddedShard(std::sync::atomic::AtomicU64);
+
+/// A running total safe to bump from every worker at once: one padded cell per shard, summed
+/// when read. The same nothing as [`Counter`] without the feature.
+///
+/// [`Counter`] is one atomic, which is exactly right for totals touched once per sweep or
+/// once per region — and exactly wrong for one touched per record drawn, where eight workers
+/// bumping one cache line spend more time on the line than on the records (the measurement is
+/// on [`RECORDS_DRAWN`]). This spreads the bumps by worker; a read pays the sum of
+/// [`COUNTER_SHARDS`] loads, which no hot path does.
+#[cfg(feature = "merge-timing")]
+#[derive(Debug)]
+pub struct ShardedCounter([PaddedShard; COUNTER_SHARDS]);
+
+/// A running total safe to bump from every worker at once — nothing at all without the
+/// feature.
+#[cfg(not(feature = "merge-timing"))]
+#[derive(Debug)]
+pub struct ShardedCounter;
+
+#[cfg(feature = "merge-timing")]
+impl ShardedCounter {
+    /// A counter at zero.
+    pub const fn new() -> Self {
+        Self([const { PaddedShard(std::sync::atomic::AtomicU64::new(0)) }; COUNTER_SHARDS])
+    }
+
+    /// Add `amount` to the calling worker's own shard.
+    #[inline]
+    pub fn add(&self, amount: u64) {
+        // The organiser (or any thread outside the pool) lands on the last shard; workers
+        // 0..15 each get their own.
+        let shard = rayon::current_thread_index().unwrap_or(COUNTER_SHARDS - 1) % COUNTER_SHARDS;
+        self.0[shard]
+            .0
+            .fetch_add(amount, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The total so far, over every shard.
+    pub fn get(&self) -> u64 {
+        self.0
+            .iter()
+            .map(|shard| shard.0.load(std::sync::atomic::Ordering::Relaxed))
+            .sum()
+    }
+
+    /// Read the total and put every shard back to zero.
+    pub fn take(&self) -> u64 {
+        self.0
+            .iter()
+            .map(|shard| shard.0.swap(0, std::sync::atomic::Ordering::Relaxed))
+            .sum()
+    }
+}
+
+#[cfg(not(feature = "merge-timing"))]
+impl ShardedCounter {
+    /// A counter at zero.
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Add `amount` — nothing, in a build without the feature.
+    #[inline(always)]
+    pub fn add(&self, _amount: u64) {}
+
+    /// The total so far — always zero without the feature.
+    pub fn get(&self) -> u64 {
+        0
+    }
+
+    /// Read the total and put it back to zero — always zero without the feature.
+    pub fn take(&self) -> u64 {
+        0
+    }
+}
+
+impl Default for ShardedCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// How many rounds of building regions the merge ran.
 pub static ROUNDS: Counter = Counter::new();
 /// How many building regions were handed to a builder, over the whole merge.
@@ -215,9 +311,16 @@ pub static MERGE_WALL_NANOS: Counter = Counter::new();
 ///
 /// **A count and not a measurement of what it costs.** A share of allocator *calls* is not a
 /// share of wall time; it bounds the prize rather than naming it.
-pub static RECORDS_DRAWN: Counter = Counter::new();
+///
+/// **Sharded, because these two are bumped once per record on every thread of a parallel
+/// cover at once.** As plain adjacent statics they shared a cache line, and the line
+/// ping-ponging between eight workers put a 63-sample merge at 791 ms where a build without
+/// the feature took 552 (measured 2026-09-03, 200 kb of tomato ground) — the instrument was
+/// nearly half the parallel schedule it existed to measure. Every other counter here is
+/// touched at most once per sample per sweep and stays a plain atomic.
+pub static RECORDS_DRAWN: ShardedCounter = ShardedCounter::new();
 /// **Sequence observations inside those records**, summed — the second term above.
-pub static OBSERVATIONS_DRAWN: Counter = Counter::new();
+pub static OBSERVATIONS_DRAWN: ShardedCounter = ShardedCounter::new();
 
 /// Every counter, back to zero — call before the merge that is to be measured.
 pub fn reset() {
@@ -238,11 +341,11 @@ pub fn reset() {
         &ORGANISE_NANOS,
         &AFTER_ASSEMBLY_NANOS,
         &MERGE_WALL_NANOS,
-        &RECORDS_DRAWN,
-        &OBSERVATIONS_DRAWN,
     ] {
         counter.take();
     }
+    RECORDS_DRAWN.take();
+    OBSERVATIONS_DRAWN.take();
 }
 
 /// What one merge's counters say, in milliseconds, with the derived shares worked out.
