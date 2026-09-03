@@ -405,9 +405,8 @@ mod tests {
         read_named_with_length_in_read_group,
     };
     use crate::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion};
-    use crate::ng::repeat_catalog::{RepeatCatalogHeader, StrRepeatCriteria};
-    use crate::ng::tandem_repeat::ScanParams;
-    use crate::ng::types::{ContigId, GenomeRegion, MapQual, Position, ReadGroupId};
+    use crate::ng::run::test_fixtures::{build_segmentation, index, unusual_read_filters};
+    use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
     use crate::regions::ContigBounds;
     use noodles_sam::alignment::RecordBuf;
     use noodles_sam::alignment::record::MappingQuality;
@@ -426,32 +425,6 @@ mod tests {
                 length: 200,
             },
         ]
-    }
-
-    /// A segmentation over `segments`, analysing `analysed`, under the catalog header and
-    /// criteria every fixture here shares — **the one copy of that scaffold**, so a change
-    /// to `Segmentation::build` or to the catalog header's fields touches one site.
-    fn build_segmentation(
-        segments: Vec<TypedRegion>,
-        analysed: GenomeRegions,
-    ) -> Arc<Segmentation> {
-        Arc::new(
-            Segmentation::build(
-                segments.into_iter().map(Ok),
-                analysed,
-                RepeatCatalogHeader {
-                    contigs: Vec::new(),
-                    reference_md5: [7; 16],
-                    built_under: StrRepeatCriteria::default(),
-                    scan: ScanParams::default(),
-                    tool_version: "test".to_string(),
-                    longest_tract_bp: Vec::new(),
-                },
-                StrRepeatCriteria::default(),
-                PathBuf::from("/genomes/test.catalog.parquet"),
-            )
-            .expect("a clean stream builds"),
-        )
     }
 
     /// A whole-contig generic segment.
@@ -497,13 +470,6 @@ mod tests {
     // the reverse), must be visible. The fixture is built to discriminate BOTH sides:
     // `the_fixture_tells_applied_settings_from_the_defaults` proves it can.
     // -----------------------------------------------------------------
-
-    fn unusual_read_filters() -> ReadFilterConfig {
-        ReadFilterConfig {
-            min_mapq: Some(MapQual(37)),
-            ..ReadFilterConfig::default()
-        }
-    }
 
     fn unusual_locus_generator_settings() -> PileupGeneratorConfig {
         PileupGeneratorConfig {
@@ -582,11 +548,6 @@ mod tests {
         let (dir, path) = named_bam(&sam_header, &records, file_name);
         index(&path);
         (dir, path)
-    }
-
-    fn index(path: &PathBuf) {
-        crate::bam::index_preflight::preflight_alignment_indexes(std::slice::from_ref(path), true)
-            .expect("build index");
     }
 
     /// A gatherer over `segmentation` at the unusual settings — **the one place those

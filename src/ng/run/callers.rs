@@ -1758,10 +1758,9 @@ mod tests {
         read_named_with_length, read_named_with_length_in_read_group,
     };
     use crate::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion};
-    use crate::ng::repeat_catalog::{RepeatCatalogHeader, StrRepeatCriteria};
     use crate::ng::run::cohort_merge::{MinAltObs, MinAltReadShare};
-    use crate::ng::tandem_repeat::ScanParams;
-    use crate::ng::types::{ContigId, GenomeRegion, MapQual, Ploidy, Position};
+    use crate::ng::run::test_fixtures::index;
+    use crate::ng::types::{ContigId, GenomeRegion, Ploidy, Position};
     use crate::regions::ContigBounds;
     use std::num::NonZeroU32;
     use std::path::PathBuf;
@@ -1818,21 +1817,7 @@ mod tests {
         (dir, path)
     }
 
-    fn index(path: &PathBuf) {
-        crate::bam::index_preflight::preflight_alignment_indexes(std::slice::from_ref(path), true)
-            .expect("build index");
-    }
-
-    pub(super) fn catalog_header() -> RepeatCatalogHeader {
-        RepeatCatalogHeader {
-            contigs: Vec::new(),
-            reference_md5: [7; 16],
-            built_under: StrRepeatCriteria::default(),
-            scan: ScanParams::default(),
-            tool_version: "test".to_string(),
-            longest_tract_bp: Vec::new(),
-        }
-    }
+    pub(super) use crate::ng::run::test_fixtures::catalog_header;
 
     /// A segmentation over one short contig, with one ordinary stretch in it, whose catalog
     /// claims it was built on `reference_md5`.
@@ -1853,17 +1838,12 @@ mod tests {
             },
             kind: RegionKind::Generic,
         }];
-        Segmentation::build(
-            segments.into_iter().map(Ok),
+        Arc::into_inner(crate::ng::run::test_fixtures::build_segmentation_under(
+            segments,
             GenomeRegions::whole_contigs(&bounds),
-            RepeatCatalogHeader {
-                reference_md5,
-                ..catalog_header()
-            },
-            StrRepeatCriteria::default(),
-            PathBuf::from("/genomes/test.catalog.parquet"),
-        )
-        .expect("a clean stream builds")
+            crate::ng::run::test_fixtures::catalog_header_built_on(reference_md5),
+        ))
+        .expect("the fixture holds the only handle")
     }
 
     /// The segmentation the tests that never reach the catalog check use.
@@ -1879,12 +1859,7 @@ mod tests {
     // an earlier draft of this suite. Everything below differs from what ships.
     // -----------------------------------------------------------------
 
-    pub(super) fn unusual_read_filters() -> ReadFilterConfig {
-        ReadFilterConfig {
-            min_mapq: Some(MapQual(37)),
-            ..ReadFilterConfig::default()
-        }
-    }
+    pub(super) use crate::ng::run::test_fixtures::unusual_read_filters;
 
     /// **Locus-generator settings no run would arrive at by default**, so a run that dropped
     /// them on the floor and built its generators with the shipped constants is visible.

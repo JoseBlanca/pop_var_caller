@@ -32,6 +32,8 @@ pub mod gatherer;
 pub mod records;
 pub mod report;
 pub mod segments;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 pub mod walker;
 
 pub use callers::{

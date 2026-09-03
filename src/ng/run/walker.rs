@@ -321,11 +321,8 @@ mod tests {
         read_named_with_length,
     };
     use crate::ng::region_typing::{GenomeRegions, RegionKind};
-    use crate::ng::repeat_catalog::{RepeatCatalogHeader, StrRepeatCriteria};
-    use crate::ng::tandem_repeat::ScanParams;
     use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position};
     use crate::regions::ContigBounds;
-    use std::path::PathBuf;
 
     // -----------------------------------------------------------------
     // Fixtures
@@ -890,22 +887,10 @@ mod tests {
                 length: 200,
             },
         ];
-        Segmentation::build(
-            segments.into_iter().map(Ok),
+        crate::ng::run::test_fixtures::build_segmentation(
+            segments,
             GenomeRegions::whole_contigs(&bounds),
-            RepeatCatalogHeader {
-                contigs: Vec::new(),
-                reference_md5: [7; 16],
-                built_under: StrRepeatCriteria::default(),
-                scan: ScanParams::default(),
-                tool_version: "test".to_string(),
-                longest_tract_bp: Vec::new(),
-            },
-            StrRepeatCriteria::default(),
-            PathBuf::from("/genomes/test.catalog.parquet"),
         )
-        .map(Arc::new)
-        .expect("a clean stream builds")
     }
 
     /// **Every segment of the run's ground reaches the walk, once, in genome order.**
