@@ -837,5 +837,12 @@ never-offered shrinkage (23 and 17). The pre-registered ceiling was 61; discover
 of those tracts outright (11 + 14 converted) — the rest stay cut by the bar or mis-genotyped
 over the enlarged set, which is the next lever family's territory, not this one's.
 
-**Verdict: default-candidate, pending the tomato behavioural gate below and the owner's
-sign-off.**
+**Verdict: default-candidate, pending the owner's sign-off — the tomato gate passed.**
+On the 63-accession cohort at ~3 reads (`tmp/tract_program/tomato_gate_l7/`), discovery on
+against off changes **2 records of 228,852** and nothing else, byte for byte: at
+`SL4.0ch06:22,887,980` and `SL4.0ch08:30,899,713` one interruption-carrying spelling is
+admitted with coherent genotype and AD shifts (a `1/1` becomes `2/2` on the fuller spelling
+with the extra allele's read in AD). At three reads the 2-reads-and-15% bar almost never
+fires beyond what the merge already tabled — the mechanism is inert exactly where thin
+evidence makes admission dangerous, which is what the range commitment asks of a
+depth-dependent lever.
