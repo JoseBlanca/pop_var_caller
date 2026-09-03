@@ -3876,12 +3876,14 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     observation reaching a probe carries the same motif the generator minted, on real data
     (`ng_ssr_loci_dump` ground truth beside the merge's output)"*. A1's tests pin the field on
     synthetic loci only.
-  - **⚠ `benches/psp_writer_perf.rs` panics under `cargo test --all-targets`** —
-    `index out of bounds: the len is 3300000 but the index is 3300000` at line 386, in
-    `psp_writer_phases/flush_block_one`, which walks its fixture until a block fills and runs
-    off the end when it does not. Confirmed pre-existing (same panic on the untouched tree) and
-    over production's `.psp` writer, so no ng step owns it — but it makes the plan's
-    `--all-targets` validation gate red for every step until somebody fixes it.
+  - **`benches/psp_writer_perf.rs` no longer panics under `cargo test --all-targets`** —
+    fixed 2026-09-03 (`cba10a0b`, on `ng-psp-mode`). Both `psp_writer_phases` sub-benches
+    assumed the byte cap was the writer's only block cut, which stopped being true when the
+    5 kb genomic window became the primary cut: with 1-bp-apart fixture records the writer cut
+    a block every 5,000 records, so the flush-only prime loop ran off its fixture's end
+    (measured: 49 projected bytes left after all 3.3 M records) and the steady-state bench
+    timed hidden flushes. Both writers are now built with `new_with_block_layout` and a window
+    no position can cross, and an assert names the premise if it breaks again.
 
 ---
 
@@ -3890,14 +3892,14 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 Not bound to a specific stage block; pick up whenever the active feature
 list is clear.
 
-- **Two standard validation commands are red, independent of any feature
+- **One standard validation command is red, independent of any feature
   work** (surfaced 2026-07-23 by the ng alignment plan's per-step
-  validation; both verified pre-existing by `git stash -u` + re-run on a
-  clean tree). They are two of the five commands the review skill
-  prescribes, so every step of every plan currently has to except them by
-  hand.
-  - `cargo test --all-targets --all-features` panics at
-    [benches/psp_writer_perf.rs:386](benches/psp_writer_perf.rs).
+  validation; verified pre-existing by `git stash -u` + re-run on a
+  clean tree). It is one of the five commands the review skill
+  prescribes, so every step of every plan currently has to except it by
+  hand. (The `psp_writer_perf` bench panic that used to sit beside it was
+  fixed 2026-09-03, `cba10a0b` on `ng-psp-mode`; `cargo test --all-targets`
+  is now red only on the three documented locus-dump behaviour failures.)
   - `cargo doc --no-deps` fails on 11 unresolved intra-doc links, in
     `src/ng/locus_generation/ssr.rs`,
     `src/ng/region_typing/{segment_criteria.rs,mod.rs}`,
