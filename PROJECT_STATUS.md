@@ -19,8 +19,26 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-03):** **psp-mode Milestone A is built, reviewed and
-> committed — the psp header now records everything a calling run will check** (branch
+> - **Last completed task (2026-09-03):** **psp-mode step B1 is built, reviewed and committed —
+> `SampleObservationGatherer`, psp mode's walk stage** (branch `ng-psp-mode`;
+> [B1 report](doc/devel/reports/implementations/ng_psp_mode_b1_2026-09-03.md),
+> [review](doc/devel/reports/reviews/ng_psp_mode_b1_2026-09-03.md),
+> [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-03_v3.md)). One sample's alignment
+> files through the exact direct-mode chain as an iterator; the psp header built at `open` —
+> the first production header builder — recording the configured reach ceiling, the walk-local
+> read-group table and the read filters; `write_psp` drains the walk into the store and hands
+> back the write totals beside the walk tally. The nine-agent review's Blocker (a swallowed
+> walk error seals a psp every reader accepts) and the applied-settings gap (walking with
+> default filters while recording the configured ones passed all tests) are both closed by
+> tests; the bundle-threshold rule now has one copy, derived inside
+> `generic_path_generators` from the segmentation's own record. Milestone B continues with B2
+> (file-equals-the-walk oracle, fixtures + real CRAM) and B3 (byte identity). **Also landed
+> before B1, per Checkpoint A's rulings (owner, 2026-09-03):** the `SegmentationInputs` lift
+> to its own module + the recorded no-version-bump ruling (`a1fdab11`), and the standing
+> `psp_writer_perf` bench panic fixed forward (`cba10a0b`).
+>
+> - **Earlier (2026-09-03):** **psp-mode Milestone A built, reviewed and
+> committed — the psp header records everything a calling run will check** (branch
 > `ng-psp-mode`, commits 114efe24 + 918eec89;
 > [A1 report](doc/devel/reports/implementations/ng_psp_mode_a1_2026-09-03.md),
 > [A2–A4 report](doc/devel/reports/implementations/ng_psp_mode_a2_a3_a4_2026-09-03.md)).
@@ -3682,15 +3700,27 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     closure; re-opens only on a large-cohort measurement that moves the share.
 
 #### Psp mode — the walk to a psp+census, and calling from a cohort of psps
-- **Status:** `fixes-applied` — **Milestone A complete on branch `ng-psp-mode` (A1 committed
-  as 114efe24; A2+A3+A4 landed, reviewed and fixed 2026-09-03 as one deliberately bundled
-  loop); at Checkpoint A, paused for the owner.** The psp header now carries the whole of
-  spec §6.1 minus the deliberately dropped record count: the analysed regions + catalog
-  identity + routing criteria as `Header.segmentation_inputs` (recorded whole so a refusal
-  names the differing field), the read-group table (`@RG ID`, library, walk-local number —
-  what lets separately-walked samples join one cohort), the observation reach ceiling, and
-  the read filters as provenance parameters. `format_version` stays (1,0) because no written
-  psp predates the fields.
+- **Status:** `fixes-applied` — **Milestone B under way on branch `ng-psp-mode`: B1 built,
+  reviewed (nine agents, 23 mutants run / 10 survived — all closed by the applied fixes) and
+  committed; B2 and B3 next.** Checkpoint A passed (owner, 2026-09-03; the three rulings are recorded in the
+  plan's Checkpoint A note): `SegmentationInputs` lifted to `src/ng/segmentation_inputs.rs`
+  with the `ng::run` re-export kept (`a1fdab11` — nothing in `src/ng/psp/` imports from
+  `ng::run` any more), and the no-version-bump reason recorded in spec §6.1. B1 =
+  `SampleObservationGatherer` (`src/ng/run/gatherer.rs`): one sample's files through the
+  direct-mode chain as an iterator, the psp `Header` built at `open` (the first production
+  header builder — configured reach ceiling, walk-local read-group table, filters as
+  provenance), `write_psp` draining the walk into a `PspWriter`. Milestone A (complete,
+  reviewed, fixed): the header carries spec §6.1 minus the deliberately dropped record
+  count; `format_version` stays (1,0).
+- **Impl report (B1):**
+  [B1](doc/devel/reports/implementations/ng_psp_mode_b1_2026-09-03.md);
+  **latest review:** [B1](doc/devel/reports/reviews/ng_psp_mode_b1_2026-09-03.md) (1 Blocker —
+  a swallowed walk error sealed a psp every reader accepts, mutation-proven — 4 Majors, 12
+  Minors; the applied-settings gap and the triplicated bundle-threshold rule are the two to
+  remember); **fixes-applied:**
+  [B1](doc/devel/reports/reviews/fixes_applied_2026-09-03_v3.md) (everything applied; carried
+  forward: B2's fixtures must include a repeat-tract segment, and the run-level shared
+  test-fixture module lands with B2).
 - **Plan:** [run_driver_psp_mode.md](doc/devel/ng/impl_plan/run_driver_psp_mode.md) (milestones
   A–G; three upstream questions all ruled by the owner 2026-09-03);
   **Spec:** [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §6.1–§6.3;
@@ -3721,11 +3751,10 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     scaffolds now encode to 10,798,518 bytes of the 16,777,187-byte body ceiling (measured by
     the worst-case test's own print, 2026-09-03) — about 46,000 scaffolds fit; a
     100,000-scaffold draft is refused loudly at write. The ceiling is one constant if it binds.
-  - **For Checkpoint A (review M6):** where `SegmentationInputs` should live once psp and run
-    depend on each other (Milestone B adds the run→psp arrow); candidate: lift to
-    `src/ng/segmentation_inputs.rs`, keep the `ng::run` re-export.
-  - **For Checkpoint A (review Mi9):** record the ruling that the required `[segmentation]`
-    section lands in format 1.0 unbumped because no psp outside tests predates it.
+  - ~~For Checkpoint A (review M6): where `SegmentationInputs` should live~~ — ruled and
+    done (`a1fdab11`): lifted to `src/ng/segmentation_inputs.rs`, `ng::run` re-export kept.
+  - ~~For Checkpoint A (review Mi9): record the no-version-bump ruling~~ — recorded in the
+    plan's Checkpoint A note and spec §6.1 (`a1fdab11`).
 
 #### Step 5/6 — STR observations through a run: routing, the tract slot, and the kind at the merge
 - **Status:** `implemented` — **✅ THE WHOLE PLAN COMPLETE: milestones A, B and C, all twelve

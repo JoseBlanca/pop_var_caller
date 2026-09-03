@@ -1,8 +1,9 @@
-//! ng's calling run — the machinery the two variant callers drive.
+//! ng's runs — the machinery both calling modes drive, and psp mode's walk stage.
 //!
 //! A calling run reads every sample's locus observations in coordinate order and emits called
-//! variants in coordinate order. `doc/devel/ng/spec/run_streaming.md` owns that outer shape
-//! (the caller objects, the sources, the VCF writing) and
+//! variants in coordinate order; psp mode's walk stage runs the same per-sample machinery and
+//! stores the observations instead. `doc/devel/ng/spec/run_streaming.md` owns that outer shape
+//! (the run objects, the sources, the VCF writing) and
 //! `doc/devel/ng/arch/run_streaming.md` the types; this module is where its parts land as
 //! they are built.
 //!
@@ -10,18 +11,24 @@
 //! cohort observations; [`segments`]'s [`Segmentation`], the ground every sample of a run
 //! walks; [`walker`]'s [`AlignmentFilesWalker`], one sample's alignment files behind the merge's
 //! source interface; [`callers`]'s [`AlignedFilesVariantCaller`], which drives that merge
-//! over one walker per sample and genotypes each cohort locus where it is built; and
-//! [`records`], which turns each called locus into what a VCF record states.
+//! over one walker per sample and genotypes each cohort locus where it is built;
+//! [`records`], which turns each called locus into what a VCF record states; [`report`]'s
+//! [`RunReport`], what a finished run says about itself; and [`gatherer`]'s
+//! [`SampleObservationGatherer`], psp mode's walk stage — one sample's observations drained
+//! into a psp on disk (spec §5.2).
 //!
-//! **Two ways out, and only one of them is a run's.**
+//! **Three ways out, and only two are a real run's.**
 //! [`AlignedFilesVariantCaller::call_cohort`] collects every called locus and hands them back at
 //! once, which is what an oracle wants and what no real run can afford;
 //! [`AlignedFilesVariantCaller::call_cohort_handing_each_record_over`] hands each record over as
 //! it is finished and keeps none, which is the path
-//! [`call-from-alignments`](crate::pop_var_caller_exp::call_from_alignments) takes.
+//! [`call-from-alignments`](crate::pop_var_caller_exp::call_from_alignments) takes; and
+//! [`SampleObservationGatherer::write_psp`] stores one sample's walk as a psp, calling
+//! nothing — psp mode's walk half, whose calling half reads a cohort of those files back.
 
 pub mod callers;
 pub mod cohort_merge;
+pub mod gatherer;
 pub mod records;
 pub mod report;
 pub mod segments;
@@ -31,6 +38,7 @@ pub use callers::{
     AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, CalledCohort,
     CohortWalkTallies, MergeParameters, SampleWalkTallies, WrittenCohort,
 };
+pub use gatherer::{SampleObservationGatherer, SampleWalkInputs};
 pub use report::RunReport;
 pub use segments::{Segmentation, SegmentationInputs};
 pub use walker::{AlignmentFilesWalker, RunSegments};
@@ -360,6 +368,43 @@ pub enum RunError {
         /// What refused it.
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// The files handed to one sample's walk could not be read as one sample's.
+    ///
+    /// psp mode's walk writes one psp per sample, so a gatherer takes one sample's alignment
+    /// files and builds its read-group table over exactly those (spec `run_streaming.md`
+    /// §5.2, §6.1 — the table's numbering starts at zero *because* it sees one sample).
+    /// Two ways the files can fail that: their read-group headers cannot be read at all, or
+    /// they read fine and name more than one sample. Both arrive here, and the source —
+    /// [`IngestError`] — lists every file beside the sample it claims, so the stray is
+    /// visible.
+    ///
+    /// **Deliberately not [`OpeningSample`](Self::OpeningSample)**, which names the sample
+    /// that failed to open: this failure is that no one sample could be established, so a
+    /// variant naming one would name it wrongly.
+    #[error("a psp holds one sample, and these alignment files could not be read as one sample's")]
+    FilesNotFromOneSample {
+        /// What the read-group table build found.
+        #[source]
+        source: Box<IngestError>,
+    },
+
+    /// The sample's psp file itself could not be produced — created at the start, or sealed
+    /// at the end.
+    ///
+    /// The record-by-record failures in between carry
+    /// [`RecordNotWritten`](Self::RecordNotWritten), which names the locus; these two
+    /// moments have no locus, so what locates them is the path. A file that fails at the
+    /// seal may be left half-written at that path — the format guarantees a reader refuses
+    /// it as interrupted rather than reading it as whole (`psp_file_format.md` §10).
+    #[error("the psp at {} could not be written", path.display())]
+    PspNotWritten {
+        /// The file that could not be produced.
+        path: PathBuf,
+        /// What the store refused.
+        #[source]
+        source: Box<crate::ng::psp::PspWriteError>,
     },
 }
 

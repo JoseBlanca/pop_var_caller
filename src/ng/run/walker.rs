@@ -1552,6 +1552,13 @@ impl WalkReference {
         })
     }
 
+    /// The FASTA this reference walks over — [`of`](Self::of) refused a reference
+    /// without one, so the path is never in question again downstream.
+    #[must_use]
+    pub(crate) fn fasta_path(&self) -> &std::path::Path {
+        &self.fasta
+    }
+
     /// One accessor of its own, over the shared index and contig table.
     #[must_use]
     pub(crate) fn accessor(&self) -> WindowedRefSeq {
@@ -1593,17 +1600,24 @@ impl std::fmt::Debug for WalkReference {
 /// **The aligner is not a knob here**: the delimiter bake-off is recorded and a run gets its
 /// winner, the unit-robust algorithm 4u.
 ///
-/// **`bundle_threshold` comes from the criteria the ground was cut with**, not from a constant,
-/// so the flank the generator fetches is checked against the radius the classification actually
-/// used. No flag moves it today, and if one is added this is the second place it has to reach.
+/// **The bundle radius is derived here, from the criteria the ground was cut with** — the
+/// segmentation's own record, never a constant a caller could substitute — so the flank the
+/// tract generator fetches is checked against the radius the classification actually used.
+/// Taking the whole [`SegmentationInputs`] rather than the one number is deliberate: both
+/// calling modes and any test build their generators through this function, so the rule that
+/// turns criteria into a radius has exactly one copy.
 ///
 /// One set per sample: a locus generator carries state across segments and cannot be shared
 /// (spec §8).
 pub(crate) fn generic_path_generators(
     reference: &WalkReference,
     config: PileupGeneratorConfig,
-    bundle_threshold: Bp,
+    segmentation_inputs: &crate::ng::segmentation_inputs::SegmentationInputs,
 ) -> Result<GeneratorSet, RunError> {
+    let bundle_threshold = Bp(segmentation_inputs
+        .repeat_tract_criteria
+        .classification
+        .bundle_threshold);
     let make_reference = {
         let reference = WalkReference {
             fasta: reference.fasta.clone(),

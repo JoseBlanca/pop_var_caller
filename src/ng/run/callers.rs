@@ -58,7 +58,7 @@ use crate::ng::run::cohort_merge::serial::{
     merge_cohort_handing_each_locus_over_covering_samples_in_parallel, merge_cohort_through_cache,
 };
 use crate::ng::run::cohort_merge::{CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads};
-use crate::ng::types::{Bp, GenomeRegion, ReadGroupId};
+use crate::ng::types::{GenomeRegion, ReadGroupId};
 use crate::ng::vcf::VcfRecord;
 use crate::ng::vcf::assemble::assemble_record;
 use crate::pop_var_caller::common::format_md5_hex;
@@ -442,15 +442,9 @@ impl AlignedFilesVariantCaller {
             let generators = generic_path_generators(
                 &self.walk_reference,
                 self.locus_generator_settings,
-                // **The radius the ground was actually cut with**, so the tract generator's
-                // flank is checked against the classification that produced the segments it
-                // will be handed rather than against a constant that happens to match.
-                Bp(self
-                    .segmentation
-                    .inputs()
-                    .repeat_tract_criteria
-                    .classification
-                    .bundle_threshold),
+                // The generators derive the tract generator's bundle radius from here —
+                // the criteria the ground was actually cut with, by construction.
+                self.segmentation.inputs(),
             )?;
             walkers.push(AlignmentFilesWalker::over(
                 Arc::clone(&self.segmentation),
@@ -3696,10 +3690,11 @@ mod cohort_loci_from_reads_match_cohort_loci_from_records {
                     false,
                 )
                 .expect("the fixture sample opens");
+                let default_criteria_segmentation = super::tests::segmentation();
                 let generators = generic_path_generators(
                     &walk_reference,
                     crate::ng::locus_generation::pileup::PileupGeneratorConfig::default(),
-                    Bp(crate::ng::region_typing::segment_criteria::DEFAULT_BUNDLE_THRESHOLD),
+                    default_criteria_segmentation.inputs(),
                 )
                 .expect("the shipped generator settings are accepted");
                 SampleLocusObservationsIterator::new(
@@ -4071,10 +4066,11 @@ mod what_the_fixtures_above_could_not_distinguish {
     fn a_repeat_tract_is_refused_as_unbuilt_rather_than_as_out_of_scope() {
         let (_reference_dir, reference) = fixture_reference_from_its_index();
         let walk_reference = WalkReference::of(&reference).expect("the fixture has bases");
+        let default_criteria_segmentation = super::tests::segmentation();
         let mut generators = generic_path_generators(
             &walk_reference,
             PileupGeneratorConfig::default(),
-            Bp(crate::ng::region_typing::segment_criteria::DEFAULT_BUNDLE_THRESHOLD),
+            default_criteria_segmentation.inputs(),
         )
         .expect("the shipped settings are accepted");
 

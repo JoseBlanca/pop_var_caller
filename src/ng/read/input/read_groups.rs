@@ -409,6 +409,33 @@ impl ReadGroups {
         &self.per_sample
     }
 
+    /// The one sample every read group of this table names, or the refusal a
+    /// single-sample tool owes.
+    ///
+    /// **The mismatch lists every read group, not just the offenders, and pairs each
+    /// file with the sample it claims** — the two vectors are built from the same
+    /// iteration so they cannot come apart, and a file whose read groups name two
+    /// samples appears twice, correctly. This is the one copy of that listing rule:
+    /// [`SampleReads::open_only_sample`](crate::ng::read::input::SampleReads::open_only_sample)
+    /// and psp mode's walk both classify through here.
+    pub fn only_sample(&self) -> Result<&SampleReadGroups, crate::ng::read::input::IngestError> {
+        use crate::ng::read::input::IngestError;
+        match self.read_groups_per_sample() {
+            [only] => Ok(only),
+            [] => Err(IngestError::NoFiles),
+            _ => Err(IngestError::SampleNameMismatch {
+                files: self
+                    .iter()
+                    .map(|(_, group)| group.file.to_path_buf())
+                    .collect(),
+                names: self
+                    .iter()
+                    .map(|(_, group)| group.sample.to_string())
+                    .collect(),
+            }),
+        }
+    }
+
     /// **A run's read-group shape, for a test that has no file to read one from** — one entry
     /// per `(ID, SM)` pair, in the order given, minted the way a real header would be.
     ///

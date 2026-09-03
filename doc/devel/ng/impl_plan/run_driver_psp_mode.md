@@ -162,7 +162,7 @@ compared (goal 4). *Depends:* —. *Source:* spec §6.1.
 
 ### Milestone B — the gatherer: one sample's walk into a psp
 
-**B1. ☐ `SampleObservationGatherer` over the existing walker.**
+**B1. ✅ `SampleObservationGatherer` over the existing walker.**
 Arch §3.3's object: constructed from one sample's alignment files, the shared
 `Arc<Segmentation>`, and a census configuration; internally the direct-mode chain
 (`SampleReads` + `GeneratorSet` + `RunSegments` → `SampleLocusObservationsIterator`) that

@@ -537,31 +537,16 @@ impl SampleReads {
         build_index_if_missing: bool,
     ) -> Result<Self, IngestError> {
         let read_groups = build_read_groups(paths).map_err(IngestError::ReadGroups)?;
-
-        match read_groups.read_groups_per_sample() {
-            [only] => Self::open(
-                only,
-                &read_groups,
-                reference,
-                filter_config,
-                build_index_if_missing,
-            ),
-            [] => Err(IngestError::NoFiles),
-            // Listed per **read group**, not per distinct sample: the two
-            // vectors have to stay parallel so each file is paired with what it
-            // claims, which is the only way to see which one is the stray. A
-            // file whose read groups name two samples appears twice, correctly.
-            _ => Err(IngestError::SampleNameMismatch {
-                files: read_groups
-                    .iter()
-                    .map(|(_, group)| group.file.to_path_buf())
-                    .collect(),
-                names: read_groups
-                    .iter()
-                    .map(|(_, group)| group.sample.to_string())
-                    .collect(),
-            }),
-        }
+        // The classification — one sample, none, or a mismatch listed per read
+        // group — lives on the table itself, shared with psp mode's walk.
+        let only = read_groups.only_sample()?;
+        Self::open(
+            only,
+            &read_groups,
+            reference,
+            filter_config,
+            build_index_if_missing,
+        )
     }
 
     /// The one sample all this sample's files name.
