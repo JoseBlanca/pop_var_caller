@@ -243,6 +243,93 @@ impl RepeatTractOutlierWeight {
     }
 }
 
+/// **How fast the junk distribution falls away from the candidate alleles**, per motif unit of
+/// distance — the stated constant `repeat_tract_junk_decay_per_unit` takes when nobody supplies
+/// one.
+///
+/// At 1.0 the junk term is the shipped uniform over the locus's reachable lengths, unchanged.
+/// Below 1.0 each reachable length `i` is weighted `g^(d_i) / Z`, where `d_i` is its distance
+/// from the **nearest** candidate allele in motif units and `Z` normalises the weights to one —
+/// so a junk read near a candidate collects more of the floor than one far from every candidate.
+///
+/// **1.0 is a deliberate identity, not a measurement**: it is the tract-accuracy program's L1
+/// lever (`doc/devel/ng/research/tract_accuracy_program_report.md`), shipped at the value that
+/// changes nothing so that a run at the default is byte-identical to one before the lever
+/// existed. Like the outlier weight above, nothing fits it, so its two reachable warrants are
+/// `defaulted` and `supplied`.
+pub const DEFAULT_JUNK_DECAY_PER_UNIT: f64 = 1.0;
+
+/// **The junk-term decay this run scored with, and whether the run was handed it or inherited
+/// it.**
+///
+/// The same two-state shape as [`RepeatTractOutlierWeight`] above, and for the same reasons:
+/// nothing fits this number, so either the run read a value out of a parameters file
+/// (`Supplied`) or it took [`DEFAULT_JUNK_DECAY_PER_UNIT`] (`Defaulted`); both fields are
+/// private and the two constructors set them together, so the unreachable pairs cannot be
+/// written; and a run that kept only the number could not tell an edited value from the
+/// compiled-in one, which is what the warrant beside it in the parameters file exists to say
+/// (`doc/devel/ng/spec/parameters_file.md` §3.8).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RepeatTractJunkDecayPerUnit {
+    value: f64,
+    provenance: Provenance,
+}
+
+impl RepeatTractJunkDecayPerUnit {
+    /// [`DEFAULT_JUNK_DECAY_PER_UNIT`], marked `Defaulted` — what a run that was handed no
+    /// value gets, and the value under which the junk term is the shipped uniform.
+    #[must_use]
+    pub const fn defaulted() -> Self {
+        Self {
+            value: DEFAULT_JUNK_DECAY_PER_UNIT,
+            provenance: Provenance::Defaulted,
+        }
+    }
+
+    /// A value the run was handed — from a parameters file — marked `Supplied`.
+    ///
+    /// # Panics
+    ///
+    /// Unless `value` is finite and inside `(0, 1]`, which is the range
+    /// [`genotype_log_likelihood_row`] already refuses outside of, several frames later and
+    /// naming a locus rather than the file the number came from. At exactly 1.0 the decay is
+    /// the shipped uniform, which is a legal thing to supply; at zero every length but a
+    /// candidate's own would carry no junk mass at all, and above one a length *far* from every
+    /// candidate would be the likeliest thing a junk read shows.
+    ///
+    /// **A caller reading a validated parameters file does not reach this panic**:
+    /// `ParametersFile::validate` refuses this key outside the same interval, naming it. This
+    /// is the guard for a caller that did not validate.
+    #[must_use]
+    pub fn supplied(value: f64) -> Self {
+        assert!(
+            value.is_finite() && value > 0.0 && value <= 1.0,
+            "a repeat-tract junk decay is a per-motif-unit multiplier inside 0 and 1 — 1.0 \
+             being the shipped uniform — and {value} was supplied; a zero leaves a junk read at \
+             any length but a candidate's own nowhere to land, and a value above one makes the \
+             lengths far from every candidate the likeliest ones"
+        );
+        Self {
+            value,
+            provenance: Provenance::Supplied,
+        }
+    }
+
+    /// The number itself — what a scoring row shapes the junk distribution with.
+    #[inline]
+    #[must_use]
+    pub fn value(self) -> f64 {
+        self.value
+    }
+
+    /// Whether the run was handed it or inherited it.
+    #[inline]
+    #[must_use]
+    pub fn provenance(self) -> Provenance {
+        self.provenance
+    }
+}
+
 /// The smallest share of a read the row will leave to this individual's own copies.
 ///
 /// **`1 − λ − c` is floored positive** (spec §4.5.1). It is nowhere near this at the values in
@@ -452,6 +539,17 @@ pub struct SsrLocusParameters<'a> {
     /// stripped of its warrant — [`DEFAULT_OUTLIER_WEIGHT`] where the run was handed none, and
     /// whatever a parameters file supplied where it was.
     pub outlier_weight: f64,
+    /// **How fast the junk distribution falls away from the candidate alleles**, per motif unit
+    /// of distance — the run's own value, which is
+    /// [`FrozenParameters::repeat_tract_junk_decay_per_unit`](crate::ng::calling::FrozenParameters::repeat_tract_junk_decay_per_unit)
+    /// stripped of its warrant, exactly as `outlier_weight` above arrives.
+    ///
+    /// **At [`DEFAULT_JUNK_DECAY_PER_UNIT`] (1.0) the junk term is the shipped uniform over
+    /// [`Self::reachable_lengths`], computed by the same expression it always was** — the row
+    /// special-cases it so a run at the default is byte-identical to one before this parameter
+    /// existed. Below 1.0, reachable length `i` takes weight `g^(d_i) / Z` with `d_i` its
+    /// motif-unit distance from the nearest candidate.
+    pub junk_decay_per_unit: f64,
     /// The tract lengths the outlier weight is spread over — **a property of the candidate set
     /// and the two cutoffs, with no cohort in it** (spec §4.5), built by
     /// [`fill_reachable_lengths`].
@@ -502,6 +600,42 @@ fn lengths_the_observation_allows(
     }
 }
 
+/// **The decayed junk distribution over the locus's reachable lengths** — one weight per entry
+/// of `reachable_lengths`, summing to one, written into `weights`.
+///
+/// Reachable length `i` takes `g^(d_i) / Z`: `d_i` is its distance from the **nearest**
+/// candidate allele, measured in motif units as `|length − candidate bases| / period` and
+/// minimised over the candidates, and `Z` is the sum of the raw `g^(d_i)` so the weights are a
+/// distribution. A candidate's own length has `d = 0` and weight `1 / Z`; at `g = 1` every
+/// length would take `1 / K` — which is why the row never calls this at the default, taking the
+/// shipped uniform expression verbatim instead.
+///
+/// Called once per row, not per observation: the weights are a property of the candidate set
+/// and the support, and `weights` is the scratch's reusable buffer.
+fn fill_junk_weights(
+    candidates: &[SsrCandidate<'_>],
+    reachable_lengths: &[u32],
+    period: f64,
+    decay_per_unit: f64,
+    weights: &mut Vec<f64>,
+) {
+    weights.clear();
+    weights.reserve(reachable_lengths.len());
+    let mut total = 0.0;
+    for &length in reachable_lengths {
+        let distance_in_motif_units = candidates
+            .iter()
+            .map(|candidate| (f64::from(length) - candidate.bases.len() as f64).abs() / period)
+            .fold(f64::INFINITY, f64::min);
+        let weight = decay_per_unit.powf(distance_in_motif_units);
+        total += weight;
+        weights.push(weight);
+    }
+    for weight in weights.iter_mut() {
+        *weight /= total;
+    }
+}
+
 /// **One sample's log-likelihood for every candidate genotype at one repeat tract**, written
 /// into `out` in genotype-table order.
 ///
@@ -515,7 +649,8 @@ fn lengths_the_observation_allows(
 ///
 /// On any mismatch between the tables handed in: a row of the wrong width; a candidate set the
 /// genotype table does not cover; a context table for a different locus; a ploidy past
-/// `MAX_PLOIDY_COPIES`; an outlier weight outside `(0, 1)`; an empty reachable-length support;
+/// `MAX_PLOIDY_COPIES`; an outlier weight outside `(0, 1)`; a junk decay outside `(0, 1]`; an
+/// empty reachable-length support;
 /// a contamination seed of a different width from that support, or one that does not sum to
 /// one; or a contamination fraction outside `[0, 1)`.
 ///
@@ -534,6 +669,7 @@ pub fn genotype_log_likelihood_row<Model: SsrEmissionModel>(
         candidates,
         contexts,
         outlier_weight,
+        junk_decay_per_unit,
         reachable_lengths,
         contamination,
     } = locus;
@@ -653,6 +789,16 @@ pub fn genotype_log_likelihood_row<Model: SsrEmissionModel>(
         "the outlier weight is the share of reads that came from somewhere else, so it lies \
          strictly inside 0 and 1 — not {outlier_weight}"
     );
+    // **The junk decay is a per-motif-unit multiplier, so it lives inside 0 and 1 with 1.0 —
+    // the shipped uniform — included.** At zero, `0^0 = 1` leaves mass only at the candidates'
+    // own lengths and a junk read anywhere else collects nothing, which is precisely the
+    // no-floor state the term exists to prevent; above one the weights *grow* with distance, so
+    // the lengths far from every candidate become the likeliest thing a junk read shows.
+    assert!(
+        junk_decay_per_unit > 0.0 && junk_decay_per_unit <= 1.0,
+        "the junk decay is a per-motif-unit multiplier inside 0 and 1 — 1.0 being the shipped \
+         uniform — not {junk_decay_per_unit}"
+    );
 
     // **The cache is filled with `NaN` and not with zero.** An unwritten slot has to hold
     // something the row cannot mistake for a real score, and zero is exactly that mistake: a
@@ -660,6 +806,37 @@ pub fn genotype_log_likelihood_row<Model: SsrEmissionModel>(
     // *never computed* and *computed as impossible* the same value.
     scratch.prepare_emissions(evidence, allele_count, f64::NAN);
     fill_emissions(model, evidence, candidates, contexts, scratch);
+
+    // **The decayed junk weights, computed once per row into the scratch's own buffer** — they
+    // are a property of the locus (its candidates and its support), not of any observation, so
+    // per-observation work is only a sum over a range of them. Left untouched at the default,
+    // where the uniform expression below never reads them.
+    if junk_decay_per_unit < 1.0 {
+        // Every context of one locus carries the locus's own motif, so the first cell's is the
+        // period the distances are measured in.
+        let period = f64::from(contexts.of(ReadGroupId(0), 0).motif.ssr_period().get());
+        fill_junk_weights(
+            candidates,
+            reachable_lengths,
+            period,
+            junk_decay_per_unit,
+            scratch.junk_weights_mut(),
+        );
+    }
+    // The smallest weight any reachable length carries — what an observation allowing *no*
+    // reachable length is floored at, playing the role `.max(1)` plays for the uniform: a read
+    // nothing explains must still land somewhere, and the least it can be given is the least
+    // any length gets. Zero at the default, where the uniform branch below never reads it.
+    let smallest_junk_weight = if junk_decay_per_unit < 1.0 {
+        scratch
+            .junk_weights()
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min)
+    } else {
+        0.0
+    };
+    let junk_weights = scratch.junk_weights();
 
     // `k / P` for every copy count a genotype can carry, shared with the SNP/indel row so the
     // two cannot disagree about what that is. It also carries the ploidy check.
@@ -691,8 +868,18 @@ pub fn genotype_log_likelihood_row<Model: SsrEmissionModel>(
         // membership test; the seed below is a real distribution and does test membership,
         // which is why the two are not the same expression.
         let allowed = lengths_the_observation_allows(observation, reachable_lengths);
-        let from_the_junk_distribution =
-            outlier_weight * allowed.len().max(1) as f64 / reachable_lengths.len() as f64;
+        // **Below 1.0, the uniform is replaced by the precomputed decayed weights**, and the
+        // mass an observation collects is their sum over the same range the uniform counted.
+        // **At exactly 1.0 the expression is the shipped uniform, verbatim**: `Σᵢ 1/K` and
+        // `|allowed|/K` are equal in algebra and not in floating point, so taking the sum at
+        // the default would move a run's output by a bit here and there for no change anybody
+        // asked for. A run at the default is byte-identical to one before the decay existed.
+        let from_the_junk_distribution = if junk_decay_per_unit < 1.0 {
+            let mass: f64 = junk_weights[allowed.clone()].iter().sum();
+            outlier_weight * mass.max(smallest_junk_weight)
+        } else {
+            outlier_weight * allowed.len().max(1) as f64 / reachable_lengths.len() as f64
+        };
 
         // **The third term, and the reason it is a third rather than part of the second.** A
         // contaminating read shows a *plausible* length, so its distribution is peaked and its
@@ -977,6 +1164,24 @@ mod tests {
         score_row_with_contamination(fixture, observations, ploidy, outlier_weight, None, &[])
     }
 
+    /// The row at a stated junk decay, everything else at the defaults.
+    fn score_row_at_decay(
+        fixture: &Fixture,
+        observations: &[SequenceObservation],
+        ploidy: u8,
+        junk_decay_per_unit: f64,
+    ) -> Vec<LogProb> {
+        score_row_fully_stated(
+            fixture,
+            observations,
+            ploidy,
+            DEFAULT_OUTLIER_WEIGHT,
+            junk_decay_per_unit,
+            None,
+            &[],
+        )
+    }
+
     /// The row at a stated outlier weight and contamination, over the locus's own reachable
     /// lengths.
     fn score_row_with_contamination(
@@ -984,6 +1189,27 @@ mod tests {
         observations: &[SequenceObservation],
         ploidy: u8,
         outlier_weight: f64,
+        seed: Option<&[f64]>,
+        fractions: &[f64],
+    ) -> Vec<LogProb> {
+        score_row_fully_stated(
+            fixture,
+            observations,
+            ploidy,
+            outlier_weight,
+            DEFAULT_JUNK_DECAY_PER_UNIT,
+            seed,
+            fractions,
+        )
+    }
+
+    /// The row with every locus parameter stated, which the two wrappers above default.
+    fn score_row_fully_stated(
+        fixture: &Fixture,
+        observations: &[SequenceObservation],
+        ploidy: u8,
+        outlier_weight: f64,
+        junk_decay_per_unit: f64,
         seed: Option<&[f64]>,
         fractions: &[f64],
     ) -> Vec<LogProb> {
@@ -1016,6 +1242,7 @@ mod tests {
                 candidates: &candidates,
                 contexts: SsrScoringContextTable::new(&contexts, candidates.len()),
                 outlier_weight,
+                junk_decay_per_unit,
                 reachable_lengths: &lengths,
                 contamination,
             },
@@ -1349,6 +1576,7 @@ mod tests {
                 candidates: &candidates,
                 contexts: SsrScoringContextTable::new(&contexts, candidates.len()),
                 outlier_weight: DEFAULT_OUTLIER_WEIGHT,
+                junk_decay_per_unit: DEFAULT_JUNK_DECAY_PER_UNIT,
                 reachable_lengths: &lengths,
                 contamination: None,
             },
@@ -1552,6 +1780,7 @@ mod tests {
                     candidates: &candidates,
                     contexts: table,
                     outlier_weight: DEFAULT_OUTLIER_WEIGHT,
+                    junk_decay_per_unit: DEFAULT_JUNK_DECAY_PER_UNIT,
                     reachable_lengths: &lengths,
                     contamination: None,
                 },
@@ -1656,6 +1885,249 @@ mod tests {
         score_row_at(&fixture, &observations, 2, 0.0);
     }
 
+    /// **The row refuses a junk decay outside `(0, 1]`.**
+    ///
+    /// At zero, `0^0 = 1` leaves junk mass only at the candidates' own lengths, so a junk read
+    /// anywhere else collects nothing — the no-floor collapse the term exists to prevent; above
+    /// one the weights grow with distance, making the lengths far from every candidate the
+    /// likeliest thing a junk read shows. One is legal: it is the shipped uniform, and the
+    /// default.
+    #[test]
+    #[should_panic(expected = "the junk decay is a per-motif-unit multiplier")]
+    fn a_junk_decay_of_zero_is_refused() {
+        let fixture = Fixture::of(b"CA", &[4, 5]);
+        let observations = [spanning(&a_tract(b"CA", 4), 5)];
+        score_row_at_decay(&fixture, &observations, 2, 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "the junk decay is a per-motif-unit multiplier")]
+    fn a_junk_decay_above_one_is_refused() {
+        let fixture = Fixture::of(b"CA", &[4, 5]);
+        let observations = [spanning(&a_tract(b"CA", 4), 5)];
+        score_row_at_decay(&fixture, &observations, 2, 1.5);
+    }
+
+    /// **At the default decay of 1.0 the junk term is the shipped uniform, to the bit.**
+    ///
+    /// The row special-cases `g == 1.0` to the exact expression it computed before the decay
+    /// existed — `λ · |allowed| / K`, with the floor at one length — because `Σᵢ 1/K` summed
+    /// over the allowed range is not float-identical to `|allowed| / K`. This recomputes the
+    /// whole formula outside the row with that **old** expression, over a complete read, a read
+    /// that ran out, and a complete read at a length no candidate reaches (which exercises the
+    /// `max(1)` floor), and requires the row at an explicit decay of 1.0 to match bit for bit.
+    /// That is the claim that a run at the default is byte-identical to one from before the
+    /// parameter existed.
+    #[test]
+    fn a_row_at_the_default_decay_is_the_uniform_junk_term_to_the_bit() {
+        let fixture = Fixture::of(b"CA", &[4, 5]);
+        let candidates = fixture.candidates();
+        let contexts = fixture.contexts(&candidates);
+
+        let mut truncated = spanning(&a_tract(b"CA", 3), 4);
+        truncated.read_witness =
+            ReadWitness::from_left(6, LocusLen::from_positions(10)).expect("a partial witness");
+        let observations = [
+            spanning(&a_tract(b"CA", 4), 6),
+            truncated,
+            // Eleven repeats past the longest candidate: no candidate reaches it, so its
+            // allowed range is empty and its whole bracket is the floored junk term.
+            spanning(&a_tract(b"CA", 5 + 11), 1),
+        ];
+
+        let mut model_scratch = StutterSubstitutionScratch::default();
+        let emission = |observation: usize, candidate: usize, scratch: &mut _| -> f64 {
+            let seen = &observations[observation];
+            match seen.read_witness {
+                ReadWitness::Complete => StutterSubstitutionEmission.emission(
+                    &seen.bases,
+                    &candidates[candidate],
+                    &contexts[candidate],
+                    scratch,
+                ),
+                ReadWitness::Partial { .. } => StutterSubstitutionEmission.censored_emission(
+                    &seen.bases,
+                    &candidates[candidate],
+                    &contexts[candidate],
+                    scratch,
+                ),
+            }
+        };
+        let scored: Vec<Vec<f64>> = (0..observations.len())
+            .map(|observation| {
+                (0..candidates.len())
+                    .map(|candidate| emission(observation, candidate, &mut model_scratch))
+                    .collect()
+            })
+            .collect();
+
+        let mut lengths = Vec::new();
+        fill_reachable_lengths(&candidates, &fixture.motif, &mut lengths);
+        let own = 1.0 - DEFAULT_OUTLIER_WEIGHT;
+        // The pre-change junk expression, verbatim in shape: the uniform's mass over the
+        // allowed lengths, floored at one length.
+        let junk_of = |observation: &SequenceObservation| -> f64 {
+            let showed = observation.bases.len() as u32;
+            let allowed = match observation.read_witness {
+                ReadWitness::Complete => usize::from(lengths.contains(&showed)),
+                ReadWitness::Partial { .. } => {
+                    lengths.iter().filter(|length| **length >= showed).count()
+                }
+            };
+            DEFAULT_OUTLIER_WEIGHT * allowed.max(1) as f64 / lengths.len() as f64
+        };
+        let by_hand: Vec<f64> = [(1.0, 0.0), (0.5, 0.5), (0.0, 1.0)]
+            .iter()
+            .map(|(first, second)| {
+                observations
+                    .iter()
+                    .enumerate()
+                    .map(|(observation, entry)| {
+                        let explained =
+                            first * scored[observation][0] + second * scored[observation][1];
+                        f64::from(entry.num_obs) * (own * explained + junk_of(entry)).ln()
+                    })
+                    .sum()
+            })
+            .collect();
+
+        let row = score_row_at_decay(&fixture, &observations, 2, 1.0);
+        assert_eq!(row.len(), by_hand.len(), "the genotype table changed shape");
+        for (genotype, (slot, expected)) in row.iter().zip(&by_hand).enumerate() {
+            assert_eq!(
+                slot.0.to_bits(),
+                expected.to_bits(),
+                "genotype {genotype}: the row gave {} and the old formula {expected}",
+                slot.0
+            );
+        }
+    }
+
+    /// **Below 1.0 the junk mass is the decayed weights' sum over what the observation
+    /// allows**, checked against the arithmetic done by hand on a hand-built support.
+    ///
+    /// The support is `[6, 8, 10, 12]` bases against candidates of 8 and 10 bases (CA × 4 and
+    /// CA × 5, period 2), so the distances from the nearest candidate, in motif units, are
+    /// `[1, 0, 0, 1]`. At `g = 0.5` the raw weights are `[0.5, 1, 1, 0.5]`, `Z = 3`, and
+    /// `w = [1/6, 1/3, 1/3, 1/6]`:
+    ///
+    /// - the complete read at 8 bases allows exactly its own length, so its junk mass is
+    ///   `λ · w(8) = 0.05 · (1/3) ≈ 0.016 666 666 666 666 666` — against `0.05 · (1/4) =
+    ///   0.0125` under the uniform;
+    /// - the read that got through 7 bases and ran out allows every length at or above, so its
+    ///   mass is `λ · (w(8) + w(10) + w(12)) = 0.05 · (5/6) ≈ 0.041 666 666 666 666 664` —
+    ///   against `0.05 · (3/4) = 0.0375` under the uniform.
+    #[test]
+    fn a_decay_below_one_reweights_the_junk_mass_as_computed_by_hand() {
+        let fixture = Fixture::of(b"CA", &[4, 5]);
+        let candidates = fixture.candidates();
+        let contexts = fixture.contexts(&candidates);
+        let lengths: Vec<u32> = vec![6, 8, 10, 12];
+        let decay = 0.5;
+
+        // The weights, in the same arithmetic order the row computes them: raw `g^d`, a running
+        // total, then one division per weight.
+        let raw = [
+            0.5f64.powf(1.0),
+            0.5f64.powf(0.0),
+            0.5f64.powf(0.0),
+            0.5f64.powf(1.0),
+        ];
+        let mut total = 0.0;
+        for weight in raw {
+            total += weight;
+        }
+        let w: Vec<f64> = raw.iter().map(|weight| weight / total).collect();
+
+        let mut truncated = spanning(&a_tract(b"CA", 3), 4);
+        truncated.read_witness =
+            ReadWitness::from_left(7, LocusLen::from_positions(10)).expect("a partial witness");
+        truncated.bases = a_tract(b"CA", 4)[..7].to_vec().into_boxed_slice();
+        let observations = [spanning(&a_tract(b"CA", 4), 6), truncated];
+
+        // The two junk masses, as the doc comment's arithmetic gives them.
+        let junk_complete = DEFAULT_OUTLIER_WEIGHT * w[1..2].iter().sum::<f64>();
+        let junk_partial = DEFAULT_OUTLIER_WEIGHT * w[1..4].iter().sum::<f64>();
+        assert!((junk_complete - 0.016_666_666_666_666_666).abs() < 1e-15);
+        assert!((junk_partial - 0.041_666_666_666_666_664).abs() < 1e-15);
+
+        let mut model_scratch = StutterSubstitutionScratch::default();
+        let emission = |observation: usize, candidate: usize, scratch: &mut _| -> f64 {
+            let seen = &observations[observation];
+            match seen.read_witness {
+                ReadWitness::Complete => StutterSubstitutionEmission.emission(
+                    &seen.bases,
+                    &candidates[candidate],
+                    &contexts[candidate],
+                    scratch,
+                ),
+                ReadWitness::Partial { .. } => StutterSubstitutionEmission.censored_emission(
+                    &seen.bases,
+                    &candidates[candidate],
+                    &contexts[candidate],
+                    scratch,
+                ),
+            }
+        };
+        let scored: Vec<Vec<f64>> = (0..observations.len())
+            .map(|observation| {
+                (0..candidates.len())
+                    .map(|candidate| emission(observation, candidate, &mut model_scratch))
+                    .collect()
+            })
+            .collect();
+
+        let own = 1.0 - DEFAULT_OUTLIER_WEIGHT;
+        let junk = [junk_complete, junk_partial];
+        let by_hand: Vec<f64> = [(1.0, 0.0), (0.5, 0.5), (0.0, 1.0)]
+            .iter()
+            .map(|(first, second)| {
+                observations
+                    .iter()
+                    .enumerate()
+                    .map(|(observation, entry)| {
+                        let explained =
+                            first * scored[observation][0] + second * scored[observation][1];
+                        f64::from(entry.num_obs) * (own * explained + junk[observation]).ln()
+                    })
+                    .sum()
+            })
+            .collect();
+
+        // The row itself, over the same hand-built support.
+        let detail = a_detail(b"CA");
+        let evidence = SsrSampleEvidence::new(&observations, &detail);
+        let table = GenotypeTable::build(Ploidy::try_new(2).expect("a valid ploidy"), 2);
+        let view = table.view();
+        let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
+        let mut scratch = SsrRowScratch::<StutterSubstitutionScratch>::default();
+        genotype_log_likelihood_row(
+            &StutterSubstitutionEmission,
+            &evidence,
+            SsrLocusParameters {
+                candidates: &candidates,
+                contexts: SsrScoringContextTable::new(&contexts, candidates.len()),
+                outlier_weight: DEFAULT_OUTLIER_WEIGHT,
+                junk_decay_per_unit: decay,
+                reachable_lengths: &lengths,
+                contamination: None,
+            },
+            &view,
+            &mut out,
+            &mut scratch,
+        );
+
+        assert_eq!(out.len(), by_hand.len(), "the genotype table changed shape");
+        for (genotype, (slot, expected)) in out.iter().zip(&by_hand).enumerate() {
+            assert_eq!(
+                slot.0.to_bits(),
+                expected.to_bits(),
+                "genotype {genotype}: the row gave {} and the hand arithmetic {expected}",
+                slot.0
+            );
+        }
+    }
+
     /// **A locus reaching no lengths at all is refused**, because the outlier weight is spread
     /// over them and there is always at least one — a candidate's own.
     ///
@@ -1682,6 +2154,7 @@ mod tests {
                 candidates: &candidates,
                 contexts: SsrScoringContextTable::new(&contexts, candidates.len()),
                 outlier_weight: DEFAULT_OUTLIER_WEIGHT,
+                junk_decay_per_unit: DEFAULT_JUNK_DECAY_PER_UNIT,
                 reachable_lengths: &[],
                 contamination: None,
             },
@@ -1716,6 +2189,7 @@ mod tests {
                 candidates: &candidates,
                 contexts: SsrScoringContextTable::new(&contexts, candidates.len()),
                 outlier_weight: DEFAULT_OUTLIER_WEIGHT,
+                junk_decay_per_unit: DEFAULT_JUNK_DECAY_PER_UNIT,
                 reachable_lengths: &lengths,
                 contamination: None,
             },

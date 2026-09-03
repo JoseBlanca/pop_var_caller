@@ -309,6 +309,10 @@ bases_compared = 40122
 value = 0.05
 warrant = "defaulted"
 
+[stated_constants.repeat_tract_junk_decay_per_unit]
+value = 1.0
+warrant = "defaulted"
+
 [repeat_routing]
 min_copies = [5, 5, 4, 4, 4, 3]
 min_period = 1

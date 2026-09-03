@@ -543,4 +543,104 @@ reachable class grew back to its old size, and its gate is re-armed with that nu
 
 ---
 
-*Sections L1–L3 and L5–L7 are opened as the program reaches them.*
+## L1 — junk-shape: where the junk mass sits
+
+Status: pre-registered
+
+**Pre-registration (written 2026-09-03, after L4 landed and before any L1 code).**
+
+**The baseline for this lever is the L4-fixed caller** (arm `l4_input_spelling`):
+0.8981 / 0.8964 at 30×, 679 errors — 369 never-offered, 238 spurious het, 44 collapsed het,
+28 wrong-other.
+
+**The geneticist's criterion, from the owner (2026-09-03):** much of the junk is expected to
+be **hidden duplications** — single-copy in the reference, multi-copy in the sample — where a
+mutation in one sample-copy manufactures an artefactual heterozygote, at a distance that can
+be **more than one motif unit**. Two measured facts frame it:
+
+- The refreshed P1 partition on the L4 baseline (probe re-run, control asserted, 238 tracts):
+  **184 locus-real** (persistent at 300×, both strands, MAPQ 70), 22 unseen-in-raw,
+  16 sampling-noise, 12 spelling-only, 4 clustered-and-persistent. The locus-real class shows
+  **no coverage excess** at 300× (median 175 spanning reads against 182 over all scored
+  tracts) — the classic collapsed-duplication signature (roughly doubled depth) is absent, so
+  if these are duplications they are ones whose extra copy's reads are split or lost, not
+  piled on.
+- **The stray tail is multi-step, as the owner predicted**: of the 52 spurious alleles
+  carried by under 2 reads in 10, only 12 sit one unit from the truth — the spread reaches 36
+  units, with most inside 7. A junk shape peaked at ±1 unit is contraindicated; the contest
+  is uniform (shipped) against a moderate decay concentrating floor mass within a few units.
+
+targets: the **52 stray-tail spurious heterozygotes** plus part of the 28 wrong-other. The
+  184 well-supported locus-real cases are explicitly NOT claimed — a junk term absorbs stray
+  reads, and a second length carried by half the reads at 300× is not stray.
+ceiling: **80 tracts** (52 + 28), and it will not be reached — some strays are real slippage
+  the stutter model owns.
+bar: verdict flips against the L4 baseline, net-positive on both period classes at both
+  depths; the collapsed-het class not enlarged beyond what fixed strays justify (a stronger
+  junk floor is a het-suppressor by construction); λ re-swept jointly with any shape change
+  (rule 6); the simulator sanity run (planted junk absorbed without moving clean loci); and
+  the tomato behavioural gate before any default claim — a floor under every read binds
+  hardest at 3 reads a position, which HG002 cannot see.
+
+**Arms, in order:** (b) the junk weight split per period class, seeded from the measured
+junk rates (1 read in 2,300 at homopolymers, 1 in 209 at period 2+ — the opposite ordering
+to what the single 0.05 implies) and swept around them; (a) the uniform `U` replaced by a
+geometric decay with distance in motif units from the nearest candidate, decay swept from
+steep to nearly flat with uniform as the control; (c) the winner of each combined, λ
+re-swept on top.
+
+*(measurements to follow the runs — nothing below this line was written before them)*
+
+**Arm (b), measured — and closed without code.** Each locus is scored under its own period
+class independently, so per-class optima read directly off a global-λ sweep; the split needs
+plumbing only if the peaks separate. They do not: re-swept on the L4 baseline
+(`tmp/tract_program/l1_sweep/`, six values 0.01–0.30 at 30×, the two contenders at 50×), the
+homopolymer optimum is **0.20** and period 2+ is flat from 0.05 to 0.20 (within 0.04 points),
+so a global 0.20 captures everything a per-class pair would. **L4 moved this dial's optimum**:
+pre-L4 the 0.05–0.30 stretch was flat within 0.1 points; post-L4, 0.05 → 0.20 is worth
+**+0.32 / +0.04** at 30× (flips: 25 tracts right — 24 of them spurious hets — against 11 new
+collapsed hets and 6 lost records; net positive both classes) and **+0.58 / +0.16** at 50×
+with **no collapse cost there** (17 collapsed homopolymer hets, identical to baseline).
+The λ=0.05 control row reproduces the L4 baseline to the fourth decimal. Recommendation to
+the slate: **default λ = 0.20**, pending the tomato behavioural gate — a floor under every
+read binds hardest at 3 reads a position, which HG002 cannot see.
+
+**Arm (a), measured — the shape is a weaker copy of the strength dial.** The knob
+(`repeat_tract_junk_decay_per_unit`, a stated constant defaulting to 1.0 = the shipped
+uniform) is built end-to-end and proven inert at its default twice over: the row takes the
+pre-change expression verbatim at 1.0 (bit-identity asserted in a unit test), and a fresh
+`--defaults` run under the decay build is **byte-identical** to the pre-decay L4 arm
+(`CONTROL-BYTE-IDENTICAL`, `tmp/tract_program/l1_decay_run.sh`). The sweep
+(decay 0.85/0.70/0.50/0.30 × λ 0.05/0.20 at 30×, `tmp/tract_program/l1_decay/`):
+
+- at λ 0.05, decay 0.50 is the shape's best: 0.9008 / 0.8964, **flips +6 net** (22 right
+  against 16 leaving) — strictly inside what uniform λ 0.20 buys (+8 net, 0.9013 / 0.8968)
+  on the same spurious-for-collapsed trade;
+- on top of λ 0.20 the shape only destroys: its mildest setting nets **−6** (32 right
+  against 38 leaving), and the steepest reaches 0.8917 with 88 collapsed homopolymer hets.
+
+**Verdict for the shape: discard as a default** — dominated at every grid cell by the
+uniform with the right λ, which is what the owner's multi-step-junk reading predicts: junk
+lands at many distances, so a uniform floor was already approximately the right shape. The
+built knob ships inert at 1.0; whether it is removed outright or kept as the fallback point
+on the trade curve is decided in the Checkpoint 1 slate — its one conceivable use is if
+λ = 0.20 fails the 3× tomato gate, since a decayed 0.05 reaches similar HG002 numbers with
+less floor mass per read. The simulator sanity run is waived for a discarded shape and owed
+before any future adoption.
+
+**Verdict for the weight (the owner's junk-strength lever, §5's owed joint re-sweep):
+default-candidate λ = 0.20**, replacing 0.05 — +0.32 / +0.04 at 30×, +0.58 / +0.16 at 50×,
+no 50× collapse cost — pending the tomato behavioural gate and the owner's slate.
+
+**Set aside with the owner (2026-09-03): a per-locus λ re-fit in the EM loop.** Proposed,
+examined, and ruled out before building: its reachable band is the 5–20%-share strays only
+(the pull-back that makes it safe also makes it unable to touch the 46%-share wall), its
+failure mode is un-calling real heterozygotes, and at 3 reads a position it is inert by
+design. The 184-tract wall's real discriminator is the **cohort** — heterozygote excess
+across samples, repeated off-ratio allele balance, Hardy–Weinberg violation — signals a
+single-sample benchmark cannot exercise; that is a future cohort-level lever outside this
+program, connected to the existing hidden-paralog census work.
+
+---
+
+*Sections L2–L3 and L5–L7 are opened as the program reaches them.*

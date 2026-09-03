@@ -65,7 +65,7 @@ use super::{
     ContaminationMeasurement, EvidenceCount, LevelSmoothing, ParametersFile, ParametersFileError,
     ShareCurve, ShareSmoothing, SlippageCurve, Warrant, WarrantedValue,
 };
-use crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
+use crate::ng::calling::likelihood::ssr::{DEFAULT_JUNK_DECAY_PER_UNIT, DEFAULT_OUTLIER_WEIGHT};
 use crate::ng::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -846,6 +846,52 @@ impl ParametersFile {
                 format!(
                     "has the warrant `{}`, and nothing fits this number: it is either the \
                      built-in {DEFAULT_OUTLIER_WEIGHT:?}, which is `defaulted`, or one you \
+                     wrote here, which is `supplied`",
+                    the_word_for(other)
+                ),
+            )),
+        }?;
+
+        let at = "stated_constants.repeat_tract_junk_decay_per_unit";
+        let decay = &self.stated_constants.repeat_tract_junk_decay_per_unit;
+        a_warranted_value(at, decay, EvidenceCount::Reads(0))?;
+        // **Open at zero and closed at one, unlike the weight above.** The scoring row asserts
+        // `0 < decay <= 1` (`likelihood::ssr`'s `genotype_log_likelihood_row`): at exactly 1.0
+        // the junk term is the shipped uniform, which is the default and a legal thing to
+        // supply, where a zero leaves a junk read at any length but a candidate's own nowhere
+        // to land and a value above one makes the lengths far from every candidate the
+        // likeliest ones.
+        if !(decay.value > 0.0 && decay.value <= 1.0) {
+            return Err(refuse(
+                at,
+                format!(
+                    "is {}, and the junk term's decay is a per-motif-unit multiplier inside \
+                     zero and one, with one — the uniform — included: a zero leaves a junk read \
+                     at any length but a candidate's own nowhere to land, and a value above one \
+                     makes the lengths far from every candidate the likeliest ones",
+                    decay.value
+                ),
+            ));
+        }
+        // The same two-of-four warrant rule as the weight above, for the same reasons — nothing
+        // fits this number either.
+        match decay.warrant {
+            Warrant::Supplied => Ok(()),
+            Warrant::Defaulted if decay.value == DEFAULT_JUNK_DECAY_PER_UNIT => Ok(()),
+            Warrant::Defaulted => Err(refuse(
+                at,
+                format!(
+                    "is {:?}, and its warrant is `defaulted`, which says this run inherited the \
+                     built-in {DEFAULT_JUNK_DECAY_PER_UNIT:?}; a number you changed is one the \
+                     run was handed, so change the warrant beside it to `supplied`",
+                    decay.value
+                ),
+            )),
+            other => Err(refuse(
+                at,
+                format!(
+                    "has the warrant `{}`, and nothing fits this number: it is either the \
+                     built-in {DEFAULT_JUNK_DECAY_PER_UNIT:?}, which is `defaulted`, or one you \
                      wrote here, which is `supplied`",
                     the_word_for(other)
                 ),
@@ -2125,6 +2171,87 @@ mod tests {
                 .value = 0.0)
             .0
             .ends_with("fallback_length_spectrum_concentration")
+        );
+    }
+
+    /// **The junk decay is held inside `(0, 1]`** — open at zero, where a junk read at any
+    /// length but a candidate's own would have nowhere to land, and **closed at one**, which is
+    /// the shipped uniform and both the default and a legal thing to supply. The scoring row
+    /// asserts the same interval, so anything past here would panic at the first repeat tract
+    /// naming a locus rather than the file.
+    #[test]
+    fn a_junk_decay_outside_its_interval_is_refused_and_its_two_ends_are_not_alike() {
+        for out_of_range in [0.0, -0.5, 1.5] {
+            let (field, problem) = refused(|file| {
+                file.stated_constants.repeat_tract_junk_decay_per_unit = WarrantedValue {
+                    value: out_of_range,
+                    warrant: Warrant::Supplied,
+                    observations: None,
+                };
+            });
+            assert!(
+                field.ends_with("repeat_tract_junk_decay_per_unit"),
+                "{field}"
+            );
+            assert!(problem.contains("per-motif-unit multiplier"), "{problem}");
+        }
+
+        // Both legal states of the upper end: 1.0 supplied, and 1.0 as the defaulted constant.
+        accepted(|file| {
+            file.stated_constants.repeat_tract_junk_decay_per_unit = WarrantedValue {
+                value: 1.0,
+                warrant: Warrant::Supplied,
+                observations: None,
+            };
+        });
+        accepted(|file| {
+            file.stated_constants.repeat_tract_junk_decay_per_unit = WarrantedValue {
+                value: DEFAULT_JUNK_DECAY_PER_UNIT,
+                warrant: Warrant::Defaulted,
+                observations: None,
+            };
+        });
+        // And an interior value a person would actually try.
+        accepted(|file| {
+            file.stated_constants.repeat_tract_junk_decay_per_unit = WarrantedValue {
+                value: 0.5,
+                warrant: Warrant::Supplied,
+                observations: None,
+            };
+        });
+    }
+
+    /// **The junk decay is the other key held to two of the four warrants**, exactly as the
+    /// outlier weight above is and for the same reasons: nothing fits it, and the state worth
+    /// catching is an edited number left under a `defaulted` label.
+    #[test]
+    fn a_junk_decay_whose_warrant_no_run_could_mean_is_refused() {
+        for unfittable in [Warrant::FittedHere, Warrant::Borrowed] {
+            let (field, problem) = refused(|file| {
+                file.stated_constants
+                    .repeat_tract_junk_decay_per_unit
+                    .warrant = unfittable;
+            });
+            assert!(
+                field.ends_with("repeat_tract_junk_decay_per_unit"),
+                "{field}"
+            );
+            assert!(problem.contains("nothing fits this number"), "{problem}");
+        }
+
+        // Derived from the constant, never written out — the same guard the outlier weight's
+        // test carries, and for the same reason.
+        let (field, problem) = refused(|file| {
+            file.stated_constants.repeat_tract_junk_decay_per_unit.value =
+                DEFAULT_JUNK_DECAY_PER_UNIT / 2.0;
+        });
+        assert!(
+            field.ends_with("repeat_tract_junk_decay_per_unit"),
+            "{field}"
+        );
+        assert!(
+            problem.contains("change the warrant beside it to `supplied`"),
+            "an edited number under a defaulted warrant is told what to change: {problem}"
         );
     }
 

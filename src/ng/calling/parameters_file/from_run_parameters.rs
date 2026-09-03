@@ -415,6 +415,14 @@ impl ParametersFile {
                     warrant: run.repeat_tract_outlier_weight().provenance().into(),
                     observations: None,
                 },
+                // The junk decay travels the same way and for the same reasons: whatever the
+                // run scored under, with its warrant, and no evidence count — nothing counted
+                // anything to arrive at it.
+                repeat_tract_junk_decay_per_unit: WarrantedValue {
+                    value: run.repeat_tract_junk_decay_per_unit().value(),
+                    warrant: run.repeat_tract_junk_decay_per_unit().provenance().into(),
+                    observations: None,
+                },
             },
         }
     }
@@ -948,7 +956,10 @@ impl From<FittedShape> for ShareShape {
 mod tests {
     use super::*;
     use crate::ng::calling::genotype_prior::SpectrumSeed;
-    use crate::ng::calling::likelihood::ssr::{DEFAULT_OUTLIER_WEIGHT, RepeatTractOutlierWeight};
+    use crate::ng::calling::likelihood::ssr::{
+        DEFAULT_JUNK_DECAY_PER_UNIT, DEFAULT_OUTLIER_WEIGHT, RepeatTractJunkDecayPerUnit,
+        RepeatTractOutlierWeight,
+    };
     use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
     use crate::ng::parameter_estimation::joint::contamination::{
         ContaminationEstimate, NotIdentifiedReason,
@@ -2220,6 +2231,55 @@ mod tests {
         assert_eq!(
             file.stated_constants
                 .repeat_tract_outlier_weight
+                .observations,
+            None,
+            "nothing counted anything to arrive at it, whichever way it got here"
+        );
+    }
+
+    /// **The junk decay is written out the same way** — defaulted at the built-in 1.0, and a
+    /// supplied one written as supplied, for the reasons the outlier weight's test above gives.
+    #[test]
+    fn the_junk_decay_is_written_as_the_inherited_constant_it_is() {
+        let file = the_projected_file();
+        assert_eq!(
+            file.stated_constants.repeat_tract_junk_decay_per_unit.value,
+            DEFAULT_JUNK_DECAY_PER_UNIT
+        );
+        assert_eq!(
+            file.stated_constants
+                .repeat_tract_junk_decay_per_unit
+                .warrant,
+            Warrant::Defaulted,
+            "1.0 is the caller's own stated constant — the value at which the junk term is the \
+             shipped uniform — and was never measured"
+        );
+        assert_eq!(
+            file.stated_constants
+                .repeat_tract_junk_decay_per_unit
+                .observations,
+            None
+        );
+
+        let read_groups = a_runs_read_groups();
+        let supplied = a_fitted_run(&read_groups, &the_runs_contamination())
+            .with_repeat_tract_junk_decay_per_unit(RepeatTractJunkDecayPerUnit::supplied(0.5));
+        let file = projected(&supplied, &read_groups);
+        assert_eq!(
+            file.stated_constants.repeat_tract_junk_decay_per_unit.value,
+            0.5
+        );
+        assert_eq!(
+            file.stated_constants
+                .repeat_tract_junk_decay_per_unit
+                .warrant,
+            Warrant::Supplied,
+            "a decay the run was handed is not one it inherited, and the file is where that \
+             difference has to survive"
+        );
+        assert_eq!(
+            file.stated_constants
+                .repeat_tract_junk_decay_per_unit
                 .observations,
             None,
             "nothing counted anything to arrive at it, whichever way it got here"

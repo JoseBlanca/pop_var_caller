@@ -100,6 +100,7 @@
 //!
 //! [stated_constants]               # §3.8 — the numbers no fit produces
 //! repeat_tract_outlier_weight = { value = 0.05, warrant = "defaulted" }
+//! repeat_tract_junk_decay_per_unit = { value = 1.0, warrant = "defaulted" }
 //! ```
 //!
 //! # Three conventions the whole tree keeps
@@ -1351,15 +1352,31 @@ pub struct StatedConstants {
     /// whole point of writing it down. Without the warrant a run reports an edited guess as the
     /// project's own constant, and spec §2.1's wholesale demotion of a mismatched file has
     /// nowhere to write itself for this one number. **The other two warrants are refusals** —
-    /// nothing fits this number, so [`Self::repeat_tract_outlier_weight`] is the one key
-    /// `validate` holds to two of the four. Its evidence count is absent: no fit produced it.
+    /// nothing fits this number, so it and [`Self::repeat_tract_junk_decay_per_unit`] below are
+    /// the keys `validate` holds to two of the four. Its evidence count is absent: no fit
+    /// produced it.
     pub repeat_tract_outlier_weight: WarrantedValue,
+    /// **How fast the repeat-tract junk term's distribution falls away from the candidate
+    /// alleles**, per motif unit of distance from the nearest candidate. At the shipped 1.0 the
+    /// junk term is the uniform it always was — byte for byte — and below 1.0 the reachable
+    /// lengths near a candidate collect more of the floor than the ones far from every
+    /// candidate. The tract-accuracy program's L1 lever
+    /// (`doc/devel/ng/research/tract_accuracy_program_report.md`).
+    ///
+    /// **It carries a warrant for the same reason the outlier weight above does**, and is held
+    /// to the same two states: `defaulted` says the run took the stated constant from
+    /// `likelihood/ssr.rs`, `supplied` says somebody wrote a number here and the run scored
+    /// under it. Nothing fits it, so the other two warrants are refusals, and its evidence
+    /// count is absent.
+    pub repeat_tract_junk_decay_per_unit: WarrantedValue,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
+    use crate::ng::calling::likelihood::ssr::{
+        DEFAULT_JUNK_DECAY_PER_UNIT, DEFAULT_OUTLIER_WEIGHT,
+    };
     use crate::ng::parameter_estimation::joint::loci::ReferenceDigest;
     use crate::ng::repeat_catalog::StrRepeatCriteria;
 
@@ -1759,6 +1776,11 @@ mod tests {
                     warrant: Warrant::Defaulted,
                     observations: None,
                 },
+                repeat_tract_junk_decay_per_unit: WarrantedValue {
+                    value: DEFAULT_JUNK_DECAY_PER_UNIT,
+                    warrant: Warrant::Defaulted,
+                    observations: None,
+                },
             },
             // The shape, not a recommendation: what a run that routed on the catalog's own
             // storage floors would record. Every field differs from at least one neighbour, so
@@ -2124,16 +2146,16 @@ mod tests {
         stripped
     }
 
-    /// **Every warranted number in the file is written the same way, and these five are all of
+    /// **Every warranted number in the file is written the same way, and these six are all of
     /// them** — which is the whole of what this shape is for: a reader who has understood one has
     /// understood all of them.
     ///
     /// It searches the emitted document for *every* table carrying a `warrant` key rather than
-    /// visiting the five by name, and **the two assertions catch different things**. A number
+    /// visiting the six by name, and **the two assertions catch different things**. A number
     /// written flat with its key spelled exactly `warrant` lands in a table that has no `value`,
     /// and the loop catches it. One written flat under a *suffixed* key —
     /// `stated_length_spectrum_warrant`, the spelling this shape replaced — is invisible to the
-    /// walk, and only the list of paths catches it. A sixth warranted number, or a fifth that
+    /// walk, and only the list of paths catches it. A seventh warranted number, or a sixth that
     /// lost its warrant, is caught by the list too.
     #[test]
     fn every_warranted_number_is_written_the_same_way() {
@@ -2156,9 +2178,10 @@ mod tests {
                 ".inbreeding.by_sample.inbreeding_coefficient",
                 ".repeat_tracts.fallback_length_spectrum_concentration",
                 ".repeat_tracts.substitution_rate_by_stratum.rate",
+                ".stated_constants.repeat_tract_junk_decay_per_unit",
                 ".stated_constants.repeat_tract_outlier_weight",
             ],
-            "these five numbers carry a warrant and nothing else does"
+            "these six numbers carry a warrant and nothing else does"
         );
 
         for (path, table) in &found {
@@ -2223,9 +2246,10 @@ mod tests {
             "a repeat-tract substitution rate is fitted over bases compared, not over reads"
         );
 
-        // Absent, not zero: neither of these came from a fit with a sample size.
+        // Absent, not zero: none of these came from a fit with a sample size.
         assert_eq!(unit_of("fallback_length_spectrum_concentration"), None);
         assert_eq!(unit_of("repeat_tract_outlier_weight"), None);
+        assert_eq!(unit_of("repeat_tract_junk_decay_per_unit"), None);
     }
 
     /// **Each of spec §5's five states is a missing key, and each is distinct from the value a
@@ -2606,6 +2630,7 @@ substitution_rate_by_stratum = []
 
 [stated_constants]
 repeat_tract_outlier_weight = { value = 0.05, warrant = "defaulted" }
+repeat_tract_junk_decay_per_unit = { value = 1.0, warrant = "defaulted" }
 "#;
         let file: ParametersFile = toml::from_str(text).expect("the documented inline form parses");
 

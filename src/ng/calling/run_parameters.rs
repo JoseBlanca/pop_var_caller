@@ -52,7 +52,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::genotype_prior::SpectrumSeed;
 use super::genotype_prior::seed_generic::seed_from_population_moments;
-use super::likelihood::ssr::RepeatTractOutlierWeight;
+use super::likelihood::ssr::{RepeatTractJunkDecayPerUnit, RepeatTractOutlierWeight};
 use super::run_report::{
     ContaminationUsed, ReadGroupContamination, RepeatTractFitsUsed, RunParameterReport,
     SequencingBatchingUsed,
@@ -121,6 +121,15 @@ pub struct RunParameters {
     /// a person can change it). [`Self::assemble`] takes the default and
     /// [`Self::with_repeat_tract_outlier_weight`] is how a supplied one gets in.
     repeat_tract_outlier_weight: RepeatTractOutlierWeight,
+    /// **How fast the repeat-tract junk distribution falls away from the candidate alleles**,
+    /// per motif unit of distance, and whether the run was handed that number or inherited it.
+    ///
+    /// **The second parameter here no fit produces**, beside the outlier weight above and with
+    /// the same plumbing: it arrives from the binary — 1.0, under which the junk term is the
+    /// shipped uniform — unless a parameters file supplied one. [`Self::assemble`] takes the
+    /// default and [`Self::with_repeat_tract_junk_decay_per_unit`] is how a supplied one gets
+    /// in.
+    repeat_tract_junk_decay_per_unit: RepeatTractJunkDecayPerUnit,
 }
 
 impl RunParameters {
@@ -498,6 +507,10 @@ impl RunParameters {
             // is the inherited one; a run handed a parameters file replaces it through
             // [`Self::with_repeat_tract_outlier_weight`].
             repeat_tract_outlier_weight: RepeatTractOutlierWeight::defaulted(),
+            // The same reasoning for the junk decay: nothing in the pre-pass measures it, so
+            // assembly can only put the inherited 1.0 here, and a run handed a parameters file
+            // replaces it through [`Self::with_repeat_tract_junk_decay_per_unit`].
+            repeat_tract_junk_decay_per_unit: RepeatTractJunkDecayPerUnit::defaulted(),
         }
     }
 
@@ -529,7 +542,7 @@ impl RunParameters {
     #[allow(
         clippy::too_many_arguments,
         reason = "the fields of the type itself, which is the point: this is the door for values \
-                  that are already assembled, so a bundle naming the same nine things would be a \
+                  that are already assembled, so a bundle naming the same ten things would be a \
                   second shape for one object"
     )]
     #[must_use]
@@ -543,6 +556,7 @@ impl RunParameters {
         ssr_substitution_rate: BTreeMap<StratumKey, Estimate<ErrorRate>>,
         ploidy: Ploidy,
         repeat_tract_outlier_weight: RepeatTractOutlierWeight,
+        repeat_tract_junk_decay_per_unit: RepeatTractJunkDecayPerUnit,
     ) -> Self {
         assert!(
             !calibration_by_read_group.is_empty(),
@@ -590,6 +604,7 @@ impl RunParameters {
             ssr_substitution_rate,
             ploidy,
             repeat_tract_outlier_weight,
+            repeat_tract_junk_decay_per_unit,
         }
     }
 
@@ -614,6 +629,23 @@ impl RunParameters {
         self
     }
 
+    /// **Score repeat tracts under a supplied junk decay rather than the inherited 1.0.**
+    ///
+    /// A builder for the same reasons [`Self::with_repeat_tract_outlier_weight`] is one: no fit
+    /// produces this number, so assembly takes the default and the projection back from a
+    /// parameters file is the caller with another value. **Nothing that skips this call is
+    /// silently wrong** — it keeps [`RepeatTractJunkDecayPerUnit::defaulted`], under which the
+    /// junk term is the shipped uniform the run would have scored with anyway, and what
+    /// [`Self::report`] then states.
+    #[must_use]
+    pub fn with_repeat_tract_junk_decay_per_unit(
+        mut self,
+        decay: RepeatTractJunkDecayPerUnit,
+    ) -> Self {
+        self.repeat_tract_junk_decay_per_unit = decay;
+        self
+    }
+
     /// What calling borrows for the whole run.
     #[must_use]
     pub fn view(&self) -> FrozenParameters<'_> {
@@ -627,6 +659,7 @@ impl RunParameters {
                 self.ploidy,
             )
             .with_repeat_tract_outlier_weight(self.repeat_tract_outlier_weight)
+            .with_repeat_tract_junk_decay_per_unit(self.repeat_tract_junk_decay_per_unit)
         } else {
             FrozenParameters::new(
                 &self.calibration_by_read_group,
@@ -639,6 +672,7 @@ impl RunParameters {
                 self.ploidy,
             )
             .with_repeat_tract_outlier_weight(self.repeat_tract_outlier_weight)
+            .with_repeat_tract_junk_decay_per_unit(self.repeat_tract_junk_decay_per_unit)
         }
     }
 
@@ -729,6 +763,16 @@ impl RunParameters {
     #[must_use]
     pub fn repeat_tract_outlier_weight(&self) -> RepeatTractOutlierWeight {
         self.repeat_tract_outlier_weight
+    }
+
+    /// **How fast the repeat-tract junk distribution falls away from the candidates**, and
+    /// whether the run was handed it or inherited it.
+    ///
+    /// The second number here that is not the pre-pass's — see
+    /// [`Self::repeat_tract_outlier_weight`]; its two reachable warrants are the same two.
+    #[must_use]
+    pub fn repeat_tract_junk_decay_per_unit(&self) -> RepeatTractJunkDecayPerUnit {
+        self.repeat_tract_junk_decay_per_unit
     }
 
     /// **What this run scored its reads under, in a form an output can print** — the
@@ -834,6 +878,7 @@ impl RunParameters {
             contamination,
             sequencing_batching,
             self.repeat_tract_outlier_weight,
+            self.repeat_tract_junk_decay_per_unit,
             repeat_tract_fits,
         )
     }
@@ -2377,6 +2422,89 @@ mod tests {
         assert_eq!(
             contaminated.view().repeat_tract_outlier_weight().value(),
             0.04
+        );
+    }
+
+    /// **The run states the junk decay it took and states that nothing fitted it** — the same
+    /// claims as the outlier weight's test above, for the second stated constant, including
+    /// both arms of `view` and for the same reason: only one of the two forwarding calls was
+    /// covered when the outlier weight landed.
+    #[test]
+    fn the_run_states_the_junk_decay_it_took() {
+        let groups = two_samples_one_of_them_two_read_groups();
+        let (rates, totals) = three_calibrated_read_groups();
+        let run = RunParameters::assemble(
+            &rates,
+            &totals,
+            &BTreeMap::new(),
+            SequencingBatches::all_together(&groups),
+            vec![outbred(), outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        );
+
+        let report = run.report(&groups);
+        assert_eq!(
+            report.repeat_tract_junk_decay_per_unit(),
+            RepeatTractJunkDecayPerUnit::defaulted()
+        );
+        assert_eq!(report.repeat_tract_junk_decay_per_unit().value(), 1.0);
+        assert_eq!(
+            report.repeat_tract_junk_decay_per_unit().provenance(),
+            Provenance::Defaulted,
+            "no fit produces this number, so a run that was handed none took the stated constant"
+        );
+
+        // A supplied one reaches both the report and the scoring path.
+        let supplied = RunParameters::assemble(
+            &rates,
+            &totals,
+            &BTreeMap::new(),
+            SequencingBatches::all_together(&groups),
+            vec![outbred(), outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        )
+        .with_repeat_tract_junk_decay_per_unit(RepeatTractJunkDecayPerUnit::supplied(0.5));
+        let report = supplied.report(&groups);
+        assert_eq!(report.repeat_tract_junk_decay_per_unit().value(), 0.5);
+        assert_eq!(
+            report.repeat_tract_junk_decay_per_unit().provenance(),
+            Provenance::Supplied
+        );
+        assert_eq!(
+            supplied.view().repeat_tract_junk_decay_per_unit().value(),
+            0.5,
+            "the view calling borrows is what carries it to a tract's scoring row"
+        );
+
+        // And the other arm of `view`, which a contaminated run takes.
+        let contaminated = RunParameters::assemble(
+            &rates,
+            &totals,
+            &BTreeMap::from([(ReadGroupId(0), estimated(0.02, 4_000))]),
+            SequencingBatches::all_together(&groups),
+            vec![outbred(), outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        )
+        .with_repeat_tract_junk_decay_per_unit(RepeatTractJunkDecayPerUnit::supplied(0.5));
+        assert!(
+            !contaminated.view().contamination_is_absent(),
+            "this run takes the other arm of `view`"
+        );
+        assert_eq!(
+            contaminated
+                .view()
+                .repeat_tract_junk_decay_per_unit()
+                .value(),
+            0.5
         );
     }
 

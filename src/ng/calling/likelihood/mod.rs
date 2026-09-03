@@ -1700,6 +1700,11 @@ impl GenericEvidenceBuffer {
 pub struct SsrRowScratch<ModelScratch> {
     emissions: Vec<f64>,
     candidates: usize,
+    /// The decayed junk weights of the current locus — one per reachable length, cleared and
+    /// refilled by the row wherever the junk decay is below 1.0, and **left stale at the
+    /// default**, where the row's uniform expression never reads it. A buffer here rather than
+    /// a local so a worker's loop over samples and loci allocates it once.
+    junk_weights: Vec<f64>,
     model: ModelScratch,
 }
 
@@ -1762,6 +1767,19 @@ impl<ModelScratch> SsrRowScratch<ModelScratch> {
     /// The whole cache, for a filler that walks it in order rather than by index.
     pub fn emissions_mut(&mut self) -> &mut [f64] {
         &mut self.emissions
+    }
+
+    /// The decayed junk weights of the current locus, for the row to clear and refill —
+    /// meaningful only after the row has filled it for this locus, which it does exactly where
+    /// the junk decay is below 1.0.
+    pub fn junk_weights_mut(&mut self) -> &mut Vec<f64> {
+        &mut self.junk_weights
+    }
+
+    /// The decayed junk weights the row last filled — see [`Self::junk_weights_mut`] for when
+    /// they are meaningful.
+    pub fn junk_weights(&self) -> &[f64] {
+        &self.junk_weights
     }
 
     /// The emission model's own scratch — its placement buffer and its alignment matrix.

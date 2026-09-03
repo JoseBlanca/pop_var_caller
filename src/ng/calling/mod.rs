@@ -86,7 +86,7 @@ pub use likelihood::{
 };
 
 use crate::ng::calling::genotype_prior::SpectrumSeed;
-use crate::ng::calling::likelihood::ssr::RepeatTractOutlierWeight;
+use crate::ng::calling::likelihood::ssr::{RepeatTractJunkDecayPerUnit, RepeatTractOutlierWeight};
 use crate::ng::calling::quality::{ArtifactTestCounts, SiteQualityBuffers};
 use crate::ng::locus_generation::{LocusKind, SsrDetail};
 use crate::ng::parameter_estimation::Estimate;
@@ -703,6 +703,16 @@ pub struct FrozenParameters<'a> {
     /// [`RunParameters::view`](run_parameters::RunParameters::view), which passes on whatever
     /// its own parameters hold.
     repeat_tract_outlier_weight: RepeatTractOutlierWeight,
+    /// **How fast the repeat-tract junk distribution falls away from the candidate alleles**,
+    /// per motif unit of distance — the second of the two repeat-tract numbers no fit produces,
+    /// carried with its warrant for the same reason the outlier weight above is.
+    ///
+    /// **Defaulted unless a constructor is told otherwise**
+    /// ([`Self::with_repeat_tract_junk_decay_per_unit`]), and the default — 1.0 — is the value
+    /// under which the junk term is the shipped uniform, byte for byte. The one caller with
+    /// another value is [`RunParameters::view`](run_parameters::RunParameters::view), which
+    /// passes on whatever its own parameters hold.
+    repeat_tract_junk_decay_per_unit: RepeatTractJunkDecayPerUnit,
 }
 
 impl<'a> FrozenParameters<'a> {
@@ -922,6 +932,7 @@ impl<'a> FrozenParameters<'a> {
             ssr_substitution_rate,
             ploidy,
             repeat_tract_outlier_weight: RepeatTractOutlierWeight::defaulted(),
+            repeat_tract_junk_decay_per_unit: RepeatTractJunkDecayPerUnit::defaulted(),
         }
     }
 
@@ -960,6 +971,34 @@ impl<'a> FrozenParameters<'a> {
     #[must_use]
     pub fn repeat_tract_outlier_weight(&self) -> RepeatTractOutlierWeight {
         self.repeat_tract_outlier_weight
+    }
+
+    /// **Score repeat tracts under a supplied junk decay rather than the inherited 1.0.**
+    ///
+    /// A builder for the same reasons [`Self::with_repeat_tract_outlier_weight`] is one: no fit
+    /// produces this number, almost every call site wants the compiled-in value, and the one
+    /// caller with another value is
+    /// [`RunParameters::view`](run_parameters::RunParameters::view). **A caller that omits it
+    /// is not silently wrong**: it gets 1.0, under which the junk term is the shipped uniform
+    /// the run would have scored with anyway.
+    #[inline]
+    #[must_use]
+    pub fn with_repeat_tract_junk_decay_per_unit(
+        mut self,
+        decay: RepeatTractJunkDecayPerUnit,
+    ) -> Self {
+        self.repeat_tract_junk_decay_per_unit = decay;
+        self
+    }
+
+    /// **How fast the junk distribution at a repeat tract falls away from the candidate
+    /// alleles**, with its warrant — what
+    /// [`TractScoringFits`](inference::repeat_tract_parameters::TractScoringFits) reads once a
+    /// locus and hands the scoring row, beside the outlier weight above.
+    #[inline]
+    #[must_use]
+    pub fn repeat_tract_junk_decay_per_unit(&self) -> RepeatTractJunkDecayPerUnit {
+        self.repeat_tract_junk_decay_per_unit
     }
 
     /// One contamination view per read group, or empty where the fit identified none —

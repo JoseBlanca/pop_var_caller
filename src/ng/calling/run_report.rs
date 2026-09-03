@@ -45,7 +45,7 @@
 //! neither of them.
 
 use super::ContaminationView;
-use crate::ng::calling::likelihood::ssr::RepeatTractOutlierWeight;
+use crate::ng::calling::likelihood::ssr::{RepeatTractJunkDecayPerUnit, RepeatTractOutlierWeight};
 use crate::ng::read::input::read_groups::NameWithOrigin;
 use crate::ng::types::ReadGroupId;
 
@@ -64,28 +64,31 @@ pub struct RunParameterReport {
     contamination: ContaminationUsed,
     sequencing_batching: SequencingBatchingUsed,
     repeat_tract_outlier_weight: RepeatTractOutlierWeight,
+    repeat_tract_junk_decay_per_unit: RepeatTractJunkDecayPerUnit,
     repeat_tract_fits: RepeatTractFitsUsed,
 }
 
 impl RunParameterReport {
-    /// Build the report from its four parts.
+    /// Build the report from its five parts.
     ///
-    /// **Three parts are plain data and the fourth counts**, so the only thing to get wrong is
-    /// the pairing — four parts read off four different runs. That is why this is `pub(crate)`:
+    /// **Four parts are plain data and the fifth counts**, so the only thing to get wrong is
+    /// the pairing — five parts read off five different runs. That is why this is `pub(crate)`:
     /// [`RunParameters::report`](super::run_parameters::RunParameters::report) is the only
-    /// builder that can exist, and it reads all four off one run. A consumer reads a report; it
+    /// builder that can exist, and it reads all five off one run. A consumer reads a report; it
     /// does not assemble one.
     #[must_use]
     pub(crate) fn new(
         contamination: ContaminationUsed,
         sequencing_batching: SequencingBatchingUsed,
         repeat_tract_outlier_weight: RepeatTractOutlierWeight,
+        repeat_tract_junk_decay_per_unit: RepeatTractJunkDecayPerUnit,
         repeat_tract_fits: RepeatTractFitsUsed,
     ) -> Self {
         Self {
             contamination,
             sequencing_batching,
             repeat_tract_outlier_weight,
+            repeat_tract_junk_decay_per_unit,
             repeat_tract_fits,
         }
     }
@@ -142,6 +145,18 @@ impl RunParameterReport {
     #[must_use]
     pub fn repeat_tract_outlier_weight(&self) -> RepeatTractOutlierWeight {
         self.repeat_tract_outlier_weight
+    }
+
+    /// **How fast the junk distribution at a repeat tract falls away from the candidate
+    /// alleles**, per motif unit of distance — the second repeat-tract constant nothing
+    /// measures, reported for the same reasons the outlier weight above is and at the same
+    /// grain: once for the run, with its warrant (`Defaulted` at the shipped 1.0, under which
+    /// the junk term is the uniform it always was; `Supplied` where a parameters file gave it
+    /// one), and never folded into a tract's per-cell warrant.
+    #[inline]
+    #[must_use]
+    pub fn repeat_tract_junk_decay_per_unit(&self) -> RepeatTractJunkDecayPerUnit {
+        self.repeat_tract_junk_decay_per_unit
     }
 }
 
