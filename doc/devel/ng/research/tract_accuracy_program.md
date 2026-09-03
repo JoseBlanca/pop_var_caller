@@ -123,7 +123,7 @@ persists at 300× points at L3/L4 (the locus really yields that length — its o
 the realigner making it), and no persistence at 300× points at sampling noise no lever fixes.
 Deliverable: the 225 partitioned across those three, with cases printed whole for the owner.
 
-**P2. Re-derive the missing-sequence follow-through.** ☐
+**P2. Re-derive the missing-sequence follow-through.** ✅
 The split of the never-offered class (434 → aligner / support bar / top-ploidy / unobservable)
 predates the corrected comparison and its script has two recorded defects
 (`tract_genotype_accuracy_2026-09-03.md` §3.5). Rebuild it on the corrected comparison. This

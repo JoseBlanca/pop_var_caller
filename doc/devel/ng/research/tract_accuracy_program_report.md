@@ -275,4 +275,87 @@ unseen-in-raw tracts are the bulk of the gap.
 
 ---
 
-*Section P2 and L1–L7 are opened as the program reaches them.*
+## P2 — where the never-offered truth sequences were lost
+
+Status: **measured** — probe `benchmarks/ssr_hg002/src/never_offered_attribution.py`, 2026-09-03
+
+**Pre-registration (written 2026-09-03, before the derivation is run).**
+
+The superseded split of this class (434 under the old comparison: 268 no read carried it /
+61 top-ploidy cut / 59 merge refused / 46 support bar) was produced by
+`ng_tract_candidate_recall.py`, which carries two recorded defects
+(`tract_genotype_accuracy_2026-09-03.md` §3.5): its window rule drops a truth insertion
+anchored one base before the tract — where left-alignment puts every repeat-length gain —
+and its truth reconstruction misses records left-aligned before the tract. This re-derivation
+avoids both by construction: the missing truth sequences come from the corrected instrument's
+own machinery (records collected within ten bases, reduced to minimal edits, left-aligned,
+laid on the tract's reference), and the candidate side comes from the caller's own selection
+code via `ng_candidate_selection_probe`'s per-tract dump (`NG_TRACT_DUMP`), which runs
+`select_ssr` itself — every allele the merge tabled, whether some sample cleared the support
+bar for it, and whether selection kept it.
+
+targets: sizes L4 (the realigner's prize) and gates L7 (discovery's prize).
+ceiling: not applicable — a measurement.
+
+**The classes, each of the 463 never-offered tracts to exactly one:**
+
+1. **merge refused** — no locus was built (`RefusedByMerge` in the dump);
+2. **tabled and kept** — the truth sequence is among selection's survivors, yet the record
+   cannot express it (§3.4c measured these as real disagreements, not artefacts; counted
+   apart so they cannot inflate any lever's ceiling);
+3. **top-ploidy cut** — in the table, cleared the support bar, dropped by selection.
+   **This is the only class L7 (discovery) can reach**; its old count was 61 of 434;
+4. **support bar** — in the table, never cleared the bar in any sample;
+5. **never tabled** — no read carried the spelling into the merge. Subdivided by whether the
+   truth's **length** was tabled (a spelling loss — the realigner's) or not (absent from the
+   evidence or lost upstream). This class plus P1's unseen-in-raw is L4's pool.
+
+**Controls:** the candidate dump is regenerated from the current binary and must reproduce
+the Sep 2 stored dump (`tmp/attrib/tier_30x_candidates.tsv`) — selection code has not changed
+since, so any difference is a red flag; and the join must find a dump entry for every one of
+the 463 tracts, asserted, with the count of never-offered tracts derived by the attribution
+equal to the verdict dump's.
+
+**One extension, stated before it ran:** for the tracts whose truth length is absent from
+the merge's table, `--bam-low` counts how many raw-aligned 30× spanning reads carry that
+length, by P1's read rule — reads that carry it while the table does not are an admission or
+realignment loss, the recall-side twin of P1's unseen-in-raw.
+
+**Results (written after the runs they quote).**
+
+Controls: the dump regenerated from the freshly built probe is **byte-identical** to the
+Sep 2 stored one; the attribution derives exactly the verdict dump's 463 tracts (asserted);
+every tract found its dump entry. Per-tract table `tmp/tract_program/p2_tracts.tsv`.
+
+| class | homopolymer | period 2+ | total | old split (of 434) |
+|---|---:|---:|---:|---:|
+| merge refused | 7 | 7 | **14** | 59 |
+| tabled and kept (real disagreements, §3.4c) | 5 | 1 | **6** | — |
+| top-ploidy cut — **L7's whole reachable class** | 20 | 22 | **42** | 61 |
+| support bar | 60 | 28 | **88** | 46 |
+| never tabled, truth's **length** tabled | 42 | 46 | **88** | — |
+| never tabled, length absent, **2+ raw reads carry it** | 65 | 49 | **114** | 67 ("alignment loss") |
+| never tabled, length absent, 1 raw read | 7 | 7 | **14** | — |
+| never tabled, length absent, 0 raw reads | 39 | 58 | **97** | 121 ("unrecoverable") |
+
+**What this sizes:**
+
+- **L4 (realigner), the program's largest prize by far.** 88 tracts where the table holds the
+  right length in the wrong letters (the §6.2 corruption mechanism — an interruption or a
+  leading base discarded), plus 114 where two or more raw reads carry a length the merge
+  never tabled at all. That is **202 of the 463**, before adding P1's 74 spurious-side cases
+  (65 unseen-in-raw + 9 spelling-only). The same caveat cuts both ways: "a raw read carries
+  it" is the CIGAR-implied length, and the realigner legitimately re-spells some reads — the
+  202 is the size of the disagreement surface between aligner and realigner, and L4's case
+  reading decides how much of it is defect.
+- **L7 (discovery): the gate number is 42**, down from the superseded 61 — every allele that
+  cleared the support bar and was cut by the per-sample top-ploidy rule. Against it stands
+  the unchanged risk side: the 225-strong spurious class it can only enlarge.
+- **The support bar holds 88** — nearly double the old 46; the `hetfhom` sweep already
+  measured that lowering it buys 2 tracts per 137 false candidates, so this stays closed.
+- **97 tracts are a limit of the evidence** — no raw read at 30× carries the truth's length
+  at all (the old 121, re-derived smaller).
+
+---
+
+*Sections L1–L7 are opened as the program reaches them.*
