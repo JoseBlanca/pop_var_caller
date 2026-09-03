@@ -19,7 +19,17 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-02):** **two parameter values, no code, and ng's repeat-tract
+> - **Last completed task (2026-09-03):** **the research handoff for repeat-tract accuracy**
+> ([doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md](doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md)).
+> Written to be read by somebody starting fresh: how the numbers are produced and on which ground,
+> **the genotype-coding trap that produced two wrong reports** (GIAB writes a two-allele
+> heterozygote as two phased records where ng writes one multi-allelic record — 1,412 tracts of
+> 6,303 — and four other ways the comparison goes wrong, each measured), every lever tried with
+> what it was worth, what the six investigations found, and what to do next. **Two open decisions
+> for the owner**: whether a tract genotype is scored on its sequence (0.886) or its repeat length
+> (0.915), which re-ranks everything after it; and Checkpoint D, still uncleared.
+>
+> - **Earlier (2026-09-02):** **two parameter values, no code, and ng's repeat-tract
 > genotypes get better by 0.6 points**
 > ([report](doc/devel/reports/ng_tract_genotype_improvement_2026-09-02.md); six parallel
 > investigations behind it in
