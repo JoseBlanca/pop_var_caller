@@ -5,9 +5,11 @@ use super::*;
 use clap::Parser;
 use std::path::Path;
 
-use crate::ng::region_typing::{RegionKind, TypedRegion};
-use crate::ng::repeat_catalog::StrRepeatCriteria;
+use crate::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig};
+use crate::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
 use crate::ng::types::InbreedingF;
+use crate::pop_var_caller_exp::run_ground::{GroundError, routing_criteria, segments_over};
+use crate::regions::ContigBounds;
 
 use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
 
@@ -295,7 +297,7 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
     };
 
     let refused = segments_over(
-        &args,
+        &super::ground_request(&args),
         &GenomeRegions::whole_contigs(&[]),
         &ReferenceInfo {
             md5: None,
@@ -847,7 +849,8 @@ fn the_tomato_cohorts_width_is_the_one_that_was_measured() {
 /// struct, so a `default_value` that drifted from the library constant fails here.
 #[test]
 fn the_default_routing_is_the_calling_floors_and_not_the_catalogs() {
-    let asked = routing_criteria(&args_of(&a_defaults_run())).expect("the defaults make a range");
+    let asked = routing_criteria(&super::ground_request(&args_of(&a_defaults_run())).routing)
+        .expect("the defaults make a range");
 
     assert_eq!(
         asked,
@@ -900,7 +903,8 @@ fn every_routing_flag_reaches_the_criteria_the_catalog_is_asked_with() {
         "--min-purity",
         "0.95",
     ]);
-    let asked = routing_criteria(&args_of(&argv)).expect("2..=4 is a range");
+    let asked = routing_criteria(&super::ground_request(&args_of(&argv)).routing)
+        .expect("2..=4 is a range");
 
     let floors: Vec<u32> = (1..=6)
         .map(|period| asked.classification.min_copies.for_period(period))
@@ -925,64 +929,11 @@ fn a_period_range_the_wrong_way_round_is_refused_before_the_catalog_is_opened() 
     let mut argv = a_defaults_run();
     argv.extend(["--min-period", "5", "--max-period", "3"]);
 
-    let refused = routing_criteria(&args_of(&argv)).expect_err("5..=3 is not a range");
+    let refused = routing_criteria(&super::ground_request(&args_of(&argv)).routing)
+        .expect_err("5..=3 is not a range");
     assert!(
-        matches!(refused, CallFromAlignmentsCliError::PeriodRange { .. }),
+        matches!(refused, GroundError::PeriodRange { .. }),
         "got {refused:?}",
-    );
-}
-
-/// **A run asking for repeats the file does not hold is told which flag to move.**
-///
-/// The catalog's own refusal names two numbers and no knob: *"period 1: catalog holds tracts
-/// of 5 copies and up, reader asked for 3"* leaves a person to work out which of five flags
-/// produced it. Each bounded axis maps to the flag that moves it.
-#[test]
-fn a_request_the_catalog_cannot_serve_names_the_flag_that_made_it() {
-    let path = Path::new("ref.fa.repeats.parquet");
-    let named = |refusal: CriteriaRefusal| match catalog_error_naming_the_flag(
-        RepeatCatalogError::CriteriaTooPermissive(refusal),
-        path,
-    ) {
-        CallFromAlignmentsCliError::RoutingBelowCatalog { flag, .. } => Some(flag),
-        CallFromAlignmentsCliError::Catalog { .. } => None,
-        other => panic!("expected a catalog refusal, got {other:?}"),
-    };
-
-    assert_eq!(
-        named(CriteriaRefusal::CopyFloor {
-            period: 1,
-            built: 5,
-            wanted: 3
-        }),
-        Some("--min-copies"),
-    );
-    assert_eq!(
-        named(CriteriaRefusal::PeriodRange {
-            built_min: 2,
-            built_max: 6,
-            wanted_min: 1,
-            wanted_max: 6,
-        }),
-        Some("--min-period"),
-        "the low end is the one outside what was built",
-    );
-    assert_eq!(
-        named(CriteriaRefusal::PeriodRange {
-            built_min: 1,
-            built_max: 4,
-            wanted_min: 1,
-            wanted_max: 6,
-        }),
-        Some("--max-period"),
-    );
-    assert_eq!(
-        named(CriteriaRefusal::MinFlank {
-            built: 30,
-            wanted: 15
-        }),
-        None,
-        "no flag moves the flank floor, so this is a catalog to rebuild and says so",
     );
 }
 
@@ -1092,7 +1043,8 @@ fn a_tract_below_the_calling_floor_becomes_generic_ground_and_one_above_it_stays
     }];
     let analysed = GenomeRegions::whole_contigs(&bounds);
     let kind_covering = |args: &CallFromAlignmentsArgs, position: u64| {
-        let segmentation = segments_over(args, &analysed, &reference).expect("the catalog answers");
+        let segmentation = segments_over(&super::ground_request(args), &analysed, &reference)
+            .expect("the catalog answers");
         segmentation
             .segments()
             .iter()
@@ -1225,7 +1177,8 @@ fn the_runs_ground_partition_is_the_dumps_at_the_same_floors() {
             .collect::<Result<_, _>>()
             .expect("every region reads");
 
-        let run = segments_over(&asking_with, &analysed, &reference).expect("the run walks");
+        let run = segments_over(&super::ground_request(&asking_with), &analysed, &reference)
+            .expect("the run walks");
         assert_eq!(
             run.segments(),
             dumped.as_slice(),
@@ -1336,12 +1289,16 @@ fn where_the_routing_did_not_move_the_vcf_is_byte_identical() {
             name: "chr1",
             length: 136,
         }];
-        segments_over(args, &GenomeRegions::whole_contigs(&bounds), &_reference)
-            .expect("the run walks")
-            .segments()
-            .iter()
-            .filter(|region| matches!(region.kind, RegionKind::SsrSegment(_)))
-            .count()
+        segments_over(
+            &super::ground_request(args),
+            &GenomeRegions::whole_contigs(&bounds),
+            &_reference,
+        )
+        .expect("the run walks")
+        .segments()
+        .iter()
+        .filter(|region| matches!(region.kind, RegionKind::SsrSegment(_)))
+        .count()
     };
     assert_eq!(
         partition_at(&at_the_calling_floors),

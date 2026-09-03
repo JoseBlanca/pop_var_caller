@@ -72,28 +72,24 @@ use crate::ng::reference_info::{
     ReferenceCheck, ReferenceInfo, ReferenceInfoCache, ReferenceInfoError,
     read_reference_verifying_or_creating_fai,
 };
+use crate::ng::region_typing::DEFAULT_MAX_STR_LEN;
 use crate::ng::region_typing::segment_criteria::{
-    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies, SsrSegmentCriteria,
+    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
-use crate::ng::region_typing::{DEFAULT_MAX_STR_LEN, GenomeRegions, TypedRegionConfig};
-use crate::ng::repeat_catalog::{
-    CriteriaRefusal, ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria,
-    sibling_catalog_path,
-};
+use crate::ng::repeat_catalog::StrRepeatCriteria;
 use crate::ng::run::cohort_merge::{
     CohortLocusBuilderRegionsLen, DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN,
     DEFAULT_MAX_COHORT_LOCUS_SPAN, MaxCohortLocusSpan,
 };
 use crate::ng::run::report::BoundsTheRunCalledUnder;
 use crate::ng::run::{
-    AlignedFilesVariantCaller, AlignmentInputs, MergeParameters, RunError, RunReport, Segmentation,
+    AlignedFilesVariantCaller, AlignmentInputs, MergeParameters, RunError, RunReport,
 };
-use crate::ng::tandem_repeat::{PeriodRange, PeriodRangeError};
-use crate::ng::types::{Bp, DomainError, InbreedingF, MAX_MOTIF_LEN, Ploidy};
+use crate::ng::types::{DomainError, InbreedingF, MAX_MOTIF_LEN, Ploidy};
 use crate::ng::vcf::header::{HeaderContig, HeaderMetadataError, VcfHeaderMetadata};
 use crate::ng::vcf::writer::{VcfWriteError, VcfWriter};
 use crate::pop_var_caller::common::current_command_line;
-use crate::regions::{BedError, ContigBounds};
+use crate::pop_var_caller_exp::run_ground::{self, GroundError};
 
 /// The ploidy a run assumes when it is not told.
 ///
@@ -304,70 +300,6 @@ pub enum CallFromAlignmentsCliError {
         source: ReferenceInfoError,
     },
 
-    /// There is no repeat catalog to route this run's ground with.
-    #[error(
-        "no repeat catalog at {}; build one with `pop_var_caller_exp repeat-catalog --reference {}`",
-        path.display(),
-        reference.display()
-    )]
-    MissingCatalog {
-        /// Where one was looked for.
-        path: PathBuf,
-        /// The reference it would be built from.
-        reference: PathBuf,
-    },
-
-    /// The run's period range runs the wrong way round.
-    ///
-    /// Both ends are bounded to 1..=6 by clap, so this is reachable only by asking for a
-    /// narrowest period wider than the widest.
-    #[error("--min-period and --max-period do not make a range")]
-    PeriodRange {
-        /// Which way the range is wrong.
-        #[source]
-        source: PeriodRangeError,
-    },
-
-    /// This run asked for repeats the catalog was never built to hold.
-    ///
-    /// **Not a policy refusal**: the rows below the file's own floors were never written, so
-    /// the request cannot be served at all. Either move the named flag back up, or build a
-    /// catalog at floors low enough to answer it.
-    #[error(
-        "{flag} asks for repeats the catalog {} does not hold; raise it, or rebuild the catalog \
-         at lower floors",
-        path.display()
-    )]
-    RoutingBelowCatalog {
-        /// The flag whose value put the request outside the file.
-        flag: &'static str,
-        /// The catalog that was asked.
-        path: PathBuf,
-        /// Which axis, with both numbers.
-        #[source]
-        source: RepeatCatalogError,
-    },
-
-    /// The repeat catalog could not be used.
-    #[error("the repeat catalog {} could not be used", path.display())]
-    Catalog {
-        /// The catalog.
-        path: PathBuf,
-        /// What the catalog said.
-        #[source]
-        source: RepeatCatalogError,
-    },
-
-    /// The BED naming the ground to call could not be read.
-    #[error("the regions file {} could not be read", path.display())]
-    Bed {
-        /// The BED.
-        path: PathBuf,
-        /// What the parser said.
-        #[source]
-        source: BedError,
-    },
-
     /// A ploidy of zero, or one no genotype table can enumerate.
     #[error("--ploidy {asked}")]
     Ploidy {
@@ -521,27 +453,15 @@ pub enum CallFromAlignmentsCliError {
         in_the_file: u8,
     },
 
-    /// A contig longer than a `u32` can name.
+    /// The ground this run would walk could not be worked out — the reference's contigs, the
+    /// BED, the catalog, or what this run counts as a repeat.
     ///
-    /// **The analysed ground is resolved against contig lengths a `u32` carries**
-    /// (`ContigBounds`), so a reference whose contig is longer than that cannot be resolved
-    /// against — and narrowing it silently would compute the run's ground against a wrong
-    /// length. No assembly in use has one; the refusal is what makes that a fact rather than
-    /// an assumption.
-    #[error(
-        "contig {name} of {} is {length} bases, longer than the {limit} a run can address",
-        reference.display()
-    )]
-    ContigTooLong {
-        /// The reference.
-        reference: PathBuf,
-        /// The contig that is too long.
-        name: String,
-        /// Its length.
-        length: u64,
-        /// The longest a run can address.
-        limit: u64,
-    },
+    /// **Transparent**, so the sentence a person reads is the one
+    /// [`run_ground`](crate::pop_var_caller_exp::run_ground) writes: these refusals belong to
+    /// every mode and are shared with `generate-psps`, and a wrapper of its own here would
+    /// make the same mistake render differently depending on which command was typed.
+    #[error(transparent)]
+    Ground(#[from] GroundError),
 
     /// The alignment files' read groups could not be read.
     #[error("the read groups of this run's alignment files could not be read")]
@@ -684,6 +604,22 @@ fn round_width_for(samples: usize) -> CohortLocusBuilderRegionsLen {
     )
 }
 
+/// This command's flags, as the shared ground assembly asks for them.
+fn ground_request(args: &CallFromAlignmentsArgs) -> run_ground::GroundRequest<'_> {
+    run_ground::GroundRequest {
+        reference: &args.reference,
+        catalog: args.catalog.as_deref(),
+        regions: args.regions.as_deref(),
+        routing: run_ground::RepeatRouting {
+            min_copies: args.min_copies,
+            min_period: args.min_period,
+            max_period: args.max_period,
+            max_str_len: args.max_str_len,
+            min_purity: args.min_purity,
+        },
+    }
+}
+
 pub fn run_call_from_alignments(
     args: &CallFromAlignmentsArgs,
 ) -> Result<(), CallFromAlignmentsCliError> {
@@ -756,12 +692,13 @@ pub fn run_call_from_alignments(
     let contigs: ContigList = info.contig_list();
     let reference = OpenReference::new(info);
 
-    let analysed = analysed_regions(args, &contigs)?;
+    let ground = ground_request(args);
+    let analysed = run_ground::analysed_regions(&ground, &contigs)?;
     // **Kept because the segmentation takes the original**, and the report names the ground the
     // run undertook to speak for — which is the one thing a VCF cannot say and the whole reason
     // a run reports at all.
     let analysed_for_the_report = analysed.clone();
-    let segmentation = segments_over(args, &analysed, &with_checksums)?;
+    let segmentation = run_ground::segments_over(&ground, &analysed, &with_checksums)?;
 
     let read_groups = build_read_groups(&args.alignments)
         .map_err(|source| CallFromAlignmentsCliError::ReadGroups { source })?;
@@ -1000,163 +937,6 @@ fn resolved(path: &Path) -> PathBuf {
         Some(name) => resolved.join(name),
         None => resolved,
     }
-}
-
-/// The ground this run calls over: the BED it was given, or every base of every contig.
-fn analysed_regions(
-    args: &CallFromAlignmentsArgs,
-    contigs: &ContigList,
-) -> Result<GenomeRegions, CallFromAlignmentsCliError> {
-    // **The narrowing is refused, not taken.** `ContigBounds` carries a `u32`, and a contig
-    // past that would have its ground resolved against a wrong length with nothing to notice —
-    // the rule `typed_regions.rs`'s `ContigTooLong` records, and the reason the one precedent
-    // in this tree that casts is a test.
-    let mut bounds: Vec<ContigBounds<'_>> = Vec::with_capacity(contigs.entries.len());
-    for entry in &contigs.entries {
-        let length =
-            u32::try_from(entry.length).map_err(|_| CallFromAlignmentsCliError::ContigTooLong {
-                reference: args.reference.clone(),
-                name: entry.name.clone(),
-                length: entry.length,
-                limit: u64::from(u32::MAX),
-            })?;
-        bounds.push(ContigBounds {
-            name: &entry.name,
-            length,
-        });
-    }
-    match &args.regions {
-        Some(bed) => GenomeRegions::from_bed_path(bed, &bounds).map_err(|source| {
-            CallFromAlignmentsCliError::Bed {
-                path: bed.clone(),
-                source,
-            }
-        }),
-        None => Ok(GenomeRegions::whole_contigs(&bounds)),
-    }
-}
-
-/// **What this run counts as a repeat**, built from the five flags that say so.
-///
-/// The catalog is a source of *candidates*: it is deliberately built below every calling
-/// floor, so that a caller can put its own line anywhere inside that gap by filtering the
-/// file rather than re-scanning the genome (`repeat_catalog.md` §4.1). Until this existed the
-/// run asked the file with [`StrRepeatCriteria::default()`], which *is* the file's own storage
-/// floors — so everything the file held became an STR locus of the run, and on the human
-/// benchmark that routed about seven times more reference to the repeat path than ng's own
-/// calling floors would (`run_ssr_observations.md` §2).
-///
-/// **The flank floor is not a flag**, because it is the one axis a reader cannot move
-/// downwards: the rows below the file's 15 bp were never written, so the request could not be
-/// served. It comes from the conversion, which is where that reasoning lives
-/// ([`StrRepeatCriteria::from`]).
-///
-/// The scan half of the [`TypedRegionConfig`] built here is unread: the conversion takes only
-/// the classification rules and the satellite cap, and this run detects nothing — it reads
-/// tracts a `repeat-catalog` run already found.
-fn routing_criteria(
-    args: &CallFromAlignmentsArgs,
-) -> Result<StrRepeatCriteria, CallFromAlignmentsCliError> {
-    // Both ends are already bounded to 1..=6 by clap, so the only way left to fail is a
-    // range the wrong way round.
-    let periods = PeriodRange::new(args.min_period, args.max_period)
-        .map_err(|source| CallFromAlignmentsCliError::PeriodRange { source })?;
-    Ok(StrRepeatCriteria::from(&TypedRegionConfig {
-        max_str_len: Bp(args.max_str_len),
-        criteria: SsrSegmentCriteria {
-            periods,
-            min_copies: args.min_copies,
-            min_purity: args.min_purity,
-            // Not a flag: the score floor gates the *scanner*'s output, and a catalog reader
-            // has no scanner. `SsrSegmentCriteria::default()`'s 0 rejects nothing.
-            ..SsrSegmentCriteria::default()
-        },
-        ..TypedRegionConfig::default()
-    }))
-}
-
-/// Render a catalog failure, naming the flag to move when the failure is that this run asked
-/// for more than the file holds.
-///
-/// **The refusal is real and it is not policy** — the rows below the file's floors were never
-/// written, so the request cannot be served (`run_ssr_observations.md` §2.3) — but on its own
-/// it names two numbers and no way to change either. A person who typed `--min-copies 3,3,3,3,3,3`
-/// should be told that flag, not left to infer which of five knobs produced *"period 1: catalog
-/// holds tracts of 5 copies and up, reader asked for 3"*.
-///
-/// **The flank floor has no flag and so has no arm here**: this run pins it at the catalog's
-/// own, so a catalog built at a wider flank than 15 bp is a file that has to be rebuilt, which
-/// is what the general catalog error already says.
-fn catalog_error_naming_the_flag(
-    source: RepeatCatalogError,
-    path: &Path,
-) -> CallFromAlignmentsCliError {
-    // Exhaustive on the refusal on purpose: a new bounded axis must not silently inherit the
-    // no-flag answer and leave a person hunting five knobs for the one they moved.
-    let flag = match &source {
-        RepeatCatalogError::CriteriaTooPermissive(refusal) => match refusal {
-            CriteriaRefusal::CopyFloor { .. } => Some("--min-copies"),
-            // Whichever end reaches outside what was built; `serves` checks the low end
-            // first, so a range outside at both ends names `--min-period`.
-            CriteriaRefusal::PeriodRange {
-                built_min,
-                wanted_min,
-                ..
-            } if wanted_min < built_min => Some("--min-period"),
-            CriteriaRefusal::PeriodRange { .. } => Some("--max-period"),
-            CriteriaRefusal::MinFlank { .. } => None,
-        },
-        _ => None,
-    };
-    match flag {
-        Some(flag) => CallFromAlignmentsCliError::RoutingBelowCatalog {
-            flag,
-            path: path.to_path_buf(),
-            source,
-        },
-        None => CallFromAlignmentsCliError::Catalog {
-            path: path.to_path_buf(),
-            source,
-        },
-    }
-}
-
-/// The run's segments: the analysed ground cut into the stretches each generator owns, drawn
-/// from the catalog.
-fn segments_over(
-    args: &CallFromAlignmentsArgs,
-    analysed: &GenomeRegions,
-    with_checksums: &ReferenceInfo,
-) -> Result<Segmentation, CallFromAlignmentsCliError> {
-    let path = args
-        .catalog
-        .clone()
-        .unwrap_or_else(|| sibling_catalog_path(&args.reference));
-    if !path.exists() {
-        return Err(CallFromAlignmentsCliError::MissingCatalog {
-            path,
-            reference: args.reference.clone(),
-        });
-    }
-    let criteria = routing_criteria(args)?;
-    let catalog = RepeatCatalog::open_checking_against_reference(&path, with_checksums).map_err(
-        |source| CallFromAlignmentsCliError::Catalog {
-            path: path.clone(),
-            source,
-        },
-    )?;
-    let spans: Vec<_> = analysed.iter().collect();
-    let segments = catalog
-        .genome_segments(&criteria, ReadScope::Regions(&spans))
-        .map_err(|source| catalog_error_naming_the_flag(source, &path))?;
-    Segmentation::build(
-        segments,
-        analysed.clone(),
-        catalog.header().clone(),
-        criteria,
-        path,
-    )
-    .map_err(|source| CallFromAlignmentsCliError::Run { source })
 }
 
 /// **The numbers this run scores with, and the two things a file recording them needs beside

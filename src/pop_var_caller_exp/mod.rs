@@ -12,6 +12,7 @@ pub mod call_from_alignments;
 pub mod cli;
 pub mod estimate_contamination;
 pub mod repeat_catalog;
+pub mod run_ground;
 pub mod typed_regions;
 
 pub use call_from_alignments::{
