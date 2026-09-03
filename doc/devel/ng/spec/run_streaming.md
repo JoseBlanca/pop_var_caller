@@ -1120,16 +1120,33 @@ measured yet (§11, questions 2 and 7).
    Production's shape — posterior engine about 3%, producer decode about 30% — suggests decode
    rather than calling, but production's engine is not ng's loop.
 
-   **The merge half of this question has its own plan**, and that plan is authoritative over the
-   sketch below:
-   [`../research/cohort_merge_parallel_cost_plan.md`](../research/cohort_merge_parallel_cost_plan.md).
-   It begins with a profile before any change is made, and its first cheap move — taking the
-   allocations out of the per-region path — is not in the sketch at all. Its headline measurement:
-   **eight threads give 1.4× on 63 tomato accessions**, and a narrow enough region makes threading
-   *slower* than not threading
-   ([`cohort_merge/mod.rs:545-571`](../../../../src/ng/run/cohort_merge/mod.rs)), which is why the
-   width sweep is to be extended rather than repeated. In outline, if the merge turns out to be the
-   serial share that caps the run:
+   **The direct-mode half is answered, in two findings.** The merge half
+   ([`../research/cohort_merge_parallel_cost_2026-08-28.md`](../research/cohort_merge_parallel_cost_2026-08-28.md)):
+   eight threads give **3.1×** on 63 tomato accessions at 1,000-base regions — not the 1.4×
+   this question used to quote, which came from 200-base regions at 16 samples — and the merge
+   is 1.4–10% of walking-plus-merging, so it is already worth its pool and is not where a
+   run's time is. The run half
+   ([`../research/cohort_merge_parallel_cost_2026-09-03.md`](../research/cohort_merge_parallel_cost_2026-09-03.md)):
+   at 8 threads a 63-sample run over 200 kb is **84.5% decoding reads, 8.0% genotyping, 6.2%
+   assembling** — the pool belongs to the decode and nothing else earns one yet. The decode is
+   already spread across samples; what caps it at 2× is the work itself slowing ~2.6-fold when
+   eight copies run at once (the choice of allocator, the barrier, the fixpoint's re-sweeps
+   and the frees are each refuted by measurement there) plus a ×1.5 per-sweep wait for the
+   slowest sample. Splitting cache contention from allocation traffic from the Mac VM's
+   scheduling needs `perf` on the Linux box, and that is where this question now lives. The
+   psp half stays OPEN until the psp format exists.
+
+   **⚠ An instrument regression sat between those two findings** (the 09-03 finding §4): the
+   two per-record counters G2 added to the `merge-timing` feature on 2026-09-01 shared one
+   cache line across every worker, and an instrumented parallel merge measured between then
+   and 2026-09-03 reads ~1.4× where the true figure is ~2.2× (200-base regions). They are
+   sharded now and the instrumented build matches an uninstrumented one again.
+
+   **The merge half's plan**
+   ([`../research/cohort_merge_parallel_cost_plan.md`](../research/cohort_merge_parallel_cost_plan.md))
+   is settled by the two findings above. The sketch below is kept for the record; of it, the
+   width extension was done (500 is the default now), the overlap driver was built and
+   refuted, and the owner dropped the sliding window once the barrier priced at ~4%:
 
    - **Extend the building-region width sweep** past eight threads and toward the far end of the
      cohort range; it is a run parameter, so it costs no code, and it has already been swept at one

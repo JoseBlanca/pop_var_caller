@@ -19,7 +19,34 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-03):** **the repeat-tract genotype comparison was wrong in two
+> - **Last completed task (2026-09-03):** **where a parallel calling run's time goes — and the
+> merge-timing feature un-broken**
+> ([finding](doc/devel/ng/research/cohort_merge_parallel_cost_2026-09-03.md), on branch
+> `ng-merge-parallel-cost`; widens the 2026-08-28 merge-only finding to the whole run).
+> At 8 threads a 63-sample run over 200 kb of tomato ground is **84.5% decoding reads, 8.0%
+> genotyping, 6.2% assembling loci** — the pool belongs to the decode, and a genotyping pool
+> stays unbuilt on a third measurement. The decode's cap now has sizes: spread across samples it
+> returns 2.00×, because **its own CPU swells ×2.56 when eight copies run at once** (17.5 s
+> alone, 44.6–44.9 s summed over eight threads, twice) and the per-sweep wait for the slowest of
+> 63 samples costs **×1.48** on top. Refuted by measurement: the *choice* of allocator (glibc
+> and mimalloc identical at 1 and 8 threads), the cover's fixpoint re-sweeps (14 extra in 414),
+> and the merge's frees in isolation (254 against 281 ms). What remains — cache/memory
+> contention against allocation traffic against the Mac VM's scheduling — **needs `perf` on the
+> Linux box**, which is the named next step; the inflation is ×1.08 at 2 threads and ×2.3+ from
+> 4 up.
+> **⚠ And the timing feature had been throttling what it measured since G2 (2026-09-01)**: the
+> two per-record counters G2 added share one cache line across every worker, so an instrumented
+> parallel merge read **1.40×** where a build without the feature gives **2.25×** — numerically
+> the stale 1.4× figure the spec still quoted, by coincidence. Fixed by sharding
+> (`timing.rs::ShardedCounter`, 16 padded cells by rayon worker) and verified: instrumented
+> 545 ms against bare 552 at 8 threads, 63 samples. Whole-run figures never needed retracting —
+> a record arrives every ~4 µs per thread there, so the line never ping-ponged and E1's
+> 1.8×/1.5× stands. The merge's machinery itself parallelises at 3.75× when records are made
+> outside its clock; buffer reuse (leasing) reads 12% at 8 threads; 16-sample merges are
+> fastest at **two** threads and degrade beyond. `run_streaming.md` §11 question 7's
+> direct-mode half is answered in place, and the psp half stays open until the format exists.
+>
+> - **Earlier (2026-09-03):** **the repeat-tract genotype comparison was wrong in two
 > ways at once, and every number resting on it is re-measured**
 > ([research handoff](doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md) §3.4b–§3.4c).
 > **No change to the caller** — the callsets are the same files; the scorer is not.
