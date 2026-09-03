@@ -82,4 +82,77 @@ were measured on.
 
 ---
 
-*Sections P0–P2 and L1–L7 are opened as the program reaches them.*
+## P0 — the baseline pair and the verdict dump
+
+Status: **done** — all four bars met, 2026-09-03
+
+**Pre-registration (written 2026-09-03, before the instrument edit).**
+
+P0 is not a lever; it is the measuring stick every lever is read against. Two deliverables:
+
+1. **`--verdicts-out` on the instrument** — one row per tract the truth calls, carrying the
+   tract's coordinates, its period class, and which counter it landed in (right, no-call,
+   not comparable, truth allele never offered, spurious heterozygote, collapsed heterozygote,
+   wrong some other way), plus whether the repeat lengths alone were right. Rule 3 (verdict
+   flips, never headlines alone) needs this on every arm; today the per-tract comparison lives
+   only in throwaway scripts under `tmp/`.
+2. **A fresh `--defaults` baseline at 30× and 50×** — the stored callsets under
+   `benchmarks/ssr_hg002/results/ng/` were run when the outlier default was 0.01; the shipped
+   default moved to 0.05 (commit `073b678c`) and the program's baseline must be the shipped
+   caller, freshly run.
+
+targets: no error class — the instrument itself.
+ceiling: not applicable.
+bar (all four must hold before anything downstream is scored):
+
+- the self-test is green before and after the edit;
+- the edit leaves all three existing tables **byte-identical** on a re-score of the stored
+  30× callset (the harness-change control, rule 1);
+- the fresh 30× `--defaults` run agrees with the sweep's existing `outlier0.05` arm
+  (`tmp/slip_sweep/outlier0.05/calls.vcf`) — the same setting reached two ways: same genotype
+  row, and **zero verdict flips** between the two callsets in the new dump;
+- the 30× headline reproduces the corrected baseline, 0.8796 homopolymer / 0.8692 period 2+.
+
+**Results (written after the runs they quote).**
+
+The instrument now writes `--verdicts-out`: one row per truth-called tract —
+coordinates, period class, verdict (`right` / `no_records` / `no_call` / `not_comparable` /
+`never_offered` / `spurious_het` / `collapsed_het` / `wrong_other`), and whether the repeat
+lengths alone matched. `benchmarks/lib/tract_verdict_flips.py` joins two dumps on the tract
+and prints the flip crosstab. All four pre-registered bars:
+
+1. **Self-test**: green before and after the edit (7 pins; two new checks assert the verdict
+   rows themselves).
+2. **Harness-change control**: the stored 30× callset re-scored before and after the edit —
+   `calibration.tsv`, `sweep.tsv`, `genotype.tsv` all **byte-identical**
+   (`tmp/tract_program/control_pre/` against `control_post/`).
+3. **Same setting, two roads**: the fresh 30× `--defaults` run against the sweep's
+   `outlier0.05` arm — the VCF **data lines are identical** and the flip join reports
+   **6,993 tracts, 0 flipped**. This also confirms the freshly rebuilt binary reproduces the
+   callset the sweep's arm was scored from.
+4. **The headline reproduces**: 0.8796 / 0.8692 at 30×, to the fourth decimal.
+
+**The program's fixed baseline** (fresh `--defaults`, shipped outlier weight 0.05; callsets
+`tmp/tract_program/baseline/HG002_{30x,50x}.raw.vcf`, verdicts
+`tmp/tract_program/verdicts.tsv`, arm label `baseline`):
+
+| | 30× homopolymer | 30× period 2+ | 50× homopolymer | 50× period 2+ |
+|---|---:|---:|---:|---:|
+| sequence accuracy | 0.8796 | 0.8692 | 0.8938 | 0.8780 |
+| repeat-length accuracy | 0.8829 | 0.8749 | 0.8969 | 0.8843 |
+| never offered | 245 | 218 | 215 | 198 |
+| spurious het (called het, truth hom) | 129 | 96 | 124 | 98 |
+| collapsed het (called hom, truth het) | 40 | 20 | 23 | 13 |
+| wrong some other way | 51 | 35 | 51 | 39 |
+
+834 errors at 30×, 761 at 50×. The spurious-heterozygote class holds at the new default what
+it showed at 0.01: **225 at 30× against 222 at 50×** — 1 case in 100 fewer where total errors
+fall by 9 in 100 — so the class the levers target is still the one more reads do not buy down.
+
+Flip check run on the way (0.01 stored callset → 0.05 arm, `tract_verdict_flips.py`):
+28 tracts flipped, 17 spurious hets fixed against 4 collapsed hets created — the trade §1 of
+the plan describes, now visible tract by tract.
+
+---
+
+*Sections P1–P2 and L1–L7 are opened as the program reaches them.*

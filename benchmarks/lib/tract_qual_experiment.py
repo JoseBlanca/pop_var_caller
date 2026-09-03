@@ -110,7 +110,14 @@ Usage:
     tract_qual_experiment.py --reference <ref.fa> --truth <truth.vcf.gz> \\
         --query <calls.vcf> --confident-bed <sample.bed> --tract-bed <tracts.bed> \\
         --arm ng --ground giab_per_sample --depth 30x --sample HG002 \\
-        --calibration-out calib.tsv --sweep-out sweep.tsv --genotype-out gt.tsv
+        --calibration-out calib.tsv --sweep-out sweep.tsv --genotype-out gt.tsv \\
+        --verdicts-out verdicts.tsv
+
+`--verdicts-out` writes one row per truth-called tract naming which counter of
+the genotype comparison it landed in, so two arms can be joined on the tract
+and report which verdicts FLIPPED — `tract_verdict_flips.py` does the join.
+The tract-accuracy program requires flips beside every headline (its rule 3):
+a headline can rise while correcting nothing, by refusing tracts.
 
 Every output file is appended to when it already carries a header, so a driver
 loops over arms and depths and ends with one table of each.
@@ -975,8 +982,13 @@ class GenotypeCell:
         called: set[tuple[str, ...]],
         expected: set[tuple[str, ...]],
         offered: frozenset[str],
-    ) -> None:
-        """Charge one tract to the right counter.
+    ) -> tuple[str, bool]:
+        """Charge one tract to the right counter, and name the counter charged.
+
+        Returns the counter's name and whether the two repeat lengths alone were
+        right. The name is the per-tract verdict `--verdicts-out` writes, so a
+        change here that moves a tract between counters shows up in the dump and
+        not only in the totals.
 
         Each side offers every tract-sequence pair its records could describe —
         one pair where the phase is known, several where it is not — and they
@@ -997,7 +1009,7 @@ class GenotypeCell:
         if called & expected:
             self.genotype_right += 1
             self.right_as_lengths += 1
-            return
+            return "right", True
         # **The same tract scored the way STR callers conventionally are**: on the
         # two repeat lengths rather than the two sequences. ng, HipSTR and the
         # existing caller all emit a per-allele repeat count, and a call that gets
@@ -1005,22 +1017,26 @@ class GenotypeCell:
         # wrong by this one. Both are real questions; reporting only the stricter
         # one understates the caller against its own field. Measured on ng at 30x,
         # the two differ by 126 tracts of 6,058.
-        if {tuple(sorted(len(one) for one in pair)) for pair in called} & {
-            tuple(sorted(len(one) for one in pair)) for pair in expected
-        }:
+        lengths_right = bool(
+            {tuple(sorted(len(one) for one in pair)) for pair in called}
+            & {tuple(sorted(len(one) for one in pair)) for pair in expected}
+        )
+        if lengths_right:
             self.right_as_lengths += 1
         wanted = {sequence for pair in expected for sequence in pair}
         if any(sequence not in offered for sequence in wanted):
             self.truth_allele_never_offered += 1
-            return
+            return "never_offered", lengths_right
         homozygous_call = all(len(set(pair)) == 1 for pair in called)
         homozygous_truth = all(len(set(pair)) == 1 for pair in expected)
         if homozygous_call and not homozygous_truth:
             self.called_homozygous_truth_heterozygous += 1
-        elif homozygous_truth and not homozygous_call:
+            return "collapsed_het", lengths_right
+        if homozygous_truth and not homozygous_call:
             self.called_heterozygous_truth_homozygous += 1
-        else:
-            self.wrong_some_other_way += 1
+            return "spurious_het", lengths_right
+        self.wrong_some_other_way += 1
+        return "wrong_other", lengths_right
 
 
 def records_near_each_tract(
@@ -1089,8 +1105,16 @@ def compare_genotypes(
     query_column: int,
     truth_column: int,
     tract_bases: dict[tuple[str, int, int], tuple[int, str]],
-) -> dict[str, GenotypeCell]:
+) -> tuple[dict[str, GenotypeCell], list[tuple[str, int, int, str, str, bool | None]]]:
     """How often the caller says the tract holds what the truth says it holds.
+
+    Returns the per-period-class totals **and one verdict per truth-called
+    tract** — (contig, start, end, period class, verdict, lengths right) — which
+    is what `--verdicts-out` writes. The totals answer "how good is this arm";
+    the verdicts answer "which tracts changed, and which way", and the program's
+    rules require the second beside the first on every arm, because the one
+    proposed correction judged by its headline alone raised it 4.7 points and
+    corrected nothing.
 
     **This is the question a discovery round moves, and the site-level ones are
     not.** Admitting an allele that was hiding under stutter does not usually
@@ -1136,25 +1160,34 @@ def compare_genotypes(
     truth_near = records_near_each_tract(truth, ground)
     query_near = records_near_each_tract(query, ground)
     cells: dict[str, GenotypeCell] = {}
+    verdicts: list[tuple[str, int, int, str, str, bool | None]] = []
     for key, truth_records in truth_near.items():
         contig, start, end, period = key
-        cell = cells.setdefault(period_class_of(period), GenotypeCell())
+        period_class = period_class_of(period)
+
+        def record_verdict(verdict: str, lengths_right: bool | None = None) -> None:
+            verdicts.append((contig, start, end, period_class, verdict, lengths_right))
+
+        cell = cells.setdefault(period_class, GenotypeCell())
         truth_genotypes = [record.genotype_indices(truth_column) for record in truth_records]
         if any(one is None for one in truth_genotypes):
             continue
         cell.tracts_truth_calls += 1
         query_records = query_near.get(key)
         if query_records is None:
+            record_verdict("no_records")
             continue
         query_genotypes = [record.genotype_indices(query_column) for record in query_records]
         if any(one is None for one in query_genotypes):
             cell.no_call += 1
+            record_verdict("no_call")
             continue
         window_bases = tract_bases.get((contig, start, end))
         if window_bases is None:
             cell.tracts_both_call += 1
             cell.not_comparable += 1
             cell.neighbourhood_not_comparable += 1
+            record_verdict("not_comparable")
             continue
         first, reference = window_bases
         window = (first, first + len(reference) - 1)
@@ -1182,10 +1215,13 @@ def compare_genotypes(
         if expected is None or called is None:
             cell.tracts_both_call += 1
             cell.not_comparable += 1
+            record_verdict("not_comparable")
         else:
-            cell.score_haplotypes(
-                called, expected,
-                offered_sequences(query_records, first, reference, tract),
+            record_verdict(
+                *cell.score_haplotypes(
+                    called, expected,
+                    offered_sequences(query_records, first, reference, tract),
+                )
             )
 
         neighbourhood = (
@@ -1197,7 +1233,7 @@ def compare_genotypes(
             cell.neighbourhood_not_comparable += 1
         elif wide_expected & wide_called:
             cell.right_in_neighbourhood += 1
-    return cells
+    return cells, verdicts
 
 
 # ---------------------------------------------------------------------------
@@ -1212,6 +1248,19 @@ CALIBRATION_HEADER = (
 SWEEP_HEADER = (
     "arm\tground\tdepth\tsample\tperiod_class\tmin_qual\ttp\tfp\t"
     "fp_with_no_called_copy\tfn\tprecision\trecall\n"
+)
+
+# One row per truth-called tract: which counter of the genotype comparison it
+# landed in. `verdict` is `right`, `no_records` (the caller wrote nothing near
+# the tract), `no_call`, `not_comparable`, `never_offered`, `spurious_het`
+# (called heterozygous, truth homozygous), `collapsed_het` (the reverse), or
+# `wrong_other`. `lengths_right` says whether the two repeat lengths alone
+# matched — `.` where the tract never reached the sequence comparison. Two arms'
+# dumps joined on (contig, start, end) give the verdict FLIPS between them,
+# which the program's rules require beside every headline.
+VERDICTS_HEADER = (
+    "arm\tground\tdepth\tsample\tcontig\tstart\tend\tperiod_class\t"
+    "verdict\tlengths_right\n"
 )
 
 GENOTYPE_HEADER = (
@@ -1262,13 +1311,13 @@ def _pin_record(pos: int, ref: str, alt: str, genotype: str) -> VcfRecord:
 
 def _pin_compare(
     tract_bases: str, period: int, truth: list, query: list
-) -> GenotypeCell:
+) -> tuple[GenotypeCell, list]:
     """One hand-built tract through the whole genotype comparison."""
     reference = _pin_reference(tract_bases)
     ground = TractGround.from_intervals(
         {"chr1": [TractInterval(PIN_TRACT[0], PIN_TRACT[1], period)]}
     )
-    cells = compare_genotypes(
+    cells, verdicts = compare_genotypes(
         [_pin_record(*one) for one in query],
         [_pin_record(*one) for one in truth],
         ground,
@@ -1276,7 +1325,7 @@ def _pin_compare(
         0,
         {("chr1", *PIN_TRACT): (PIN_FIRST, reference)},
     )
-    return cells[period_class_of(period)]
+    return cells[period_class_of(period)], verdicts
 
 
 def self_test() -> int:
@@ -1296,17 +1345,22 @@ def self_test() -> int:
     # 1. The truth writes a two-allele heterozygote as two phased records where
     #    the caller writes one multi-allelic record. Same genotype, and 1,412 of
     #    this benchmark's 6,303 tracts are this shape.
-    cell = _pin_compare(
+    cell, verdicts = _pin_compare(
         "GTGTGTGTGT", 2,
         truth=[(100, "C", "CGT", "0|1"), (100, "C", "CGTGT", "1|0")],
         query=[(100, "C", "CGT,CGTGT", "1/2")],
     )
     check("two phased truth records against one multi-allelic call", cell.genotype_right, 1)
+    check(
+        "and the verdict dump names the tract right",
+        verdicts,
+        [("chr1", *PIN_TRACT, "period2plus", "right", True)],
+    )
 
     # 2. A genuinely different call is wrong, and lands in the counter that says
     #    what would have to change — here the caller had both alleles and chose
     #    a homozygote.
-    cell = _pin_compare(
+    cell, verdicts = _pin_compare(
         "GTGTGTGTGT", 2,
         truth=[(100, "C", "CGT", "0|1"), (100, "C", "CGTGT", "1|0")],
         query=[(100, "C", "CGT,CGTGT", "1/1")],
@@ -1317,12 +1371,17 @@ def self_test() -> int:
         cell.called_homozygous_truth_heterozygous,
         1,
     )
+    check(
+        "and the verdict dump names the counter and the wrong lengths",
+        verdicts,
+        [("chr1", *PIN_TRACT, "period2plus", "collapsed_het", False)],
+    )
 
     # 3. One event written over two different spans. `bcftools norm` trims a
     #    record with two alternate alleles less than one with a single allele,
     #    so the two sides arrive anchored differently and only `left_aligned`
     #    brings them together.
-    cell = _pin_compare(
+    cell, verdicts = _pin_compare(
         "GTGTGTGTGT", 2,
         truth=[(100, "CGT", "C", "0|1")],
         query=[(100, "CGTGT", "CGT", "0/1")],
@@ -1333,7 +1392,7 @@ def self_test() -> int:
     #    The caller reproduces the truth's insertion exactly and also calls a SNP
     #    one base past the tract's end; comparing one base out scored that tract
     #    wrong, and 46 of 648 errors were this shape (`chr1:9,955,404`).
-    cell = _pin_compare(
+    cell, verdicts = _pin_compare(
         "AAAAAAAAAA", 1,
         truth=[(100, "C", "CAAA", "1|1")],
         query=[(100, "C", "CAAA", "1/1"), (111, "G", "T", "0/1")],
@@ -1388,7 +1447,7 @@ def self_test() -> int:
     #    the caller anchors them on the base before it, so the tract's own bases
     #    disagree and the neighbourhood agrees. This is `chr1:150,329,038`, and
     #    it is why both columns are reported.
-    cell = _pin_compare(
+    cell, verdicts = _pin_compare(
         "TTTTTTTTTT", 1,
         truth=[(99, "C", "A", "1|1"), (100, "C", "CTTT", "1|1")],
         query=[(99, "CC", "ACTTT", "1|1")],
@@ -1448,6 +1507,13 @@ def main() -> int:
         help="where to write the genotype comparison; skipped when not given",
     )
     parser.add_argument(
+        "--verdicts-out",
+        type=Path,
+        default=None,
+        help="where to write one verdict per truth-called tract; needs "
+        "--genotype-out, because the verdicts are the genotype comparison's",
+    )
+    parser.add_argument(
         "--genotype-sample",
         default=None,
         help="which of the query's sample columns to compare; its first by default",
@@ -1504,7 +1570,10 @@ def main() -> int:
         cells = sweep(query_allele_records, truth_allele_records, ground)
 
         genotype_cells: dict[str, GenotypeCell] = {}
+        genotype_verdicts: list[tuple[str, int, int, str, str, bool | None]] = []
         genotype_note = "not asked for"
+        if args.verdicts_out is not None and args.genotype_out is None:
+            raise SystemExit("--verdicts-out needs --genotype-out; the verdicts are its")
         if args.genotype_out is not None:
             query_samples = sample_columns_of(query_sites)
             truth_samples = sample_columns_of(truth_sites)
@@ -1524,7 +1593,7 @@ def main() -> int:
             elif in_truth not in truth_samples:
                 genotype_note = f"the truth has no sample {in_truth}"
             else:
-                genotype_cells = compare_genotypes(
+                genotype_cells, genotype_verdicts = compare_genotypes(
                     query_site_records,
                     truth_site_records,
                     ground,
@@ -1583,6 +1652,16 @@ def main() -> int:
             )
         append_rows(args.genotype_out, GENOTYPE_HEADER, genotype_rows)
         print(f"  genotypes: {genotype_note}", file=sys.stderr)
+
+    if args.verdicts_out is not None:
+        verdict_rows = [
+            f"{args.arm}\t{args.ground}\t{args.depth}\t{args.sample}\t"
+            f"{contig}\t{start}\t{end}\t{period_class}\t{verdict}\t"
+            f"{'.' if lengths_right is None else int(lengths_right)}\n"
+            for contig, start, end, period_class, verdict, lengths_right
+            in sorted(genotype_verdicts)
+        ]
+        append_rows(args.verdicts_out, VERDICTS_HEADER, verdict_rows)
 
     print(
         f"{args.arm} {args.ground} {args.depth} {args.sample}: "

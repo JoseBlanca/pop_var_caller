@@ -107,7 +107,7 @@ junk mass sits, and what the realigner reports — not how two answers are weigh
 
 ## 3. Stage 0 — aim before firing (measurements only, no caller changes)
 
-**P0. The baseline pair and the verdict dump.** ☐
+**P0. The baseline pair and the verdict dump.** ✅
 Fresh `--defaults` runs at 30× and 50× (the stored callsets predate the 0.05 default), scored
 and kept as the program's fixed baseline; the 30× run checked against the sweep's
 `outlier0.05` arm, which is the same setting reached the other way. Add a per-tract verdict
