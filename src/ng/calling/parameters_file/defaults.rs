@@ -73,7 +73,8 @@
 //!   aberrant read is called over-confidently; too high and every repeat-tract genotype loses
 //!   evidence to a term that explains nothing. **The sweep that moved it says 0.01 erred low**:
 //!   on GIAB's HG002 tandem-repeat benchmark at 30x, 0.05 takes homopolymer genotype accuracy
-//!   from 0.8851 to 0.8881 and cuts spurious heterozygotes from 88 to 77
+//!   from 0.8771 to 0.8796 and cuts spurious heterozygotes from 141 to 129 (re-scored 2026-09-03
+//!   after the genotype comparison behind those figures was corrected)
 //!   (`doc/devel/reports/ng_tract_genotype_improvement_2026-09-02.md` §5.2). What a run can look
 //!   at is how its repeat-tract calls move when the number is edited, which is why
 //!   §3.8 puts it in the file: *marking a number soft is the point of writing it down.*

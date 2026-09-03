@@ -115,20 +115,24 @@ use crate::ng::types::{LogProb, ReadGroupId};
 ///
 /// **Measured**, on GIAB's HG002 tandem-repeat benchmark at 30x, 20,204 typed tracts, one full
 /// run a setting scored against the assembly-based truth
-/// (`doc/devel/reports/ng_tract_genotype_improvement_2026-09-02.md` §5.2):
+/// (`doc/devel/reports/ng_tract_genotype_improvement_2026-09-02.md` §5.2). **Re-scored
+/// 2026-09-03** after the genotype comparison was corrected — the runs are the same, the scorer
+/// is not, and the earlier version of this table was produced by a comparison that charged a
+/// tract for variants outside it:
 ///
-/// | weight | homopolymer | period 2+ | heterozygote called for a homozygous truth |
+/// | weight | homopolymer | period 2+ | heterozygote called for a homozygous truth (homopolymer) |
 /// |---|---|---|---|
-/// | 0.01, the inherited value | 0.8851 | 0.9037 | 88 |
-/// | **0.05** | **0.8881** | **0.9059** | 77 |
-/// | 0.10 | 0.8892 | 0.9059 | 73 |
-/// | 0.20 | 0.8887 | 0.9051 | 70 |
-/// | 0.30 | 0.8891 | 0.9043 | 63 |
+/// | 0.01, the inherited value | 0.8771 | 0.8665 | 141 |
+/// | **0.05** | **0.8796** | **0.8692** | 129 |
+/// | 0.10 | 0.8808 | 0.8692 | 124 |
+/// | 0.20 | 0.8806 | 0.8685 | 118 |
+/// | 0.30 | 0.8802 | 0.8677 | 108 |
 ///
 /// The curve is flat from 0.05 to 0.30 at homopolymers and falls away above 0.10 at period 2 and
 /// above, so what the sweep really says is **"not 0.01"**. 0.05 is the owner's choice of the
-/// conservative end of that plateau (2026-09-03): it takes about three quarters of the available
-/// gain while moving least far from the value the reads themselves suggest.
+/// conservative end of that plateau (2026-09-03): at period 2 and above it takes the whole of the
+/// available gain, at homopolymers about two thirds of it, and it moves least far from the value
+/// the reads themselves suggest.
 ///
 /// # What is still open, and why this is not called fitted
 ///

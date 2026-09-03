@@ -30,13 +30,24 @@ callset — plus a third the same files can answer and the site-level two cannot
   recorded for these callsets.
 
 * **Genotype accuracy** — where the truth set and the caller both call a tract,
-  how often the caller's genotype is the truth's, reported two ways: as the two
-  tract SEQUENCES, and as the two repeat LENGTHS, which is how STR callers are
-  conventionally scored and which every caller here already emits as `REPCN`.
-  The two differ by 126 tracts of 6,058 on ng at 30x, so quoting only the first
-  understates the caller against its own field. Compared as multisets of
-  allele sequences, so two files that order their ALT columns differently still
-  agree and phase is ignored. Written only when `--genotype-out` asks for it.
+  how often the caller's genotype is the truth's. Neither file's records can be
+  compared as written, because the two spell one event differently, so each
+  side's records are laid on the reference and **the DNA of the two chromosome
+  copies is rebuilt** and compared as a multiset — two files that order their
+  ALT columns differently still agree, and phase is ignored. Reported as the two
+  SEQUENCES, base for base, and as the two repeat LENGTHS, which is how STR
+  callers are conventionally scored and which every caller here emits as
+  `REPCN`. Written only when `--genotype-out` asks for it.
+
+  **Two settings govern it and they are not the same number.** How far from the
+  tract records are COLLECTED is [`GENOTYPE_REACH`], and how much DNA the two
+  rebuilt copies are COMPARED over is the tract's own bases. Setting them both
+  to one base — which this program did until 2026-09-03 — is wrong in both
+  directions at once, and each error has its own measured size on the
+  tandem-repeat ground below. Collecting too little rebuilds the truth's own
+  haplotype from a fragment of its own records; comparing too much charges a
+  tract for a variant that is not in it. `records_near_each_tract` and
+  `compare_genotypes` carry the cases.
 
   **This is the question a discovery round moves and the other two barely see.**
   Admitting an allele that was hiding under stutter does not usually add a
@@ -60,9 +71,12 @@ silently scoring a different set of positions.
 
 **Why a variant is allowed to sit one base outside its tract.** A left-aligned
 insertion at the start of a repeat is anchored on the base *before* the repeat,
-so its position falls outside the tract by one. Every overlap test here is
-therefore padded by one base on each side. Without the pad an insertion at a
-homopolymer's first base is scored as if it were not at the tract at all.
+so its position falls outside the tract by one. Every overlap test in the
+calibration and the sweep is therefore padded by one base on each side. Without
+the pad an insertion at a homopolymer's first base is scored as if it were not
+at the tract at all. **The genotype comparison does not use this pad** — see the
+two settings above; it was tried and it is what made four successive
+measurements of tract genotype accuracy wrong.
 
 **Left-alignment runs before the region masks, and that is a departure from
 `score_ng_recall.sh` worth stating.** That script masks first, and the two
@@ -134,8 +148,24 @@ SWEEP_THRESHOLDS: tuple[float, ...] = (
 )
 
 # How far outside its tract a record may sit and still be counted at it — see
-# the module docstring's paragraph on the anchor base.
+# the module docstring's paragraph on the anchor base. **Calibration and the
+# sweep only**; the genotype comparison uses the two settings below, and the
+# module docstring says why one number could not serve both.
 ANCHOR_PAD = 1
+
+# **How far from a tract the genotype comparison collects records.** Wide,
+# because a truth set may describe one event with several records spread over a
+# few bases and rebuilding a haplotype from some of them gives a sequence
+# neither side claims. Measured on this benchmark's tandem-repeat ground, 173 of
+# the 648 tracts the one-base reach scored wrong have a truth record within ten
+# bases that it left out, against 208 of the 5,410 it scored right.
+GENOTYPE_REACH = 10
+
+# **How much reference the genotype comparison reads.** Enough for the widest
+# readout plus room for a record that starts well to the left and deletes into
+# the tract; a change reaching further than this refuses the tract rather than
+# being silently clipped.
+GENOTYPE_FETCH_PAD = GENOTYPE_REACH + 100
 
 
 def error_probability_of(qual: float) -> float:
@@ -194,6 +224,20 @@ class TractGround:
             contig: [one.start for one in intervals]
             for contig, intervals in self._by_contig.items()
         }
+
+    @classmethod
+    def from_intervals(cls, intervals: dict[str, list[TractInterval]]) -> "TractGround":
+        """A ground built in memory rather than read from a BED — the self-test's."""
+        ground = cls.__new__(cls)
+        ground._by_contig = {
+            contig: sorted(here, key=lambda one: one.start)
+            for contig, here in intervals.items()
+        }
+        ground._starts = {
+            contig: [one.start for one in here]
+            for contig, here in ground._by_contig.items()
+        }
+        return ground
 
     def intervals_by_contig(self) -> dict[str, list[TractInterval]]:
         """Every tract of the ground, by contig — what a batched reference read needs."""
@@ -323,11 +367,13 @@ def tract_reference_bases(
     One batched call rather than one a tract: 20,000 regions is 20,000
     subprocesses the other way.
 
-    **The window reaches [`ANCHOR_PAD`] bases either side of the tract**, because
-    a left-aligned insertion at a repeat's first base is anchored on the base
-    *before* it. Without the pad every such record falls outside the window and
-    the tract is scored as incomparable — measured, that was 3,354 of 3,648
-    homopolymer tracts.
+    **The window reaches [`GENOTYPE_FETCH_PAD`] bases either side of the tract**,
+    which is more than any comparison reads. Two reasons it is not the tract
+    itself: a left-aligned insertion at a repeat's first base is anchored on the
+    base *before* it, and the neighbourhood comparison reads out to
+    [`GENOTYPE_REACH`]. Without any pad, every such record falls outside the
+    window and the tract is scored as incomparable — measured, that was 3,354 of
+    3,648 homopolymer tracts.
 
     Returned with each window's own first position rather than the tract's, so
     a tract at a contig's very start — where the pad is clipped — still indexes
@@ -340,9 +386,9 @@ def tract_reference_bases(
             for one in intervals:
                 # BED is half-open and zero-based, so `one.start` is already the
                 # one-based position of the base *before* the tract.
-                first = max(1, one.start + 1 - ANCHOR_PAD)
+                first = max(1, one.start + 1 - GENOTYPE_FETCH_PAD)
                 keys.append(((contig, one.start, one.end), first))
-                handle.write(f"{contig}:{first}-{one.end + ANCHOR_PAD}\n")
+                handle.write(f"{contig}:{first}-{one.end + GENOTYPE_FETCH_PAD}\n")
     completed = subprocess.run(
         ["samtools", "faidx", str(reference), "-r", str(regions)],
         capture_output=True,
@@ -369,14 +415,164 @@ def tract_reference_bases(
     return bases
 
 
-def haplotypes_over_tract(
+@dataclass(frozen=True)
+class Edit:
+    """One allele reduced to the change it makes to the reference.
+
+    `bases` replaces the reference interval `[pos, pos + span - 1]`. A `span` of
+    zero is a pure insertion, whose bases go immediately *before* `pos`.
+
+    **A record's written span is not the change it makes**, and every rule here
+    turns on the difference. `AAG -> A` is written across three bases and
+    changes two of them; a record whose ALT column carries two alleles is
+    trimmed less by `bcftools norm` than one carrying a single allele, so two
+    records describing the same event have different spans. Asking "is this
+    change inside the tract" of the span gives the wrong answer in both cases.
+    """
+
+    pos: int
+    span: int
+    bases: str
+
+    @property
+    def is_insertion(self) -> bool:
+        return self.span == 0
+
+
+def minimal_edit(pos: int, ref: str, alt: str) -> Edit:
+    """`ref -> alt` at `pos`, stripped to the bases that actually change.
+
+    Common suffix first, then common prefix. `A -> AAT` comes back as an
+    insertion of `AT`; `AAG -> A` as a deletion of two bases; a substitution
+    unchanged. **Which position the result carries still depends on the trimming
+    order** — `T -> TGT` trims to an insertion before `pos` one way and before
+    `pos + 1` the other, and both describe the same DNA — so `left_aligned`
+    settles it afterwards and neither order is load-bearing.
+    """
+    while ref and alt and ref[-1] == alt[-1]:
+        ref, alt = ref[:-1], alt[:-1]
+    while ref and alt and ref[0] == alt[0]:
+        ref, alt, pos = ref[1:], alt[1:], pos + 1
+    return Edit(pos, len(ref), alt)
+
+
+def left_aligned(edit: Edit, first: int, reference: str) -> Edit:
+    """The same change written at the leftmost position that describes it.
+
+    **Two files can anchor one event at different positions and both be right**,
+    wherever the bases added or removed repeat what is beside them: deleting the
+    first `GT` of `GTGTGT` and deleting its last leave the same DNA. Which one a
+    record carries decides whether the change lands inside the tract's own bases
+    or outside them, so it has to be settled before the two sides are compared,
+    and settled the same way for both.
+
+    `bcftools norm` does this for a record with one alternate allele and
+    **cannot** for a record with two, because it trims each allele against the
+    whole ALT column: `AGTGTGT -> A,AGTGT` leaves the second allele anchored five
+    bases right of where the first is. That is the mismatch that made 324 of
+    6,303 tracts read as genotype errors when allele strings were compared as
+    written.
+
+    A substitution has one position and comes back unchanged.
+    """
+    if edit.span and edit.bases:
+        return edit
+    # A change reaching outside the reference that was read cannot be shifted
+    # against it. `Haplotype.apply` refuses such a change and the tract is
+    # counted as one this program cannot compare, which is the honest answer.
+    last = first + len(reference) - 1
+    if edit.pos < first or edit.pos + max(edit.span, 1) - 1 > last:
+        return edit
+    pos, span, bases = edit.pos, edit.span, edit.bases
+    if span:
+        while pos > first and reference[pos - 1 - first] == reference[pos + span - 1 - first]:
+            pos -= 1
+    else:
+        while pos > first and bases and reference[pos - 1 - first] == bases[-1]:
+            bases = bases[-1] + bases[:-1]
+            pos -= 1
+    return Edit(pos, span, bases)
+
+
+def edit_of(
+    record: VcfRecord, allele: int, first: int, reference: str
+) -> Edit | None:
+    """The change one of a record's alleles makes, left-aligned against `reference`.
+
+    `None` for the reference allele, which changes nothing.
+    """
+    if allele == 0:
+        return None
+    return left_aligned(
+        minimal_edit(record.pos, record.ref.upper(), record.allele_bases(allele)),
+        first,
+        reference,
+    )
+
+
+class Haplotype:
+    """One copy of the reference window, with changes laid on it.
+
+    Held as one string per reference position — empty where a base is deleted,
+    several where it is replaced, plus whatever is inserted before it — so **any
+    sub-interval of the window can be read out afterwards**. That is what lets
+    one builder answer both questions this program asks: what the tract's own
+    bases are, and what the tract and its neighbourhood are.
+    """
+
+    def __init__(self, first: int, reference: str) -> None:
+        self.first = first
+        self.emitted = list(reference)
+        self.inserted = [""] * len(reference)
+        self.written: set = set()
+
+    def apply(self, edit: Edit) -> bool:
+        """Lay one change on this copy; `False` where it cannot be laid.
+
+        Refused when the change reaches outside the reference that was read, and
+        when it touches a base another change on this same copy has already
+        rewritten — the genuine "one copy needs two overlapping changes at once"
+        case, which is a refusal rather than a guess.
+        """
+        last = self.first + len(self.emitted) - 1
+        if edit.is_insertion:
+            if not self.first <= edit.pos <= last:
+                return False
+            if ("insert", edit.pos) in self.written:
+                return False
+            self.written.add(("insert", edit.pos))
+            self.inserted[edit.pos - self.first] += edit.bases
+            return True
+        if edit.pos < self.first or edit.pos + edit.span - 1 > last:
+            return False
+        touched = range(edit.pos, edit.pos + edit.span)
+        if any(position in self.written for position in touched):
+            return False
+        for position in touched:
+            self.written.add(position)
+            self.emitted[position - self.first] = ""
+        self.emitted[edit.pos - self.first] = edit.bases
+        return True
+
+    def read(self, first: int, last: int) -> str:
+        """The bases this copy carries over the one-based inclusive `[first, last]`."""
+        out = []
+        for position in range(first, last + 1):
+            index = position - self.first
+            out.append(self.inserted[index])
+            out.append(self.emitted[index])
+        return "".join(out)
+
+
+def haplotype_pairs(
     records: list[VcfRecord],
     genotypes: list[tuple[int, ...]],
-    tract: tuple[int, int],
+    first: int,
     reference: str,
     phased: bool,
+    readout: tuple[int, int],
 ) -> set[tuple[str, ...]] | None:
-    """Every tract sequence pair this side's records could describe.
+    """Every sequence pair this side's records could describe over `readout`.
 
     A **set** of pairs, because an unphased side with several records does not
     say which allele sits on which copy: every assignment is returned and the
@@ -387,46 +583,35 @@ def haplotypes_over_tract(
     it**, and that is what makes the common shape work rather than be refused.
     A truth set writes a two-allele heterozygote as two records at the same
     position — `AGT -> A` phased `0|1` and `AGTGTGT -> A` phased `1|0`. As
-    edits they overlap and cannot both be applied; as haplotypes they do not,
+    changes they overlap and cannot both be applied; as haplotypes they do not,
     because each copy takes a non-reference allele from exactly one of them.
     Refusing on the records' spans alone threw out 1,412 of this benchmark's
     tracts, which are precisely the two-allele heterozygotes.
 
-    `None` where a copy really does need two overlapping edits at once, or where
-    a record reaches outside the window — a refusal rather than a guess.
+    `None` where no assignment can be laid out at all.
     """
-    start, end = tract
-    for record in records:
-        if record.pos < start or record.end > end:
-            return None
     copies = len(genotypes[0])
     if any(len(one) != copies for one in genotypes):
         return None
 
-    def sequence(assignment: list[int]) -> tuple[str, ...] | None:
+    def sequences(assignment: list[int]) -> tuple[str, ...] | None:
         built = []
         for copy in range(copies):
-            applied = [
-                (record, genotypes[index][(copy + assignment[index]) % copies])
-                for index, record in enumerate(records)
-            ]
-            applied = [(record, allele) for record, allele in applied if allele != 0]
-            applied.sort(key=lambda pair: pair[0].pos)
-            for (left, _), (right, _) in zip(applied, applied[1:]):
-                if left.end >= right.pos:
+            haplotype = Haplotype(first, reference)
+            for index, record in enumerate(records):
+                edit = edit_of(
+                    record,
+                    genotypes[index][(copy + assignment[index]) % copies],
+                    first,
+                    reference,
+                )
+                if edit is not None and not haplotype.apply(edit):
                     return None
-            out = []
-            cursor = start
-            for record, allele in applied:
-                out.append(reference[cursor - start : record.pos - start])
-                out.append(record.allele_bases(allele))
-                cursor = record.end + 1
-            out.append(reference[cursor - start :])
-            built.append("".join(out))
+            built.append(haplotype.read(*readout))
         return tuple(sorted(built))
 
     if phased or len(records) == 1:
-        one = sequence([0] * len(records))
+        one = sequences([0] * len(records))
         return None if one is None else {one}
     # Unphased with several records: every way of rotating each record's called
     # alleles across the copies, with the first held fixed so one assignment is
@@ -438,10 +623,49 @@ def haplotypes_over_tract(
         for index in range(1, len(records)):
             assignment[index] = remaining % copies
             remaining //= copies
-        one = sequence(assignment)
+        one = sequences(assignment)
         if one is not None:
             pairs.add(one)
     return pairs or None
+
+
+def offered_sequences(
+    records: list[VcfRecord], first: int, reference: str, readout: tuple[int, int]
+) -> frozenset[str]:
+    """Every sequence the caller's own alleles could have spelled over `readout`.
+
+    **One allele from each record, in every combination**, not one allele of one
+    record. With a single record the two are the same; where a tract carries two
+    or three records, a sequence needing two of them is one the caller did
+    offer, and counting it as never offered charges candidate selection for a
+    genotype the caller could have written.
+    """
+    choices: list[list[Edit | None]] = [[]]
+    for record in records:
+        alleles = [
+            edit_of(record, allele, first, reference)
+            for allele in range(1 + len(record.alt.split(",")))
+        ]
+        choices = [one + [allele] for one in choices for allele in alleles]
+        if len(choices) > 4096:
+            # More records than this counter can speak about; fall back to one
+            # allele of one record, which is a subset and so cannot overstate
+            # what was offered.
+            choices = [
+                [edit if index == position else None for index in range(len(records))]
+                for position, one in enumerate(records)
+                for edit in [
+                    edit_of(one, allele, first, reference)
+                    for allele in range(1 + len(one.alt.split(",")))
+                ]
+            ]
+            break
+    out = set()
+    for choice in choices:
+        haplotype = Haplotype(first, reference)
+        if all(edit is None or haplotype.apply(edit) for edit in choice):
+            out.add(haplotype.read(*readout))
+    return frozenset(out)
 
 
 def sample_columns_of(path: Path) -> list[str]:
@@ -739,6 +963,8 @@ class GenotypeCell:
     no_call: int = 0
     not_comparable: int = 0
     right_as_lengths: int = 0
+    right_in_neighbourhood: int = 0
+    neighbourhood_not_comparable: int = 0
     truth_allele_never_offered: int = 0
     called_homozygous_truth_heterozygous: int = 0
     called_heterozygous_truth_homozygous: int = 0
@@ -797,24 +1023,62 @@ class GenotypeCell:
             self.wrong_some_other_way += 1
 
 
-def records_by_tract(
+def records_near_each_tract(
     records: list[VcfRecord], ground: TractGround
 ) -> dict[tuple[str, int, int, int], list[VcfRecord]]:
-    """Every record a tract holds, by tract — **all of them, not the best one**.
+    """Every record within [`GENOTYPE_REACH`] bases of each tract, by tract.
 
-    A tract can carry several records a side and they are not alternatives: the
-    truth set writes a two-allele heterozygote as two phased records where the
-    caller writes one multi-allelic record, and a tract can hold a substitution
-    at one end and a length change at the other. Keeping one a tract compares
-    different events and calls the result a genotype error.
+    **All of them, not the best one, and a record may serve two tracts.** Three
+    reasons, each measured on this benchmark's tandem-repeat ground:
+
+    - A tract carries several records a side and they are not alternatives: the
+      truth set writes a two-allele heterozygote as two phased records where the
+      caller writes one multi-allelic record. Keeping one a tract compares
+      different events and calls the result a genotype error.
+    - **A truth set may describe one event with several records spread over a
+      few bases.** At `chr1:150,329,038` the truth writes four — at 150,329,033,
+      35, 36 and 37 — and a reach of one base collects only the last, so the
+      truth's own haplotype is rebuilt from a fragment of its own claim and the
+      caller is compared against a sequence nobody stated. 173 of the 648 tracts
+      the one-base reach scored wrong have a truth record it left out, against
+      208 of the 5,410 it scored right.
+    - Assigning each record to one tract, as `TractGround.tract_at` does for the
+      site-level questions, would make a record between two tracts speak for
+      only one of them. That is right when the unit is the record and wrong when
+      the unit is the tract.
     """
-    out: dict[tuple[str, int, int, int], list[VcfRecord]] = {}
+    ordered: dict[str, list[VcfRecord]] = {}
     for record in records:
-        tract = ground.tract_at(record.contig, record.pos, record.end)
-        if tract is None:
+        ordered.setdefault(record.contig, []).append(record)
+    for contig in ordered:
+        ordered[contig].sort(key=lambda record: record.pos)
+    starts = {
+        contig: [record.pos for record in here] for contig, here in ordered.items()
+    }
+    # How far back the search must look for a record that starts to the left and
+    # reaches in — the longest span this callset actually carries, so a long
+    # deletion cannot be missed and a short callset costs nothing.
+    longest = {
+        contig: max((record.end - record.pos + 1 for record in here), default=1)
+        for contig, here in ordered.items()
+    }
+    out: dict[tuple[str, int, int, int], list[VcfRecord]] = {}
+    for contig, intervals in ground.intervals_by_contig().items():
+        here = ordered.get(contig)
+        if not here:
             continue
-        key = (record.contig, tract.start, tract.end, tract.period)
-        out.setdefault(key, []).append(record)
+        for one in intervals:
+            low = one.start + 1 - GENOTYPE_REACH
+            high = one.end + GENOTYPE_REACH
+            begin = bisect.bisect_left(starts[contig], low - longest[contig] + 1)
+            stop = bisect.bisect_right(starts[contig], high)
+            near = [
+                record
+                for record in here[begin:stop]
+                if record.pos <= high and record.end >= low
+            ]
+            if near:
+                out[(contig, one.start, one.end, one.period)] = near
     return out
 
 
@@ -854,18 +1118,32 @@ def compare_genotypes(
     So each side's records are laid on the tract's reference bases and the two
     resulting sequences compared. A side whose records leave the phase open
     offers every assignment, and the two agree if any pair is shared.
+
+    **Two intervals are compared, from the same records, and both are
+    reported.** The headline is the tract's own bases: it answers what this
+    program is for, and it does not charge a tract for a variant outside it. At
+    `chr1:9,955,404` ng reproduces the truth's three-base insertion exactly and
+    also calls a SNP one base past the tract's end; comparing one base out
+    scored that tract wrong, and 46 of 648 errors were of that shape. The second
+    interval reaches [`GENOTYPE_REACH`] bases either side and is where a variant
+    ng genuinely misses at the boundary shows up — it cannot show in the first,
+    and at `chr1:150,329,038` it is the only one of the two that sees ng's call
+    and the truth's four records describing the identical sequence. It is not
+    the headline because it also charges the tract for every variant the caller
+    writes *near* it: on this ground, widening the compared interval to ten
+    bases turns 62 tracts from right to wrong and only 13 from wrong to right.
     """
-    truth_by_tract = records_by_tract(truth, ground)
-    query_by_tract = records_by_tract(query, ground)
+    truth_near = records_near_each_tract(truth, ground)
+    query_near = records_near_each_tract(query, ground)
     cells: dict[str, GenotypeCell] = {}
-    for key, truth_records in truth_by_tract.items():
+    for key, truth_records in truth_near.items():
         contig, start, end, period = key
         cell = cells.setdefault(period_class_of(period), GenotypeCell())
         truth_genotypes = [record.genotype_indices(truth_column) for record in truth_records]
         if any(one is None for one in truth_genotypes):
             continue
         cell.tracts_truth_calls += 1
-        query_records = query_by_tract.get(key)
+        query_records = query_near.get(key)
         if query_records is None:
             continue
         query_genotypes = [record.genotype_indices(query_column) for record in query_records]
@@ -876,41 +1154,49 @@ def compare_genotypes(
         if window_bases is None:
             cell.tracts_both_call += 1
             cell.not_comparable += 1
+            cell.neighbourhood_not_comparable += 1
             continue
         first, reference = window_bases
+        window = (first, first + len(reference) - 1)
 
         # **A truth record is phased where its own genotype separator says so**,
         # and this truth set writes `0|1`. An unphased side offers every
         # assignment instead.
         truth_phased = all("|" in record.samples[truth_column] for record in truth_records)
-        window = (first, first + len(reference) - 1)
-        expected = haplotypes_over_tract(
-            truth_records,
-            [one for one in truth_genotypes if one is not None],
-            window,
-            reference,
-            truth_phased,
-        )
-        called = haplotypes_over_tract(
-            query_records,
-            [one for one in query_genotypes if one is not None],
-            window,
-            reference,
-            False,
-        )
+
+        def pairs_over(readout: tuple[int, int]) -> tuple[object, object]:
+            return (
+                haplotype_pairs(
+                    truth_records, truth_genotypes, first, reference,
+                    truth_phased, readout,
+                ),
+                haplotype_pairs(
+                    query_records, query_genotypes, first, reference, False, readout
+                ),
+            )
+
+        # BED is half-open and zero-based, so the tract's own bases are
+        # `start + 1` to `end` one-based inclusive.
+        tract = (start + 1, end)
+        expected, called = pairs_over(tract)
         if expected is None or called is None:
             cell.tracts_both_call += 1
             cell.not_comparable += 1
-            continue
+        else:
+            cell.score_haplotypes(
+                called, expected,
+                offered_sequences(query_records, first, reference, tract),
+            )
 
-        offered = frozenset(
-            reference[: record.pos - window[0]]
-            + record.allele_bases(index)
-            + reference[record.end - window[0] + 1 :]
-            for record in query_records
-            for index in range(1 + len(record.alt.split(",")))
+        neighbourhood = (
+            max(window[0], tract[0] - GENOTYPE_REACH),
+            min(window[1], tract[1] + GENOTYPE_REACH),
         )
-        cell.score_haplotypes(called, expected, offered)
+        wide_expected, wide_called = pairs_over(neighbourhood)
+        if wide_expected is None or wide_called is None:
+            cell.neighbourhood_not_comparable += 1
+        elif wide_expected & wide_called:
+            cell.right_in_neighbourhood += 1
     return cells
 
 
@@ -932,6 +1218,8 @@ GENOTYPE_HEADER = (
     "arm\tground\tdepth\tsample\tperiod_class\ttracts_truth_calls\t"
     "tracts_both_call\tgenotype_right\tno_call\tgenotype_accuracy\t"
     "not_comparable\tright_as_lengths\tlength_accuracy\t"
+    "right_in_neighbourhood\tneighbourhood_accuracy\t"
+    "neighbourhood_not_comparable\t"
     "truth_allele_never_offered\tcalled_hom_truth_het\t"
     "called_het_truth_hom\twrong_some_other_way\n"
 )
@@ -951,12 +1239,187 @@ def ratio(numerator: int, denominator: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# The pins
+# ---------------------------------------------------------------------------
+
+# **A hand-built tract with 20 bases of flank each side**, positions 81 to 130,
+# the tract itself at 101 to 110. Neither flank continues either motif, so no
+# change laid on it can be shifted out of the tract by `left_aligned` and a pin
+# tests what it says it tests.
+PIN_FIRST = 81
+PIN_LEFT_FLANK = "AGCTAGCTAGCTAGCTAGCC"   # 81..100, ending C
+PIN_RIGHT_FLANK = "GACGACGACGACGACGACGA"  # 111..130, starting G
+PIN_TRACT = (100, 110)                    # BED, so the bases are 101..110
+
+
+def _pin_reference(tract_bases: str) -> str:
+    return PIN_LEFT_FLANK + tract_bases + PIN_RIGHT_FLANK
+
+
+def _pin_record(pos: int, ref: str, alt: str, genotype: str) -> VcfRecord:
+    return VcfRecord("chr1", pos, ref, alt, 100.0, "STR", (f"{genotype}:99",))
+
+
+def _pin_compare(
+    tract_bases: str, period: int, truth: list, query: list
+) -> GenotypeCell:
+    """One hand-built tract through the whole genotype comparison."""
+    reference = _pin_reference(tract_bases)
+    ground = TractGround.from_intervals(
+        {"chr1": [TractInterval(PIN_TRACT[0], PIN_TRACT[1], period)]}
+    )
+    cells = compare_genotypes(
+        [_pin_record(*one) for one in query],
+        [_pin_record(*one) for one in truth],
+        ground,
+        0,
+        0,
+        {("chr1", *PIN_TRACT): (PIN_FIRST, reference)},
+    )
+    return cells[period_class_of(period)]
+
+
+def self_test() -> int:
+    """Six shapes this comparison has to get right, each hand-checkable.
+
+    The first three are the shapes that made earlier versions wrong and are kept
+    from the 2026-09-02 fix. The last three are the shapes that made the
+    2026-09-03 version wrong: one for each of the two settings, and one for what
+    the tract-only comparison cannot see and the neighbourhood one can.
+    """
+    failures: list[str] = []
+
+    def check(name: str, got: object, want: object) -> None:
+        if got != want:
+            failures.append(f"{name}: got {got!r}, wanted {want!r}")
+
+    # 1. The truth writes a two-allele heterozygote as two phased records where
+    #    the caller writes one multi-allelic record. Same genotype, and 1,412 of
+    #    this benchmark's 6,303 tracts are this shape.
+    cell = _pin_compare(
+        "GTGTGTGTGT", 2,
+        truth=[(100, "C", "CGT", "0|1"), (100, "C", "CGTGT", "1|0")],
+        query=[(100, "C", "CGT,CGTGT", "1/2")],
+    )
+    check("two phased truth records against one multi-allelic call", cell.genotype_right, 1)
+
+    # 2. A genuinely different call is wrong, and lands in the counter that says
+    #    what would have to change — here the caller had both alleles and chose
+    #    a homozygote.
+    cell = _pin_compare(
+        "GTGTGTGTGT", 2,
+        truth=[(100, "C", "CGT", "0|1"), (100, "C", "CGTGT", "1|0")],
+        query=[(100, "C", "CGT,CGTGT", "1/1")],
+    )
+    check("a different call is wrong", cell.genotype_right, 0)
+    check(
+        "a different call is charged to the genotyper",
+        cell.called_homozygous_truth_heterozygous,
+        1,
+    )
+
+    # 3. One event written over two different spans. `bcftools norm` trims a
+    #    record with two alternate alleles less than one with a single allele,
+    #    so the two sides arrive anchored differently and only `left_aligned`
+    #    brings them together.
+    cell = _pin_compare(
+        "GTGTGTGTGT", 2,
+        truth=[(100, "CGT", "C", "0|1")],
+        query=[(100, "CGTGT", "CGT", "0/1")],
+    )
+    check("one event over two spans", cell.genotype_right, 1)
+
+    # 4. **The comparison must not charge a tract for a variant outside it.**
+    #    The caller reproduces the truth's insertion exactly and also calls a SNP
+    #    one base past the tract's end; comparing one base out scored that tract
+    #    wrong, and 46 of 648 errors were this shape (`chr1:9,955,404`).
+    cell = _pin_compare(
+        "AAAAAAAAAA", 1,
+        truth=[(100, "C", "CAAA", "1|1")],
+        query=[(100, "C", "CAAA", "1/1"), (111, "G", "T", "0/1")],
+    )
+    check("a caller SNP past the tract's end leaves the tract right",
+          cell.genotype_right, 1)
+    check("and the neighbourhood sees it", cell.right_in_neighbourhood, 0)
+
+    # 5. **The comparison must collect a truth record that sits beyond the old
+    #    one-base reach.** At `chr1:150,329,038` the truth describes one event
+    #    with four records from five bases out and the one-base reach collected
+    #    the last of them, rebuilding the truth's own haplotype from a fragment.
+    far = _pin_record(96, "T", "A", "1|1")
+    ground = TractGround.from_intervals(
+        {"chr1": [TractInterval(PIN_TRACT[0], PIN_TRACT[1], 1)]}
+    )
+    check(
+        "a truth record five bases before the tract is collected",
+        records_near_each_tract([far], ground).get(("chr1", *PIN_TRACT, 1)),
+        [far],
+    )
+    check(
+        "and the site-level rule, which is not this one, still refuses it",
+        ground.tract_at("chr1", far.pos, far.end),
+        None,
+    )
+
+    # 5b. **`left_aligned` on its own**, because none of the end-to-end shapes
+    #     above needs it: within a pure repeat every anchoring gives the same
+    #     DNA, so it only shows at the tract's edge. Deleting one `GT` of
+    #     `GTGTGTGTGT` can be written at any of five positions and they are one
+    #     change; the same insertion likewise.
+    repeat_reference = _pin_reference("GTGTGTGTGT")
+    check(
+        "a deletion written five bases right comes back at the leftmost position",
+        left_aligned(Edit(105, 2, ""), PIN_FIRST, repeat_reference),
+        Edit(101, 2, ""),
+    )
+    check(
+        "an insertion written inside the repeat comes back at its start",
+        left_aligned(Edit(105, 0, "GT"), PIN_FIRST, repeat_reference),
+        Edit(101, 0, "GT"),
+    )
+    check(
+        "a substitution has one position and is left alone",
+        left_aligned(Edit(105, 1, "A"), PIN_FIRST, repeat_reference),
+        Edit(105, 1, "A"),
+    )
+
+    # 6. **What the tract-only comparison cannot see.** Both sides describe the
+    #    same DNA; the truth anchors the three added bases inside the tract and
+    #    the caller anchors them on the base before it, so the tract's own bases
+    #    disagree and the neighbourhood agrees. This is `chr1:150,329,038`, and
+    #    it is why both columns are reported.
+    cell = _pin_compare(
+        "TTTTTTTTTT", 1,
+        truth=[(99, "C", "A", "1|1"), (100, "C", "CTTT", "1|1")],
+        query=[(99, "CC", "ACTTT", "1|1")],
+    )
+    check("an event anchored across the tract's edge: the tract disagrees",
+          cell.genotype_right, 0)
+    check("and the neighbourhood agrees", cell.right_in_neighbourhood, 1)
+
+    for one in failures:
+        print(f"FAIL {one}", file=sys.stderr)
+    print(
+        f"self-test: {'FAILED' if failures else 'passed'}, {len(failures)} failures",
+        file=sys.stderr,
+    )
+    return 1 if failures else 0
+
+
+# ---------------------------------------------------------------------------
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run the hand-checkable pins and exit; needs no files and no tools",
+    )
+    if "--self-test" in sys.argv:
+        return self_test()
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--truth", type=Path, required=True)
     parser.add_argument("--query", type=Path, required=True)
@@ -1110,6 +1573,9 @@ def main() -> int:
                 f"{ratio(cell.genotype_right, cell.tracts_both_call - cell.not_comparable)}\t"
                 f"{cell.not_comparable}\t{cell.right_as_lengths}\t"
                 f"{ratio(cell.right_as_lengths, cell.tracts_both_call - cell.not_comparable)}\t"
+                f"{cell.right_in_neighbourhood}\t"
+                f"{ratio(cell.right_in_neighbourhood, cell.tracts_both_call - cell.neighbourhood_not_comparable)}\t"
+                f"{cell.neighbourhood_not_comparable}\t"
                 f"{cell.truth_allele_never_offered}\t"
                 f"{cell.called_homozygous_truth_heterozygous}\t"
                 f"{cell.called_heterozygous_truth_homozygous}\t"

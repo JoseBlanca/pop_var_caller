@@ -16,6 +16,24 @@ improve them?* The conclusions drawn from them, and the runs that test those con
 | [`hipstr.md`](hipstr.md) | Score HipSTR — which fits its stutter model per locus — on exactly ng's ground with exactly ng's instrument, and say whether the gap is a candidate problem or a model problem. |
 | [`unseen.md`](unseen.md) | Split the 268 true sequences no read carried between unobservable, an alignment loss, and a truth-set artefact. |
 
+## ⚠ All six predate the 2026-09-03 re-scoring
+
+**The genotype comparison these six were scored against was wrong in two ways and was fixed on
+2026-09-03** ([research handoff](../../ng/research/tract_genotype_accuracy_2026-09-03.md) §3.4b).
+Which of their figures that touches depends on what each counted:
+
+- **A count of reads, of candidate-table entries, or of truth records is untouched.** That covers
+  the whole of `slippage.md`, most of `readmodel.md`, and `unseen.md`'s three hand-verified
+  alignment losses.
+- **A count of tracts scored wrong has moved.** The denominator is now 852 errors at 30× rather
+  than 648, and the spurious-heterozygote class 242 rather than 137. `hetfhom.md`'s *shares* hold
+  and its counts do not; `prior.md`'s "10 of 648" is a magnitude, not a figure.
+- **`hipstr.md` has been re-scored, and the correction reversed its direction**: ng is 1.9 points
+  ahead at 30× (0.8998 against 0.8806) where it read as level, and level at 50× where it read as
+  0.9 points behind. ng was the arm the old rule penalised, because ng writes SNP-path records
+  beside a tract and HipSTR writes none, so only ng was charged for its own neighbours. Re-run it
+  with `bash tmp/agent_hipstr/run_all.sh`.
+
 ## What is and is not verified
 
 **The numbers in these reports were not independently re-derived.** Three of their central claims

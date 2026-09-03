@@ -16,6 +16,12 @@
 # Both are appended to, so a second ground adds rows rather than replacing them;
 # delete the directory to start over.
 #
+# `RESCORE_ONLY=1` scores the callsets that are already on disk and generates
+# nothing — no caller run, no simulator, no ground rebuild. **That is the mode
+# to use after a change to the scorer**, because it re-derives every published
+# number from the exact files they were first derived from; anything else mixes
+# a scorer change with a fresh set of reads.
+#
 # WHAT THE THREE GROUNDS ARE FOR, AND WHY THERE ARE THREE
 #
 #   per_sample          The GIAB trio's 100 random confident intervals, at 30x
@@ -79,6 +85,12 @@ else
     PYTHON=(uv run --no-project python)
 fi
 DEPTHS="${DEPTHS:-30x 50x}"
+RESCORE_ONLY="${RESCORE_ONLY:-}"
+
+# **The scorer's own pins run before any of it.** They need no files and no
+# tools, they take under a second, and a comparison that gets one of its six
+# hand-checked shapes wrong cannot be trusted with 20,000 tracts.
+"${PYTHON[@]}" "$SCORER" --self-test
 
 CALIBRATION="$OUT_DIR/calibration.tsv"
 SWEEP="$OUT_DIR/sweep.tsv"
@@ -99,6 +111,7 @@ build_tract_ground() {
         echo "[ground] reusing $out ($(wc -l < "$out") tracts)"
         return
     fi
+    [[ -z "$RESCORE_ONLY" ]] || { echo "!! $out is missing and RESCORE_ONLY builds nothing" >&2; exit 1; }
     echo "[ground] typing $regions"
     NG_REFERENCE_CHECK=skip "$NG_EXAMPLE_DIR/ng_typed_region_dump" \
         "$REFERENCE" "$regions" calling 2>/dev/null \
@@ -177,6 +190,14 @@ run_simulator() {
             local dir="$OUT_DIR/sim_slip${slip}_${depth}"
             echo "[simulator] slip=$slip depth=$depth -> $dir"
             mkdir -p "$dir"
+            if [[ -n "$RESCORE_ONLY" ]]; then
+                for arm in ng ng_fitted; do
+                    GENOTYPE_SAMPLE=sim000 score "$arm" "simulator_slip${slip}" \
+                        "$depth" pooled "$dir/truth.vcf" "$dir/${arm}.vcf" \
+                        "$dir/confident.bed" "$dir/tracts.bed" "$dir/reference.fa"
+                done
+                continue
+            fi
             "$NG_EXAMPLE_DIR/ng_tract_simulator" "$dir" \
                 "tracts=$tracts_n" "samples=$samples" "depth=$reads" \
                 "slip_share=$slip" > "$dir/simulator.log" 2>&1

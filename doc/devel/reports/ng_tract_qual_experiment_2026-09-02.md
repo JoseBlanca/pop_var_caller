@@ -29,11 +29,16 @@ further takes the 2 points back** — precision peaks at 0.850 at QUAL 50 and fa
 QUAL 200, within a point of the 0.825 it started at, having shed more than half the recall. At
 period 2 and above the gate never buys more than 0.2 points at all.
 
-**The genotypes are a separate question and §5 answers it** (added after the owner asked). Where
-the truth set and ng both call a tract on the tandem-repeat benchmark at 30×, the genotype is
-right 0.886 of the time at homopolymers and 0.903 at period 2 and above. **Six of every ten
-remaining errors are an allele ng never put on the table**, which is the ceiling on what a wider
-candidate set can buy — 6.9 and 6.5 points — and what Milestone E is aimed at.
+**The genotypes are a separate question and §5 answers it** (added after the owner asked, and
+**re-scored 2026-09-03** after the comparison behind it was corrected). Where the truth set and ng
+both call a tract on the tandem-repeat benchmark at 30×, the genotype is right 0.877 of the time at
+homopolymers and 0.867 at period 2 and above. **Five of every ten remaining errors are an allele ng
+never put on the table**, which is the ceiling on what a wider candidate set can buy — 6.3 and 7.8
+points — and what Milestone E is aimed at.
+
+**The QUAL half of this report was not affected.** Only the genotype comparison changed; the
+calibration and threshold-sweep tables re-derive byte-identically from the same callsets, 68 and 52
+rows, so every number in §1, §3 and §4 stands as first measured.
 
 ---
 
@@ -161,23 +166,38 @@ records on it — see [the instrument](../../../benchmarks/lib/tract_qual_experi
 cannot be laid on it (a copy needing two overlapping edits at once) is counted apart and left out
 of the denominator.
 
+**Re-scored 2026-09-03**, after the comparison behind this table was found wrong in two ways and
+fixed ([the research handoff](../ng/research/tract_genotype_accuracy_2026-09-03.md) §3.4b): it
+collected records from only one base out, so a truth set describing one event with several records
+had its own haplotype rebuilt from a fragment; and it compared one base past the tract's end, so a
+caller was charged for variants outside the tract. The runs are unchanged.
+
 | ground | depth | period | comparable tracts | genotype right | accuracy |
 |---|---|---|---:|---:|---:|
-| tandem repeat | 30× | homopolymer | 3 515 | 3 113 | **0.886** |
-| | | period 2+ | 2 543 | 2 297 | **0.903** |
-| | 50× | homopolymer | 3 542 | 3 170 | 0.895 |
-| | | period 2+ | 2 570 | 2 347 | 0.913 |
-| per-sample | 30× | homopolymer | 116 | 113 | 0.974 |
-| | | period 2+ | 35 | 34 | 0.971 |
+| tandem repeat | 30× | homopolymer | 3 864 | 3 389 | **0.877** |
+| | | period 2+ | 2 823 | 2 446 | **0.867** |
+| | 50× | homopolymer | 3 892 | 3 470 | 0.892 |
+| | | period 2+ | 2 854 | 2 502 | 0.877 |
+| per-sample, trio pooled | 30× | homopolymer | 126 | 125 | 0.992 |
+| | | period 2+ | 41 | 36 | 0.878 |
 | simulator, slippage 0.10 | 30× | period 2+ | 1 682 | 1 680 | 0.999 |
 | simulator, slippage 0.25 | 30× | period 2+ | 1 683 | 1 569 | 0.932 |
 | simulator, slippage 0.25, true slippage supplied | 30× | period 2+ | 1 677 | 1 660 | **0.990** |
 
-Between 3 and 4 tracts in 100 are not comparable at either depth (133 and 112 at 30×).
+**The simulator rows did not move at all** — 0.932 and 0.990 to four figures either way — because
+its tracts have no neighbouring variants for either error to bite on. The real-data rows all fell,
+by 0.9 to 3.6 points, and the reason is in §5's own error partition: the corrected comparison
+scores 629 more tracts at 30×, and the ones the old rule refused or never reached are the hard
+ones.
+
+**7 tracts of 6,694 are not comparable at 30×**, against 245 of 6,303 under the old rule; most of
+that 245 were tracts the rule refused rather than tracts that are genuinely ambiguous.
 
 **Against the existing repeat-tract caller at period 2 and above, the two are level on accuracy
-and not on reach**: 0.913 on 1,181 tracts against ng's 0.903 on 2,543. Its homopolymer row is 31
-tracts, because its catalog holds motif periods 2 to 6 and no homopolymers at all.
+and not on reach**: 0.903 on 1,230 tracts against ng's 0.867 on 2,823 — but ng's row includes
+1,593 tracts the existing caller does not reach, and on the tracts both do it is the reach that
+separates them, not the genotyper. Its homopolymer row is 46 tracts, because its catalog holds
+motif periods 2 to 6 and no homopolymers at all.
 
 **And the slippage numbers matter here where they barely moved anything else.** On the simulator
 at a true slippage of 0.25 against the model's assumed 0.10, handing the caller the model the
@@ -190,33 +210,39 @@ Comparable errors at 30×, a partition by what would have to change:
 
 | period | errors | a truth sequence was **never offered** | called heterozygous, truth homozygous | called homozygous, truth heterozygous | other |
 |---|---:|---:|---:|---:|---:|
-| homopolymer | 402 | **242** | 86 | 27 | 47 |
-| period 2+ | 246 | **165** | 51 | 14 | 16 |
+| homopolymer | 475 | **245** | 141 | 37 | 52 |
+| period 2+ | 377 | **219** | 101 | 19 | 38 |
 
-**Six errors in ten are an allele the caller never put on the table**, so no genotype over that
-table could have been right. That is the ceiling on what a wider candidate set can buy: **6.9
-points of homopolymer genotype accuracy and 6.5 at period 2+**. It is a ceiling and not a
+**Five errors in ten are an allele the caller never put on the table**, so no genotype over that
+table could have been right. That is the ceiling on what a wider candidate set can buy: **6.3
+points of homopolymer genotype accuracy and 7.8 at period 2+**. It is a ceiling and not a
 forecast — a discovery round can only admit a sequence some read showed, and over this same
-ground the selection dump says where the missing sequences go: of 434 missing true sequences,
+ground the selection dump — **not re-derived after the 2026-09-03 re-scoring, so read the split
+below as a shape and not as figures** — says where the missing sequences go: of 434 missing true
+sequences,
 **268 were carried by no read at all**, 61 cleared the support bar and were dropped by the
 per-sample top-`ploidy` cut, 59 sat at a tract the merge refused, and 46 were refused by the
 support bar. **Only the 61 are what a discovery round is aimed at**; a bar sweep reaches the 46.
 
-**The second-largest class is a warning for that work.** 86 homopolymer errors and 51 at period
+**The second-largest class is a warning for that work.** 141 homopolymer errors and 101 at period
 2+ are ng calling a heterozygote where the truth is homozygous — a second allele that is not
-there. A discovery round adds alleles, so it can only enlarge this class, and it is already twice
-the size of the class it is meant to fix. The simulator says what drives it: at a true slippage
+there. A discovery round adds alleles, so it can only enlarge this class, and it is already four
+times the size of the class it is meant to fix. The simulator says what drives it: at a true slippage
 of 0.25 it is 106 of the 114 period-2+ errors, and supplying the true slippage cuts it to 7.
 
-### How this measurement was got wrong three times
+### How this measurement was got wrong five times
 
-Recorded because each attempt gave a plausible number and two of them reached a report.
+Recorded because each attempt gave a plausible number and four of them reached a report. The
+fourth and fifth are in [the research handoff](../ng/research/tract_genotype_accuracy_2026-09-03.md)
+§3.4b and §3.4c: the fifth is the only one that erred **for** the caller, and it did so by
+proposing a correction that raised the headline without correcting a single verdict.
 
 1. **Allele strings as written**, after `bcftools norm`. Two records describing one event over
    different spans — `AGT → A` against `AGTGTGT → A,AGTGT` — share no string, because
    normalisation trims each record against its own ALT column. **324 of 6,303 tracts read as
    genotype errors that were only a difference of spelling**, and the reported accuracy was
-   0.771 and 0.628 against the true 0.886 and 0.903.
+   0.771 and 0.628, where the same callsets score 0.877 and 0.867 under the comparison as it now
+   stands.
 2. **Padding both records to their union span.** Fixes that pair, and still fails wherever the
    two sides put their records at different places in the tract, because the span between them is
    in neither record's REF.
@@ -224,10 +250,12 @@ Recorded because each attempt gave a plausible number and two of them reached a 
    1,412 of those are the truth set writing a two-allele heterozygote as two phased records
    against ng's one multi-allelic record, which is the class most worth measuring.
 
-The rule that works: lay each side's non-reference edits on the tract's reference bases, one copy
-at a time, and compare the resulting sequences. Three hand-checkable cases pin it — two phased
-truth records against one multi-allelic call agree, a genuinely different call does not, and one
-event written over two spans agrees.
+The rule that works: collect every record within ten bases of the tract, reduce each allele to
+the change it makes, left-align it, lay the non-reference changes on the reference one copy at a
+time, and compare the resulting sequences **over the tract's own bases**. Seven hand-checkable
+shapes pin it, in the scorer itself — `benchmarks/lib/tract_qual_experiment.py --self-test`, which
+the experiment driver runs before it scores anything, and each of which was checked against a
+mutation of the code it covers.
 
 ---
 
