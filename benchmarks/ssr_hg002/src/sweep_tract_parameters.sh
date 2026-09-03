@@ -11,10 +11,6 @@
 #     --fall-off F         how fast two-repeat slips fall off (default 0.05)
 #     --rows FILE          slippage rows written elsewhere, e.g. a fit's output
 #     --outlier W          the repeat-tract outlier weight (default: the run's own 0.01)
-#     --junk-decay G       the junk term's decay per motif unit of distance from the
-#                          nearest candidate (default: the run's own 1.0 — uniform).
-#                          The key may be absent from an older parameters file, so it is
-#                          inserted after the outlier weight's line rather than replaced.
 #     --concentration C    the fallback length-spectrum concentration — how much
 #                          prior belief, in chromosomes, is spread over a tract's
 #                          candidate lengths (default: the run's own 1.0). **This
@@ -78,7 +74,7 @@ PYTHON=$(command -v python3 > /dev/null && echo python3 || echo "uv run --no-pro
 
 LABEL="${1:?a label for this setting, e.g. outlier0.10}"; shift
 SHARE=""; BASE=""; SLOPE=""; SHORTER=0.50; FALLOFF=0.05; ROWS=""; OUTLIER=""
-CONCENTRATION=""; COVERAGE=30x; OUT=""; JUNK_DECAY=""
+CONCENTRATION=""; COVERAGE=30x; OUT=""
 while (( $# )); do
     case "$1" in
         --share) SHARE="$2"; shift 2 ;;
@@ -88,7 +84,6 @@ while (( $# )); do
         --fall-off) FALLOFF="$2"; shift 2 ;;
         --rows) ROWS="$2"; shift 2 ;;
         --outlier) OUTLIER="$2"; shift 2 ;;
-        --junk-decay) JUNK_DECAY="$2"; shift 2 ;;
         --concentration) CONCENTRATION="$2"; shift 2 ;;
         --coverage) COVERAGE="$2"; shift 2 ;;
         --out) OUT="$2"; shift 2 ;;
@@ -134,29 +129,6 @@ if [[ -n "$OUTLIER" ]]; then
 else
     cp "$DEFAULTS_PARAMETERS" "$OUT/parameters.toml"
 fi
-
-# **The junk-decay key is ensured unconditionally.** The key postdates the stored
-# parameters files and the file format states every constant (an absent key is a
-# parse refusal, not a default), so a replayed pre-decay file needs the line
-# inserted after the outlier weight's. A value somebody typed says `supplied`;
-# without `--junk-decay` the inserted line states the binary's own default as
-# `defaulted`, which validation accepts only at that value.
-if [[ -n "$JUNK_DECAY" ]]; then
-    DECAY_LINE="repeat_tract_junk_decay_per_unit = { value = $JUNK_DECAY, warrant = \"supplied\" }"
-else
-    DECAY_LINE="repeat_tract_junk_decay_per_unit = { value = 1.0, warrant = \"defaulted\" }"
-fi
-if grep -q '^repeat_tract_junk_decay_per_unit = ' "$OUT/parameters.toml"; then
-    [[ -n "$JUNK_DECAY" ]] && {
-        sed -i.bak "s|^repeat_tract_junk_decay_per_unit = .*|$DECAY_LINE|" "$OUT/parameters.toml"
-        rm -f "$OUT/parameters.toml.bak"; }
-else
-    sed -i.bak "/^repeat_tract_outlier_weight = /a\\
-$DECAY_LINE" "$OUT/parameters.toml"
-    rm -f "$OUT/parameters.toml.bak"
-fi
-grep -q '^repeat_tract_junk_decay_per_unit = ' "$OUT/parameters.toml" || {
-    echo "the junk decay line was not written" >&2; exit 1; }
 
 if [[ -n "$CONCENTRATION" ]]; then
     # Same rule as the outlier weight: a value somebody typed says `supplied`,

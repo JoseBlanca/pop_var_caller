@@ -756,6 +756,59 @@ is no longer called het** at 3× (0.068 → 0.062), and tract QUALs sit about a 
 
 ---
 
-*Sections L5–L7 are opened as the program reaches them; L5 is folded into the re-fit-the-
-strata follow-up the L3 section names, and L7's gate numbers (61 reachable, spurious at 238)
-are in the Checkpoint 1 slate.*
+## Checkpoint 1 — the owner's rulings (2026-09-03)
+
+1. **λ = 0.20 adopted as the shipped default** (gate passed; the 1-in-11 tract-het trade at
+   3× accepted).
+2. **The junk-decay knob removed** — it gains nothing over the weight, so the parameter goes.
+3. **L2 (read-independence / the two caps): explanation requested before ruling** — see the
+   chat record; the measured premise stands at 0 clustered of 238.
+4. **L3 (stutter-em): disabled, code kept** — rounds ship at zero, machinery stays.
+5. **L5/L6: re-measure first** — re-fit the per-stratum rates on the fixed caller, decide
+   then.
+6. **L7 (new-alleles): approved to proceed.**
+
+Main was merged back in under the levers; its parallel junction-ownership work includes the
+routing-crack fix L4's residue named (`328a1a2b` — the flank claims the insertion the tract
+refuses). Measured on the post-adoption baseline: **13 flips against the λ-0.20 arm, every
+one a silent tract turned right** (6 homopolymer, 7 period 2+), nothing else moved — 13 of
+the 22 tracts L4's residue named, recovered by the parallel fix with zero breakage.
+
+**The program's baseline, restated after Checkpoint 1's adoptions** (fresh `--defaults`,
+λ = 0.20, decay knob removed, main's junction fix in; arm `adopted`,
+`tmp/tract_program/adopted/`):
+
+| | 30× homopolymer | 30× period 2+ | 50× homopolymer | 50× period 2+ |
+|---|---:|---:|---:|---:|
+| program start (P0) | 0.8796 | 0.8692 | 0.8938 | 0.8780 |
+| **after Checkpoint 1** | **0.9015** | **0.8970** | **0.9173** | **0.9071** |
+| gain (points) | +2.19 | +2.78 | +2.35 | +2.91 |
+
+Errors at 30×: 834 → **665** (369 never-offered, 214 spurious het, 56 collapsed het,
+26 other). The tomato gate stands as run (its λ arm is now the default).
+
+---
+
+## L7 — new-alleles: discovery, wired and measured
+
+Status: pre-registered
+
+**Pre-registration (written 2026-09-03, before the wiring is built).**
+
+The decision half is built and tested (`calling/inference/discovery.rs`, 12 tests, E1); the
+wiring belongs inside `select_ssr` per E1's findings: discovery is a **pre-pass, not a round
+wrapped around the loop** — the tract locus generator already realigns every read, so the
+eligible set is a function of the observations and the candidate table alone, and a second
+round over the same evidence admits nothing (asserted by an E1 test). The spec's §4.1 premise
+("look against the converged posteriors") is contradicted by that and is amended rather than
+the code bent to it — recorded at E1 and standing.
+
+targets: the **61 top-ploidy-cut tracts** (P2 re-derived on the fixed caller) — a truth
+  allele cleared the support bar and the per-sample ploidy rung cut it; discovery admits it
+  back when 2+ reads and 15%+ of the sample's spanning reads carry it.
+ceiling: **61**, minus whatever the admission bar refuses.
+risk, named: every admitted length can only enlarge the spurious-het class (214 under the
+  adopted λ 0.20); the bar is that flips stay net-positive on both period classes at both
+  depths with the spurious class's growth smaller than the never-offered class's shrinkage.
+
+*(build to follow; measurements after the runs they quote)*

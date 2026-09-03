@@ -102,9 +102,9 @@ impl ParametersFile {
                 "",
                 "A number that could be fitted carries a `warrant`: fitted_here, borrowed, supplied or defaulted. **If you edit one, change its warrant to \"supplied\" and delete its `observations`** — otherwise this file says a number you typed was measured, and the run that reads it will report it that way. A `supplied` number that still carries `observations` came that way from another run's file, and those counts are that run's.",
                 "",
-                "**Three keys do not take every warrant.** `repeat_tracts.fallback_length_spectrum_concentration` is `fitted_here` only where this file holds a fitted stratum spectrum for it to be the median of, and `defaulted` only at the built-in constant; `stated_constants.repeat_tract_outlier_weight` and `stated_constants.repeat_tract_junk_decay_per_unit` are `defaulted` only at their built-in constants. All three take `supplied` freely, which is what you write when you change one. Anything else is refused, and says so.",
+                "**Two keys do not take every warrant.** `repeat_tracts.fallback_length_spectrum_concentration` is `fitted_here` only where this file holds a fitted stratum spectrum for it to be the median of, and `defaulted` only at the built-in constant; `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the built-in constant. Both take `supplied` freely, which is what you write when you change one. Anything else is refused, and says so.",
                 "",
-                "**What that checking reaches, and what it cannot.** It reaches those three keys and nowhere else. It cannot catch a number you changed that still says `fitted_here` or `borrowed`: nothing in this file can tell your value from a fitted one, so the run will report it as measured, with the old `observations` count still beside it. And on every other key a `defaulted` warrant is checked against nothing — including the inbreeding coefficient, whose built-in number is 0.0. The base-quality multiplier is not one of them: a `defaulted` multiplier is **not** fixed at 1.0, and the note beside `base_quality_calibration` says what it is instead. A `defaulted` substitution rate is the one to avoid writing by hand, and the reason is worth stating because a note further down looks like it contradicts this: the caller **does** default that number, at the tract and for the cells that need it, but it never writes one as a row here — so a `defaulted` warrant on a row of `substitution_rate_by_stratum` is a claim no build makes.",
+                "**What that checking reaches, and what it cannot.** It reaches those two keys and nowhere else. It cannot catch a number you changed that still says `fitted_here` or `borrowed`: nothing in this file can tell your value from a fitted one, so the run will report it as measured, with the old `observations` count still beside it. And on every other key a `defaulted` warrant is checked against nothing — including the inbreeding coefficient, whose built-in number is 0.0. The base-quality multiplier is not one of them: a `defaulted` multiplier is **not** fixed at 1.0, and the note beside `base_quality_calibration` says what it is instead. A `defaulted` substitution rate is the one to avoid writing by hand, and the reason is worth stating because a note further down looks like it contradicts this: the caller **does** default that number, at the tract and for the cells that need it, but it never writes one as a row here — so a `defaulted` warrant on a row of `substitution_rate_by_stratum` is a claim no build makes.",
                 "",
                 "The slippage numbers, the prior's two concentrations and the length spectrum rows carry no warrant — they say where they came from another way, and there is nowhere in them to record that you changed one. Note such an edit elsewhere.",
                 "",
@@ -432,15 +432,6 @@ impl ParametersFile {
             where_it_came_from(
                 &self.stated_constants.repeat_tract_outlier_weight,
                 origins::OUTLIER_WEIGHT,
-            ),
-        );
-        scalar_with_note(
-            &mut out,
-            "repeat_tract_junk_decay_per_unit",
-            &a_warranted_value(&self.stated_constants.repeat_tract_junk_decay_per_unit),
-            where_it_came_from(
-                &self.stated_constants.repeat_tract_junk_decay_per_unit,
-                origins::JUNK_DECAY_PER_UNIT,
             ),
         );
 
@@ -920,15 +911,6 @@ mod origins {
         "the share of repeat-tract reads that came from nowhere the model can explain. Not ",
         "measured: this value was chosen by sweeping it against genotype accuracy on one human ",
         "sample, so it is a stated constant rather than an estimate of that share"
-    );
-
-    /// The junk term's decay per motif unit, where a run took the stated constant rather than
-    /// being handed one.
-    pub const JUNK_DECAY_PER_UNIT: &str = concat!(
-        "how fast the junk term's distribution falls away from the candidate alleles, per ",
-        "motif unit of distance. At this built-in 1.0 the junk mass is spread uniformly over ",
-        "the reachable lengths, which is the caller's original behaviour; a value below one ",
-        "concentrates it near the candidates"
     );
 
     /// A repeat-tract substitution rate that nothing could be fitted for.
@@ -1978,11 +1960,6 @@ mod tests {
                 "chosen by sweeping it against genotype accuracy",
                 &text,
             ),
-            (
-                "repeat_tract_junk_decay_per_unit",
-                "falls away from the candidate alleles",
-                &text,
-            ),
         ] {
             let lines: Vec<&str> = in_this_text.lines().collect();
             let at = lines
@@ -2054,9 +2031,6 @@ mod tests {
             .fallback_length_spectrum_concentration
             .warrant = Warrant::FittedHere;
         file.stated_constants.repeat_tract_outlier_weight.warrant = Warrant::Supplied;
-        file.stated_constants
-            .repeat_tract_junk_decay_per_unit
-            .warrant = Warrant::Supplied;
 
         let text = file.to_toml();
         for note in [
@@ -2065,7 +2039,6 @@ mod tests {
             "this run fitted no stratum on its own tracts",
             "nothing was fitted for this read group",
             "inbreeding has no default",
-            "falls away from the candidate alleles",
         ] {
             assert!(
                 !text.contains(note),
@@ -2544,7 +2517,6 @@ mod every_float_comes_back_bit_identical {
             vec![0.1 + 0.2, -0.0, 1.000_000_000_000_000_2];
         file.repeat_tracts.slippage_by_stratum_and_group[1].share_of_reads_that_slip = f64::MAX;
         file.stated_constants.repeat_tract_outlier_weight.value = 1e-5;
-        file.stated_constants.repeat_tract_junk_decay_per_unit.value = 1.0 / 3.0;
 
         for (writer, text) in [
             ("this module's writer", file.to_toml()),

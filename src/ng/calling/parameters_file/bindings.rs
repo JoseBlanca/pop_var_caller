@@ -738,12 +738,9 @@ impl ParametersFile {
         }
         let StatedConstants {
             repeat_tract_outlier_weight,
-            repeat_tract_junk_decay_per_unit,
         } = stated_constants;
         repeat_tract_outlier_weight.warrant =
             no_better_than_supplied(repeat_tract_outlier_weight.warrant);
-        repeat_tract_junk_decay_per_unit.warrant =
-            no_better_than_supplied(repeat_tract_junk_decay_per_unit.warrant);
         demoted
     }
 }
@@ -2091,43 +2088,6 @@ mod the_fourth_binding_demotes {
                 .demoted_to_no_better_than_supplied()
                 .stated_constants
                 .repeat_tract_outlier_weight
-                .warrant,
-            Warrant::Supplied
-        );
-    }
-
-    /// **The junk decay is not promoted either** — the same property as the outlier weight's
-    /// test above, for the second stated constant nothing fits.
-    #[test]
-    fn the_junk_decay_the_project_guessed_is_not_promoted_to_one_somebody_chose() {
-        let file = a_file_using_every_shape();
-        assert_eq!(
-            file.stated_constants
-                .repeat_tract_junk_decay_per_unit
-                .warrant,
-            Warrant::Defaulted
-        );
-        assert_eq!(
-            file.demoted_to_no_better_than_supplied()
-                .stated_constants
-                .repeat_tract_junk_decay_per_unit
-                .warrant,
-            Warrant::Defaulted,
-            "the demotion takes the weaker of the two, and defaulted is already weaker"
-        );
-
-        // And one a person did choose stays chosen.
-        let mut chosen = file;
-        chosen.stated_constants.repeat_tract_junk_decay_per_unit = WarrantedValue {
-            value: 0.5,
-            warrant: Warrant::Supplied,
-            observations: None,
-        };
-        assert_eq!(
-            chosen
-                .demoted_to_no_better_than_supplied()
-                .stated_constants
-                .repeat_tract_junk_decay_per_unit
                 .warrant,
             Warrant::Supplied
         );

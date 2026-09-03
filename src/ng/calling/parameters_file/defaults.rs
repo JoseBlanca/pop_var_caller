@@ -20,8 +20,7 @@
 //! | what a run needs | what it takes with no fit | what that is |
 //! |---|---|---|
 //! | the base-quality multiplier, per read group | [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::ng::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER), one | the value at which the model does nothing |
-//! | the repeat-tract outlier weight, one per run | [`DEFAULT_OUTLIER_WEIGHT`](crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT), 0.05 | a stated constant, swept against genotype accuracy and not a measurement of the share it is named for |
-//! | the repeat-tract junk decay, one per run | [`DEFAULT_JUNK_DECAY_PER_UNIT`](crate::ng::calling::likelihood::ssr::DEFAULT_JUNK_DECAY_PER_UNIT), one | the value at which the junk term is the shipped uniform |
+//! | the repeat-tract outlier weight, one per run | [`DEFAULT_OUTLIER_WEIGHT`](crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT), 0.20 | a stated constant, swept against genotype accuracy and not a measurement of the share it is named for |
 //! | the tract ladder's fallback concentration | [`STATED_FLAT_CONCENTRATION`](crate::ng::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION), one | a stated uninformative prior |
 //! | contamination, per read group | **absence** — no `[contamination]` section | a model state, not a guess |
 //! | the repeat-tract substitution rate, per (read group × stratum) | [`DEFAULT_SSR_SUBSTITUTION_RATE`](crate::ng::calling::inference::repeat_tract_parameters::DEFAULT_SSR_SUBSTITUTION_RATE), 0.001 | a default taken at the tract, not written in the file |
@@ -66,7 +65,7 @@
 //!   5.4 Phred less confident than the instrument claimed. Spec §5's third row says such a read
 //!   group gets "scale 1.0" and is the sentence to correct; `DEFAULT_ERROR_RATE` is itself a
 //!   placeholder until it is fitted from GIAB. Recorded in `PROJECT_STATUS.md`.
-//! - **The outlier weight is a stated constant at 0.05**, chosen by a sweep and not fitted (it was
+//! - **The outlier weight is a stated constant at 0.20**, chosen by a sweep and not fitted (it was
 //!   the existing caller's 0.01 until 2026-09-03)
 //!   and never measured here (§3.8). It is the share of a repeat tract's reads the model expects to
 //!   have come from somewhere it cannot explain — a chimera, a paralogous tract, a mismapped read.
@@ -188,7 +187,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::ng::calling::likelihood::ssr::{RepeatTractJunkDecayPerUnit, RepeatTractOutlierWeight};
+use crate::ng::calling::likelihood::ssr::RepeatTractOutlierWeight;
 use crate::ng::calling::likelihood::{ContaminationView, ReadGroupCalibration};
 use crate::ng::calling::run_parameters::RunParameters;
 use crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
@@ -427,9 +426,6 @@ impl RunParameters {
             BTreeMap::new(),
             ploidy,
             RepeatTractOutlierWeight::defaulted(),
-            // The other stated constant, at its own default: 1.0, under which the junk term is
-            // the shipped uniform.
-            RepeatTractJunkDecayPerUnit::defaulted(),
         )
     }
 }
@@ -439,10 +435,7 @@ mod tests {
     use super::{DEFAULT_INBREEDING_COEFFICIENT, DeclaredInbreeding};
     use crate::ng::alignment::StutterModel;
     use crate::ng::calling::genotype_prior::SeedRegime;
-    use crate::ng::calling::likelihood::ssr::{
-        DEFAULT_JUNK_DECAY_PER_UNIT, DEFAULT_OUTLIER_WEIGHT, RepeatTractJunkDecayPerUnit,
-        RepeatTractOutlierWeight,
-    };
+    use crate::ng::calling::likelihood::ssr::{DEFAULT_OUTLIER_WEIGHT, RepeatTractOutlierWeight};
     use crate::ng::calling::likelihood::{
         DEFAULT_ERROR_PROBABILITY_MULTIPLIER, MIN_BASE_ERROR, ReadGroupCalibration,
     };
@@ -530,7 +523,7 @@ mod tests {
         assert_eq!(defaulted.log_scale(), 0.0);
     }
 
-    /// **The outlier weight a run takes is the stated 0.05 and says it was defaulted** — still
+    /// **The outlier weight a run takes is the stated 0.20 and says it was defaulted** — still
     /// not a measurement of the quantity it is named for, which is why the warrant stays
     /// `Defaulted` after the value moved off the existing caller's 0.01 on 2026-09-03.
     ///
@@ -542,22 +535,7 @@ mod tests {
         let taken = RepeatTractOutlierWeight::defaulted();
         assert_eq!(taken.value(), DEFAULT_OUTLIER_WEIGHT);
         assert_eq!(taken.provenance(), Provenance::Defaulted);
-        assert_eq!(DEFAULT_OUTLIER_WEIGHT, 0.05);
-    }
-
-    /// **The junk decay a run takes is the stated 1.0 and says it was defaulted** — the value
-    /// at which the junk term is the shipped uniform, byte for byte, which is what makes 1.0
-    /// the only possible default for a lever added after the caller's output was already being
-    /// measured.
-    ///
-    /// **The literal `1.0` is here on purpose**, as the outlier weight's `0.05` is above: a
-    /// change to it has to be a deliberate edit in two places rather than a number that slid.
-    #[test]
-    fn the_junk_decay_a_run_takes_is_the_stated_constant() {
-        let taken = RepeatTractJunkDecayPerUnit::defaulted();
-        assert_eq!(taken.value(), DEFAULT_JUNK_DECAY_PER_UNIT);
-        assert_eq!(taken.provenance(), Provenance::Defaulted);
-        assert_eq!(DEFAULT_JUNK_DECAY_PER_UNIT, 1.0);
+        assert_eq!(DEFAULT_OUTLIER_WEIGHT, 0.20);
     }
 
     /// **A run that fitted no stratum states the flat concentration, says it was defaulted, and
@@ -629,7 +607,7 @@ mod tests {
         assert!(projected.parameters.view().contamination_is_absent());
     }
 
-    /// **The file's reader holds the three keys it can to their own constant**: a value marked
+    /// **The file's reader holds the two keys it can to their own constant**: a value marked
     /// `defaulted` that is not the number this caller holds is refused, naming the key, quoting
     /// both numbers as the file spells them, and saying what to type instead.
     ///
@@ -661,14 +639,6 @@ mod tests {
                 .observations = None;
             file
         };
-        let decay_edited = {
-            let mut file = a_file_using_every_shape();
-            let decay = &mut file.stated_constants.repeat_tract_junk_decay_per_unit;
-            decay.warrant = Warrant::Defaulted;
-            decay.value = DEFAULT_JUNK_DECAY_PER_UNIT / 2.0;
-            decay.observations = None;
-            file
-        };
         let concentration_edited = {
             let mut file = a_file_using_every_shape();
             let rung = &mut file.repeat_tracts.fallback_length_spectrum_concentration;
@@ -684,12 +654,6 @@ mod tests {
                 "stated_constants.repeat_tract_outlier_weight",
                 DEFAULT_OUTLIER_WEIGHT,
                 DEFAULT_OUTLIER_WEIGHT * 2.0,
-            ),
-            (
-                decay_edited,
-                "stated_constants.repeat_tract_junk_decay_per_unit",
-                DEFAULT_JUNK_DECAY_PER_UNIT,
-                DEFAULT_JUNK_DECAY_PER_UNIT / 2.0,
             ),
             (
                 concentration_edited,
@@ -734,11 +698,11 @@ mod tests {
         }
     }
 
-    /// **Each of the four constants is accepted beside a `defaulted` warrant**, so the test
+    /// **Each of the three constants is accepted beside a `defaulted` warrant**, so the test
     /// above refuses the edit rather than the shape it was made in — and the multiplier, which
     /// nothing checks, is accepted at its constant too.
     #[test]
-    fn each_of_the_four_constants_is_accepted_beside_a_defaulted_warrant() {
+    fn each_of_the_three_constants_is_accepted_beside_a_defaulted_warrant() {
         let mut file = a_file_using_every_shape();
 
         let row = &mut file.base_quality_calibration.by_read_group[0];
@@ -752,21 +716,13 @@ mod tests {
             .repeat_tract_outlier_weight
             .observations = None;
 
-        file.stated_constants
-            .repeat_tract_junk_decay_per_unit
-            .warrant = Warrant::Defaulted;
-        file.stated_constants.repeat_tract_junk_decay_per_unit.value = DEFAULT_JUNK_DECAY_PER_UNIT;
-        file.stated_constants
-            .repeat_tract_junk_decay_per_unit
-            .observations = None;
-
         let rung = &mut file.repeat_tracts.fallback_length_spectrum_concentration;
         rung.warrant = Warrant::Defaulted;
         rung.value = STATED_FLAT_CONCENTRATION;
         rung.observations = None;
 
         file.validate()
-            .expect("the four constants are what a `defaulted` warrant claims");
+            .expect("the three constants are what a `defaulted` warrant claims");
     }
 
     // -----------------------------------------------------------------
@@ -775,7 +731,7 @@ mod tests {
 
     /// **A run that fitted nothing assembles, and every number it holds is the defaulted one.**
     ///
-    /// This is step E2's whole claim, asserted field by field over the ten `RunParameters`
+    /// This is step E2's whole claim, asserted field by field over the nine `RunParameters`
     /// holds — a run that got one of them from somewhere else would still assemble, and the
     /// genotypes would be wrong in a way nothing says.
     #[test]
@@ -836,10 +792,6 @@ mod tests {
         let weight = run.repeat_tract_outlier_weight();
         assert_eq!(weight.value(), DEFAULT_OUTLIER_WEIGHT);
         assert_eq!(weight.provenance(), Provenance::Defaulted);
-
-        let decay = run.repeat_tract_junk_decay_per_unit();
-        assert_eq!(decay.value(), DEFAULT_JUNK_DECAY_PER_UNIT);
-        assert_eq!(decay.provenance(), Provenance::Defaulted);
 
         // The batching nobody declared: one batch holding the run.
         assert!(run.sequencing_batches().is_default());
@@ -1068,15 +1020,11 @@ mod tests {
             run.repeat_tract_outlier_weight()
         );
         assert_eq!(
-            read_back.parameters.repeat_tract_junk_decay_per_unit(),
-            run.repeat_tract_junk_decay_per_unit()
-        );
-        assert_eq!(
             read_back.parameters.ssr_slippage_fits(),
             run.ssr_slippage_fits()
         );
         assert_eq!(read_back.parameters.ssr_substitution_rate().count(), 0);
-        // The tenth field, so that all ten are checked *after* the trip and not nine after and
+        // The ninth field, so that all nine are checked *after* the trip and not eight after and
         // one before: a batching nobody declared has to come back saying nobody declared it.
         assert!(read_back.parameters.sequencing_batches().is_default());
         assert_eq!(
@@ -1274,7 +1222,6 @@ mod tests {
             BTreeMap::new(),
             diploid(),
             RepeatTractOutlierWeight::defaulted(),
-            RepeatTractJunkDecayPerUnit::defaulted(),
         );
 
         let fits = run.report(&read_groups).repeat_tract_fits().clone();
@@ -1346,7 +1293,6 @@ mod tests {
             two_rates,
             diploid(),
             RepeatTractOutlierWeight::defaulted(),
-            RepeatTractJunkDecayPerUnit::defaulted(),
         );
 
         let fits = run.report(&read_groups).repeat_tract_fits().clone();
@@ -1405,7 +1351,6 @@ mod tests {
             BTreeMap::new(),
             diploid(),
             RepeatTractOutlierWeight::defaulted(),
-            RepeatTractJunkDecayPerUnit::defaulted(),
         );
 
         let fits = run.report(&read_groups).repeat_tract_fits().clone();

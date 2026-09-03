@@ -8614,9 +8614,9 @@ mod tests {
     /// **Requires:** the genotypes match. That is the failing state a differential needs.
     ///
     /// **Reports, by asserting the numbers so they cannot go stale:** the tighter tolerance takes
-    /// **five passes against two** on this tract — two and a half times the work for the same
-    /// three genotypes — and the two stopping points land **4.8 × 10⁻⁵ of a chromosome** apart,
-    /// which is twenty times inside the looser tolerance. *(That is how far apart the two answers
+    /// **five passes against three** on this tract — most of a run's extra work for the same
+    /// three genotypes — and the two stopping points land **1.8 × 10⁻⁶ of a chromosome** apart,
+    /// far inside the looser tolerance. *(That is how far apart the two answers
     /// finished, not a promise either rule makes: a convergence rule bounds the **last step**
     /// between two passes and says nothing about the distance to another rule's answer.)*
     ///
@@ -8625,12 +8625,14 @@ mod tests {
     /// loop settled in one.
     #[test]
     fn a_tract_called_under_both_tolerances_gives_one_answer_and_says_what_moved() {
-        /// Measured on this fixture, not predicted from it.
+        /// Measured on this fixture, not predicted from it — at the shipped outlier weight,
+        /// so the counts moved when that constant moved to 0.20 (the shipped rule took two
+        /// passes at 0.05).
         const PASSES_AT_THE_TIGHT_TOLERANCE: u32 = 5;
         /// The shipped tolerance's count on the same tract.
-        const PASSES_AT_THE_SHIPPED_TOLERANCE: u32 = 2;
+        const PASSES_AT_THE_SHIPPED_TOLERANCE: u32 = 3;
         /// How far apart the two stopping points landed, per chromosome — see the doc above.
-        const CHROMOSOMES_APART: f64 = 4.8e-5;
+        const CHROMOSOMES_APART: f64 = 1.8e-6;
 
         let reads_of_each_sample = three_samples_at_four_reads();
         let reads: [&[SequenceObservation]; 3] = [
@@ -9051,14 +9053,15 @@ mod tests {
     /// measured, the contaminant explains them and the sample comes back **`0/0`**.
     ///
     /// **The fraction's own value does the work, which is why a third run is called here.** At
-    /// the same four reads a fitted fraction of 5 in 100 still calls `0/1`: it is not enough
+    /// the same four reads a fitted fraction of 1 in 100 still calls `0/1`: it is not enough
     /// mass to beat a heterozygote that must also account for twenty reference reads. So this
     /// fixture cannot be satisfied by a model that reads `c` as a flag.
     ///
-    /// **Where the window is, measured on this fixture.** At one, two and three reads every run
-    /// calls `0/0` — the slippage term alone covers them and there is nothing for the mixture to
-    /// change. At five, no fraction below about 20 in 100 recovers the homozygote. Four is where
-    /// 5 in 100 and 8 in 100 give different answers.
+    /// **Where the window is, measured on this fixture at the shipped outlier weight of
+    /// 0.20.** Four reads is where 1 in 100 and 8 in 100 give different answers; 2 in 100
+    /// already recovers the homozygote. *(At the earlier weight of 0.05 the dividing line sat
+    /// higher — 5 in 100 still called the heterozygote — because the flat outlier floor was a
+    /// quarter of what it is now and the contaminant term had more work to do.)*
     ///
     /// The other two samples are unambiguous at twenty reads and are called `0/0` and `1/1`
     /// either way, so the cohort the middle sample is scored against is the same in both runs
@@ -9086,7 +9089,7 @@ mod tests {
         let mut contaminated_scratch = worker_scratch();
         let contaminated = call_contaminated_tract(&evidence, 0.08, &mut contaminated_scratch);
         let mut barely_scratch = worker_scratch();
-        let barely = call_contaminated_tract(&evidence, 0.05, &mut barely_scratch);
+        let barely = call_contaminated_tract(&evidence, 0.01, &mut barely_scratch);
 
         assert_eq!(
             called_alleles(&clean, 1),
@@ -9100,7 +9103,7 @@ mod tests {
         );
         // **The fraction's own value has to do work, not merely its existence.** A fixture
         // where any positive fraction gives the same answer would pass against a model that
-        // read `c` as a flag; here 5 in 100 is not enough to explain four reads and 8 is.
+        // read `c` as a flag; here 1 in 100 is not enough to explain four reads and 8 is.
         assert_eq!(
             called_alleles(&barely, 1),
             vec![0, 1],

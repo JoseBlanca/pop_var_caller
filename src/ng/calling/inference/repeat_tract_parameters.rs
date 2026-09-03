@@ -85,8 +85,7 @@
 use crate::ng::alignment::StutterModel;
 use crate::ng::calling::genotype_prior::fill_seed_share_per_candidate;
 use crate::ng::calling::likelihood::ssr::{
-    RepeatTractJunkDecayPerUnit, RepeatTractOutlierWeight, SsrContaminationMixture,
-    SsrLocusParameters, SsrScoringContextTable,
+    RepeatTractOutlierWeight, SsrContaminationMixture, SsrLocusParameters, SsrScoringContextTable,
 };
 use crate::ng::calling::likelihood::ssr_emission::{
     SsrCandidate, SsrScoringContext, fill_reachable_lengths,
@@ -258,11 +257,6 @@ pub struct TractScoringFits {
     /// parameters file so that a person can change it, and a row reading the compiled-in
     /// constant made an edited file round-trip and change nothing.
     outlier_weight: Option<RepeatTractOutlierWeight>,
-    /// **The run's junk decay, taken at the gather beside the outlier weight** — `None` until a
-    /// tract has been gathered, for the same reason: a bare `f64` here would default to zero,
-    /// which the scoring row refuses, where the parameter's own default is 1.0 — the shipped
-    /// uniform.
-    junk_decay_per_unit: Option<RepeatTractJunkDecayPerUnit>,
 }
 
 impl TractScoringFits {
@@ -335,7 +329,6 @@ impl TractScoringFits {
         self.motif = Some(*motif);
         self.run_fitted_contamination = !parameters.contamination_is_absent();
         self.outlier_weight = Some(parameters.repeat_tract_outlier_weight());
-        self.junk_decay_per_unit = Some(parameters.repeat_tract_junk_decay_per_unit());
         self.candidates = candidates.len();
         self.read_groups = read_groups;
         self.slippage_defaulted = 0;
@@ -658,10 +651,6 @@ impl TractScoringFits {
             contexts: SsrScoringContextTable::new(contexts, self.candidates),
             outlier_weight: self
                 .outlier_weight
-                .expect("a tract's fits were gathered before its row was built")
-                .value(),
-            junk_decay_per_unit: self
-                .junk_decay_per_unit
                 .expect("a tract's fits were gathered before its row was built")
                 .value(),
             reachable_lengths: &self.reachable_lengths,
@@ -1987,7 +1976,7 @@ mod tests {
         let locus = gathered.locus_parameters(&alleles, &contexts, &[]);
 
         assert_eq!(locus.outlier_weight, DEFAULT_OUTLIER_WEIGHT);
-        assert_eq!(locus.outlier_weight, 0.05);
+        assert_eq!(locus.outlier_weight, 0.20);
         assert!(locus.contamination.is_none());
         assert_eq!(gathered.weakest_warrant(), Provenance::FittedHere);
 
@@ -2018,57 +2007,6 @@ mod tests {
             gathered.weakest_warrant(),
             Provenance::FittedHere,
             "the weight is reported at the run and stays out of the per-cell warrant, \
-             whether it was supplied or inherited"
-        );
-    }
-
-    /// **The junk decay is the inherited 1.0, it is in no cell's warrant, and a supplied one
-    /// reaches the row** — the same three claims the outlier weight's test above holds, for the
-    /// second stated constant threading the same path.
-    #[test]
-    fn the_junk_decay_is_the_inherited_constant_and_a_supplied_one_reaches_the_row() {
-        let bases = candidate_bases();
-        let alleles = candidates(&bases);
-        let fits = fits_for_both_candidates();
-        let rates = all_substitution_rates();
-        let calibration = calibrations();
-        let inbreeding = outbred(1);
-        let parameters = run(&calibration, &inbreeding, &fits, &rates);
-
-        let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(
-            motif(),
-            &alleles,
-            tract_prior(reference_repeats(), &parameters),
-            &parameters,
-        );
-        let contexts = gathered.scoring_contexts(&alleles);
-        let locus = gathered.locus_parameters(&alleles, &contexts, &[]);
-
-        assert_eq!(locus.junk_decay_per_unit, 1.0);
-        assert_eq!(gathered.weakest_warrant(), Provenance::FittedHere);
-
-        // Re-gathered into the same scratch, for the reason the outlier weight's test gives:
-        // one `TractScoringFits` serves every locus of a shard.
-        let supplied = parameters
-            .with_repeat_tract_junk_decay_per_unit(RepeatTractJunkDecayPerUnit::supplied(0.5));
-        gathered.gather_for_locus(
-            motif(),
-            &alleles,
-            tract_prior(reference_repeats(), &supplied),
-            &supplied,
-        );
-        let contexts = gathered.scoring_contexts(&alleles);
-        assert_eq!(
-            gathered
-                .locus_parameters(&alleles, &contexts, &[])
-                .junk_decay_per_unit,
-            0.5
-        );
-        assert_eq!(
-            gathered.weakest_warrant(),
-            Provenance::FittedHere,
-            "the decay is reported at the run and stays out of the per-cell warrant, \
              whether it was supplied or inherited"
         );
     }

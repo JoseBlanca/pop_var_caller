@@ -60,7 +60,7 @@ use super::{
     ShareSmoothing, SlippageCurve, Warrant,
 };
 use crate::ng::calling::genotype_prior::{SeedRegime, SpectrumSeed};
-use crate::ng::calling::likelihood::ssr::{RepeatTractJunkDecayPerUnit, RepeatTractOutlierWeight};
+use crate::ng::calling::likelihood::ssr::RepeatTractOutlierWeight;
 use crate::ng::calling::likelihood::{ContaminationView, ReadGroupCalibration};
 use crate::ng::calling::run_parameters::{RunParameters, UNMEASURED_READ_GROUP};
 use crate::ng::parameter_estimation::joint::census::Stratum;
@@ -179,7 +179,6 @@ impl ParametersFile {
                 self.substitution_rates()?,
                 a_ploidy("ploidy", self.ploidy)?,
                 self.outlier_weight(),
-                self.junk_decay_per_unit(),
             ),
             reads_behind_each_calibration,
             inbreeding_by_sample,
@@ -443,24 +442,6 @@ impl ParametersFile {
             ),
         }
     }
-
-    /// The other stated constant, held to the same two warrants by the same `validate`.
-    fn junk_decay_per_unit(&self) -> RepeatTractJunkDecayPerUnit {
-        match self
-            .stated_constants
-            .repeat_tract_junk_decay_per_unit
-            .warrant
-        {
-            Warrant::Defaulted => RepeatTractJunkDecayPerUnit::defaulted(),
-            Warrant::Supplied => RepeatTractJunkDecayPerUnit::supplied(
-                self.stated_constants.repeat_tract_junk_decay_per_unit.value,
-            ),
-            fitted @ (Warrant::FittedHere | Warrant::Borrowed) => unreachable!(
-                "`validate` holds this key to `supplied` or `defaulted` — nothing fits it — and \
-                 a warrant of {fitted:?} reached the projection, so the two have come apart"
-            ),
-        }
-    }
 }
 
 fn a_measured_view(measurement: &ContaminationMeasurement) -> ContaminationView {
@@ -717,9 +698,7 @@ pub(super) mod tests {
     use super::super::{
         ParametersFile, ParametersFileError, ReadsBehindEachCalibration, Warrant, WarrantedValue,
     };
-    use crate::ng::calling::likelihood::ssr::{
-        DEFAULT_JUNK_DECAY_PER_UNIT, DEFAULT_OUTLIER_WEIGHT,
-    };
+    use crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
     use crate::ng::parameter_estimation::Provenance;
     use crate::ng::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION;
     use crate::ng::read::input::read_groups::ReadGroups;
@@ -929,14 +908,6 @@ pub(super) mod tests {
             run.repeat_tract_outlier_weight().provenance(),
             Provenance::Defaulted
         );
-        assert_eq!(
-            run.repeat_tract_junk_decay_per_unit().value(),
-            DEFAULT_JUNK_DECAY_PER_UNIT
-        );
-        assert_eq!(
-            run.repeat_tract_junk_decay_per_unit().provenance(),
-            Provenance::Defaulted
-        );
 
         // The slippage lookup answers where the file has a row and says *no such stratum* where
         // it does not — never a zero slip rate (spec §5's fifth row).
@@ -965,26 +936,6 @@ pub(super) mod tests {
             Provenance::Supplied
         );
         assert_eq!(run.view().repeat_tract_outlier_weight().value(), 0.04);
-    }
-
-    /// **A supplied junk decay comes back supplied** — the same round-trip claim as the outlier
-    /// weight's test above, for the second stated constant: a run that read a changed value has
-    /// to score under it and say so.
-    #[test]
-    fn an_edited_junk_decay_arrives_supplied() {
-        let mut file = a_file_using_every_shape();
-        file.stated_constants.repeat_tract_junk_decay_per_unit.value = 0.5;
-        file.stated_constants
-            .repeat_tract_junk_decay_per_unit
-            .warrant = Warrant::Supplied;
-
-        let run = file.to_run_parameters().expect("a usable file").parameters;
-        assert_eq!(run.repeat_tract_junk_decay_per_unit().value(), 0.5);
-        assert_eq!(
-            run.repeat_tract_junk_decay_per_unit().provenance(),
-            Provenance::Supplied
-        );
-        assert_eq!(run.view().repeat_tract_junk_decay_per_unit().value(), 0.5);
     }
 
     /// **An absent `[contamination]` section is the uncontaminated run**, and the read
@@ -1900,10 +1851,6 @@ mod the_north_star_round_trip {
         assert_eq!(
             after.repeat_tract_outlier_weight(),
             before.repeat_tract_outlier_weight()
-        );
-        assert_eq!(
-            after.repeat_tract_junk_decay_per_unit(),
-            before.repeat_tract_junk_decay_per_unit()
         );
         assert_eq!(
             after.ssr_substitution_rate().collect::<Vec<_>>(),
