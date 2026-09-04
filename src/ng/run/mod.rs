@@ -29,6 +29,7 @@
 //! nothing — psp mode's walk half, whose calling half reads a cohort of those files back.
 
 pub mod callers;
+pub mod census_from_psp;
 pub mod cohort_merge;
 pub mod gatherer;
 pub mod psp_caller;
@@ -46,6 +47,7 @@ pub use callers::{
     AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, CalledCohort,
     CohortWalkTallies, MergeParameters, SampleWalkTallies, WrittenCohort,
 };
+pub use census_from_psp::{CensusFromPspError, CensusOfStoredPileup, census_from_psp};
 pub use gatherer::{CensusPlan, CensusSelection, SampleObservationGatherer, SampleWalkInputs};
 pub use psp_caller::{
     OpenPspCohort, PspVariantCaller, StoredCohortInputs, StoredCohortTallies, StoredSample,

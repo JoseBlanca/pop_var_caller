@@ -53,6 +53,7 @@
 //! `doc/devel/ng/spec/psp_chain_id_encoding.md` (the chain ids), and
 //! `doc/devel/ng/arch/psp_file_format.md` (the code shape).
 
+use md5::{Digest, Md5};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -154,10 +155,45 @@ pub(crate) fn read_header_and_its_length(path: &Path) -> Result<(Header, usize),
 /// **`PspReader::open` holds one**, and opening the file a second time to read its header is a
 /// second `open(2)` per sample in a cohort that opens thousands. It rewinds first, so it does not
 /// depend on where the caller left the cursor.
-pub(crate) fn read_header_from(
-    mut file: File,
-    path: &Path,
-) -> Result<(Header, usize), PspReadError> {
+pub(crate) fn read_header_from(file: File, path: &Path) -> Result<(Header, usize), PspReadError> {
+    let whole_header = read_header_bytes_from(file, path)?;
+    Header::decode(&whole_header, path)
+}
+
+/// **The md5 of a psp's header exactly as it stands in the file.**
+///
+/// This is what a census names the psp it was built from by
+/// ([`PileupIdentity`](crate::ng::parameter_estimation::joint::census_file::PileupIdentity)), and
+/// it must be taken from the bytes on disk rather than from a `Header` value held in memory.
+/// **`PspWriter::create` amends the header before encoding it** — it records the compression
+/// level it chose — so a digest of the header a walk *holds* names a file that does not exist,
+/// and every freshness check comparing the two would answer *rebuild* for ever, silently. The
+/// walk-time producer avoids that by taking the digest the writer hands back; a producer reading
+/// a stored psp takes it here, from the file.
+///
+/// # Errors
+///
+/// The same refusals [`read_header`] makes: a file that is not a psp, one whose header is
+/// malformed or truncated, or an I/O failure — the header's bytes are read the same way and only
+/// the decoding is skipped.
+pub fn header_digest(path: &Path) -> Result<[u8; 16], PspReadError> {
+    let file = File::open(path).map_err(|source| PspReadError::Io {
+        path: path.to_path_buf(),
+        while_doing: "opening the file",
+        source,
+    })?;
+    let whole_header = read_header_bytes_from(file, path)?;
+    let mut hasher = Md5::new();
+    hasher.update(&whole_header);
+    Ok(hasher.finalize().into())
+}
+
+/// The header's bytes, framing included, exactly as they stand in the file.
+///
+/// Split out from [`read_header_from`] so that [`header_digest`] hashes the same bytes the
+/// decoder parses. **Every bound is applied here**, before a buffer sized by the file's own
+/// claim exists.
+fn read_header_bytes_from(mut file: File, path: &Path) -> Result<Vec<u8>, PspReadError> {
     use std::io::Seek;
     file.rewind().map_err(|source| PspReadError::Io {
         path: path.to_path_buf(),
@@ -224,7 +260,7 @@ pub(crate) fn read_header_from(
             _ => io("reading the header body")(source),
         })?;
 
-    Header::decode(&whole_header, path)
+    Ok(whole_header)
 }
 
 // ---------------------------------------------------------------------
