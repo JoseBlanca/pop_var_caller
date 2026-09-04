@@ -135,6 +135,12 @@ fn run(args: &Args) -> io::Result<()> {
         ));
     }
 
+    let index_entries = cram::crai::fs::read(&index_path(&args.cram))?.len();
+    println!(
+        "index     {index_entries} entries, {:.1} MB held for the whole file at {} bytes each",
+        (index_entries * std::mem::size_of::<cram::crai::Record>()) as f64 / 1e6,
+        std::mem::size_of::<cram::crai::Record>(),
+    );
     println!(
         "file      {}\ncontig    {} (id {contig_id}) from {}\ncontainers {} \
          (index offsets, de-duplicated)\nrepeats   {}\n",

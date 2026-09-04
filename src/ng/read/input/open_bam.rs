@@ -77,7 +77,13 @@ pub struct AlignmentFile {
     /// Parsed once, at open — never re-read per query (spec §3.3). Queried from
     /// C2 onwards, which is the guarantee the whole per-query cost model rests
     /// on: a query is an in-memory lookup plus a seek.
-    index: AlignmentIndex,
+    /// **A BAM's index, and `None` for a CRAM.** A cursor over a BAM is built from this; a
+    /// cursor over a CRAM is built from `crai_by_contig` below, which is the same entries
+    /// bucketed by contig at open. So on the CRAM arm the flat index is never read again, and
+    /// holding it costs one `crai::Record` — 56 bytes — per slice of the file for nothing:
+    /// 6.3 MB for a whole-genome tomato CRAM's 112,140 slices, and 400 MB across a cohort of
+    /// 63 such files.
+    index: Option<AlignmentIndex>,
     /// How this file's records are assigned to read groups. Settled at open and
     /// never recomputed; the record sources consult it per record only when it
     /// says they must.
@@ -258,9 +264,14 @@ impl AlignmentFile {
         //    at open rather than a mystery at the first query. The bases
         //    themselves arrive per contig, at query time. A BAM never asks, so
         //    a BAM-only run still never touches the FASTA.
-        let crai_by_contig = match &index {
-            AlignmentIndex::Crai(crai) => group_crai_by_contig(crai, file_contigs.entries.len()),
-            _ => Vec::new(),
+        // The grouping is where a `.crai` is consumed. What comes back out is either the
+        // grouped entries and no flat index, or no grouping and the index a BAM cursor needs.
+        let (crai_by_contig, index) = match index {
+            AlignmentIndex::Crai(crai) => (
+                group_crai_by_contig(&crai, file_contigs.entries.len()),
+                None,
+            ),
+            index => (Vec::new(), Some(index)),
         };
 
         let file_reference = match AlignmentFileKind::from_path(path) {
@@ -433,10 +444,18 @@ impl AlignmentFile {
                     .build_from_path(&self.path)
                     .map_err(open_error)?;
                 reader.read_header().map_err(open_error)?;
+                // A BAM always has one: `AlignmentIndex` is `None` only on the CRAM arm,
+                // and both arms are chosen from the same `AlignmentFileKind::from_path`.
+                let index = self.index.clone().ok_or_else(|| AlignmentFileError::Open {
+                    path: self.path.to_path_buf(),
+                    source: std::io::Error::other(
+                        "a BAM was opened without the index a cursor is built from",
+                    ),
+                })?;
                 AlignedReadsReader::Bam(BamAlignedReadsReader::new(
                     reader,
                     Arc::clone(&self.header),
-                    self.index.clone(),
+                    index,
                     Arc::clone(&self.path),
                 ))
             }
