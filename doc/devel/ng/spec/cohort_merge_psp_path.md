@@ -97,24 +97,26 @@ against the rebuilt body at decode time
 fold over built records read identical numbers by construction — the byte-identity of the two
 modes' VCFs needs no tolerance argument, only the record-equality oracle of goal 1.
 
-Grouping needs only each record's region, which the head also carries. **The span verdict and
-the never-mix assertion additionally need the record's kind before anything is assembled** —
-`max_cohort_locus_span` governs generic loci only, so a reader blind to kind would fail every
-STR tract wider than the bound, and a cohort locus must not mix a generic member with a tract
-member ([`cohort_merge.md`](cohort_merge.md) §3.1;
-[`close.rs:647-653`](../../../../src/ng/run/cohort_merge/close.rs)).
+Grouping needs only each record's region, which the head also carries.
 
-**The kind comes from the coordinate, not from the record — the owner's ruling of 2026-09-04**
-(`fe9df2a3`). A locus's kind is the kind of the typed region it falls in, and typed regions are
-derived from the reference and the repeat catalog before any read is looked at; every psp
-records the segmentation inputs its typing used, and a calling run already refuses a cohort
-whose inputs disagree with the run's own. So a summary carrying a coordinate can look its kind
-up, which serves both decisions above for a head-only reader exactly as for a full one. **The
-tag stays at the end of the body**, where the body decoder needs it to know whether a tract's
-motif and flanks follow — taking it out would make decoding a body need the catalog. *(An
-earlier draft of this section had the tag move into the head; the ruling reversed it, and this
-design is better for the reversal: the kind lookup a builder already has to do costs the
-summary nothing.)*
+**The locus's kind is not part of a summary, and an earlier draft of this section was wrong to
+imply it.** That draft said the width verdict and the never-mix assertion "need the record's
+kind before anything is assembled", which reads as though every observation must answer for its
+kind. Neither does. `max_cohort_locus_span` governs generic loci and not repeat tracts, whose
+span the reference fixes — but that verdict is passed **once on the closed locus**, from the
+kind the opening observation carried
+([`close.rs:114-124`](../../../../src/ng/run/cohort_merge/close.rs)), not once per member. The
+only per-member read is a release assertion that a locus never mixes the two, guarding
+something segments already guarantee. So a summary is three facts and a region, and carrying a
+kind in it would have cost every observation a field to serve a check that cannot fire.
+
+**What a run whose evidence stays undecoded does for that one per-locus kind is C's to settle,
+and the owner's ruling of 2026-09-04 (`fe9df2a3`) already supplies the answer it will use**: a
+locus's kind is the kind of the typed region it falls in, typed regions come from the reference
+and the catalog before any read is looked at, and every psp records the segmentation inputs its
+typing used against a run that refuses a cohort disagreeing with its own. So a coordinate is
+enough to look one up — once per locus, not once per record. The tag stays at the end of the
+body, where the body decoder needs it to know whether a tract's motif and flanks follow.
 
 The one thing summaries cannot answer is assembly, which is the point.
 

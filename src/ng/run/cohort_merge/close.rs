@@ -654,8 +654,14 @@ impl<'a> Iterator for LocusCloser<'a> {
             // ordering check above, because a mixed locus must never reach a verdict.
             // Comparing discriminants keeps it O(1): `LocusKind`'s payload holds boxed
             // flanks, and comparing those per observation would not be affordable.
+            // **Read from the record and not from the summary, because a locus's kind is not
+            // a fact about an observation** (`observation_cache::LocusSummary`): the width
+            // bound is passed once on the closed locus from the kind the opening observation
+            // carried, and this is a release assertion guarding something segments already
+            // guarantee. How a run whose evidence stays undecoded reaches a kind is Milestone
+            // C's to settle; nothing here should oblige every observation to carry one.
             assert!(
-                summary.kind == std::mem::discriminant(kind),
+                std::mem::discriminant(&head.kind) == std::mem::discriminant(kind),
                 "a cohort locus at {contig:?}:{} mixes locus kinds — {:?} with {:?}",
                 start.get(),
                 kind,

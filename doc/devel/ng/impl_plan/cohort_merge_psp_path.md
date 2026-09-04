@@ -118,10 +118,12 @@ first of them: the cached item gains the state spec §3.1 describes — a summar
 record's head, with the evidence not yet built — and the psp source walks heads to produce it,
 retaining each record's raw bytes; cover advances it, eviction drains it (spec §3.2, §3.3).
 Storage per §3.4's leaning (per-record boxes), eviction verified to return memory.
-**Where a summary's locus kind comes from is the design question to settle first**: the tag is
-in the body, not the head (the owner's ruling of 2026-09-04), so a head-only reader looks it up
-from the coordinate against the run's segmentation, and this step is where that lookup is
-built. *Depends:* B1. *Source:* spec §2, §3.1, §3.2, §3.3, §3.4.
+**A summary carries no locus kind** — the width verdict reads one per *locus*, from the opening
+observation, and the per-member read is only a release assertion segments already guarantee
+(spec §2). What this step must settle is therefore narrower than an earlier draft of it said:
+where that one per-locus kind comes from when no body has been decoded. The ruling of
+2026-09-04 supplies the route — look it up from the coordinate against the run's segmentation —
+and this step builds that lookup. *Depends:* B1. *Source:* spec §2, §3.1, §3.2, §3.3, §3.4.
 
 **C2. ☐ The build cursor.** Evidence on demand: monotonic per-sample builds through the
 retained window, chain-id changes replayed, bodies built by the existing bounded decode; the

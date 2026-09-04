@@ -42,19 +42,28 @@
 //! field and no function.
 
 use super::CohortLocusBuilderRegionsLen;
-use crate::ng::locus_generation::{LocusKind, SampleLocusObservations};
+use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::types::{GenomePosition, GenomeRegion, Position};
 
 /// What the merge knows about one sample's observation **before** it decides to build
 /// anything.
 ///
-/// **These are the whole of what closing a cohort locus reads.** Where the locus opens and how
-/// far it reaches come from [`region`](Self::region); whether two observations may share a
-/// locus at all comes from [`kind`](Self::kind); and whether any sample varied enough for the
-/// locus to be worth calling comes from the two counts, which are the numerator and the
-/// denominator of the keep rule ([`MinAltReads::reached_by`](super::MinAltReads::reached_by)).
-/// Nothing else about an observation is consulted until the locus has survived both verdicts
-/// and is being assembled.
+/// **These are the whole of what closing a cohort locus reads *per observation*.** Where the
+/// locus opens and how far it reaches come from [`region`](Self::region); whether any sample
+/// varied enough for the locus to be worth calling comes from the two counts, which are the
+/// numerator and the denominator of the keep rule
+/// ([`MinAltReads::reached_by`](super::MinAltReads::reached_by)). Nothing else about an
+/// observation is consulted until the locus has survived both verdicts and is being assembled.
+///
+/// **The locus's kind is deliberately not here, because it is not a fact about an
+/// observation.** The width bound applies to generic loci and not to repeat tracts, whose span
+/// the reference fixes — but that verdict is passed once on the closed locus, reading the kind
+/// the opening observation carried, not once per member. The only per-member read of a kind is
+/// a release assertion that a locus never mixes the two, which is structurally guaranteed by
+/// segments being the reference's own partition. Putting a kind in this type would have cost
+/// every observation a field to serve a check that cannot fire, and would have obliged a
+/// summary drawn from a psp record's head to answer something that record's head does not
+/// carry (the owner's ruling of 2026-09-04 keeps the tag in the body).
 ///
 /// **Why that set has a name.** A sample whose observations are stored in a psp can answer all
 /// four without decoding the evidence they describe, because a stored record's head carries
@@ -71,11 +80,6 @@ use crate::ng::types::{GenomePosition, GenomeRegion, Position};
 pub struct LocusSummary {
     /// The reference the observation covers, first base to last.
     pub region: GenomeRegion,
-    /// **Which kind of locus it belongs to, as a discriminant and not as the value.** The
-    /// closing walk asks only whether two observations agree, never what they are, and
-    /// [`LocusKind`]'s payload holds boxed flanks that could not be compared per observation
-    /// affordably. Assembly reads the kind itself, from the record.
-    pub kind: std::mem::Discriminant<LocusKind>,
     /// The reads that showed something other than the reference — the keep rule's numerator.
     pub non_reference_reads: u32,
     /// The reads whose whole sequence over the locus was compared against the reference — the
@@ -98,7 +102,6 @@ impl LocusSummary {
             observation.non_reference_and_compared_reads();
         Self {
             region: observation.region,
-            kind: std::mem::discriminant(&observation.kind),
             non_reference_reads,
             reads_compared_with_reference,
         }
