@@ -31,16 +31,15 @@ express that"* — and defers the fix to this document.
 **The design: every stored observation reaches the merge in two parts, and the second is built
 only on demand.** The *summary* — where the record sits, how far it reaches, its non-reference
 read count and its compared-read count — is read off the record's head without decoding the
-body, and the record's locus kind is looked up from its coordinate in the run's own
-segmentation (§2). The *evidence* — sequences, qualities, read groups, chain ids — is built only for the
+body. The *evidence* — sequences, qualities, read groups, chain ids — is built only for the
 records that overlap a locus the cohort decided to keep. Everything the merge decides before
 assembly (grouping, the span verdict, the keep verdict) it decides from summaries; only
 assembly (§4.4 of [`cohort_merge.md`](cohort_merge.md)) touches evidence.
 
-**What that is worth, measured where it can be:** a walk that skips unwanted bodies runs
-**2.06× faster** than one building everything — 0.141 s against 0.30 s over a 7.69 M-record
-tomato accession at three reads a position, of which 0.104 s is block decompression nothing
-avoids ([`psp_file_format.md`](psp_file_format.md) §4.3). The memory side is unmeasured and
+**What that is worth, measured on ng's own files (§5):** a walk that skips the bodies a run
+does not need is **2.57× faster** than one building everything at the rate a 63-sample cohort
+actually needs — one record in eight — and **2.66×** on a high-depth sample at its own rate of
+one in fifty-three. Block decompression happens either way and is what remains. The memory side is unmeasured and
 expected to be the larger win at scale: a built record is a heap object with several
 allocations; its raw encoded bytes are about 5 a record at that depth on disk, and what this
 design holds per sample over the in-flight ground is summaries and raw bytes, with built
