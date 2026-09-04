@@ -14,6 +14,7 @@ pub mod calling_run;
 pub mod cli;
 pub mod estimate_contamination;
 pub mod generate_psps;
+pub mod mode_equivalence;
 pub mod repeat_catalog;
 pub mod run_ground;
 #[cfg(test)]

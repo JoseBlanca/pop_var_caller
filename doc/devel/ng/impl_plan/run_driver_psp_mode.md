@@ -416,13 +416,33 @@ agreed names.
 > both kept running, which is what F2 compares. Direct mode's VCF, parameters file and run report
 > are byte-identical across the lift.
 
-**F2. ☐ Mode equivalence. Own commit, do not bundle.**
+**F2. ✅ Mode equivalence. Own commit, do not bundle.**
 Same cohort, same parameters: `call-from-alignments` and `generate-psps` +
 `call-from-psps` produce **the same VCF** — bytes, at the default block size — on the run
 fixtures and on six tomato accessions over 400 kb through the real catalog. (Comparing
 *across block sizes* is the weaker §10.1 tolerance oracle and is not this test.) This is
 §12.3, "the oracle that justifies the design", and goal 1's proof. *Depends:* C1, F1.
 *Source:* spec §12.3, §1.1 goal 4; `psp_file_format.md` §10.1.
+
+> **Done 2026-09-04** ([report](../../reports/implementations/ng_psp_mode_f2_2026-09-04.md)).
+> **599 records, byte-identical apart from `##commandline`** on six tomato accessions over the
+> two 100 kb intervals, parameters file identical too —
+> `scripts/ng_mode_equivalence_oracle.sh`, in the repository so the run reproduces. In the suite,
+> `pop_var_caller_exp::mode_equivalence` compares the two routes' VCFs **whole**, nothing
+> filtered: inside one process both routes record the same command line, so the script's one
+> exemption is not needed there.
+>
+> **The fixture had to be built for it**, because the cohort the commands' own tests use has an
+> all-`A` reference and writes no record at all. Each of its four discriminating properties
+> closes a defect measured surviving without it: two samples varying in different places, a
+> repeat tract with a length variant, alternative reads leaning to one strand, and — because
+> `--defaults` scores every read group alike — a second comparison under parameters whose three
+> read groups carry different multipliers, which is also the only place psp mode's supplied-file
+> path meets direct mode's.
+>
+> **Where it stops, stated rather than assumed**: it compares VCFs, so a stored locus with no
+> variant is not compared (578 of 581 a sample); neither route fits, so what only a fit reads can
+> be destroyed on write with both comparisons green.
 
 **F3. ☐ The remaining run-level invariances.**
 File order does not matter (§12.6, same VCF sample-for-sample); a cohort of

@@ -27,7 +27,32 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-04):** **psp mode calls from the command line, and what it
+> - **Last completed task (2026-09-04):** **the oracle that justifies psp mode is a test, and it
+> can see four kinds of defect it could not see when it was written** (branch `ng-psp-mode`, plan
+> step F2; [report](doc/devel/reports/implementations/ng_psp_mode_f2_2026-09-04.md)). One cohort
+> called two ways gives one VCF: on **six tomato accessions over the two 100 kb intervals, 599
+> records byte-identical apart from the `##commandline` line**, parameters file identical too
+> (`scripts/ng_mode_equivalence_oracle.sh`, now in the repository so the run reproduces from a
+> fresh checkout); and in the suite, comparing the two routes' VCFs **whole** with nothing
+> filtered out, because inside one process both routes record the same command line.
+>
+> **The fixture had to be built for it.** The cohort the commands' own tests use has an all-`A`
+> reference, so the catalog routes every base to the repeat-tract path and a run over it writes
+> no record — two empty files are equal for the wrong reason. Each of the new fixture's four
+> discriminating properties closes a defect **measured surviving** without it: two samples
+> varying in different places (one sample's observations given to the other), a repeat tract with
+> a length variant (every stored locus written as `Generic`), alternative reads leaning to one
+> strand (the stored forward-read count zeroed), and a second comparison under parameters whose
+> three read groups carry multipliers of 0.25, 2.5 and 4.0 (the read-group renumbering deleted —
+> under `--defaults` every group scores alike, so identity reaches no genotype).
+>
+> **Where the oracle stops, stated rather than assumed**: it compares VCFs, so a stored locus
+> that produces no record is not compared — 578 of the 581 a sample; and neither route fits, so
+> what only a fit reads can be destroyed on write with both comparisons green. **Next: F3**, the
+> remaining run-level invariances — file order, a separately-walked cohort, analysed-but-empty,
+> and concurrency.
+>
+> - **Earlier (2026-09-04):** **psp mode calls from the command line, and what it
 > writes is direct mode's VCF** (branch `ng-psp-mode`, plan step F1;
 > [report](doc/devel/reports/implementations/ng_psp_mode_f1_2026-09-04.md),
 > [review](doc/devel/reports/reviews/ng_psp_mode_f1_2026-09-04.md)). `call-from-psps` opens a
