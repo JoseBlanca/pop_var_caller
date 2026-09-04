@@ -15,6 +15,27 @@ This is the plan [`run_driver_direct_mode.md`](run_driver_direct_mode.md) deferr
 ("Everything psp … their own plan, once the encoding settles" — its Scope/Out). The encoding
 settled 2026-08-30; direct mode completed 2026-09-01 and is this plan's oracle.
 
+## ⚑ Another plan runs inside this one, and it has to land before Milestone F
+
+[`psp_head_compared_reads.md`](psp_head_compared_reads.md) — one milestone, lettered **H** so
+its steps cannot be confused with this plan's A–G — adds a sixth field to the psp record head:
+`reads-compared-with-reference`, the keep rule's denominator. The rule that admits a locus asks
+for `max(2, 2% of the sample's compared reads)` non-reference reads, and the head carries the
+numerator alone, so a future cheap-numbers read could apply the rule at three reads a position
+(where the floor decides) and not at three hundred (where the share does).
+[`run_streaming.md`](../spec/run_streaming.md) §3.3 flagged the requirement and the settled head
+never picked it up.
+
+**The ordering is a hard constraint, and it comes from the format rather than from either
+plan.** A head layout change costs nothing while no psp exists outside tests and costs a format
+version afterwards — [`record.rs:133-137`](../../../../src/ng/psp/record.rs) says so at the
+field list itself: *"It costs nothing today because no psp exists; from Milestone F it costs a
+version."* **F is where this plan makes psps that people keep**, so H goes in before it.
+
+H is independent of Milestones A–E and touches files none of them touch, so it slots wherever
+it fits. **Sequence chosen 2026-09-04: A–E, then H, then F–G.** A fresh conversation picking
+this plan up after Checkpoint E should read H's plan next, not F's.
+
 ---
 
 ## Scope
@@ -330,6 +351,11 @@ reader at `observation_cache.rs:420`). *Depends:* A3, E1. *Source:* `cohort_merg
 > review.**
 
 ### Milestone F — `call-from-psps`, and the oracle that justifies the design
+
+> **⚑ Precondition: [`psp_head_compared_reads.md`](psp_head_compared_reads.md)'s Milestone H is
+> committed.** After F, a change to the record head costs a format version
+> ([`record.rs:133-137`](../../../../src/ng/psp/record.rs)); before it, nothing. If H has not
+> landed, stop and land it first — see this plan's ordering note above.
 
 **F1. ☐ The subcommand.**
 One `--psp` per sample (or a directory), `--parameters`/`--defaults` exactly as direct mode

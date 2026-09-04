@@ -19,6 +19,14 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
+> - **Standing sequencing note for `ng-psp-mode` (2026-09-04):** a second plan runs inside the
+> psp-mode plan and **must land before its Milestone F** —
+> [psp_head_compared_reads.md](doc/devel/ng/impl_plan/psp_head_compared_reads.md), one milestone
+> lettered H, which adds the keep rule's denominator to the psp record head. A head layout
+> change costs nothing while no psp exists and a format version afterwards, and F is where the
+> psps people keep start being written. Sequence: A–E, then H, then F–G. The psp-mode plan's own
+> ordering note carries the same thing.
+>
 > - **Last completed task (2026-09-04):** **psp mode's calling stage opens its cohort and
 > refuses one it cannot call** (branch `ng-psp-mode`, plan step E1;
 > [report](doc/devel/reports/implementations/ng_psp_mode_e1_2026-09-04.md),
