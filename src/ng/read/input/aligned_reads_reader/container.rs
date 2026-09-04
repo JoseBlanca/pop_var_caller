@@ -382,7 +382,13 @@ pub(crate) fn decode_container_at(
         // copying each record's bytes into the container's own buffers here keeps the result
         // independent of those borrows.
         let (core_data_src, external_data_srcs) = slice.decode_blocks()?;
-        for record in slice.records(
+        // **The auxiliary tags are not read at all**, where the file's own encoding lets them
+        // be skipped safely — noodles decides that from the compression header and falls back
+        // to reading them when it cannot. ng reads exactly one thing out of a record's tags,
+        // the read group, and a CRAM does not store that as a tag: it stores a *number*, an
+        // index into the header's `@RG` list, which `resolve_read_group` below gets from that
+        // number rather than from any tag. So nothing here loses an answer.
+        for record in slice.records_discarding_tags(
             repository.clone(),
             header,
             &compression_header,
