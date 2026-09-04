@@ -352,8 +352,20 @@ covers 12.
 closed locus is disjoint from its neighbours because consecutive ones never share a base. Whether
 what came out is too wide is a separate question, asked next.
 
-Then `max_cohort_locus_span` is applied per locus (§3.2): a locus at most that wide goes on to the
-variability filter; a wider one is failed, counted, and done with.
+Then the two verdicts are passed on the closed locus, **variability first** (the owner,
+2026-09-04): a locus no sample varied enough at is dropped as quiet and done with; only one
+that survives is measured against `max_cohort_locus_span` (§3.2), and a wider one is failed and
+counted.
+
+**That order was the other way round until 2026-09-04, and what the reversal costs is one
+statistic.** The width bound is the only rule that needs to know a locus's *kind* — it governs
+generic loci and not repeat tracts, whose span the reference fixes — and asking about the kind
+before the quiet verdict obliges a run whose evidence is still compressed to establish a kind
+for every quiet locus in the genome, which is nearly all of them, purely to file the locus
+under the right counter. **Neither order emits anything over such a locus's ground**, so no VCF
+distinguishes them. What changes is that the failed count no longer includes wide loci nobody
+varied at; it counts the wide loci that had evidence in them, which is the class an operator
+raising the bound cares about.
 
 **A locus may run past the end of the region its builder was given, and often does** — that is the
 whole of §6.1's ownership rule, and it is what a deletion reaching forward makes necessary. What a
@@ -1241,9 +1253,9 @@ New tests the ruling requires, with no production ancestor:
   `max_cohort_locus_span`: same verdict, same count, no single member over it (§3.2).
 - **The failed set is scheduling-invariant.** The two fixtures above at 1, 2, 8 builders and at
   two partitions: identical failed counts and identical surviving streams (§9).
-- **The width verdict comes before the variability one.** A reference-only chain wider than
-  `max_cohort_locus_span` counts
-  as failed, not silently dropped (§4.3).
+- **The variability verdict comes before the width one** — reversed by the owner on
+  2026-09-04, having read the other way since this spec was written. A reference-only chain
+  wider than `max_cohort_locus_span` is dropped as quiet, **not** counted as failed (§4.3).
 ## 16. Reuse map
 
 | what | existing code | how it is reused |

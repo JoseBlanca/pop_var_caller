@@ -114,6 +114,23 @@ fn judge(
     kind: &LocusKind,
     max_cohort_locus_span: MaxCohortLocusSpan,
 ) -> Verdict {
+    // **The quiet verdict is asked first, and the kind is not consulted until it passes**
+    // (the owner, 2026-09-04). The width bound is the only thing that needs to know what kind
+    // of locus this is, and for a locus no sample varied at the answer changes nothing anyone
+    // can observe: both verdicts drop it, nothing is emitted over its ground either way, and
+    // the sole difference is which counter it lands in. Asking about the kind first would
+    // oblige a run whose evidence is still compressed to find one out for every quiet locus in
+    // the genome — which is nearly all of them — to move a statistic.
+    //
+    // **What it costs, stated plainly: a locus that is both wider than the bound and quiet is
+    // now counted as examined-and-empty rather than as refused.** The failed count is what an
+    // operator reads to see the bound charging more than they expected, so it now under-counts
+    // by the wide loci nobody varied at. The counted ones are the wide loci that had evidence
+    // in them, which is the class worth knowing about.
+    if !some_sample_reached_the_threshold {
+        return Verdict::TooQuiet;
+    }
+
     // Exhaustive on purpose: a new kind of locus should not silently inherit either
     // answer, so adding one is a compile error here until somebody decides.
     let bounded_by_policy = match kind {
@@ -123,8 +140,6 @@ fn judge(
 
     if bounded_by_policy && span > u64::from(max_cohort_locus_span.get()) {
         Verdict::Failed
-    } else if !some_sample_reached_the_threshold {
-        Verdict::TooQuiet
     } else {
         Verdict::Build
     }
@@ -1170,19 +1185,24 @@ mod tests {
     // The two verdicts, decided width first (spec §4.3).
     // ---------------------------------------------------------------
 
-    /// **The width verdict comes before the variability one, and this is the fixture that
-    /// says so** (spec §15's fourth new test).
+    /// **The variability verdict comes before the width one, and this is the fixture that
+    /// says so** — reversed by the owner on 2026-09-04, having said the opposite since the
+    /// spec was written.
     ///
     /// The locus qualifies for both at once: 21 bases wide against a bound of 10, and not
-    /// one non-reference read in it. Judged width first it is `Failed` — ground the caller
-    /// *refused*, and counted. Judged variability first it would be `TooQuiet` — ground
-    /// the caller *examined and found empty*, and not counted. Both orders drop the locus,
-    /// so nothing downstream can tell them apart; what changes is the failed count, which
-    /// is the only signal an operator has that the bound is charging more than they
-    /// expected. Getting this backwards is invisible except in the number that exists to
-    /// be read.
+    /// one non-reference read in it. Judged variability first it is `TooQuiet` — ground the
+    /// caller *examined and found empty*. Judged width first it would be `Failed` — ground
+    /// the caller *refused*, and counted. **Both orders drop the locus and neither emits
+    /// anything over its ground**, so no VCF can tell them apart; the whole of the
+    /// difference is which counter it lands in.
+    ///
+    /// The order was reversed because the width verdict is the only thing that needs the
+    /// locus's kind, and asking for one before the quiet verdict would make a run whose
+    /// evidence is still compressed produce a kind for every quiet locus in the genome —
+    /// nearly all of them — to keep a statistic exact. The statistic loses the wide loci
+    /// nobody varied at and keeps the wide loci that had evidence in them.
     #[test]
-    fn a_reference_only_chain_wider_than_the_bound_is_failed_not_too_quiet() {
+    fn a_reference_only_chain_wider_than_the_bound_is_too_quiet_not_failed() {
         let chain = [
             all_reference_observation(region(10, 20), 4),
             all_reference_observation(region(20, 30), 4),
@@ -1194,9 +1214,9 @@ mod tests {
         assert_eq!(closed[0].span(), 21, "10 to 30 inclusive");
         assert_eq!(
             closed[0].non_reference_reads, 0,
-            "and it qualifies for the quiet verdict too"
+            "and it qualifies for the width verdict too"
         );
-        assert_eq!(closed[0].verdict, Verdict::Failed);
+        assert_eq!(closed[0].verdict, Verdict::TooQuiet);
     }
 
     /// The bound is the widest the caller undertakes to build, not the first width it
@@ -1496,7 +1516,7 @@ mod tests {
     /// The verdict order, on the ordering rule alone rather than through a fixture — the
     /// four cases the two tests cross, with the both-qualify cell asserted explicitly.
     #[test]
-    fn the_verdict_is_decided_width_first() {
+    fn the_verdict_is_decided_quiet_first() {
         let wide = 11;
         let narrow = 5;
         let loud = true;
@@ -1516,8 +1536,9 @@ mod tests {
         );
         assert_eq!(
             judge(wide, quiet, &LocusKind::Generic, max_span(10)),
-            Verdict::Failed,
-            "qualifies for both: the width verdict is the one that stands"
+            Verdict::TooQuiet,
+            "qualifies for both: the quiet verdict is the one that stands, so that no kind \
+             has to be found out for a locus nobody varied at"
         );
     }
 
