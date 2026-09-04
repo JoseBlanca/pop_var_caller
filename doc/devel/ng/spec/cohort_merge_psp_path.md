@@ -157,25 +157,40 @@ reader:
 - **The retained window** is the raw bytes of every record between the two cursors, per
   sample — a FIFO the cover advances and eviction drains, the same rhythm the cache already
   has ([`observation_cache.rs:113-118`](../../../../src/ng/run/cohort_merge/observation_cache.rs)).
-- **The build cursor** trails behind. When assembly wants a record's evidence, this cursor
-  advances to it through the retained window — replaying each intervening record's chain-id
-  changes into its own live set, skipping their bodies by the head's byte count — and builds
-  the one body asked for through the existing bounded decode
-  ([`decode_the_body_of`, `record.rs:1984`](../../../../src/ng/psp/record.rs)).
+- **Building a body needs nothing but its own bytes**, so any thread may do it, at any time,
+  in any order. That is a property of the format rather than a convenience of this design: a
+  psp body writes every count absolutely and every observation's read list from zero rather
+  than as a difference from the record before it, **which is the reason a skipped body costs
+  nothing in the first place** ([`record.rs:828-846`](../../../../src/ng/psp/record.rs)). A
+  reader that never saw the records in between has missed nothing it needs.
 
-**Why a replaying cursor and not a stored live set per record.** A record's body can only be
-decoded against the live set *as of that record*
-([`record.rs:1979-1983`](../../../../src/ng/psp/record.rs)). Storing a snapshot per record
-would make the retained window's cost a set per record; replaying costs the head walk a second
-time over only the retained span, and the whole first head walk was 0.027 s per 7.69 M
-records — the replay over a few kilobases of window is noise.
+**So there is no build cursor, and an earlier draft of this section invented one.** It had a
+second cursor trailing the first, replaying each skipped record's chain-id changes into its own
+live set before building — and argued at length why replaying beat storing a snapshot per
+record. Both were answers to a problem the format does not pose. **The state a reader carries
+across records lives in the head, not the body**, and every reader parses every head whether or
+not it wants the record ([`record.rs:1881-1902`](../../../../src/ng/psp/record.rs)); the one
+thing the body decoder is handed from outside is the live set the head walk already produced.
 
-**The build order is a contract: per sample, evidence is asked for in coordinate order.** The
-merge already lives by this — a builder that interleaves non-monotonically turns every locus
-into seeks, named as a trap in [`cohort_merge.md`](cohort_merge.md) §11 — and the organiser's
-cover/evict is monotonic by construction. A backwards ask is refused with an error naming the
-sample and both regions, the same shape as the source's existing order refusal
-([`psp_source.rs:66-93`](../../../../src/ng/run/psp_source.rs)).
+**Which resolves the concurrency question this design would otherwise have had.** The merge
+hands several builders one shared window at a time and they run together, so a build that
+needed mutable state — a cursor to advance, a live set to replay into — would need either a
+lock per sample or a serial build phase between deciding and assembling, and the second would
+put decoding, which is 43% of a psp-mode run at 63 samples (§5), on one thread. Neither is
+needed: the retained bytes are immutable, a body is built from them alone, and builders share
+nothing but read-only memory. **The one piece of state a run must still carry is the live set,
+and the head walk carries it** — so what the window retains beside each record's bytes is the
+set as the head walk left it, at the one place it is asked for.
+
+⚠ **This rests on the body staying self-contained, and today that is under-tested because the
+chain ids are not yet written.** `encode_record_body` drops them — a record read back has empty
+lists where it had ids ([`record.rs:830-835`](../../../../src/ng/psp/record.rs)) — so the live
+set is inert in every file this caller currently produces, and the residual read list a body
+derives from it is trivial. When the encoding's Milestone E writes them, the body's own
+guarantee is what must continue to hold; if it does not, this section's argument fails and the
+lock-or-serial-phase question returns. **The test that would catch it is the record-equality
+oracle of §1.1 goal 1 run on a file whose records carry chain ids**, and it does not exist
+because such a file cannot yet be written.
 
 **What this replaces:** the adapter's refusal of head-only records
 (`ObservationBodyNotBuilt`, [`psp_source.rs:95-112`](../../../../src/ng/run/psp_source.rs))
@@ -198,7 +213,7 @@ nobody has measured — [`cohort_merge.md`](cohort_merge.md) §8 marks the built
 and the raw size is about 5 bytes a record compressed at three reads a position
 ([`psp_record_encoding.md`](psp_record_encoding.md) §11; the decompressed encoded size is also
 unmeasured — the plan measures both). Eviction is unchanged in shape: when the organiser
-releases ground, the source drops the retained bytes behind the build cursor.
+releases ground, the source drops the retained bytes behind the window's left edge.
 
 **The alternative that lost: two readers per sample** — a head-only reader ahead and a
 building reader behind, no retained window at all. It loses on arithmetic: each reader
@@ -331,7 +346,7 @@ gated cover-parallelism work (§5), if it comes, parallelises *across* samples.
 
 | what | existing code | how it is reused |
 |---|---|---|
-| the head walk and the skip | `RecordIter`, `building_only_where` ([`walk.rs:168,215`](../../../../src/ng/psp/walk.rs)) | the summary cursor is the head walk; the build cursor is the selective walk's stepping over retained bytes |
+| the head walk and the skip | `RecordIter`, `building_only_where` ([`walk.rs:168,215`](../../../../src/ng/psp/walk.rs)) | the summary cursor is the head walk, which also keeps the live set; a body is built from its own retained bytes and needs no second walk |
 | the bounded body build | `decode_the_body_of` ([`record.rs:1984`](../../../../src/ng/psp/record.rs)) | called once per built record, unchanged |
 | the verdict's numbers | `non_reference_and_compared_reads` → `reached_by` ([`close.rs:665,713`](../../../../src/ng/run/cohort_merge/close.rs)) | the summary carries the same pair; the verdict code does not change |
 | the source seam and its errors | `PspObservationSource`, `PspSourceError` ([`psp_source.rs`](../../../../src/ng/run/psp_source.rs)) | upgraded in place; the decode-everything form survives as the record-equality oracle |
