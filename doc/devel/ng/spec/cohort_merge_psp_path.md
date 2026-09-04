@@ -1,0 +1,317 @@
+# ng — the cohort merge's psp path: summaries first, evidence on demand
+
+*Status: design spec draft, 2026-09-04. No code yet — this settles the design of the work
+[`../impl_plan/run_driver_psp_mode.md`](../impl_plan/run_driver_psp_mode.md) reserves a slot for
+under "psp-mode performance". It builds on that plan's finished state: `call-from-psps` exists,
+and its VCF equals direct mode's byte for byte (that plan's Milestone F). **This spec moves no
+byte of output** — it changes what a psp-mode run decodes, holds and allocates to produce the
+same bytes. Two of its citations land with the `ng-psp-mode` branch:
+[`psp_head_compared_reads.md`](psp_head_compared_reads.md) (the head field this design cannot
+run without) and `src/ng/run/psp_source.rs` (the source it upgrades); line numbers to that
+branch are as of `d2c7113e`. Parents:
+[`cohort_merge.md`](cohort_merge.md) (the merge, path-agnostic),
+[`run_streaming.md`](run_streaming.md) §3.3 and §10 (the three-step read and the deferred
+"cheap question" seam), [`psp_file_format.md`](psp_file_format.md) §4.3 (the record head).*
+
+---
+
+## 1. What this is
+
+**Today a psp-mode run builds every stored observation into a full record before the merge looks
+at it, and about 99 in 100 of those records are then discarded unread.** The first psp source
+([`psp_source.rs:31-38`](../../../../src/ng/run/psp_source.rs)) is an adapter over the
+build-everything walk, deliberately: the merge's source interface has one method and it returns
+a whole built observation
+([`ObservationSource::next_observation`,
+`observation_cache.rs:70-90`](../../../../src/ng/run/cohort_merge/observation_cache.rs)), so a
+source behind it has no way to say anything cheaper.
+[`run_streaming.md`](run_streaming.md) §10 records this exact gap — *"the built merge cannot
+express that"* — and defers the fix to this document.
+
+**The design: every stored observation reaches the merge in two parts, and the second is built
+only on demand.** The *summary* — where the record sits, how far it reaches, its non-reference
+read count and its compared-read count — is read off the record's head without decoding the
+body, and the record's locus kind is looked up from its coordinate in the run's own
+segmentation (§2). The *evidence* — sequences, qualities, read groups, chain ids — is built only for the
+records that overlap a locus the cohort decided to keep. Everything the merge decides before
+assembly (grouping, the span verdict, the keep verdict) it decides from summaries; only
+assembly (§4.4 of [`cohort_merge.md`](cohort_merge.md)) touches evidence.
+
+**What that is worth, measured where it can be:** a walk that skips unwanted bodies runs
+**2.06× faster** than one building everything — 0.141 s against 0.30 s over a 7.69 M-record
+tomato accession at three reads a position, of which 0.104 s is block decompression nothing
+avoids ([`psp_file_format.md`](psp_file_format.md) §4.3). The memory side is unmeasured and
+expected to be the larger win at scale: a built record is a heap object with several
+allocations; its raw encoded bytes are about 5 a record at that depth on disk, and what this
+design holds per sample over the in-flight ground is summaries and raw bytes, with built
+records existing only for the roughly one locus in a hundred that survives.
+
+### 1.1 Goals
+
+1. **The same VCF, byte for byte.** Direct mode and psp mode already agree
+   ([`run_driver_psp_mode.md`](../impl_plan/run_driver_psp_mode.md) F2); every change here keeps
+   that oracle green, and the decode-everything source survives as the test oracle the two-phase
+   source is compared against, record for record — production's eager-decode pattern
+   ([`sample_reader.rs:20-26`](../../../../src/var_calling/sample_reader.rs)).
+2. **One merge, not two.** The merge's grouping, verdicts, ownership and organiser stay one code
+   path for both modes. What varies is the cached item's state, not the algorithm (§3.1) — the
+   same shape that kept the calling loop single when the psp source arrived
+   (`run_driver_psp_mode.md` D2).
+3. **Bounded across the committed range** — one sample to several thousand, three reads a
+   position to several hundred. Every retained quantity in §3.3 is a formula in sample count and
+   in-flight ground, and §6 states what each end of each axis does to it.
+
+### 1.2 Non-goals, and what this does not do
+
+- **No new subcommand, no new flag.** `call-from-psps` exists and its interface does not change.
+- **No change to any verdict.** The keep rule, the span bound, grouping, projection,
+  unification — all fixed by [`cohort_merge.md`](cohort_merge.md). This document changes when
+  evidence is materialised, never what is decided.
+- **No change to the psp format.** Its one format prerequisite — the head carrying the keep
+  rule's denominator — is [`psp_head_compared_reads.md`](psp_head_compared_reads.md)'s, and
+  landed on main on 2026-09-04 (`47d4c7e1`), costing 3.9 % of the compressed file at 10 reads
+  a position and 8.5 % at 280 (`ebf8d2f5`, re-measured in `fe9df2a3`).
+- **It does not parallelise the merge.** The organiser's serial cover phase and the 1.4×-on-8-
+  threads wall are measured facts of the direct path
+  ([`cohort_merge.md`](cohort_merge.md) §6.2); whether the psp path's decode belongs on several
+  threads is settled by measurement *after* this design is built and timed (§5), not designed
+  here on suspicion.
+
+## 2. Where it sits, and why the head can answer the merge
+
+The run shape is fixed upstream: reading one sample's evidence is three steps — a stored
+summary, the cheap per-position numbers, the full evidence — and *"the merge puts every
+sample's answers together and decides which positions are worth calling"*
+([`run_streaming.md`](run_streaming.md) §3.3; its step 1, a per-stretch skip without
+decompression, was removed from the format on 2026-08-25 and is dead text — the cheap read is
+step 2, after decompression).
+
+**The head's numbers are the verdict's inputs, not an approximation of them.** The merge's keep
+verdict calls, per member record, `non_reference_and_compared_reads()` and feeds the pair to
+`MinAltReads::reached_by`
+([`close.rs:665,713`](../../../../src/ng/run/cohort_merge/close.rs);
+[`mod.rs:526`](../../../../src/ng/run/cohort_merge/mod.rs)). The head's two count fields are
+defined as that function's two return values, derived by the writer at encode time and checked
+against the rebuilt body at decode time
+([`psp_head_compared_reads.md`](psp_head_compared_reads.md) §3). So a fold over summaries and a
+fold over built records read identical numbers by construction — the byte-identity of the two
+modes' VCFs needs no tolerance argument, only the record-equality oracle of goal 1.
+
+Grouping needs only each record's region, which the head also carries. **The span verdict and
+the never-mix assertion additionally need the record's kind before anything is assembled** —
+`max_cohort_locus_span` governs generic loci only, so a reader blind to kind would fail every
+STR tract wider than the bound, and a cohort locus must not mix a generic member with a tract
+member ([`cohort_merge.md`](cohort_merge.md) §3.1;
+[`close.rs:647-653`](../../../../src/ng/run/cohort_merge/close.rs)).
+
+**The kind comes from the coordinate, not from the record — the owner's ruling of 2026-09-04**
+(`fe9df2a3`). A locus's kind is the kind of the typed region it falls in, and typed regions are
+derived from the reference and the repeat catalog before any read is looked at; every psp
+records the segmentation inputs its typing used, and a calling run already refuses a cohort
+whose inputs disagree with the run's own. So a summary carrying a coordinate can look its kind
+up, which serves both decisions above for a head-only reader exactly as for a full one. **The
+tag stays at the end of the body**, where the body decoder needs it to know whether a tract's
+motif and flanks follow — taking it out would make decoding a body need the catalog. *(An
+earlier draft of this section had the tag move into the head; the ruling reversed it, and this
+design is better for the reversal: the kind lookup a builder already has to do costs the
+summary nothing.)*
+
+The one thing summaries cannot answer is assembly, which is the point.
+
+## 3. The design
+
+### 3.1 The cached observation has two states, and the merge stops caring which
+
+The observation cache's item today is a built `SampleLocusObservations`. It becomes a
+two-state item:
+
+- **summary available, evidence built** — direct mode's only state: the walker minted the whole
+  record, and its summary is read off it (the same derivation call the verdict makes today,
+  [`close.rs:665`](../../../../src/ng/run/cohort_merge/close.rs));
+- **summary available, evidence stored** — the psp state: the summary came from the head, and
+  the evidence is raw bytes the source still holds. Asking for the evidence builds it, once,
+  and the item moves to the first state.
+
+Everything before assembly — the fold, grouping, both verdicts, ownership — reads summaries.
+Assembly asks for evidence, and in direct mode that ask is free. This is
+[`cohort_merge.md`](cohort_merge.md) §1's *"one step in the direct path and two in the psp
+path"*, made a type instead of a sentence.
+
+**Building is per record and pure**, so nothing about which records get built, or when, can
+move the output: the set of kept loci is a function of the summaries
+([`cohort_merge.md`](cohort_merge.md) §9), and a built record equals the record the
+decode-everything walk would have produced — the oracle of goal 1 checks exactly that.
+
+### 3.2 The psp source: one reader, two cursors, and builds in coordinate order
+
+The upgraded source replaces the decode-everything adapter. Per sample, over one forward
+reader:
+
+- **The summary cursor** walks record heads, applying each record's chain-id changes to its
+  live set as every reader must
+  ([`record.rs:1881-1902`](../../../../src/ng/psp/record.rs)), and hands each record's summary
+  plus its raw bytes — head and unbuilt body — into the retained window. It never builds a
+  body. This is the measured 0.141 s walk.
+- **The retained window** is the raw bytes of every record between the two cursors, per
+  sample — a FIFO the cover advances and eviction drains, the same rhythm the cache already
+  has ([`observation_cache.rs:113-118`](../../../../src/ng/run/cohort_merge/observation_cache.rs)).
+- **The build cursor** trails behind. When assembly wants a record's evidence, this cursor
+  advances to it through the retained window — replaying each intervening record's chain-id
+  changes into its own live set, skipping their bodies by the head's byte count — and builds
+  the one body asked for through the existing bounded decode
+  ([`decode_the_body_of`, `record.rs:1984`](../../../../src/ng/psp/record.rs)).
+
+**Why a replaying cursor and not a stored live set per record.** A record's body can only be
+decoded against the live set *as of that record*
+([`record.rs:1979-1983`](../../../../src/ng/psp/record.rs)). Storing a snapshot per record
+would make the retained window's cost a set per record; replaying costs the head walk a second
+time over only the retained span, and the whole first head walk was 0.027 s per 7.69 M
+records — the replay over a few kilobases of window is noise.
+
+**The build order is a contract: per sample, evidence is asked for in coordinate order.** The
+merge already lives by this — a builder that interleaves non-monotonically turns every locus
+into seeks, named as a trap in [`cohort_merge.md`](cohort_merge.md) §11 — and the organiser's
+cover/evict is monotonic by construction. A backwards ask is refused with an error naming the
+sample and both regions, the same shape as the source's existing order refusal
+([`psp_source.rs:66-93`](../../../../src/ng/run/psp_source.rs)).
+
+**What this replaces:** the adapter's refusal of head-only records
+(`ObservationBodyNotBuilt`, [`psp_source.rs:95-112`](../../../../src/ng/run/psp_source.rs))
+exists because the current interface cannot carry a deferred body; in this design a head-only
+record is the normal case and that variant goes, its job taken by the build-order refusal
+above. The reader-side machinery both cursors need exists: the head-only walk and the
+build-some walk are `RecordIter` and `building_only_where`
+([`walk.rs:215`](../../../../src/ng/psp/walk.rs)).
+
+### 3.3 What is retained, and when it goes
+
+Per sample, between eviction and the cover frontier:
+
+> summaries (a fixed few dozen bytes each) + the records' raw encoded bytes + one live set per
+> cursor
+
+and built records only where assembly asked. The raw bytes replace the built records the cache
+holds today over the same ground, and a built record costs a multiple of its raw bytes that
+nobody has measured — [`cohort_merge.md`](cohort_merge.md) §8 marks the built size unmeasured,
+and the raw size is about 5 bytes a record compressed at three reads a position
+([`psp_record_encoding.md`](psp_record_encoding.md) §11; the decompressed encoded size is also
+unmeasured — the plan measures both). Eviction is unchanged in shape: when the organiser
+releases ground, the source drops the retained bytes behind the build cursor.
+
+**The alternative that lost: two readers per sample** — a head-only reader ahead and a
+building reader behind, no retained window at all. It loses on arithmetic: each reader
+decompresses every block, and decompression is 0.104 s of the 0.141 s walk, so the second pass
+gives back most of what the skip won — about 0.27 s a sample against the single-reader design's
+roughly 0.17 s, on the corpus above. It would win only if the retained window's memory turned
+out to matter more than the time, which §6's formulas say it does not at either end.
+
+### 3.4 Open, before the builder is coded
+
+**Where the retained bytes live** — one growing arena per sample with offsets, or a
+`VecDeque` of per-record boxes — is the implementer's, with one constraint from the design:
+eviction must actually return memory (an arena that only grows is the cache leak this module
+exists to avoid). *Leaning: per-record boxes first, arena only if the allocator share says
+so.*
+
+## 4. The run-level companions
+
+Two items travel with this work because they live in the same objects, not because the
+two-phase read needs them:
+
+- **One contig list for the run.** On a human reference 357 kB of an open sample's 480 kB is
+  a copy of the reference's contigs, identical in every sample — 1.07 GB of the same list at
+  three thousand ([`run_streaming.md`](run_streaming.md) §10, with the owner's 2026-08-30
+  ruling: the *file* keeps carrying its own list; what the *readers* work from is the run's).
+  `PspVariantCaller::open` already reads every header, so it checks the lists agree and hands
+  every reader one shared list.
+- **The spare offer, taken.** The merge hands every source a spent record for reuse and the
+  psp adapter currently drops the offer
+  ([`psp_source.rs:23-29`](../../../../src/ng/run/psp_source.rs);
+  [`observation_cache.rs:58-69`](../../../../src/ng/run/cohort_merge/observation_cache.rs)
+  names a decoder as the hook's best customer). With builds now rare, the offer matters most
+  exactly where records are large: at depth, a built record's buffers are refilled instead of
+  reallocated. Adopted only if measured — the merge's 39% Linux allocator share is the number
+  that says it might pay ([`../research/cohort_merge_parallel_cost_plan.md`](../research/cohort_merge_parallel_cost_plan.md) §2).
+
+## 5. Performance: what is known, what is measured first, what is gated
+
+**Known:** the skip is 2.06× on the per-sample walk at three reads a position, and its value
+shrinks with depth — the chain-id changes ride in the head and grow from 0.432 bytes a position
+at 11.4 reads to 6.42 at 293, so at depth the head carries most of the bytes and the body the
+skip avoids is a smaller share ([`psp_record_encoding.md`](psp_record_encoding.md) §6;
+[`examples/ng_psp_skip_value.rs`](../../../../examples/ng_psp_skip_value.rs) exists to measure
+what survives). **Known of the merge:** its parallel driver gives 1.4× on 8 threads because the
+organiser's cover runs serially between rounds — tolerable in direct mode behind a generator
+14–23× its cost, and the whole ceiling in psp mode, where the generator is gone
+([`cohort_merge.md`](cohort_merge.md) §6.2).
+
+**Never measured: a psp-mode run end to end.** The first measurement of the plan is the
+timing of `call-from-psps` — decode, merge, calling, as shares of wall — at one, sixteen and
+sixty-three samples, before and after the two-phase source. That number gates everything
+structural: per-sample cover parallelism, overlap of cover with building, and the rest of
+[`../research/cohort_merge_parallel_cost_plan.md`](../research/cohort_merge_parallel_cost_plan.md)'s
+psp half fold into this work **only if the share of a run they could recover says so**, and
+[`run_streaming.md`](run_streaming.md) §11 question 7 is where the conclusion is owed either
+way.
+
+## 6. Degradation at the edges
+
+- **One sample.** The two-phase read stands on its own: the fold is one sample's summaries and
+  the keep rule is unchanged at k = 1 ([`cohort_merge.md`](cohort_merge.md) §7.2). What is
+  saved is the same 2× walk; what is retained is one sample's window.
+- **Three thousand samples.** Retained bytes scale as `samples × window`, the same product the
+  built cache already pays with a larger per-record constant; open readers are
+  `samples × 123 kB` once the contig list is shared (against 480 kB before —
+  [`psp_file_format.md`](psp_file_format.md) §5.2). The plan reports peak resident beside wall
+  at the sweep's top end.
+- **Three reads a position.** The skip's best corner: bodies dominate records, one in a
+  hundred is built.
+- **Three hundred reads.** The skip's worst corner, twice over: the head is most of the record,
+  and error alone clears the keep rule's floor at about 4 positions in 100 so more loci reach
+  assembly. The design degrades to what the decode-everything source already is, plus a small
+  head-walk overhead — it cannot be slower than today's path by more than that walk, which is
+  0.027 s per 7.69 M records.
+
+## 7. Cross-cutting concerns
+
+**Errors.** Two new refusals, both naming the sample: a backwards build ask (§3.2), and a build
+ask for ground already evicted — both are merge bugs surfacing, not file damage, and say so.
+File damage keeps its existing shapes (the bounded body decode, the head-body checks).
+
+**Concurrency.** Unchanged: one reader per sample, drawn by the organiser; builders read, never
+draw. Nothing here adds a lock, and the source stays single-threaded per sample so that the
+gated cover-parallelism work (§5), if it comes, parallelises *across* samples.
+
+**Memory.** §3.3's formula, measured in the plan with the dhat probes that already exist
+([`examples/dhat_psp_reader.rs`](../../../../examples/dhat_psp_reader.rs)).
+
+## 8. Reuse map
+
+| what | existing code | how it is reused |
+|---|---|---|
+| the head walk and the skip | `RecordIter`, `building_only_where` ([`walk.rs:168,215`](../../../../src/ng/psp/walk.rs)) | the summary cursor is the head walk; the build cursor is the selective walk's stepping over retained bytes |
+| the bounded body build | `decode_the_body_of` ([`record.rs:1984`](../../../../src/ng/psp/record.rs)) | called once per built record, unchanged |
+| the verdict's numbers | `non_reference_and_compared_reads` → `reached_by` ([`close.rs:665,713`](../../../../src/ng/run/cohort_merge/close.rs)) | the summary carries the same pair; the verdict code does not change |
+| the source seam and its errors | `PspObservationSource`, `PspSourceError` ([`psp_source.rs`](../../../../src/ng/run/psp_source.rs)) | upgraded in place; the decode-everything form survives as the record-equality oracle |
+| cover / evict rhythm | `ObservationCache` ([`observation_cache.rs:113`](../../../../src/ng/run/cohort_merge/observation_cache.rs)) | the retained window advances and drains on the same calls |
+| the mode-equivalence oracle | `run_driver_psp_mode.md` F2 | rerun green after every milestone — the definition of "moves no byte" |
+
+## 9. Deferred, with a recommended home
+
+- **Parallelising the psp path's cover or decode** — gated on §5's timing; its conclusion is
+  owed to [`run_streaming.md`](run_streaming.md) §11 question 7, and if built it is its own
+  plan.
+- **Dropping the record's stored reference bases and re-fetching from the run's reference**
+  ([`run_streaming.md`](run_streaming.md) §11 question 4) — untimed leaning, untouched here;
+  builds get rarer under this design, which moves that trade and is worth saying when it is
+  finally timed.
+- **The callers-in-flight default** — [`run_streaming.md`](run_streaming.md) §11 question 2's
+  open half, unchanged by this work.
+
+## 10. Open questions
+
+1. **The retained window's storage shape** — §3.4, the implementer's, leaning stated.
+2. **Is the spare offer worth taking?** — §4; settled by the allocator share in the plan's
+   before/after profile, not by argument.
+3. **Does anything structural get built for scaling?** — §5; settled by the end-to-end shares,
+   answered into [`run_streaming.md`](run_streaming.md) §11 question 7.
