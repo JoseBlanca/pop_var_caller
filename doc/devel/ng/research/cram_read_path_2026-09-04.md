@@ -7,8 +7,8 @@ modifying noodles make it faster, and could requiring sorted files and reading t
 sequentially cut the memory?
 
 **Answer in one line.** Three changes, all measured and all leaving every decoded read
-byte-identical, take the CRAM read path from 0.847 s to 0.454 s per 600,000 whole-genome
-reads — **1.87×** — and take a whole calling run from about 79 s to about 59 s — **1.29× to 1.36×** across two
+byte-identical, take the CRAM read path from 0.847 s to 0.403 s per 600,000 whole-genome
+reads — **2.10×** — and take a whole calling run from about 79 s to about 59 s — **1.29× to 1.36×** across two
 alternated pairs. A fourth,
 built and verified but not yet wired into ng, cuts what the decode holds resident by
 **6.4×**: 198 MB to 31 MB on a tomato chromosome, 493 MB to 77 MB on a human one. None of
@@ -85,10 +85,10 @@ fixtures are not a small version of the real input, they are a different workloa
 | layer | stock noodles | with §4 | with §4–5 | with §4–5 and §5a |
 |---|---:|---:|---:|---:|
 | pull the bytes off disk | 0.001 | 0.001 | 0.001 | 0.001 |
-| inflate the blocks | 0.346 | **0.266** | 0.266 | 0.266 |
+| inflate the blocks | 0.346 | **0.227** | 0.227 | 0.227 |
 | decode the records | 0.145 | 0.144 | 0.144 | **0.049** |
-| build ng's read from each record | 0.355 | 0.355 | **0.139** | 0.139 |
-| **total** | **0.847** | **0.767** | **0.551** | **0.454** |
+| build ng's read from each record | 0.355 | 0.355 | **0.126** | 0.126 |
+| **total** | **0.847** | **0.727** | **0.498** | **0.403** |
 
 Reading bytes off disk is 1 part in 800. Two things are large and they are roughly equal:
 **inflating the compressed blocks (41 %)** and **turning a decoded record into ng's own read
@@ -103,40 +103,55 @@ half of it.
 
 ---
 
-## 4. noodles builds a megabyte of lookup table for every order-1 rANS block, mostly for
-symbols that never occur
+## 4. rANS spends more time building its lookup tables than decoding with them
 
-**What the codecs cost.** Instrumenting the vendored copy's block decode, over the same 60
-containers:
+**What the codecs cost.** Instrumenting the vendored copy's block decode, over 60 containers
+of the whole-genome CRAM:
 
 | compression method | blocks | compressed | inflated | seconds |
 |---|---:|---:|---:|---:|
 | none | 374 | 0.0 MB | 0.0 MB | 0.000 |
 | gzip | 529 | 7.0 MB | 35.5 MB | 0.030 |
-| **rANS 4x8** | **1,351** | **17.3 MB** | **74.5 MB** | **0.323** |
+| **rANS 4x8** | **1,351** | **17.3 MB** | **74.5 MB** | **0.347** |
 
-**rANS is 91 % of decompression, and it inflates at 231 MB/s where gzip does 1,183 MB/s** —
-one fifth the throughput of the general-purpose codec beside it, on the same file. gzip here
-is `flate2` on the `zlib-rs` backend; rANS is noodles' own Rust.
+**rANS is 91 % of decompression, and it inflated at 215 MB/s where the gzip beside it in the
+same file did 1,183 MB/s** — one fifth the throughput of the general-purpose codec, on the
+same data. gzip here is `flate2` on the `zlib-rs` backend; rANS is noodles' own Rust.
 
-**Where that goes.** Splitting the rANS time into building the decode tables and decoding
-symbols: 1,051 of the blocks are order-0 over 10.1 MB, 300 are order-1 over 64.5 MB, and
-**table building is 0.161 s of the 0.397 s** — 41 % of the codec, before a symbol is decoded.
+**And nearly half of it was setting up.** Splitting the rANS time by phase: 1,051 of the blocks
+are order-0 over 10.1 MB, 300 are order-1 over 64.5 MB, and **building the decode tables was
+0.161 s of the codec's 0.347 s**, before a symbol was decoded.
 
-The order-1 model keys on the previous symbol, so it declares 256 contexts and
-`build_cumulative_frequencies_symbols_table` fills a 4,096-entry lookup for every one of them:
-a megabyte of table per block. A block of DNA bases uses about five of those contexts and a
-block of quality scores a few dozen; the rest have an all-zero frequency row that no state can
-ever land in.
+Decoding a byte needs three numbers keyed on the same slot of the same context — which symbol
+owns the slot, that symbol's frequency, and where its range starts — and they lived in three
+separate arrays, each built over all 256 contexts the order-1 model can declare. A block of
+DNA bases uses about five of those contexts and a block of quality scores a few dozen; the
+rest have an all-zero frequency row that no state can reach, because the decoder indexes
+context *i* only after emitting symbol *i*.
 
-**The change is to skip them** — `noodles-cram/src/codecs/rans_4x8/decode/order_1.rs`, about
-fifteen lines. A row is skipped only when every frequency in it is zero, and the decoder
-indexes row *i* only after emitting symbol *i*, which requires a non-zero frequency for *i*
-somewhere; so a decoder reaching a skipped row would already have decoded a symbol the
-frequency table says cannot occur.
+The three arrays are now one 32-bit word per slot — range start, frequency less one, symbol —
+and only the used contexts get a table:
 
-**Measured: block inflation 0.346 s → 0.266 s, −23 %; the whole read path −9.4 %.** All 218 of
-noodles-cram's own tests pass, and the record digest is unchanged.
+| | building the tables | decoding the symbols | block inflation, all codecs |
+|---|---:|---:|---:|
+| before | 0.161 s | 0.196 s | 0.347 s |
+| after | **0.015 s** | 0.183 s | **0.227 s** |
+
+**Almost all of it is the table building, and that is worth saying plainly**, because the
+lookup-table shape is what it looks like and is not what paid. Three attempts at the decode
+loop each moved it by 2 % or less: the packed lookup itself (0.196 → 0.186 s), removing the
+inner bounds check by giving each context a fixed-size row (0.186 s, unmoved), and
+renormalising without an `io::Result` per byte (0.186 → 0.183 s, reverted for earning
+nothing). At 352 MB/s the loop is bound by its dependency chain — each byte's table row is
+chosen by the byte before it — and CRAM 3.0's four interleaved states are all the parallelism
+the format offers. **Anyone taking the remaining 0.183 s should know three of the obvious
+moves are already spent.**
+
+The frequency is stored less one because it does not otherwise fit. Frequencies are normalised
+to sum to 4,096, so a context holding one symbol gives it a frequency of 4,096 — thirteen bits.
+Its range then starts at zero and every other frequency is at most 4,095, so subtracting one
+makes all three fields fit in exactly 32 bits with nothing spare. That context has its own
+test, being the one the arithmetic is tight for.
 
 **What this does not cover.** These files are CRAM 3.0, so only gzip and rANS 4x8 appear.
 CRAM 3.1 files — `samtools --output-fmt-option version=3.1` — use rANS Nx16, fqzcomp and the
@@ -304,33 +319,51 @@ that does not require the guarantee.
 - **Merely discarding the decoded tag values** rather than not reading them: 3.4 %, against
   20 % for not reading them — §5a.
 
-## 9. What is next, in the order it pays
+## 9. What is next — and it is mostly not CRAM any more
 
-1. **Wire ng to the windowed reference** — §7. The noodles half is built and verified; the ng
+**The premise this note started from no longer holds.** A sampling profile of the current
+build on the whole-genome run (one sample, 10 Mb of chromosome 1, one thread, 35 s of
+sampling, parked threads excluded from the 28,293 busy samples):
+
+| | share of busy CPU |
+|---|---:|
+| building each position's pile of observations (`PileupGenerator::next_locus`) | **32.2 %** |
+| a `u64` sort sitting directly under it | 7.9 % |
+| CRAM block decompression | **17.1 %** |
+| stepping the read cursor | 7.0 % |
+| classifying repeat tracts | 5.9 % |
+| `memmove` | 3.9 % |
+| gzip inside the CRAM | 1.8 % |
+| turning a slice's blocks into records | 1.4 % |
+
+CRAM reading was about a third of a serial run and is now roughly a fifth. **The largest
+single thing in the run is locus generation at 32 %, and with the sort beneath it about 40 %**,
+and none of it is noodles.
+
+In order of what it pays:
+
+1. **Locus generation.** ng's own hot loop, and the largest item left. The 2026-09-02 review
+   already has three unapplied candidates in it — a per-observation vector that grows one push
+   at a time, a one-byte heap allocation per position, and a sort on a witness that is one run
+   in every DNA-seq observation, which is probably the 7.9 % above. It needs its own profile at
+   cohort scale first: everything in the table is a *single-sample* run, and that is the number
+   least likely to survive at 63 samples.
+2. **Wire ng to the windowed reference** — §7. The noodles half is built and verified; the ng
    half is one sliding window shared by the cohort in place of a `Repository`, which is a
    design change in `read/input/reference.rs`. Worth 167 MB on a tomato chromosome and 416 MB
    on a human one, fixed per run.
-2. **rANS symbol decoding is now the largest single item left** — 0.196 s of the 0.454 s the
-   read path costs, 43 %. A sampling profile of the harness puts `Block::decode_inner` at 8,815
-   self-samples of 25 seconds, four times the next leaf. What was *not* tried is making the
-   inner loop cheaper: it does three table lookups a byte (symbol, frequency, cumulative
-   frequency) where htslib packs all three into one word, and it renormalises a byte at a time
-   through an `io::Result`. Both are plausible and neither is measured, so neither is a
-   finding yet.
 3. **Re-measure everything on a CRAM 3.1 file before ever claiming it applies there** — §4.
 
-**What was measured and left alone.** After the tag skip, `RandomState::hash_one` was the
-third-largest leaf in the profile at 1,013 samples — noodles keys tag content ids and its
-external data readers in `HashMap`s with the default SipHash. Most of that is gone for a
-caller that skips tags, which is why it is recorded rather than pursued.
+**What is finished rather than merely small.** Reading bytes off disk (1 part in 800), the
+per-slice reference digest (1 part in 1,000 on a real file), the auxiliary tags (gone), and
+the rANS decode loop, whose three obvious moves are spent for under 2 % each (§4). The
+remaining 0.183 s of rANS symbol decoding is bound by a dependency chain the format fixes, and
+would need a different approach than the ones tried here.
 
-**The fork is the open question and it is the owner's.** §4 is a change to noodles that should
-go upstream: it is a clear defect, it is fifteen lines, and it needs no new API. §5, §5a and
-§7's decode are not — each adds an interface noodles has no other caller for, so they either
-live in a fork this project carries and rebases at every noodles bump, or they are proposed
-upstream and wait. All of them live in `vendor/noodles-cram`, pinned by a `[patch.crates-io]`
-entry against the same 0.93.0 the manifest already names, and `FORK.md` beside them lists
-every one with what it costs and whether it belongs upstream.
+**One thing measured and deliberately left.** After the tag skip, `RandomState::hash_one` was
+the third-largest leaf in an earlier profile at 1,013 samples — noodles keys tag content ids
+and its external data readers in `HashMap`s with the default SipHash. Most of that is gone for
+a caller that skips tags, which is why it is recorded rather than pursued.
 
 ---
 
@@ -343,7 +376,8 @@ noodles can be judged — and if the owner decides so, offered upstream — one 
 |---|---|---|
 | `build(ng): vendor noodles-cram 0.93.0 unchanged` | the copy, byte for byte the registry's, and `[patch.crates-io]` pointing the build at it. `vendor/noodles-cram/FORK.md` is the list of what this copy has that crates.io does not, checkable with one `diff -r`. | — |
 | `test(ng): a harness that times the CRAM read path layer by layer` | `examples/ng_cram_decode_layers.rs`, and the per-codec counters behind the `cram-perf-counters` feature. | no — an instrument |
-| `perf(cram): rANS builds a megabyte of lookup table per block…` | §4. | **yes** — a defect, no API change |
+| `perf(cram): rANS builds a megabyte of lookup table per block…` | §4, first half. | **yes** — no API change |
+| `perf(cram): rANS keeps one packed lookup per used context…` | §4, and it subsumes the commit above. | **yes** — no API change |
 | `perf(cram): read a decoded record's fields into the caller's buffers…` | §5's noodles half. | not as it stands — a new API with one caller |
 | `perf(ng): a CRAM record goes straight into the container's buffers` | §5's ng half. | — |
 | `perf(cram): a caller that reads no auxiliary tags need not decode them…` | §5a's noodles half, with the check that says when it is safe. | not as it stands |
