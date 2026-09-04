@@ -301,7 +301,7 @@ loop").
 
 ### Milestone E — `PspVariantCaller`
 
-**E1. ☐ Open the cohort: every header, every refusal, before any block.**
+**E1. ✅ Open the cohort: every header, every refusal, before any block.**
 `PspVariantCaller::open` (arch §3.4): read every header; refuse per §6.2 — analysed regions
 equal across the cohort (`AnalysedRegionsDiffer`, new variant), segmentation inputs match
 the run's (`SegmentationInputsDiffer`, new variant, via `first_difference`), two files

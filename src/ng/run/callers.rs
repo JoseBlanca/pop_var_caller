@@ -1613,7 +1613,7 @@ fn refuse_an_empty_cohort(per_sample: &[SampleReadGroups]) -> Result<(), RunErro
 /// order. A supplied file's names are matched against the run's at that file's own door. What is
 /// left, and what nothing else prevents, is parameters assembled for one cohort handed to a
 /// caller opened over another.
-fn refuse_parameters_assembled_for_another_cohort(
+pub(super) fn refuse_parameters_assembled_for_another_cohort(
     parameters: &RunParameters,
     read_groups: &ReadGroups,
 ) -> Result<(), RunError> {
@@ -1681,7 +1681,7 @@ const DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES: u64 = 2;
 /// ([`call_cohort_handing_each_record_over`](AlignedFilesVariantCaller::call_cohort_handing_each_record_over))
 /// — **nine** — plus 23 of slack for whatever the runtime holds open on its own. The constant
 /// did not move; what the ninth spent is slack.
-const DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES: u64 = 32;
+pub(super) const DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES: u64 = 32;
 
 /// A run that would run out of file descriptors refuses now, naming the arithmetic.
 ///
@@ -1752,7 +1752,7 @@ fn descriptors_needed_for(alignment_files: usize, samples: usize) -> u64 {
 /// **What it prevents is silent and genome-wide.** A catalog built on another build of the same
 /// assembly puts every repeat tract at the wrong position, and every segment this run walks is
 /// drawn from it.
-fn refuse_a_catalog_built_on_another_reference(
+pub(super) fn refuse_a_catalog_built_on_another_reference(
     segmentation: &Segmentation,
     with_checksums: &ReferenceInfo,
     reference_path: &std::path::Path,
@@ -1779,7 +1779,7 @@ fn refuse_a_catalog_built_on_another_reference(
 /// release, so two genuinely different genomes would pair a file's chromosome against something
 /// else's, blaming the wrong contig or missing a real mismatch past the end of the shorter
 /// list.
-fn refuse_two_references_that_are_not_one(
+pub(super) fn refuse_two_references_that_are_not_one(
     opened_against: &ReferenceInfo,
     with_checksums: &ReferenceInfo,
 ) -> Result<(), RunError> {
@@ -1815,7 +1815,7 @@ fn refuse_two_references_that_are_not_one(
 
 /// What a refusal names when the reference has checksums but no path to point at — unreachable
 /// while checksums only come from reading a FASTA, and readable rather than blank if it ever is.
-const A_REFERENCE_WITH_NO_PATH: &str = "(a reference read from its index alone)";
+pub(super) const A_REFERENCE_WITH_NO_PATH: &str = "(a reference read from its index alone)";
 
 /// Compare every sample's contig checksums against the reference's.
 ///

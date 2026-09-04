@@ -377,6 +377,71 @@ pub struct ReadGroups {
 }
 
 impl ReadGroups {
+    /// A table assembled from tables that were built elsewhere — psp mode's, where each
+    /// sample's read groups were numbered by its own walk and are renumbered run-wide here
+    /// (`doc/devel/ng/spec/run_streaming.md` §6.2).
+    ///
+    /// **Not a second way to build a run's table**, and the difference matters: the ordinary
+    /// one reads alignment headers and *decides* what the samples are, minting every
+    /// identifier itself. This takes read groups that already carry their sample and their
+    /// library and only puts them in one numbering, which is why it does no header reading and
+    /// runs no synthesized-library collision check — a psp's library names were resolved by
+    /// the walk that wrote it, and that walk ran the check.
+    ///
+    /// # Panics
+    ///
+    /// If the two views disagree: every identifier in `per_sample` must index `read_groups`,
+    /// every read group must appear under exactly one sample, **and the sample claiming a read
+    /// group must be the sample that read group names**. They are two views of one set (arch
+    /// §1.2), and a caller that builds them separately can make them disagree — which would put
+    /// one sample's reads under another sample's name with nothing failing.
+    ///
+    /// **The third clause is the one the first two do not imply**, and it is the one the
+    /// symptom above actually describes: a table where alpha's entry claims beta's read group
+    /// has every identifier in range and every group claimed exactly once.
+    pub(crate) fn of_merged_tables(
+        read_groups: Vec<ReadGroup>,
+        per_sample: Vec<SampleReadGroups>,
+    ) -> Self {
+        let mut claimed = vec![false; read_groups.len()];
+        for sample in &per_sample {
+            for id in &sample.read_groups {
+                let at = id.get() as usize;
+                let slot = claimed.get_mut(at).unwrap_or_else(|| {
+                    panic!(
+                        "sample {} claims read group {at}, and the table holds {}. This is a \
+                         defect in ng rather than anything about the data.",
+                        sample.sample,
+                        read_groups.len(),
+                    )
+                });
+                assert!(
+                    !*slot,
+                    "read group {at} is claimed by more than one sample, so one sample's reads \
+                     would be reported under another's name. This is a defect in ng rather \
+                     than anything about the data."
+                );
+                assert_eq!(
+                    read_groups[at].sample, sample.sample,
+                    "read group {at} is {}'s in the table and {}'s in the by-sample view, so \
+                     one sample's reads would be reported under another's name. This is a \
+                     defect in ng rather than anything about the data.",
+                    read_groups[at].sample, sample.sample,
+                );
+                *slot = true;
+            }
+        }
+        assert!(
+            claimed.iter().all(|claimed| *claimed),
+            "some read groups belong to no sample, so their reads would reach no sample's \
+             calls. This is a defect in ng rather than anything about the data."
+        );
+        Self {
+            read_groups,
+            per_sample,
+        }
+    }
+
     /// One read group, by its identifier. Panics on an id this table never
     /// minted — the out-of-range check the unconstrained newtype defers to its
     /// lookup.
@@ -752,6 +817,111 @@ mod tests {
 
     fn path() -> PathBuf {
         PathBuf::from("/data/project/SRR1.cram")
+    }
+
+    // --- assembling a table from tables built elsewhere (psp mode's, spec §6.2) ---
+
+    /// One read group belonging to `sample`, named `id`. **The library is declared**, so
+    /// nothing here trips the synthesized-name collision rule.
+    fn a_read_group(sample: &str, id: &str) -> ReadGroup {
+        let library = NameWithOrigin {
+            value: format!("{sample}-lib").into_boxed_str(),
+            origin: NameOrigin::Declared,
+        };
+        ReadGroup {
+            file: std::sync::Arc::from(path().as_path()),
+            id: id.into(),
+            sample: sample.into(),
+            experiment: library.clone(),
+            library,
+            platform: None,
+        }
+    }
+
+    /// The ordinary case: two samples, one read group each, the two views agreeing.
+    #[test]
+    fn of_merged_tables_keeps_both_views_of_the_read_groups_it_is_given() {
+        let table = ReadGroups::of_merged_tables(
+            vec![a_read_group("alpha", "L1"), a_read_group("beta", "L1")],
+            vec![
+                SampleReadGroups {
+                    sample: "alpha".into(),
+                    read_groups: vec![ReadGroupId(0)],
+                },
+                SampleReadGroups {
+                    sample: "beta".into(),
+                    read_groups: vec![ReadGroupId(1)],
+                },
+            ],
+        );
+        assert_eq!(table.len(), 2);
+        assert_eq!(&*table.get(ReadGroupId(1)).sample, "beta");
+        assert_eq!(table.read_groups_per_sample().len(), 2);
+    }
+
+    /// **The guard's third clause, and the one the first two do not imply.** Every identifier
+    /// is in range and every group is claimed exactly once — and alpha's entry claims beta's
+    /// read group, which is exactly the symptom the panic message names.
+    #[test]
+    #[should_panic(expected = "is beta's in the table and alpha's in the by-sample view")]
+    fn of_merged_tables_refuses_a_sample_claiming_another_samples_read_group() {
+        let _ = ReadGroups::of_merged_tables(
+            vec![a_read_group("alpha", "L1"), a_read_group("beta", "L1")],
+            vec![
+                SampleReadGroups {
+                    sample: "alpha".into(),
+                    read_groups: vec![ReadGroupId(1)],
+                },
+                SampleReadGroups {
+                    sample: "beta".into(),
+                    read_groups: vec![ReadGroupId(0)],
+                },
+            ],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "claims read group 4, and the table holds 1")]
+    fn of_merged_tables_refuses_an_identifier_the_table_does_not_hold() {
+        let _ = ReadGroups::of_merged_tables(
+            vec![a_read_group("alpha", "L1")],
+            vec![SampleReadGroups {
+                sample: "alpha".into(),
+                read_groups: vec![ReadGroupId(4)],
+            }],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "claimed by more than one sample")]
+    fn of_merged_tables_refuses_two_samples_claiming_one_read_group() {
+        let _ = ReadGroups::of_merged_tables(
+            vec![a_read_group("alpha", "L1")],
+            vec![
+                SampleReadGroups {
+                    sample: "alpha".into(),
+                    read_groups: vec![ReadGroupId(0)],
+                },
+                SampleReadGroups {
+                    sample: "alpha".into(),
+                    read_groups: vec![ReadGroupId(0)],
+                },
+            ],
+        );
+    }
+
+    /// A read group nothing claims would reach no sample's calls, so its reads would be read
+    /// and then dropped.
+    #[test]
+    #[should_panic(expected = "belong to no sample")]
+    fn of_merged_tables_refuses_a_read_group_no_sample_claims() {
+        let _ = ReadGroups::of_merged_tables(
+            vec![a_read_group("alpha", "L1"), a_read_group("beta", "L1")],
+            vec![SampleReadGroups {
+                sample: "alpha".into(),
+                read_groups: vec![ReadGroupId(0)],
+            }],
+        );
     }
 
     // --- reading one header's @RG records (A4) ---

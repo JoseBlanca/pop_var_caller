@@ -52,7 +52,13 @@ src/ng/run/
 ├── segments.rs    – Segmentation + SegmentationInputs: the run's segments and what they
 │                    were computed from
 ├── walker.rs      – one sample's alignment files behind the merge's source trait
-├── callers.rs     – AlignedFilesVariantCaller, and later PspVariantCaller
+├── callers.rs     – AlignedFilesVariantCaller, and the calling loop both modes drive
+│                    (call_cohort_from_sources_handing_each_record_over, lifted 2026-09-04)
+├── psp_caller.rs  – OpenPspCohort + PspVariantCaller: psp mode's calling stage.
+│                    ⛦ **A file of its own rather than callers.rs**, where this document
+│                    said it would go (landed 2026-09-04, plan step E1). Recorded rather
+│                    than quietly changed: callers.rs was 6,559 lines by then, and every
+│                    other run object in this module already has its own file.
 ├── records.rs     – what a record needs that the called locus does not carry: the per-sample
 │                    and per-allele counts read off the merge's observation, the artifact
 │                    correction, the padding base, and the rule that decides which loci reach
@@ -545,6 +551,17 @@ impl AlignedFilesVariantCaller {
 /// psp mode's calling stage (spec §5.3). `open` reads every header and runs both checks of
 /// spec §6.2 before any block is decoded; the analysed regions come from the headers, and the
 /// segmentation is rebuilt from the catalog and routing criteria the run was handed.
+///
+/// **⛦ Built 2026-09-04 (step E1) as two objects, not one, and the sketch below is what
+/// changed.** Opening a cohort cannot both read the headers and rebuild the segmentation from
+/// the catalog: the one copy of the ground assembly — `run_ground::segments_over`, which
+/// `call-from-alignments` and `generate-psps` share — lives in the command module, and a
+/// pipeline stage reaching down for the commands that drive it inverts the dependency
+/// direction. So `OpenPspCohort::open(&[PathBuf])` reads every header and runs §6.2's
+/// *cohort* checks (the ground the files agree on, one individual per file, a mergeable
+/// read-group table), its caller builds the segmentation over that ground with the shared
+/// assembly, and `PspVariantCaller::open` runs §6.2's *file-against-run* checks. Keeping one
+/// copy of the ground assembly is what makes the second set of checks mean anything.
 pub struct PspVariantCaller { /* open psps, segmentation, params, pool */ }
 
 impl PspVariantCaller {
@@ -874,9 +891,21 @@ pub enum RunError {
     /// individual twice and weight the allele frequencies by it (spec §6.2).
     #[error("sample {sample} appears twice: {first} and {second}")]
     SampleAppearsTwice { sample: String, first: PathBuf, second: PathBuf },
-    /// A psp ended without a valid trailer: an interrupted walk, not a short sample (spec §9).
+    /// **⛦ Replaced at E1 by `PspNotRead { path, source: Box<PspReadError> }`.** A psp's
+    /// sample name lives in its header, and a reader reaches the header third — footer, then
+    /// index, then header — so a file whose footer will not parse has no name to be reported
+    /// under. The interrupted case is not lost: it arrives as `PspReadError::Incomplete`
+    /// under `#[source]`, rendering *"the writer did not finish"*, which is what tells an
+    /// interrupted walk from a damaged file.
     #[error("psp for sample {sample} is incomplete")]
     IncompletePsp { sample: String },
+    /// **Three more landed at E1** beside the replacement above, each implementing a clause of
+    /// spec §6.2 this list did not spell: `NoPsps` (an empty cohort, `NoAlignmentFiles`' sibling);
+    /// `PspAgainstAnotherReference { sample, difference }` (a file whose contig table is not
+    /// the run's, which would put every observation on the wrong chromosome — named apart
+    /// from `SampleAlignedToAnotherReference`, which says the narrower thing that only the
+    /// *bases* differ); and `PspReadGroupsCannotBeMerged { sample, problem }` (§6.2's "what
+    /// is refused is a table that cannot be merged").
     #[error("i/o while reading or writing a run's files")]
     Io(#[from] std::io::Error),
 }

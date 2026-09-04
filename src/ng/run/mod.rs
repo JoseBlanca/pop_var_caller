@@ -31,6 +31,7 @@
 pub mod callers;
 pub mod cohort_merge;
 pub mod gatherer;
+pub mod psp_caller;
 pub mod psp_source;
 pub mod records;
 pub mod report;
@@ -44,6 +45,7 @@ pub use callers::{
     CohortWalkTallies, MergeParameters, SampleWalkTallies, WrittenCohort,
 };
 pub use gatherer::{SampleObservationGatherer, SampleWalkInputs};
+pub use psp_caller::{OpenPspCohort, PspVariantCaller, StoredCohortInputs};
 pub use psp_source::{PspObservationSource, PspSourceError};
 pub use report::RunReport;
 pub use segments::{Segmentation, SegmentationInputs};
@@ -411,6 +413,162 @@ pub enum RunError {
         /// What the store refused.
         #[source]
         source: Box<crate::ng::psp::PspWriteError>,
+    },
+
+    // ---------------------------------------------------------------------
+    // psp mode's calling stage: what a cohort of stored files can be wrong about
+    // (spec `run_streaming.md` §6.2)
+    // ---------------------------------------------------------------------
+    /// The run was given no psps, so it has no cohort to call.
+    ///
+    /// **[`NoAlignmentFiles`](Self::NoAlignmentFiles)'s sibling, not a reuse of it**: the two
+    /// name different arguments, and a run told to look in a directory of psps that held none
+    /// must be told about psps. The reason for refusing rather than writing an empty file is
+    /// the same — assembling the parameters for a cohort of none panics inside the pre-pass.
+    #[error(
+        "this run was given no psps, so it has no samples to call; check the paths or the \
+         directory it was given"
+    )]
+    NoPsps,
+
+    /// One of the run's psps could not be read.
+    ///
+    /// **The path and not the sample**, and that is forced rather than chosen: a psp's sample
+    /// name lives in its header, and a reader reaches the header third — footer, then index,
+    /// then header, the order the layout forces — so a file that was cut short, or whose
+    /// footer will not parse, has no name to be reported under. What went wrong comes from the cause, which tells an interrupted walk
+    /// (`the writer did not finish`) apart from a damaged one.
+    #[error("the psp at {} could not be read", path.display())]
+    PspNotRead {
+        /// The file that would not read.
+        path: PathBuf,
+        /// What the store refused.
+        #[source]
+        source: Box<crate::ng::psp::PspReadError>,
+    },
+
+    /// Two psps name the same sample.
+    ///
+    /// Either a duplicated argument, or a cohort that would call one individual twice and
+    /// weight every allele frequency by it (spec §6.2).
+    #[error(
+        "sample {sample} appears twice, in {} and {}; a cohort holds each individual once, so \
+         drop one of the two",
+        first.display(),
+        second.display()
+    )]
+    SampleAppearsTwice {
+        /// The individual named by both files.
+        sample: String,
+        /// The first psp naming it.
+        first: PathBuf,
+        /// The second.
+        second: PathBuf,
+    },
+
+    /// Two of the run's psps were walked over different ground.
+    ///
+    /// **The one cohort-wide check, and the one mismatch that would produce a wrong answer**
+    /// rather than a missing one (spec §6.2). A sample has no records over ground it never
+    /// looked at, and that absence is indistinguishable from *no variant here* — so a cohort
+    /// mixing two grounds would call the ground only one sample walked and read the other's
+    /// silence as homozygous reference.
+    ///
+    /// Whether the shared ground could be called instead of refusing is spec §11's question 5.
+    #[error(
+        "samples {left} and {right} were walked over different ground, so they cannot be \
+         called as one cohort; re-walk one of them over the other's regions, or call each over \
+         the ground it has"
+    )]
+    AnalysedRegionsDiffer {
+        /// The sample whose ground the run took as the cohort's.
+        left: String,
+        /// The first sample whose ground differed from it.
+        right: String,
+    },
+
+    /// A psp was written under a different segmentation from the one this run loops over.
+    ///
+    /// **Why this is not pedantry**: the observations in a psp were minted inside the segments
+    /// of the walking run's segmentation, and *no observation crosses a segment's edge*
+    /// (spec §4.3) is true only while the two segmentations are the same. Under a different
+    /// catalog or different repeat-tract criteria, a stored repeat-tract observation can
+    /// straddle a calling segment's edge, and the independence the calling loop rests on is
+    /// gone.
+    ///
+    /// `field` is [`SegmentationInputs::first_difference`]'s answer, written to read inside
+    /// this sentence.
+    #[error(
+        "the psp for sample {sample} was written under a different {field} from this run's; \
+         call it with the catalog and repeat-tract settings it was walked with, or walk it \
+         again with this run's"
+    )]
+    SegmentationInputsDiffer {
+        /// The sample whose file disagrees with the run.
+        sample: String,
+        /// The first field of the segmentation's inputs that differs.
+        field: &'static str,
+    },
+
+    /// A psp's coordinate space is not the run's reference's.
+    ///
+    /// **Every record in a psp is written against the contig table its header carries**, in
+    /// that order — `ContigId(i)` *is* `contigs[i]` — so a file whose table is not this run's
+    /// puts every one of its observations on the wrong chromosome. `difference` names the
+    /// first contig that disagrees and how, because a run over a whole genome cannot be
+    /// checked by hand.
+    ///
+    /// **Named apart from [`SampleAlignedToAnotherReference`](Self::SampleAlignedToAnotherReference)**,
+    /// which is direct mode's and says something narrower: there the file's contigs are known
+    /// to be the reference's and only the *bases* differ. Here the table itself may differ.
+    #[error(
+        "the psp for sample {sample} was written against a different reference from this \
+         run's: {difference}"
+    )]
+    PspAgainstAnotherReference {
+        /// The sample whose file disagrees.
+        sample: String,
+        /// The first contig that differs, and how.
+        difference: String,
+    },
+
+    /// A run over stored files needs more open files than this process is allowed.
+    ///
+    /// **Named at construction rather than met as `EMFILE` at the two-hundred-and-fiftieth
+    /// psp**, which is where a macOS default limit lands and where the operating system's own
+    /// message would blame whichever file happened to be next (spec §7.1a). The arithmetic is
+    /// stated because it is what the operator is being asked to act on, and it is simpler than
+    /// direct mode's: a psp costs one descriptor, held for the whole run.
+    #[error(
+        "this run needs {needed} open files for its {samples} psps and this process may open \
+         {limit}: one descriptor a psp, held open for the whole run, and {allowance} for the \
+         reference, the repeat catalog and the output. \
+         Raise the limit with: ulimit -n {needed}, or call fewer samples at once"
+    )]
+    NotEnoughFileDescriptorsForPsps {
+        /// How many psps the run was given — one per individual.
+        samples: usize,
+        /// Descriptors the run needs besides its psps.
+        allowance: u64,
+        /// The two above, combined.
+        needed: u64,
+        /// What this process may open — the soft `RLIMIT_NOFILE`.
+        limit: u64,
+    },
+
+    /// A psp's read-group table cannot be renumbered into the run's.
+    ///
+    /// **Tables are merged, not compared** (spec §6.2): every psp numbers its own read groups
+    /// from zero, so identifiers colliding across files is the normal case. What cannot be
+    /// merged is a table that does not identify its own groups at all.
+    #[error(
+        "the read groups of sample {sample}'s psp cannot be renumbered into this run's: {problem}"
+    )]
+    PspReadGroupsCannotBeMerged {
+        /// The sample whose table will not merge.
+        sample: String,
+        /// What is wrong with it, as a clause that reads inside the sentence.
+        problem: String,
     },
 }
 

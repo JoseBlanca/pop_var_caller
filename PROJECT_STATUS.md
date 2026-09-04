@@ -19,7 +19,27 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-04):** **psp-mode Milestone D is complete — two sources, one
+> - **Last completed task (2026-09-04):** **psp mode's calling stage opens its cohort and
+> refuses one it cannot call** (branch `ng-psp-mode`, plan step E1;
+> [report](doc/devel/reports/implementations/ng_psp_mode_e1_2026-09-04.md),
+> [review](doc/devel/reports/reviews/ng_psp_mode_e1_2026-09-04.md),
+> [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-04_v3.md)). Every psp is opened, every
+> header read, and every refusal spec §6.2 asks for is made before a block is decoded — the
+> ground the files agree they were walked over (read out of the headers, not asked for), one
+> individual per file, one run-wide read-group numbering merged from the files' own, and each
+> file checked against the run's segmentation and reference. The review's most valuable findings
+> were checks that were *missing*: the file-descriptor refusal spec §7.1a names, direct mode's
+> catalog-against-reference refusal, and the psp header's own whole-assembly digest — the
+> field's one documented consumer, which nothing was consuming. It also caught tests that could
+> not tell a loop from its first step: with every per-file refusal pinned on a one-file cohort, a
+> mutant that checked `psps[0]` and stopped passed all 490 tests. 18 mutations, 17 killed;
+> `ng::run` 475 → 496. **Two questions for the owner at Checkpoint E**: §6.2 asks for a
+> duplicate-`@RG ID` refusal that the psp format's own validator declares legal and that direct
+> mode calls without complaint (not made, with the reasoning recorded), and §6.2's by-name
+> parameters match cannot live here because `RunParameters` carries no names (it is F1's). Next:
+> E2's read-group remap in the source, then E3 driving the lifted calling loop.
+>
+> - **Earlier (2026-09-04):** **psp-mode Milestone D is complete — two sources, one
 > calling loop, direct mode provably untouched** (branch `ng-psp-mode`, at Checkpoint D; step D2:
 > [report](doc/devel/reports/implementations/ng_psp_mode_d2_2026-09-04.md),
 > [review](doc/devel/reports/reviews/ng_psp_mode_d2_2026-09-04.md),
