@@ -36,6 +36,26 @@ pub struct Slice<'c> {
 }
 
 impl<'c> Slice<'c> {
+    /// **Which reference bases this slice needs, before any of them are fetched.**
+    ///
+    /// `(reference sequence id, first position, last position)`, both 1-based and inclusive, or
+    /// `None` when the slice needs no external bases — an unmapped slice, or one spanning
+    /// several reference sequences, which is resolved record by record instead.
+    ///
+    /// It is readable from the slice header, which is parsed before any block is decoded, so a
+    /// caller can fetch exactly this window and hand it to
+    /// [`records_over_window`](Self::records_over_window) rather than holding a whole contig.
+    pub fn reference_span(&self) -> Option<(usize, Position, Position)> {
+        match self.header.reference_sequence_context() {
+            ReferenceSequenceContext::Some(context) => Some((
+                context.reference_sequence_id(),
+                context.alignment_start(),
+                context.alignment_end(),
+            )),
+            _ => None,
+        }
+    }
+
     pub(crate) fn header(&self) -> &Header {
         &self.header
     }
@@ -106,6 +126,7 @@ impl<'c> Slice<'c> {
     ) -> io::Result<Vec<Record<'c>>> {
         self.read_records(
             reference_sequence_repository,
+            None,
             header,
             compression_header,
             core_data_src,
@@ -137,6 +158,48 @@ impl<'c> Slice<'c> {
     ) -> io::Result<Vec<Record<'c>>> {
         self.read_records(
             reference_sequence_repository,
+            None,
+            header,
+            compression_header,
+            core_data_src,
+            external_data_srcs,
+            if tag_streams::tags_can_be_left_unread(compression_header) {
+                TagPolicy::SkipStreams
+            } else {
+                TagPolicy::DiscardValues
+            },
+        )
+    }
+
+    /// The slice's records, decoded against a **window** of the reference rather than a whole
+    /// contig — and with the auxiliary tags dropped, as
+    /// [`records_discarding_tags`](Self::records_discarding_tags).
+    ///
+    /// `window` is the bases from `window_start` onward, and it must cover every position
+    /// [`reference_span`](Self::reference_span) named or the decode is refused. Nothing else
+    /// about it is assumed: it may start anywhere and may be longer than the span.
+    ///
+    /// **This is what lets a caller reading a genome in order hold megabases instead of a
+    /// chromosome.** A CRAM stores a mapped read as differences from the reference, so the
+    /// bases under the read have to be in hand — but only those, and a coordinate-ordered walk
+    /// knows which they are one slice ahead. On a human chromosome 1 the difference between
+    /// this and a whole contig is 249 MB of resident memory.
+    ///
+    /// Falls back to `repository` for a slice that names no single reference sequence — an
+    /// unmapped slice needs none, and a multi-reference slice resolves its bases per record.
+    pub fn records_over_window<'h: 'c, 'ch: 'c>(
+        &self,
+        window: &'c [u8],
+        window_start: Position,
+        reference_sequence_repository: fasta::Repository,
+        header: &'h sam::Header,
+        compression_header: &'ch CompressionHeader,
+        core_data_src: &'c [u8],
+        external_data_srcs: &'c [(block::ContentId, Cow<'c, [u8]>)],
+    ) -> io::Result<Vec<Record<'c>>> {
+        self.read_records(
+            reference_sequence_repository,
+            Some((window, window_start)),
             header,
             compression_header,
             core_data_src,
@@ -152,6 +215,7 @@ impl<'c> Slice<'c> {
     fn read_records<'h: 'c, 'ch: 'c>(
         &self,
         reference_sequence_repository: fasta::Repository,
+        window: Option<(&'c [u8], Position)>,
         header: &'h sam::Header,
         compression_header: &'ch CompressionHeader,
         core_data_src: &'c [u8],
@@ -182,7 +246,8 @@ impl<'c> Slice<'c> {
         let phase_started = std::time::Instant::now();
 
         let slice_reference_sequence = get_slice_reference_sequence(
-            &reference_sequence_repository.clone(),
+            &reference_sequence_repository,
+            window,
             header,
             compression_header,
             &self.header,
@@ -423,10 +488,39 @@ pub(crate) enum ReferenceSequence<'c> {
     External {
         sequence: Arc<fasta::record::Sequence>,
     },
+    /// Bases the caller supplied, starting at `reference_start` — see
+    /// [`Slice::records_over_window`]. Indexed exactly as `Embedded` is; kept apart from it
+    /// because one comes out of the file and the other out of the caller, and a reader of this
+    /// enum should be able to tell which.
+    Window {
+        reference_start: Position,
+        sequence: &'c [u8],
+    },
+}
+
+/// The refusal a window that does not cover the slice earns. Spelled out rather than a bare
+/// "out of range", because the two spans are what a caller needs to see to fix the fetch.
+fn window_too_small(
+    slice_start: Position,
+    slice_end: Position,
+    window_start: Position,
+    window_len: usize,
+) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "the reference window given covers {}..{} but this slice spans {}..{}",
+            usize::from(window_start),
+            usize::from(window_start) + window_len.saturating_sub(1),
+            usize::from(slice_start),
+            usize::from(slice_end),
+        ),
+    )
 }
 
 fn get_slice_reference_sequence<'c>(
     reference_sequence_repository: &fasta::Repository,
+    window: Option<(&'c [u8], Position)>,
     header: &sam::Header,
     compression_header: &CompressionHeader,
     slice_header: &Header,
@@ -446,6 +540,38 @@ fn get_slice_reference_sequence<'c>(
         slice_header.embedded_reference_bases_block_content_id();
 
     if external_reference_sequence_is_required {
+        // A caller-supplied window answers the same question the repository would, from
+        // memory the caller already holds. It has to cover the span the slice declares —
+        // checked here rather than trusted, because getting it wrong decodes every read
+        // against the wrong bases and says nothing.
+        if let Some((bases, window_start)) = window {
+            let slice_start = context.alignment_start();
+            let slice_end = context.alignment_end();
+            let offset = usize::from(slice_start)
+                .checked_sub(usize::from(window_start))
+                .ok_or_else(|| {
+                    window_too_small(slice_start, slice_end, window_start, bases.len())
+                })?;
+            let span = usize::from(slice_end) - usize::from(slice_start);
+            if offset + span >= bases.len() {
+                return Err(window_too_small(
+                    slice_start,
+                    slice_end,
+                    window_start,
+                    bases.len(),
+                ));
+            }
+
+            if let Some(expected_md5) = slice_header.reference_md5() {
+                validate_sequence(&bases[offset..=offset + span], expected_md5)?;
+            }
+
+            return Ok(Some(ReferenceSequence::Window {
+                reference_start: window_start,
+                sequence: bases,
+            }));
+        }
+
         let reference_sequence_name = header
             .reference_sequences()
             .get_index(context.reference_sequence_id())

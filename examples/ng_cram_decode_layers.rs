@@ -76,6 +76,10 @@ struct Args {
     start: u64,
     containers: usize,
     repeats: usize,
+    /// Run one pass alone and report nothing but its wall time — so the process holds only
+    /// what that pass needs, and `/usr/bin/time -l` measures that pass's memory rather than
+    /// the union of every pass's.
+    only: Option<Pass>,
 }
 
 impl Args {
@@ -86,6 +90,7 @@ impl Args {
         let mut start = 1u64;
         let mut containers = 50usize;
         let mut repeats = 3usize;
+        let mut only = None;
 
         let mut argv = std::env::args().skip(1);
         while let Some(flag) = argv.next() {
@@ -99,6 +104,13 @@ impl Args {
                     containers = value()?.parse().map_err(|_| "--containers is a number")?
                 }
                 "--repeats" => repeats = value()?.parse().map_err(|_| "--repeats is a number")?,
+                "--only" => {
+                    only = Some(match value()?.as_str() {
+                        "contig" => Pass::DiscardTags,
+                        "window" => Pass::Window,
+                        other => return Err(format!("--only takes contig or window, not {other}")),
+                    })
+                }
                 other => return Err(format!("unknown argument {other}")),
             }
         }
@@ -110,6 +122,7 @@ impl Args {
             start,
             containers,
             repeats,
+            only,
         })
     }
 }
@@ -117,6 +130,9 @@ impl Args {
 fn run(args: &Args) -> io::Result<()> {
     let repository = build_fasta_repository(&args.reference)
         .map_err(|error| io::Error::other(error.to_string()))?;
+
+    let mut reference: IndexedFasta =
+        fasta::io::indexed_reader::Builder::default().build_from_path(&args.reference)?;
 
     let mut reader = cram::io::Reader::new(File::open(&args.cram)?);
     reader.read_file_definition()?;
@@ -151,6 +167,32 @@ fn run(args: &Args) -> io::Result<()> {
         args.repeats,
     );
 
+    // One pass alone, so the process holds only what that pass needs and an external memory
+    // measurement is of that pass rather than of every pass together.
+    if let Some(pass) = args.only {
+        let mut elapsed = Duration::MAX;
+        for _ in 0..args.repeats {
+            elapsed = elapsed.min(time_pass(
+                &mut reader,
+                &header,
+                &repository,
+                &mut reference,
+                offsets,
+                pass,
+            )?);
+        }
+        println!(
+            "{} containers, {}: {:.3} s",
+            offsets.len(),
+            match pass {
+                Pass::Window => "decoded against a per-slice window of the reference",
+                _ => "decoded against the whole contig, held resident",
+            },
+            elapsed.as_secs_f64(),
+        );
+        return Ok(());
+    }
+
     let spans = spans_from_index(&index_path(&args.cram), contig_id, args.start, offsets)?;
 
     // Warm the page cache and collect the shape of the work, so the timings below are of
@@ -180,6 +222,7 @@ fn run(args: &Args) -> io::Result<()> {
             &mut reader,
             &header,
             &repository,
+            &mut reference,
             offsets,
             Pass::Read,
         )?);
@@ -187,6 +230,7 @@ fn run(args: &Args) -> io::Result<()> {
             &mut reader,
             &header,
             &repository,
+            &mut reference,
             offsets,
             Pass::Blocks,
         )?);
@@ -194,6 +238,7 @@ fn run(args: &Args) -> io::Result<()> {
             &mut reader,
             &header,
             &repository,
+            &mut reference,
             offsets,
             Pass::Records,
         )?);
@@ -201,6 +246,7 @@ fn run(args: &Args) -> io::Result<()> {
             &mut reader,
             &header,
             &repository,
+            &mut reference,
             offsets,
             Pass::Convert,
         )?);
@@ -208,6 +254,7 @@ fn run(args: &Args) -> io::Result<()> {
             &mut reader,
             &header,
             &repository,
+            &mut reference,
             offsets,
             Pass::Direct,
         )?);
@@ -215,6 +262,7 @@ fn run(args: &Args) -> io::Result<()> {
             &mut reader,
             &header,
             &repository,
+            &mut reference,
             offsets,
             Pass::DiscardTags,
         )?);
@@ -260,7 +308,7 @@ fn run(args: &Args) -> io::Result<()> {
     // the vendored copy of noodles-cram and are exact in blocks and bytes; the nanoseconds are
     // one clock read per block.
     #[cfg(feature = "cram-perf-counters")]
-    print_codec_costs(&mut reader, &header, &repository, offsets)?;
+    print_codec_costs(&mut reader, &header, &repository, &mut reference, offsets)?;
 
     println!(
         "\nReading each field straight off the CRAM record instead of through `RecordBuf`: \
@@ -279,15 +327,37 @@ fn run(args: &Args) -> io::Result<()> {
         direct.as_secs_f64(),
     );
 
-    let through_record_buf =
-        checksum_pass(&mut reader, &header, &repository, offsets, Pass::Convert)?;
-    let read_directly = checksum_pass(&mut reader, &header, &repository, offsets, Pass::Direct)?;
+    let through_record_buf = checksum_pass(
+        &mut reader,
+        &header,
+        &repository,
+        &mut reference,
+        offsets,
+        Pass::Convert,
+    )?;
+    let read_directly = checksum_pass(
+        &mut reader,
+        &header,
+        &repository,
+        &mut reference,
+        offsets,
+        Pass::Direct,
+    )?;
     let without_tags = checksum_pass(
         &mut reader,
         &header,
         &repository,
+        &mut reference,
         offsets,
         Pass::DiscardTags,
+    )?;
+    let over_a_window = checksum_pass(
+        &mut reader,
+        &header,
+        &repository,
+        &mut reference,
+        offsets,
+        Pass::Window,
     )?;
     println!(
         "\nEvery decoded field of all {} records hashes to {through_record_buf} through \
@@ -302,6 +372,14 @@ fn run(args: &Args) -> io::Result<()> {
     println!(
         "With the tags decoded and discarded they hash to {without_tags} — {}.",
         if without_tags == read_directly {
+            "still the same records"
+        } else {
+            "THESE DIFFER"
+        },
+    );
+    println!(
+        "Decoded against a per-slice window of the reference they hash to {over_a_window} — {}.",
+        if over_a_window == read_directly {
             "still the same records"
         } else {
             "THESE DIFFER"
@@ -346,17 +424,39 @@ enum Pass {
     Direct,
     /// What `Direct` does, and the auxiliary tags decoded but not kept.
     DiscardTags,
+    /// What `DiscardTags` does, decoding against a window of the reference fetched for each
+    /// slice rather than against a whole contig held resident.
+    Window,
+}
+
+/// One window of the reference, read out of the indexed FASTA — which is what a caller
+/// holding no contig would do, and the reason this harness does not take it from the
+/// repository: taking it from there would load the contig this is meant to avoid.
+fn fetch_window(
+    reference: &mut IndexedFasta,
+    contig: &[u8],
+    start: noodles_core::Position,
+    end: noodles_core::Position,
+) -> io::Result<fasta::Record> {
+    let region =
+        noodles_core::Region::new(contig, noodles_core::region::Interval::from(start..=end));
+    reference.query(&region)
 }
 
 fn time_pass(
     reader: &mut cram::io::Reader<File>,
     header: &sam::Header,
     repository: &fasta::Repository,
+    reference: &mut IndexedFasta,
     offsets: &[u64],
     pass: Pass,
 ) -> io::Result<Duration> {
-    time_pass_checked(reader, header, repository, offsets, pass, false).map(|(elapsed, _)| elapsed)
+    time_pass_checked(reader, header, repository, reference, offsets, pass, false)
+        .map(|(elapsed, _)| elapsed)
 }
+
+/// The FASTA, open and indexed, for the windowed pass.
+type IndexedFasta = fasta::io::IndexedReader<fasta::io::BufReader<File>>;
 
 /// Every field of every decoded record, hashed — the oracle a change to the decoder has to
 /// leave unmoved. Sequence and CIGAR are reconstructed from the reference, so a wrong
@@ -365,10 +465,12 @@ fn checksum_pass(
     reader: &mut cram::io::Reader<File>,
     header: &sam::Header,
     repository: &fasta::Repository,
+    reference: &mut IndexedFasta,
     offsets: &[u64],
     pass: Pass,
 ) -> io::Result<String> {
-    let (_, digest) = time_pass_checked(reader, header, repository, offsets, pass, true)?;
+    let (_, digest) =
+        time_pass_checked(reader, header, repository, reference, offsets, pass, true)?;
     Ok(digest)
 }
 
@@ -376,6 +478,7 @@ fn time_pass_checked(
     reader: &mut cram::io::Reader<File>,
     header: &sam::Header,
     repository: &fasta::Repository,
+    reference: &mut IndexedFasta,
     offsets: &[u64],
     pass: Pass,
     checksum: bool,
@@ -389,6 +492,7 @@ fn time_pass_checked(
     let mut bases: Vec<u8> = Vec::new();
     let mut quality_scores: Vec<u8> = Vec::new();
     let mut cigar: Vec<sam::alignment::record::cigar::Op> = Vec::new();
+    let mut window: Vec<u8> = Vec::new();
     let mut payload: Vec<u8> = Vec::new();
     let mut cigar_ops: Vec<sam::alignment::record::cigar::Op> = Vec::new();
 
@@ -411,7 +515,33 @@ fn time_pass_checked(
                 continue;
             }
 
-            let records = if pass == Pass::DiscardTags {
+            let records = if pass == Pass::Window {
+                // What a caller walking the genome in order would do: ask the slice which
+                // bases it needs, fetch exactly those, and hand them over. Fetched here from
+                // the same repository for want of a second reference reader in this harness —
+                // the point being measured is what the decode needs resident, not how the
+                // window is read.
+                let (contig, start, end) = slice
+                    .reference_span()
+                    .expect("a mapped slice names one reference sequence");
+                let name = header
+                    .reference_sequences()
+                    .get_index(contig)
+                    .map(|(name, _)| name.clone())
+                    .expect("the slice's reference sequence is in the header");
+                window.clear();
+                let fetched = fetch_window(reference, &name, start, end)?;
+                window.extend_from_slice(fetched.sequence().as_ref());
+                slice.records_over_window(
+                    &window,
+                    start,
+                    repository.clone(),
+                    header,
+                    &compression_header,
+                    &core_data_src,
+                    &external_data_srcs,
+                )?
+            } else if pass == Pass::DiscardTags {
                 slice.records_discarding_tags(
                     repository.clone(),
                     header,
@@ -433,7 +563,7 @@ fn time_pass_checked(
                 continue;
             }
 
-            if pass == Pass::Direct || pass == Pass::DiscardTags {
+            if matches!(pass, Pass::Direct | Pass::DiscardTags | Pass::Window) {
                 for record in &records {
                     sink.absorb_usize(record.read_group_index().map_or(0, |index| index + 1));
                     if checksum {
@@ -750,12 +880,13 @@ fn print_codec_costs(
     reader: &mut cram::io::Reader<File>,
     header: &sam::Header,
     repository: &fasta::Repository,
+    reference: &mut IndexedFasta,
     offsets: &[u64],
 ) -> io::Result<()> {
     cram::perf::reset_counters();
     cram::perf::reset_rans_counters();
     cram::perf::reset_slice_counters();
-    let _ = time_pass(reader, header, repository, offsets, Pass::Blocks)?;
+    let _ = time_pass(reader, header, repository, reference, offsets, Pass::Blocks)?;
     let counters = cram::perf::read_counters();
     println!("\nBlock decompression, by compression method (one pass):\n");
     println!(

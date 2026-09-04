@@ -149,10 +149,18 @@ impl sam::alignment::Record for Record<'_> {
             Box::new(Bases(&self.sequence[..]))
         } else {
             let (reference_sequence, alignment_start) = match self.reference_sequence.as_ref() {
-                Some(ReferenceSequence::Embedded {
-                    reference_start,
-                    sequence,
-                }) => {
+                // The caller's window and the file's embedded reference are indexed the same
+                // way: both are bases starting at a position that is not 1.
+                Some(
+                    ReferenceSequence::Embedded {
+                        reference_start,
+                        sequence,
+                    }
+                    | ReferenceSequence::Window {
+                        reference_start,
+                        sequence,
+                    },
+                ) => {
                     let alignment_start = usize::from(self.alignment_start.unwrap());
                     let offset = usize::from(*reference_start);
                     let offset_alignment_start =

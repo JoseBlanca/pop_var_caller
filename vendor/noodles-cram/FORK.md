@@ -88,3 +88,34 @@ by a different aligner, 0.551 s → 0.505 s. Records identical in both.
 **Not upstream as it stands**, for the same reason as change 3: it is an API with one caller.
 The `tag_streams` check would be the interesting part of any upstream proposal, since it is
 what makes the option safe to offer at all.
+
+### 5. Decoding against a window of the reference instead of a whole contig — a new API
+
+`src/io/reader/container/slice.rs`: `Slice::reference_span` says which bases a slice needs
+before any are fetched; `Slice::records_over_window` takes those bases and decodes against
+them; `ReferenceSequence` gains a `Window` variant carrying the window's first position.
+`src/record.rs` and `src/record/direct.rs` index it exactly as they already index a CRAM's
+own embedded reference, which is the same problem — bases whose first byte is not position 1.
+
+A CRAM decodes a mapped read as differences from the reference, and noodles fetched the whole
+contig from a `fasta::Repository` to do it. **`Repository::get` also clones the sequence into
+its cache, so the peak is two copies of the contig**, and the cache never evicts. A caller
+reading the genome in coordinate order does not need any of that: it knows one slice ahead
+which bases it will want, because the slice header states the span before a block is decoded.
+
+Measured, decoding the same containers into the same records, `/usr/bin/time -l`:
+
+| | whole contig | per-slice window |
+|---|---:|---:|
+| tomato chromosome 1 (90.9 Mb) | 198.2 MB | **31.0 MB** |
+| human chromosome 1 (249.0 Mb) | 492.8 MB | **76.5 MB** |
+
+Wall time is unchanged on tomato (0.453 s against 0.454 s) and 6 % worse on the human file,
+whose slices span 2.5 Mb each so the windows are large and re-read per slice.
+
+**A window that does not cover the slice is refused, not truncated** — the message names both
+spans — because the failure it prevents is silent: every read decoded against the wrong bases.
+
+**Not upstream as it stands**, for the same reason as changes 3 and 4. The shape may be worth
+proposing, since it is what a coordinate-ordered reader wants and noodles already does the
+same coordinate rebasing for embedded references.
