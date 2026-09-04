@@ -19,10 +19,22 @@
 //! independence is the difference from direct mode, which must hold every sample open at one
 //! shared frontier and therefore has to parallelise inside one process.
 //!
-//! **What this command does *not* write is the census** — the second file spec §2 gives the
-//! walk stage, which the parameters fit reads. It lands with Milestone G of
-//! `run_driver_psp_mode.md`; until then a psp written here is a complete record of the
-//! sample's observations and the fit still has to be fed from elsewhere.
+//! **Two files a sample, and the walk is once** (spec §2). Beside each psp goes that sample's
+//! census — the smaller file a parameters fit reads, holding what the sample showed at a fixed
+//! set of positions chosen for the whole run. Both are built from the one pass over the
+//! alignment files, because that is the promise psp mode exists to keep: **a sample whose census
+//! were missing would have to be walked again**, so a census that cannot be written fails the
+//! sample's walk rather than being reported and passed over.
+//!
+//! **The census's positions are the run's, not the sample's.** Which positions and which repeat
+//! tracts are kept is a function of the seed, the reference, the analysed ground and the
+//! catalog — none of them per-sample — so the selection is made once, before the first sample,
+//! and every walk of the run is handed the same one
+//! (`parameter_prepass_census_sites.md` §3). The numbers behind it are
+//! [`CensusSelection::SHIPPED`]: about two million positions, five thousand tracts a stratum,
+//! and a fixed seed. **The seed is a constant rather than a clock**, and that is what makes this
+//! command's own advice — one invocation a sample — work at all: two invocations that seeded
+//! differently would keep disjoint sets of positions, and their samples could not be pooled.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -34,6 +46,7 @@ use thiserror::Error;
 use crate::fasta::ContigList;
 use crate::ng::locus_generation::LocusCounts;
 use crate::ng::locus_generation::pileup::PileupGeneratorConfig;
+use crate::ng::parameter_estimation::joint::loci::{SelectionError, UnambiguousRuns};
 use crate::ng::psp::{WriteStats, WriterProvenance};
 use crate::ng::read::ReadFilterConfig;
 use crate::ng::read::input::read_groups::{
@@ -41,15 +54,17 @@ use crate::ng::read::input::read_groups::{
 };
 use crate::ng::read::input::reference::OpenReference;
 use crate::ng::reference_info::{
-    ReferenceCheck, ReferenceInfoCache, ReferenceInfoError,
-    read_reference_verifying_or_creating_fai,
+    ReferenceCheck, ReferenceInfoError, read_reference_observing_or_creating_fai,
 };
 use crate::ng::region_typing::DEFAULT_MAX_STR_LEN;
 use crate::ng::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
+use crate::ng::repeat_catalog::RepeatCatalog;
 use crate::ng::run::report::{describe, plural, share_of};
-use crate::ng::run::{RunError, SampleObservationGatherer, SampleWalkInputs};
+use crate::ng::run::{
+    CensusPlan, CensusSelection, RunError, SampleObservationGatherer, SampleWalkInputs,
+};
 use crate::ng::types::MAX_MOTIF_LEN;
 use crate::pop_var_caller::common::{current_command_line, rfc3339_now};
 use crate::pop_var_caller_exp::run_ground::{self, GroundError};
@@ -255,6 +270,25 @@ pub enum GeneratePspsCliError {
         sample: String,
     },
 
+    /// This run's census positions could not be chosen.
+    ///
+    /// **Refused before the first sample is walked**, because the selection is the run's and not
+    /// the sample's: a run that discovered this at its third sample would have spent two walks.
+    #[error("this run's census positions could not be chosen")]
+    CensusNotPlanned {
+        /// What the selection refused.
+        #[source]
+        source: RunError,
+    },
+
+    /// Where the reference is sequence at all could not be turned into a selection domain.
+    #[error("the runs of unambiguous base in this reference could not be used")]
+    CensusGround {
+        /// What the domain refused.
+        #[source]
+        source: SelectionError,
+    },
+
     /// The moment this run started could not be written down.
     ///
     /// **Not silently substituted**, because the timestamp is the one header field two
@@ -315,6 +349,13 @@ pub struct SampleWalkOutcome {
     pub stats: WriteStats,
     /// What the walk met: segments dispatched, handled, and the two kinds of refused.
     pub counts: LocusCounts,
+    /// The census now on disk beside the psp, and how big it is.
+    ///
+    /// **Both files or neither**: a walk whose census could not be written fails the sample
+    /// (spec §2), so a finished `SampleWalkOutcome` always names both.
+    pub census: PathBuf,
+    /// The census file's length in bytes.
+    pub census_bytes: u64,
 }
 
 /// **What the walk stage has to say about itself when it finishes.**
@@ -357,11 +398,13 @@ impl SampleWalkOutcome {
         let mut line = String::new();
         let _ = write!(
             line,
-            "{}: {} loci stored, {} bytes at {}",
+            "{}: {} loci stored, {} bytes at {}, census {} bytes at {}",
             self.sample,
             self.stats.records,
             self.stats.bytes,
             self.psp.display(),
+            self.census_bytes,
+            self.census.display(),
         );
         let _ = write!(
             line,
@@ -423,13 +466,19 @@ impl WalkReport {
             }
             lines.push(format!("  {}", outcome.line()));
         }
+        // **Both totals, because the run wrote both files.** A line naming the psps alone would
+        // under-report what the walk put on disk by the size of every census beside them.
         lines.push(format!(
-            "{} psp{}, {} bytes in total",
+            "{} sample{}: {} bytes of psp and {} bytes of census",
             self.samples.len(),
             plural(self.samples.len() as u64),
             self.samples
                 .iter()
                 .map(|outcome| outcome.stats.bytes)
+                .sum::<u64>(),
+            self.samples
+                .iter()
+                .map(|outcome| outcome.census_bytes)
                 .sum::<u64>(),
         ));
         lines
@@ -522,27 +571,31 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
         }
     }
 
-    let cache = Arc::new(ReferenceInfoCache::new());
-    let (info, verify) = read_reference_verifying_or_creating_fai(
-        &cache,
-        args.reference.clone(),
-        ReferenceCheck::VerifyAgainstIndex,
-    )
-    .map_err(|source| GeneratePspsCliError::Reference {
-        path: args.reference.clone(),
-        source,
-    })?;
-    let with_checksums = match verify {
-        Some(handle) => {
-            handle
-                .join()
-                .map_err(|source| GeneratePspsCliError::ReferenceVerification {
-                    path: args.reference.clone(),
-                    source,
-                })?
-        }
-        None => Arc::clone(&info),
-    };
+    // **Read on this thread, and observed** — where the reference is sequence at all is what
+    // choosing census positions needs, since a position inside a run of `N` has no base to
+    // compare a read against. It is the same single pass the background route makes, not an
+    // extra one; what it gives up is overlapping that pass with opening the alignment files,
+    // and what it buys is the mask, which no cached read can hand back (see the reader's own
+    // note on why an observation cannot be cached).
+    let mut callable = UnambiguousRuns::default();
+    let info = Arc::new(
+        read_reference_observing_or_creating_fai(
+            args.reference.clone(),
+            ReferenceCheck::VerifyAgainstIndex,
+            &mut callable,
+        )
+        .map_err(|source| GeneratePspsCliError::Reference {
+            path: args.reference.clone(),
+            source,
+        })?,
+    );
+    let unambiguous = callable
+        .into_selectable()
+        .map_err(|source| GeneratePspsCliError::CensusGround { source })?;
+    // **One value, because this read was verified.** The background route hands back two views
+    // of the reference — the cheap `.fai` one and the verified one — and every caller of it has
+    // to join before comparing checksums; here the verification already happened.
+    let with_checksums = Arc::clone(&info);
     let contigs: ContigList = info.contig_list();
     let reference = OpenReference::new(info);
 
@@ -556,6 +609,28 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
         &analysed,
         &with_checksums,
     )?);
+    // **Chosen once, before the first sample.** The selection is the run's — a pure function of
+    // the seed, the reference, the analysed ground and the catalog — so a run that chose per
+    // sample would be choosing the same set N times, and a run whose samples chose *differently*
+    // could not be fitted at all. Refused here rather than at the third sample's walk.
+    let catalog =
+        RepeatCatalog::open_checking_against_reference(&ground.catalog_path(), &with_checksums)
+            .map_err(|source| {
+                GeneratePspsCliError::Ground(GroundError::Catalog {
+                    path: ground.catalog_path(),
+                    source,
+                })
+            })?;
+    let census = CensusPlan::of_run(
+        CensusSelection::SHIPPED,
+        &catalog,
+        &analysed,
+        &unambiguous,
+        &with_checksums,
+        &segmentation.inputs().repeat_tract_criteria,
+    )
+    .map_err(|source| GeneratePspsCliError::CensusNotPlanned { source })?;
+    drop(catalog);
 
     // **The samples are walked one at a time, in the order given** (spec §5.2). Nothing here
     // holds two samples' files open at once, which is the property psp mode exists for.
@@ -577,7 +652,13 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
         // so the loser replaces the winner's psp with an equally whole one instead of a
         // shredded one. It is not a lock: the existence check below is advisory, and two
         // invocations racing on one sample is still a thing not to do.
+        let census_path = census_path_for(&args.output_dir, sample.sample.as_ref());
         let while_writing = psp_path.with_extension(format!("psp.{}.partial", std::process::id()));
+        // **The census gets the same treatment as the psp**, for the same reason: a stopped walk
+        // must leave neither a stump at a name a later run would open, nor a destroyed copy of
+        // the file it was replacing.
+        let census_while_writing =
+            census_path.with_extension(format!("census.{}.partial", std::process::id()));
         let walk = || -> Result<(WriteStats, LocusCounts), RunError> {
             let gatherer = SampleObservationGatherer::open(
                 SampleWalkInputs {
@@ -589,15 +670,18 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
                 },
                 Arc::clone(&segmentation),
                 provenance.clone(),
+                Some(&census),
             )?;
-            gatherer.write_psp(&while_writing)
+            gatherer.write_psp(&while_writing, Some(&census_while_writing))
         };
         let produced = match walk() {
             Ok(produced) => produced,
             Err(source) => {
-                // The stump says nothing a reader wants and its name is not a psp's; leaving
-                // it would put a file in the output directory no later run should ever open.
+                // The stumps say nothing a reader wants and their names are not a psp's or a
+                // census's; leaving them would put files in the output directory no later run
+                // should ever open.
                 let _ = std::fs::remove_file(&while_writing);
+                let _ = std::fs::remove_file(&census_while_writing);
                 return Err(GeneratePspsCliError::Walk {
                     sample: sample.sample.to_string(),
                     path: psp_path,
@@ -605,6 +689,22 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
                 });
             }
         };
+        // **The census is renamed into place first, and the pair is not atomic.** Two renames
+        // cannot be one, so a run that dies between them leaves this sample's *new* census
+        // beside its *old* psp — and the run says so, because the second rename's failure ends
+        // it. What makes that state safe rather than silent is the identity the census carries:
+        // it names the header and the record count of the psp it was built from, so a fit
+        // reaching this pair finds a census naming a file that is not the one beside it and
+        // refuses it (`census_file.rs`'s `Freshness`). **The order matters for the other
+        // direction**: renaming the psp first would leave a finished-looking psp beside a stale
+        // census, which is the same mismatch with the two files' roles reversed — and the psp,
+        // being what a calling run reads, would be trusted.
+        std::fs::rename(&census_while_writing, &census_path).map_err(|source| {
+            GeneratePspsCliError::OutputDir {
+                path: census_path.clone(),
+                source,
+            }
+        })?;
         std::fs::rename(&while_writing, &psp_path).map_err(|source| {
             GeneratePspsCliError::OutputDir {
                 path: psp_path.clone(),
@@ -612,11 +712,19 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
             }
         })?;
         let (stats, counts) = produced;
+        let census_bytes = std::fs::metadata(&census_path)
+            .map_err(|source| GeneratePspsCliError::OutputDir {
+                path: census_path.clone(),
+                source,
+            })?
+            .len();
         let outcome = SampleWalkOutcome {
             sample: sample.sample.to_string(),
             psp: psp_path,
             stats,
             counts,
+            census: census_path,
+            census_bytes,
         };
         // **Said as each sample finishes, not only at the end**: a cohort of sixty is an hour
         // or more, and a command that says nothing until it is done cannot be told from a
@@ -703,4 +811,18 @@ fn provenance() -> Result<WriterProvenance, GeneratePspsCliError> {
 #[must_use]
 pub fn psp_path_for(output_dir: &Path, sample: &str) -> PathBuf {
     output_dir.join(format!("{sample}.{PSP_FILE_EXTENSION}"))
+}
+
+/// **The extension every census this command writes carries.**
+pub const CENSUS_FILE_EXTENSION: &str = "census";
+
+/// Where this command writes `sample`'s census — beside its psp, under the same stem.
+///
+/// **Two files rather than two parts of one, and the reason is what a rebuild costs.** A census
+/// is a rebuildable cache of the psp: which positions it holds depends on a per-run budget and a
+/// seed, so *rebuild it* has to mean deleting a small file rather than rewriting a large one
+/// (`parameter_prepass_joint_records.md` §6.1, spec §5.2).
+#[must_use]
+pub fn census_path_for(output_dir: &Path, sample: &str) -> PathBuf {
+    output_dir.join(format!("{sample}.{CENSUS_FILE_EXTENSION}"))
 }

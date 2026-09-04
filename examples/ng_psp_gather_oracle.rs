@@ -245,6 +245,7 @@ fn gather_and_compare(
             },
             Arc::clone(segmentation),
             provenance(),
+            None,
         )
     };
 
@@ -255,7 +256,7 @@ fn gather_and_compare(
     // rather than two — on real data an open re-reads the alignment headers.
     let header_the_gatherer_fixed = gatherer.header().clone();
     let psp_path = work_dir.join(format!("{sample}.psp"));
-    let (stats, counts) = gatherer.write_psp(&psp_path)?;
+    let (stats, counts) = gatherer.write_psp(&psp_path, None)?;
     let gather_seconds = gathering.elapsed().as_secs_f64();
 
     let walking = Instant::now();
@@ -357,7 +358,7 @@ fn gathered_twice_is_byte_identical(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     if std::env::var("NG_TWICE").is_ok_and(|value| value == "1") {
         let again_path = work_dir.join(format!("{sample}.again.psp"));
-        let (again_stats, _) = open_gatherer()?.write_psp(&again_path)?;
+        let (again_stats, _) = open_gatherer()?.write_psp(&again_path, None)?;
         let first_bytes = std::fs::read(first_psp)?;
         let again_bytes = std::fs::read(&again_path)?;
         if first_bytes != again_bytes {

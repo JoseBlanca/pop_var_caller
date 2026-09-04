@@ -490,20 +490,55 @@ psp-route VCF at pools of 1/2/4/8 (§12.2). *Depends:* F1. *Source:* spec §12.
 
 ### Milestone G — the census beside the psp
 
-**G1. ☐ The gatherer feeds the census accumulator.**
+**G1. ✅ The gatherer feeds the census accumulator.**
 At the gatherer's ordered yield point, each locus into the accumulator the joint-records
 walk example already drives (`examples/ng_joint_records_walk.rs:1131-1146`); `finish()`
 writes the census file beside the psp via `write_census`, its `PileupIdentity` built from
 the psp's own header — the identity's first real construction site. *Depends:* B1, A1-A4.
 *Source:* spec §5.2 l.611-633, §1.2 l.84-87; `parameter_prepass_joint_records.md` §6.1.
 
-**G2. ☐ `generate-psps` writes both files; the walk is once.**
+**G2. ✅ `generate-psps` writes both files; the walk is once.**
 The command's report names both; a census that cannot be written fails the sample's walk
 (spec §2: alignments read exactly once — a psp without its census would force a re-walk).
 *Depends:* G1, C1. *Source:* spec §2 l.152-171.
 
+> **Both done 2026-09-04, in one commit and deliberately**
+> ([report](../../reports/implementations/ng_psp_mode_g_2026-09-04.md)): G1 changes
+> `write_psp`'s signature, so G2's command has to move in the same breath or the tree does not
+> build — the two steps share one loop iteration rather than being split artificially.
+>
+> **Measured on six tomato accessions over the two 100 kb intervals: 3,592,149 bytes of psp and
+> 1,305,915 bytes of census, in 5 s**, both files named per sample in the run's report. The
+> census is fed at the walk's yield point, not by the psp writer, so it records what the walk saw
+> rather than what was stored.
+>
+> **The selection's numbers**: about two million positions and five thousand tracts a stratum are
+> the design's own figures; **the seed is a compiled-in constant**, which is what lets two
+> invocations of one cohort keep the same positions — a seed that differed between them would
+> keep disjoint sets and the samples could not be pooled. Whether the three become flags is the
+> same open question Milestone C recorded about the read filters.
+>
+> **A defect the milestone's own test caught first**: `PspWriter::create` amends the header
+> before writing it, so a census built from the header the gatherer *holds* names a psp that does
+> not exist, and every freshness check would have said *rebuild* for ever. `WriteStats` now
+> carries the digest of the header as written.
+
 > **Checkpoint G: the walk stage is spec §2's, whole. The fit stage and the census-equality
 > oracle (§7.12) hand to the next plan. Pause for review.**
+>
+> **Reached 2026-09-04, and the plan is finished.** `generate-psps` reads each sample's
+> alignment files once and writes both files spec §2 gives the walk stage; `call-from-psps` calls
+> a cohort of the first kind and produces direct mode's VCF. Nothing in this plan is open.
+>
+> **Carried to the next plan** (`parameter_prepass_runs.md`, unwritten): reading a census back,
+> building one *from* a psp, and §7.12's byte-for-byte census-equality oracle. **Two of this
+> plan's own gaps close there rather than here** — the mode-equivalence oracle cannot see the
+> stored fields only a fit reads (the sum of squared mapping qualities, and the count of reads
+> that covered a locus without producing an observation), and nothing yet reads a census at all.
+>
+> **Still open, and both are the owner's:** whether the census selection's three numbers become
+> flags, and whether the read filters and the five locus-generator knobs do — one question, since
+> Milestone C recorded the second and G adds the first to it.
 
 ---
 

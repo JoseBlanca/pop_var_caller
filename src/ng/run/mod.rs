@@ -46,7 +46,7 @@ pub use callers::{
     AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, CalledCohort,
     CohortWalkTallies, MergeParameters, SampleWalkTallies, WrittenCohort,
 };
-pub use gatherer::{SampleObservationGatherer, SampleWalkInputs};
+pub use gatherer::{CensusPlan, CensusSelection, SampleObservationGatherer, SampleWalkInputs};
 pub use psp_caller::{
     OpenPspCohort, PspVariantCaller, StoredCohortInputs, StoredCohortTallies, StoredSample,
 };
@@ -417,6 +417,37 @@ pub enum RunError {
         /// What the store refused.
         #[source]
         source: Box<crate::ng::psp::PspWriteError>,
+    },
+
+    /// The sample's census file could not be produced, though its psp was.
+    ///
+    /// **This fails the sample's walk rather than being reported and passed over** (spec §2,
+    /// plan step G2). The two files are one product: the census is what a parameters fit reads,
+    /// and a psp without one forces the sample to be walked again — which is the single thing
+    /// psp mode exists to avoid. A run that left a finished-looking psp beside a missing census
+    /// would be storing that re-walk for somebody to discover later.
+    ///
+    /// **Three different failures reach it and the source says which**: the psp's header would
+    /// not encode, the file would not be created, or the census encoder refused. The path is
+    /// what locates all three.
+    /// This run's census positions could not be chosen, so no sample can build one.
+    ///
+    /// **Refused before the first sample is walked**, because the selection is the run's and not
+    /// the sample's: a run that discovered this at its third sample would have spent two walks.
+    #[error("this run's census positions could not be chosen")]
+    CensusNotPlanned {
+        /// What the selection refused.
+        #[source]
+        source: Box<crate::ng::parameter_estimation::joint::loci::SelectionError>,
+    },
+
+    #[error("the census at {} could not be written", path.display())]
+    CensusNotWritten {
+        /// The file that could not be produced.
+        path: PathBuf,
+        /// What refused it.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     // ---------------------------------------------------------------------
