@@ -330,7 +330,9 @@ fn a_walk_that_stops_names_its_sample_and_leaves_the_earlier_samples_psps_writte
 /// would leave a stump every reader refuses.
 #[test]
 fn a_stopped_rewalk_does_not_destroy_the_psp_it_was_replacing() {
-    use crate::ng::read::input::test_fixtures::{header, matching_contigs, named_bam};
+    use crate::ng::read::input::test_fixtures::{
+        header, matching_contigs, named_bam, read_group_for,
+    };
 
     let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
     run_generate_psps(&args).expect("the cohort walks");
@@ -342,7 +344,7 @@ fn a_stopped_rewalk_does_not_destroy_the_psp_it_was_replacing() {
         &header(
             Some("coordinate"),
             &matching_contigs(),
-            &[("rg1", Some("zeta"))],
+            &[(&read_group_for("zeta"), Some("zeta"))],
         ),
         &[],
         "zeta.bam",
@@ -513,7 +515,7 @@ fn a_cohort_on_disk() -> (
     GeneratePspsArgs,
 ) {
     use crate::ng::read::input::test_fixtures::{
-        FIXTURE_CONTIGS, header, indexed_named_bam, matching_contigs,
+        FIXTURE_CONTIGS, header, indexed_named_bam, matching_contigs, read_group_for,
         read_named_with_length_in_read_group,
     };
     use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
@@ -558,7 +560,7 @@ fn a_cohort_on_disk() -> (
             &header(
                 Some("coordinate"),
                 &matching_contigs(),
-                &[("rg1", Some(sample))],
+                &[(&read_group_for(sample), Some(sample))],
             ),
             records,
             file,
@@ -568,9 +570,9 @@ fn a_cohort_on_disk() -> (
     // that produces records and the other the analysed-but-empty case — and a wiring defect
     // that walked the right sample over the wrong ground cannot hide behind two empty files.
     let zeta_reads = [
-        read_named_with_length_in_read_group("z-r0", 0, 5, 30, "rg1"),
-        read_named_with_length_in_read_group("z-r1", 0, 20, 30, "rg1"),
-        read_named_with_length_in_read_group("z-r2", 1, 40, 30, "rg1"),
+        read_named_with_length_in_read_group("z-r0", 0, 5, 30, &read_group_for("zeta")),
+        read_named_with_length_in_read_group("z-r1", 0, 20, 30, &read_group_for("zeta")),
+        read_named_with_length_in_read_group("z-r2", 1, 40, 30, &read_group_for("zeta")),
     ];
     let (zeta_dir, zeta) = with_sample("zeta", "zeta.bam", &zeta_reads);
     let (alpha_dir, alpha) = with_sample("alpha", "alpha.bam", &[]);

@@ -144,13 +144,23 @@ fi
 # commonly do — would send cargo looking for a registry at a path that is not
 # mounted.
 #
+# **`NG_*` is forwarded for the same reason, added 2026-09-04 after it bit
+# someone.** The project's measuring programs read their own settings from the
+# environment — `NG_SAMPLES`, `NG_REGIONS` and the rest, which the probes' usage
+# text documents — and those names matched none of the patterns below, so
+# `NG_SAMPLES=63 ./scripts/dev.sh ./target-container/…` ran at the probe's
+# default and printed as though it had not. A cohort-size sweep came back five
+# times at six samples with nothing saying so. That is the exact failure the
+# paragraph above describes for `RUSTFLAGS`, in a second family of names, and
+# the fix is the same one.
+#
 # `compgen -e` lists exported names only, so shell-local variables cannot leak
 # in. Indirect expansion `${!name}` reads each one's value.
 FORWARDED_ENV=()
 while read -r forwarded_name; do
     case "$forwarded_name" in
         CARGO_TARGET_DIR | CARGO_HOME | RUSTUP_HOME | HOME) continue ;;
-        CARGO_* | RUSTFLAGS | RUSTDOCFLAGS | RUSTC_WRAPPER | RUST_BACKTRACE | RUST_LOG)
+        CARGO_* | NG_* | RUSTFLAGS | RUSTDOCFLAGS | RUSTC_WRAPPER | RUST_BACKTRACE | RUST_LOG)
             FORWARDED_ENV+=(-e "$forwarded_name=${!forwarded_name}")
             ;;
     esac

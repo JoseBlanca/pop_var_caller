@@ -158,6 +158,17 @@ pub(crate) fn header_with_read_groups(
     builder.build()
 }
 
+/// The `@RG ID` a fixture gives `sample`'s reads.
+///
+/// **Derived from the plant's name because a run refuses two read groups that share an id**
+/// (the owner's ruling of 2026-09-04, widened to the whole cohort), and a fixture cohort is
+/// several plants opened together. Real data is the same shape: an id belongs to one plant's
+/// library, and a pipeline that names every plant's read group `1` is one this caller turns
+/// down.
+pub(crate) fn read_group_for(sample: &str) -> String {
+    format!("rg-{sample}")
+}
+
 /// A header whose `@SQ` list is `contigs`, `SO:coordinate`, and one read group
 /// naming `NA12878` — the shape a file has to have to get past the gate.
 ///

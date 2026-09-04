@@ -306,32 +306,33 @@ pub fn build_read_groups(paths: &[PathBuf]) -> Result<ReadGroups, ReadGroupError
     })
 }
 
-/// Fail if **one sample** declares the same `@RG ID` twice.
+/// Fail if any two read groups **anywhere in this run** declare the same `@RG ID`.
 ///
-/// **The owner's ruling of 2026-09-04.** SAM makes an `@RG ID` unique within one file and says
-/// nothing across files, so a sample walked from several files — one per lane, the ordinary
-/// reason — *can* present two read groups with one id, and the identifiers this table mints would
-/// keep them apart. It is refused anyway, because in practice it is far more often a mistake than
-/// a deliberate collision: the same file passed twice, or read groups copied from one file to
-/// another. The cost of that mistake is silent — one lane's reads counted as another's library.
+/// **The owner's ruling of 2026-09-04, widened to the whole cohort the same day.** SAM makes an
+/// `@RG ID` unique within one file and says nothing across files, so two read groups with one id
+/// are legal input — a sample walked from several lanes, or a cohort whose samples were each
+/// aligned by a pipeline that names its read group the same way. The identifiers this table mints
+/// would keep them apart either way.
+///
+/// **It is refused because in practice it is a mistake, not a shape anyone means**: the same file
+/// passed twice, read groups copied from one file to another, or a pipeline that never gave them
+/// distinct names. Within one sample the mistake is silent — one lane's reads counted as
+/// another's library. Across samples nothing merges, and it is refused anyway, because a run
+/// whose read groups cannot be told apart by the name they carry is one whose provenance nobody
+/// can follow afterwards: every report, every parameters file and every error message names a
+/// lane by its id.
 ///
 /// **Refused here, where the alignment files are opened**, so a run fails in a second rather than
 /// after hours of decoding, and the fix is the user's: give the read groups distinct ids
 /// (`samtools addreplacerg`).
-///
-/// **⚠ Two *different* samples sharing an id is not refused**, and the choice is worth its own
-/// sentence. A read group's identity in a run is its sample together with its id, so a collision
-/// across samples merges nothing — and it is what a cohort looks like when every sample was
-/// aligned by one pipeline that names its read group `1`. Widening this to the whole run is one
-/// line (key the map on the id alone) and it is the owner's to ask for.
 fn reject_duplicate_read_group_ids(read_groups: &[ReadGroup]) -> Result<(), ReadGroupError> {
-    let mut seen: HashMap<(&str, &str), &ReadGroup> = HashMap::new();
+    let mut seen: HashMap<&str, &ReadGroup> = HashMap::new();
 
     for group in read_groups {
-        if let Some(first) = seen.insert((&group.sample, &group.id), group) {
+        if let Some(first) = seen.insert(&group.id, group) {
             return Err(ReadGroupError::DuplicateReadGroupId {
                 read_group_id: group.id.to_string(),
-                sample: group.sample.to_string(),
+                samples: (first.sample.to_string(), group.sample.to_string()),
                 paths: (first.file.to_path_buf(), group.file.to_path_buf()),
             });
         }
@@ -752,17 +753,21 @@ pub enum ReadGroupError {
 
     /// Two read groups declare the same `@RG ID`. Legal by the SAM specification across
     /// files, and refused anyway (the owner's ruling of 2026-09-04): a repeated id is far more
-    /// often a mistake than a deliberate collision, and the mistake is silent.
+    /// often a mistake than a deliberate collision, and a run whose lanes cannot be told apart
+    /// by the name they carry is one whose provenance nobody can follow afterwards.
     #[error(
-        "sample '{sample}' declares @RG ID '{read_group_id}' twice, in '{first}' and in \
-         '{second}'. One sample's read groups have to be told apart by their ids; give them \
-         distinct ids (e.g. `samtools addreplacerg`) and try again",
+        "two read groups both declare @RG ID '{read_group_id}': one in '{first}' (sample \
+         '{first_sample}') and one in '{second}' (sample '{second_sample}'). A read group's id \
+         has to be unique across every file of one run; give them distinct ids (e.g. \
+         `samtools addreplacerg`) and try again",
         first = paths.0.display(),
-        second = paths.1.display()
+        second = paths.1.display(),
+        first_sample = samples.0,
+        second_sample = samples.1
     )]
     DuplicateReadGroupId {
         read_group_id: String,
-        sample: String,
+        samples: (String, String),
         paths: (PathBuf, PathBuf),
     },
 
@@ -1351,57 +1356,54 @@ mod build_tests {
         );
     }
 
-    /// **One sample's two files declaring one `@RG ID` are refused** (the owner's ruling of
-    /// 2026-09-04). The SAM specification makes an id unique within a file and says nothing
-    /// across files, so this is legal input; it is refused because in practice it is a mistake —
-    /// the same file passed twice, or read groups copied between files — and the mistake is
-    /// silent, scoring one lane's reads as another's library.
+    /// **Two files declaring one `@RG ID` are refused, whether they are one sample's or two**
+    /// (the owner's ruling of 2026-09-04, widened to the whole cohort the same day). The SAM
+    /// specification makes an id unique within a file and says nothing across files, so both
+    /// shapes are legal input; they are refused because in practice a repeated id is a mistake —
+    /// the same file passed twice, or read groups copied between files, or a pipeline that never
+    /// gave them distinct names.
+    ///
+    /// **The two shapes cost different things and are refused alike.** Within a sample the
+    /// mistake is silent, scoring one lane's reads as another's library. Across samples nothing
+    /// merges — identity in the run is the sample with the id — and it is still refused, because
+    /// a run whose lanes cannot be told apart by the name they carry is one whose provenance
+    /// nobody can follow: every report, parameters file and error message names a lane by its id.
     #[test]
-    fn one_samples_two_files_declaring_one_read_group_id_are_refused() {
-        let (_first_dir, first) = file_declaring(
-            &[FixtureReadGroup::new("rg1", Some("NA12878")).with_library("lib-A")],
-            "first.bam",
-        );
-        let (_second_dir, second) = file_declaring(
-            &[FixtureReadGroup::new("rg1", Some("NA12878")).with_library("lib-B")],
-            "second.bam",
-        );
+    fn two_files_declaring_one_read_group_id_are_refused() {
+        for (first_sample, second_sample) in [("NA12878", "NA12878"), ("NA12878", "HG002")] {
+            let (_first_dir, first) = file_declaring(
+                &[FixtureReadGroup::new("rg1", Some(first_sample)).with_library("lib-A")],
+                "first.bam",
+            );
+            let (_second_dir, second) = file_declaring(
+                &[FixtureReadGroup::new("rg1", Some(second_sample)).with_library("lib-B")],
+                "second.bam",
+            );
 
-        let error = build_read_groups(&[first.clone(), second.clone()])
-            .expect_err("one sample's read groups cannot share an id");
+            let error = build_read_groups(&[first.clone(), second.clone()])
+                .expect_err("two read groups cannot share an id");
 
-        match &error {
-            ReadGroupError::DuplicateReadGroupId {
-                read_group_id,
-                sample,
-                paths,
-            } => {
-                assert_eq!(read_group_id, "rg1");
-                assert_eq!(sample, "NA12878");
-                assert_eq!(paths, &(first, second), "both paths, in input order");
+            match &error {
+                ReadGroupError::DuplicateReadGroupId {
+                    read_group_id,
+                    samples,
+                    paths,
+                } => {
+                    assert_eq!(read_group_id, "rg1");
+                    assert_eq!(
+                        samples,
+                        &(first_sample.to_string(), second_sample.to_string()),
+                        "both plants are named, so a reader knows which shape they have"
+                    );
+                    assert_eq!(paths, &(first, second), "both paths, in input order");
+                }
+                other => panic!("expected DuplicateReadGroupId, got {other:?}"),
             }
-            other => panic!("expected DuplicateReadGroupId, got {other:?}"),
+            assert!(
+                error.to_string().contains("samtools addreplacerg"),
+                "the message says what to do: {error}"
+            );
         }
-        assert!(
-            error.to_string().contains("samtools addreplacerg"),
-            "the message says what to do: {error}"
-        );
-    }
-
-    /// **Two different samples may share an id, and must**, because that is what a cohort looks
-    /// like when every sample was aligned by one pipeline that names its read group the same
-    /// way. Their identity in the run is the sample together with the id, so nothing merges.
-    #[test]
-    fn two_samples_may_share_a_read_group_id() {
-        let (_first_dir, first) = file_declaring(
-            &[FixtureReadGroup::new("rg1", Some("NA12878"))],
-            "first.bam",
-        );
-        let (_second_dir, second) =
-            file_declaring(&[FixtureReadGroup::new("rg1", Some("HG002"))], "second.bam");
-
-        let built = build_read_groups(&[first, second]).expect("different samples do not collide");
-        assert_eq!(built.len(), 2);
     }
 
     /// **And distinct ids are the ordinary case** — the shape every benchmark cohort here has,

@@ -125,14 +125,16 @@ fn a_defaults_runs_parameters(read_groups: &ReadGroups) -> ParametersFile {
 
 /// Two fixture alignment files, and the run's read-group table over them.
 fn a_cohorts_read_groups() -> (tempfile::TempDir, tempfile::TempDir, ReadGroups) {
-    use crate::ng::read::input::test_fixtures::{header, indexed_named_bam, matching_contigs};
+    use crate::ng::read::input::test_fixtures::{
+        header, indexed_named_bam, matching_contigs, read_group_for,
+    };
 
     let with_sample = |sample: &str, file: &str| {
         indexed_named_bam(
             &header(
                 Some("coordinate"),
                 &matching_contigs(),
-                &[("rg1", Some(sample))],
+                &[(&read_group_for(sample), Some(sample))],
             ),
             &[],
             file,
@@ -464,7 +466,7 @@ fn the_report_names_only_the_filter_reasons_that_fired() {
         "the two totals, and 100 is 60 + 40: {text}",
     );
     assert!(
-        text.contains("library rg1 of zeta: 60 duplicate, 40 mapping quality too low"),
+        text.contains("library rg-zeta of zeta: 60 duplicate, 40 mapping quality too low"),
         "the library as its file named it, not an index: {text}",
     );
     assert!(

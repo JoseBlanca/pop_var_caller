@@ -33,6 +33,7 @@
 //! header and touches no block ([`PspReader::open`]), which is what lets a cohort of thousands
 //! be opened and refused before any of it is spent.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -628,9 +629,27 @@ fn merge_the_read_group_tables(
 ) -> Result<ReadGroups, RunError> {
     let mut groups: Vec<ReadGroup> = Vec::new();
     let mut per_sample: Vec<SampleReadGroups> = Vec::new();
+    // **An `@RG ID` is unique across the whole cohort, not merely within a file** (the owner's
+    // ruling of 2026-09-04). A walked run refuses a repeat where the alignment files are opened
+    // (`read_groups::reject_duplicate_read_group_ids`), so this is the same rule held over the
+    // stored path: a cohort of psps must be refusable for what a cohort of alignment files is
+    // refused for, or psp mode accepts what direct mode turns down.
+    let mut ids_already_seen: BTreeMap<&str, &str> = BTreeMap::new();
 
     for (header, path) in headers.iter().zip(paths) {
         refuse_a_table_that_cannot_be_renumbered(header)?;
+        for stored in &header.read_groups {
+            if let Some(first) = ids_already_seen.insert(stored.id.as_str(), &header.sample) {
+                return Err(RunError::PspReadGroupsCannotBeMerged {
+                    sample: header.sample.clone(),
+                    problem: format!(
+                        "it names the @RG ID '{}', which sample '{first}' names too; a read \
+                         group's id has to be unique across every file of one run",
+                        stored.id
+                    ),
+                });
+            }
+        }
         let file: Arc<Path> = Arc::from(path.as_path());
         let mut mine = Vec::with_capacity(header.read_groups.len());
         for stored in &header.read_groups {
@@ -882,6 +901,13 @@ mod tests {
         header.sample = sample.to_string();
         header.contigs = fixture_contigs();
         header.segmentation_inputs = segmentation.inputs().clone();
+        // **Each sample's lanes are named after it**, because an `@RG ID` is unique across the
+        // whole cohort (the owner's ruling of 2026-09-04) and every psp here is a *different*
+        // sample. The shared header fixture names them all alike, which is one sample's shape,
+        // not a cohort's.
+        for lane in &mut header.read_groups {
+            lane.id = format!("{sample}-{}", lane.id);
+        }
         edit(&mut header);
         let path = dir.path().join(format!("{sample}.psp"));
         let writer = PspWriter::create(&path, header).expect("the header writes");
@@ -900,6 +926,11 @@ mod tests {
         header.sample = sample.to_string();
         header.contigs = fixture_contigs();
         header.segmentation_inputs = segmentation.inputs().clone();
+        // Named after the sample, for the reason `a_psp` gives: an `@RG ID` is unique across
+        // the whole cohort, and each psp here is a different sample.
+        for lane in &mut header.read_groups {
+            lane.id = format!("{sample}-{}", lane.id);
+        }
         let path = dir.path().join(format!("{sample}.psp"));
         let mut writer = PspWriter::create(&path, header).expect("the header writes");
         for record in records {
@@ -1019,7 +1050,12 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            vec!["SRR7279481", "SRR7279481.L2", "SRR7279481", "SRR7279481.L2"],
+            vec![
+                "alpha-SRR7279481",
+                "alpha-SRR7279481.L2",
+                "beta-SRR7279481",
+                "beta-SRR7279481.L2"
+            ],
             "first file first, header order within a file — `build_read_groups`' own rule",
         );
         assert_eq!(
@@ -1186,6 +1222,68 @@ mod tests {
         };
         assert_eq!(sample, "alpha");
         assert!(problem.contains("'L1'"), "the id is named: {problem}");
+    }
+
+    /// **Two *different* stored samples naming one `@RG ID` are refused too** — the owner's
+    /// ruling of 2026-09-04, widened to the whole cohort the same day.
+    ///
+    /// Nothing merges when the collision is across samples: identity in the run is the sample
+    /// together with the id, and a psp's own read groups are identified by their walk-local
+    /// number besides. It is refused because a run whose lanes cannot be told apart by the name
+    /// they carry is one whose provenance nobody can follow afterwards — and because a walked
+    /// cohort is refused for exactly this, so a stored cohort that accepted it would let psp
+    /// mode call what direct mode turns down.
+    #[test]
+    fn two_stored_samples_naming_one_read_group_id_are_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let segmentation = a_segmentation(ground(false));
+        let one_lane = |id: &'static str| {
+            move |header: &mut Header| {
+                header.read_groups = vec![ReadGroupIdentity {
+                    id: id.to_string(),
+                    library: format!("lib-{id}"),
+                    walk_local_id: ReadGroupId(0),
+                }];
+            }
+        };
+        let paths = vec![
+            a_psp(&dir, "alpha", &segmentation, one_lane("L1")),
+            a_psp(&dir, "beta", &segmentation, one_lane("L1")),
+        ];
+
+        let refused = OpenPspCohort::open(&paths).expect_err("two samples, one id");
+        let RunError::PspReadGroupsCannotBeMerged { sample, problem } = refused else {
+            panic!("the sample must be named: {refused:?}");
+        };
+        assert_eq!(sample, "beta", "the sample the collision was found at");
+        assert!(
+            problem.contains("'L1'") && problem.contains("alpha"),
+            "the id and the other sample are both named: {problem}"
+        );
+    }
+
+    /// **And two samples with distinct ids are a cohort**, which is the ordinary case the
+    /// refusal above must not touch.
+    #[test]
+    fn two_stored_samples_with_distinct_read_group_ids_call() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let segmentation = a_segmentation(ground(false));
+        let one_lane = |id: &'static str| {
+            move |header: &mut Header| {
+                header.read_groups = vec![ReadGroupIdentity {
+                    id: id.to_string(),
+                    library: format!("lib-{id}"),
+                    walk_local_id: ReadGroupId(0),
+                }];
+            }
+        };
+        let paths = vec![
+            a_psp(&dir, "alpha", &segmentation, one_lane("L1")),
+            a_psp(&dir, "beta", &segmentation, one_lane("L2")),
+        ];
+
+        let cohort = OpenPspCohort::open(&paths).expect("distinct ids are an ordinary cohort");
+        assert_eq!(cohort.read_groups().len(), 2);
     }
 
     /// **And two lanes with different ids are a cohort**, which is what a sample sequenced

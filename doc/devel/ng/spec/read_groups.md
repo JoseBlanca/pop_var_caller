@@ -101,8 +101,9 @@ our grouping can always regroup on `(sample, id)` or on the file.
 pub struct ReadGroup {
     /// The file that declared it. `Arc<Path>` matches what `AlignmentFile` already holds.
     pub file: Arc<Path>,
-    /// `@RG ID`, verbatim. A label: unique within its file (SAM requires it), never
-    /// across files, and never an identity — see §4.
+    /// `@RG ID`, verbatim. A label and never an identity — see §4. SAM makes it unique
+    /// within its file and says nothing across files; **this caller requires it unique
+    /// across the whole run** and refuses a repeat (§6, the owner's ruling of 2026-09-04).
     pub id: Box<str>,
     /// `@RG SM`. Required; absence is a hard error (§6).
     pub sample: Box<str>,
@@ -146,11 +147,16 @@ pub struct ReadGroups { /* Vec<ReadGroup> */ }
 ```
 
 **Not the `@RG ID` string.** Two reasons, and the second is the one that would bite at runtime.
-`ID` is unique only within its file, so two files may each declare `ID:1` — keying on the string
-would fuse two unrelated read groups. And a string identifier means an `Arc<str>` or a hash lookup
-per read, on a loop that carries millions of reads through the region queries the whole read-input
-cost model was built around ([`alignment_file.md`](alignment_file.md) §3.3). A generated integer
-cannot collide and costs nothing.
+`ID` is unique only within its file *by the SAM specification*, so keying on the string would risk
+fusing two unrelated read groups. And a string identifier means an `Arc<str>` or a hash lookup per
+read, on a loop that carries millions of reads through the region queries the whole read-input cost
+model was built around ([`alignment_file.md`](alignment_file.md) §3.3). A generated integer cannot
+collide and costs nothing.
+
+**⚠ Since 2026-09-04 the first reason is a rule rather than a hazard**: a run whose files declare
+one id twice is refused outright (§6). The generated integer stays, for the second reason and
+because it is what the psp records, but nothing now depends on it to keep two same-named lanes
+apart — that shape does not reach the caller.
 
 **Scoped to the run, not to the sample.** An earlier draft scoped the identifier space to one
 `SampleReads`, with each file receiving a base offset. It fails on the case §9 requires: a file
@@ -248,8 +254,23 @@ and the remedy. One is lenient by design.
 |---|---|---|
 | the file declares at least one `@RG` | pre-pass | error naming the file, and saying it must be re-headered |
 | every `@RG` carries `SM` | pre-pass | error naming the file and the offending `@RG ID` |
+| **no two `@RG ID`s in the run are equal** | pre-pass, when the files are opened | error naming the id, both samples, both files, and `samtools addreplacerg` |
 | every record names a declared read group — **only in a file that declares several** (§7) | first read of the record | fatal to the run, naming file, read and position |
 | `LB` present | — | absent → synthesized, below |
+
+**The uniqueness rule is the owner's, 2026-09-04, and it refuses input the SAM specification
+allows.** Two files may legitimately each declare `ID:1` — one sample's two lanes, or two samples
+each aligned by a pipeline that names its read group the same way. Within a sample the collision is
+silent and costly: one lane's reads counted as another's library. Across samples nothing merges,
+since a lane's identity here is the generated integer. It is refused in both shapes anyway, because
+in practice a repeated id is a mistake — the same file passed twice, or read groups copied between
+files — and because a run whose lanes cannot be told apart by the name they carry is one whose
+provenance nobody can follow afterwards: every report, every parameters file and every error
+message names a lane by its id.
+
+**The same rule is held over stored files**: a cohort of psps is refused for a repeated id exactly
+as a cohort of alignment files is, so psp mode cannot call what direct mode turns down
+([`run_streaming.md`](run_streaming.md) §6.2).
 
 Two of the three already exist in some form — `MissingTag` and `NoReadGroups`
 ([`open_bam.rs:841`](../../../../src/ng/read/input/open_bam.rs#L841)) — but they collapse into

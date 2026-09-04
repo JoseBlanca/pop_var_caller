@@ -453,14 +453,16 @@ fn a_parameters_file_that_is_not_the_runs_own_output_is_admitted() {
 /// keyed on it — one row a read group, one a sample, in the order this table fixes — and a
 /// hand-built one would not exercise the joins `ParametersFile::of_run` holds in release.
 fn a_cohorts_read_groups() -> (tempfile::TempDir, tempfile::TempDir, ReadGroups) {
-    use crate::ng::read::input::test_fixtures::{header, indexed_named_bam, matching_contigs};
+    use crate::ng::read::input::test_fixtures::{
+        header, indexed_named_bam, matching_contigs, read_group_for,
+    };
 
     let with_sample = |sample: &str, file: &str| {
         indexed_named_bam(
             &header(
                 Some("coordinate"),
                 &matching_contigs(),
-                &[("rg1", Some(sample))],
+                &[(&read_group_for(sample), Some(sample))],
             ),
             &[],
             file,
@@ -605,7 +607,9 @@ fn a_cohort_on_disk() -> (
     tempfile::TempDir,
     CallFromAlignmentsArgs,
 ) {
-    use crate::ng::read::input::test_fixtures::{header, indexed_named_bam, matching_contigs};
+    use crate::ng::read::input::test_fixtures::{
+        header, indexed_named_bam, matching_contigs, read_group_for,
+    };
     use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
     use crate::ng::repeat_catalog::RepeatCatalogBuilder;
     use crate::ng::tandem_repeat::ScanParams;
@@ -647,7 +651,7 @@ fn a_cohort_on_disk() -> (
             &header(
                 Some("coordinate"),
                 &matching_contigs(),
-                &[("rg1", Some(sample))],
+                &[(&read_group_for(sample), Some(sample))],
             ),
             &[],
             file,
@@ -1241,7 +1245,10 @@ fn where_the_routing_did_not_move_the_vcf_is_byte_identical() {
     let header = crate::ng::read::input::test_fixtures::header(
         Some("coordinate"),
         &[("chr1", 136, None)],
-        &[("rg1", Some("one"))],
+        &[(
+            &crate::ng::read::input::test_fixtures::read_group_for("one"),
+            Some("one"),
+        )],
     );
     let mut reads = Vec::new();
     for start in [5usize, 101] {
