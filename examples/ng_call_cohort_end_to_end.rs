@@ -47,6 +47,15 @@
 //!
 //! # What it measured, 2026-09-01
 //!
+//! **⚠ Every number in this section was taken before the segmentation fix of 2026-09-04 and
+//! is a measurement of the wrong run.** This probe asked the catalog with
+//! `StrRepeatCriteria::default()` — the file's own storage floors — where every real run asks
+//! with the routing defaults, so it cut **2,991 segments over this 200 kb where a run makes
+//! 318** and routed several times more reference to the repeat path than a caller does. The
+//! loci counts below are not the loci a run calls: re-measured after the fix, 63 accessions
+//! give **24,538 loci called and 5,492 written**, against the 23,450 this table reports. The
+//! time split's shape survives — decoding still dominates — but the figures want re-taking.
+//!
 //! Tomato accessions from `benchmarks/tomato1/crams/` over the first **two** intervals of
 //! `benchmarks/tomato1/regions.bed` — 200 kb of SL4.0 at about three reads a position — in the
 //! development container, release build, `--features merge-timing`:
@@ -158,11 +167,15 @@ use pop_var_caller::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::GenomeRegions;
-use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::ng::region_typing::DEFAULT_MAX_STR_LEN;
+use pop_var_caller::ng::region_typing::segment_criteria::{
+    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
+};
+use pop_var_caller::pop_var_caller_exp::run_ground::{self, GroundRequest, RepeatRouting};
 use pop_var_caller::ng::run::cohort_merge::timing;
 use pop_var_caller::ng::run::{
     AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, CalledCohort,
-    MergeParameters, Segmentation,
+    MergeParameters,
 };
 use pop_var_caller::ng::types::{Genotype, Ploidy};
 use pop_var_caller::regions::ContigBounds;
@@ -342,17 +355,29 @@ fn run(
     let analysed = GenomeRegions::from_bed_path(&trimmed, &bounds)?;
     let analysed_bases: u64 = analysed.iter().map(|region| region.len()).sum();
 
-    let criteria = StrRepeatCriteria::default();
-    let catalog = RepeatCatalog::open_checking_against_reference(catalog_path, &with_checksums)?;
+    // **The segmentation is built through the subcommands' own path** —
+    // `run_ground::segments_over`, which is what `call-from-alignments` and `generate-psps`
+    // both call. **This probe used `StrRepeatCriteria::default()` until 2026-09-04 and that
+    // was wrong**: those are the catalog *file's* storage floors, deliberately built below
+    // every calling floor, so asking with them makes everything the file holds an STR locus of
+    // the run. On this benchmark's 200 kb it produced **2,991 segments where a real run makes
+    // 318**, and the timings taken under it are timings of a run nobody performs. It was found
+    // by comparing this probe against psp mode: the two disagreed on the loci called, and the
+    // disagreement was this, not the store.
     let spans: Vec<_> = analysed.iter().collect();
-    let segments = catalog.genome_segments(&criteria, ReadScope::Regions(&spans))?;
-    let segmentation = Segmentation::build(
-        segments,
-        analysed,
-        catalog.header().clone(),
-        criteria,
-        catalog_path.to_path_buf(),
-    )?;
+    let ground = GroundRequest {
+        reference: fasta,
+        catalog: Some(catalog_path),
+        regions: None,
+        routing: RepeatRouting {
+            min_copies: MinCopies::default(),
+            min_period: DEFAULT_MIN_PERIOD,
+            max_period: DEFAULT_MAX_PERIOD,
+            max_str_len: DEFAULT_MAX_STR_LEN,
+            min_purity: DEFAULT_MIN_PURITY,
+        },
+    };
+    let segmentation = run_ground::segments_over(&ground, &analysed, &with_checksums)?;
 
     let mut paths: Vec<PathBuf> = std::fs::read_dir(crams)?
         .filter_map(Result::ok)
