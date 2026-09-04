@@ -19,6 +19,7 @@
 //! The cohort total is still reported on each closed locus, as the locus's size in
 //! evidence rather than as a decision.
 
+use super::observation_cache::LocusSummary;
 use super::{MaxCohortLocusSpan, MinAltReads};
 use crate::ng::locus_generation::{LocusKind, SampleLocusObservations};
 use crate::ng::types::{GenomePosition, GenomeRegion};
@@ -621,11 +622,20 @@ impl<'a> Iterator for LocusCloser<'a> {
             // (`locus_generation/mod.rs`). The cost is one comparison against
             // per-observation work that already includes a base-by-base sequence
             // comparison in `non_reference_reads`.
+            // **Every fact this walk reads about a record is read here, once, and through
+            // the summary** — the region, the kind's discriminant, and the keep rule's two
+            // counts (`observation_cache::LocusSummary`). That is not tidiness: it is the
+            // property a run over stored files depends on, since a psp answers all four from
+            // a record's head without decoding the evidence behind it, and so can decline to
+            // build the roughly ninety-nine positions in a hundred that no sample varied at
+            // (`spec/cohort_merge_psp_path.md` §2). Direct mode pays exactly what it paid
+            // before: the same single walk over the record's sequences.
+            let summary = LocusSummary::of(head);
             assert!(
-                head.region.start >= start,
+                summary.region.start >= start,
                 "sample {sample}'s observations are not in coordinate order: {} starts \
                  before the locus that opened at {}",
-                head.region,
+                summary.region,
                 start.get(),
             );
             // **A generic locus and an STR locus must never be mixed** (the owner,
@@ -645,24 +655,23 @@ impl<'a> Iterator for LocusCloser<'a> {
             // Comparing discriminants keeps it O(1): `LocusKind`'s payload holds boxed
             // flanks, and comparing those per observation would not be affordable.
             assert!(
-                std::mem::discriminant(&head.kind) == std::mem::discriminant(kind),
+                summary.kind == std::mem::discriminant(kind),
                 "a cohort locus at {contig:?}:{} mixes locus kinds — {:?} with {:?}",
                 start.get(),
                 kind,
                 head.kind,
             );
-            reach = reach.max(head.reach());
+            reach = reach.max(summary.reach());
             // **Each sample's two totals are kept apart, because the keep rule asks each
             // sample about its own reads** (spec §4.3). Summing them into one cohort
             // total and comparing that — the rule until 2026-08-19 — asks a question
             // whose answer moves when a sample that carries nothing is added to the run.
-            // **Both counts in one walk of the record's sequences.** They are the numerator
-            // and the denominator of the same question, they filter on the same witness and
-            // they read the same `num_obs`; asked separately, this record's sequences are
-            // walked twice. What that is worth grows with the reads at a position rather than
-            // with the cohort — at the tomato panel's 1.03 sequences a record there is barely
-            // a loop to fuse, and at GIAB's 313 compared reads a sample there is.
-            let (alt, compared) = head.non_reference_and_compared_reads();
+            // Both counts came off the summary in one walk of the record's sequences, for the
+            // reason `LocusSummary::of` gives.
+            let (alt, compared) = (
+                summary.non_reference_reads,
+                summary.reads_compared_with_reference,
+            );
             non_reference_reads = non_reference_reads.saturating_add(alt);
             self.alt_reads_per_sample[sample] =
                 self.alt_reads_per_sample[sample].saturating_add(alt);
