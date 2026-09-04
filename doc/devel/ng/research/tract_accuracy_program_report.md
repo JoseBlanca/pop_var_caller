@@ -914,3 +914,46 @@ with the extra allele's read in AD). At three reads the 2-reads-and-15% bar almo
 fires beyond what the merge already tabled — the mechanism is inert exactly where thin
 evidence makes admission dangerous, which is what the range commitment asks of a
 depth-dependent lever.
+
+---
+
+## Post-close characterization — what separates the failing genotypes (2026-09-04)
+
+Asked by the owner against two hypotheses: (a) tomato priors at F = 0 despite high
+inbreeding; (b) hidden duplications — single-copy in the reference, multiplied in samples —
+making artefactual heterozygotes at high-coverage loci.
+
+**HG002, final baseline at 30×, per verdict class** (join of the verdict dump, the ground
+and the record fields):
+
+| class | n | tract units, median | ≥20 units | DP med | GQ med | het AB med |
+|---|---:|---:|---:|---:|---:|---:|
+| right | 5,966 | 14 | 0.19 | 33 | **56** | 0.42 |
+| spurious het | 214 | 18 | 0.39 | 29 | **25** | 0.37 |
+| collapsed het | 55 | 17 | 0.40 | 24 | **7** | — |
+| never offered | 346 | 18 | 0.44 | 26 | 24 | 0.38 |
+| wrong other | 45 | 19 | 0.47 | 28 | 12 | 0.40 |
+
+Two axes carry everything: **tract length** (the ≥20-unit share doubles in every error
+class) and **GQ** (right calls sit at 56, every error class at 7–25 — the caller knows when
+it is guessing, so GQ is the annotation downstream filtering should read even though a hard
+GQ floor was measured as a bad accuracy trade in the `hetfhom` work).
+
+**Tomato, 63 accessions, per-locus heterozygote share across samples vs coverage** (the gate
+run's cohort VCF, loci with ≥10 called samples):
+
+- generic ground: **2,800 of 227,862 loci have more than half their called samples
+  heterozygous** — in a highly inbred panel, the duplication signature hypothesis (b)
+  predicts. Their depth is elevated (median 1.2× cohort), and **12 in 100 exceed twice the
+  cohort depth against 1 in 100 baseline** — a twelvefold enrichment, but coverage alone
+  catches only about an eighth of the het-excess class.
+- tract ground: the het-excess tracts run the **other way** — 22 loci above half-het sit at
+  **0.5× depth**, thin-evidence false hets, not duplication pile-ups.
+- HG002's 184-tract wall showed **no coverage excess at all** at 300×.
+
+**The reading**: hypothesis (b) is real and measurable, but the strong discriminator is the
+**cross-sample heterozygote excess** (with off-ratio allele balance and HWE as
+corroborators), not coverage — a coverage-only filter misses seven eighths of the tomato
+signature class and all of the HG002 wall. Hypothesis (a) will act on the thin, low-GQ het
+calls (the tomato tract het-excess-at-low-depth class is exactly prior-shaped); it cannot
+touch the wall class, whose 46%-share evidence overwhelms any prior.
