@@ -46,6 +46,33 @@ use crate::ng::psp::{PspReadError, PspReader, RecordIter, StreamedRecord};
 use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 
 use super::cohort_merge::observation_cache::ObservationSource;
+use super::cohort_merge::observation_cache::LocusSummary;
+use crate::ng::psp::RecordHead;
+
+/// **A stored record's head is a summary** — the claim the whole deferred-build design rests
+/// on, written down as a conversion so it can be tested rather than asserted.
+///
+/// The merge decides everything it decides before assembling a locus from three facts about an
+/// observation: the reference it covers, and the keep rule's numerator and denominator
+/// ([`LocusSummary`]). A psp record carries all three in the fixed head in front of its body,
+/// so a reader can produce this without decompressing the evidence it describes — which is what
+/// lets a run decline to build the roughly ninety-nine positions in a hundred no sample varied
+/// at (`spec/cohort_merge_psp_path.md` §2).
+///
+/// **The head's two counts are the same numbers, not an approximation of them**: the writer
+/// derives them from the record it is about to write, by the same call the merge would make,
+/// and the reader checks them against the rebuilt body whenever it does build one
+/// (`psp/record.rs`, `decode_the_body_of`). `a_head_summarises_a_record_exactly` pins the
+/// mapping from the other end.
+impl From<&RecordHead> for LocusSummary {
+    fn from(head: &RecordHead) -> Self {
+        Self {
+            region: head.region,
+            non_reference_reads: head.non_reference_reads,
+            reads_compared_with_reference: head.reads_compared_with_reference,
+        }
+    }
+}
 use super::{RunError, WalkProgress};
 
 /// What is wrong with a psp's observations themselves, once the file has decoded.
@@ -481,7 +508,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::locus_generation::{LocusKind, SsrDetail};
+    use crate::ng::locus_generation::{
+        LocusKind, ReadWitness, SsrDetail, WitnessedLocusPositions,
+    };
     use crate::ng::psp::PspWriter;
     use crate::ng::psp::writer::tests_support::{a_header, a_record, a_sample};
     use crate::ng::types::{ContigId, Motif, Position};
@@ -1068,4 +1097,84 @@ mod tests {
         let source = PspObservationSource::over(&mut psp, &as_walked()).expect("the walk starts");
         only_takes_send(&source);
     }
+
+    /// **A head summarises its record exactly** — every field, on every record of a psp,
+    /// including the ones where the two counts differ.
+    ///
+    /// This is the property the deferred build is bought with: if a head's summary can differ
+    /// from the summary of the record behind it, then deciding from heads decides on something
+    /// other than the evidence, and the cohort keeps or drops the wrong loci — silently, since
+    /// nothing downstream ever sees the discarded records. The fixture deliberately includes a
+    /// record whose reads are not all complete, because that is where numerator and denominator
+    /// come apart: a read whose bases stop inside the locus is counted by neither, so a summary
+    /// that took read depth for its denominator would pass this test only on the easy records.
+    #[test]
+    fn a_head_summarises_a_record_exactly() {
+        let mut records = a_sample();
+        // One record with a partial read beside its complete ones, and one whose only
+        // non-reference evidence is partial — so `reads_compared_with_reference` is below the
+        // reads that covered the ground, and `non_reference_reads` ignores what it cannot
+        // compare.
+        let mut mixed = a_record(0, 5_000, 4);
+        let mut partial = mixed.observations[0].clone();
+        partial.read_witness = ReadWitness::Partial {
+            positions: WitnessedLocusPositions::one_run_from_offset_and_length(0, 2)
+                .expect("a two-base witness inside a four-base locus"),
+        };
+        partial.bases = Box::from(&b"AC"[..]);
+        partial.num_obs = 7;
+        mixed.observations.push(partial);
+        let mut varying = a_record(0, 6_000, 3);
+        varying.observations[0].bases = Box::from(&b"TTT"[..]);
+        records.push(mixed);
+        records.push(varying);
+        records.sort_by_key(|record| (record.region.contig.get(), record.region.start.get()));
+
+        let (_dir, path) = a_psp_of(&records);
+        let mut psp = PspReader::open(&path).expect("the file opens");
+
+        let mut checked = 0usize;
+        let mut differing_counts = 0usize;
+        for found in psp.records().expect("the walk starts") {
+            let found = found.expect("the fixture reads back");
+            let record = found.record.as_ref().expect("a full walk builds every body");
+            let from_the_head = LocusSummary::from(&found.head);
+            assert_eq!(
+                from_the_head,
+                LocusSummary::of(record),
+                "the head and the record disagree at {}",
+                found.head.region,
+            );
+            if from_the_head.non_reference_reads != from_the_head.reads_compared_with_reference {
+                differing_counts += 1;
+            }
+            checked += 1;
+        }
+
+        assert_eq!(checked, records.len(), "every record was compared");
+        assert!(differing_counts > 0, "the fixture separates the two counts");
+
+        // **The sharp case, asserted on the record built for it.** At 5,000 the fixture has
+        // three complete reads and seven partial ones. A denominator taken from read depth
+        // would say ten; the rule's denominator is the reads whose whole sequence over the
+        // locus could be compared, which is three — and the head has to say three, or a run
+        // deciding from heads applies a bar ten-thirds too high at exactly the sites where
+        // reads run out mid-locus.
+        let mut psp = PspReader::open(&path).expect("the file opens again");
+        let mixed_head = psp
+            .records()
+            .expect("the walk starts")
+            .map(|found| found.expect("the fixture reads back").head)
+            .find(|head| head.region.start.get() == 5_000)
+            .expect("the mixed record is in the file");
+        assert_eq!(
+            mixed_head.reads_compared_with_reference, 3,
+            "the seven partial reads are in neither count"
+        );
+        assert_eq!(
+            mixed_head.non_reference_reads, 0,
+            "and the complete reads all matched the reference"
+        );
+    }
+
 }
