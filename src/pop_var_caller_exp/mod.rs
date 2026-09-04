@@ -9,16 +9,21 @@
 //! its `Args`, its `run_*`, and its `#[non_exhaustive]` error enum.
 
 pub mod call_from_alignments;
+pub mod call_from_psps;
+pub mod calling_run;
 pub mod cli;
 pub mod estimate_contamination;
 pub mod generate_psps;
 pub mod repeat_catalog;
 pub mod run_ground;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 pub mod typed_regions;
 
 pub use call_from_alignments::{
     CallFromAlignmentsArgs, CallFromAlignmentsCliError, run_call_from_alignments,
 };
+pub use call_from_psps::{CallFromPspsArgs, CallFromPspsCliError, run_call_from_psps};
 pub use cli::{Cli, PopVarCallerExpCommand};
 pub use estimate_contamination::{
     EstimateContaminationArgs, EstimateContaminationCliError, run_estimate_contamination,

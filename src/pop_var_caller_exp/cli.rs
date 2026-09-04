@@ -4,6 +4,7 @@
 use clap::{Parser, Subcommand};
 
 use super::call_from_alignments::CallFromAlignmentsArgs;
+use super::call_from_psps::CallFromPspsArgs;
 use super::estimate_contamination::EstimateContaminationArgs;
 use super::generate_psps::GeneratePspsArgs;
 use super::repeat_catalog::RepeatCatalogArgs;
@@ -65,6 +66,23 @@ pub enum PopVarCallerExpCommand {
     /// this stage does not do yet: it writes no census beside the psp (the file a
     /// parameters fit reads), and it does not refuse to overwrite a psp already there.
     GeneratePsps(GeneratePspsArgs),
+
+    /// Call a cohort of stored psps and write a VCF — psp mode's second stage.
+    ///
+    /// Same cohort, same parameters, same VCF as `call-from-alignments`: what differs is
+    /// that the evidence is read from files a `generate-psps` run already wrote, so no
+    /// alignment file is opened and no read is decoded again.
+    ///
+    /// There is no --regions here. A psp records the ground its walk covered, the cohort is
+    /// refused unless every file agrees about it, and that agreed ground is what this run
+    /// calls over. To call over less, walk less.
+    ///
+    /// What it can say about each sample is narrower than direct mode's, and for a reason no
+    /// flag can fix: a psp carries no count of the reads its walk kept or dropped. So the
+    /// report says how many stored loci this run read out of each file and how deep they
+    /// were — and it names any file whose walk applied different read filters from the rest,
+    /// which nothing else in the pipeline checks.
+    CallFromPsps(CallFromPspsArgs),
 
     /// Estimate, for each sample in a panel of alignments, what share of its
     /// reads came from another individual, and write the answers as JSON.

@@ -5,9 +5,17 @@ use super::*;
 use clap::Parser;
 use std::path::Path;
 
+use crate::ng::calling::parameters_file::{
+    CensusIdentity, DeclaredInbreeding, ReadsBehindEachCalibration,
+};
+use crate::ng::calling::run_parameters::RunParameters;
+use crate::ng::read::input::read_groups::ReadGroups;
+use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig};
 use crate::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
 use crate::ng::types::InbreedingF;
+use crate::ng::types::Ploidy;
+use crate::pop_var_caller_exp::calling_run;
 use crate::pop_var_caller_exp::run_ground::{GroundError, routing_criteria, segments_over};
 use crate::regions::ContigBounds;
 
@@ -145,8 +153,10 @@ fn the_ground_and_the_catalog_have_defaults_a_person_need_not_type() {
          ploidy be taken without the flag's default contradicting it",
     );
     assert_eq!(
-        ploidy_asked_for(&args).expect("two is a ploidy").get(),
-        DEFAULT_PLOIDY,
+        calling_run::ploidy_asked_for(args.ploidy)
+            .expect("two is a ploidy")
+            .get(),
+        calling_run::DEFAULT_PLOIDY,
     );
 }
 
@@ -162,7 +172,8 @@ fn a_ploidy_past_what_the_caller_scores_is_refused_and_names_the_ceiling() {
     argv.extend(["--ploidy", "20"]);
     let args = args_of(&argv);
 
-    let refused = ploidy_asked_for(&args).expect_err("twenty copies cannot be scored");
+    let refused =
+        calling_run::ploidy_asked_for(args.ploidy).expect_err("twenty copies cannot be scored");
 
     let rendered = crate::error_render::format_error_chain(&refused);
     assert!(
@@ -170,11 +181,14 @@ fn a_ploidy_past_what_the_caller_scores_is_refused_and_names_the_ceiling() {
         "the message names the ceiling, and got: {rendered}",
     );
     assert!(
-        ploidy_asked_for(&args_of(&{
-            let mut argv = a_defaults_run();
-            argv.extend(["--ploidy", "16"]);
-            argv
-        }))
+        calling_run::ploidy_asked_for(
+            args_of(&{
+                let mut argv = a_defaults_run();
+                argv.extend(["--ploidy", "16"]);
+                argv
+            })
+            .ploidy
+        )
         .is_ok(),
         "sixteen is the ceiling and is scored, so the refusal is not off by one",
     );
@@ -186,7 +200,7 @@ fn a_ploidy_of_zero_is_refused() {
     let mut argv = a_defaults_run();
     argv.extend(["--ploidy", "0"]);
 
-    assert!(ploidy_asked_for(&args_of(&argv)).is_err());
+    assert!(calling_run::ploidy_asked_for(args_of(&argv).ploidy).is_err());
 }
 
 /// **`--output` naming a directory is refused before the reference is read.**
@@ -198,7 +212,7 @@ fn an_output_that_names_a_directory_is_refused_before_anything_is_read() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let args = a_run_writing_to(directory.path().to_path_buf());
 
-    let refused = refuse_an_output_that_cannot_be_written(&args)
+    let refused = calling_run::refuse_an_output_that_cannot_be_written(&args.output)
         .expect_err("a directory is not somewhere to write a VCF");
 
     let rendered = crate::error_render::format_error_chain(&refused);
@@ -212,7 +226,7 @@ fn an_output_in_a_missing_directory_is_refused_before_anything_is_read() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let args = a_run_writing_to(directory.path().join("no-such-directory").join("calls.vcf"));
 
-    let refused = refuse_an_output_that_cannot_be_written(&args)
+    let refused = calling_run::refuse_an_output_that_cannot_be_written(&args.output)
         .expect_err("there is no directory to write into");
 
     let rendered = crate::error_render::format_error_chain(&refused);
@@ -228,14 +242,16 @@ fn an_output_in_a_missing_directory_is_refused_before_anything_is_read() {
 fn an_output_that_can_be_written_is_admitted() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     assert!(
-        refuse_an_output_that_cannot_be_written(&a_run_writing_to(
-            directory.path().join("calls.vcf.gz")
-        ))
+        calling_run::refuse_an_output_that_cannot_be_written(
+            &a_run_writing_to(directory.path().join("calls.vcf.gz")).output
+        )
         .is_ok()
     );
     assert!(
-        refuse_an_output_that_cannot_be_written(&a_run_writing_to(PathBuf::from("calls.vcf")))
-            .is_ok(),
+        calling_run::refuse_an_output_that_cannot_be_written(
+            &a_run_writing_to(PathBuf::from("calls.vcf")).output
+        )
+        .is_ok(),
         "a bare file name is the working directory, not a missing one",
     );
 }
@@ -357,8 +373,11 @@ fn a_run_whose_output_would_overwrite_its_own_parameters_file_is_refused() {
     args.defaults = false;
     args.parameters = Some(supplied);
 
-    let refused = refuse_an_output_whose_parameters_file_is_this_run_s_input(&args)
-        .expect_err("the run would write over its own input");
+    let refused = calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
+        &args.output,
+        args.parameters.as_deref(),
+    )
+    .expect_err("the run would write over its own input");
 
     let rendered = crate::error_render::format_error_chain(&refused);
     assert!(
@@ -387,7 +406,11 @@ fn the_refusal_sees_through_two_spellings_of_one_path() {
     );
 
     assert!(
-        refuse_an_output_whose_parameters_file_is_this_run_s_input(&args).is_err(),
+        calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
+            &args.output,
+            args.parameters.as_deref()
+        )
+        .is_err(),
         "`<dir>/sub/../calls.parameters.toml` is `<dir>/calls.parameters.toml`",
     );
 }
@@ -407,7 +430,11 @@ fn the_refusal_follows_a_symlink_to_the_file_the_run_would_write() {
     args.parameters = Some(handy);
 
     assert!(
-        refuse_an_output_whose_parameters_file_is_this_run_s_input(&args).is_err(),
+        calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
+            &args.output,
+            args.parameters.as_deref()
+        )
+        .is_err(),
         "a link to the destination is the destination",
     );
 }
@@ -423,7 +450,11 @@ fn a_parameters_file_that_does_not_exist_is_left_to_the_read_that_follows() {
     args.parameters = Some(directory.path().join("calls.parameters.toml"));
 
     assert!(
-        refuse_an_output_whose_parameters_file_is_this_run_s_input(&args).is_ok(),
+        calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
+            &args.output,
+            args.parameters.as_deref()
+        )
+        .is_ok(),
         "nothing is there to be overwritten yet",
     );
 }
@@ -438,11 +469,21 @@ fn a_parameters_file_that_is_not_the_runs_own_output_is_admitted() {
     let mut args = a_run_writing_to(directory.path().join("calls.vcf.gz"));
     args.defaults = false;
     args.parameters = Some(elsewhere);
-    assert!(refuse_an_output_whose_parameters_file_is_this_run_s_input(&args).is_ok());
+    assert!(
+        calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
+            &args.output,
+            args.parameters.as_deref()
+        )
+        .is_ok()
+    );
 
     let defaults = a_run_writing_to(directory.path().join("calls.vcf.gz"));
     assert!(
-        refuse_an_output_whose_parameters_file_is_this_run_s_input(&defaults).is_ok(),
+        calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
+            &defaults.output,
+            defaults.parameters.as_deref()
+        )
+        .is_ok(),
         "a defaults run has no supplied file to overwrite",
     );
 }
@@ -595,76 +636,30 @@ fn a_defaults_runs_file_says_it_fitted_nothing() {
 /// **A reference, its catalog, and two samples' alignment files** — everything
 /// [`run_call_from_alignments`] needs, built on disk.
 ///
-/// **The reference is the shared fixture's**, a hundred `A`s on `chr1` and two hundred on
-/// `chr2`, which is what the alignment fixtures declare in their `@SQ`. Every base of it is one
-/// mononucleotide run, so the catalog routes the whole genome to the repeat-tract generator and
-/// the run calls no locus at all. **That is what this fixture is for**: what it exercises is the
-/// command's wiring — the files it writes and what they say about each other — and a run that
-/// wrote no record still writes a header, a parameters file, and a summary.
+/// **The shared one** ([`crate::pop_var_caller_exp::test_fixtures`]), which is also what
+/// `generate-psps` and `call-from-psps` are driven over — so the three commands are exercised
+/// on one cohort and a fixture change reaches all of them. It was two cohorts until F1: this
+/// one gave both samples no reads at all, so the only test that drove the whole command drove
+/// it over a cohort with nothing in it.
+///
+/// **The reference is a hundred `A`s on `chr1` and two hundred on `chr2`**, which is what the
+/// alignment fixtures declare in their `@SQ`. Every base of it is one mononucleotide run, so
+/// the catalog routes the whole genome to the repeat-tract generator and the run writes no VCF
+/// record — what these tests exercise is the command's wiring, the files it writes and what
+/// they say about each other, and a run that wrote no record still writes a header, a
+/// parameters file and a summary.
 fn a_cohort_on_disk() -> (
     tempfile::TempDir,
     tempfile::TempDir,
     tempfile::TempDir,
     CallFromAlignmentsArgs,
 ) {
-    use crate::ng::read::input::test_fixtures::{
-        header, indexed_named_bam, matching_contigs, read_group_for,
-    };
-    use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
-    use crate::ng::repeat_catalog::RepeatCatalogBuilder;
-    use crate::ng::tandem_repeat::ScanParams;
-    use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
-
-    let specs: Vec<ContigSpec> = crate::ng::read::input::test_fixtures::FIXTURE_CONTIGS
-        .iter()
-        .map(|(name, length)| ContigSpec {
-            name: (*name).to_string(),
-            length: *length as u64,
-        })
-        .collect();
-    let (reference_dir, fasta) = build_fasta(&specs).expect("a reference on disk");
-
-    let catalog_path = reference_dir.path().join("ref.fa.repeats.parquet");
-    let criteria = StrRepeatCriteria::default();
-    let mut builder = RepeatCatalogBuilder::create(
-        &catalog_path,
-        criteria.clone(),
-        ScanParams {
-            match_reward: 2,
-            mismatch_penalty: 7,
-            min_copies: 2,
-        },
-    )
-    .expect("a catalog to build into");
-    let reference = read_reference_info_observing(
-        ReferenceSource::Fasta {
-            fasta: fasta.clone(),
-            fai: None,
-        },
-        &mut builder,
-    )
-    .expect("the reference reads");
-    builder.finish(&reference).expect("the catalog is written");
-
-    let with_sample = |sample: &str, file: &str| {
-        indexed_named_bam(
-            &header(
-                Some("coordinate"),
-                &matching_contigs(),
-                &[(&read_group_for(sample), Some(sample))],
-            ),
-            &[],
-            file,
-        )
-    };
-    let (zeta_dir, zeta) = with_sample("zeta", "zeta.bam");
-    let (alpha_dir, alpha) = with_sample("alpha", "alpha.bam");
-
+    let cohort = crate::pop_var_caller_exp::test_fixtures::a_cohort_on_disk();
     let args = CallFromAlignmentsArgs {
-        reference: fasta,
-        catalog: Some(catalog_path),
-        alignments: vec![zeta, alpha],
-        output: reference_dir.path().join("calls.vcf"),
+        reference: cohort.reference,
+        catalog: Some(cohort.catalog),
+        alignments: cohort.alignments,
+        output: cohort.directory.path().join("calls.vcf"),
         regions: None,
         parameters: None,
         defaults: true,
@@ -680,7 +675,7 @@ fn a_cohort_on_disk() -> (
         max_str_len: DEFAULT_MAX_STR_LEN,
         min_purity: DEFAULT_MIN_PURITY,
     };
-    (reference_dir, zeta_dir, alpha_dir, args)
+    (cohort.directory, cohort.zeta, cohort.alpha, args)
 }
 
 /// **The command writes both its files, and each says the right thing about the other.**
@@ -772,72 +767,6 @@ fn the_command_refuses_to_write_its_parameters_over_the_file_it_was_given() {
 fn the_report_a_person_sees() {
     let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
     run_call_from_alignments(&args).expect("the cohort runs");
-}
-
-// ---------------------------------------------------------------------
-// The round width chosen from the cohort's size
-// ---------------------------------------------------------------------
-
-/// **What a round costs is `width × samples`, so that is what the rule holds fixed.** A
-/// round holds about one observation per covered base per sample, so a width that is right
-/// at sixty-three samples holds sixteen times as much at a thousand. Pinning the product
-/// rather than the width is what lets one rule serve both ends of the cohort range
-/// (`design_principles.md` §0).
-///
-/// The two clamps are what the product cannot express: below the floor the merge's own
-/// default takes over, and above the ceiling there is nothing left to buy — measured on four
-/// accessions over 400 kb of SL4.0, 3.29 s at 8,000 bases, 3.18 s at 32,000 and 3.22 s at
-/// 64,000, the last costing 407 MB of peak resident against 340.
-#[test]
-fn the_round_width_holds_one_rounds_observations_to_a_budget() {
-    // Between the clamps, the product is the budget.
-    for samples in [40_usize, 63, 100, 500] {
-        let width = u64::from(round_width_for(samples).get());
-        let held = width * samples as u64;
-        assert!(
-            held <= u64::from(ROUND_OBSERVATION_BUDGET),
-            "{samples} samples got {width} bases, holding {held} observations a round",
-        );
-        assert!(
-            held > u64::from(ROUND_OBSERVATION_BUDGET) / 2,
-            "{samples} samples got {width} bases, which leaves most of the budget unspent",
-        );
-    }
-}
-
-/// **A cohort big enough to be memory-bound gets the number it has today.** The floor is the
-/// merge's own compiled-in default, so nothing this rule does can make a thousand-sample run
-/// hold more ground than it held before the rule existed.
-#[test]
-fn a_large_cohort_gets_the_merges_own_default() {
-    assert_eq!(
-        round_width_for(2_000).get(),
-        DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN,
-    );
-    assert_eq!(
-        round_width_for(1_000).get(),
-        DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN,
-    );
-}
-
-/// **A single sample gets the ceiling, not the budget.** One sample could hold half a million
-/// bases of ground within the budget; the ceiling is there because the gain has saturated
-/// long before that, and because a round that wide would make the run's memory jump on the
-/// one input where it is least expected.
-#[test]
-fn a_small_cohort_gets_the_ceiling() {
-    assert_eq!(round_width_for(1).get(), WIDEST_ROUND);
-    assert_eq!(round_width_for(4).get(), WIDEST_ROUND);
-    // Zero files cannot reach the command, but the rule must not divide by it.
-    assert_eq!(round_width_for(0).get(), WIDEST_ROUND);
-}
-
-/// **The benchmark's own cohort gets the width the sweep found.** 63 accessions over the
-/// whole 8 Mb of `benchmarks/tomato1/regions.bed` ran in 193.2 s at 500 bases and 115.3 s at
-/// 8,000, writing the same VCF; the rule lands on 7,936.
-#[test]
-fn the_tomato_cohorts_width_is_the_one_that_was_measured() {
-    assert_eq!(round_width_for(63).get(), 7_936);
 }
 
 // ---------------------------------------------------------------------

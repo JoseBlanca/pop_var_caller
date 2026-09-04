@@ -40,7 +40,8 @@ use std::sync::Arc;
 use crate::ng::calling::inference::LocusGenotyper;
 use crate::ng::calling::inference::RunnableCallingLoopConfig;
 use crate::ng::calling::run_parameters::RunParameters;
-use crate::ng::psp::{ContigIdentity, Header, PspReader};
+use crate::ng::psp::{ContigIdentity, Header, ParameterValue, PspReader};
+use crate::ng::read::filtering::READ_FILTER_PROVENANCE_PREFIX;
 use crate::ng::read::input::read_groups::{
     NameOrigin, NameWithOrigin, ReadGroup, ReadGroups, SampleReadGroups,
 };
@@ -59,7 +60,7 @@ use super::callers::{
     refuse_parameters_assembled_for_another_cohort, refuse_two_references_that_are_not_one,
 };
 use super::cohort_merge::observation_cache::ObservationCache;
-use super::psp_source::PspObservationSource;
+use super::psp_source::{PspObservationSource, StoredSampleTallies};
 use super::walker::WalkReference;
 use super::{RunError, Segmentation};
 
@@ -411,12 +412,13 @@ impl PspVariantCaller {
     /// walk-local read groups into this run's numbering. Everything after that — the merge, the
     /// genotyping, the records — cannot tell it is reading files rather than walking them.
     ///
-    /// **It returns the calling tallies alone, where direct mode also returns per-sample walk
-    /// tallies.** That is not an omission: a walker carries what its walk saw — the regions it
-    /// handled, its generators' counts, its read filters' drops — and a psp source carries none
-    /// of it, because the walk happened in another process and what it counted is in that
-    /// file's provenance rather than in its records. What a run over stored files can say about
-    /// each sample is the run report's question, and it is the subcommand's (plan step F1).
+    /// **What it says about each sample is what it measured, not what the walk saw.** A walker
+    /// carries the regions it handled, its generators' counts and its read filters' drops; a
+    /// psp source carries none of that, because the walk happened in another process and what
+    /// it counted is in that file's provenance rather than in its records. So the second half
+    /// of the return is [`StoredCohortTallies`]: how many stored loci this run drew out of each
+    /// file and how deep they were, both counted as the records went past, beside the read
+    /// filters that file's header records (owner's ruling, 2026-09-04).
     ///
     /// # Errors
     ///
@@ -427,7 +429,7 @@ impl PspVariantCaller {
         self,
         genotyper: &G,
         hand_over: &mut impl FnMut(&VcfRecord) -> Result<(), E>,
-    ) -> Result<CohortCallingTallies, RunError>
+    ) -> Result<(CohortCallingTallies, StoredCohortTallies), RunError>
     where
         G: LocusGenotyper<S>,
         S: Default,
@@ -487,11 +489,120 @@ impl PspVariantCaller {
                 genotyper,
                 hand_over,
             )?;
-        // **Dropped, and that is the whole of what psp mode does not add.** The sources come
-        // back so that a mode can turn them into per-sample facts; a psp source has none to
-        // give beyond the name its file already carries.
+        // **The sources come back so that a mode can turn them into per-sample facts**, and
+        // this is psp mode doing it: each spent source carries what it drew, which is the only
+        // per-sample measurement a run over stored files makes.
+        //
+        // **Counted first and the readers read second**, because the sources borrow the readers
+        // for as long as they live: the headers are out of reach until the borrow ends.
+        let read: Vec<WhatOneSourceRead> = sources
+            .iter()
+            .map(|source| WhatOneSourceRead {
+                sample: source.sample_name().to_owned(),
+                read: source.read(),
+            })
+            .collect();
         drop(sources);
-        Ok(calling)
+        // **The two lists are paired by position and the pairing is asserted**, exactly as the
+        // source-building loop above asserts its own. A mis-pairing here does not crash and does
+        // not go out of range: it puts one sample's loci count and depth in the run report under
+        // another sample's name, with every number in range and nothing failing. The names are
+        // the check because they are the one field both sides carry.
+        assert_eq!(
+            read.len(),
+            psps.len(),
+            "{} psps came back with {} sets of counts, so the run report would put one sample's \
+             depth under another sample's name. This is a defect in ng rather than anything \
+             about the data.",
+            psps.len(),
+            read.len(),
+        );
+        let stored = StoredCohortTallies {
+            per_sample: psps
+                .iter()
+                .zip(read)
+                .map(|(psp, read)| {
+                    assert_eq!(
+                        psp.header().sample.as_str(),
+                        read.sample.as_str(),
+                        "the counts from {}'s source were paired with {}'s file. This is a \
+                         defect in ng rather than anything about the data.",
+                        read.sample,
+                        psp.header().sample,
+                    );
+                    StoredSample {
+                        sample_name: psp.header().sample.clone(),
+                        read: read.read,
+                        read_filters_the_walk_applied: StoredSample::read_filters_of(psp.header()),
+                    }
+                })
+                .collect(),
+        };
+        Ok((calling, stored))
+    }
+}
+
+/// **What a run over stored files knows about each of its samples** — psp mode's answer to
+/// direct mode's [`CohortWalkTallies`](super::callers::CohortWalkTallies), and a shorter one.
+///
+/// **The two are not the same fields with different values; they are different facts.** A
+/// walker carries what its walk saw — the ground it handled, its generators' counts, its read
+/// filters' drops — and a psp source carries none of it, because the walk happened in another
+/// process and what it counted is in that file's provenance rather than in its records. So
+/// this holds what the *calling* run measured for itself as it decoded, plus the one thing the
+/// header does carry and nothing compares: the read filters that walk applied.
+#[derive(Debug, Default)]
+pub struct StoredCohortTallies {
+    /// One per sample, in the run's sample order — which is the order the psps were given.
+    pub per_sample: Vec<StoredSample>,
+}
+
+/// **What one spent source read, carrying the name of the sample it read it for.**
+///
+/// The name travels with the counts so that pairing them back against the open files is a check
+/// rather than an assumption — see the assertion at the pairing.
+struct WhatOneSourceRead {
+    /// The individual whose source this was, as the source itself names it.
+    sample: String,
+    /// What it drew.
+    read: StoredSampleTallies,
+}
+
+/// **What one stored file gave this run, and what its walk was configured with.**
+#[derive(Debug)]
+pub struct StoredSample {
+    /// The individual, by the name its own psp header carries.
+    pub sample_name: String,
+    /// What this run drew out of the file, counted as it decoded.
+    pub read: StoredSampleTallies,
+    /// **The read filters the walk that wrote this file applied**, as its header records them
+    /// (spec §6.1) — recorded there, and compared by nothing in the format.
+    ///
+    /// **The run report is the only thing that looks**, and it prints a line only where the
+    /// cohort's files disagree: a psp records these so a census can be told from a census built
+    /// from different reads, and a cohort assembled from files walked under different filters
+    /// would otherwise call without a word about it.
+    pub read_filters_the_walk_applied: BTreeMap<String, ParameterValue>,
+}
+
+impl StoredSample {
+    /// The read filters a psp's header recorded, and nothing else out of its provenance.
+    ///
+    /// **Every key the filters spell with their own prefix, not a fixed list.** The fixed list
+    /// exists — [`READ_FILTER_PROVENANCE_KEYS`], which the filters' own tests hold every key
+    /// against — and taking it would drop a key a *later* ng recorded and this build does not
+    /// know, so two files written months apart under different policies would compare equal on
+    /// the difference that matters. Matching the prefix keeps the unknown key in the
+    /// comparison, where it shows up as a setting one file records and the other does not,
+    /// which is the truth.
+    fn read_filters_of(header: &Header) -> BTreeMap<String, ParameterValue> {
+        header
+            .writer
+            .parameters
+            .iter()
+            .filter(|(key, _)| key.starts_with(READ_FILTER_PROVENANCE_PREFIX))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
     }
 }
 
@@ -1695,10 +1806,15 @@ mod tests {
     fn a_cohort_of_stored_samples_calls_and_hands_its_records_over() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let segmentation = a_segmentation(ground(false));
-        let records = vec![a_variant_at(20), a_variant_at(30)];
+        // **The two samples hold different numbers of loci, and that is what makes the
+        // per-sample tallies testable.** Two files holding the same records look identical
+        // under every permutation of the pairing between spent sources and open files, so a
+        // fixture built that way cannot tell a report that names each sample's own counts from
+        // one that swaps them.
+        let both = vec![a_variant_at(20), a_variant_at(30)];
         let paths = vec![
-            a_psp_holding(&dir, "alpha", &segmentation, &records),
-            a_psp_holding(&dir, "beta", &segmentation, &records),
+            a_psp_holding(&dir, "alpha", &segmentation, &both),
+            a_psp_holding(&dir, "beta", &segmentation, &both[..1]),
         ];
         let (_reference_dir, reference) = fixture_reference_from_its_index();
         let cohort = OpenPspCohort::open(&paths).expect("the two files agree");
@@ -1712,7 +1828,7 @@ mod tests {
         .expect("the cohort matches the run");
 
         let mut handed: Vec<GenomeRegion> = Vec::new();
-        let tallies = caller
+        let (tallies, stored) = caller
             .call_cohort_handing_each_record_over(
                 &the_shipped_genotyper(),
                 &mut |record: &VcfRecord| {
@@ -1721,6 +1837,29 @@ mod tests {
                 },
             )
             .expect("a cohort of two stored samples calls");
+
+        // **What the run drew, per sample, is measured and not copied from the file** — the
+        // one per-sample fact psp mode has (owner's ruling, 2026-09-04). Named beside the
+        // count, because the count alone is satisfied by a report that gives each sample the
+        // other's: alpha stored two loci and beta one, so a swapped pairing reads (1, 2).
+        assert_eq!(
+            stored
+                .per_sample
+                .iter()
+                .map(|sample| (sample.sample_name.as_str(), sample.read.loci_read))
+                .collect::<Vec<_>>(),
+            vec![("alpha", 2), ("beta", 1)],
+            "each sample's own count, under its own name: {stored:?}",
+        );
+        for sample in &stored.per_sample {
+            assert!(
+                sample
+                    .read
+                    .mean_reads_a_locus()
+                    .is_some_and(|depth| depth > 0.0),
+                "a file that gave loci gives a depth: {sample:?}",
+            );
+        }
 
         assert_eq!(
             tallies.records_written as usize,

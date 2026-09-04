@@ -27,7 +27,40 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-04):** **the owner's four rulings on Checkpoint H are built,
+> - **Last completed task (2026-09-04):** **psp mode calls from the command line, and what it
+> writes is direct mode's VCF** (branch `ng-psp-mode`, plan step F1;
+> [report](doc/devel/reports/implementations/ng_psp_mode_f1_2026-09-04.md),
+> [review](doc/devel/reports/reviews/ng_psp_mode_f1_2026-09-04.md)). `call-from-psps` opens a
+> cohort of stored psps — one `--psp` a sample, or a directory of them — and writes the VCF, the
+> parameters file and the run report `call-from-alignments` writes. **Measured on six tomato
+> accessions over the first two 100 kb intervals of `benchmarks/tomato1/regions.bed`: 599
+> records, and every byte but the `##commandline` line is direct mode's own** (sha256
+> `fd677c91…` on both sides once that line is removed), with the parameters file identical too.
+> That is F2's oracle passing early; F2 owns pinning it.
+>
+> **There is no `--regions` and that is spec §5.3**: a psp records the ground its walk covered,
+> the cohort is refused unless the files agree about it, and that agreed ground is what the run
+> calls over.
+>
+> **The owner's ruling on what a run over stored files says about each sample is built.** A psp
+> carries no count of what its walk kept or dropped, so the report states what this run drew —
+> how many stored loci it read out of each file, and how many reads went into the comparison at
+> one of them — plus a line, printed only where the cohort's psps disagree, naming the files
+> whose walk applied other read filters. **That average is not depth and the line does not call
+> it depth**: the head's count excludes filtered reads, depth-capped reads, and reads that
+> covered a locus without anchoring it.
+>
+> **Three lifts were made rather than a second copy written, all recorded**: the numbers both
+> calling commands score with (`src/pop_var_caller_exp/calling_run.rs` — parameters, the `NG_*`
+> switches, the round width, the output refusals, the VCF header, the report printer); the
+> on-disk cohort fixture, which closes a Milestone C carry-forward and turned out to matter,
+> since direct mode's private copy gave both samples no reads at all; and the read filters' key
+> prefix. **Direct mode is byte-identical across all of it.** Two reviews ran fifteen deliberate
+> defects; four survived and all four are now caught. **⚠ One integration test still fails and it
+> is main's, not this work's**: `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele`.
+> **Next: F2**, the mode-equivalence oracle as a test, then F3's run-level invariances.
+>
+> - **Earlier (2026-09-04):** **the owner's four rulings on Checkpoint H are built,
 > and the branch is merged into main** (`main` at the merge; the rulings' own report is
 > [ng_psp_head_rulings_2026-09-04.md](doc/devel/reports/implementations/ng_psp_head_rulings_2026-09-04.md)).
 > **The locus kind came back out of the record head** — it is a function of the coordinate, being

@@ -33,12 +33,14 @@ use std::fmt::Write as _;
 
 use crate::fasta::ContigList;
 use crate::ng::calling::parameters_file::ParametersFile;
+use crate::ng::psp::ParameterValue;
 use crate::ng::read::filtering::ReadFilterCounts;
 use crate::ng::read::input::read_groups::ReadGroups;
 use crate::ng::region_typing::GenomeRegions;
 use crate::ng::types::{GenomeRegion, ReadGroupId};
 
-use super::callers::WrittenCohort;
+use super::callers::{CohortCallingTallies, CohortWalkTallies, WrittenCohort};
+use super::psp_caller::StoredCohortTallies;
 
 /// **The two bounds a run's refusals were measured against**, so the report can name each beside
 /// the count it explains — and name it as the flag a person types, which is the whole of what
@@ -57,8 +59,11 @@ pub struct BoundsTheRunCalledUnder {
 /// contig table, so ground can be named rather than numbered, and the parameters file, so the
 /// numbers behind the calls can be said to rest on a measurement or not.
 pub struct RunReport<'a> {
-    /// What the run wrote and what it refused.
-    written: &'a WrittenCohort,
+    /// What the calling itself produced — the same in both modes, because none of it depends
+    /// on where the observations came from.
+    calling: &'a CohortCallingTallies,
+    /// **What the run knows about each sample, which is the one part that differs by mode.**
+    samples: WhatEachSampleDid<'a>,
     /// The run's contigs, so a span can be named.
     contigs: &'a ContigList,
     /// The run's read groups, so a library can be named where its reads were dropped.
@@ -77,6 +82,24 @@ pub struct RunReport<'a> {
     max_cohort_locus_span: u32,
     /// The most alleles this run called a locus over, for the same reason.
     max_candidate_alleles: u16,
+}
+
+/// **How this run came by its observations, and therefore what it can say about each sample.**
+///
+/// A walk counts what it saw — the ground it handled, the reads its filters kept and dropped —
+/// and hands those counts to the report. **A stored file carries none of them**: they belong to
+/// the read cursor of a walk that ran in another process, and what that walk counted is in the
+/// file's provenance rather than in its records. So a run over stored files reports what it
+/// *drew* instead, and this enum is where the report stops pretending the two are the same.
+///
+/// The alternative — one shape with the walk's fields left at zero in psp mode — was rejected
+/// for the reason the report exists at all: a zero reads as *measured and none*, where the
+/// truth is *not measured here*.
+enum WhatEachSampleDid<'a> {
+    /// Direct mode: every sample's reads were walked by this run.
+    TheirReadsWereWalked(&'a CohortWalkTallies),
+    /// psp mode: every sample's stored file was read by this run.
+    TheirStoredFilesWereRead(&'a StoredCohortTallies),
 }
 
 /// How many refused spans a report prints before it stops and says how many are left.
@@ -99,7 +122,37 @@ impl<'a> RunReport<'a> {
         bounds: BoundsTheRunCalledUnder,
     ) -> Self {
         Self {
-            written,
+            calling: &written.calling,
+            samples: WhatEachSampleDid::TheirReadsWereWalked(&written.walk),
+            contigs,
+            read_groups,
+            parameters,
+            where_the_ground_is: describe(analysed, contigs),
+            analysed_bases: analysed.iter().map(|region| region.len()).sum(),
+            max_cohort_locus_span: bounds.max_cohort_locus_span,
+            max_candidate_alleles: bounds.max_candidate_alleles,
+        }
+    }
+
+    /// Gather what a finished run over **stored files** has to say (spec §5.3).
+    ///
+    /// **The calling half is the same value direct mode's report is built from**, because
+    /// calling does not know where its observations came from. What differs is the second
+    /// argument: `stored` says what this run drew out of each psp, where direct mode hands over
+    /// what each sample's walk saw — see [`WhatEachSampleDid`].
+    #[must_use]
+    pub fn of_a_stored_cohort(
+        calling: &'a CohortCallingTallies,
+        stored: &'a StoredCohortTallies,
+        contigs: &'a ContigList,
+        read_groups: &'a ReadGroups,
+        parameters: &'a ParametersFile,
+        analysed: &GenomeRegions,
+        bounds: BoundsTheRunCalledUnder,
+    ) -> Self {
+        Self {
+            calling,
+            samples: WhatEachSampleDid::TheirStoredFilesWereRead(stored),
             contigs,
             read_groups,
             parameters,
@@ -145,15 +198,12 @@ impl<'a> RunReport<'a> {
 
     /// What reached the file, and what was called but established nothing.
     fn what_was_written(&self, lines: &mut Vec<String>) {
-        lines.push(format!(
-            "records written: {}",
-            self.written.calling.records_written
-        ));
+        lines.push(format!("records written: {}", self.calling.records_written));
         lines.push(format!(
             "loci called: {} — {} written, {} establishing no variant and so left out",
-            self.written.loci_called(),
-            self.written.calling.records_written,
-            self.written.calling.loci_called_but_not_written,
+            self.calling.loci_called(),
+            self.calling.records_written,
+            self.calling.loci_called_but_not_written,
         ));
     }
 
@@ -170,15 +220,32 @@ impl<'a> RunReport<'a> {
     /// so they add to a hundred by construction, and the two totals are printed side by side
     /// whenever they differ so nobody has to work out why.
     fn what_was_not_called(&self, lines: &mut Vec<String>) {
+        self.the_ground_the_run_spoke_for(lines);
+        self.what_the_loci_came_to(lines);
+    }
+
+    /// **How the analysed ground was accounted for, in bases** — printed only by a run that
+    /// walked the reads itself.
+    ///
+    /// **A run over stored files cannot say this and does not guess.** The three parts are a
+    /// walk's own region tally, and no psp records one: the ground a sample was walked over is
+    /// in its header, but how much of it a generator spoke for is not. So psp mode prints the
+    /// ground it called over and stops there, rather than printing three numbers it would have
+    /// to invent — which is the same rule the per-sample section follows below.
+    fn the_ground_the_run_spoke_for(&self, lines: &mut Vec<String>) {
+        let WhatEachSampleDid::TheirReadsWereWalked(walk) = self.samples else {
+            // **The ground still gets named**, because it is the one thing a VCF cannot say and
+            // psp mode knows it exactly — every file's header records it and the cohort was
+            // refused unless they agreed (spec §6.2).
+            lines.push(format!(
+                "analysed ground: {} — {} bases, as every file's header records them",
+                self.where_the_ground_is, self.analysed_bases,
+            ));
+            return;
+        };
         // **Every sample walks the same ground, so one sample's region tally is the run's.**
         // The loci each sample's walk emitted differ and are not this section's business.
-        let Some(ground) = self
-            .written
-            .walk
-            .per_sample
-            .first()
-            .map(|walk| &walk.regions)
-        else {
+        let Some(ground) = walk.per_sample.first().map(|walk| &walk.regions) else {
             return;
         };
         let covered = ground.regions_handled_bp
@@ -213,16 +280,21 @@ impl<'a> RunReport<'a> {
             ground.unhandled_out_of_scope_bp,
             share_of(ground.unhandled_out_of_scope_bp, covered),
         ));
-        // **Loci, not bases, and a different fact from either line above.** Those two say what
-        // ground no generator looked at; these say what was looked at, built and merged across
-        // the cohort — and then called, filtered, or not scored at all. A run that printed only
-        // the base lines would say a refused tract's ground was *called*, which it was not.
-        //
+    }
+
+    /// **What became of the loci the run built** — which is a different fact from how much
+    /// ground it covered, and one both modes can state, because it is the calling's.
+    ///
+    /// **Loci, not bases, and a different fact from the base lines above.** Those say what
+    /// ground no generator looked at; these say what was looked at, built and merged across
+    /// the cohort — and then called, filtered, or not scored at all. A run that printed only
+    /// the base lines would say a refused tract's ground was *called*, which it was not.
+    fn what_the_loci_came_to(&self, lines: &mut Vec<String>) {
         // **The two refusals are here because the file cannot say them.** A tract refused as not
         // periodic is called over the reference tract alone, so every sample is homozygous
         // reference and no record is written; in the file it is indistinguishable from a tract
         // nobody varied at (`doc/devel/ng/spec/vcf_output.md` §9).
-        let tracts = &self.written.calling.tracts;
+        let tracts = &self.calling.tracts;
         if tracts.built() > 0 {
             lines.push(format!(
                 "repeat tracts: {} built, of which {} called",
@@ -259,7 +331,7 @@ impl<'a> RunReport<'a> {
         self.refused_loci(
             lines,
             "loci the merge declined to assemble for being too wide",
-            &self.written.calling.loci_too_wide_to_assemble,
+            &self.calling.loci_too_wide_to_assemble,
             &format!(
                 "the bound is --max-cohort-locus-span {}; raise it and call again if the \
                  lengths above cluster just past it",
@@ -269,7 +341,7 @@ impl<'a> RunReport<'a> {
         self.refused_loci(
             lines,
             "loci where the allele cap left no sample callable",
-            &self.written.calling.loci_with_nobody_to_call,
+            &self.calling.loci_with_nobody_to_call,
             &format!(
                 "the cap is --max-candidate-alleles {}; raise it to keep more of what they vary \
                  over",
@@ -323,10 +395,20 @@ impl<'a> RunReport<'a> {
     /// likelihoods are flat, and F1 implemented it. The claim was reassurance that stopped a
     /// reader opening the file, and the file said the opposite.
     fn what_the_reads_did(&self, lines: &mut Vec<String>) {
+        match self.samples {
+            WhatEachSampleDid::TheirReadsWereWalked(walk) => self.what_each_walk_saw(lines, walk),
+            WhatEachSampleDid::TheirStoredFilesWereRead(stored) => {
+                what_each_stored_file_gave(lines, stored);
+            }
+        }
+    }
+
+    /// **What each sample's reads did**, for a run that walked them — the section above's body.
+    fn what_each_walk_saw(&self, lines: &mut Vec<String>, walked: &CohortWalkTallies) {
         let mut spoke = 0_usize;
         let mut emptied_by_the_filters = Vec::new();
         let mut nothing_reached_the_caller = Vec::new();
-        for walk in &self.written.walk.per_sample {
+        for walk in &walked.per_sample {
             let did: Vec<WhatTheFiltersDid> = walk
                 .read_filters
                 .iter()
@@ -343,7 +425,7 @@ impl<'a> RunReport<'a> {
         lines.push(format!(
             "samples: {} — {spoke} whose reads the caller used, {} whose reads the filters took \
              all of, {} that contributed none",
-            self.written.walk.per_sample.len(),
+            walked.per_sample.len(),
             emptied_by_the_filters.len(),
             nothing_reached_the_caller.len(),
         ));
@@ -361,7 +443,7 @@ impl<'a> RunReport<'a> {
             ));
         }
 
-        for walk in &self.written.walk.per_sample {
+        for walk in &walked.per_sample {
             let did: Vec<(Option<ReadGroupId>, WhatTheFiltersDid)> = walk
                 .read_filters
                 .iter()
@@ -431,6 +513,149 @@ impl<'a> RunReport<'a> {
     /// A span with its chromosome named — [`name_of`], with the run's own table.
     fn named(&self, region: GenomeRegion) -> String {
         name_of(region, self.contigs)
+    }
+}
+
+/// **What each sample's stored file gave this run** — psp mode's counterpart of the section
+/// above, and deliberately a different set of facts.
+///
+/// **Both numbers are this run's own measurements, not the file's claims.** A psp records no
+/// count of reads kept or dropped, so nothing here restates a walk; what it states is how many
+/// stored loci this run drew out of each file, and how many reads went into the comparison at
+/// one of them on average — summed from the record head's `reads-compared-with-reference` as
+/// the loci went past.
+///
+/// **That average is not the sample's depth, and the line does not call it depth.** The head's
+/// count is the keep rule's own denominator, and
+/// [its field](crate::ng::psp::RecordHead::reads_compared_with_reference) lists what it leaves
+/// out: reads a filter turned away, reads the per-position cap discarded, reads that covered
+/// the locus and produced no observation, and reads whose witness stopped inside it. At a
+/// repeat tract that 40 reads cover but only 22 anchor both borders of, this says 22. It is the
+/// number the admission rule was applied with, which is why it is worth printing; a reader who
+/// wants coverage wants a different number and no psp carries one.
+///
+/// **A file that gave no loci is named, and that is the third of direct mode's three cases.**
+/// A sample whose reads the filters emptied and one that had no reads at all are the same
+/// thing here — an empty file — because the walk that could tell them apart is not this run.
+///
+/// **The read filters are compared, and this is the only place they are.** Every psp records
+/// the filters its walk applied and spec §6.1 compares them against nothing, so without this a
+/// cohort assembled from files walked under different filters would call without a word about
+/// it. The line is printed only where the files disagree, which is never on a cohort walked by
+/// one `generate-psps` invocation.
+///
+/// **What can differ today is the build, not a flag.** `generate-psps` exposes no read-filter
+/// option and walks with the compiled-in policy, so two psps disagree here only when they were
+/// written by ng builds whose defaults differ — a cohort walked over months, which is exactly
+/// the cohort psp mode exists to make possible (spec §2). The moment those settings become
+/// flags, which Milestone C left as the owner's call, this becomes the check on what a person
+/// typed.
+fn what_each_stored_file_gave(lines: &mut Vec<String>, stored: &StoredCohortTallies) {
+    let empty: Vec<&str> = stored
+        .per_sample
+        .iter()
+        .filter(|sample| sample.read.loci_read == 0)
+        .map(|sample| sample.sample_name.as_str())
+        .collect();
+    lines.push(format!(
+        "samples: {} — {} whose stored file gave this run loci, {} whose file held none over \
+         this ground",
+        stored.per_sample.len(),
+        stored.per_sample.len() - empty.len(),
+        empty.len(),
+    ));
+    if !empty.is_empty() {
+        lines.push(format!(
+            "  no locus over this ground: {} — written ./. wherever that left nothing to score",
+            empty.join(", "),
+        ));
+    }
+    for sample in &stored.per_sample {
+        // **A sample whose file held nothing has nothing to say about its depth**, and the line
+        // above already named it. `0 loci read, — reads a locus` would be a line to discard.
+        let Some(depth) = sample.read.mean_reads_a_locus() else {
+            continue;
+        };
+        lines.push(format!(
+            "  {}: {} loci read, {depth:.1} reads a locus compared with the reference",
+            sample.sample_name, sample.read.loci_read,
+        ));
+    }
+    where_the_walks_disagreed(lines, stored);
+}
+
+/// **Where the cohort's files were not walked alike**, one line a setting that differs.
+///
+/// Each line names the setting as its key is spelled in the psp header, then every value the
+/// cohort holds with the samples that hold it — so a reader sees at once which files are the
+/// odd ones and by how much. Nothing is printed where every file agrees.
+fn where_the_walks_disagreed(lines: &mut Vec<String>, stored: &StoredCohortTallies) {
+    // **Keys from every file, not from the first**, so a setting one walk recorded and another
+    // did not is a disagreement rather than an absence nobody looks at.
+    let mut settings: Vec<&str> = stored
+        .per_sample
+        .iter()
+        .flat_map(|sample| {
+            sample
+                .read_filters_the_walk_applied
+                .keys()
+                .map(String::as_str)
+        })
+        .collect();
+    settings.sort_unstable();
+    settings.dedup();
+
+    let mut differing: Vec<String> = Vec::new();
+    for setting in settings {
+        // **Values in the order the samples were given**, and each carrying its samples, so the
+        // line reads as *these files say this, those say that*.
+        let mut values: Vec<(String, Vec<&str>)> = Vec::new();
+        for sample in &stored.per_sample {
+            let value = match sample.read_filters_the_walk_applied.get(setting) {
+                Some(value) => as_a_person_reads_it(value),
+                // **Absent is a value here.** A file whose walk did not record this setting
+                // differs from one that did, and saying so is the point of the check.
+                None => "not recorded".to_owned(),
+            };
+            match values.iter_mut().find(|(seen, _)| *seen == value) {
+                Some((_, samples)) => samples.push(sample.sample_name.as_str()),
+                None => values.push((value, vec![sample.sample_name.as_str()])),
+            }
+        }
+        if values.len() < 2 {
+            continue;
+        }
+        differing.push(format!(
+            "    {setting}: {}",
+            values
+                .iter()
+                .map(|(value, samples)| format!("{value} for {}", samples.join(", ")))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
+    }
+    if differing.is_empty() {
+        return;
+    }
+    lines.push(
+        "  not every file was walked under the same read filters, and nothing refuses that — \
+         these samples were judged on different reads:"
+            .to_owned(),
+    );
+    lines.extend(differing);
+}
+
+/// **A psp header's recorded setting, as the header itself spells it.**
+///
+/// A quoted string would put quotation marks round `off`, which is how a switched-off filter
+/// is spelled in the header — so the value goes out bare, exactly as somebody reading the
+/// file's own TOML would see it.
+fn as_a_person_reads_it(value: &ParameterValue) -> String {
+    match value {
+        ParameterValue::Integer(number) => number.to_string(),
+        ParameterValue::Float(number) => number.to_string(),
+        ParameterValue::Boolean(flag) => flag.to_string(),
+        ParameterValue::String(text) => text.clone(),
     }
 }
 

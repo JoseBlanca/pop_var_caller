@@ -395,11 +395,26 @@ reader at `observation_cache.rs:420`). *Depends:* A3, E1. *Source:* `cohort_merg
 > ([`record.rs:133-137`](../../../../src/ng/psp/record.rs)); before it, nothing. If H has not
 > landed, stop and land it first — see this plan's ordering note above.
 
-**F1. ☐ The subcommand.**
+**F1. ✅ The subcommand.**
 One `--psp` per sample (or a directory), `--parameters`/`--defaults` exactly as direct mode
 (`run_parameters` reused; the census argument stays `None` until the fit plan), the same
 VCF + parameters-file + run-report outputs. *Depends:* E3. *Source:* spec §2, §5.3; the
 agreed names.
+
+> **Done 2026-09-04** ([report](../../reports/implementations/ng_psp_mode_f1_2026-09-04.md),
+> [review](../../reports/reviews/ng_psp_mode_f1_2026-09-04.md)). **What a run over stored files
+> says about each sample is ruled** (owner, 2026-09-04): how many stored loci it read out of each
+> file and how many reads went into the comparison at one of them, both measured by the run as it
+> decodes; a file holding no loci over this ground named as contributing nothing; and one line,
+> printed only where the cohort's psps disagree, naming the files whose walk applied other read
+> filters — the one comparison of a field spec §6.1 records and nothing checks.
+>
+> **The numbers both calling commands score with now live in one module**
+> (`src/pop_var_caller_exp/calling_run.rs`), `run_ground`'s sibling: the parameters, the `NG_*`
+> measurement switches, the round width, the ploidy, the output refusals, the VCF header metadata
+> and the report printer. Two copies of those would be two places for the modes to drift while
+> both kept running, which is what F2 compares. Direct mode's VCF, parameters file and run report
+> are byte-identical across the lift.
 
 **F2. ☐ Mode equivalence. Own commit, do not bundle.**
 Same cohort, same parameters: `call-from-alignments` and `generate-psps` +

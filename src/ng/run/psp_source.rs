@@ -200,7 +200,57 @@ pub struct PspObservationSource<W> {
     /// wasted there; it is applied unconditionally anyway, because a source that sometimes
     /// renumbers is a source somebody forgets to hand a map to.
     read_groups: Vec<ReadGroupId>,
+    /// **What this source drew, kept past the draw** — the only per-sample facts psp mode's
+    /// run report has, because a stored file records no walk.
+    read: StoredSampleTallies,
     walk: W,
+}
+
+/// **What one sample's stored file gave this run**, counted as it was decoded.
+///
+/// **Measured by the run that read it, not copied from the file.** A psp carries no count of
+/// what its walk kept or dropped — those tallies belong to the read cursor of a walk that
+/// happened in another process — so a run over stored files can only say what it drew, and
+/// these two are that. They are the psp-mode counterpart of direct mode's
+/// [`SampleWalkTallies`](super::callers::SampleWalkTallies), and they are deliberately not the
+/// same fields: a number that cannot be measured here is absent rather than zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StoredSampleTallies {
+    /// How many stored loci this run drew out of the file.
+    ///
+    /// **Loci and not observations.** One psp record is one locus with every read that spoke
+    /// at it inside, so this is several times smaller than the observations it carries — the
+    /// same distinction `generate-psps` draws when it reports what it stored.
+    pub loci_read: u64,
+    /// **Summed over those loci, how many reads each compared with the reference** — the
+    /// record head's `reads-compared-with-reference`, the keep rule's own denominator.
+    ///
+    /// **Not the sample's depth, and divided by [`loci_read`](Self::loci_read) not its mean
+    /// depth either.** The head's own field says what it leaves out
+    /// ([`RecordHead::reads_compared_with_reference`](crate::ng::psp::RecordHead::reads_compared_with_reference)):
+    /// reads a filter turned away, reads the per-position cap discarded, reads that covered the
+    /// locus and produced no observation, and reads whose witness stopped inside it. At a repeat
+    /// tract 40 reads cover but only 22 anchor both borders of, this counts 22.
+    ///
+    /// It is worth carrying because it is the number the keep rule was applied with, and it is
+    /// the closest a stored file comes to direct mode's *what this sample's reads did* — which
+    /// no psp records at all.
+    pub reads_compared_with_reference: u64,
+}
+
+impl StoredSampleTallies {
+    /// **How many reads went into the comparison at one locus, on average** — or `None` where
+    /// this source read none. Not depth: see
+    /// [`reads_compared_with_reference`](Self::reads_compared_with_reference).
+    ///
+    /// `None` rather than zero, because the two are different facts about a sample: a file
+    /// with no loci over this ground contributed nothing, where a mean of zero would say every
+    /// locus it did hold was compared against no reads at all.
+    #[must_use]
+    pub fn mean_reads_a_locus(&self) -> Option<f64> {
+        (self.loci_read > 0)
+            .then(|| self.reads_compared_with_reference as f64 / self.loci_read as f64)
+    }
 }
 
 /// **The sample's name and how far it has got, not the walk.** The sibling walker hand-writes
@@ -238,6 +288,7 @@ impl<W> PspObservationSource<W> {
             last_start: None,
             refused: false,
             read_groups: read_groups.to_vec(),
+            read: StoredSampleTallies::default(),
             walk,
         }
     }
@@ -246,6 +297,13 @@ impl<W> PspObservationSource<W> {
     #[must_use]
     pub fn sample_name(&self) -> &str {
         &self.sample
+    }
+
+    /// **What this source drew out of its file**, which is what a run over stored files has to
+    /// say about the sample (plan step F1).
+    #[must_use]
+    pub fn read(&self) -> StoredSampleTallies {
+        self.read
     }
 
     /// How far this source has got. `NothingYet` until the first observation is handed over,
@@ -406,6 +464,11 @@ where
             observation.read_group = run_wide;
         }
         self.last_start = Some(start);
+        // **Counted where the record is handed over, not where it is decoded.** A record the
+        // source refuses is not a record this run read, and the two differ by exactly the
+        // refused one — which is the number the report would otherwise over-state.
+        self.read.loci_read += 1;
+        self.read.reads_compared_with_reference += u64::from(head.reads_compared_with_reference);
         // **`reach_position` rather than `region.end`**: `reach` is `end.max(start)`, and
         // `GenomeRegion` has public fields and no constructor, so an inverted region read
         // straight off `end` would put an observation's reach before its own first base. The
@@ -572,6 +635,15 @@ mod tests {
             at, written[0].region,
             "the first record is where it stopped"
         );
+        // **A record whose body was never built is not a record this run read.** The counters
+        // sit below this refusal, so nothing is counted here; moving them above it would put
+        // loci in a run report that no genotype could ever be built from.
+        assert_eq!(
+            source.read(),
+            StoredSampleTallies::default(),
+            "nothing was handed over, so nothing is counted: {:?}",
+            source.read(),
+        );
     }
 
     /// **Backwards observations are an error, not an assertion** (arch §8).
@@ -627,6 +699,16 @@ mod tests {
         };
         assert_eq!(previous, written[1].start_position());
         assert_eq!(offered, written[0].start_position());
+        // **A refused record is not a record this run read**, and the counters are incremented
+        // where the record is handed over rather than where it is decoded, so exactly one is
+        // counted here. Counting at the decode instead would say two, and a run report would
+        // then credit this sample with a locus no genotype was ever built from.
+        assert_eq!(
+            source.read().loci_read,
+            1,
+            "one record was handed over and one was refused: {:?}",
+            source.read(),
+        );
     }
 
     /// **A source that refused a record is finished, and says so on every later draw.**

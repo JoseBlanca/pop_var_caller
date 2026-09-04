@@ -19,6 +19,8 @@ use crate::ng::repeat_catalog::StrRepeatCriteria;
 use crate::ng::run::AssemblyCheckOutcome;
 use crate::ng::run::callers::TractOutcomes;
 use crate::ng::run::callers::{CohortCallingTallies, CohortWalkTallies, SampleWalkTallies};
+use crate::ng::run::psp_caller::{StoredCohortTallies, StoredSample};
+use crate::ng::run::psp_source::StoredSampleTallies;
 use crate::ng::types::{ContigId, Ploidy, Position, ReadGroupId};
 
 /// The two contigs every fixture here names its spans on.
@@ -855,4 +857,317 @@ fn the_tract_outcomes_sum_to_the_tracts_built() {
     assert_eq!(outcomes.built(), 56);
     assert_eq!(outcomes.refused_by_a_filter(), 8);
     assert_eq!(TractOutcomes::default().built(), 0);
+}
+
+// ---------------------------------------------------------------------
+// A run over stored files says what it read, and does not say what it did not walk
+// ---------------------------------------------------------------------
+
+/// One sample's psp as the report sees it: what this run drew out of it, and what its walk's
+/// read filters were.
+fn a_stored_sample(
+    name: &str,
+    loci_read: u64,
+    reads_compared_with_reference: u64,
+    min_mapq: Option<i64>,
+) -> StoredSample {
+    StoredSample {
+        sample_name: name.to_owned(),
+        read: StoredSampleTallies {
+            loci_read,
+            reads_compared_with_reference,
+        },
+        read_filters_the_walk_applied: min_mapq
+            .map(|floor| {
+                (
+                    "read-filter-min-mapq".to_owned(),
+                    crate::ng::psp::ParameterValue::Integer(floor),
+                )
+            })
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// The report of a run over stored files, as one string.
+fn stored_rendered(
+    calling: &CohortCallingTallies,
+    stored: &StoredCohortTallies,
+    read_groups: &ReadGroups,
+    parameters: &ParametersFile,
+    analysed_bases: u64,
+) -> String {
+    let contigs = contigs();
+    let ground = ground_of(analysed_bases);
+    RunReport::of_a_stored_cohort(
+        calling,
+        stored,
+        &contigs,
+        read_groups,
+        parameters,
+        &ground,
+        shipped_bounds(),
+    )
+    .lines()
+    .join("\n")
+}
+
+/// **What each stored file gave this run is measured by the run, and both numbers are stated**
+/// (owner's ruling, 2026-09-04): how many loci it read, and how deep they were.
+///
+/// The depth is the mean of the record head's compared-read counts, so the fixture's 300 reads
+/// over 100 loci must read as 3.0 and not as 300 or 100 — a report that printed the sum, or the
+/// count, would pass a test that only asked for a number.
+#[test]
+fn a_run_over_stored_files_says_how_much_it_read_and_how_deep_it_was() {
+    let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
+    let stored = StoredCohortTallies {
+        per_sample: vec![
+            a_stored_sample("zeta", 100, 300, Some(20)),
+            a_stored_sample("alpha", 40, 1_000, Some(20)),
+        ],
+    };
+
+    let rendered = stored_rendered(
+        &CohortCallingTallies::default(),
+        &stored,
+        &read_groups,
+        &a_defaults_runs_parameters(&read_groups),
+        300,
+    );
+
+    assert!(
+        rendered.contains("zeta: 100 loci read, 3.0 reads a locus"),
+        "and got:\n{rendered}",
+    );
+    assert!(
+        rendered.contains("alpha: 40 loci read, 25.0 reads a locus"),
+        "the two samples' depths are their own, and got:\n{rendered}",
+    );
+    assert!(
+        rendered.contains("samples: 2 — 2 whose stored file gave this run loci"),
+        "and got:\n{rendered}",
+    );
+}
+
+/// **A file that held no locus over this ground is named, and gets no depth line.**
+///
+/// `0 loci read, — reads a locus` would be a line a reader has to discard, and a mean of zero
+/// would be a different claim from *this file held nothing*: it would say every locus the file
+/// did hold was compared against no reads.
+#[test]
+fn a_stored_file_that_held_no_locus_is_named_rather_than_given_a_depth() {
+    let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
+    let stored = StoredCohortTallies {
+        per_sample: vec![
+            a_stored_sample("zeta", 100, 300, Some(20)),
+            a_stored_sample("alpha", 0, 0, Some(20)),
+        ],
+    };
+
+    let rendered = stored_rendered(
+        &CohortCallingTallies::default(),
+        &stored,
+        &read_groups,
+        &a_defaults_runs_parameters(&read_groups),
+        300,
+    );
+
+    assert!(
+        rendered.contains("1 whose file held none over this ground"),
+        "and got:\n{rendered}",
+    );
+    assert!(
+        rendered.contains("no locus over this ground: alpha"),
+        "and got:\n{rendered}",
+    );
+    assert!(
+        !rendered.contains("alpha: 0 loci read"),
+        "a file that held nothing gets no depth line, and got:\n{rendered}",
+    );
+}
+
+/// **A run over stored files names the ground it called over and does not partition it.**
+///
+/// The three base lines are a walk's own region tally and no psp records one, so printing them
+/// would mean inventing them — and a zero there reads as *measured and none*, which is the one
+/// thing the whole report exists to avoid.
+#[test]
+fn a_run_over_stored_files_does_not_partition_ground_it_did_not_walk() {
+    let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
+    let stored = StoredCohortTallies {
+        per_sample: vec![a_stored_sample("zeta", 100, 300, Some(20))],
+    };
+
+    let rendered = stored_rendered(
+        &CohortCallingTallies::default(),
+        &stored,
+        &read_groups,
+        &a_defaults_runs_parameters(&read_groups),
+        300,
+    );
+
+    assert!(
+        rendered.contains("analysed ground: chr1:1-300 — 300 bases, as every file's header"),
+        "the ground is named, and named as the files' rather than as something asked for — \
+         nobody asked, there is no --regions here, and got:\n{rendered}",
+    );
+    for absent in [
+        "  called:",
+        "clusters of repeats too close together",
+        "tandem arrays longer than this run types",
+    ] {
+        assert!(
+            !rendered.contains(absent),
+            "{absent:?} is a walk's tally and this run did not walk, and got:\n{rendered}",
+        );
+    }
+}
+
+/// **Files walked under different read filters are named, with both values.**
+///
+/// Nothing else in the pipeline compares them: every psp records the filters its walk applied
+/// and spec §6.1 says they are recorded and never compared, so without this line a cohort where
+/// one sample was walked at a mapping-quality floor of 37 and the rest at 20 calls in silence.
+#[test]
+fn files_walked_under_different_read_filters_are_named_with_their_values() {
+    let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
+    let stored = StoredCohortTallies {
+        per_sample: vec![
+            a_stored_sample("zeta", 100, 300, Some(20)),
+            a_stored_sample("alpha", 100, 300, Some(37)),
+        ],
+    };
+
+    let rendered = stored_rendered(
+        &CohortCallingTallies::default(),
+        &stored,
+        &read_groups,
+        &a_defaults_runs_parameters(&read_groups),
+        300,
+    );
+
+    assert!(
+        rendered.contains("not every file was walked under the same read filters"),
+        "and got:\n{rendered}",
+    );
+    assert!(
+        rendered.contains("read-filter-min-mapq: 20 for zeta; 37 for alpha"),
+        "the line names the setting, both values and whose they are, and got:\n{rendered}",
+    );
+}
+
+/// **A file whose walk recorded a setting at all differs from one whose walk did not**, and the
+/// line says so rather than treating an absent key as agreement.
+///
+/// **Both orders, and the second is the one that matters.** The settings to compare are
+/// collected from *every* file, not from the first — a check written the other way agrees with
+/// this one whenever the file that records the key comes first, and goes silent when it comes
+/// second. Measured: taking the keys from the first file alone left all 24 of this module's
+/// tests green until the second half of this test existed.
+#[test]
+fn a_file_that_recorded_no_read_filter_differs_from_one_that_did() {
+    let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
+    let rendered_with = |first: StoredSample, second: StoredSample| {
+        stored_rendered(
+            &CohortCallingTallies::default(),
+            &StoredCohortTallies {
+                per_sample: vec![first, second],
+            },
+            &read_groups,
+            &a_defaults_runs_parameters(&read_groups),
+            300,
+        )
+    };
+
+    let recorded_first = rendered_with(
+        a_stored_sample("zeta", 100, 300, Some(20)),
+        a_stored_sample("alpha", 100, 300, None),
+    );
+    assert!(
+        recorded_first.contains("read-filter-min-mapq: 20 for zeta; not recorded for alpha"),
+        "and got:\n{recorded_first}",
+    );
+
+    let recorded_second = rendered_with(
+        a_stored_sample("alpha", 100, 300, None),
+        a_stored_sample("zeta", 100, 300, Some(20)),
+    );
+    assert!(
+        recorded_second.contains("read-filter-min-mapq: not recorded for alpha; 20 for zeta"),
+        "the file that records the setting comes second here, and a check that took its \
+         settings from the first file alone would print nothing, and got:\n{recorded_second}",
+    );
+}
+
+/// **A cohort walked alike says nothing about its read filters**, which is every cohort one
+/// `generate-psps` invocation wrote — a line that fires on the ordinary case is a line a reader
+/// learns to skip.
+#[test]
+fn a_cohort_walked_alike_says_nothing_about_its_read_filters() {
+    let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
+    let stored = StoredCohortTallies {
+        per_sample: vec![
+            a_stored_sample("zeta", 100, 300, Some(20)),
+            a_stored_sample("alpha", 100, 300, Some(20)),
+        ],
+    };
+
+    let rendered = stored_rendered(
+        &CohortCallingTallies::default(),
+        &stored,
+        &read_groups,
+        &a_defaults_runs_parameters(&read_groups),
+        300,
+    );
+
+    assert!(
+        !rendered.contains("read filters"),
+        "every file agrees, so there is nothing to say, and got:\n{rendered}",
+    );
+}
+
+/// **The calling half of the report is the same in both modes**, because calling does not know
+/// where its observations came from — so the counts, the tract outcomes and the two refusals
+/// must read identically whichever constructor built the report.
+#[test]
+fn the_calling_half_of_the_report_does_not_depend_on_the_mode() {
+    let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
+    let parameters = a_defaults_runs_parameters(&read_groups);
+    let calling = CohortCallingTallies {
+        records_written: 120,
+        loci_called_but_not_written: 45,
+        loci_too_wide_to_assemble: vec![region(0, 10, 90)],
+        loci_with_nobody_to_call: Vec::new(),
+        tracts: TractOutcomes::default(),
+    };
+    let walked = a_run(
+        calling.records_written,
+        calling.loci_called_but_not_written,
+        calling.loci_too_wide_to_assemble.clone(),
+        Vec::new(),
+        vec![walked("zeta", ground_mostly_called(), Vec::new())],
+    );
+    let stored = StoredCohortTallies {
+        per_sample: vec![a_stored_sample("zeta", 100, 300, Some(20))],
+    };
+
+    let from_alignments = rendered(&walked, &read_groups, &parameters, 300);
+    let from_psps = stored_rendered(&calling, &stored, &read_groups, &parameters, 300);
+
+    for line in [
+        "records written: 120",
+        "loci called: 165 — 120 written, 45 establishing no variant and so left out",
+        "loci the merge declined to assemble for being too wide: 1",
+        "loci where the allele cap left no sample callable: 0",
+    ] {
+        assert!(
+            from_alignments.contains(line),
+            "direct mode says {line:?}, and got:\n{from_alignments}",
+        );
+        assert!(
+            from_psps.contains(line),
+            "psp mode says the same, and got:\n{from_psps}",
+        );
+    }
 }
