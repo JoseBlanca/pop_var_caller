@@ -72,7 +72,7 @@ witnesses (where the two counts differ) and with no complete observation (where 
 zero). Oracle: the whole psp suite green, the refusals provoked in both directions.
 *Depends:* —. *Source:* spec §3, §3.1, §6.
 
-**H2. ☐ The owning documents follow.** May share H1's commit; if split, H2 lands immediately
+**H2. ✅ The owning documents follow.** May share H1's commit; if split, H2 lands immediately
 after. [`psp_file_format.md`](../spec/psp_file_format.md) §4.3: the field joins the head
 diagram and the field-by-field list, and the measured-cost paragraph gains one line saying its
 figures predate the sixth field and H3 re-takes them.

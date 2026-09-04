@@ -132,7 +132,8 @@ Two more terms this document needs:
   ([`chain_id_allocator.rs`](../../../../src/ng/locus_generation/pileup/chain_id_allocator.rs)).
 - **the record head** — the fixed fields at the front of every record that let a reader decide
   whether it wants the record without building it: the position offset, the reference span, the
-  non-reference read count, and the body's length (§4.3).
+  locus kind, the non-reference read count, the reads compared with the reference, and the body's
+  length (§4.3).
 
 ---
 
@@ -391,11 +392,16 @@ is not.
 
 **Settled 2026-08-25, and it replaces a two-stream design that was adopted and then measured
 away.** A psp block is **one** compressed stream. Each record in it opens with a fixed head that
-answers, cheaply, the two questions a reader has before it decides whether it wants the record:
+answers, cheaply, every question a reader has before it decides whether it wants the record: what
+ground the record covers, what kind of locus it is, whether enough of the sample's reads varied
+there to be worth building, and how far to skip if not. *It answered the first and the last of
+those when this section was settled; the kind and the share's denominator joined them on
+2026-09-04, and the shape of the argument is unchanged.*
 
 ```
-record = position_offset | reference_span | non_reference_reads | record_length | body
-         └────────────────── the head ──────────────────────┘   └── skip this ──┘
+record = position_offset | reference_span | locus_kind | non_reference_reads
+       | reads_compared_with_reference | record_length | body
+         └──────────────────────── the head ───────────────────────────┘   └── skip this ──┘
 ```
 
 A reader takes the head, decides, and either builds the body or advances `record_length` bytes past
@@ -465,10 +471,33 @@ at the cost of two more head fields and a reader that maintains state while skip
   [`cohort_merge.md`](cohort_merge.md) names it as one of two things it asks of this document, because
   a record widened by a deletion covers more than one position, so a reader indexed by position
   cannot work out what a record reaches from its start alone.
+- **`locus_kind`** — generic, repeat tract, or bundle. **Here rather than in the body since
+  2026-09-04** ([`psp_head_compared_reads.md`](psp_head_compared_reads.md) §3.1), because two of the
+  merge's decisions are taken before any evidence is assembled: `max_cohort_locus_span` governs
+  *generic* loci only — a tract's span is its reference tract and may lawfully exceed the bound —
+  and a cohort locus may not hold a generic and a tract member at once. A reader that cannot say a
+  record's kind fails every wide tract as an over-wide locus. **A move and not a copy:** the tract's
+  motif and flanks stay in the body, present exactly when this says repeat tract, so nothing has two
+  answers to check against each other.
 - **`non_reference_reads`** — the reads at this position that supported something other than the
   reference. **The owner's correction of his own first suggestion, 2026-08-25**: a count of
   alternative *alleles* answers *does anything vary here* identically, since an allele exists only
   because reads showed it — but the read count also lets a reader apply a threshold.
+- **`reads_compared_with_reference`** — how many of the sample's reads were compared, whole, against
+  the reference over this record's locus. **Added 2026-09-04**
+  ([`psp_head_compared_reads.md`](psp_head_compared_reads.md) §3): it is the *denominator* of the
+  rule the field above is the numerator of. A locus is built when some single sample shows at least
+  `max(floor, share × its compared reads)` non-reference reads
+  ([`cohort_merge.md`](cohort_merge.md) §4.3), and without both numbers a head answers that rule
+  only where the floor decides it — at three reads a position, not at three hundred, where two
+  non-reference reads in 300 is the sequencing error rate and the bar is six.
+
+  **The same subset counted both ways round, so the numerator never exceeds it**: a read whose
+  witness stopped inside the locus is in neither, and neither is a read that produced no
+  observation. *Depth* would have been the wrong denominator — it raises the bar with reads that
+  could never clear it. A head whose numerator exceeds its denominator is refused without its body
+  being read; it is the one check that holds two of the head's counts against each other, and it
+  is free.
 - **`record_length`** — the body's length in bytes, so an unwanted record is skipped rather than
   decoded. Measured cost: **1.4 % of the file** at three reads a position, 3.3 % at 279.
 
@@ -478,8 +507,17 @@ that document's, not this one's.
 
 **Fixed-width or variable-length is the manifest's to say** (§4.5), not this section's. A fixed
 width is quicker to read, and costs less than it looks after compression because a column of small,
-repetitive values collapses — the four head fields together compressed to 0.077 bytes a record when
-measured on their own. *Unmeasured: the two encodings against each other in place.*
+repetitive values collapses — the head's four scalars as it then stood compressed to 0.077 bytes a
+record when measured on their own. *Unmeasured: the two encodings against each other in place.*
+
+**⚠ Every cost figure in this section was taken on a head of four scalars, and the head now has
+five.** The 9.2 % and 5.8 % above, and the 0.077 bytes a record here, predate
+`reads_compared_with_reference` and the arrival of `locus_kind` from the body. The kind is a move
+and should cost nothing to first order; the denominator is an addition, and it is expected to
+compress worse than the numerator, because it tracks depth and so varies record to record where the
+numerator is almost always zero. **Re-measuring both corpora is step H3 of
+[`../impl_plan/psp_head_compared_reads.md`](../impl_plan/psp_head_compared_reads.md)**; until it
+lands, read every percentage in §4.3 as the figure for a head two fields smaller.
 
 ### 4.4 The reader's two buffers — 16 kB each
 

@@ -124,8 +124,11 @@ path; §4.4 says so at the point it matters.
   ([`pileup/generator.rs:93`](../../../../src/ng/locus_generation/pileup/generator.rs)). It bounds
   how far the observation cache must reach and nothing else (§5, §6.4).
 - **position summary** — the cheap facts a builder needs about a position before it decides
-  anything: what a record there covers, and whether any sample recorded something other than the
-  reference. **In the direct path these are read straight off the observations the walk minted** —
+  anything: what a record there covers, what kind of locus it is, how many of the sample's reads
+  were compared against the reference there, and how many of those showed something other than the
+  reference. The last two are the two numbers §4.3's rule needs — a flat count and a share of the
+  compared reads — and the kind is what says whether §3.1's width bound applies at all.
+  **In the direct path these are read straight off the observations the walk minted** —
   there is no separate object. In the psp path they are the file's light columns, decoded ahead of
   the heavy ones (production's `TwoPhaseSegment`,
   [`sample_reader.rs:698`](../../../../src/var_calling/sample_reader.rs)). The name is the role,
@@ -1082,10 +1085,17 @@ for the run).
   the observation cache may have to reach (§5, §6.4), and that cache grows on demand rather than
   taking a capacity — so the number is exposed for the psp-mode performance work rather than
   consumed by the merge.
-- **The position summary's encoding, carrying the reference span** — to the psp encoding spec
-  ([`run_streaming.md`](run_streaming.md) §10). Phase 1 must serve position, reference span and
-  non-reference count per record (§1.3); the sketch in [`run_streaming.md`](run_streaming.md)
-  §3.3 lists depth instead of span and should be corrected when the encoding spec lands.
+- ~~**The position summary's encoding, carrying the reference span**~~ — **landed, and it carries
+  more than the span**. The record head is the encoding
+  ([`psp_file_format.md`](psp_file_format.md) §4.3): position offset, reference span, locus kind,
+  non-reference reads, reads compared with the reference, and the body's length. **This bullet
+  asked for three of those** — position, reference span, non-reference count. Two more joined them
+  on 2026-09-04 ([`psp_head_compared_reads.md`](psp_head_compared_reads.md)): the **compared-read
+  count**, because §4.3's rule takes a share of it and a head without it answers that rule only
+  where the flat floor decides it, and the **locus kind**, because §3.1's width bound applies to
+  generic loci only. §1.3's entry lists all five, and so does the sketch in
+  [`run_streaming.md`](run_streaming.md) §3.3, which used to ask step 2 for a sample's total reads
+  and no span at all.
 - **Where the run summary lives, and the failed-locus count's exact surface in it** — to the
   emission step's document, which owns what a calling run reports; this spec fixes only that the
   count exists, is summed at the drain, and reaches the user (§3.3).

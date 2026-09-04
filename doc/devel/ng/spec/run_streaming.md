@@ -335,9 +335,10 @@ did this sample show a non-reference read anywhere in this stretch?
 #   step 3 at every position the cohort kept, and must answer there in full.
 
 # step 2 — cheap, at every position of the segment
-how many non-reference reads, and how many reads in total, did this sample have here?
+how far does this record reach, what kind of locus is it, how many of this sample's
+reads were compared whole against the reference here, and how many of those varied?
 #   the merge puts every sample's answers together and decides which positions are
-#   worth calling
+#   worth calling. ⚠ Compared reads, not depth: see the ⚑ below.
 
 # step 3 — expensive, only at the positions the merge kept
 everything the sample saw there — sequences, qualities, read names
@@ -348,12 +349,16 @@ has the reads in hand, so step 2 costs it a walk and step 3 is free; a psp reade
 for step 2 and a dear one for step 3. **One interface, two cost profiles** — and the merge, which
 sees only the answers, is where the decision is taken either way.
 
-**⚑ The read count in step 2 is a requirement the encoding did not have written down.** The rule
-that admits a position asks each sample for a *share* of its own reads as well as a flat count —
+**⚑ The read count in step 2 is a requirement the encoding did not have written down — and now
+does, since 2026-09-04.** The rule that admits a position asks each sample for a *share* of its own
+reads as well as a flat count —
 `max(floor reads, share × that sample's reads compared against the reference over the locus)`
 ([`src/ng/run/cohort_merge/mod.rs`](../../../../src/ng/run/cohort_merge/mod.rs)) — so a cheap read
 that returns only the non-reference count cannot answer it. Named here because this document is
-where the requirement comes from; the encoding is where it has to be met.
+where the requirement comes from; the encoding is where it had to be met, and
+[`psp_head_compared_reads.md`](psp_head_compared_reads.md) is where it was: the record head carries
+`reads_compared_with_reference` beside the non-reference count, so a reader answers the rule at
+every depth without decoding a body.
 
 *The production path also ships its own oracle, which is worth carrying: an eager whole-segment
 decode used only by tests, as the byte-identity check the two-phase path is measured against

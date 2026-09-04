@@ -294,7 +294,8 @@ in 100 none does. Production measured that as 28,718 positions worth calling out
 with the body's length so an unwanted record is skipped rather than decoded:
 
 ```
-position_offset | reference_span | non_reference_reads | record_length | body
+position_offset | reference_span | locus_kind | non_reference_reads
+| reads_compared_with_reference | record_length | body
 ```
 
 [`psp_file_format.md`](psp_file_format.md) §4.3 owns the layout and the field-by-field reasons. What
