@@ -1529,7 +1529,8 @@ mod census_tests {
     /// The fixture cohort, its ground, and a census plan over it.
     fn a_cohort_with_a_census_plan() -> (ACohortOnDisk, Arc<Segmentation>, CensusPlan) {
         let cohort = a_cohort_on_disk();
-        let (segmentation, plan) = crate::ng::run::test_fixtures::a_census_plan_over(&cohort);
+        let (segmentation, plan) =
+            crate::ng::run::test_fixtures::a_census_plan_over(&cohort.reference, &cohort.catalog);
         (cohort, segmentation, plan)
     }
 
@@ -1550,9 +1551,14 @@ mod census_tests {
         let psp = cohort.directory.path().join("zeta.psp");
         let census = cohort.directory.path().join("zeta.census");
 
-        let (stats, _) = gatherer_over(&cohort, 0, &segmentation, Some(&plan))
-            .write_psp(&psp, Some(&census))
-            .expect("the walk writes both files");
+        let (stats, _) = gatherer_over(
+            &cohort.alignments[0],
+            &cohort.reference,
+            &segmentation,
+            Some(&plan),
+        )
+        .write_psp(&psp, Some(&census))
+        .expect("the walk writes both files");
 
         assert!(census.is_file(), "the census is at {census:?}");
         let (_evidence, named) = open_census(&census).expect("this build's own census");
@@ -1578,9 +1584,14 @@ mod census_tests {
         let (cohort, segmentation, _plan) = a_cohort_with_a_census_plan();
         let psp = cohort.directory.path().join("zeta.psp");
 
-        let _ = gatherer_over(&cohort, 0, &segmentation, None)
-            .write_psp(&psp, None)
-            .expect("the walk writes its psp");
+        let _ = gatherer_over(
+            &cohort.alignments[0],
+            &cohort.reference,
+            &segmentation,
+            None,
+        )
+        .write_psp(&psp, None)
+        .expect("the walk writes its psp");
 
         assert!(psp.is_file());
         assert!(
@@ -1604,9 +1615,14 @@ mod census_tests {
             .join("no-such-directory")
             .join("zeta.census");
 
-        let refused = gatherer_over(&cohort, 0, &segmentation, Some(&plan))
-            .write_psp(&psp, Some(&census))
-            .expect_err("there is nowhere to write the census");
+        let refused = gatherer_over(
+            &cohort.alignments[0],
+            &cohort.reference,
+            &segmentation,
+            Some(&plan),
+        )
+        .write_psp(&psp, Some(&census))
+        .expect_err("there is nowhere to write the census");
 
         let rendered = crate::error_render::format_error_chain(&refused);
         assert!(
@@ -1629,9 +1645,14 @@ mod census_tests {
         for (which, sample) in ["zeta", "alpha"].iter().enumerate() {
             let psp = cohort.directory.path().join(format!("{sample}.psp"));
             let census = cohort.directory.path().join(format!("{sample}.census"));
-            let _ = gatherer_over(&cohort, which, &segmentation, Some(&plan))
-                .write_psp(&psp, Some(&census))
-                .expect("the walk writes both files");
+            let _ = gatherer_over(
+                &cohort.alignments[which],
+                &cohort.reference,
+                &segmentation,
+                Some(&plan),
+            )
+            .write_psp(&psp, Some(&census))
+            .expect("the walk writes both files");
             written.push(std::fs::read(&census).expect("the census reads"));
         }
 

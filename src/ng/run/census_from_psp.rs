@@ -174,12 +174,17 @@ mod tests {
     #[test]
     fn the_census_it_builds_names_the_psp_it_read() {
         let cohort = a_cohort_on_disk();
-        let (segmentation, plan) = a_census_plan_over(&cohort);
+        let (segmentation, plan) = a_census_plan_over(&cohort.reference, &cohort.catalog);
         let psp = cohort.directory.path().join("zeta.psp");
 
-        let (stats, _) = gatherer_over(&cohort, 0, &segmentation, Some(&plan))
-            .write_psp(&psp, None)
-            .expect("the walk writes its psp");
+        let (stats, _) = gatherer_over(
+            &cohort.alignments[0],
+            &cohort.reference,
+            &segmentation,
+            Some(&plan),
+        )
+        .write_psp(&psp, None)
+        .expect("the walk writes its psp");
 
         let built = census_from_psp(&psp, &plan, &segmentation).expect("the psp is readable");
 
@@ -202,11 +207,16 @@ mod tests {
     #[test]
     fn the_digest_off_the_file_is_the_digest_of_its_own_header() {
         let cohort = a_cohort_on_disk();
-        let (segmentation, plan) = a_census_plan_over(&cohort);
+        let (segmentation, plan) = a_census_plan_over(&cohort.reference, &cohort.catalog);
         let psp = cohort.directory.path().join("zeta.psp");
-        let _ = gatherer_over(&cohort, 0, &segmentation, Some(&plan))
-            .write_psp(&psp, None)
-            .expect("the walk writes its psp");
+        let _ = gatherer_over(
+            &cohort.alignments[0],
+            &cohort.reference,
+            &segmentation,
+            Some(&plan),
+        )
+        .write_psp(&psp, None)
+        .expect("the walk writes its psp");
 
         let from_the_file = psp::header_digest(&psp).expect("the header reads");
         let re_encoded = PileupIdentity::of_header(
@@ -228,11 +238,16 @@ mod tests {
     #[test]
     fn the_sample_and_its_read_groups_come_from_the_psp() {
         let cohort = a_cohort_on_disk();
-        let (segmentation, plan) = a_census_plan_over(&cohort);
+        let (segmentation, plan) = a_census_plan_over(&cohort.reference, &cohort.catalog);
         let psp = cohort.directory.path().join("zeta.psp");
-        let _ = gatherer_over(&cohort, 0, &segmentation, Some(&plan))
-            .write_psp(&psp, None)
-            .expect("the walk writes its psp");
+        let _ = gatherer_over(
+            &cohort.alignments[0],
+            &cohort.reference,
+            &segmentation,
+            Some(&plan),
+        )
+        .write_psp(&psp, None)
+        .expect("the walk writes its psp");
 
         let stored = PspReader::open(&psp).expect("the psp opens");
         let expected_sample = stored.header().sample.clone();
@@ -259,7 +274,7 @@ mod tests {
     #[test]
     fn a_file_that_is_not_a_psp_is_refused() {
         let cohort = a_cohort_on_disk();
-        let (segmentation, plan) = a_census_plan_over(&cohort);
+        let (segmentation, plan) = a_census_plan_over(&cohort.reference, &cohort.catalog);
         let not_a_psp = cohort.directory.path().join("not-a-psp.psp");
         std::fs::write(&not_a_psp, b"this is not a psp at all").expect("the scratch dir is ours");
 
@@ -269,6 +284,141 @@ mod tests {
         assert!(
             matches!(&error, CensusFromPspError::NotOpened { path, .. } if path == &not_a_psp),
             "{error:?}",
+        );
+    }
+}
+
+#[cfg(test)]
+mod the_two_producers_agree {
+    //! **Plan step A2, and the question it answers is about the psp** (spec §7.12).
+    //!
+    //! One sample's census built while its reads are walked, and built again from the psp that
+    //! walk wrote, must be the same file byte for byte. **That is what says the psp holds
+    //! everything a census needs**: a field the record format drops survives every other test —
+    //! the psp still reads back, the caller still calls, the census still writes — and shows up
+    //! only here, as two files that differ.
+    //!
+    //! **The fixture is the varying cohort and not the plain one**, because the field most
+    //! likely not to survive the round trip is a read's length at a repeat tract, and only that
+    //! fixture has a tract for a read to have a length at.
+
+    use super::*;
+    use crate::ng::parameter_estimation::joint::census_file::write_census;
+    use crate::ng::run::test_fixtures::{a_census_plan_over, gatherer_over};
+    use crate::pop_var_caller_exp::test_fixtures::a_varying_cohort_on_disk;
+
+    /// Build both censuses for one sample and return the two files' bytes.
+    ///
+    /// The walk writes its own; this then re-reads the psp it left and writes the second
+    /// through the same `write_census`, so the comparison is of two census *files* rather than
+    /// of two in-memory values that a writing difference could still separate.
+    fn both_censuses_for(which: usize) -> (Vec<u8>, Vec<u8>) {
+        let cohort = a_varying_cohort_on_disk();
+        let (segmentation, plan) = a_census_plan_over(&cohort.reference, &cohort.catalog);
+        let psp = cohort.directory.path().join(format!("sample{which}.psp"));
+        let walked = cohort
+            .directory
+            .path()
+            .join(format!("sample{which}.census"));
+
+        let _ = gatherer_over(
+            &cohort.alignments[which],
+            &cohort.reference,
+            &segmentation,
+            Some(&plan),
+        )
+        .write_psp(&psp, Some(&walked))
+        .expect("the walk writes both files");
+
+        let rebuilt = census_from_psp(&psp, &plan, &segmentation).expect("the psp is readable");
+        let mut from_the_psp = Vec::new();
+        write_census(&rebuilt.evidence, Some(rebuilt.identity), &mut from_the_psp)
+            .expect("a vector accepts every write");
+
+        let from_the_walk = std::fs::read(&walked).expect("the walk's census is on disk");
+        (from_the_walk, from_the_psp)
+    }
+
+    /// **The sample that carries reads: the two censuses are one file.**
+    #[test]
+    fn a_sample_with_reads_gets_the_same_census_either_way() {
+        let (from_the_walk, from_the_psp) = both_censuses_for(0);
+
+        assert_eq!(
+            from_the_walk.len(),
+            from_the_psp.len(),
+            "the two censuses are different lengths, so the psp is not round-tripping some \
+             field the census records",
+        );
+        assert!(
+            from_the_walk == from_the_psp,
+            "the two censuses are the same length and differ at byte {}",
+            from_the_walk
+                .iter()
+                .zip(&from_the_psp)
+                .position(|(walked, rebuilt)| walked != rebuilt)
+                .expect("the lengths match and the vectors differ, so a first difference exists"),
+        );
+    }
+
+    /// **The second sample too**, because the two carry their variation in different places and
+    /// a producer that read only the first record of a block would pass on one of them alone.
+    #[test]
+    fn the_other_sample_gets_the_same_census_either_way() {
+        let (from_the_walk, from_the_psp) = both_censuses_for(1);
+        assert_eq!(from_the_walk, from_the_psp);
+    }
+
+    /// **The census the psp produces is not empty**, which is what stops the test above passing
+    /// on two censuses that both recorded nothing.
+    ///
+    /// A census whose every position reads *never walked* would compare equal to another of the
+    /// same shape while proving nothing about the psp at all. This asserts the fixture's walk
+    /// actually reached the kept loci — the depth codes are not all the never-walked one.
+    #[test]
+    fn the_census_being_compared_holds_something() {
+        let cohort = a_varying_cohort_on_disk();
+        let (segmentation, plan) = a_census_plan_over(&cohort.reference, &cohort.catalog);
+        let psp = cohort.directory.path().join("sample0.psp");
+        let _ = gatherer_over(
+            &cohort.alignments[0],
+            &cohort.reference,
+            &segmentation,
+            Some(&plan),
+        )
+        .write_psp(&psp, None)
+        .expect("the walk writes its psp");
+
+        let built = census_from_psp(&psp, &plan, &segmentation).expect("the psp is readable");
+
+        assert!(
+            built.identity.records > 0,
+            "the fixture's walk stored no records at all, so nothing was fed to either producer",
+        );
+        assert!(
+            !built.evidence.strata().is_empty(),
+            "the census holds no repeat-tract stratum, so the comparison above says nothing \
+             about the field it was built to catch — a read's length at a tract",
+        );
+        let strata = built.evidence.strata();
+        let groups = built.evidence.read_groups();
+        let mut evidence = built.evidence;
+        let mut reads_at_tracts: u32 = 0;
+        for group in groups {
+            reads_at_tracts += evidence
+                .with_strata(group, &strata, |lent| {
+                    lent.iter()
+                        .flat_map(|section| {
+                            (0..section.len()).map(|locus| section.offsets(locus).total())
+                        })
+                        .sum::<u32>()
+                })
+                .expect("the sections are resident");
+        }
+        assert!(
+            reads_at_tracts > 0,
+            "no read reached a kept tract, so a producer that dropped every tract read would \
+             pass the byte-for-byte comparison",
         );
     }
 }

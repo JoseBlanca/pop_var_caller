@@ -27,7 +27,31 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-04):** **the fit stage has a plan, and psp mode is on `main`**
+> - **Last completed task (2026-09-04):** **a census built from a stored psp is the same census**
+> (branch `ng-psp-mode`, Checkpoint A of
+> [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
+> [report](doc/devel/reports/implementations/ng_fit_stage_a_2026-09-04.md)).
+>
+> One sample's census built while its reads are walked, and built again afterwards from the psp
+> that walk wrote, are the same file byte for byte — on both samples of the fixture cohort with
+> a ten-copy `GT` tract and three read groups. **That is a statement about the psp**, not about
+> the new code: a record format that dropped a read's read group, its per-position witness or
+> its length at a tract would still read back, still call, and still produce a census, one that
+> differs only here.
+>
+> **Both producers now build their writer through `CensusPlan::writer_for`**, so the comparison
+> cannot degrade into a test of whether two hand-copied constructor call sites were kept in step.
+>
+> **Four deliberate defects were run against the comparison**
+> (`scripts/ng_census_agreement_mutations.sh`): skipping repeat-tract loci fails all three tests,
+> losing one read at every locus fails two, crediting every read to read group 0 fails one — the
+> sample with a single read group cannot see it — and **changing a read's minted error fails
+> none.** The last is a fact about the format rather than a hole in the test: a census holds a
+> depth code per position per read group and the non-reference allele counts, and no per-read
+> quality at all. So the per-read-group minted-error totals `RunParameters::assemble` needs
+> cannot be read out of a census as it stands, which is what plan step E2 has to settle.
+>
+> - **Earlier (2026-09-04):** **the fit stage has a plan, and psp mode is on `main`**
 > ([parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md); branch
 > `ng-psp-mode` fast-forwarded onto `main` at `e7eeab1c`, 6,229 lib tests green in the container).
 >

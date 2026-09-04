@@ -180,13 +180,13 @@ Confirm each still holds before starting.
 
 ### Milestone A — a census built from a stored pileup
 
-☐ **A1 — the producer.** Drive `CensusWriter` from a pileup's decoded record stream instead of
+✅ **A1 — the producer.** Drive `CensusWriter` from a pileup's decoded record stream instead of
 from alignments: the same writer, the same selection, fed downstream of every filter and cap
 the walk applied. One sample.
 *Depends:* —. *Source:* [records spec](../spec/parameter_prepass_joint_records.md) §6.1;
 [`census_file.md`](census_file.md) C1.
 
-☐ **A2 — the two producers agree byte for byte.** One sample's census built during a walk and
+✅ **A2 — the two producers agree byte for byte.** One sample's census built during a walk and
 again from the pileup that walk wrote, identical. Run it on a fixture carrying every corner
 state, **including a repeat tract**: a tract's per-read length is the field most likely not to
 survive the round trip, and a census that lost it fits a stutter model on nothing.
@@ -195,6 +195,18 @@ survive the round trip, and a census that lost it fits a stutter model on nothin
 
 > **Checkpoint A: the pileup holds everything a census needs, demonstrated rather than assumed.**
 > Pause for review.
+>
+> **Reached 2026-09-04**
+> ([report](../../reports/implementations/ng_fit_stage_a_2026-09-04.md)). One sample's census
+> built during its walk and built again from the psp that walk wrote is the same file byte for
+> byte, on both samples of the varying cohort — the fixture with a ten-copy `GT` tract and three
+> read groups. Four deliberate defects were run against the comparison: skipping tract loci fails
+> all three tests, losing one read at every locus fails two, crediting every read to read group 0
+> fails one (the sample with a single read group cannot see it), and **changing a read's minted
+> error fails none** — because a census records depth codes and allele counts and no per-read
+> quality at all. That last one confirms §3.4 from the code rather than from reasoning: the
+> minted-error totals cannot come out of a census as the format stands, which is what step E2
+> has to settle.
 
 ### Milestone B — `generate-census`, and the two routes measured
 
@@ -334,3 +346,25 @@ still says so.
   [`parameter_prepass_joint_fit.md`](../spec/parameter_prepass_joint_fit.md) §11 q8, q10.
 - **Which walk knobs become flags** — re-opened at Checkpoint C, decided by the owner.
 - **psp-mode performance** — `cohort_merge_psp_path.md`, on branch `ng-psp-calling`.
+
+### 9.1 Open question: does skipping the loci nobody varied at speed the fit up too?
+
+**Raised by the owner, 2026-09-04.** The psp-mode performance work skips loci where no sample
+carries a difference from the reference, and the question is whether the fit can skip them the
+same way.
+
+**What is settled is what the census needs**, and it does not point that way. A census records a
+**depth code for every kept position and every read group, including the positions where nothing
+varies** — the zero is the denominator, and a spectrum built without it has a shape and no scale
+(`parameter_prepass_census_sites.md` §2). Building that depth means walking the record's
+observations one read at a time: `CensusWriter::add_generic` adds each read's `num_obs` into
+every position its witness covers, per read group. The record head carries one count for the
+whole record and no read-group split, so **a body skipped on its head alone leaves the census
+with no depth at that position at all** — which is the state that reads as *never walked*, and
+is exactly the confusion `mark_walked` exists to prevent.
+
+So the two stages want different things from the same skip: calling can drop an invariant locus
+because it emits no record; the fit needs it because it is the denominator. **What might still
+transfer is the cheaper decode rather than the skip** — reading a body far enough to total its
+depths without materialising its observations. That is a measurement to make once the fit runs
+end to end, not a design decision to take now.

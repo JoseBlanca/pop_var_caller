@@ -17,7 +17,7 @@
 //!   was given by showing the result differs from the shipped default's, which is only a
 //!   proof while this value is not the default.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::ng::read::ReadFilterConfig;
@@ -117,7 +117,8 @@ pub(crate) fn unusual_read_filters() -> ReadFilterConfig {
 /// is two million positions; at that number the threshold keeps everything here, which is what
 /// a test of the wiring wants — but saying so is better than relying on it.
 pub(crate) fn a_census_plan_over(
-    cohort: &crate::pop_var_caller_exp::test_fixtures::ACohortOnDisk,
+    reference_fasta: &Path,
+    catalog_path: &Path,
 ) -> (Arc<Segmentation>, super::CensusPlan) {
     use crate::ng::parameter_estimation::joint::loci::UnambiguousRuns;
     use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
@@ -132,7 +133,7 @@ pub(crate) fn a_census_plan_over(
     let mut callable = UnambiguousRuns::default();
     let reference = read_reference_info_observing(
         ReferenceSource::Fasta {
-            fasta: cohort.reference.clone(),
+            fasta: reference_fasta.to_path_buf(),
             fai: None,
         },
         &mut callable,
@@ -143,8 +144,8 @@ pub(crate) fn a_census_plan_over(
         .expect("maximal runs are disjoint");
 
     let request = GroundRequest {
-        reference: &cohort.reference,
-        catalog: Some(&cohort.catalog),
+        reference: reference_fasta,
+        catalog: Some(catalog_path),
         regions: None,
         routing: RepeatRouting {
             min_copies: MinCopies::default(),
@@ -158,7 +159,7 @@ pub(crate) fn a_census_plan_over(
         .expect("the whole reference");
     let segmentation =
         Arc::new(run_ground::segments_over(&request, &analysed, &reference).expect("it types"));
-    let catalog = RepeatCatalog::open_checking_against_reference(&cohort.catalog, &reference)
+    let catalog = RepeatCatalog::open_checking_against_reference(catalog_path, &reference)
         .expect("the fixture's catalog is this reference's");
     let plan = CensusPlan::of_run(
         CensusSelection {
@@ -177,8 +178,8 @@ pub(crate) fn a_census_plan_over(
 
 /// A walk over one sample of a fixture cohort, with a census plan or without one.
 pub(crate) fn gatherer_over(
-    cohort: &crate::pop_var_caller_exp::test_fixtures::ACohortOnDisk,
-    which: usize,
+    alignment: &PathBuf,
+    reference: &Path,
     segmentation: &Arc<Segmentation>,
     plan: Option<&super::CensusPlan>,
 ) -> super::SampleObservationGatherer {
@@ -193,15 +194,15 @@ pub(crate) fn gatherer_over(
     let cache = Arc::new(ReferenceInfoCache::new());
     let (info, _) = read_reference_verifying_or_creating_fai(
         &cache,
-        cohort.reference.clone(),
+        reference.to_path_buf(),
         ReferenceCheck::TrustIndexWithoutChecking,
     )
     .expect("the reference reads");
-    let reference = OpenReference::new(info);
+    let open_reference = OpenReference::new(info);
     SampleObservationGatherer::open(
         SampleWalkInputs {
-            alignments: std::slice::from_ref(&cohort.alignments[which]),
-            reference: &reference,
+            alignments: std::slice::from_ref(alignment),
+            reference: &open_reference,
             read_filters: ReadFilterConfig::default(),
             locus_generator_settings: PileupGeneratorConfig::default(),
             build_index_if_missing: false,
