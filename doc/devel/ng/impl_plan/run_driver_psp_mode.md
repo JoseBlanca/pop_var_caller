@@ -65,8 +65,9 @@ this plan up after Checkpoint E should read H's plan next, not F's.
 - **The fit stage**: a run that fits parameters from census files, the census built *from a
   psp*, the §7.12 byte-for-byte census-equality oracle, and the `generate-census` migration
   command (`parameter_prepass_joint_records.md` §6.1) — a follow-on plan
-  (`parameter_prepass_runs.md`, unwritten). This plan writes the census beside the psp
-  (Milestone G) so no sample ever needs re-walking; it does not read one back.
+  ([`parameter_prepass_runs.md`](parameter_prepass_runs.md), written 2026-09-04). This plan
+  writes the census beside the psp (Milestone G) so no sample ever needs re-walking; it does
+  not read one back.
 - **psp-mode performance**: the cheap-numbers source method (spec §3.3 step 2, deferred at
   spec §10 / arch §8), the shared contig list (spec §7.2, §10 — 357 kB a sample), record
   leasing through the `spare` offer (Milestone G of the direct-mode plan, deferred by the
@@ -530,11 +531,12 @@ The command's report names both; a census that cannot be written fails the sampl
 > alignment files once and writes both files spec §2 gives the walk stage; `call-from-psps` calls
 > a cohort of the first kind and produces direct mode's VCF. Nothing in this plan is open.
 >
-> **Carried to the next plan** (`parameter_prepass_runs.md`, unwritten): reading a census back,
-> building one *from* a psp, and §7.12's byte-for-byte census-equality oracle. **Two of this
-> plan's own gaps close there rather than here** — the mode-equivalence oracle cannot see the
-> stored fields only a fit reads (the sum of squared mapping qualities, and the count of reads
-> that covered a locus without producing an observation), and nothing yet reads a census at all.
+> **Carried to the next plan** ([`parameter_prepass_runs.md`](parameter_prepass_runs.md), written
+> 2026-09-04): reading a census back, building one *from* a psp, and §7.12's byte-for-byte
+> census-equality oracle. **Two of this plan's own gaps close there rather than here** — the
+> mode-equivalence oracle cannot see the stored fields only a fit reads (the sum of squared
+> mapping qualities, and the count of reads that covered a locus without producing an
+> observation), and nothing yet reads a census at all.
 >
 > **Ruled by the owner, 2026-09-04: they all stay constants until the fit stage exists.** The
 > census selection's seed and two counts, the read filters, and the five locus-generator knobs —
@@ -560,8 +562,8 @@ The command's report names both; a census that cannot be written fails the sampl
 
 ## Out of scope (next plans)
 
-- **`parameter_prepass_runs.md`** (unwritten): the fit stage, census-from-psp, §7.12's
-  byte-for-byte census equality, `generate-census`.
+- **[`parameter_prepass_runs.md`](parameter_prepass_runs.md)** (written 2026-09-04): the fit
+  stage, census-from-psp, §7.12's byte-for-byte census equality, `generate-census`.
 - **psp-mode performance** (after the first measured run): the cheap-numbers read (spec
   §3.3/§10), the shared contig list (§7.2/§10), leasing through `spare`, §11 q7's psp half,
   and q2's remaining callers-in-flight half.

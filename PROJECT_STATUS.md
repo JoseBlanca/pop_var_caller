@@ -27,7 +27,31 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-04):** **the psp-mode plan is finished — `generate-psps`
+> - **Last completed task (2026-09-04):** **the fit stage has a plan, and psp mode is on `main`**
+> ([parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md); branch
+> `ng-psp-mode` fast-forwarded onto `main` at `e7eeab1c`, 6,229 lib tests green in the container).
+>
+> The plan's route is four files on disk: alignments → psp → census → parameters file → VCF, so
+> any stage can be re-run without repeating the one before it. Five milestones — a census built
+> from a stored psp and §7.12's byte-for-byte agreement with the walk-time one; `generate-census`;
+> the fit and the parameters file it writes; the four commands end to end; the base-quality
+> calibration.
+>
+> **Two rulings by the owner shaped it (2026-09-04).** `generate-psps` keeps writing the census it
+> already writes — the second producer is added beside it, not in place of it, and the two are
+> measured against each other on wall time and peak memory. And the fit reads census files rather
+> than fitting during the walk, so nothing else reaches the estimates for now.
+>
+> **What the plan found before it was written:** `RunParameters::assemble` is called 36 times in
+> this tree and 35 are inside test modules, so **no program has ever produced a fitted parameters
+> file**; a run today scores with the compiled-in defaults or a file somebody hands it. It also
+> takes a per-read-group sum of `ln P(read is wrong)` that the joint fit does not produce, so the
+> first parameters files this route writes carry a **defaulted** base-quality calibration and say
+> so. Milestone E closes that: a stored psp decodes back to exactly the observations the
+> accumulator sums, with `q_sum` held in integer steps, so the totals can be taken on a pass that
+> is already being made.
+>
+> - **Earlier (2026-09-04):** **the psp-mode plan is finished — `generate-psps`
 > writes the census beside each psp from one pass over the reads** (branch `ng-psp-mode`,
 > Checkpoint G; [report](doc/devel/reports/implementations/ng_psp_mode_g_2026-09-04.md)).
 > Measured on the six tomato accessions over the two 100 kb intervals: **3,592,149 bytes of psp
@@ -51,10 +75,10 @@ Skills and agents are instructed to leave it untouched.
 > different — and every freshness check would have said *rebuild* for ever, silently. `WriteStats`
 > now carries the digest of the header as written.
 >
-> **Next: `parameter_prepass_runs.md`** (unwritten) — reading a census back, building one from a
-> psp, and §7.12's byte-for-byte census-equality oracle. Two of the psp-mode plan's own gaps close
-> there: nothing yet reads a census, and the mode-equivalence oracle cannot see the stored fields
-> only a fit reads.
+> **Next: execute [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md)**
+> — reading a census back, building one from a psp, and §7.12's byte-for-byte census-equality
+> oracle. Two of the psp-mode plan's own gaps close there: nothing yet reads a census, and the
+> mode-equivalence oracle cannot see the stored fields only a fit reads.
 >
 > - **Earlier (2026-09-04):** **Milestone F is complete — psp mode exists, equals
 > direct mode, and every run-level invariance spec §12 asks of it holds** (branch `ng-psp-mode`,
