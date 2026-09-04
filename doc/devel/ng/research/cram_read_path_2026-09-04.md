@@ -8,7 +8,8 @@ sequentially cut the memory?
 
 **Answer in one line.** Three changes, all measured and all leaving every decoded read
 byte-identical, take the CRAM read path from 0.847 s to 0.454 s per 600,000 whole-genome
-reads — **1.87×** — and take a whole calling run from 79.0 s to 58.1 s — **1.36×**. A fourth,
+reads — **1.87×** — and take a whole calling run from about 79 s to about 59 s — **1.29× to 1.36×** across two
+alternated pairs. A fourth,
 built and verified but not yet wired into ng, cuts what the decode holds resident by
 **6.4×**: 198 MB to 31 MB on a tomato chromosome, 493 MB to 77 MB on a human one. None of
 these is the change the previous review pointed at, and the thing that review pointed at
@@ -212,10 +213,10 @@ which is a different change and needed the check to be safe.
 
 | | wall (18 threads) | wall (1 thread) | peak resident |
 |---|---:|---:|---:|
-| `main` as it stands | 81.5, 80.4 s | **79.0 s** | 298–322 MB |
-| §4, §5 and §5a applied | 60.6, 59.6 s | **58.1 s** | 322 MB |
+| `main` as it stands | 81.5, 80.4 s | **79.0, 78.9 s** | 298–322 MB |
+| §4, §5 and §5a applied | 60.6, 59.6 s | **58.1, 60.9 s** | 296–322 MB |
 
-**1.36×, and the VCF is byte-identical** — 50,203 records, compared line for line except
+**1.29× to 1.36× across the two single-threaded pairs, and the VCF is byte-identical** — 50,203 records, compared line for line except
 `##commandline` and `##parametersFile`. Peak resident does not move. The single-threaded pair
 is the one quoted because the 18-thread figures swing by 10 s between repeats of the same
 binary on this machine while the one-thread pair does not, and a single-sample run has little
@@ -346,7 +347,7 @@ noodles can be judged — and if the owner decides so, offered upstream — one 
 | `perf(cram): read a decoded record's fields into the caller's buffers…` | §5's noodles half. | not as it stands — a new API with one caller |
 | `perf(ng): a CRAM record goes straight into the container's buffers` | §5's ng half. | — |
 | `perf(cram): a caller that reads no auxiliary tags need not decode them…` | §5a's noodles half, with the check that says when it is safe. | not as it stands |
-| `perf(ng): the CRAM decode stops reading tags it was already throwing away` | §5a's ng half, and the 1.36× of §6. | — |
+| `perf(ng): the CRAM decode stops reading tags it was already throwing away` | §5a's ng half, and the whole-run figure of §6. | — |
 | `perf(ng): a CRAM's `.crai` is grouped by contig at open and the flat copy is then let go` | §7's cohort-scaling piece. | — |
 | `perf(cram): decode a slice against a window of the reference…` | §7's windowed decode. **ng does not use it yet.** | the shape may be worth proposing |
 | this report | | |
