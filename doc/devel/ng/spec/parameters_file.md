@@ -380,14 +380,30 @@ Four bindings, and each has a failure attached:
 
 - **the reference's content digest.** A parameters file fitted against a different assembly gives a
   plausible VCF with wrong repeat strata. **Refuse.**
-- **the sample list, in order, by name.** The inbreeding coefficients are per sample and the file
-  carries names for exactly this reason (§3.5). A file listing samples the run does not have, or
-  missing ones it does: **refuse**, naming the samples.
-- **the read-group table.** The calibration and contamination axes are dense over `0..n` with
-  nothing missing — a gap drops the highest read group entirely and surfaces as a panic at
+- **the sample list, by name — and *not* in order** (the owner's ruling of 2026-09-04). The
+  inbreeding coefficients are per sample and the file carries names for exactly this reason
+  (§3.5). A file listing samples the run does not have, or missing ones it does: **refuse**,
+  naming the samples on both sides.
+
+  **Order is immaterial and must be**, because a run's sample order is *first-seen over the
+  alignment files it was given* — so the same cohort handed over in another order lists its
+  samples differently, and a file fitted on that cohort is still the right file. Each of the
+  file's rows is put where *this run* wants it rather than where the file lists it. An earlier
+  draft compared the two lists position by position and refused a re-ordered file; the reasoning
+  was right about the danger — a plant handed its neighbour's coefficient, which nothing
+  downstream could see — and wrong about the remedy.
+- **the read-group table, joined on the sample and the `@RG ID`.** Not on the row's place, and
+  not on the file's own read-group number: those numbers are the file's internal axis, which
+  every other section joins on, and the run's are assigned first-seen over its input files. A
+  lane the run has and the file does not, or the reverse: **refuse**, naming it by plant and id.
+  A matched lane whose *library* differs is refused too, naming both.
+
+  **The pair and not the id alone**, because an `@RG ID` is unique within a sample and nothing
+  makes it unique across them — which is what a cohort looks like when one pipeline aligned every
+  sample. That the file's own numbers are dense over `0..n` remains a rule, and it is
+  `validate`'s: a gap there drops the highest read group entirely and surfaces as a panic at
   whichever locus first carries one of that library's reads
   ([`run_parameters.rs`](../../../../src/ng/calling/run_parameters.rs), module documentation).
-  Checked here, at read, so the message is about the run rather than about a locus.
 - **the census recording terms the fit ran under.** These identify *which* census produced the
   numbers. They are recorded in the census file rather than in the psp header, because several
   different censuses can be built from one psp

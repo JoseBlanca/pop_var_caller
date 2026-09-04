@@ -80,6 +80,7 @@ use crate::ng::parameter_estimation::joint::stratum_fits::{
 };
 use crate::ng::parameter_estimation::ssr::{RepeatCount, Stratum as SsrStratum, StratumKey};
 use crate::ng::parameter_estimation::{Estimate, Provenance};
+use crate::ng::read::input::read_groups::ReadGroups;
 use crate::ng::types::{BatchId, ErrorRate, InbreedingF, Ploidy, ReadGroupId, SsrPeriod};
 
 /// **What a parameters file gives a run back** — the parameters themselves, and the two things
@@ -105,6 +106,82 @@ pub struct RunParametersFromFile {
     pub inbreeding_by_sample: Vec<Estimate<InbreedingF>>,
 }
 
+/// Where each of the file's rows belongs on the axes it is being read onto.
+///
+/// **A parameters file identifies a read group by its sample and its `@RG ID`, and a sample by
+/// its name — never by where its row sits** (the owner's ruling of 2026-09-04). Both of the run's
+/// axes are dense and ordered *first-seen over the alignment files it was given*, so the same
+/// cohort handed over in another order numbers its read groups differently and lists its samples
+/// differently. A file fitted on that cohort is still the right file, and reading it must not
+/// depend on the two orders coinciding.
+///
+/// So the projection asks this where each row goes. With no run to speak of that is the file's
+/// own order, which is what [`ParametersFile::to_run_parameters`] wants; with a run it is the
+/// run's.
+pub(super) struct WhereTheFilesRowsBelong {
+    /// For each read group the file numbers `0..n`, the position it takes on the target axis.
+    read_group: Vec<usize>,
+    /// Each sample's position on the target axis, by name.
+    sample: BTreeMap<String, usize>,
+}
+
+impl WhereTheFilesRowsBelong {
+    /// The identity: every row where the file itself puts it.
+    ///
+    /// `validate` has already refused a file whose read groups are not `0..n` once each and
+    /// whose per-sample tables do not name `fitted_from.samples` exactly, so this is total over
+    /// the rows the projection will look up.
+    pub(super) fn of_the_files_own_order(file: &ParametersFile) -> Self {
+        Self {
+            read_group: (0..file.fitted_from.read_groups.len()).collect(),
+            sample: file
+                .fitted_from
+                .samples
+                .iter()
+                .enumerate()
+                .map(|(at, sample)| (sample.clone(), at))
+                .collect(),
+        }
+    }
+
+    /// Where the run puts them, matched **by sample name and `@RG ID`**.
+    ///
+    /// **⚠ Build this only after [`ParametersFile::refuse_if_not_this_runs_inputs`] has
+    /// passed.** That is where a sample or a read group one side has and the other lacks is
+    /// named and refused; here a row with no match on the run's side would silently keep the
+    /// file's own position, which is the very confusion this type exists to remove. The
+    /// `expect` below is what makes that loud instead: it fires only on a file the refusal
+    /// should already have turned down.
+    pub(super) fn of_this_run(file: &ParametersFile, read_groups: &ReadGroups) -> Self {
+        let run_position_of: BTreeMap<(&str, &str), usize> = read_groups
+            .iter()
+            .map(|(id, lane)| ((&*lane.sample, &*lane.id), id.get() as usize))
+            .collect();
+        let read_group = file
+            .fitted_from
+            .read_groups
+            .iter()
+            .map(|row| {
+                *run_position_of
+                    .get(&(row.sample.as_str(), row.declared_id.as_str()))
+                    .expect("refuse_if_not_this_runs_inputs matched every read group by now")
+            })
+            .collect();
+
+        // **The file's rows are walked, not the run's**, so a file numbering its read groups in
+        // another order still lands each of them where the run wants it. The vector is indexed
+        // by the file's own number, which is what every table in the file joins on.
+        let sample = read_groups
+            .read_groups_per_sample()
+            .iter()
+            .enumerate()
+            .map(|(at, of_sample)| (of_sample.sample.to_string(), at))
+            .collect();
+
+        Self { read_group, sample }
+    }
+}
+
 impl ParametersFile {
     /// **Read this file back into the parameters a run scores with.**
     ///
@@ -121,6 +198,21 @@ impl ParametersFile {
     /// shape can state (this module's header says which).
     pub fn to_run_parameters(&self) -> Result<RunParametersFromFile, ParametersFileError> {
         self.validate()?;
+        let its_own_order = WhereTheFilesRowsBelong::of_the_files_own_order(self);
+        self.project_onto(&its_own_order)
+    }
+
+    /// [`Self::to_run_parameters`] with the file's rows put where **a run** wants them, rather
+    /// than where the file happens to list them.
+    ///
+    /// **`order` must have been built after [`Self::refuse_if_not_this_runs_inputs`] passed**,
+    /// which is what makes every lookup below find its row: that refusal is where a sample or a
+    /// read group the run has and the file lacks is named and turned down.
+    pub(super) fn project_onto(
+        &self,
+        order: &WhereTheFilesRowsBelong,
+    ) -> Result<RunParametersFromFile, ParametersFileError> {
+        self.validate()?;
 
         let read_group_count = self.fitted_from.read_groups.len();
         let sample_count = self.fitted_from.samples.len();
@@ -132,7 +224,7 @@ impl ParametersFile {
         let mut calibration_by_read_group = vec![None; read_group_count];
         let mut reads_behind_each_calibration = vec![None; read_group_count];
         for row in &self.base_quality_calibration.by_read_group {
-            let at = row.read_group as usize;
+            let at = order.read_group[row.read_group as usize];
             calibration_by_read_group[at] = Some(ReadGroupCalibration {
                 scale: row.error_probability_multiplier.value,
                 provenance: row.error_probability_multiplier.warrant.into(),
@@ -144,21 +236,9 @@ impl ParametersFile {
             .map(|found| found.expect("validate refuses a calibration table with a gap in it"))
             .collect();
 
-        // **One index over the sample names, built once and shared.** Both per-sample tables are
-        // read by name into the run's sample order, and resolving each row with a linear scan
-        // would be a quadratic walk over the file's one cohort-sized axis — 9 million string
-        // comparisons at the 3,000 samples `CLAUDE.md` commits to, twice over.
-        let sample_at: BTreeMap<&str, usize> = self
-            .fitted_from
-            .samples
-            .iter()
-            .enumerate()
-            .map(|(at, sample)| (sample.as_str(), at))
-            .collect();
-
-        let contamination_by_read_group = self.contamination_views(read_group_count);
-        let sequencing_batches = self.batching(read_group_count, sample_count, &sample_at);
-        let inbreeding_by_sample = self.inbreeding_estimates(&sample_at)?;
+        let contamination_by_read_group = self.contamination_views(read_group_count, order);
+        let sequencing_batches = self.batching(read_group_count, sample_count, order);
+        let inbreeding_by_sample = self.inbreeding_estimates(order)?;
         let prior_seed = SpectrumSeed::new(
             self.ordinary_site_prior.reference_concentration,
             self.ordinary_site_prior.alternative_concentration_total,
@@ -194,13 +274,17 @@ impl ParametersFile {
     /// a run where others were — and it becomes a view of zero fraction and zero evidence, which
     /// `ContaminationView::was_measured` still tells apart from a library measured and found
     /// clean.
-    fn contamination_views(&self, read_group_count: usize) -> Vec<ContaminationView> {
+    fn contamination_views(
+        &self,
+        read_group_count: usize,
+        order: &WhereTheFilesRowsBelong,
+    ) -> Vec<ContaminationView> {
         let Some(table) = &self.contamination else {
             return Vec::new();
         };
         let mut views = vec![None; read_group_count];
         for row in &table.by_read_group {
-            views[row.read_group as usize] = Some(match &row.measurement {
+            views[order.read_group[row.read_group as usize]] = Some(match &row.measurement {
                 Some(measurement) => a_measured_view(measurement),
                 None => UNMEASURED_READ_GROUP,
             });
@@ -216,18 +300,18 @@ impl ParametersFile {
         &self,
         read_group_count: usize,
         sample_count: usize,
-        sample_at: &BTreeMap<&str, usize>,
+        order: &WhereTheFilesRowsBelong,
     ) -> SequencingBatches {
         let mut of_each_read_group = vec![BatchId::ALL_TOGETHER; read_group_count];
         for row in &self.sequencing_batches.by_read_group {
-            of_each_read_group[row.read_group as usize] = BatchId(row.batch);
+            of_each_read_group[order.read_group[row.read_group as usize]] = BatchId(row.batch);
         }
-        // **The sample column is read by the file's own sample order**, which is
-        // `fitted_from.samples` — the order every per-sample axis of the run is indexed in, and
-        // the order `validate` has already checked this table names exactly.
+        // **The sample column is read by name**, never by where its row sits, and `order` says
+        // where that name belongs — the file's own position with no run to speak of, and the
+        // run's otherwise.
         let mut of_each_sample = vec![BatchId::ALL_TOGETHER; sample_count];
         for row in &self.sequencing_batches.by_sample {
-            of_each_sample[sample_at[row.sample.as_str()]] = BatchId(row.batch);
+            of_each_sample[order.sample[row.sample.as_str()]] = BatchId(row.batch);
         }
         let batch_count = of_each_read_group
             .iter()
@@ -246,11 +330,11 @@ impl ParametersFile {
     /// Each sample's coefficient, its warrant and its count, in the file's own sample order.
     fn inbreeding_estimates(
         &self,
-        sample_at: &BTreeMap<&str, usize>,
+        order: &WhereTheFilesRowsBelong,
     ) -> Result<Vec<Estimate<InbreedingF>>, ParametersFileError> {
         let mut by_sample = vec![None; self.fitted_from.samples.len()];
         for row in &self.inbreeding.by_sample {
-            let at = sample_at[row.sample.as_str()];
+            let at = order.sample[row.sample.as_str()];
             let field = format!(
                 "inbreeding.by_sample[{:?}].inbreeding_coefficient",
                 row.sample

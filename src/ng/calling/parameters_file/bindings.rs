@@ -47,8 +47,9 @@
 
 use md5::{Digest, Md5};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use super::to_run_parameters::WhereTheFilesRowsBelong;
 use super::{
     BaseQualityCalibrationRow, CensusIdentity, CensusTerm, InbreedingRow, ParametersFile,
     ParametersFileError, ReadGroupRow, RepeatRouting, RepeatTracts, RunParametersFromFile,
@@ -383,114 +384,113 @@ impl ParametersFile {
             ));
         }
 
-        // **The run's samples are its read-group table's, in first-seen order**, which is what
-        // `of_run` writes and what `validate` holds the file's own list to.
-        let this_runs_samples: Vec<&str> = read_groups
+        // **Matched by name, never by position** (the owner's ruling of 2026-09-04). The run's
+        // sample order is its read-group table's, which is first-seen over the alignment files
+        // it was given — so the same cohort handed over in another order lists its samples in
+        // another order, and a file fitted on that cohort is still the right file. What must
+        // agree is *which* samples, not where each one sits.
+        let this_runs_samples: BTreeSet<&str> = read_groups
             .read_groups_per_sample()
             .iter()
             .map(|of_sample| of_sample.sample.as_ref())
             .collect();
-        for (at, (in_the_file, in_the_run)) in bound
-            .samples
-            .iter()
-            .zip(&this_runs_samples)
-            .enumerate()
-            .map(|(at, (mine, theirs))| (at, (mine.as_str(), *theirs)))
-        {
-            if in_the_file != in_the_run {
-                return Err(fitted_from_other_inputs(
-                    format!("fitted_from.samples[{at}]"),
-                    format!("{in_the_file:?}"),
-                    format!("{in_the_run:?}"),
+        let the_files_samples: BTreeSet<&str> = bound.samples.iter().map(String::as_str).collect();
+        // **Named, not counted**, which is what spec §6 asks for: a reader told *2 against 3*
+        // has to diff two lists by eye, and one of them is not written down anywhere they can
+        // look. Each direction is its own message because the two mean different things — a
+        // sample the run brought that nothing was fitted for, against one the file was fitted
+        // for that this run does not have.
+        if the_files_samples != this_runs_samples {
+            let missing: Vec<&str> = this_runs_samples
+                .difference(&the_files_samples)
+                .copied()
+                .collect();
+            let stray: Vec<&str> = the_files_samples
+                .difference(&this_runs_samples)
+                .copied()
+                .collect();
+            let mut in_the_run = a_list_of(
+                "samples",
+                this_runs_samples.iter().map(|name| format!("{name:?}")),
+            );
+            if !missing.is_empty() {
+                in_the_run.push_str(&format!(
+                    "; nothing was fitted for {}",
+                    a_list_of("of them", missing.iter().map(|name| format!("{name:?}")))
                 ));
             }
-        }
-        // **`zip` stops at the shorter, so this is the other half of the walk above** and not a
-        // tidier restatement of it: a cohort that gained or lost a plant agrees on every position
-        // the two lists share. **It names the plants rather than counting them**, which is what
-        // spec §6 asks for — a reader told *2 against 3* has to diff two lists by eye, and one of
-        // them is not written down anywhere they can look.
-        if bound.samples.len() != this_runs_samples.len() {
+            if !stray.is_empty() {
+                in_the_run.push_str(&format!(
+                    "; the file was fitted for {} this run does not have",
+                    a_list_of("of its own", stray.iter().map(|name| format!("{name:?}")))
+                ));
+            }
             return Err(fitted_from_other_inputs(
                 "fitted_from.samples",
                 a_list_of(
                     "samples",
-                    bound.samples.iter().map(|name| format!("{name:?}")),
+                    the_files_samples.iter().map(|name| format!("{name:?}")),
                 ),
-                a_list_of(
-                    "samples",
-                    this_runs_samples.iter().map(|name| format!("{name:?}")),
-                ),
+                in_the_run,
             ));
         }
 
-        // **Joined on the read group's own number, never on the row's place in the table.** The
-        // ids the file carries are `0..n` once `validate` has passed and the run's are `0..n` by
-        // construction, so equal id *sets* is the whole of spec §6's gap check — and the join is
-        // still sound on a file `validate` has not seen, since it looks each id up rather than
-        // assuming any of them.
-        let this_runs_lanes: BTreeMap<u32, &ReadGroup> = read_groups
+        // **Joined on the sample and the `@RG ID`, never on the row's number or its place in the
+        // table** (the owner's ruling of 2026-09-04). The file's numbers are its own: they are
+        // `0..n` once `validate` has passed, and so are the run's by construction, but the run's
+        // are assigned first-seen over the alignment files it was given — so the same cohort
+        // handed over in another order gives every lane a different number, and a file fitted on
+        // that cohort is still the right file.
+        //
+        // **The `@RG ID` alone is not the key, the sample and the id together are.** An id is
+        // unique within one sample and nothing makes it unique across them, which is exactly the
+        // shape a cohort has when one pipeline aligned every sample and named each one's read
+        // group the same way.
+        let this_runs_lanes: BTreeMap<(&str, &str), &ReadGroup> = read_groups
             .iter()
-            .map(|(id, declared)| (id.get(), declared))
+            .map(|(_, declared)| ((&*declared.sample, &*declared.id), declared))
             .collect();
-        let the_files_lanes: BTreeMap<u32, &ReadGroupRow> = bound
+        let the_files_lanes: BTreeMap<(&str, &str), &ReadGroupRow> = bound
             .read_groups
             .iter()
-            .map(|row| (row.read_group, row))
+            .map(|row| ((row.sample.as_str(), row.declared_id.as_str()), row))
             .collect();
         if the_files_lanes.keys().ne(this_runs_lanes.keys()) {
-            // **Each lane is its number *and* its `@RG ID`.** The `@RG ID` is what the reader's
-            // alignment files call it and the number is what every other section of this file
-            // joins on, and either alone gives a message that reads as a contradiction: a file
-            // numbered `0, 1, 3` for this run's three lanes has the same three names as the run,
-            // so names alone print two identical lists beside "these differ".
+            // **A lane is named by its sample and its id**, which is the pair that identifies it
+            // on both sides. The file's own number is shown beside it because that is what every
+            // other section of the file joins on, so a reader chasing a row has something to
+            // look for.
+            let a_lane = |(sample, id): (&str, &str)| format!("{sample:?} {id:?}");
             return Err(fitted_from_other_inputs(
                 "fitted_from.read_groups",
                 a_list_of(
                     "read groups",
                     the_files_lanes
-                        .values()
-                        .map(|row| format!("{} {:?}", row.read_group, row.declared_id)),
+                        .iter()
+                        .map(|(key, row)| format!("{} ({})", a_lane(*key), row.read_group)),
                 ),
                 a_list_of(
                     "read groups",
-                    this_runs_lanes
-                        .iter()
-                        .map(|(number, lane)| format!("{number} {:?}", lane.id)),
+                    this_runs_lanes.keys().map(|key| a_lane(*key)),
                 ),
             ));
         }
-        for (number, (row, declared)) in the_files_lanes
-            .values()
+        for ((sample, id), (row, declared)) in the_files_lanes
+            .iter()
             .zip(this_runs_lanes.values())
-            .map(|(row, lane)| (row.read_group, (*row, *lane)))
+            .map(|((key, row), lane)| (*key, (*row, *lane)))
         {
-            // **The three names a reader joins a row to a lane by.** The number itself is what
-            // the two tables were joined on, so it cannot differ here.
-            for (key, in_the_file, in_the_run) in [
-                (
-                    "declared_id",
-                    format!("{:?}", row.declared_id),
-                    format!("{:?}", declared.id),
-                ),
-                (
-                    "library",
+            // **The sample and the id were the join, so only the library can differ here** — and
+            // it can: two runs may give one lane different library names, and the calibration
+            // this file carries was fitted under the file's.
+            if row.library != *declared.library.value {
+                return Err(fitted_from_other_inputs(
+                    format!(
+                        "fitted_from.read_groups[sample = {sample:?}, declared_id = {id:?}].library"
+                    ),
                     format!("{:?}", row.library),
                     format!("{:?}", declared.library.value),
-                ),
-                (
-                    "sample",
-                    format!("{:?}", row.sample),
-                    format!("{:?}", declared.sample),
-                ),
-            ] {
-                if in_the_file != in_the_run {
-                    return Err(fitted_from_other_inputs(
-                        format!("fitted_from.read_groups[read_group = {number}].{key}"),
-                        in_the_file,
-                        in_the_run,
-                    ));
-                }
+                ));
             }
         }
 
@@ -586,11 +586,15 @@ impl ParametersFile {
         // whose largest axis spec §9 prices at up to 62 MB at 3,000 samples; the copy is
         // transient and dropped as soon as the projection is done, and demoting the file rather
         // than the assembled parameters is what makes the demotion provably per-file.
+        // **Where each of the file's rows belongs on *this run's* axes**, matched by sample name
+        // and `@RG ID` — built here, after the refusal above has established that both sides
+        // name the same samples and the same lanes (the owner's ruling of 2026-09-04).
+        let order = WhereTheFilesRowsBelong::of_this_run(self, read_groups);
         let from_file = if agreement.demoted_the_file() {
             self.demoted_to_no_better_than_supplied()
-                .to_run_parameters()?
+                .project_onto(&order)?
         } else {
-            self.to_run_parameters()?
+            self.project_onto(&order)?
         };
         Ok(ParametersForThisRun {
             from_file,
@@ -944,6 +948,7 @@ pub(super) fn a_censuss_recording_terms() -> RecordingTerms {
 
 #[cfg(test)]
 mod tests {
+    use super::super::EvidenceCount;
     use super::super::tests::a_file_using_every_shape;
     use super::*;
 
@@ -1313,7 +1318,8 @@ mod tests {
         assert_eq!(in_the_run, "ab".repeat(16));
     }
 
-    /// **Spec §6's second binding**, and it names the samples.
+    /// **Spec §6's second binding**, and it names the samples on both sides — the sets differ,
+    /// so the message shows which plant each side has that the other does not.
     #[test]
     fn a_file_listing_samples_the_run_does_not_have_is_refused() {
         let (reference, _) = the_run_the_fixture_was_fitted_by();
@@ -1325,33 +1331,94 @@ mod tests {
         let (field, in_the_file, in_the_run) =
             refused(&a_file_using_every_shape(), &reference, &another_cohort);
 
-        assert_eq!(field, "fitted_from.samples[1]");
-        assert_eq!(in_the_file, "\"Ailsa ‘Craig’ \\\"×2\\\"\"");
-        assert_eq!(in_the_run, "\"TS-9\"");
+        assert_eq!(field, "fitted_from.samples");
+        assert_eq!(
+            in_the_file,
+            "2 samples (\"Ailsa ‘Craig’ \\\"×2\\\"\", \"TS-1\")"
+        );
+        // **Each direction is named**, because the two mean different things to whoever holds
+        // the file: a plant this run brought that nothing was fitted for, and a plant the file
+        // was fitted for that this run does not have.
+        assert_eq!(
+            in_the_run,
+            "2 samples (\"TS-1\", \"TS-9\"); nothing was fitted for 1 of them (\"TS-9\"); \
+             the file was fitted for 1 of its own (\"Ailsa ‘Craig’ \\\"×2\\\"\") this run does not have"
+        );
     }
 
-    /// **A cohort of the same plants in another order is refused too**, and that is the point of
-    /// comparing by position: every per-sample row is read by name into this list and handed to
-    /// calling as a position, so a run whose order differs gives each plant its neighbour's
-    /// inbreeding coefficient. Nothing downstream could see it.
+    /// **⚑ A cohort of the same plants in another order is the same cohort, and every value
+    /// lands on the plant it was fitted for** — the owner's ruling of 2026-09-04, and this test
+    /// is what it overturned.
+    ///
+    /// It used to be a refusal, on the reasoning that the file's per-sample rows are read into
+    /// the file's own order and handed to calling as positions, so a run ordered otherwise would
+    /// give each plant its neighbour's inbreeding coefficient. The reasoning was right about the
+    /// danger and wrong about the remedy: **a run's sample order is first-seen over the
+    /// alignment files it was given**, so the same cohort handed over in another order is an
+    /// ordinary thing to do and refusing it turns a good file into an error a user cannot act on.
+    /// The remedy is to put each row where the *run* wants it, which is what
+    /// `WhereTheFilesRowsBelong` does.
+    ///
+    /// **The assertions are on where the values land, not on the file being accepted.** Accepting
+    /// it while still projecting into the file's order would be the silent mis-pairing the old
+    /// refusal existed to prevent, and it would pass a test that only checked for `Ok`.
     #[test]
-    fn the_same_samples_in_another_order_are_refused() {
+    fn the_same_samples_in_another_order_are_the_same_cohort() {
         let (reference, _) = the_run_the_fixture_was_fitted_by();
+        let awkward = "Ailsa ‘Craig’ \"×2\"";
+        // The same three lanes and the same two plants, given in another order: the run now
+        // numbers `HWI.5` zero and lists Ailsa first.
         let reordered = ReadGroups::of_lanes(&[
-            ("HWI.5", "Ailsa ‘Craig’ \"×2\"", "lib5"),
+            ("HWI.5", awkward, "lib5"),
             ("HWI.3", "TS-1", "lib3"),
             ("HWI.4", "TS-1", "lib4"),
         ]);
-        let (field, in_the_file, in_the_run) =
-            refused(&a_file_using_every_shape(), &reference, &reordered);
-        assert_eq!(field, "fitted_from.samples[0]");
-        assert_eq!(in_the_file, "\"TS-1\"");
-        assert_eq!(in_the_run, "\"Ailsa ‘Craig’ \\\"×2\\\"\"");
+
+        let read = a_file_using_every_shape()
+            .to_run_parameters_for(&reference, &reordered, None)
+            .expect("the same plants in another order are the same cohort");
+
+        // The file fits TS-1 at 0.42 and Ailsa at 0.17. The run lists Ailsa first, so that is
+        // the order they come back in — by name, not by row.
+        let inbreeding: Vec<f64> = read
+            .from_file
+            .inbreeding_by_sample
+            .iter()
+            .map(|estimate| estimate.value.get())
+            .collect();
+        assert_eq!(
+            inbreeding,
+            vec![0.17, 0.42],
+            "each plant keeps its own coefficient when the run orders them otherwise"
+        );
+
+        // And the read-group axis the same way: the run's lane 0 is `HWI.5`, which the file
+        // files under 2 and fitted 812,344 reads behind lane 0 — so a projection that kept the
+        // file's numbering would put these three counts in the file's order.
+        let reads_behind: Vec<Option<EvidenceCount>> =
+            read.from_file.reads_behind_each_calibration.clone();
+        let the_files_own_order: Vec<Option<EvidenceCount>> = a_file_using_every_shape()
+            .to_run_parameters()
+            .expect("and the file reads on its own terms too")
+            .reads_behind_each_calibration;
+        assert_eq!(
+            reads_behind,
+            vec![
+                the_files_own_order[2],
+                the_files_own_order[0],
+                the_files_own_order[1],
+            ],
+            "each lane's evidence follows its @RG ID into the run's numbering"
+        );
+        assert_ne!(
+            reads_behind, the_files_own_order,
+            "and the two orders really do differ, or this test asserts nothing"
+        );
     }
 
-    /// A run that has a plant the file never saw, with the file's own list a prefix of it.
+    /// A run that has a plant the file never saw, with the file's own list a subset of it.
     #[test]
-    fn a_cohort_with_one_more_sample_is_refused_by_its_count() {
+    fn a_cohort_with_one_more_sample_is_refused_and_the_plant_is_named() {
         let (reference, _) = the_run_the_fixture_was_fitted_by();
         let one_more = ReadGroups::of_lanes(&[
             ("HWI.3", "TS-1", "lib3"),
@@ -1367,11 +1434,14 @@ mod tests {
         assert_eq!(field, "fitted_from.samples");
         assert_eq!(
             in_the_file,
-            "2 samples (\"TS-1\", \"Ailsa ‘Craig’ \\\"×2\\\"\")"
+            "2 samples (\"Ailsa ‘Craig’ \\\"×2\\\"\", \"TS-1\")"
         );
+        // **The plant is named, not left to a subtraction.** Told *2 against 3*, a reader has to
+        // diff two lists by eye, and the run's is not written down anywhere they can look.
         assert_eq!(
             in_the_run,
-            "3 samples (\"TS-1\", \"Ailsa ‘Craig’ \\\"×2\\\"\", \"TS-4\")"
+            "3 samples (\"Ailsa ‘Craig’ \\\"×2\\\"\", \"TS-1\", \"TS-4\"); \
+             nothing was fitted for 1 of them (\"TS-4\")"
         );
     }
 
@@ -1391,63 +1461,54 @@ mod tests {
             refused(&a_file_using_every_shape(), &reference, &a_fourth_lane);
 
         // The samples still agree — both cohorts are the same two plants — so the walk reaches
-        // the read-group table, which is what this test is about. **The lane is named by its
-        // `@RG ID`**: the run's fourth is `HWI.6`, and the file has no row for it.
+        // the read-group table, which is what this test is about. **A lane is named by its plant
+        // and its `@RG ID`**, which is the pair that identifies it on both sides; the file's own
+        // number follows in brackets, because that is what its other sections join on.
         assert_eq!(field, "fitted_from.read_groups");
         assert_eq!(
             in_the_file,
-            "3 read groups (0 \"HWI.3\", 1 \"HWI.4\", 2 \"HWI.5\")"
+            "3 read groups (\"Ailsa ‘Craig’ \\\"×2\\\"\" \"HWI.5\" (2), \"TS-1\" \"HWI.3\" (0), \
+             \"TS-1\" \"HWI.4\" (1))"
         );
         assert_eq!(
             in_the_run,
-            "4 read groups (0 \"HWI.3\", 1 \"HWI.4\", 2 \"HWI.5\", 3 \"HWI.6\")"
+            "4 read groups (\"Ailsa ‘Craig’ \\\"×2\\\"\" \"HWI.5\", \
+             \"Ailsa ‘Craig’ \\\"×2\\\"\" \"HWI.6\", \"TS-1\" \"HWI.3\", \"TS-1\" \"HWI.4\")"
         );
     }
 
-    /// **Each of the three names on a read-group row is compared, and both values are
-    /// asserted.**
+    /// **A lane the file has no row for is refused, whichever of the two names moved.**
     ///
-    /// The three are what a reader joins a row to a lane by. **The values and not only the
-    /// field**: a review swapped `in_the_file` and `in_the_run` in the library arm and the whole
-    /// module stayed green, and the message that mutant produces tells a geneticist the file
-    /// says `lib9` where the file says `lib4`.
+    /// The join is the plant and the `@RG ID` together (the owner's ruling of 2026-09-04), so a
+    /// run whose lane carries a different id, *or* the same id under a different plant, is a run
+    /// with a lane this file was not fitted for — and the file has one the run does not. Both
+    /// come out as the two lists rather than as a per-field mismatch, because with the join
+    /// broken there is no pair to compare field by field.
     #[test]
-    fn a_read_group_row_that_differs_in_any_name_is_refused() {
+    fn a_lane_the_file_has_no_row_for_is_refused() {
         let (reference, _) = the_run_the_fixture_was_fitted_by();
         let awkward = "Ailsa ‘Craig’ \"×2\"";
-        for (key, in_the_files_row, in_the_runs_lane, lanes) in [
+        for (what_moved, lanes, missing_from_the_file) in [
             (
-                "declared_id",
-                "\"HWI.4\"",
-                "\"HWI.9\"",
+                "the id",
                 [
                     ("HWI.3", "TS-1", "lib3"),
                     ("HWI.9", "TS-1", "lib4"),
                     ("HWI.5", awkward, "lib5"),
                 ],
-            ),
-            (
-                "library",
-                "\"lib4\"",
-                "\"lib9\"",
-                [
-                    ("HWI.3", "TS-1", "lib3"),
-                    ("HWI.4", "TS-1", "lib9"),
-                    ("HWI.5", awkward, "lib5"),
-                ],
+                "\"TS-1\" \"HWI.9\"",
             ),
             (
                 // The plant a lane belongs to, moved without moving the sample *list*: both
-                // cohorts still hold these two plants in this order, and only which lane is
-                // whose has changed. Nothing before this check can see it.
-                "sample",
-                "\"TS-1\"",
-                "\"Ailsa ‘Craig’ \\\"×2\\\"\"",
+                // cohorts still hold these two plants, and only which lane is whose has changed.
+                // Nothing before this check can see it.
+                "the plant",
                 [
                     ("HWI.3", "TS-1", "lib3"),
                     ("HWI.4", awkward, "lib4"),
                     ("HWI.5", awkward, "lib5"),
                 ],
+                "\"Ailsa ‘Craig’ \\\"×2\\\"\" \"HWI.4\"",
             ),
         ] {
             let (field, in_the_file, in_the_run) = refused(
@@ -1455,36 +1516,75 @@ mod tests {
                 &reference,
                 &ReadGroups::of_lanes(&lanes),
             );
-            assert_eq!(
-                field,
-                format!("fitted_from.read_groups[read_group = 1].{key}")
+            assert_eq!(field, "fitted_from.read_groups", "{what_moved} moved");
+            assert!(
+                in_the_run.contains(missing_from_the_file),
+                "{what_moved} moved: the run's lane is named — {in_the_run}"
             );
-            assert_eq!(in_the_file, in_the_files_row);
-            assert_eq!(in_the_run, in_the_runs_lane);
+            assert!(
+                !in_the_file.contains(missing_from_the_file),
+                "{what_moved} moved: and the file has no such lane — {in_the_file}"
+            );
         }
     }
 
-    /// **A file whose rows are numbered otherwise is a file for other read groups**, however
-    /// well its names match: every other section of the file joins on `read_group`, so a table
-    /// numbered `0, 1, 3` files this run's lanes under numbers the run does not use.
+    /// **A lane whose library differs is refused naming the lane and both libraries.**
+    ///
+    /// The plant and the id are what the two tables were joined on, so the library is the one
+    /// name that can still disagree on a matched pair — and it can: two runs may give one lane
+    /// different library names, and the calibration this file carries was fitted under the
+    /// file's.
+    ///
+    /// **The values and not only the field**: a review once swapped `in_the_file` and
+    /// `in_the_run` here and the whole module stayed green, and the message that mutant produces
+    /// tells a geneticist the file says `lib9` where the file says `lib4`.
     #[test]
-    fn a_read_group_table_numbered_otherwise_is_refused() {
+    fn a_lane_whose_library_differs_is_refused() {
+        let (reference, _) = the_run_the_fixture_was_fitted_by();
+        let awkward = "Ailsa ‘Craig’ \"×2\"";
+        let (field, in_the_file, in_the_run) = refused(
+            &a_file_using_every_shape(),
+            &reference,
+            &ReadGroups::of_lanes(&[
+                ("HWI.3", "TS-1", "lib3"),
+                ("HWI.4", "TS-1", "lib9"),
+                ("HWI.5", awkward, "lib5"),
+            ]),
+        );
+        assert_eq!(
+            field,
+            "fitted_from.read_groups[sample = \"TS-1\", declared_id = \"HWI.4\"].library"
+        );
+        assert_eq!(in_the_file, "\"lib4\"");
+        assert_eq!(in_the_run, "\"lib9\"");
+    }
+
+    /// **⚑ A file's own read-group numbering is not this check's business any more**, and that
+    /// is the other half of the owner's 2026-09-04 ruling.
+    ///
+    /// It used to be: a table numbered `0, 1, 3` files this run's lanes under numbers the run
+    /// does not use, so refuse. But the run's numbers are assigned first-seen over the alignment
+    /// files it was given, so *any* re-ordering of the inputs renumbers every lane — and the
+    /// file's numbers are its own internal axis, which every section of the file joins on and
+    /// nothing outside it means anything by. The join is the sample and the `@RG ID` now, and
+    /// the file's numbering is held to being dense `0..n` by `validate`, where it belongs.
+    #[test]
+    fn a_read_group_tables_own_numbering_is_validates_business_and_not_this_ones() {
         let (reference, read_groups) = the_run_the_fixture_was_fitted_by();
         let mut file = a_file_using_every_shape();
         file.fitted_from.read_groups[2].read_group = 3;
-        let (field, in_the_file, in_the_run) = refused(&file, &reference, &read_groups);
 
-        // **The number and the `@RG ID` together**, which is what keeps this message from
-        // printing two identical lists: the three lanes are the same three lanes, and the file
-        // has filed the last of them under a number the run does not use.
-        assert_eq!(field, "fitted_from.read_groups");
-        assert_eq!(
-            in_the_file,
-            "3 read groups (0 \"HWI.3\", 1 \"HWI.4\", 3 \"HWI.5\")"
-        );
-        assert_eq!(
-            in_the_run,
-            "3 read groups (0 \"HWI.3\", 1 \"HWI.4\", 2 \"HWI.5\")"
+        // The binding does not look: the three lanes are the same three lanes by sample and id.
+        file.refuse_if_not_this_runs_inputs(&reference, &read_groups)
+            .expect("a file's own numbering is not what makes it this run's file");
+
+        // And the file is still refused, by the check that owns the question.
+        let refused = file
+            .validate()
+            .expect_err("a table numbered 0, 1, 3 is not dense");
+        assert!(
+            format!("{refused}").contains("read_group"),
+            "the refusal names the axis: {refused}"
         );
     }
 
@@ -1592,7 +1692,7 @@ mod tests {
     /// one nobody reads. The names are what says *which* cohort and the count is what a reader
     /// acts on, so both are kept and the list is cut.
     #[test]
-    fn a_refusal_over_a_cohort_of_thousands_still_fits_on_a_line() {
+    fn a_refusal_over_a_cohort_of_thousands_names_a_few_and_tallies_the_rest() {
         let (reference, _) = the_run_the_fixture_was_fitted_by();
         let named: Vec<(String, String, String)> = (0..3_000)
             .map(|plant| {
@@ -1614,11 +1714,28 @@ mod tests {
             &ReadGroups::of_lanes(&lanes),
         );
 
-        assert_eq!(field, "fitted_from.samples[0]");
-        assert_eq!(in_the_file, "\"TS-1\"");
-        assert_eq!(in_the_run, "\"TS-0\"");
+        assert_eq!(field, "fitted_from.samples");
+        // **Five plants and a tally per clause, not three thousand names.** Measured: 265
+        // characters where the run and the file share almost nothing, which is the worst shape
+        // this message has — the run's list, the plants nothing was fitted for, and the file's
+        // own that this run does not have, all three at their longest.
+        assert_eq!(in_the_run.len(), 265);
+        assert!(
+            in_the_run.contains("and 2995 more") && in_the_run.contains("and 2994 more"),
+            "both clauses tally rather than list: {in_the_run}"
+        );
+        // The file's own side is small and is printed whole, which is what makes the two
+        // comparable at a glance.
+        assert_eq!(
+            in_the_file,
+            "2 samples (\"Ailsa ‘Craig’ \\\"×2\\\"\", \"TS-1\")"
+        );
 
-        // And where the two lists agree on every shared position, the tally rather than the list.
+        // And where the two lists agree on almost everything, the tally rather than the list.
+        //
+        // **The names come out sorted**, which is what comparing the two as *sets* gives and is
+        // what a reader wants of a message whose job is to be diffed against another list — not
+        // each side's own arbitrary order. `TS-10` before `TS-2` is lexicographic, not a bug.
         let mut of_three_thousand = a_file_using_every_shape();
         of_three_thousand.fitted_from.samples =
             named.iter().map(|(_, sample, _)| sample.clone()).collect();
@@ -1630,15 +1747,17 @@ mod tests {
         assert_eq!(field, "fitted_from.samples");
         assert_eq!(
             in_the_file,
-            "3000 samples (\"TS-0\", \"TS-1\", \"TS-2\", \"TS-3\", \"TS-4\" and 2995 more)"
+            "3000 samples (\"TS-0\", \"TS-1\", \"TS-10\", \"TS-100\", \"TS-1000\" and 2995 more)"
         );
-        assert_eq!(
-            in_the_run,
-            "2999 samples (\"TS-0\", \"TS-1\", \"TS-2\", \"TS-3\", \"TS-4\" and 2994 more)"
+        assert!(
+            in_the_run.starts_with(
+                "2999 samples (\"TS-0\", \"TS-1\", \"TS-10\", \"TS-100\", \"TS-1000\" and 2994 more)"
+            ),
+            "{in_the_run}"
         );
         // **Asserted rather than described**, so the claim cannot go stale: a cohort at the top
-        // of spec §9's committed range still names five plants and a tally, on one line.
-        assert_eq!(in_the_file.len(), 67);
+        // of spec §9's committed range still names five plants and a tally, in 73 characters.
+        assert_eq!(in_the_file.len(), 73);
     }
 
     /// A binding refusal has no line and no parser behind it, and both accessors say so.
