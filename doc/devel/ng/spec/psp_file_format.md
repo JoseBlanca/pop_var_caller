@@ -443,8 +443,34 @@ avoided *only* by a record saying how long it is, which is what `record_length` 
 records, and the rest of its 0.141 s is decompression, which nothing avoids. **The second stream is
 last on both axes**, which is why it is gone.
 
-**⚠ The head costs 9.2 % of the file at three reads a position and 5.8 % at 279 — not the 1.4 % an
-earlier draft quoted**, and the difference is the point of the next paragraph.
+**⚠ The 2.06× is superseded and the direction is up. Re-taken 2026-09-04 on a store ng wrote
+itself — 8,105,483 loci from tomato SRR7279481 at 9.7 reads a record, the whole genome, keeping one
+record in a hundred over seven timed rounds: the skipping walk is 2.930× faster** (1.041 s against
+0.355 s), and it steps over 99.0 % of the body bytes. The old figure was taken on a store converted
+from a production `.psp`, whose chain-id column carries about 3.4 % of the identifiers ng names, so
+its heads were far lighter than ng's; that caveat is spent, and the number went **up** rather than
+down when the heads got heavier — the skip avoids more body at ng's depths than the fuller head
+costs. (`examples/ng_psp_skip_value.rs`.)
+
+**⚠ The 9.2 % and the 5.8 % are stale, and they cannot be re-taken.** They compare this format
+against the *no-head* row above, whose bodies code coverage and chain ids as differences from the
+previous record — a format nothing has implemented, so there is nothing to measure it on. What
+*can* be measured is narrower: the same bodies with and without the head's own bytes. Re-taken
+2026-09-04, compressed bytes a record, on two production psps rebuilt with the current `pileup`
+(**tomato SRR7279481**, 7,687,686 records at **10.25 reads a position**, and **HG002 chr21**,
+56,627 records at **280.32**; `examples/ng_psp_head_encoding.rs`):
+
+| what the file carries | tomato, 10.25 reads a position | HG002 chr21, 280.32 |
+|---|---:|---:|
+| bodies alone, no head scalars | 4.752 | 14.870 |
+| + the head as it stood before 2026-09-04 | 4.944 (**+4.1 %**) | 15.831 (**+6.5 %**) |
+| **+ the head as it stands now** | **5.138 (+8.1 %)** | **17.178 (+15.5 %)** |
+
+**So the head costs 8.1 % of the file at ten reads a position and 15.5 % at 280** — against a
+denominator that is *not* the one the 9.2 % used, and the two numbers must not be read as a
+before-and-after of each other. Every row here keeps the chain ids' live-set changes, which are the
+head's and which no reader can skip; what the middle and last rows add to the first is the scalar
+fields alone.
 
 #### Why a skippable body costs more than a length field
 
@@ -505,19 +531,37 @@ Together these are what [`cohort_merge.md`](cohort_merge.md) calls the **positio
 *"the cheap facts a builder needs about a position before it decides anything"* — and the name is
 that document's, not this one's.
 
-**Fixed-width or variable-length is the manifest's to say** (§4.5), not this section's. A fixed
-width is quicker to read, and costs less than it looks after compression because a column of small,
-repetitive values collapses — the head's four scalars as it then stood compressed to 0.077 bytes a
-record when measured on their own. *Unmeasured: the two encodings against each other in place.*
+**Fixed-width or variable-length is the manifest's to say** (§4.5), not this section's, and it was
+settled by measurement at Milestone D2: **variable-length, on both samples and at every width
+tried**. A fixed width is quicker to read and does compress away almost all of what it adds, but
+what survives is a few per cent of a file that is only a few bytes a record to begin with.
 
-**⚠ Every cost figure in this section was taken on a head of four scalars, and the head now has
-five.** The 9.2 % and 5.8 % above, and the 0.077 bytes a record here, predate
-`reads_compared_with_reference` and the arrival of `locus_kind` from the body. The kind is a move
-and should cost nothing to first order; the denominator is an addition, and it is expected to
-compress worse than the numerator, because it tracks depth and so varies record to record where the
-numerator is almost always zero. **Re-measuring both corpora is step H3 of
-[`../impl_plan/psp_head_compared_reads.md`](../impl_plan/psp_head_compared_reads.md)**; until it
-lands, read every percentage in §4.3 as the figure for a head two fields smaller.
+**What the head costs on its own**, compressed with no body between the heads — the best case for a
+column of small repetitive values, and not what the file pays: **0.509 bytes a record on tomato at
+10.25 reads a position and 3.945 on HG002 chr21 at 280.32**, against 0.253 and 2.425 for the head
+as it stood before 2026-09-04. *This supersedes "the four head fields compressed to 0.077 bytes a
+record", which was four scalars with the chain-id changes left out, on a psp built before the
+changes joined the head.*
+
+#### What the locus kind and the compared-read count cost
+
+**Measured 2026-09-04, both fields at once, on the corpora above** — the same records with the head
+written both ways, so nothing but the head differs:
+
+| | tomato, 10.25 reads a position | HG002 chr21, 280.32 |
+|---|---:|---:|
+| raw bytes a record added | **+1.00** | **+1.93** |
+| compressed bytes a record added | +0.194 | +1.347 |
+| **as a share of the compressed file** | **+3.9 %** | **+8.5 %** |
+
+**The raw cost is exactly what was predicted** — one byte a record at low depth, two at high — and
+the kind's move contributes none of it: the tag left the body as it joined the head. **What was not
+predicted is how little of it compression removes at depth**: 81 % of the added bytes disappear at
+ten reads a position and only 30 % at 280, because the compared-read count tracks depth and so
+varies record to record, where the non-reference count is almost always zero and a column of zeros
+costs nothing. **So the field is cheap where the flat floor already answered the rule, and dearest
+exactly where it is needed.** Whether 8.5 % of a deep file is worth the body decodes it saves is a
+question for the reader that consumes it, which does not exist yet.
 
 ### 4.4 The reader's two buffers — 16 kB each
 

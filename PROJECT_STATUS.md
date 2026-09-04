@@ -19,15 +19,37 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Standing sequencing note for `ng-psp-mode` (2026-09-04):** a second plan runs inside the
-> psp-mode plan and **must land before its Milestone F** —
+> - **Standing sequencing note for `ng-psp-mode` (2026-09-04, DISCHARGED):** a second plan ran
+> inside the psp-mode plan and had to land before its Milestone F —
 > [psp_head_compared_reads.md](doc/devel/ng/impl_plan/psp_head_compared_reads.md), one milestone
 > lettered H, which adds the keep rule's denominator to the psp record head. A head layout
 > change costs nothing while no psp exists and a format version afterwards, and F is where the
-> psps people keep start being written. Sequence: A–E, then H, then F–G. The psp-mode plan's own
-> ordering note carries the same thing.
+> psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
+> are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-04):** **the psp record head carries the keep rule's
+> - **Last completed task (2026-09-04):** **Milestone H is complete — the head answers the keep
+> rule at every depth, the specs say so, and the cost is a number** (branch `ng-psp-mode`, at
+> Checkpoint H; [H2 report](doc/devel/reports/implementations/ng_psp_head_h2_2026-09-04.md),
+> [H3 report](doc/devel/reports/implementations/ng_psp_head_h3_2026-09-04.md)). **The two new head
+> fields cost 3.9 % of the compressed file at 10.25 reads a position and 8.5 % at 280.32.** The
+> raw cost is what the spec predicted — one byte a record at low depth, two at high — and what it
+> did not predict is how little compression removes at depth: 81 % of the added bytes disappear at
+> ten reads a position and only 30 % at 280, because the compared-read count tracks depth where the
+> non-reference count is almost always zero. So the field is cheapest where the flat floor already
+> answered the rule and dearest exactly where it is needed. **Two things the plan did not
+> anticipate.** The cost probe had not been updated since the chain ids joined the head at E4, so
+> its own byte-for-byte check against the shipped writer failed on first run and every head-cost
+> figure in the specs was stale for two reasons rather than one. And **the 9.2 % / 5.8 % the plan
+> asked to re-take cannot be re-taken**: they compare against a format whose bodies code coverage
+> and chain ids as cross-record differences, which nothing has implemented. What replaced them is
+> exact and narrower — the same bodies with and without the head's own bytes — and the spec says
+> which denominator is which. Also re-taken: **the skipping walk is 2.930× on a store ng wrote
+> itself**, against the 2.06× on record, so the shallow end of that figure is no longer an upper
+> bound. **⛦ Owner's at this checkpoint:** whether an unknown locus-kind tag should refuse a walk
+> that would have *skipped* the record (it does now; it is a choice, not a consequence of the move),
+> plus the two rulings recorded at Checkpoint E. **Next: psp-mode Milestone F.**
+>
+> - **Earlier (2026-09-04):** **the psp record head carries the keep rule's
 > denominator, and the locus kind's tag** (branch `ng-psp-mode`, plan step H1 of
 > [psp_head_compared_reads.md](doc/devel/ng/impl_plan/psp_head_compared_reads.md);
 > [report](doc/devel/reports/implementations/ng_psp_head_h1_2026-09-04.md)). The cohort merge

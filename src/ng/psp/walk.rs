@@ -364,11 +364,17 @@ impl Iterator for RecordIter<'_> {
 /// 93** — about three in four. `a_declining_walk_accepts_damage_a_full_walk_refuses` is that
 /// measurement.
 ///
-/// **⚠ What the skip is worth was measured on the prototype's reader and not on this one**: over
-/// 7.69 M records of a tomato accession, a walk keeping one record in a hundred took 0.141 s
-/// against 0.29 s for one building every record. Milestone H5 times this reader, on the
-/// 279-reads-a-position sample as well as on tomato — and the chain-id changes ride in the head
-/// and grow with depth, so how much of that 2.06× survives at depth is an open question.
+/// **What the skip is worth, on this reader.** Keeping one record in a hundred: **3.038× on
+/// tomato at 10.3 reads a record and 2.869× on HG002 at 280.0** — depth costs about 5 % of it,
+/// not the collapse that was feared when the chain ids' live-set changes joined the head
+/// (`reports/implementations/ng_psp_h5_2026-08-30.md`). Those stores were converted from a
+/// production `.psp`, whose chain-id column is a fraction of ng's, so they read high.
+///
+/// **Re-taken 2026-09-04 on a store ng wrote itself** — 8,105,483 loci over tomato SRR7279481's
+/// whole genome at 9.7 reads a record, with ng's own chain ids and the head this build writes:
+/// **2.930×**, stepping over 99.0 % of the body bytes. It is 3.6 % below the converted store's
+/// reading at a comparable depth, which is the direction a fuller head predicts — though the two
+/// corpora are not identical, so the gap is not cleanly the chain ids' doing.
 #[must_use = "a walk that is not iterated reads nothing"]
 pub struct SelectiveRecordIter<'a, F> {
     walk: RecordIter<'a>,

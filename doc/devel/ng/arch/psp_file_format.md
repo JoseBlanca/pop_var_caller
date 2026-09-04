@@ -436,10 +436,14 @@ Every row read before it was written down.
   Spec [`psp_record_encoding.md`](../spec/psp_record_encoding.md) §6. **Measured: the skip is worth
   2.40× to 3.11×, and a 27× rise in depth costs about 5 % of that**, on corpora of 10.3 and 280.0
   reads a record — every reading above the prototype's 2.06×
-  ([the measurement](../../reports/implementations/ng_psp_h5_2026-08-30.md)). ⚠ **Every figure is
-  an upper bound, not an answer.** The stores are ng's writer over a production `.psp`, which names
-  about 3.4 % of the reads ng will name, so their heads carry a fraction of ng's chain-id changes;
-  a bigger head makes the skip worth less, never more. What is left is one quantity — what the full
+  ([the measurement](../../reports/implementations/ng_psp_h5_2026-08-30.md)). ⚠ **Those figures
+  were upper bounds** — the stores were ng's writer over a production `.psp`, which names about
+  3.4 % of the reads ng will name, so their heads carried a fraction of ng's chain-id changes, and
+  a bigger head makes the skip worth less rather than more. **The shallow end is no longer a
+  bound**: on a store ng wrote from the alignments itself, 8,105,483 loci at 9.7 reads a record,
+  the skip is worth **2.930×** keeping one record in a hundred (2026-09-04), which is 3.6 % under
+  the converted store's 3.038× at a comparable depth. **The deep end is still a bound**, because no
+  ng-written store at 280 reads a record exists. What is left is one quantity — what the full
   read column does to the head — and closing it needs a store written from ng's own locus
   generation, which is [`run_streaming.md`](../spec/run_streaming.md)'s to arrange.
 

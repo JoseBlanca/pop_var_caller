@@ -82,7 +82,7 @@ at the spec. [`cohort_merge.md`](../spec/cohort_merge.md) §13: the position-sum
 field list gains the denominator.
 *Depends:* H1. *Source:* spec §1 (the owning specs), §2 (the ⚑).
 
-**H3. ☐ The cost, measured.** Extend `ng_psp_head_encoding.rs` with the sixth field (its
+**H3. ✅ The cost, measured.** Extend `ng_psp_head_encoding.rs` with the sixth field (its
 corpus is production records, whose allele support gives the same approximation the numerator
 already uses — state the approximation in the output as the probe's header already does for
 `record-body-byte-count`) and rerun on the two corpora the specs quote (the tomato accession

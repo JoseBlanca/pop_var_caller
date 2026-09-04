@@ -789,10 +789,14 @@ decisions list records; it was built as Milestone E of
 was the only text in three documents saying otherwise, and it survived long enough to be read as an
 open question by someone implementing from it.
 
-**The one thing it was right about is the paragraph above**, which stands: how much of §2.3's
-2.06× survives at depth is unmeasured, and **nothing can measure it until Milestone F opens a
-file**. Every figure in this section is from a prototype over alignments, not from the writer that
-now exists.
+**The one thing it was right about is now answered.** How much of §2.3's 2.06× survives at depth
+was measured on 2026-08-30: **3.038× on tomato at 10.3 reads a record and 2.869× on HG002 at
+280.0**, keeping one record in a hundred — a 27× rise in depth costs about 5 % of the skip's value
+rather than most of it. Those stores were converted from a production `.psp` and so carry a
+fraction of ng's chain ids; **re-taken 2026-09-04 on a store ng wrote itself, at 9.7 reads a
+record, the skip is worth 2.930×** — 3.6 % below the converted store at a comparable depth, the
+direction a fuller head predicts. **What is still unmeasured is the deep end on an ng-written
+store**: no such store exists at 280 reads a record.
 
 ---
 

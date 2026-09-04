@@ -19,7 +19,8 @@
 //! On the wire a record is
 //!
 //! ```text
-//! position offset | reference span | non-reference reads | body bytes | chain-id changes | body
+//! position offset | reference span | locus kind | non-reference reads
+//! | reads compared with the reference | body bytes | chain-id changes | body
 //! ```
 //!
 //! and `body bytes` does not reach the changes — deliberately, so that a reader which skips a body
@@ -28,15 +29,12 @@
 //!
 //! # ⚠ What this corpus cannot tell you
 //!
-//! ng cannot yet write a psp of its own, so these stores are built from a production `.psp` by
-//! `examples/ng_psp_parity.rs`. **Production names about 3.4 % of the reads ng will name** (the
-//! owner's ruling of 2026-08-17; `examples/ng_chain_id_column_cost.rs` measures the gap), so the
-//! chain-id changes in these heads are a small fraction of what ng's will be.
-//!
-//! **The consequence is one-directional, which is what makes the reading still worth having.** A
-//! bigger head makes the skip worth *less*, never more. So the ratio measured here is an **upper
-//! bound** on what ng will see at the same depth — and arch §7's question stays open until a real
-//! ng-written store exists.
+//! **⚠ That caveat is spent, and the figure below is not.** It read: *ng cannot yet write a psp
+//! of its own, so these stores are built from a production `.psp` by `examples/ng_psp_parity.rs`,
+//! which names about 3.4 % of the reads ng will name, so the ratio here is an upper bound.* ng
+//! writes its own stores now (`pop_var_caller_exp generate-psps`), so a store from that command
+//! carries ng's own chain ids and the reading is no longer a bound — **on the store it was taken
+//! on**. Which store a figure came from is now the thing to say beside it.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;

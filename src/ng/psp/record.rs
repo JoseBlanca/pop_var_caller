@@ -24,23 +24,18 @@
 //!
 //! A reader takes the head, decides, and either builds the body or advances past it by the byte
 //! count the head declared; nothing else in the block has to be touched to make that decision.
-//! **Measured
-//! on a tomato accession at three reads a position, 7.69 M records: a walk keeping one
-//! record in a hundred takes 0.141 s against 0.29 s for one that builds every record —
-//! 2.06× faster** (spec §4.3).
+//! **Measured 2026-09-04 on a store ng wrote itself** — tomato SRR7279481, 8,105,483 loci at
+//! 9.7 reads a record, keeping one record in a hundred: **2.930× faster** than a walk that
+//! builds every record, 0.355 s against 1.041 s, stepping over 99.0 % of the body bytes
+//! (spec §4.3; `examples/ng_psp_skip_value.rs`).
 //!
-//! **The head is not free, and most of its price is not the length field.** It costs 9.2 %
-//! of the file at three reads a position and 5.8 % at 279, of which the length field alone
-//! is 1.4 % and 3.3 %. The rest is what skippability forces on the body: a record's
-//! coverage and its chain ids would otherwise be coded as differences from the previous
-//! record, and a reader that skips a body never sees those differences — so both restart at
-//! every record instead (spec §4.3).
-//!
-//! **⚠ Those two percentages were taken on a five-field head and this one has seven.** The
-//! locus-kind tag moved in from the body, which is a move and costs nothing to first order, and
-//! `reads-compared-with-reference` is new. Re-measuring is step H3 of
-//! `impl_plan/psp_head_compared_reads.md`; until it lands, read them as the figures for a head
-//! two fields smaller.
+//! **The head is not free.** Re-taken the same day, compressed bytes a record over the same
+//! bodies with and without it: the head costs **8.1 % of the file at 10.25 reads a position and
+//! 15.5 % at 280.32**. Most of that is not the length field. It is what skippability forces on
+//! the body — a record's coverage and its chain ids would otherwise be coded as differences from
+//! the previous record, and a reader that skips a body never sees those differences, so both
+//! restart at every record — plus the chain ids' live-set changes, which ride in the head and
+//! grow with depth (spec §4.3).
 //!
 //! # The body
 //!
@@ -183,11 +178,11 @@ impl LocusKindTag {
 ///
 /// **Variable-length integers, and that is an implementation choice with a measurement owed.**
 /// Spec `psp_file_format.md` §4.3 leaves the width to the manifest and records that a fixed width
-/// is quicker to read and costs less than it looks after compression — the four scalar head fields
-/// together compressed to 0.077 bytes a record when measured on their own — but that the two
-/// encodings have never been compared *in place*. That comparison needs a compressor, which
-/// arrives at Milestone D2, so the choice here is the one that composes with every other field and
-/// **that comparison belongs to Milestone D2**.
+/// is quicker to read and costs less than it looks after compression — the head compressed on its
+/// own is **0.509 bytes a record at 10.25 reads a position and 3.945 at 280.32**, re-taken
+/// 2026-09-04 — but that the two encodings had never been compared *in place*. **They have been
+/// since Milestone D2, and variable-length won on both samples and at every width tried**, so the
+/// choice here is settled by measurement rather than left open.
 ///
 /// **The last field is not a scalar and is here for the one reason that outranks tidiness.**
 /// The chain ids' live-set changes carry state: a reader knows which reads are live only because
