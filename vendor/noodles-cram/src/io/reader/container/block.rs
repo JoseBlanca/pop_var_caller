@@ -21,7 +21,25 @@ pub struct Block<'c> {
 }
 
 impl<'c> Block<'c> {
+    #[cfg(feature = "perf-counters")]
     pub fn decode(&self) -> io::Result<Cow<'c, [u8]>> {
+        let started = std::time::Instant::now();
+        let decoded = self.decode_inner();
+        crate::perf::record(
+            self.compression_method as usize,
+            self.src.len(),
+            self.uncompressed_size,
+            started.elapsed().as_nanos() as u64,
+        );
+        decoded
+    }
+
+    #[cfg(not(feature = "perf-counters"))]
+    pub fn decode(&self) -> io::Result<Cow<'c, [u8]>> {
+        self.decode_inner()
+    }
+
+    fn decode_inner(&self) -> io::Result<Cow<'c, [u8]>> {
         use crate::codecs::{aac, bzip2, fqzcomp, gzip, lzma, name_tokenizer, rans_4x8, rans_nx16};
 
         match self.compression_method {

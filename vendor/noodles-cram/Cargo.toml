@@ -36,6 +36,7 @@ repository = "https://github.com/zaeleus/noodles"
 features = ["async"]
 
 [features]
+perf-counters = []
 async = [
     "dep:async-compression",
     "dep:futures",

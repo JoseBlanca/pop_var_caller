@@ -203,6 +203,12 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zstd = "0.13"
 
 [features]
+# **Per-codec counters inside the vendored CRAM decompressor.** Off by default,
+# because the clock reads sit in the block-decode loop. On, a run can say how
+# many blocks each compression method decoded, how many bytes it inflated, and
+# how long it took — which is what `examples/ng_cram_decode_layers.rs` prints
+# and the only way to tell one codec's cost from another's.
+cram-perf-counters = ["noodles-cram/perf-counters"]
 # Enable in `cargo run --example dhat_pileup --features dhat-heap` to swap
 # the global allocator for `dhat::Alloc` and produce `dhat-heap.json`.
 # Off by default so production builds carry no dhat code.

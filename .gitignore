@@ -89,3 +89,7 @@ benchmarks/tomato2/*
 # is large. It cannot live beside the reference the way GRCh38's does, because
 # `$HOME/genomes` is mounted read-only, so it is built here instead.
 benchmarks/ssr_tomato1/catalog/
+
+# Registry bookkeeping that comes with an extracted crate and means nothing here.
+/vendor/noodles-cram/.cargo-ok
+/vendor/noodles-cram/.cargo_vcs_info.json

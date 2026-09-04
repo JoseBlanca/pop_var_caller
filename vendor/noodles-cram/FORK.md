@@ -21,5 +21,17 @@ field accessors take a caller-supplied buffer, and the record's fields are `pub(
 
 ## The changes
 
-At this commit: none. The copy is unchanged, and exists so that the commits after it have one
-place to put a change and one file that lists them.
+### 1. Per-codec counters, behind the `perf-counters` feature — measurement only
+
+`src/perf.rs` (new), declared in `src/lib.rs`; `Block::decode` in
+`src/io/reader/container/block.rs` split into a timed wrapper and a `decode_inner` carrying
+the body it always had; the feature declared in this crate's `Cargo.toml`.
+
+**With the feature off, `decode` is the upstream function under a different name and nothing
+else changes** — no counter, no clock read, no atomic. With it on, each block decode records
+its compression method, its compressed and inflated sizes, and its elapsed nanoseconds, so a
+run can say which codec its decompression time went into. That question has no other answer:
+a sampling profile shows `Block::decode` as one frame whatever method the block used.
+
+This is a measuring instrument, not a change to what noodles does, and it is not the kind of
+thing to send upstream.
