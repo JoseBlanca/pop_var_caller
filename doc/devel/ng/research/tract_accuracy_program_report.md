@@ -543,4 +543,417 @@ reachable class grew back to its old size, and its gate is re-armed with that nu
 
 ---
 
-*Sections L1–L3 and L5–L7 are opened as the program reaches them.*
+## L1 — junk-shape: where the junk mass sits
+
+Status: pre-registered
+
+**Pre-registration (written 2026-09-03, after L4 landed and before any L1 code).**
+
+**The baseline for this lever is the L4-fixed caller** (arm `l4_input_spelling`):
+0.8981 / 0.8964 at 30×, 679 errors — 369 never-offered, 238 spurious het, 44 collapsed het,
+28 wrong-other.
+
+**The geneticist's criterion, from the owner (2026-09-03):** much of the junk is expected to
+be **hidden duplications** — single-copy in the reference, multi-copy in the sample — where a
+mutation in one sample-copy manufactures an artefactual heterozygote, at a distance that can
+be **more than one motif unit**. Two measured facts frame it:
+
+- The refreshed P1 partition on the L4 baseline (probe re-run, control asserted, 238 tracts):
+  **184 locus-real** (persistent at 300×, both strands, MAPQ 70), 22 unseen-in-raw,
+  16 sampling-noise, 12 spelling-only, 4 clustered-and-persistent. The locus-real class shows
+  **no coverage excess** at 300× (median 175 spanning reads against 182 over all scored
+  tracts) — the classic collapsed-duplication signature (roughly doubled depth) is absent, so
+  if these are duplications they are ones whose extra copy's reads are split or lost, not
+  piled on.
+- **The stray tail is multi-step, as the owner predicted**: of the 52 spurious alleles
+  carried by under 2 reads in 10, only 12 sit one unit from the truth — the spread reaches 36
+  units, with most inside 7. A junk shape peaked at ±1 unit is contraindicated; the contest
+  is uniform (shipped) against a moderate decay concentrating floor mass within a few units.
+
+targets: the **52 stray-tail spurious heterozygotes** plus part of the 28 wrong-other. The
+  184 well-supported locus-real cases are explicitly NOT claimed — a junk term absorbs stray
+  reads, and a second length carried by half the reads at 300× is not stray.
+ceiling: **80 tracts** (52 + 28), and it will not be reached — some strays are real slippage
+  the stutter model owns.
+bar: verdict flips against the L4 baseline, net-positive on both period classes at both
+  depths; the collapsed-het class not enlarged beyond what fixed strays justify (a stronger
+  junk floor is a het-suppressor by construction); λ re-swept jointly with any shape change
+  (rule 6); the simulator sanity run (planted junk absorbed without moving clean loci); and
+  the tomato behavioural gate before any default claim — a floor under every read binds
+  hardest at 3 reads a position, which HG002 cannot see.
+
+**Arms, in order:** (b) the junk weight split per period class, seeded from the measured
+junk rates (1 read in 2,300 at homopolymers, 1 in 209 at period 2+ — the opposite ordering
+to what the single 0.05 implies) and swept around them; (a) the uniform `U` replaced by a
+geometric decay with distance in motif units from the nearest candidate, decay swept from
+steep to nearly flat with uniform as the control; (c) the winner of each combined, λ
+re-swept on top.
+
+*(measurements to follow the runs — nothing below this line was written before them)*
+
+**Arm (b), measured — and closed without code.** Each locus is scored under its own period
+class independently, so per-class optima read directly off a global-λ sweep; the split needs
+plumbing only if the peaks separate. They do not: re-swept on the L4 baseline
+(`tmp/tract_program/l1_sweep/`, six values 0.01–0.30 at 30×, the two contenders at 50×), the
+homopolymer optimum is **0.20** and period 2+ is flat from 0.05 to 0.20 (within 0.04 points),
+so a global 0.20 captures everything a per-class pair would. **L4 moved this dial's optimum**:
+pre-L4 the 0.05–0.30 stretch was flat within 0.1 points; post-L4, 0.05 → 0.20 is worth
+**+0.32 / +0.04** at 30× (flips: 25 tracts right — 24 of them spurious hets — against 11 new
+collapsed hets and 6 lost records; net positive both classes) and **+0.58 / +0.16** at 50×
+with **no collapse cost there** (17 collapsed homopolymer hets, identical to baseline).
+The λ=0.05 control row reproduces the L4 baseline to the fourth decimal. Recommendation to
+the slate: **default λ = 0.20**, pending the tomato behavioural gate — a floor under every
+read binds hardest at 3 reads a position, which HG002 cannot see.
+
+**Arm (a), measured — the shape is a weaker copy of the strength dial.** The knob
+(`repeat_tract_junk_decay_per_unit`, a stated constant defaulting to 1.0 = the shipped
+uniform) is built end-to-end and proven inert at its default twice over: the row takes the
+pre-change expression verbatim at 1.0 (bit-identity asserted in a unit test), and a fresh
+`--defaults` run under the decay build is **byte-identical** to the pre-decay L4 arm
+(`CONTROL-BYTE-IDENTICAL`, `tmp/tract_program/l1_decay_run.sh`). The sweep
+(decay 0.85/0.70/0.50/0.30 × λ 0.05/0.20 at 30×, `tmp/tract_program/l1_decay/`):
+
+- at λ 0.05, decay 0.50 is the shape's best: 0.9008 / 0.8964, **flips +6 net** (22 right
+  against 16 leaving) — strictly inside what uniform λ 0.20 buys (+8 net, 0.9013 / 0.8968)
+  on the same spurious-for-collapsed trade;
+- on top of λ 0.20 the shape only destroys: its mildest setting nets **−6** (32 right
+  against 38 leaving), and the steepest reaches 0.8917 with 88 collapsed homopolymer hets.
+
+**Verdict for the shape: discard as a default** — dominated at every grid cell by the
+uniform with the right λ, which is what the owner's multi-step-junk reading predicts: junk
+lands at many distances, so a uniform floor was already approximately the right shape. The
+built knob ships inert at 1.0; whether it is removed outright or kept as the fallback point
+on the trade curve is decided in the Checkpoint 1 slate — its one conceivable use is if
+λ = 0.20 fails the 3× tomato gate, since a decayed 0.05 reaches similar HG002 numbers with
+less floor mass per read. The simulator sanity run is waived for a discarded shape and owed
+before any future adoption.
+
+**Verdict for the weight (the owner's junk-strength lever, §5's owed joint re-sweep):
+default-candidate λ = 0.20**, replacing 0.05 — +0.32 / +0.04 at 30×, +0.58 / +0.16 at 50×,
+no 50× collapse cost — pending the tomato behavioural gate and the owner's slate.
+
+**Set aside with the owner (2026-09-03): a per-locus λ re-fit in the EM loop.** Proposed,
+examined, and ruled out before building: its reachable band is the 5–20%-share strays only
+(the pull-back that makes it safe also makes it unable to touch the 46%-share wall), its
+failure mode is un-calling real heterozygotes, and at 3 reads a position it is inert by
+design. The 184-tract wall's real discriminator is the **cohort** — heterozygote excess
+across samples, repeated off-ratio allele balance, Hardy–Weinberg violation — signals a
+single-sample benchmark cannot exercise; that is a future cohort-level lever outside this
+program, connected to the existing hidden-paralog census work.
+
+---
+
+## L2 — read-independence: n agreeing reads are not n pieces of evidence
+
+Status: **premise measured false — discard proposed to the owner (their lever), for the
+Checkpoint 1 sitting; nothing built**
+
+The lever family (the identical-observation discount, the freebayes-style aggregate factor,
+the GATK-style per-read cap, the beta-binomial) exists to stop reads that share an origin
+from counting as independent evidence. P1 measured the premise directly, twice: on the P0
+baseline, **0 of 225** spurious-heterozygote tracts show a strand or duplicate-family
+clustering signal; re-measured on the L4 baseline, **0 of 238** show clustering alone and
+only 4 show clustering beside persistence. The reads behind the spurious class sit on both
+strands at independent start positions — they are exactly as independent as real evidence,
+so a discount can only reweigh good and bad evidence alike, which is the strength dial λ
+already does with one number. The caps' own pre-registered ceilings concur: the aggregate
+factor is bounded by a tenth of the unexplained mass, and a per-read floor bounds one read
+where these classes are many.
+
+**The number for the ruling: 0 clustered of 238, with 4 ambiguous.**
+
+**VERDICT: discard, unbuilt — ruled by the owner 2026-09-03** after the plain-language
+account: the evidence behind the errors carries no photocopy signature, so a cap or a
+discount cannot single it out and can only weaken all read evidence uniformly, which the
+tuned λ already does with one number.
+
+---
+
+## L3 — stutter-em: the locus's own slippage
+
+Status: pre-registered
+
+**Pre-registration (written 2026-09-03, before the re-fit body is built).**
+
+The calling loop's per-locus slippage re-fit is designed and refused-at-runtime today
+(`calling_em_loop.md` §5.1; `SlippageRefitConfig`, 50 pseudo-counts, 20 slipped reads,
+`SlippageRefitNotBuilt`). This lever builds the body inside the existing interface and sweeps
+the three designed pull-back settings. **Scope ruling (owner, 2026-09-03): slippage only** —
+the per-locus λ re-fit that could share this machinery was examined and set aside (L1's
+section records why).
+
+targets: the locus-real spurious heterozygotes whose 300× share is **under 0.30** — the band
+  a pulled-back re-fit can plausibly explain as locus-specific slippage. On the L4 baseline:
+  **60 tracts** (46 homopolymer, 14 period 2+), 31 of them exactly one unit off. The
+  ≥0.30-share wall (128 tracts) is explicitly not claimed — the pull-back cannot and should
+  not reach it.
+ceiling: **60**, and part of the 44 collapsed heterozygotes if a locus fitted *below* its
+  stratum re-arms real one-unit hets.
+bar: flips against the L4-plus-λ0.20 baseline once the slate fixes λ (or against L4-λ0.05
+  with λ re-swept jointly if the slate is still open when L3 runs — rule 6 either way);
+  net-positive both period classes both depths; the simulator run (its slippage is settable,
+  so the re-fit must recover a planted per-locus rate on it — the mechanism check rule 5
+  requires); the 242-tract subset scored directly per the plan; and the interaction with
+  fitted per-stratum rows (L6) measured at stage end.
+
+**Results (written after the runs they quote; arms under `tmp/tract_program/l3_arms/`).**
+
+The re-fit body is built inside the designed interface (`slippage_refit.rs`, the round driver
+in `summarise_condition.rs`; production's formulas with the pull-backs as settings, the
+spec's posterior-weighted attribution in place of production's hard assignment; granularity
+mirrored from `em.rs` — one pooled count set per locus, one level multiplier, per-cell shape
+pull-back — with the deviations documented at the module head). 6,060 lib tests, fmt, clippy
+green. **Two identity controls hold**: frozen (`rounds = 0`) is byte-identical to the L4 arm,
+and rounds switched on at `--defaults` is byte-identical too — every cell is a shipped
+constant there, outside the re-fit, so the rounds measure and adopt nothing. The re-fit
+therefore engages only above fitted per-stratum rows, which folds the planned L3×L6
+interaction into the measurement by construction.
+
+On the fitted rows (`fitted_slippage_hg002_30x.toml`), 30×:
+
+| arm (λ 0.05) | homopolymer | period 2+ | spurious het | collapsed het |
+|---|---:|---:|---:|---:|
+| fitted rows, frozen | 0.8932 | 0.8983 | 175 + 94 | 21 + 7 |
+| + re-fit, designed pull-backs (50/20, ≤3 rounds) | 0.8934 | 0.8986 | 172 + 93 | 23 + 7 |
+| + re-fit, free (HipSTR's zero pull-back) | 0.8950 | 0.8927 | 135 + 88 | 46 + 26 |
+
+**The pulled-back re-fit is a near-no-op: 7 verdict flips of 6,993, net +1 tract**
+(4 spurious hets fixed against 2 new collapsed and 1 silenced); at λ 0.20 the same
+(+0.02 / 0.00). The free setting is the EM degeneracy the pull-back exists to prevent,
+measured: collapsed hets double and period 2+ loses 0.56 points.
+
+**Verdict proposed: discard as a default** — the owner's lever, so the number goes to the
+Checkpoint 1 sitting: **+1 net tract of 6,993 at the designed settings**. The machinery stays
+built and frozen at zero rounds (building it was the spec's own requirement — §12's Q2 is now
+answered), with the env switch remaining experiment-only.
+
+**A finding that re-aims L6, recorded here because this measurement produced it:** the fitted
+per-stratum rows themselves — worth +0.18 before L4 — now **cost homopolymers 0.4–0.5
+points** against plain defaults (64 flips: 28 right→spurious at homopolymers against
+16 collapsed fixed and 10 silent tracts recovered; net ≈ −4). Two readings, unresolved: the
+corrected observations no longer carry the corruption the low fitted rates were fitted on —
+**the rows are stale, measured on the pre-L4 caller's observations** — or low per-stratum
+rates genuinely over-trust one-unit reads. L6's real question is now "re-fit the strata on
+the fixed caller and re-measure", not "build the fit-mode command around the old rows".
+
+---
+
+## L5 + L6 — the fitted per-stratum rows, re-measured on the fixed caller
+
+Status: **measured to verdicts, 2026-09-03** (the owner's ruling 5: "re-measure and decide
+then")
+
+The pre-pass fit was rerun end to end with only the caller's observations changed: the
+candidate dump regenerated under the current binary (the pre-L4 dump kept beside it as
+`tier_30x_candidates.pre_l4.tsv`; the dump moved), the extractor and fit scripts unchanged
+(`tmp/agent_slippage/`, pad 15). The fresh rates keep the old fit's shape — homopolymer level
+0.0029 at 8 repeats rising to 0.0957 at 30 (old: 0.0039 → 0.088) — so the rates were not
+stale in any way that matters. Swept as rows on the shipped defaults
+(`tmp/tract_program/l6_arms/`):
+
+| vs shipped defaults | 30× | 50× |
+|---|---|---|
+| homopolymer | **−0.29** (spurious 128 → 148) | **−0.48** (16 right → spurious) |
+| period 2+ | **+0.26** (collapsed 20 → 11) | +0.02 |
+
+**The stale-rows hypothesis is refuted**: the homopolymer-selling trade persists with rates
+fitted from the fixed caller's own observations. Low fitted homopolymer levels make one-unit
+reads strong evidence, and post-L4 those reads are spelled faithfully — the constant 0.10,
+wrong as a rate, is doing junk-absorption work at homopolymers that the fitted truth undoes.
+
+**L6 verdict: optional, never default** — the program's rule 8 named the fitted-slippage
+shape as the standing example of optional, and the measurement sharpens the sentence: *right
+for a run that cares about period-2+ collapsed heterozygotes (it halves them at 30×), at the
+price of homopolymer spurious heterozygotes; wrong as a constant.* The rows route
+(`--parameters` with appended rows) already serves that run; **the fit-mode command build is
+deferred** until something wants it enough to own it.
+
+**L5 verdict: discard** — a finer stratification is more of the same direction: the gradient
+the fit measures is real (0.003 → 0.096 over the homopolymer range) and shipping it is what
+loses, so keying the model more finely on it has no case the rows did not already test.
+
+---
+
+## The tomato behavioural gate (rule 7), for the λ = 0.20 candidate
+
+**Run 2026-09-03** on the 63-accession tomato cohort (the `tomato1` bench slice, ~2 Mb, ~3
+reads a position), both arms on the current binary, one cohort invocation each, the 0.20 arm
+replaying the 0.05 run's own parameters file with only the outlier weight edited
+(`tmp/tract_program/tomato_gate/`). No truth set — what moved:
+
+| | λ = 0.05 | λ = 0.20 |
+|---|---:|---:|
+| generic records | 227,881 | 227,881 — **identical**, as the dial must leave them |
+| tract records | 966 | 938 (−28, 3 in 100) |
+| het share among tract sample-genotypes | 0.068 | 0.062 |
+| hom-alt / hom-ref / no-call | 0.094 / 0.752 / 0.086 | 0.099 / 0.752 / 0.088 |
+| tract QUAL quartiles | 247 / 568 / 1,585 | 198 / 453 / 1,181 |
+
+**No breakage shape**: no no-call surge, no record collapse, no het wipe-out at 3 reads. The
+cost side for the owner's standing conservatism question: about **1 tract heterozygote in 11
+is no longer called het** at 3× (0.068 → 0.062), and tract QUALs sit about a fifth lower.
+
+---
+
+## The program's close — every lever holds a verdict (2026-09-03)
+
+**The shipped defaults after all rulings**: the input-alignment spelling (L4), the outlier
+weight at 0.20 (L1's re-sweep), the discovery pre-pass on (L7). Discarded loudly: the junk
+shape (dominated), the read-independence caps (premise measured false, unbuilt), the
+per-locus slippage re-fit as a default (+1 tract; machinery kept frozen), finer stutter
+keying (more of the direction that loses). Optional: fitted per-stratum rows, for a run that
+trades homopolymer spurious hets for period-2+ collapsed ones.
+
+**The final baseline, which is a fresh `--defaults` run** (proven byte-identical to the
+measured `l7_discovery` arm):
+
+| | 30× homopolymer | 30× period 2+ | 50× homopolymer | 50× period 2+ |
+|---|---:|---:|---:|---:|
+| program start (P0) | 0.8796 | 0.8692 | 0.8938 | 0.8780 |
+| **program close** | **0.9026** | **0.8974** | **0.9186** | **0.9074** |
+| gain (points) | +2.30 | +2.82 | +2.48 | +2.94 |
+
+Errors at 30×: 834 → **660**. What remains, by owner: 346 never-offered (about 100 with no
+read carrying the truth at all — the evidence limit, per the L4-baseline re-derivation; the
+rest split across the support bar and genuinely mis-spelled reads), 214 spurious
+heterozygotes (184 of them the duplication-shaped wall, routed to future cohort-level
+signals), 55 collapsed, 45 wrong-other. Both tomato gates passed; every adopted default was
+measured as verdict flips at both depths.
+
+---
+
+## Checkpoint 1 — the owner's rulings (2026-09-03)
+
+1. **λ = 0.20 adopted as the shipped default** (gate passed; the 1-in-11 tract-het trade at
+   3× accepted).
+2. **The junk-decay knob removed** — it gains nothing over the weight, so the parameter goes.
+3. **L2 (read-independence / the two caps): explanation requested before ruling** — see the
+   chat record; the measured premise stands at 0 clustered of 238.
+4. **L3 (stutter-em): disabled, code kept** — rounds ship at zero, machinery stays.
+5. **L5/L6: re-measure first** — re-fit the per-stratum rates on the fixed caller, decide
+   then.
+6. **L7 (new-alleles): approved to proceed.**
+
+Main was merged back in under the levers; its parallel junction-ownership work includes the
+routing-crack fix L4's residue named (`328a1a2b` — the flank claims the insertion the tract
+refuses). Measured on the post-adoption baseline: **13 flips against the λ-0.20 arm, every
+one a silent tract turned right** (6 homopolymer, 7 period 2+), nothing else moved — 13 of
+the 22 tracts L4's residue named, recovered by the parallel fix with zero breakage.
+
+**The program's baseline, restated after Checkpoint 1's adoptions** (fresh `--defaults`,
+λ = 0.20, decay knob removed, main's junction fix in; arm `adopted`,
+`tmp/tract_program/adopted/`):
+
+| | 30× homopolymer | 30× period 2+ | 50× homopolymer | 50× period 2+ |
+|---|---:|---:|---:|---:|
+| program start (P0) | 0.8796 | 0.8692 | 0.8938 | 0.8780 |
+| **after Checkpoint 1** | **0.9015** | **0.8970** | **0.9173** | **0.9071** |
+| gain (points) | +2.19 | +2.78 | +2.35 | +2.91 |
+
+Errors at 30×: 834 → **665** (369 never-offered, 214 spurious het, 56 collapsed het,
+26 other). The tomato gate stands as run (its λ arm is now the default).
+
+---
+
+## L7 — new-alleles: discovery, wired and measured
+
+Status: pre-registered
+
+**Pre-registration (written 2026-09-03, before the wiring is built).**
+
+The decision half is built and tested (`calling/inference/discovery.rs`, 12 tests, E1); the
+wiring belongs inside `select_ssr` per E1's findings: discovery is a **pre-pass, not a round
+wrapped around the loop** — the tract locus generator already realigns every read, so the
+eligible set is a function of the observations and the candidate table alone, and a second
+round over the same evidence admits nothing (asserted by an E1 test). The spec's §4.1 premise
+("look against the converged posteriors") is contradicted by that and is amended rather than
+the code bent to it — recorded at E1 and standing.
+
+targets: the **61 top-ploidy-cut tracts** (P2 re-derived on the fixed caller) — a truth
+  allele cleared the support bar and the per-sample ploidy rung cut it; discovery admits it
+  back when 2+ reads and 15%+ of the sample's spanning reads carry it.
+ceiling: **61**, minus whatever the admission bar refuses.
+risk, named: every admitted length can only enlarge the spurious-het class (214 under the
+  adopted λ 0.20); the bar is that flips stay net-positive on both period classes at both
+  depths with the spurious class's growth smaller than the never-offered class's shrinkage.
+
+**Results (written after the runs they quote; arm `l7_discovery`, `tmp/tract_program/l7_arm/`).**
+
+The wiring landed as E1's findings direct: the pre-pass runs inside `select_ssr` over the
+merge's own support rows (a support row *is* a complete realigned observation), per sample
+against the shipped bar (2 reads AND 15% of that sample's spanning reads, never pooled across
+samples), admitted alleles face the shared cap and truncation rules, and a new
+`DiscoveryMode::BeforeTheLoop` names the setting while the two posterior-round modes stay
+refused. Off is proven byte-identical (`CONTROL-OFF-IDENTICAL`); 6,061 lib tests, fmt, clippy
+green; switch `NG_TRACT_DISCOVERY=1` (parameters-file plumbing owed on a keep).
+
+Measured against the adopted baseline:
+
+| | 30× | 50× |
+|---|---|---|
+| accuracy (hom / p2+) | 0.9026 / 0.8974 (+0.11 / +0.04) | 0.9186 / 0.9074 (+0.13 / +0.03) |
+| flips | 31: **11 right-gains** (10 never-offered, 1 silent) against 4 leaving right | 21: **10 right-gains** against 2 leaving (both to spurious) |
+| never-offered | −23 (369 → 346) | −17 |
+| spurious het | **unchanged** (214) | +2 |
+| wrong-other | +19 — errors converted from never-offered into offered-but-mis-genotyped | +7 |
+
+**The bar is met on every clause**: net-positive both period classes both depths (hom +5 /
+p2+ +2 at 30×; +6 / +2 at 50×), and the spurious class's growth (0 and 2) is far under the
+never-offered shrinkage (23 and 17). The pre-registered ceiling was 61; discovery reached 25
+of those tracts outright (11 + 14 converted) — the rest stay cut by the bar or mis-genotyped
+over the enlarged set, which is the next lever family's territory, not this one's.
+
+**VERDICT: default — adopted by the owner 2026-09-03.** `DiscoveryMode::BeforeTheLoop` is
+the shipped setting; `NG_TRACT_DISCOVERY=0` is the measurement arm until the owed
+parameters-file key exists. The tomato gate had passed:
+On the 63-accession cohort at ~3 reads (`tmp/tract_program/tomato_gate_l7/`), discovery on
+against off changes **2 records of 228,852** and nothing else, byte for byte: at
+`SL4.0ch06:22,887,980` and `SL4.0ch08:30,899,713` one interruption-carrying spelling is
+admitted with coherent genotype and AD shifts (a `1/1` becomes `2/2` on the fuller spelling
+with the extra allele's read in AD). At three reads the 2-reads-and-15% bar almost never
+fires beyond what the merge already tabled — the mechanism is inert exactly where thin
+evidence makes admission dangerous, which is what the range commitment asks of a
+depth-dependent lever.
+
+---
+
+## Post-close characterization — what separates the failing genotypes (2026-09-04)
+
+Asked by the owner against two hypotheses: (a) tomato priors at F = 0 despite high
+inbreeding; (b) hidden duplications — single-copy in the reference, multiplied in samples —
+making artefactual heterozygotes at high-coverage loci.
+
+**HG002, final baseline at 30×, per verdict class** (join of the verdict dump, the ground
+and the record fields):
+
+| class | n | tract units, median | ≥20 units | DP med | GQ med | het AB med |
+|---|---:|---:|---:|---:|---:|---:|
+| right | 5,966 | 14 | 0.19 | 33 | **56** | 0.42 |
+| spurious het | 214 | 18 | 0.39 | 29 | **25** | 0.37 |
+| collapsed het | 55 | 17 | 0.40 | 24 | **7** | — |
+| never offered | 346 | 18 | 0.44 | 26 | 24 | 0.38 |
+| wrong other | 45 | 19 | 0.47 | 28 | 12 | 0.40 |
+
+Two axes carry everything: **tract length** (the ≥20-unit share doubles in every error
+class) and **GQ** (right calls sit at 56, every error class at 7–25 — the caller knows when
+it is guessing, so GQ is the annotation downstream filtering should read even though a hard
+GQ floor was measured as a bad accuracy trade in the `hetfhom` work).
+
+**Tomato, 63 accessions, per-locus heterozygote share across samples vs coverage** (the gate
+run's cohort VCF, loci with ≥10 called samples):
+
+- generic ground: **2,800 of 227,862 loci have more than half their called samples
+  heterozygous** — in a highly inbred panel, the duplication signature hypothesis (b)
+  predicts. Their depth is elevated (median 1.2× cohort), and **12 in 100 exceed twice the
+  cohort depth against 1 in 100 baseline** — a twelvefold enrichment, but coverage alone
+  catches only about an eighth of the het-excess class.
+- tract ground: the het-excess tracts run the **other way** — 22 loci above half-het sit at
+  **0.5× depth**, thin-evidence false hets, not duplication pile-ups.
+- HG002's 184-tract wall showed **no coverage excess at all** at 300×.
+
+**The reading**: hypothesis (b) is real and measurable, but the strong discriminator is the
+**cross-sample heterozygote excess** (with off-ratio allele balance and HWE as
+corroborators), not coverage — a coverage-only filter misses seven eighths of the tomato
+signature class and all of the HG002 wall. Hypothesis (a) will act on the thin, low-GQ het
+calls (the tomato tract het-excess-at-low-depth class is exactly prior-shaped); it cannot
+touch the wall class, whose 46%-share evidence overwhelms any prior.

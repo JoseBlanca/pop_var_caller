@@ -299,7 +299,7 @@ substitution_rate_by_stratum = [
 # Not measured: this value was chosen by sweeping it against genotype accuracy
 # on one human sample, so it is a stated constant rather than an estimate of
 # that share
-repeat_tract_outlier_weight = { value = 0.05, warrant = "defaulted" }
+repeat_tract_outlier_weight = { value = 0.2, warrant = "defaulted" }
 
 [repeat_routing]
 # What this run counted as a repeat. A tandem-repeat catalog is built below

@@ -1764,6 +1764,14 @@ impl<ModelScratch> SsrRowScratch<ModelScratch> {
         &mut self.emissions
     }
 
+    /// The whole cache to read — what the slippage re-fit copies out per row, because this
+    /// one buffer is reused across rows and only the last row's emissions survive a table
+    /// build. Meaningful between a row's fill and the next row's
+    /// [`prepare_emissions`](Self::prepare_emissions).
+    pub fn emissions(&self) -> &[f64] {
+        &self.emissions
+    }
+
     /// The emission model's own scratch — its placement buffer and its alignment matrix.
     pub fn model_scratch_mut(&mut self) -> &mut ModelScratch {
         &mut self.model

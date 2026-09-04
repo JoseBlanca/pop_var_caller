@@ -128,29 +128,31 @@ use crate::ng::types::{LogProb, ReadGroupId};
 /// | 0.20 | 0.8806 | 0.8685 | 118 |
 /// | 0.30 | 0.8802 | 0.8677 | 108 |
 ///
-/// The curve is flat from 0.05 to 0.30 at homopolymers and falls away above 0.10 at period 2 and
-/// above, so what the sweep really says is **"not 0.01"**. 0.05 is the owner's choice of the
-/// conservative end of that plateau (2026-09-03): at period 2 and above it takes the whole of the
-/// available gain, at homopolymers about two thirds of it, and it moves least far from the value
-/// the reads themselves suggest.
+/// The curve was flat from 0.05 to 0.30 at homopolymers when that table was made, so what the
+/// sweep then said was **"not 0.01"**, and 0.05 was the owner's conservative choice of
+/// 2026-09-03. **The realigner fix moved the curve** (the tract-accuracy program's L4,
+/// `doc/devel/ng/research/tract_accuracy_program_report.md`): with observations spelled by the
+/// read's own alignment, the joint re-sweep puts the homopolymer optimum at **0.20** — worth
+/// +0.32/+0.04 points at 30x and +0.58/+0.16 at 50x over 0.05, with no 50x collapse cost —
+/// and a per-period split buys nothing beyond it (each locus scores under its own period, so
+/// per-class optima read off the global sweep, and the peaks do not separate). Adopted by the
+/// owner at the program's Checkpoint 1 (2026-09-03), after the behavioural gate on the
+/// 63-accession tomato cohort at ~3 reads a position: the generic path byte-identical, tract
+/// records down 3 in 100, and about one tract heterozygote in eleven no longer called het —
+/// the accepted cost.
 ///
 /// # What is still open, and why this is not called fitted
 ///
 /// **The literal reading of this number disagrees with the sweep.** Read as what it is named —
 /// the share of reads nothing explains — it measures 1 in 2,300 at homopolymers and 1 in 209 at
-/// period 2 and above, which is both far below 0.05 and ordered the opposite way to what the
-/// sweep prefers. So the constant is doing a job nobody named it for, and its warrant stays
-/// `Defaulted`: a stated constant, not an estimate.
+/// period 2 and above, which is both far below this value and ordered the opposite way to what
+/// the sweep prefers. So the constant is doing a job nobody named it for — a bound on how far
+/// one read may pull a genotype — and its warrant stays `Defaulted`: a stated constant, not an
+/// estimate.
 ///
-/// **Three things it has not been tested against**, all of them inside the range this caller is
-/// committed to (`doc/devel/ng/spec/design_principles.md` §0): a second individual, a cohort, and
-/// low depth. A floor under every read's emission behaves very differently at three reads a tract
-/// than at thirty, and the sweep was run at 30x and 50x on one sample. **Sweeping it per motif
-/// period, and on the tomato panel at three reads, is the work this constant owes.**
-///
-/// Production's value, which ng carried until now, is 0.01
-/// ([`em.rs`](../../../../src/ssr/cohort/em.rs)).
-pub const DEFAULT_OUTLIER_WEIGHT: f64 = 0.05;
+/// Production's value, which ng carried until 2026-09-03, is 0.01
+/// ([`em.rs`](../../../../src/ssr/cohort/em.rs)); 0.05 held for the rest of that day.
+pub const DEFAULT_OUTLIER_WEIGHT: f64 = 0.20;
 
 /// **The outlier weight this run scored with, and whether the run was handed it or inherited
 /// it.**
@@ -1476,9 +1478,11 @@ mod tests {
         }
 
         // And the copy weights really are what the fixture claims: a row whose weights summed
-        // to the ploidy rather than to one would be about seven nats away from this.
+        // to the ploidy rather than to one would be about seven nats away from this. Measured
+        // at the shipped outlier weight; it was −11.465 at 0.05 and moved here when the
+        // constant moved to 0.20.
         assert!(
-            (row[0].0 - (-11.465_325)).abs() < 1e-5,
+            (row[0].0 - (-11.069_500)).abs() < 1e-5,
             "the fixture moved: {}",
             row[0].0
         );

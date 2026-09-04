@@ -112,6 +112,10 @@ pub fn select_generic(
         promoted_rungs: _,
         rung_is_promoted: _,
         cap_cut_table_indices,
+        // Discovery is defined on stutter attribution, so the ordinary path never runs the
+        // pre-pass and never reads its flags (spec §5.1's closing paragraph names the same
+        // structural ignoring for both outer settings).
+        discovery_nominated: _,
     } = scratch;
     cap_cut_table_indices.clear();
     // Every alternative some sample's reads earned, in the merge table's own order — which is

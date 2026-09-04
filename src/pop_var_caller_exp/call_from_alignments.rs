@@ -53,8 +53,8 @@ use crate::ng::calling::allele_candidates::{
     CandidateSelectionConfig, DEFAULT_MAX_CANDIDATE_ALLELES, MaxCandidateAlleles,
 };
 use crate::ng::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
-use crate::ng::calling::inference::CallingLoopConfig;
 use crate::ng::calling::inference::summarise_condition::SummariseConditionLoop;
+use crate::ng::calling::inference::{CallingLoopConfig, DiscoveryMode};
 use crate::ng::calling::likelihood::MAX_PLOIDY_COPIES;
 use crate::ng::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
 use crate::ng::calling::parameters_file::{
@@ -100,6 +100,117 @@ use crate::regions::{BedError, ContigBounds};
 /// **A property of the run and not of any fit** (`doc/devel/ng/spec/parameters_file.md` §3.2),
 /// which is why it is a flag here rather than a number read out of a parameters file.
 const DEFAULT_PLOIDY: u8 = 2;
+
+/// **The tract-accuracy program's measurement switch for the per-locus slippage re-fit**
+/// (lever L3, `doc/devel/ng/research/tract_accuracy_program_report.md`): how many re-fit
+/// rounds a repeat tract may run, as an environment variable.
+///
+/// Absent or `0` is the frozen shipped default — no rounds, the loop untouched. A positive
+/// whole number runs that many rounds at the configuration's default pull-backs
+/// (`SlippageRefitConfig`: 50 pseudo-counts on the direction split and fall-off, 20 slipped
+/// reads on the level); anything else is refused before a read is decoded, because a
+/// measurement switch that fell back silently would report the frozen loop as the re-fitted
+/// arm.
+///
+/// **An environment variable by design, not an oversight**: there is no parameters-file key
+/// for this yet, deliberately — the arm is enabled per run while the program measures it, and
+/// a *keep* verdict owes this switch proper parameters-file plumbing before the experiment
+/// spelling is retired.
+const NG_SLIPPAGE_REFIT_ROUNDS: &str = "NG_SLIPPAGE_REFIT_ROUNDS";
+
+/// Zero both of the re-fit's pull-backs — the spec's **free** setting (HipSTR's), where the
+/// locus's own reads set the numbers outright. `1` is the only accepted value; anything else
+/// set is refused loudly. The same measurement-switch caveat as
+/// [`NG_SLIPPAGE_REFIT_ROUNDS`] applies: an arm's spelling, owed real plumbing on a keep.
+const NG_SLIPPAGE_REFIT_FREE: &str = "NG_SLIPPAGE_REFIT_FREE";
+
+/// **The tract-accuracy program's measurement switch for allele discovery** (lever L7): run
+/// the discovery pre-pass at every repeat tract, admitting the tract sequences one sample
+/// showed too often for slippage to explain — 2 reads **and** 15% of that sample's spanning
+/// reads, the shipped bar.
+///
+/// Absent is the shipped default — no discovery, selection untouched. `1` asks for
+/// [`DiscoveryMode::BeforeTheLoop`], the pre-pass inside candidate selection that milestone
+/// E1's finding put there (`doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md`
+/// §6.5); anything else set is refused before a read is decoded, for the reason the other
+/// switches give: a measurement switch that fell back silently would report the plain
+/// selection as the discovery arm.
+///
+/// **An environment variable by design, not an oversight**: there is no parameters-file key
+/// for this yet, deliberately — the arm is enabled per run while the program measures it, and
+/// a *keep* verdict owes this switch proper parameters-file plumbing before the experiment
+/// spelling is retired.
+const NG_TRACT_DISCOVERY: &str = "NG_TRACT_DISCOVERY";
+
+/// The calling-loop configuration this run asks for: the shipped defaults, with the slippage
+/// re-fit's round count read once from [`NG_SLIPPAGE_REFIT_ROUNDS`], its pull-backs
+/// zeroed where [`NG_SLIPPAGE_REFIT_FREE`] asks for the free setting, and the discovery
+/// pre-pass switched on where [`NG_TRACT_DISCOVERY`] asks for it.
+fn calling_loop_config_for_this_run()
+-> Result<crate::ng::calling::inference::RunnableCallingLoopConfig, CallFromAlignmentsCliError> {
+    let mut config = CallingLoopConfig::DEFAULT;
+    match std::env::var(NG_SLIPPAGE_REFIT_ROUNDS) {
+        Ok(rounds) => {
+            config.slippage_refit.max_rounds = rounds.trim().parse().map_err(|error| {
+                CallFromAlignmentsCliError::CallingLoopSettings(format!(
+                    "{NG_SLIPPAGE_REFIT_ROUNDS} must be a whole number of re-fit rounds \
+                     (0 is the frozen default), not {rounds:?}: {error}"
+                ))
+            })?;
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(value)) => {
+            return Err(CallFromAlignmentsCliError::CallingLoopSettings(format!(
+                "{NG_SLIPPAGE_REFIT_ROUNDS} is set but is not text: {value:?}"
+            )));
+        }
+    }
+    match std::env::var(NG_SLIPPAGE_REFIT_FREE) {
+        Ok(value) if value.trim() == "1" => {
+            config
+                .slippage_refit
+                .direction_and_fall_off_pull_back_pseudocounts = 0.0;
+            config.slippage_refit.level_pull_back_slipped_reads = 0.0;
+        }
+        Ok(value) => {
+            return Err(CallFromAlignmentsCliError::CallingLoopSettings(format!(
+                "{NG_SLIPPAGE_REFIT_FREE} accepts only 1 (zero both pull-backs), \
+                 not {value:?}"
+            )));
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(value)) => {
+            return Err(CallFromAlignmentsCliError::CallingLoopSettings(format!(
+                "{NG_SLIPPAGE_REFIT_FREE} is set but is not text: {value:?}"
+            )));
+        }
+    }
+    match std::env::var(NG_TRACT_DISCOVERY) {
+        // The pre-pass has been the shipped default since the owner adopted L7 (2026-09-03),
+        // so `1` restates the default and `0` is the measurement arm that switches it off.
+        Ok(value) if value.trim() == "1" => {
+            config.discovery.mode = DiscoveryMode::BeforeTheLoop;
+        }
+        Ok(value) if value.trim() == "0" => {
+            config.discovery.mode = DiscoveryMode::Off;
+        }
+        Ok(value) => {
+            return Err(CallFromAlignmentsCliError::CallingLoopSettings(format!(
+                "{NG_TRACT_DISCOVERY} accepts 1 (the discovery pre-pass, the shipped \
+                 default) or 0 (off, the measurement arm), not {value:?}"
+            )));
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(value)) => {
+            return Err(CallFromAlignmentsCliError::CallingLoopSettings(format!(
+                "{NG_TRACT_DISCOVERY} is set but is not text: {value:?}"
+            )));
+        }
+    }
+    config
+        .validate()
+        .map_err(|source| CallFromAlignmentsCliError::CallingLoopSettings(source.to_string()))
+}
 
 /// `call-from-alignments` arguments.
 ///
@@ -817,9 +928,7 @@ pub fn run_call_from_alignments(
         },
         segmentation,
         numbers.parameters,
-        CallingLoopConfig::DEFAULT.validate().map_err(|source| {
-            CallFromAlignmentsCliError::CallingLoopSettings(source.to_string())
-        })?,
+        calling_loop_config_for_this_run()?,
         candidate_selection,
         merge_parameters,
     )

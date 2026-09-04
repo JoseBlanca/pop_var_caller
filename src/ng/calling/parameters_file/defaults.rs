@@ -20,7 +20,7 @@
 //! | what a run needs | what it takes with no fit | what that is |
 //! |---|---|---|
 //! | the base-quality multiplier, per read group | [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::ng::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER), one | the value at which the model does nothing |
-//! | the repeat-tract outlier weight, one per run | [`DEFAULT_OUTLIER_WEIGHT`](crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT), 0.05 | a stated constant, swept against genotype accuracy and not a measurement of the share it is named for |
+//! | the repeat-tract outlier weight, one per run | [`DEFAULT_OUTLIER_WEIGHT`](crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT), 0.20 | a stated constant, swept against genotype accuracy and not a measurement of the share it is named for |
 //! | the tract ladder's fallback concentration | [`STATED_FLAT_CONCENTRATION`](crate::ng::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION), one | a stated uninformative prior |
 //! | contamination, per read group | **absence** — no `[contamination]` section | a model state, not a guess |
 //! | the repeat-tract substitution rate, per (read group × stratum) | [`DEFAULT_SSR_SUBSTITUTION_RATE`](crate::ng::calling::inference::repeat_tract_parameters::DEFAULT_SSR_SUBSTITUTION_RATE), 0.001 | a default taken at the tract, not written in the file |
@@ -65,7 +65,7 @@
 //!   5.4 Phred less confident than the instrument claimed. Spec §5's third row says such a read
 //!   group gets "scale 1.0" and is the sentence to correct; `DEFAULT_ERROR_RATE` is itself a
 //!   placeholder until it is fitted from GIAB. Recorded in `PROJECT_STATUS.md`.
-//! - **The outlier weight is a stated constant at 0.05**, chosen by a sweep and not fitted (it was
+//! - **The outlier weight is a stated constant at 0.20**, chosen by a sweep and not fitted (it was
 //!   the existing caller's 0.01 until 2026-09-03)
 //!   and never measured here (§3.8). It is the share of a repeat tract's reads the model expects to
 //!   have come from somewhere it cannot explain — a chimera, a paralogous tract, a mismapped read.
@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(defaulted.log_scale(), 0.0);
     }
 
-    /// **The outlier weight a run takes is the stated 0.05 and says it was defaulted** — still
+    /// **The outlier weight a run takes is the stated 0.20 and says it was defaulted** — still
     /// not a measurement of the quantity it is named for, which is why the warrant stays
     /// `Defaulted` after the value moved off the existing caller's 0.01 on 2026-09-03.
     ///
@@ -535,7 +535,7 @@ mod tests {
         let taken = RepeatTractOutlierWeight::defaulted();
         assert_eq!(taken.value(), DEFAULT_OUTLIER_WEIGHT);
         assert_eq!(taken.provenance(), Provenance::Defaulted);
-        assert_eq!(DEFAULT_OUTLIER_WEIGHT, 0.05);
+        assert_eq!(DEFAULT_OUTLIER_WEIGHT, 0.20);
     }
 
     /// **A run that fitted no stratum states the flat concentration, says it was defaulted, and

@@ -306,7 +306,7 @@ warrant = "borrowed"
 bases_compared = 40122
 
 [stated_constants.repeat_tract_outlier_weight]
-value = 0.05
+value = 0.2
 warrant = "defaulted"
 
 [repeat_routing]

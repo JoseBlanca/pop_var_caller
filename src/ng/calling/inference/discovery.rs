@@ -58,8 +58,14 @@
 //! cannot arise here. That is a property of ng's retrace being structural, not a claim about
 //! HipSTR's.
 //!
-//! **What that does *not* make free is the round's cost**, which is the second convergence and
-//! is paid at every tract whether or not anything is found.
+//! **And it is why the wiring did not land here.** A decision that reads no posterior has
+//! nothing to wait for, so discovery runs as a **pre-pass inside candidate selection** —
+//! [`select_ssr`](crate::ng::calling::allele_candidates::ssr::select_ssr)'s
+//! [`nominate_discovered_sequences`](crate::ng::calling::allele_candidates::ssr::nominate_discovered_sequences),
+//! over the merge's rows, whose spellings are these same realigned observations — and the
+//! second convergence the spec's cost argument priced in is never paid: the loop runs once,
+//! over a table already widened (`doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md`
+//! §6.5). This module remains the decision half, and its tests are the decision's oracle.
 
 use std::num::NonZeroU32;
 
@@ -128,10 +134,11 @@ impl DiscoveryScratch {
 ///
 /// # What it does not do
 ///
-/// **It does not touch the candidate table**, and it does not read a posterior. Growing the
-/// table, rebuilding what a wider table changes and re-running the loop are the caller's, in
-/// [`summarise_condition`](super::summarise_condition); this function is the decision alone so
-/// that its own tests can reach it without a loop.
+/// **It does not touch the candidate table**, and it does not read a posterior. This function
+/// is the decision alone, so that its own tests can reach it without a loop; the shipped
+/// wiring applies the same decision to the merge's rows inside candidate selection
+/// ([`nominate_discovered_sequences`](crate::ng::calling::allele_candidates::ssr::nominate_discovered_sequences)),
+/// where admission, the cap and the per-sample leftover already live.
 ///
 /// # Panics
 ///

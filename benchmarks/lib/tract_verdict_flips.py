@@ -35,27 +35,33 @@ from collections import Counter
 from pathlib import Path
 
 
-def read_verdicts(path: Path, arm: str | None) -> dict[tuple[str, int, int], tuple[str, str]]:
-    """(contig, start, end) -> (period_class, verdict), for one arm's rows."""
+def read_verdicts(
+    path: Path, arm: str | None, depth: str | None
+) -> dict[tuple[str, int, int], tuple[str, str]]:
+    """(contig, start, end) -> (period_class, verdict), for one arm's rows at one depth."""
     out: dict[tuple[str, int, int], tuple[str, str]] = {}
     with open(path, encoding="utf-8") as handle:
         header = handle.readline().rstrip("\n").split("\t")
         wanted = {name: header.index(name) for name in
-                  ("arm", "contig", "start", "end", "period_class", "verdict")}
+                  ("arm", "depth", "contig", "start", "end", "period_class", "verdict")}
         for line in handle:
             fields = line.rstrip("\n").split("\t")
             if arm is not None and fields[wanted["arm"]] != arm:
+                continue
+            if depth is not None and fields[wanted["depth"]] != depth:
                 continue
             key = (fields[wanted["contig"]], int(fields[wanted["start"]]),
                    int(fields[wanted["end"]]))
             if key in out:
                 raise SystemExit(
-                    f"{path}: tract {key} appears twice — pass --baseline-arm/"
-                    f"--arm-arm to pick one arm of a multi-arm file"
+                    f"{path}: tract {key} appears twice — pass --baseline-arm/--arm-arm "
+                    f"and --baseline-depth/--arm-depth to pick one arm at one depth of a "
+                    f"multi-arm file"
                 )
             out[key] = (fields[wanted["period_class"]], fields[wanted["verdict"]])
     if not out:
-        raise SystemExit(f"{path}: no rows" + (f" for arm {arm}" if arm else ""))
+        raise SystemExit(f"{path}: no rows" + (f" for arm {arm}" if arm else "")
+                         + (f" at {depth}" if depth else ""))
     return out
 
 
@@ -69,12 +75,16 @@ def main() -> int:
                         help="which arm's rows to read from --baseline")
     parser.add_argument("--arm-arm", default=None,
                         help="which arm's rows to read from --arm")
+    parser.add_argument("--baseline-depth", default=None,
+                        help="which depth's rows to read from --baseline")
+    parser.add_argument("--arm-depth", default=None,
+                        help="which depth's rows to read from --arm")
     parser.add_argument("--list", action="store_true",
                         help="print every flipped tract, one a line")
     args = parser.parse_args()
 
-    base = read_verdicts(args.baseline, args.baseline_arm)
-    arm = read_verdicts(args.arm, args.arm_arm)
+    base = read_verdicts(args.baseline, args.baseline_arm, args.baseline_depth)
+    arm = read_verdicts(args.arm, args.arm_arm, args.arm_depth)
 
     flips: Counter[tuple[str, str, str]] = Counter()
     flipped: list[tuple[str, int, int, str, str, str]] = []

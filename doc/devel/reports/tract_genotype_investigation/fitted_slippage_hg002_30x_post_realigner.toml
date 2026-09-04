@@ -1,0 +1,2745 @@
+# HG002's own slippage, measured on its 30x reads over ng's 20,204-tract ground, as the
+# rows a parameters file states slippage in. Paste over the run's own
+# `.parameters.toml`: delete its `slippage_by_stratum_and_group = []` line and append
+# this file **at the end** — an array-of-tables closes the table it sits in, so pasting
+# these where the empty array was would make every key after them a key of the last row.
+#
+# Against the shipped constants (0.10 / 0.50 / 0.05, one pair for every stratum):
+#   * `share_of_reads_that_slip` is not one number. Over homopolymers it runs from
+#     4 reads in 1,000 at 8 repeats to 88 in 1,000 at 30 — the shipped 0.10 is about
+#     25 times too high at the short end and roughly right only at the very longest
+#     tracts. Over period 2 and above it never reaches 0.07.
+#   * `shorter_share` is 0.64 for homopolymers and 0.73 for period 2, not 0.50: a read
+#     loses repeats about 1.8 to 2.7 times as often as it gains them.
+#   * `fall_off` is 0.16 for homopolymers and 0.18 for period 2, not 0.05: about
+#     1 slip in 6 moves by more than one repeat, where the shipped number says 1 in 20.
+#
+# **The origin fields say `this_stratum` throughout because the row shape asked for
+# fixes them there, not because every row is its own fit.** A level comes from the bin
+# of at least 900 reads its repeat count falls in, made non-decreasing along the count
+# and held flat past the shortest and longest bin with reads behind it; `shorter_share`
+# and `fall_off` are one pair per period pool (1, 2, and 3-6 together).
+# `expected_slipped_reads` carries the real evidence behind each.
+#
+# Measured on ONE sample, ONE library, ONE aligner, at 30x, over GRCh38 tandem repeats
+# inside GIAB's confident intervals. Nothing here is a property of the caller.
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 1
+slippage_group = 0
+share_of_reads_that_slip = 0.002890
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 179.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 2
+slippage_group = 0
+share_of_reads_that_slip = 0.002890
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 179.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 3
+slippage_group = 0
+share_of_reads_that_slip = 0.002890
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 179.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 4
+slippage_group = 0
+share_of_reads_that_slip = 0.002890
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 179.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 5
+slippage_group = 0
+share_of_reads_that_slip = 0.002890
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 179.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 6
+slippage_group = 0
+share_of_reads_that_slip = 0.002890
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 179.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 7
+slippage_group = 0
+share_of_reads_that_slip = 0.002890
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 179.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 8
+slippage_group = 0
+share_of_reads_that_slip = 0.002897
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 179.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 9
+slippage_group = 0
+share_of_reads_that_slip = 0.004131
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 256.2 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 10
+slippage_group = 0
+share_of_reads_that_slip = 0.011972
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 742.5 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 11
+slippage_group = 0
+share_of_reads_that_slip = 0.017282
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1071.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 12
+slippage_group = 0
+share_of_reads_that_slip = 0.022247
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1379.8 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 13
+slippage_group = 0
+share_of_reads_that_slip = 0.032722
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 2029.5 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 14
+slippage_group = 0
+share_of_reads_that_slip = 0.041756
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 2589.8 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 15
+slippage_group = 0
+share_of_reads_that_slip = 0.043353
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 2688.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 16
+slippage_group = 0
+share_of_reads_that_slip = 0.058408
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 3622.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 17
+slippage_group = 0
+share_of_reads_that_slip = 0.074680
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 4631.8 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 18
+slippage_group = 0
+share_of_reads_that_slip = 0.075427
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 4678.1 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 19
+slippage_group = 0
+share_of_reads_that_slip = 0.076389
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 4737.8 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 20
+slippage_group = 0
+share_of_reads_that_slip = 0.078426
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 4864.1 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 21
+slippage_group = 0
+share_of_reads_that_slip = 0.080517
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 4993.8 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 22
+slippage_group = 0
+share_of_reads_that_slip = 0.083499
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5178.8 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 23
+slippage_group = 0
+share_of_reads_that_slip = 0.087471
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5425.1 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 24
+slippage_group = 0
+share_of_reads_that_slip = 0.090431
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5608.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 25
+slippage_group = 0
+share_of_reads_that_slip = 0.092649
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5746.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 26
+slippage_group = 0
+share_of_reads_that_slip = 0.094629
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5869.1 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 27
+slippage_group = 0
+share_of_reads_that_slip = 0.094907
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5886.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 28
+slippage_group = 0
+share_of_reads_that_slip = 0.095185
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5903.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 29
+slippage_group = 0
+share_of_reads_that_slip = 0.095465
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5920.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 30
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 31
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 32
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 33
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 34
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 35
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 36
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 37
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 38
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 39
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 40
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 41
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 42
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 43
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 44
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 45
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 46
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 47
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 48
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 49
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 50
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 51
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 52
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 53
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 54
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 55
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 56
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 57
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 1
+reference_repeats = 58
+slippage_group = 0
+share_of_reads_that_slip = 0.095671
+shorter_share = 0.550892
+fall_off = 0.163365
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 5933.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 5099.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 1
+slippage_group = 0
+share_of_reads_that_slip = 0.002289
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 43.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 2
+slippage_group = 0
+share_of_reads_that_slip = 0.002289
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 43.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 3
+slippage_group = 0
+share_of_reads_that_slip = 0.002289
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 43.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 4
+slippage_group = 0
+share_of_reads_that_slip = 0.002289
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 43.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 5
+slippage_group = 0
+share_of_reads_that_slip = 0.002289
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 43.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 6
+slippage_group = 0
+share_of_reads_that_slip = 0.002306
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 43.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 7
+slippage_group = 0
+share_of_reads_that_slip = 0.005174
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 97.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 8
+slippage_group = 0
+share_of_reads_that_slip = 0.006327
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 119.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 9
+slippage_group = 0
+share_of_reads_that_slip = 0.007024
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 132.1 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 10
+slippage_group = 0
+share_of_reads_that_slip = 0.008105
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 152.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 11
+slippage_group = 0
+share_of_reads_that_slip = 0.009653
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 181.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 12
+slippage_group = 0
+share_of_reads_that_slip = 0.012067
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 227.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 13
+slippage_group = 0
+share_of_reads_that_slip = 0.015667
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 294.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 14
+slippage_group = 0
+share_of_reads_that_slip = 0.019132
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 359.8 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 15
+slippage_group = 0
+share_of_reads_that_slip = 0.025336
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 476.5 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 16
+slippage_group = 0
+share_of_reads_that_slip = 0.036585
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 688.1 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 17
+slippage_group = 0
+share_of_reads_that_slip = 0.044989
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 846.2 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 18
+slippage_group = 0
+share_of_reads_that_slip = 0.047500
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 893.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 19
+slippage_group = 0
+share_of_reads_that_slip = 0.054038
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1016.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 20
+slippage_group = 0
+share_of_reads_that_slip = 0.062604
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1177.5 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 21
+slippage_group = 0
+share_of_reads_that_slip = 0.067864
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1276.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 22
+slippage_group = 0
+share_of_reads_that_slip = 0.068748
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1293.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 23
+slippage_group = 0
+share_of_reads_that_slip = 0.069643
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1309.8 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 24
+slippage_group = 0
+share_of_reads_that_slip = 0.070550
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1326.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 25
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 26
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 27
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 28
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 29
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 30
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 31
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 32
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 33
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 34
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 35
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 36
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 37
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 38
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 39
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 40
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 41
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 42
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 43
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 44
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 45
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 46
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 47
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 48
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 49
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 50
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 51
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 52
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 53
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 54
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 55
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 56
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 57
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 58
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 59
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 60
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 61
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 62
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 63
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 64
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 65
+slippage_group = 0
+share_of_reads_that_slip = 0.071331
+shorter_share = 0.715337
+fall_off = 0.180368
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 1341.6 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 815.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 1
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 2
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 3
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 4
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 5
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 6
+slippage_group = 0
+share_of_reads_that_slip = 0.002428
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 20.5 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 7
+slippage_group = 0
+share_of_reads_that_slip = 0.003544
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 30.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 8
+slippage_group = 0
+share_of_reads_that_slip = 0.006289
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 53.2 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 9
+slippage_group = 0
+share_of_reads_that_slip = 0.011112
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 94.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 10
+slippage_group = 0
+share_of_reads_that_slip = 0.015730
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 133.1 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 11
+slippage_group = 0
+share_of_reads_that_slip = 0.019120
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 161.8 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 12
+slippage_group = 0
+share_of_reads_that_slip = 0.020762
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 175.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 13
+slippage_group = 0
+share_of_reads_that_slip = 0.025326
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 214.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 14
+slippage_group = 0
+share_of_reads_that_slip = 0.033690
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 285.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 15
+slippage_group = 0
+share_of_reads_that_slip = 0.044816
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 379.1 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 16
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 17
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 18
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 19
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 20
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 21
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 22
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 23
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 24
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 25
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 26
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 27
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 28
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 29
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 30
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 31
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 32
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 33
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 34
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 35
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 36
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 37
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 38
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 39
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 40
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 41
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 42
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 43
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 44
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 45
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 46
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 3
+reference_repeats = 47
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 1
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 2
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 3
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 4
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 5
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 6
+slippage_group = 0
+share_of_reads_that_slip = 0.002428
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 20.5 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 7
+slippage_group = 0
+share_of_reads_that_slip = 0.003544
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 30.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 8
+slippage_group = 0
+share_of_reads_that_slip = 0.006289
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 53.2 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 9
+slippage_group = 0
+share_of_reads_that_slip = 0.011112
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 94.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 10
+slippage_group = 0
+share_of_reads_that_slip = 0.015730
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 133.1 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 11
+slippage_group = 0
+share_of_reads_that_slip = 0.019120
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 161.8 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 12
+slippage_group = 0
+share_of_reads_that_slip = 0.020762
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 175.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 13
+slippage_group = 0
+share_of_reads_that_slip = 0.025326
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 214.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 14
+slippage_group = 0
+share_of_reads_that_slip = 0.033690
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 285.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 15
+slippage_group = 0
+share_of_reads_that_slip = 0.044816
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 379.1 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 16
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 17
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 18
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 19
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 20
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 21
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 22
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 23
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 24
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 25
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 26
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 27
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 28
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 29
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 30
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 31
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 32
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 33
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 34
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 35
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 36
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 37
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 38
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 4
+reference_repeats = 39
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 1
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 2
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 3
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 4
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 5
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 6
+slippage_group = 0
+share_of_reads_that_slip = 0.002428
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 20.5 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 7
+slippage_group = 0
+share_of_reads_that_slip = 0.003544
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 30.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 8
+slippage_group = 0
+share_of_reads_that_slip = 0.006289
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 53.2 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 9
+slippage_group = 0
+share_of_reads_that_slip = 0.011112
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 94.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 10
+slippage_group = 0
+share_of_reads_that_slip = 0.015730
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 133.1 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 11
+slippage_group = 0
+share_of_reads_that_slip = 0.019120
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 161.8 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 12
+slippage_group = 0
+share_of_reads_that_slip = 0.020762
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 175.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 13
+slippage_group = 0
+share_of_reads_that_slip = 0.025326
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 214.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 14
+slippage_group = 0
+share_of_reads_that_slip = 0.033690
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 285.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 15
+slippage_group = 0
+share_of_reads_that_slip = 0.044816
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 379.1 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 16
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 17
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 18
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 19
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 20
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 21
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 22
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 23
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 24
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 25
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 26
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 27
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 28
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 29
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 30
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 31
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 5
+reference_repeats = 32
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 1
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 2
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 3
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 4
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 5
+slippage_group = 0
+share_of_reads_that_slip = 0.002180
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 18.4 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 6
+slippage_group = 0
+share_of_reads_that_slip = 0.002428
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 20.5 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 7
+slippage_group = 0
+share_of_reads_that_slip = 0.003544
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 30.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 8
+slippage_group = 0
+share_of_reads_that_slip = 0.006289
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 53.2 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 9
+slippage_group = 0
+share_of_reads_that_slip = 0.011112
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 94.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 10
+slippage_group = 0
+share_of_reads_that_slip = 0.015730
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 133.1 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 11
+slippage_group = 0
+share_of_reads_that_slip = 0.019120
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 161.8 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 12
+slippage_group = 0
+share_of_reads_that_slip = 0.020762
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 175.7 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 13
+slippage_group = 0
+share_of_reads_that_slip = 0.025326
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 214.3 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 14
+slippage_group = 0
+share_of_reads_that_slip = 0.033690
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 285.0 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 15
+slippage_group = 0
+share_of_reads_that_slip = 0.044816
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 379.1 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 16
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 17
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 18
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 19
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 20
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 21
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 22
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 23
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 24
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 25
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 26
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 27
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 28
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 29
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 30
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }
+
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 6
+reference_repeats = 31
+slippage_group = 0
+share_of_reads_that_slip = 0.052351
+shorter_share = 0.584541
+fall_off = 0.429952
+share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 442.9 }
+shorter_share_and_fall_off_origin = { expected_slipped_reads = 207.0, shorter_share_smoothing = "this_stratum", fall_off_smoothing = "this_stratum" }

@@ -99,7 +99,7 @@
 //! substitution_rate_by_stratum = [ … ]
 //!
 //! [stated_constants]               # §3.8 — the numbers no fit produces
-//! repeat_tract_outlier_weight = { value = 0.05, warrant = "defaulted" }
+//! repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
 //! ```
 //!
 //! # Three conventions the whole tree keeps
@@ -2605,7 +2605,7 @@ length_spectrum_by_period = []
 substitution_rate_by_stratum = []
 
 [stated_constants]
-repeat_tract_outlier_weight = { value = 0.05, warrant = "defaulted" }
+repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
 "#;
         let file: ParametersFile = toml::from_str(text).expect("the documented inline form parses");
 

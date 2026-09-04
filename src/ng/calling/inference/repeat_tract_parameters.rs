@@ -94,6 +94,7 @@ use crate::ng::calling::likelihood::stutter_rates::stutter_model_for;
 use crate::ng::calling::{CandidateAlleles, ContaminationView, FrozenParameters};
 use crate::ng::locus_generation::LocusKind;
 use crate::ng::parameter_estimation::Provenance;
+use crate::ng::parameter_estimation::joint::ssr_fit::Slippage;
 use crate::ng::parameter_estimation::joint::stratum_fits::{
     FittedSlippage, LengthSpectrum, NoSlippage,
 };
@@ -182,6 +183,19 @@ pub struct TractScoringFits {
     /// `read groups × candidates`, read-group-major — the same order
     /// [`SsrScoringContextTable`] indexes.
     stutter: Vec<StutterModel>,
+    /// Parallel to [`Self::stutter`]: the **frozen** three-number fit each cell's model was
+    /// built from — `None` where the fit had no numbers and the cell took
+    /// [`StutterModel::hipstr_shipped`]. What the per-locus slippage re-fit reads its
+    /// pull-back targets and expected slip counts from, and what
+    /// [`Self::apply_refitted_slippage`] never touches: each round is fitted against the
+    /// stratum's values, not against the last round's
+    /// (`doc/devel/ng/spec/calling_em_loop.md` §5.1).
+    frozen_slippage: Vec<Option<Slippage>>,
+    /// Parallel to [`Self::stutter`]: the three numbers each cell's model **currently**
+    /// stands on — the frozen values after a gather, the re-fitted ones after
+    /// [`Self::apply_refitted_slippage`]. Held so a test, or a later report, can read what a
+    /// tract was actually scored under; `None` exactly where [`Self::frozen_slippage`] is.
+    effective_slippage: Vec<Option<Slippage>>,
     /// Parallel to [`Self::stutter`]: the per-base substitution rate for that cell.
     substitution_rate: Vec<ErrorRate>,
     /// Parallel to [`Self::stutter`]: the weaker of that cell's two warrants, which is what the
@@ -308,6 +322,8 @@ impl TractScoringFits {
         );
 
         self.stutter.clear();
+        self.frozen_slippage.clear();
+        self.effective_slippage.clear();
         self.substitution_rate.clear();
         self.warrant.clear();
         self.motif = Some(*motif);
@@ -334,8 +350,12 @@ impl TractScoringFits {
                     parameters
                         .ssr_slippage_fits()
                         .at(read_group, period.get(), u64::from(repeats));
-                let (stutter, slippage_warrant) = match &slippage {
-                    Ok(fitted) => (stutter_model_for(&fitted.slippage), warrant_of(fitted)),
+                let (stutter, fitted_slippage, slippage_warrant) = match &slippage {
+                    Ok(fitted) => (
+                        stutter_model_for(&fitted.slippage),
+                        Some(fitted.slippage),
+                        warrant_of(fitted),
+                    ),
                     Err(absence) => {
                         self.slippage_defaulted += 1;
                         if matches!(
@@ -344,7 +364,13 @@ impl TractScoringFits {
                         ) {
                             self.slippage_defaulted_by_an_unknown_read_group += 1;
                         }
-                        (StutterModel::hipstr_shipped(), Provenance::Defaulted)
+                        // **`None` and not a `Slippage` spelling of the shipped constants**:
+                        // `hipstr_shipped` keeps the two part-repeat shares HipSTR ships
+                        // (0.01 each), which the three-number conversion cannot express — a
+                        // triple standing in for it would silently change what the frozen
+                        // path scores the cell under the day a re-fit touched it. A cell
+                        // with no fitted numbers is one the per-locus re-fit leaves alone.
+                        (StutterModel::hipstr_shipped(), None, Provenance::Defaulted)
                     }
                 };
                 let rate =
@@ -357,6 +383,8 @@ impl TractScoringFits {
                     }
                 };
                 self.stutter.push(stutter);
+                self.frozen_slippage.push(fitted_slippage);
+                self.effective_slippage.push(fitted_slippage);
                 self.substitution_rate.push(substitution_rate);
                 self.warrant
                     .push(slippage_warrant.weaker_of(substitution_warrant));
@@ -675,6 +703,82 @@ impl TractScoringFits {
     #[must_use]
     pub fn cells_with_no_fitted_substitution_rate(&self) -> usize {
         self.substitution_defaulted
+    }
+
+    /// **The frozen three-number fit behind each cell's stutter model** — `read groups ×
+    /// candidates`, read-group-major, `None` where the fit had no numbers and the cell took
+    /// the shipped constants.
+    ///
+    /// What the per-locus slippage re-fit reads its pull-back targets and expected slip
+    /// counts from. Frozen means frozen: [`Self::apply_refitted_slippage`] never writes here,
+    /// so every round of the re-fit is pulled toward the stratum's values rather than toward
+    /// the last round's (`doc/devel/ng/spec/calling_em_loop.md` §5.1).
+    #[inline]
+    #[must_use]
+    pub(crate) fn frozen_slippage_cells(&self) -> &[Option<Slippage>] {
+        &self.frozen_slippage
+    }
+
+    /// The three numbers one cell's stutter model currently stands on — the frozen fit after
+    /// a gather, the re-fitted numbers after [`Self::apply_refitted_slippage`], and `None`
+    /// where the cell runs on the shipped constants.
+    ///
+    /// # Panics
+    ///
+    /// On a cell past the gathered table — a read group or candidate belonging to another
+    /// locus.
+    #[must_use]
+    pub fn effective_slippage_of_cell(
+        &self,
+        read_group: ReadGroupId,
+        candidate: usize,
+    ) -> Option<Slippage> {
+        let group = read_group.0 as usize;
+        assert!(
+            group < self.read_groups && candidate < self.candidates,
+            "cell (read group {group}, candidate {candidate}) is past the {} × {} table this \
+             was gathered for",
+            self.read_groups,
+            self.candidates
+        );
+        self.effective_slippage[group * self.candidates + candidate]
+    }
+
+    /// **Replace the stutter models with ones built from re-fitted slippage numbers** — the
+    /// per-locus slippage round's write, between a gather and the round's scoring
+    /// (`doc/devel/ng/spec/calling_em_loop.md` §5.1).
+    ///
+    /// One entry per gathered cell, in the gather's own read-group-major order. A `Some`
+    /// rebuilds that cell's model through the one conversion
+    /// ([`stutter_model_for`]), so a re-fitted cell and a frozen one cannot disagree about
+    /// how three numbers become seven shares; a `None` — a cell the fit had no numbers for —
+    /// leaves the shipped constants standing, because there is nothing of that cell's own to
+    /// have re-fitted. Everything else a cell carries — substitution rate, warrant, the junk
+    /// support, the contaminant seed — reads no slippage number and stays as gathered.
+    ///
+    /// # Panics
+    ///
+    /// If `refitted` is not one entry per gathered cell, or writes a cell the gather left
+    /// `None` — either way the re-fit and the gather describe different loci.
+    pub(crate) fn apply_refitted_slippage(&mut self, refitted: &[Option<Slippage>]) {
+        assert_eq!(
+            refitted.len(),
+            self.stutter.len(),
+            "this tract was gathered over {} cells and {} re-fitted cells arrived, so the \
+             re-fit belongs to a different locus",
+            self.stutter.len(),
+            refitted.len()
+        );
+        for (cell, new) in refitted.iter().enumerate() {
+            let Some(new) = new else { continue };
+            assert!(
+                self.frozen_slippage[cell].is_some(),
+                "cell {cell} carries re-fitted numbers and the gather found none frozen to \
+                 re-fit, so the re-fit and the gather describe different loci"
+            );
+            self.stutter[cell] = stutter_model_for(new);
+            self.effective_slippage[cell] = Some(*new);
+        }
     }
 
     /// **Whether this tract's row carried the mixture's third term** — how common each reachable
@@ -1872,7 +1976,7 @@ mod tests {
         let locus = gathered.locus_parameters(&alleles, &contexts, &[]);
 
         assert_eq!(locus.outlier_weight, DEFAULT_OUTLIER_WEIGHT);
-        assert_eq!(locus.outlier_weight, 0.05);
+        assert_eq!(locus.outlier_weight, 0.20);
         assert!(locus.contamination.is_none());
         assert_eq!(gathered.weakest_warrant(), Provenance::FittedHere);
 
