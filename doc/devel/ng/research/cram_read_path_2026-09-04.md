@@ -6,11 +6,13 @@
 modifying noodles make it faster, and could requiring sorted files and reading them
 sequentially cut the memory?
 
-**Answer in one line.** Two changes, both measured and both leaving every decoded read
-byte-identical, take the CRAM read path from 0.847 s to 0.551 s per 600,000 whole-genome
-reads — **1.54×** — and take a whole calling run from 79.4 s to 66.2 s — **1.20×**. Neither
-is the change the previous review pointed at, and the thing that review pointed at turns out
-to be an artefact of this repository's own benchmark files.
+**Answer in one line.** Three changes, all measured and all leaving every decoded read
+byte-identical, take the CRAM read path from 0.847 s to 0.454 s per 600,000 whole-genome
+reads — **1.87×** — and take a whole calling run from 79.0 s to 58.1 s — **1.36×**. A fourth,
+built and verified but not yet wired into ng, cuts what the decode holds resident by
+**6.4×**: 198 MB to 31 MB on a tomato chromosome, 493 MB to 77 MB on a human one. None of
+these is the change the previous review pointed at, and the thing that review pointed at
+turns out to be an artefact of this repository's own benchmark files.
 
 ---
 
@@ -79,13 +81,13 @@ fixtures are not a small version of the real input, they are a different workloa
 
 600,000 reads of the whole-genome CRAM, one thread, seconds:
 
-| layer | stock noodles | with §4 | with §4 and §5 |
-|---|---:|---:|---:|
-| pull the bytes off disk | 0.001 | 0.001 | 0.001 |
-| inflate the blocks | 0.346 | **0.266** | 0.266 |
-| decode the records | 0.145 | 0.144 | 0.144 |
-| build ng's read from each record | 0.355 | 0.355 | **0.139** |
-| **total** | **0.847** | **0.767** | **0.551** |
+| layer | stock noodles | with §4 | with §4–5 | with §4–5 and §5a |
+|---|---:|---:|---:|---:|
+| pull the bytes off disk | 0.001 | 0.001 | 0.001 | 0.001 |
+| inflate the blocks | 0.346 | **0.266** | 0.266 | 0.266 |
+| decode the records | 0.145 | 0.144 | 0.144 | **0.049** |
+| build ng's read from each record | 0.355 | 0.355 | **0.139** | 0.139 |
+| **total** | **0.847** | **0.767** | **0.551** | **0.454** |
 
 Reading bytes off disk is 1 part in 800. Two things are large and they are roughly equal:
 **inflating the compressed blocks (41 %)** and **turning a decoded record into ng's own read
@@ -167,6 +169,42 @@ so this is not "the tests still pass" — it is the same 600,000 reads, field fo
 
 ---
 
+## 5a. Four fifths of decoding a record was reading tags ng throws away
+
+`Records::read_data` decoded every auxiliary tag of every record and there was no way to ask
+it not to. ng reads none of them: the one thing it wants from a record's tags is the read
+group, and **a CRAM does not store that as a tag** — it stores a number, an index into the
+header's `@RG` list, which `data().get(&READ_GROUP)` answers from that number without
+touching a stored field.
+
+**Skipping them is not simply a matter of not asking.** A CRAM's tags and its data series are
+decoded out of the same set of streams, and a stream is a cursor: a read skipped when
+something else depended on it having happened leaves every value after it wrong and says
+nothing. So the fork decides the question from the compression header before any record is
+read — `tag_streams::tags_can_be_left_unread` — and refuses unless every tag in the container
+reads only external blocks that no data series reads. When it refuses, the tags are read as
+before and only their values are discarded, which is smaller and always safe.
+
+One case earns its own arm, and finding it is the difference between 3 % and 20 %: **a
+one-symbol Huffman alphabet reads no bits**, because it encodes a constant, and that is how a
+writer stores the length of a fixed-width tag. Refusing it refused every real file here.
+
+Measured, each on records that hash the same with the tags and without:
+
+| file | before | after |
+|---|---:|---:|
+| whole-genome tomato, 600,000 reads | 0.570 s | **0.454 s** |
+| GIAB human, 400,000 reads | 0.551 s | 0.505 s |
+| the region-subset tomato fixture, 61,427 reads | 0.205 s | 0.190 s |
+
+**A correction to a number earlier in this note's own working.** An instrumented build put the
+tags at 0.232 s of 0.287 s of record decoding. That was mostly the instrument — an `Instant`
+pair per record over 1.2 million records. Merely discarding the decoded values, the safe
+fallback above, is worth 3.4 %, not 40 %; the 20 % comes from not reading the streams at all,
+which is a different change and needed the check to be safe.
+
+---
+
 ## 6. End to end, on a real call
 
 `call-from-alignments`, one sample, 10 Mb of tomato chromosome 1 out of the whole-genome CRAM,
@@ -174,11 +212,14 @@ so this is not "the tests still pass" — it is the same 600,000 reads, field fo
 
 | | wall (18 threads) | wall (1 thread) | peak resident |
 |---|---:|---:|---:|
-| `main` as it stands | 79.4, 79.2, 77.9, 80.2, 79.1 s | 78.1 s | 298–322 MB |
-| §4 and §5 applied | 66.2, 65.7, 66.3, 69.2, 67.0 s | 64.9 s | 322–352 MB |
+| `main` as it stands | 81.5, 80.4 s | **79.0 s** | 298–322 MB |
+| §4, §5 and §5a applied | 60.6, 59.6 s | **58.1 s** | 322 MB |
 
-**1.20×, and the VCF is byte-identical** — 50,203 records, compared line for line except
-`##commandline` and `##parametersFile`. Peak resident does not move. The 63-accession
+**1.36×, and the VCF is byte-identical** — 50,203 records, compared line for line except
+`##commandline` and `##parametersFile`. Peak resident does not move. The single-threaded pair
+is the one quoted because the 18-thread figures swing by 10 s between repeats of the same
+binary on this machine while the one-thread pair does not, and a single-sample run has little
+to parallelise anyway. The 63-accession
 benchmark cohort over 20 of its regions is also byte-identical and shows no wall-time change,
 which is what §2 predicts: on those fixtures the read path's cost is the reference digest,
 which neither change touches.
@@ -187,53 +228,65 @@ The library's 6,189 tests pass, and noodles-cram's own 218.
 
 ---
 
-## 7. Memory: what a sliding-window reference would buy, and what it would not
+## 7. Memory: the sliding-window reference is built, and it is 6.4×
 
 The suggestion was that requiring sorted files and reading them sequentially would let ng hold
-a window of the reference rather than a whole chromosome, as `WindowedRefSeq` already does for
-the walk's own view of the bases.
+a window of the reference rather than a whole chromosome. **It works, it is built in the fork,
+and it saves more than the first estimate in this note said** — because noodles was holding
+not one copy of the chromosome but, at its peak, two.
 
-**It would work, and the mechanism is already in noodles for a different case.** A CRAM
-decodes a read's bases against the reference by absolute coordinate: the record decoder is
-handed `(**sequence).as_ref()` — the whole contig — plus an absolute alignment start, and
-indexes it at `position - 1`. But noodles already carries a *rebased* variant beside it, for
-CRAMs that embed their own reference: `ReferenceSequence::Embedded` holds a `reference_start`
-and the record decoder subtracts it. Giving the external variant the same field, and passing
-the window's first position through the digest check, is the whole of the change. Everything a
-window needs is known before the fetch: the slice header carries `reference_sequence_id`,
-`alignment_start` and `alignment_span`, parsed twenty lines before the repository is asked.
+**Why it was possible.** A CRAM may embed its own reference, and for those noodles already
+rebases coordinates against the embedded block's start. A caller-supplied window is the same
+problem — bases whose first byte is not position 1 — so the fork adds a `Window` variant
+beside `Embedded` and the two indexing sites handle them together. Everything a window needs
+is known before the fetch: the slice header states `alignment_start` and `alignment_span`, and
+is parsed before any block is decoded. `Slice::reference_span` now says so and
+`Slice::records_over_window` takes the bases.
 
-**What it is worth, measured.** Calling 200 kb out of the whole-genome CRAM, so that almost
-nothing but the fixed cost is resident:
+**Measured**, decoding the same containers into records that hash the same, `/usr/bin/time -l`
+on the harness with one pass running so the process holds only what that pass needs:
 
-| contig held | length | peak resident |
-|---|---:|---:|
-| `SL4.0ch00` | 9.6 Mb | 150 MB |
-| `SL4.0ch01` | 90.9 Mb | 271 MB |
+| | whole contig | per-slice window | |
+|---|---:|---:|---|
+| tomato chromosome 1 (90.9 Mb) | 198.2 MB | **31.0 MB** | 0.453 s → 0.454 s |
+| human chromosome 1 (249.0 Mb) | 492.8 MB | **76.5 MB** | 0.500 s → 0.530 s |
 
-121 MB for 81.2 Mb of difference — **about 1.5 bytes of resident memory per base of the
-contig in hand**, which is one copy in noodles' repository plus ng's own window. So on tomato
-a windowed reference is worth roughly 130 MB, and on a human chromosome 1 (248.9 Mb) roughly
-370 MB.
+**6.4× less resident, for the same records and the same time.** 198 MB for a 90.9 Mb
+chromosome is about two bytes a base, and that is the finding the earlier estimate missed:
+`Repository::get` fetches the contig *and clones it into a cache that never evicts*, so the
+peak holds both. The human file's 6 % of extra time is its 2.5 Mb slice spans — its windows
+are large and re-read once per slice.
 
-**And here is the part that decides whether to build it: that cost is fixed, not per sample.**
-One reference is shared by every file in a run (`read/input/reference.rs`), so it is 48 % of a
-one-sample run's 271 MB peak and 4 % of the 63-sample benchmark's 2,316 MB. **A windowed
-reference helps most exactly where memory is least of a problem** — a single sample against a
-large genome — and barely moves a cohort. It is the right change for one human sample on a
-small machine and the wrong place to look for a thousand-sample run.
+**A window that does not cover the slice is refused and the message names both spans.** The
+failure that prevents is the silent one: a short window decodes every read against bases that
+are not under it. Checked by running the harness with the window one base short.
 
-**What does scale with the cohort, and is nearly free to fix.** Every open CRAM holds its
-`.crai` twice: once as the flat `AlignmentIndex::Crai` and once grouped by contig
-(`read/input/open_bam.rs`). On the CRAM arm the flat copy is **never read again after open** —
-`self.index` is used only when building a BAM cursor. A `crai::Record` is 56 bytes and this
-file's index has 112,140 of them, so that is 6.3 MB per open file held for nothing: 400 MB
-across 63 whole-genome samples. Dropping it is a field's type, not an algorithm.
+**What is not built: ng's side.** ng holds one `fasta::Repository` for the whole run, shared
+by every open file, and switching to windows means one sliding window shared by the cohort
+instead — which has to be safe for the samples decoding in parallel and has to advance
+without ever going backwards. That is a design change in `read/input/reference.rs`, not a
+call-site swap, and it is its own piece of work.
+
+**And the proportion has not changed even though the number has.** The reference is shared by
+every file in a run, so this is a *fixed* cost: on the one-sample whole-genome run whose peak
+is 271 MB it is most of what is left after the changes above, and on the 63-accession
+benchmark's 2,257 MB it is under a tenth. **It helps most where memory is least of a
+problem** — one sample against a large genome — and a cohort's memory is elsewhere.
+
+**One cohort-scaling piece is already taken.** Every open CRAM held its `.crai` twice, once
+flat and once bucketed by contig, and on the CRAM arm the flat copy was never read again:
+56 bytes a slice, and this repository's whole-genome tomato CRAM has 112,140 slices, so 6.3 MB
+a file and 396 MB across 63. It is now `Option<AlignmentIndex>` and the grouping returns one
+or the other, so both cannot be held. **Peak resident on a one-file run does not fall** — it
+rises 2.8 MB, reproducibly, because the peak falls during reference loading and freeing 6.3 MB
+just before it leaves the allocator holding a segment the contig does not fit into. It is a
+live-heap change taken for the cohort case this machine cannot run.
 
 **One thing sequential reading would not fix.** ng already reads containers in file order
 through the `.crai`, and already keeps exactly one decoded container per open file rather than
-caching. The gain from requiring sorted input is the index itself — a purely sequential walk
-does not need one — not the walk.
+caching. What requiring sorted input would additionally buy is the index itself — a purely
+sequential walk needs none — which is the 6.3 MB a file above, now taken by a narrower change
+that does not require the guarantee.
 
 ---
 
@@ -247,24 +300,36 @@ does not need one — not the walk.
   `read` layer is 0.001 s of 0.847 s.
 - **A faster MD5.** `md-5` 0.11 has no assembly backend on aarch64, and §2 makes the question
   moot.
+- **Merely discarding the decoded tag values** rather than not reading them: 3.4 %, against
+  20 % for not reading them — §5a.
 
 ## 9. What is next, in the order it pays
 
-1. **Land §4 and §5.** Both are measured, both leave the VCF byte-identical, and together they
-   are 1.20× on a whole-genome single-sample call. They need a decision about how the fork of
-   noodles-cram is carried — see below.
-2. **Drop the unread flat `.crai`** — §7, a few lines, ~400 MB on a 63-sample whole-genome
-   cohort.
-3. **The windowed reference** — §7, if and only if the target is one sample against a large
-   genome.
-4. **Re-measure everything on a CRAM 3.1 file before ever claiming it applies there** — §4.
+1. **Wire ng to the windowed reference** — §7. The noodles half is built and verified; the ng
+   half is one sliding window shared by the cohort in place of a `Repository`, which is a
+   design change in `read/input/reference.rs`. Worth 167 MB on a tomato chromosome and 416 MB
+   on a human one, fixed per run.
+2. **rANS symbol decoding is now the largest single item left** — 0.196 s of the 0.454 s the
+   read path costs, 43 %. A sampling profile of the harness puts `Block::decode_inner` at 8,815
+   self-samples of 25 seconds, four times the next leaf. What was *not* tried is making the
+   inner loop cheaper: it does three table lookups a byte (symbol, frequency, cumulative
+   frequency) where htslib packs all three into one word, and it renormalises a byte at a time
+   through an `io::Result`. Both are plausible and neither is measured, so neither is a
+   finding yet.
+3. **Re-measure everything on a CRAM 3.1 file before ever claiming it applies there** — §4.
+
+**What was measured and left alone.** After the tag skip, `RandomState::hash_one` was the
+third-largest leaf in the profile at 1,013 samples — noodles keys tag content ids and its
+external data readers in `HashMap`s with the default SipHash. Most of that is gone for a
+caller that skips tags, which is why it is recorded rather than pursued.
 
 **The fork is the open question and it is the owner's.** §4 is a change to noodles that should
-go upstream: it is a clear defect, it is fifteen lines, and it needs no new API. §5 is not —
-it adds an API noodles has no other caller for, so it either lives in a fork this project
-carries and rebases at every noodles bump, or it is proposed upstream as a
-`Record::write_*_into` family and waits. Today both live in `vendor/noodles-cram`, pinned by a
-`[patch.crates-io]` entry against the same 0.93.0 the manifest already names.
+go upstream: it is a clear defect, it is fifteen lines, and it needs no new API. §5, §5a and
+§7's decode are not — each adds an interface noodles has no other caller for, so they either
+live in a fork this project carries and rebases at every noodles bump, or they are proposed
+upstream and wait. All of them live in `vendor/noodles-cram`, pinned by a `[patch.crates-io]`
+entry against the same 0.93.0 the manifest already names, and `FORK.md` beside them lists
+every one with what it costs and whether it belongs upstream.
 
 ---
 
@@ -279,5 +344,9 @@ noodles can be judged — and if the owner decides so, offered upstream — one 
 | `test(ng): a harness that times the CRAM read path layer by layer` | `examples/ng_cram_decode_layers.rs`, and the per-codec counters behind the `cram-perf-counters` feature. | no — an instrument |
 | `perf(cram): rANS builds a megabyte of lookup table per block…` | §4. | **yes** — a defect, no API change |
 | `perf(cram): read a decoded record's fields into the caller's buffers…` | §5's noodles half. | not as it stands — a new API with one caller |
-| `perf(ng): a CRAM record goes straight into the container's buffers` | §5's ng half, and the end-to-end numbers of §6. | — |
+| `perf(ng): a CRAM record goes straight into the container's buffers` | §5's ng half. | — |
+| `perf(cram): a caller that reads no auxiliary tags need not decode them…` | §5a's noodles half, with the check that says when it is safe. | not as it stands |
+| `perf(ng): the CRAM decode stops reading tags it was already throwing away` | §5a's ng half, and the 1.36× of §6. | — |
+| `perf(ng): a CRAM's `.crai` is grouped by contig at open and the flat copy is then let go` | §7's cohort-scaling piece. | — |
+| `perf(cram): decode a slice against a window of the reference…` | §7's windowed decode. **ng does not use it yet.** | the shape may be worth proposing |
 | this report | | |
