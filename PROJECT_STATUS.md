@@ -27,7 +27,27 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-04):** **Milestone H is complete — the head answers the keep
+> - **Last completed task (2026-09-04):** **the owner's four rulings on Checkpoint H are built,
+> and the branch is merged into main** (`main` at the merge; the rulings' own report is
+> [ng_psp_head_rulings_2026-09-04.md](doc/devel/reports/implementations/ng_psp_head_rulings_2026-09-04.md)).
+> **The locus kind came back out of the record head** — it is a function of the coordinate, being
+> the kind of the typed region the locus falls in, and every psp records the segmentation inputs
+> its typing used, so a reader holding a coordinate can look it up; the head keeps
+> `reads-compared-with-reference` alone, which costs +3.86 % of the compressed file at 10.25 reads
+> a position and +8.50 % at 280.32. **One sample may not declare an `@RG ID` twice**, refused where
+> the alignment files are opened and again when a stored cohort is opened; scoped to one sample
+> rather than the whole run, because a collision across samples merges nothing and the run-wide
+> rule failed 88 of this repository's own tests, 76 of them different samples sharing an id
+> incidentally. **The compared-read count already excluded filtered and depth-capped reads**, and
+> now says so with a test. **And the parameters file identifies samples by name and read groups by
+> the sample and `@RG ID` together, never by position** — the same cohort's files passed in another
+> order used to turn a good file into a refusal. **⚠ One integration test fails and it is main's,
+> not this work's**: `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele`, confirmed
+> by running it against main alone; likely main's own adoption of the outlier weight at 0.20, with
+> the test not moved to match. **Next: psp-mode Milestone F**, whose one open question is what a run
+> over stored files says about each sample in its report.
+>
+> - **Earlier (2026-09-04):** **Milestone H is complete — the head answers the keep
 > rule at every depth, the specs say so, and the cost is a number** (branch `ng-psp-mode`, at
 > Checkpoint H; [H2 report](doc/devel/reports/implementations/ng_psp_head_h2_2026-09-04.md),
 > [H3 report](doc/devel/reports/implementations/ng_psp_head_h3_2026-09-04.md)). **The two new head
