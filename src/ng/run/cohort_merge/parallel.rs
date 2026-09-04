@@ -26,7 +26,7 @@
 
 use rayon::prelude::*;
 
-use super::build::{RegionOutcome, build_region};
+use super::build::{RegionOutcome, build_region_windowed};
 use super::observation_cache::{ObservationCache, ObservationSource, building_regions_of};
 use super::organise::{Organiser, RegionIndex};
 use super::timing;
@@ -188,10 +188,10 @@ where
                 in_region_order(regions_in_round.par_iter().map(|building_region| {
                     let builder = timing::Stopwatch::start();
                     let outcome =
-                        cache.with_observations(*building_region, |observations_per_sample| {
-                            build_region(
+                        cache.with_observations(*building_region, |window| {
+                            build_region_windowed(
                                 *building_region,
-                                observations_per_sample,
+                                window,
                                 max_cohort_locus_span,
                                 min_alt_reads,
                             )

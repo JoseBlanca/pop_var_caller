@@ -19,7 +19,7 @@
 //! The cohort total is still reported on each closed locus, as the locus's size in
 //! evidence rather than as a decision.
 
-use super::observation_cache::LocusSummary;
+use super::observation_cache::{LocusSummary, WindowedCohort};
 use super::{MaxCohortLocusSpan, MinAltReads};
 use crate::ng::locus_generation::{LocusKind, SampleLocusObservations};
 use crate::ng::types::{GenomePosition, GenomeRegion};
@@ -457,6 +457,19 @@ pub struct LocusCloser<'a> {
     /// alive alongside the data. Copying k pointers once per walk costs nothing and
     /// leaves the borrow where it belongs — on the observations.
     observations_per_sample: Vec<&'a [SampleLocusObservations]>,
+    /// The same sequence per sample, summarised — what every decision in this walk reads.
+    ///
+    /// **At the same indices as `observations_per_sample`**, so one cursor addresses both
+    /// (`observation_cache::WindowedCohort`). The walk consults the records for one thing
+    /// only, the locus kind, which is a fact about the locus rather than about an observation.
+    /// The same sequence per sample, summarised — what every decision in this walk reads,
+    /// when the caller had them to give.
+    ///
+    /// **Owned like `observations_per_sample` and for the same reason**: the walk outlives the
+    /// array it was handed. `None` means the caller had records only, and each summary is
+    /// derived from its record the first time the walk looks at it — which is what the walk
+    /// did before summaries were held anywhere.
+    summaries_per_sample: Option<Vec<&'a [LocusSummary]>>,
     /// How far each sample has been consumed — the cursor the walk advances.
     cursors: Vec<usize>,
     /// Where every sample that still has an observation begins: one leaf per covering
@@ -520,20 +533,79 @@ impl<'a> LocusCloser<'a> {
         max_cohort_locus_span: MaxCohortLocusSpan,
         min_alt_reads: MinAltReads,
     ) -> Self {
-        let pending = PendingHeads::over(observations_per_sample.iter().map(|observations| {
-            observations
-                .first()
-                .map(SampleLocusObservations::start_position)
+        Self::over_parts(
+            observations_per_sample,
+            None,
+            max_cohort_locus_span,
+            min_alt_reads,
+        )
+    }
+
+    /// [`over`](Self::over) where the summaries are already in hand — the cache's path.
+    ///
+    /// **The difference is where the summaries come from and nothing else.** Handed a window
+    /// carrying them, the walk reads them; handed records alone it derives each one when it
+    /// first looks at that record, which is what it did before summaries were held anywhere.
+    /// Both close the same loci and reach the same verdicts, which is what
+    /// `the_two_windows_close_the_same_loci` pins.
+    pub fn over_windowed(
+        window: &WindowedCohort<'a>,
+        max_cohort_locus_span: MaxCohortLocusSpan,
+        min_alt_reads: MinAltReads,
+    ) -> Self {
+        Self::over_parts(
+            window.observations,
+            window.summaries.map(<[&[LocusSummary]]>::to_vec),
+            max_cohort_locus_span,
+            min_alt_reads,
+        )
+    }
+
+    /// The one constructor: both public forms differ only in whether summaries came with the
+    /// records.
+    fn over_parts(
+        observations_per_sample: &[&'a [SampleLocusObservations]],
+        summaries_per_sample: Option<Vec<&'a [LocusSummary]>>,
+        max_cohort_locus_span: MaxCohortLocusSpan,
+        min_alt_reads: MinAltReads,
+    ) -> Self {
+        let samples = observations_per_sample.len();
+        if let Some(summaries) = &summaries_per_sample {
+            assert_eq!(
+                samples,
+                summaries.len(),
+                "a window with {samples} samples' observations and {} samples' summaries",
+                summaries.len(),
+            );
+        }
+        let pending = PendingHeads::over((0..samples).map(|sample| {
+            let first = match &summaries_per_sample {
+                Some(summaries) => summaries[sample].first().copied(),
+                None => observations_per_sample[sample].first().map(LocusSummary::of),
+            };
+            first.map(LocusSummary::start_position)
         }));
         Self {
-            cursors: vec![0; observations_per_sample.len()],
-            cursors_at_open: vec![0; observations_per_sample.len()],
-            alt_reads_per_sample: vec![0; observations_per_sample.len()],
-            compared_reads_per_sample: vec![0; observations_per_sample.len()],
+            cursors: vec![0; samples],
+            cursors_at_open: vec![0; samples],
+            alt_reads_per_sample: vec![0; samples],
+            compared_reads_per_sample: vec![0; samples],
             observations_per_sample: observations_per_sample.to_vec(),
+            summaries_per_sample,
             pending,
             max_cohort_locus_span,
             min_alt_reads,
+        }
+    }
+
+    /// The summary of sample `sample`'s head, if it has one left.
+    fn head_summary(&self, sample: usize) -> Option<LocusSummary> {
+        let index = self.cursors[sample];
+        match &self.summaries_per_sample {
+            Some(summaries) => summaries[sample].get(index).copied(),
+            None => self.observations_per_sample[sample]
+                .get(index)
+                .map(LocusSummary::of),
         }
     }
 
@@ -559,9 +631,7 @@ impl<'a> LocusCloser<'a> {
             unreachable!("the walk consumes a head only after the tournament showed it one");
         };
         self.cursors[sample] += 1;
-        let next = self
-            .head(sample)
-            .map(SampleLocusObservations::start_position);
+        let next = self.head_summary(sample).map(LocusSummary::start_position);
         self.pending.replace_head(sample, next);
     }
 
@@ -645,7 +715,9 @@ impl<'a> Iterator for LocusCloser<'a> {
             // build the roughly ninety-nine positions in a hundred that no sample varied at
             // (`spec/cohort_merge_psp_path.md` §2). Direct mode pays exactly what it paid
             // before: the same single walk over the record's sequences.
-            let summary = LocusSummary::of(head);
+            let summary = self
+                .head_summary(sample)
+                .expect("the tournament showed a head, so its summary is at the same index");
             assert!(
                 summary.region.start >= start,
                 "sample {sample}'s observations are not in coordinate order: {} starts \

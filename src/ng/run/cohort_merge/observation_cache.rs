@@ -107,6 +107,24 @@ impl LocusSummary {
         }
     }
 
+    /// Where the observation begins, as a whole-genome position.
+    #[must_use]
+    pub fn start_position(self) -> GenomePosition {
+        GenomePosition {
+            contig: self.region.contig,
+            position: self.region.start.min(self.region.end),
+        }
+    }
+
+    /// The last reference position the observation covers, as a whole-genome position.
+    #[must_use]
+    pub fn reach_position(self) -> GenomePosition {
+        GenomePosition {
+            contig: self.region.contig,
+            position: self.reach(),
+        }
+    }
+
     /// The last reference position the observation covers.
     ///
     /// Saturating for the reason [`SampleLocusObservations::reach`] is: a region ending at the
@@ -243,8 +261,80 @@ struct SampleWindow<S> {
     /// ([`ObservationCache::with_observations`]) and a deque's two halves are not one.
     /// Eviction pays a move of what survives, which is the window — short by construction.
     held_observations: Vec<SampleLocusObservations>,
+    /// One summary per held observation, at the same index, drawn and evicted with it.
+    ///
+    /// **Kept beside the records rather than derived when wanted, because deriving one walks
+    /// the record's sequences** and the closing walk wants every summary in its window on
+    /// every pass. Held here, that walk happens once per record drawn instead of once per
+    /// record per cover.
+    ///
+    /// **And because a summary is what a run over stored files will have *instead* of a
+    /// record.** A psp answers all of it from a record's head without decoding the evidence
+    /// behind it, so this is the array that path fills while `held_observations` stays empty
+    /// until a locus survives (`spec/cohort_merge_psp_path.md` §3.1). Direct mode fills both,
+    /// which is why the two are parallel arrays rather than one array of pairs: only one of
+    /// them is always present.
+    held_summaries: Vec<LocusSummary>,
     /// Where the last observation drawn from `source` began — the ordering check's memory.
     last_drawn: Option<GenomePosition>,
+}
+
+/// The cohort's window over one stretch of ground: what every sample recorded there, in the
+/// run's sample order, in the two forms the merge reads it in.
+///
+/// **Two views of one sequence, not two sequences.** Index *i* of a sample's summaries
+/// describes index *i* of its observations, so a range of members decided from the summaries
+/// addresses the records without a second search.
+///
+/// **Why the merge is handed both at once.** Closing a cohort locus reads only
+/// [`summaries`](Self::summaries) — where each observation sits, and the keep rule's two counts
+/// — and assembly reads only [`observations`](Self::observations). Keeping them apart is what
+/// lets a run over stored files fill the first from records' heads and leave the second empty
+/// until a locus has survived both verdicts (`spec/cohort_merge_psp_path.md` §3.1); direct mode
+/// fills both, and pays for the second what it always paid.
+#[derive(Debug, Clone, Copy)]
+pub struct WindowedCohort<'a> {
+    /// One slice per sample: the evidence, in coordinate order.
+    pub observations: &'a [&'a [SampleLocusObservations]],
+    /// One slice per sample at the same indices, or **`None` when the caller has records and
+    /// no summaries beside them**.
+    ///
+    /// Absent, a summary is derived from the record when the walk asks for it — which is
+    /// exactly what the closing walk did inline before summaries were held at all, at the
+    /// same cost. Present, the walk reads it and never touches the record. The distinction
+    /// exists because a run over stored files will have the summaries and *not* the records
+    /// (`spec/cohort_merge_psp_path.md` §3.1), and every fixture in this module has the
+    /// records and no summaries; both must be expressible or one of them needs a second
+    /// merge.
+    pub summaries: Option<&'a [&'a [LocusSummary]]>,
+}
+
+impl<'a> WindowedCohort<'a> {
+    /// The summary of sample `sample`'s observation at `index`, read or derived.
+    #[must_use]
+    pub fn summary_at(&self, sample: usize, index: usize) -> Option<LocusSummary> {
+        match self.summaries {
+            Some(summaries) => summaries[sample].get(index).copied(),
+            None => self.observations[sample].get(index).map(LocusSummary::of),
+        }
+    }
+}
+
+/// A borrowed window is a window — so a caller handed one by the cache can pass it on.
+impl<'a> From<&WindowedCohort<'a>> for WindowedCohort<'a> {
+    fn from(window: &WindowedCohort<'a>) -> Self {
+        *window
+    }
+}
+
+/// Records alone are a window: the summaries come from them as they are asked for.
+impl<'a> From<&'a [&'a [SampleLocusObservations]]> for WindowedCohort<'a> {
+    fn from(observations: &'a [&'a [SampleLocusObservations]]) -> Self {
+        Self {
+            observations,
+            summaries: None,
+        }
+    }
 }
 
 impl<S> ObservationCache<S> {
@@ -262,6 +352,7 @@ impl<S> ObservationCache<S> {
                     spent: false,
                     spare: Vec::new(),
                     held_observations: Vec::new(),
+                    held_summaries: Vec::new(),
                     last_drawn: None,
                 })
                 .collect(),
@@ -326,7 +417,7 @@ impl<S> ObservationCache<S> {
     pub fn with_observations<R>(
         &self,
         span: GenomeRegion,
-        f: impl FnOnce(&[&[SampleLocusObservations]]) -> R,
+        f: impl FnOnce(&WindowedCohort<'_>) -> R,
     ) -> R {
         // `min`/`max` for the reason `cover` and `SampleLocusObservations::reach` use them:
         // `GenomeRegion` has public fields and no constructor ordering them, and these two
@@ -358,16 +449,23 @@ impl<S> ObservationCache<S> {
         // the walk, and the alternative — a scratch buffer on the cache — would need interior
         // mutability on a `&self` method that several builders will hold at once.
         let windowing = super::timing::Stopwatch::start();
-        let observations_per_sample: Vec<&[SampleLocusObservations]> = self
-            .samples
-            .iter()
-            .map(|sample| {
-                let held = &sample.held_observations;
-                &held[first_reaching_index(held, left_edge)..]
-            })
-            .collect();
+        // **Both views start at the same index**, because the two arrays are one sequence held
+        // twice (`SampleWindow::held_summaries`): the summary at index *i* is the summary of
+        // the observation at index *i*, so a member range decided on one addresses the other.
+        let mut observations_per_sample: Vec<&[SampleLocusObservations]> =
+            Vec::with_capacity(self.samples.len());
+        let mut summaries_per_sample: Vec<&[LocusSummary]> = Vec::with_capacity(self.samples.len());
+        for sample in &self.samples {
+            let held = &sample.held_observations;
+            let from = first_reaching_index(held, left_edge);
+            observations_per_sample.push(&held[from..]);
+            summaries_per_sample.push(&sample.held_summaries[from..]);
+        }
         windowing.add_to(&super::timing::WINDOW_NANOS);
-        f(&observations_per_sample)
+        f(&WindowedCohort {
+            observations: &observations_per_sample,
+            summaries: Some(&summaries_per_sample),
+        })
     }
 
     /// How many observations are held, summed across samples — the size of the window this
@@ -408,9 +506,11 @@ impl<S> ObservationCache<S> {
             // drain would borrow the whole of it a second time.
             let SampleWindow {
                 held_observations,
+                held_summaries,
                 spare,
                 ..
             } = sample;
+            held_summaries.drain(..first_survivor);
             let room = held_observations.len();
             for record in held_observations.drain(..first_survivor) {
                 if spare.len() < room {
@@ -456,9 +556,11 @@ impl<S> ObservationCache<S> {
                 let first_survivor = first_reaching_index(&sample.held_observations, position);
                 let SampleWindow {
                     held_observations,
+                    held_summaries,
                     spare,
                     ..
                 } = sample;
+                held_summaries.drain(..first_survivor);
                 let room = held_observations.len();
                 let mut dead = Vec::new();
                 for record in held_observations.drain(..first_survivor) {
@@ -640,6 +742,7 @@ where
                 let Some(observation) = self.draw_next()? else {
                     break;
                 };
+                self.held_summaries.push(LocusSummary::of(&observation));
                 self.held_observations.push(observation);
             }
             let observation = &self.held_observations[considered];
@@ -779,6 +882,7 @@ fn first_reaching_index(
 
 #[cfg(test)]
 mod tests {
+    use super::super::build::build_region_windowed;
     use super::super::fixtures::{SourceFailed, position_on, region, region_on};
     use super::*;
     use crate::ng::locus_generation::{LocusKind, ReadWitness, SequenceObservation};
@@ -859,6 +963,7 @@ mod tests {
     fn handed_out<S>(cache: &ObservationCache<S>, span: GenomeRegion) -> Vec<Vec<GenomeRegion>> {
         cache.with_observations(span, |per_sample| {
             per_sample
+                .observations
                 .iter()
                 .map(|observations| {
                     observations
@@ -1723,7 +1828,7 @@ mod tests {
                 });
                 cache.cover(*at).expect("the fixture sources hold");
                 through_cache.push(cache.with_observations(*at, |windows| {
-                    format!("{:?}", build_region(*at, windows, max_span, keep))
+                    format!("{:?}", build_region_windowed(*at, windows, max_span, keep))
                 }));
             }
 

@@ -35,6 +35,7 @@
 use ahash::AHashMap;
 
 use super::close::{ClosedLocus, LocusCloser, SampleMembers, Verdict, span_of};
+use super::observation_cache::WindowedCohort;
 use super::{MaxCohortLocusSpan, MinAltReads};
 use crate::ng::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, WitnessedLocusPositions,
@@ -816,9 +817,27 @@ pub struct RegionOutcome {
 /// against 131.6). It short-circuits at the first sample that has a record in range, which on
 /// that data is the first sample. So it is kept for the input the module also has to serve —
 /// one sample, or coverage thin enough to leave gaps — and costs the dense case nothing.
-pub fn build_region(
+pub fn build_region<'a>(
     builder_region: GenomeRegion,
-    observations_per_sample: &[&[SampleLocusObservations]],
+    observations_per_sample: &[&'a [SampleLocusObservations]],
+    max_cohort_locus_span: MaxCohortLocusSpan,
+    min_alt_reads: MinAltReads,
+) -> RegionOutcome {
+    build_region_windowed(
+        builder_region,
+        &WindowedCohort {
+            observations: observations_per_sample,
+            summaries: None,
+        },
+        max_cohort_locus_span,
+        min_alt_reads,
+    )
+}
+
+/// [`build_region`] over a window whose summaries are already in hand — the cache's path.
+pub fn build_region_windowed<'a>(
+    builder_region: GenomeRegion,
+    window: &WindowedCohort<'a>,
     max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_reads: MinAltReads,
 ) -> RegionOutcome {
@@ -830,9 +849,9 @@ pub fn build_region(
         cohort_observations,
         failed_locus_spans,
     } = &mut outcome;
-    build_region_handing_over(
+    build_region_handing_over_windowed(
         builder_region,
-        observations_per_sample,
+        window,
         max_cohort_locus_span,
         min_alt_reads,
         &mut |built| cohort_observations.push(built),
@@ -863,14 +882,37 @@ pub fn build_region(
 /// not settle is emitted with `converged` false rather than refused. A sink that could fail
 /// would need the failure threaded through the merge's every driver for a case that does not
 /// arise.
-pub fn build_region_handing_over(
+pub fn build_region_handing_over<'a>(
     builder_region: GenomeRegion,
-    observations_per_sample: &[&[SampleLocusObservations]],
+    observations_per_sample: &[&'a [SampleLocusObservations]],
     max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_reads: MinAltReads,
     keep: &mut impl FnMut(CohortObservation),
     refused: &mut Vec<GenomeRegion>,
 ) {
+    build_region_handing_over_windowed(
+        builder_region,
+        &WindowedCohort {
+            observations: observations_per_sample,
+            summaries: None,
+        },
+        max_cohort_locus_span,
+        min_alt_reads,
+        keep,
+        refused,
+    );
+}
+
+/// [`build_region_handing_over`] over a window whose summaries are already in hand.
+pub fn build_region_handing_over_windowed<'a>(
+    builder_region: GenomeRegion,
+    window: &WindowedCohort<'a>,
+    max_cohort_locus_span: MaxCohortLocusSpan,
+    min_alt_reads: MinAltReads,
+    keep: &mut impl FnMut(CohortObservation),
+    refused: &mut Vec<GenomeRegion>,
+) {
+    let observations_per_sample = window.observations;
     if no_locus_can_begin_in(builder_region, observations_per_sample) {
         super::timing::REGIONS_WITH_NO_LOCUS.add(1);
         return;
@@ -880,11 +922,7 @@ pub fn build_region_handing_over(
     // from the walk itself (`super::timing`): it is the fixed cost a building region pays
     // whatever it holds, and the question is how much of the merge that comes to.
     let opening_the_walk = super::timing::Stopwatch::start();
-    let closer = LocusCloser::over(
-        observations_per_sample,
-        max_cohort_locus_span,
-        min_alt_reads,
-    );
+    let closer = LocusCloser::over_windowed(window, max_cohort_locus_span, min_alt_reads);
     opening_the_walk.add_to(&super::timing::WALK_SETUP_NANOS);
 
     for locus in closer {

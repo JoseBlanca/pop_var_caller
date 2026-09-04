@@ -19,14 +19,16 @@
 //! over this same cache; the loci that differ once builders see different windows are what the
 //! organiser's overlap resolution settles (spec §6.1).
 
-use super::build::{CohortObservation, RegionOutcome, build_region, build_region_handing_over};
+use super::build::{
+    CohortObservation, RegionOutcome, build_region, build_region_handing_over_windowed,
+};
+use crate::ng::locus_generation::SampleLocusObservations;
 use super::observation_cache::{ObservationCache, ObservationSource, building_regions_of};
 use super::timing;
 use super::{
     CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads,
     refuse_malformed_analysed_regions,
 };
-use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::types::{GenomePosition, GenomeRegion};
 
 /// Merge the cohort over `analysed`, one region at a time, in the order given.
@@ -62,9 +64,9 @@ use crate::ng::types::{GenomePosition, GenomeRegion};
 /// regions**, which are few and long; short building regions are what the observation cache
 /// exists to make affordable (milestone D), and that is where the parallel arrangement will
 /// get them.
-pub fn merge_cohort_serially(
+pub fn merge_cohort_serially<'a>(
     analysed: &[GenomeRegion],
-    observations_per_sample: &[&[SampleLocusObservations]],
+    observations_per_sample: &[&'a [SampleLocusObservations]],
     max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_reads: MinAltReads,
 ) -> RegionOutcome {
@@ -334,10 +336,10 @@ where
             timing::ROUNDS.add(1);
             timing::REGIONS.add(1);
             let builder = timing::Stopwatch::start();
-            cache.with_observations(building_region, |observations_per_sample| {
-                build_region_handing_over(
+            cache.with_observations(building_region, |window| {
+                build_region_handing_over_windowed(
                     building_region,
-                    observations_per_sample,
+                    window,
                     max_cohort_locus_span,
                     min_alt_reads,
                     &mut timed_keep,
@@ -360,6 +362,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::super::build::build_region_windowed;
+    use crate::ng::locus_generation::SampleLocusObservations;
     use super::super::fixtures::{
         SourceFailed, in_flight, member, refuse_any_difference, region, region_on, render,
         source_of, three_samples_over_six_hundred_bases, width,
@@ -1162,10 +1166,10 @@ mod tests {
                 cache
                     .cover(building_region)
                     .expect("the fixture sources hold");
-                let outcome = cache.with_observations(building_region, |observations_per_sample| {
-                    build_region(
+                let outcome = cache.with_observations(building_region, |window| {
+                    build_region_windowed(
                         building_region,
-                        observations_per_sample,
+                        window,
                         max_cohort_locus_span,
                         min_alt_reads,
                     )
