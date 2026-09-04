@@ -27,7 +27,19 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-04):** **the oracle that justifies psp mode is a test, and it
+> - **Last completed task (2026-09-04):** **Milestone F is complete — psp mode exists, equals
+> direct mode, and every run-level invariance spec §12 asks of it holds** (branch `ng-psp-mode`,
+> Checkpoint F; [F3 report](doc/devel/reports/implementations/ng_psp_mode_f3_2026-09-04.md)).
+> The order the psps are named in does not change the calls; a cohort walked one sample at a time
+> calls what one invocation calls; ground a sample analysed and found empty is not ground it
+> never looked at. **The thread sweep is a script and the flag is why** — `--threads` builds
+> rayon's *global* pool, which a process may build once, so a test sweeping thread counts would
+> run every later count at the first one's width while reporting a sweep it did not do.
+> `scripts/ng_psp_concurrency_invariance.sh` gives **599 records at 1, 2, 4 and 8 threads,
+> byte-identical apart from `##commandline`**, which carries `--threads N`. **Next: Milestone G**,
+> the census written beside the psp.
+>
+> - **Earlier (2026-09-04):** **the oracle that justifies psp mode is a test, and it
 > can see four kinds of defect it could not see when it was written** (branch `ng-psp-mode`, plan
 > step F2; [report](doc/devel/reports/implementations/ng_psp_mode_f2_2026-09-04.md)). One cohort
 > called two ways gives one VCF: on **six tomato accessions over the two 100 kb intervals, 599

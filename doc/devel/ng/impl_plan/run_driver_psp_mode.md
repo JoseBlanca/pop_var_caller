@@ -444,13 +444,49 @@ fixtures and on six tomato accessions over 400 kb through the real catalog. (Com
 > variant is not compared (578 of 581 a sample); neither route fits, so what only a fit reads can
 > be destroyed on write with both comparisons green.
 
-**F3. ☐ The remaining run-level invariances.**
+**F3. ✅ The remaining run-level invariances.**
 File order does not matter (§12.6, same VCF sample-for-sample); a cohort of
 separately-walked samples calls (§12.7 — E2's fixture, end to end); analysed-but-empty
 ground round-trips to the VCF's absence of records (§12.9); concurrency invariance of the
 psp-route VCF at pools of 1/2/4/8 (§12.2). *Depends:* F1. *Source:* spec §12.
 
 > **Checkpoint F: psp mode exists and equals direct mode. Pause for review.**
+>
+> **Reached 2026-09-04.** `pop_var_caller_exp call-from-psps` calls a cohort of stored files and
+> writes the VCF, the parameters file and the run report direct mode writes. **On six tomato
+> accessions over the two 100 kb intervals: 599 records, byte-identical to direct mode's output
+> apart from the `##commandline` line, and the parameters file identical too**
+> (`scripts/ng_mode_equivalence_oracle.sh`). All four of §12's remaining run-level invariances
+> hold (`scripts/ng_psp_concurrency_invariance.sh` for the thread sweep, tests for the other
+> three).
+>
+> **Two rulings are recorded in this milestone:**
+>
+> 1. **What a run over stored files says about each sample** (owner, 2026-09-04): the loci it
+>    read out of each file and how many reads went into the comparison at one of them, both
+>    measured by the run; a file holding none named as contributing nothing; and a line, only
+>    where the cohort's psps disagree, naming the files whose walk applied other read filters.
+>    **The number is not depth and the line does not say depth** — the head's count excludes
+>    filtered reads, depth-capped reads and reads that cover a locus without anchoring it.
+> 2. **`##commandline` is exempted from the shell-level comparison and from nothing else.** The
+>    two routes are two commands, so the line differs by construction; inside one test process
+>    both record the same line and the suite compares the files whole.
+>
+> **Carried into Milestone G:**
+> - the oracle compares VCFs, so a stored locus that produces no record is not compared — 578 of
+>   the 581 a sample in the fixture. Field-for-field equality with the walk is Milestone B's;
+> - neither route fits parameters, so what only a fit reads (the stored sum of squared mapping
+>   qualities, the count of reads that covered a locus without an observation) can be destroyed
+>   on write with every comparison green. **G writes the census, whose fit does read them**;
+> - a psp written against a reference with a different contig count gets the catalog's refusal
+>   rather than its own, because the segmentation is built before the cohort is checked against
+>   the reference;
+> - the per-sample report section has no cap at the thousand-sample end, and neither does direct
+>   mode's — it belongs to both or neither;
+> - Milestone C's four carry-forwards: two are closed (the on-disk cohort fixture is shared by
+>   all three commands; the parameters assembly and the VCF header are lifted into
+>   `calling_run`), and two remain — the duplicated reference-open block, and the read filters
+>   and locus-generator knobs being invisible at every surface.
 
 ### Milestone G — the census beside the psp
 

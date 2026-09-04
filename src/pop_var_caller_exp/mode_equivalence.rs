@@ -34,6 +34,15 @@
 //! itself — a green test making no claim at all. So the path is deleted before the second route
 //! runs, and a run that did not recreate it fails on the read.
 //!
+//! # The run-level invariances live here too
+//!
+//! Spec §12's other properties of a psp-mode run — that the order the files are named in does
+//! not change the calls (§12.6), that a cohort each of whose samples was walked in its own
+//! invocation calls (§12.7), and that ground a sample analysed and found nothing in reads back
+//! as analysed and empty rather than as never looked at (§12.9) — are all comparisons between
+//! whole runs, so they are here rather than in either command's own tests. Each is a run
+//! against a run, which is what this module is for.
+//!
 //! # The real-data half is a script, and it is where the claim has weight
 //!
 //! What runs here is a fixture: one contig, two samples, three variants, twenty reads a
@@ -493,5 +502,220 @@ mod tests {
             "the stored cohort's run must have written it"
         );
         comparable(output)
+    }
+
+    // -----------------------------------------------------------------
+    // The run-level invariances (spec §12.6, §12.7, §12.9)
+    // -----------------------------------------------------------------
+
+    /// **The order the psps are named in does not change the calls** (spec §12.6).
+    ///
+    /// **What it proves is that nothing joins by position.** Every per-sample number a run
+    /// carries — the inbreeding coefficient, the read-group calibration, the column a genotype
+    /// is written into — is keyed by the sample's name, and a run that joined any of them by the
+    /// order its arguments arrived in would give a reordered cohort another sample's numbers
+    /// with nothing failing. That is the failure this test exists for, and it is invisible in a
+    /// VCF: every field would be in range and every column would have a genotype.
+    ///
+    /// **Sample for sample, not line for line.** The columns follow the order given, so the two
+    /// files' text differs by construction; what must match is each sample's own fields at each
+    /// locus.
+    #[test]
+    fn the_order_the_psps_are_named_in_does_not_change_the_calls() {
+        let cohort = a_varying_cohort_on_disk();
+        let output = cohort.directory.path().join("calls.vcf");
+
+        called_from_alignments(&cohort, &output);
+        let one_way = called_from_psps(&cohort, &output, &["one", "two"]);
+        std::fs::remove_file(&output).expect("the file is there to remove");
+        let psps = cohort.directory.path().join("psps");
+        run_call_from_psps(&psps_args(&cohort, &output, &psps, &["two", "one"]))
+            .expect("the same cohort in the other order calls");
+        let the_other_way = comparable(&output);
+
+        assert_ne!(
+            one_way, the_other_way,
+            "the two orders put the sample columns differently, so the files must differ — if \
+             they did not, this test would be comparing one order with itself",
+        );
+        assert_eq!(
+            genotypes_by_sample(&one_way),
+            genotypes_by_sample(&the_other_way),
+            "every sample must be called the same at every locus whichever order its file was \
+             named in",
+        );
+    }
+
+    /// Each locus's per-sample fields, keyed by the sample's name — what `--psp`'s order must
+    /// not change.
+    fn genotypes_by_sample(lines: &[String]) -> Vec<(String, Vec<(String, String)>)> {
+        let samples: Vec<&str> = lines
+            .iter()
+            .find(|line| line.starts_with("#CHROM"))
+            .expect("the VCF names its columns")
+            .split('\t')
+            .skip(9)
+            .collect();
+        lines
+            .iter()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| {
+                let columns: Vec<&str> = line.split('\t').collect();
+                let at = format!("{}:{}", columns[0], columns[1]);
+                let mut called: Vec<(String, String)> = samples
+                    .iter()
+                    .zip(columns.iter().skip(9))
+                    .map(|(sample, call)| ((*sample).to_owned(), (*call).to_owned()))
+                    .collect();
+                called.sort();
+                (at, called)
+            })
+            .collect()
+    }
+
+    /// **A cohort each of whose samples was walked in its own invocation calls, and calls the
+    /// same** (spec §12.7).
+    ///
+    /// **Without this the ordinary psp-mode run does not work at all.** A gatherer sees one
+    /// sample's files, so it numbers that sample's read groups from zero and every sample's
+    /// first group comes back as identifier `0`; the calling run has to merge those tables into
+    /// one run-wide numbering (spec §6.1, §6.2). The failure without it is a refusal at the
+    /// parameters fit rather than anything visible in the walk — and this cohort makes it
+    /// reachable, because its first sample declares two read groups and its second one, so the
+    /// separately-walked tables collide on `0` and disagree about what `1` means.
+    ///
+    /// **Compared against the one-invocation cohort**, not merely asserted to run: what must
+    /// hold is that walking a cohort in pieces is the same run as walking it whole, which is the
+    /// property psp mode exists for (spec §2).
+    #[test]
+    fn a_cohort_walked_one_sample_at_a_time_calls_what_one_invocation_calls() {
+        let cohort = a_varying_cohort_on_disk();
+        let output = cohort.directory.path().join("calls.vcf");
+
+        called_from_alignments(&cohort, &output);
+        let together = called_from_psps(&cohort, &output, &["one", "two"]);
+
+        // One invocation a sample, each into a directory of its own — the way this command's own
+        // documentation tells a person to spread a cohort over cores or machines.
+        let mut apart = Vec::new();
+        for (sample, alignment) in ["one", "two"].iter().zip(&cohort.alignments) {
+            let directory = cohort.directory.path().join(format!("walked-{sample}"));
+            run_generate_psps(&GeneratePspsArgs {
+                reference: cohort.reference.clone(),
+                catalog: Some(cohort.catalog.clone()),
+                alignments: vec![alignment.clone()],
+                output_dir: directory.clone(),
+                regions: None,
+                force: true,
+                build_index_if_missing: false,
+                min_copies: MinCopies::default(),
+                min_period: DEFAULT_MIN_PERIOD,
+                max_period: DEFAULT_MAX_PERIOD,
+                max_str_len: DEFAULT_MAX_STR_LEN,
+                min_purity: DEFAULT_MIN_PURITY,
+            })
+            .expect("one sample walks on its own");
+            apart.push(psp_path_for(&directory, sample));
+        }
+
+        std::fs::remove_file(&output).expect("the file is there to remove");
+        let mut args = psps_args(&cohort, &output, &cohort.directory.path().join("psps"), &[]);
+        args.psps = apart;
+        run_call_from_psps(&args).expect("separately-walked samples make a cohort");
+
+        assert_eq!(
+            comparable(&output),
+            together,
+            "a cohort walked one sample at a time must call what one invocation calls",
+        );
+    }
+
+    /// **Ground a sample analysed and found nothing in reads back as analysed and empty**, not
+    /// as ground it never looked at (spec §12.9).
+    ///
+    /// **A VCF cannot say which**, which is the whole reason a psp records its analysed regions:
+    /// a sample with no reads over a stretch and a sample that never looked at it produce the
+    /// same absence of records. So what this asserts is on the file rather than in it — the psp
+    /// of a sample with no reads holds no record and its header still claims the whole ground,
+    /// and the run calls that cohort rather than refusing it or dropping the sample.
+    #[test]
+    fn a_sample_that_analysed_ground_and_found_nothing_is_not_a_sample_that_never_looked() {
+        use crate::ng::psp::PspReader;
+        use crate::pop_var_caller_exp::test_fixtures::a_cohort_on_disk;
+
+        // `zeta` carries three reads and `alpha` none, over ground both were walked across.
+        let cohort = a_cohort_on_disk();
+        let psps = cohort.directory.path().join("psps");
+        run_generate_psps(&GeneratePspsArgs {
+            reference: cohort.reference.clone(),
+            catalog: Some(cohort.catalog.clone()),
+            alignments: cohort.alignments.clone(),
+            output_dir: psps.clone(),
+            regions: None,
+            force: true,
+            build_index_if_missing: false,
+            min_copies: MinCopies::default(),
+            min_period: DEFAULT_MIN_PERIOD,
+            max_period: DEFAULT_MAX_PERIOD,
+            max_str_len: DEFAULT_MAX_STR_LEN,
+            min_purity: DEFAULT_MIN_PURITY,
+        })
+        .expect("the cohort walks into psps");
+
+        let mut empty = PspReader::open(&psp_path_for(&psps, "alpha")).expect("alpha's psp opens");
+        let ground: Vec<_> = empty
+            .header()
+            .segmentation_inputs
+            .analysed_regions
+            .iter()
+            .collect();
+        assert!(
+            !ground.is_empty(),
+            "the file claims the ground it was walked over, which is what tells this apart from \
+             a sample that never looked",
+        );
+        assert_eq!(
+            empty.records().expect("the walk starts").count(),
+            0,
+            "and it holds no record, because the sample had no read there",
+        );
+
+        let output = cohort.directory.path().join("calls.vcf");
+        let mut args = psps_args_for(&cohort.reference, &cohort.catalog, &output);
+        args.psps = vec![psp_path_for(&psps, "zeta"), psp_path_for(&psps, "alpha")];
+        run_call_from_psps(&args).expect("a cohort holding an analysed-but-empty sample calls");
+
+        let called = comparable(&output);
+        assert!(
+            called
+                .iter()
+                .find(|line| line.starts_with("#CHROM"))
+                .is_some_and(|line| line.contains("zeta") && line.contains("alpha")),
+            "both samples keep their column, the empty one included:\n{}",
+            called.join("\n"),
+        );
+    }
+
+    /// [`psps_args`]'s shape for a cohort that is not [`AVaryingCohort`] — the psps are filled in
+    /// by the caller.
+    fn psps_args_for(reference: &Path, catalog: &Path, output: &Path) -> CallFromPspsArgs {
+        CallFromPspsArgs {
+            reference: reference.to_path_buf(),
+            catalog: Some(catalog.to_path_buf()),
+            psps: Vec::new(),
+            output: output.to_path_buf(),
+            parameters: None,
+            defaults: true,
+            ploidy: None,
+            max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+            max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+            cohort_locus_builder_regions_len: None,
+            threads: 0,
+            min_copies: MinCopies::default(),
+            min_period: DEFAULT_MIN_PERIOD,
+            max_period: DEFAULT_MAX_PERIOD,
+            max_str_len: DEFAULT_MAX_STR_LEN,
+            min_purity: DEFAULT_MIN_PURITY,
+        }
     }
 }
