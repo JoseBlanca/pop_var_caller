@@ -331,7 +331,7 @@ sets matching the parameters both ways. Analysed regions come from the headers, 
 Every refusal has a provoking test naming what differs (§12.5). *Depends:* A1-A2, D1.
 *Source:* spec §5.3, §6.2; arch §3.4, §6.
 
-**E2. ☐ Merge the read-group tables into the run-wide numbering.**
+**E2. ✅ Merge the read-group tables into the run-wide numbering.**
 Each sample numbers from zero; build the run table by merging and remap each observation's
 walk-local identifier as records are drawn — the remap lives in the psp source, keyed by the
 header's table (A2). Fixture: two samples whose local ids clash and whose libraries differ;

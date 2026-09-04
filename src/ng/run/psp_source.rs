@@ -20,6 +20,10 @@
 //!   in the error and the file it came from cannot come apart.
 //! - **Refusals where the merge would otherwise assert or go quiet** — see [`PspSourceError`],
 //!   which says of each whether the mistake is the file's or this crate's.
+//! - **The read groups renumbered from the file's terms into the run's.** Every psp numbers its
+//!   own read groups from zero, so a cohort's files collide by construction; the calling stage
+//!   merges their tables into one numbering and hands each source its own map (spec §6.2). This
+//!   is where a record stops being one file's and becomes the run's.
 //! - **A parameter it takes and drops: the offer of a spent record back for reuse.**
 //!   [`ObservationSource::next_observation`] hands a source a record the merge will not read
 //!   again, and this one releases it. A decoder is the reuse hook's best customer — it fills
@@ -39,7 +43,7 @@
 
 use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::psp::{PspReadError, PspReader, RecordIter, StreamedRecord};
-use crate::ng::types::{GenomePosition, GenomeRegion};
+use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 
 use super::cohort_merge::observation_cache::ObservationSource;
 use super::{RunError, WalkProgress};
@@ -111,6 +115,26 @@ pub enum PspSourceError {
         at: GenomeRegion,
     },
 
+    /// A record names a read group its own file's table does not hold.
+    ///
+    /// **The number in a record is walk-local**, and the run renumbers it through the table
+    /// its header carries (spec §6.2) — so a number past the end of that table is a file
+    /// disagreeing with itself, and there is nothing to renumber it into. Caught here rather
+    /// than by the indexing, because a panic in the middle of a cohort says nothing about
+    /// which file to look at.
+    #[error(
+        "the stored observation at {at} names read group {names}, and this sample's psp \
+         declares {in_the_table}"
+    )]
+    ReadGroupNotInThisFilesTable {
+        /// The record whose observation names it.
+        at: GenomeRegion,
+        /// The walk-local number the record carries.
+        names: u32,
+        /// How many read groups the file's own header declares.
+        in_the_table: usize,
+    },
+
     /// The source refused a record earlier in this file, so it will not go on.
     ///
     /// **A refusal has to end the source, and this is what says so on every later draw.**
@@ -167,6 +191,15 @@ pub struct PspObservationSource<W> {
     /// Set once this source has refused a record of its own — see
     /// [`PspSourceError::AlreadyRefused`] for what it stops.
     refused: bool,
+    /// What this sample's walk-local read groups are called in this run: entry `i` is the
+    /// run-wide identifier of the group its own walk numbered `i` (spec §6.2).
+    ///
+    /// **Every sample numbers its read groups from zero**, so without this every sample's
+    /// first group would reach the merge as identifier 0 and the cohort would score them all
+    /// against one calibration. A single-sample run's map is the identity and the work is
+    /// wasted there; it is applied unconditionally anyway, because a source that sometimes
+    /// renumbers is a source somebody forgets to hand a map to.
+    read_groups: Vec<ReadGroupId>,
     walk: W,
 }
 
@@ -198,12 +231,13 @@ impl<W> PspObservationSource<W> {
     /// whatever the caller passes, so a public one would let a failure name an individual the
     /// file does not hold — and at a cohort of thousands the whole value of
     /// [`RunError::SourceFailed`] is that its name identifies the file.
-    pub(crate) fn new(sample: String, walk: W) -> Self {
+    pub(crate) fn new(sample: String, walk: W, read_groups: &[ReadGroupId]) -> Self {
         Self {
             sample,
             reached: WalkProgress::NothingYet,
             last_start: None,
             refused: false,
+            read_groups: read_groups.to_vec(),
             walk,
         }
     }
@@ -260,7 +294,7 @@ impl<'a> PspObservationSource<RecordIter<'a>> {
     /// [`RunError::SourceFailed`] if the walk cannot be started — the file's manifest declares
     /// an encoding this build cannot read, or the first seek fails. It reports
     /// [`WalkProgress::NothingYet`], which is exact: nothing has been decoded.
-    pub fn over(psp: &'a mut PspReader) -> Result<Self, RunError> {
+    pub fn over(psp: &'a mut PspReader, read_groups: &[ReadGroupId]) -> Result<Self, RunError> {
         // **Cloned before the walk is asked for**, and not merely to keep the borrow checker
         // happy: the walk borrows the reader for as long as this source lives, so the header is
         // out of reach afterwards.
@@ -279,7 +313,7 @@ impl<'a> PspObservationSource<RecordIter<'a>> {
             // that the sample is named the day something does reach it — but do not read it as
             // covered.
             .map_err(|source| source_failed(&sample, WalkProgress::NothingYet, source))?;
-        Ok(Self::new(sample, walk))
+        Ok(Self::new(sample, walk, read_groups))
     }
 }
 
@@ -335,7 +369,7 @@ where
             Ok(streamed) => streamed,
             Err(source) => return Some(Err(self.refuse(source))),
         };
-        let Some(record) = record else {
+        let Some(mut record) = record else {
             self.refused = true;
             return Some(Err(self.refuse(PspSourceError::ObservationBodyNotBuilt {
                 at: head.region,
@@ -352,6 +386,24 @@ where
                 previous,
                 offered: start,
             })));
+        }
+        // **Renumbered here, at the one place a record crosses from the file's terms into the
+        // run's.** Doing it further up — in the merge, or at the call — would mean every
+        // consumer knowing which sample a record came from in order to read its read group,
+        // which is exactly what the run-wide numbering exists to remove.
+        for observation in &mut record.observations {
+            let walk_local = observation.read_group.get() as usize;
+            let Some(run_wide) = self.read_groups.get(walk_local).copied() else {
+                self.refused = true;
+                return Some(Err(self.refuse(
+                    PspSourceError::ReadGroupNotInThisFilesTable {
+                        at: record.region,
+                        names: observation.read_group.get(),
+                        in_the_table: self.read_groups.len(),
+                    },
+                )));
+            };
+            observation.read_group = run_wide;
         }
         self.last_start = Some(start);
         // **`reach_position` rather than `region.end`**: `reach` is `end.max(start)`, and
@@ -371,6 +423,14 @@ mod tests {
     use crate::ng::psp::writer::tests_support::{a_header, a_record, a_sample};
     use crate::ng::types::{ContigId, Motif, Position};
     use std::path::{Path, PathBuf};
+
+    /// **The map a single-sample run has: the identity.** The fixture header declares two read
+    /// groups, so a source over one of these file renumbers 0 to 0 and 1 to 1 — which is what
+    /// leaves every other test in this module about what it was about before the run-wide
+    /// numbering existed.
+    fn as_walked() -> Vec<ReadGroupId> {
+        vec![ReadGroupId(0), ReadGroupId(1)]
+    }
 
     /// A psp holding `records`, and the directory it lives in — dropped by the caller, which
     /// is what deletes the file.
@@ -418,7 +478,8 @@ mod tests {
             "the fixture is meant to cross blocks; it holds {}",
             psp.block_index().len()
         );
-        let mut source = PspObservationSource::over(&mut psp).expect("the walk starts");
+        let mut source =
+            PspObservationSource::over(&mut psp, &as_walked()).expect("the walk starts");
         let (read, failed) = drain(&mut source);
         assert!(failed.is_none(), "the file is sound: {failed:?}");
         assert_eq!(read, written);
@@ -440,7 +501,8 @@ mod tests {
         let written = vec![a_record(0, 1, 1), tract, a_record(0, 101, 1)];
         let (_dir, path) = a_psp_of(&written);
         let mut psp = PspReader::open(&path).expect("a finished psp opens");
-        let mut source = PspObservationSource::over(&mut psp).expect("the walk starts");
+        let mut source =
+            PspObservationSource::over(&mut psp, &as_walked()).expect("the walk starts");
         let (read, failed) = drain(&mut source);
         assert!(failed.is_none(), "the file is sound: {failed:?}");
         assert_eq!(read, written);
@@ -454,7 +516,7 @@ mod tests {
         let (_dir, path) = a_psp_of(&a_sample());
         let mut psp = PspReader::open(&path).expect("a finished psp opens");
         let in_the_header = psp.header().sample.clone();
-        let source = PspObservationSource::over(&mut psp).expect("the walk starts");
+        let source = PspObservationSource::over(&mut psp, &as_walked()).expect("the walk starts");
         assert_eq!(source.sample_name(), in_the_header);
     }
 
@@ -466,7 +528,8 @@ mod tests {
         let (_dir, path) = a_psp_of(&[]);
         let mut psp = PspReader::open(&path).expect("a finished psp opens");
         assert!(psp.block_index().is_empty(), "no records, so no blocks");
-        let mut source = PspObservationSource::over(&mut psp).expect("the walk starts");
+        let mut source =
+            PspObservationSource::over(&mut psp, &as_walked()).expect("the walk starts");
         assert!(source.next_observation(None).is_none());
         assert_eq!(source.reached(), WalkProgress::NothingYet);
     }
@@ -486,7 +549,7 @@ mod tests {
         let walk = psp
             .records_where(|head| head.non_reference_reads > 0)
             .expect("the walk starts");
-        let mut source = PspObservationSource::new(sample.clone(), walk);
+        let mut source = PspObservationSource::new(sample.clone(), walk, &as_walked());
         let (read, failed) = drain(&mut source);
         assert!(read.is_empty(), "no record had a body to hand over");
         let Some(RunError::SourceFailed {
@@ -531,7 +594,11 @@ mod tests {
             .expect("the file is sound");
         let mut backwards = vec![Ok(sound[1].clone()), Ok(sound[0].clone())];
         backwards.extend(sound.into_iter().skip(2).map(Ok));
-        let mut source = PspObservationSource::new("SRR7279481".to_string(), backwards.into_iter());
+        let mut source = PspObservationSource::new(
+            "SRR7279481".to_string(),
+            backwards.into_iter(),
+            &as_walked(),
+        );
         let (read, failed) = drain(&mut source);
         assert_eq!(
             read,
@@ -580,7 +647,11 @@ mod tests {
             .expect("the file is sound");
         let mut backwards = vec![Ok(sound[1].clone()), Ok(sound[0].clone())];
         backwards.extend(sound.into_iter().skip(2).map(Ok));
-        let mut source = PspObservationSource::new("SRR7279481".to_string(), backwards.into_iter());
+        let mut source = PspObservationSource::new(
+            "SRR7279481".to_string(),
+            backwards.into_iter(),
+            &as_walked(),
+        );
         let _ = source
             .next_observation(None)
             .expect("a record")
@@ -620,7 +691,8 @@ mod tests {
         let written = vec![a_record(0, 11, 6)];
         let (_dir, path) = a_psp_of(&written);
         let mut psp = PspReader::open(&path).expect("a finished psp opens");
-        let mut source = PspObservationSource::over(&mut psp).expect("the walk starts");
+        let mut source =
+            PspObservationSource::over(&mut psp, &as_walked()).expect("the walk starts");
         let _ = source
             .next_observation(None)
             .expect("the one record")
@@ -643,7 +715,8 @@ mod tests {
         let written = a_sample();
         let (_dir, path) = a_psp_of(&written);
         let mut psp = PspReader::open(&path).expect("a finished psp opens");
-        let mut source = PspObservationSource::over(&mut psp).expect("the walk starts");
+        let mut source =
+            PspObservationSource::over(&mut psp, &as_walked()).expect("the walk starts");
         let (read, failed) = drain(&mut source);
         assert!(failed.is_none(), "the file is sound: {failed:?}");
         assert_eq!(read.len(), written.len());
@@ -665,7 +738,7 @@ mod tests {
         let walk = psp
             .records_where(|head| head.region.start.get() < 300)
             .expect("the walk starts");
-        let mut source = PspObservationSource::new(sample, walk);
+        let mut source = PspObservationSource::new(sample, walk, &as_walked());
         let (read, failed) = drain(&mut source);
         assert_eq!(read, written[..3]);
         let Some(RunError::SourceFailed {
@@ -697,7 +770,8 @@ mod tests {
         let written = vec![a_record(0, 11, 6), a_record(0, 13, 1), a_record(0, 13, 1)];
         let (_dir, path) = a_psp_of(&written);
         let mut psp = PspReader::open(&path).expect("a finished psp opens");
-        let mut source = PspObservationSource::over(&mut psp).expect("the walk starts");
+        let mut source =
+            PspObservationSource::over(&mut psp, &as_walked()).expect("the walk starts");
         let (read, failed) = drain(&mut source);
         assert!(
             failed.is_none(),
@@ -722,7 +796,8 @@ mod tests {
         let mut walk: Vec<Result<StreamedRecord, PspReadError>> =
             sound.into_iter().take(3).map(Ok).collect();
         walk.push(Err(PspReadError::Incomplete { path: path.clone() }));
-        let mut source = PspObservationSource::new("SRR7279481".to_string(), walk.into_iter());
+        let mut source =
+            PspObservationSource::new("SRR7279481".to_string(), walk.into_iter(), &as_walked());
         let (read, failed) = drain(&mut source);
         assert_eq!(read, written[..3]);
         let Some(RunError::SourceFailed {
@@ -772,7 +847,8 @@ mod tests {
         std::fs::write(&damaged, &bytes).expect("the damaged copy writes");
 
         let mut psp = PspReader::open(&damaged).expect("the footer and index are untouched");
-        let mut source = PspObservationSource::over(&mut psp).expect("the walk starts");
+        let mut source =
+            PspObservationSource::over(&mut psp, &as_walked()).expect("the walk starts");
         let (read, failed) = drain(&mut source);
         assert!(
             !read.is_empty() && read.len() < written.len(),
@@ -809,6 +885,7 @@ mod tests {
         let mut source = PspObservationSource::new(
             "SRR7279481".to_string(),
             std::iter::once(Err::<StreamedRecord, _>(failure)),
+            &as_walked(),
         );
         let Some(Err(RunError::SourceFailed {
             sample, reached, ..
@@ -818,6 +895,81 @@ mod tests {
         };
         assert_eq!(sample, "SRR7279481");
         assert_eq!(reached, WalkProgress::NothingYet);
+    }
+
+    /// **Two samples whose read groups collide, renumbered apart.**
+    ///
+    /// This is the case the run-wide numbering exists for and the one a psp cannot avoid: every
+    /// walk sees one sample and numbers its groups from zero, so both files here call their two
+    /// groups 0 and 1. Handed to the merge unrenumbered, every sample's first group would be
+    /// identifier 0 and the cohort would score four libraries against two calibrations —
+    /// silently, because the numbers are all in range.
+    #[test]
+    fn two_samples_whose_read_groups_collide_are_renumbered_apart() {
+        let written: Vec<SampleLocusObservations> = [0u32, 1]
+            .iter()
+            .enumerate()
+            .map(|(at, group)| {
+                let mut record = a_record(0, 1 + at as u64 * 100, 1);
+                record.observations[0].read_group = ReadGroupId(*group);
+                record
+            })
+            .collect();
+        let (_first_dir, first) = a_psp_of(&written);
+        let (_second_dir, second) = a_psp_of(&written);
+
+        // What the calling stage's merged table hands each source: the first file's groups keep
+        // their numbers, the second file's start where the first's ended.
+        for (path, remap) in [
+            (&first, vec![ReadGroupId(0), ReadGroupId(1)]),
+            (&second, vec![ReadGroupId(2), ReadGroupId(3)]),
+        ] {
+            let mut psp = PspReader::open(path).expect("a finished psp opens");
+            let mut source = PspObservationSource::over(&mut psp, &remap).expect("the walk starts");
+            let (read, failed) = drain(&mut source);
+            assert!(failed.is_none(), "the file is sound: {failed:?}");
+            let groups: Vec<ReadGroupId> = read
+                .iter()
+                .map(|record| record.observations[0].read_group)
+                .collect();
+            assert_eq!(
+                groups, remap,
+                "each stored group reaches the merge under the number this run gave it",
+            );
+        }
+    }
+
+    /// **A number past the end of the file's own table is the file disagreeing with itself**,
+    /// and there is nothing to renumber it into — so it is refused rather than left to panic in
+    /// the middle of a cohort, where nothing would say which file to look at.
+    #[test]
+    fn an_observation_naming_a_read_group_the_file_does_not_declare_is_refused() {
+        let mut record = a_record(0, 1, 1);
+        record.observations[0].read_group = ReadGroupId(1);
+        let written = vec![record];
+        let (_dir, path) = a_psp_of(&written);
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        // A table of one, where the record names group 1.
+        let mut source =
+            PspObservationSource::over(&mut psp, &[ReadGroupId(7)]).expect("the walk starts");
+
+        let (read, failed) = drain(&mut source);
+        assert!(read.is_empty());
+        let Some(RunError::SourceFailed { source: cause, .. }) = failed else {
+            panic!("an unknown read group must fail the source: {failed:?}");
+        };
+        let cause = cause
+            .downcast::<PspSourceError>()
+            .expect("the cause is this source's own");
+        let PspSourceError::ReadGroupNotInThisFilesTable {
+            at,
+            names,
+            in_the_table,
+        } = *cause
+        else {
+            panic!("the read group is what was wrong: {cause:?}");
+        };
+        assert_eq!((at, names, in_the_table), (written[0].region, 1, 1));
     }
 
     /// **A source over a psp can cross a thread**, which is what the merge's parallel cover
@@ -831,7 +983,7 @@ mod tests {
         fn only_takes_send<T: Send>(_: &T) {}
         let (_dir, path) = a_psp_of(&a_sample());
         let mut psp = PspReader::open(&path).expect("a finished psp opens");
-        let source = PspObservationSource::over(&mut psp).expect("the walk starts");
+        let source = PspObservationSource::over(&mut psp, &as_walked()).expect("the walk starts");
         only_takes_send(&source);
     }
 }
