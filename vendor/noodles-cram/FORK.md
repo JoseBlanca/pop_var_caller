@@ -11,6 +11,34 @@ diff -r ~/.cargo/registry/src/index.crates.io-*/noodles-cram-0.93.0 vendor/noodl
 `[patch.crates-io]` in the workspace manifest is what points the build at this copy rather than
 at the registry.
 
+## The whole diff, file by file
+
+Every file that differs, and which change below it belongs to. `diff -r` prints exactly this
+list and nothing else — if it prints more, this file is out of date and that is a bug in the
+fork, not in the diff.
+
+| file | | change |
+|---|---|---|
+| `Cargo.toml` | the `perf-counters` feature | 1 |
+| `FORK.md` | this file | — |
+| `src/lib.rs` | declares `perf` | 1 |
+| `src/perf.rs` | new — every counter | 1 |
+| `src/io/reader/container/block.rs` | `decode` split into a timed wrapper and `decode_inner` | 1 |
+| `src/codecs/rans_4x8/decode.rs` | declares `table` | 2 |
+| `src/codecs/rans_4x8/decode/table.rs` | new — the packed slot | 2 |
+| `src/codecs/rans_4x8/decode/order_0.rs` | the decode loop, and two builders deleted | 2 |
+| `src/codecs/rans_4x8/decode/order_1.rs` | the decode loop and its tables | 2 |
+| `src/record.rs` | declares `direct`; indexes a `Window` reference | 3, 5 |
+| `src/record/direct.rs` | new — the buffer-filling accessors | 3 |
+| `src/record/sequence.rs` | `iter_concrete`, and `iter` widened | 3 |
+| `src/record/sequence/iter.rs` | `Iter` widened | 3 |
+| `src/io/reader/container/slice/records.rs` | `TagPolicy`, and the tag loop acting on it | 4 |
+| `src/io/reader/container/slice/tag_streams.rs` | new — when tags may be left unread | 4 |
+| `src/io/reader/container/slice.rs` | `records_discarding_tags`, `records_over_window`, `reference_span`, the `Window` variant | 4, 5 |
+
+Two files the registry has and this copy does not — `.cargo-ok` and `.cargo_vcs_info.json` —
+are the extraction's own bookkeeping, and are ignored rather than committed.
+
 ## Why a copy at all
 
 ng reads a CRAM by driving `Slice::decode_blocks` and `Slice::records` directly, and the CRAM
@@ -28,10 +56,21 @@ field accessors take a caller-supplied buffer, and the record's fields are `pub(
 the body it always had; the feature declared in this crate's `Cargo.toml`.
 
 **With the feature off, `decode` is the upstream function under a different name and nothing
-else changes** — no counter, no clock read, no atomic. With it on, each block decode records
-its compression method, its compressed and inflated sizes, and its elapsed nanoseconds, so a
-run can say which codec its decompression time went into. That question has no other answer:
-a sampling profile shows `Block::decode` as one frame whatever method the block used.
+else changes** — no counter, no clock read, no atomic, and every call site below compiles to
+nothing. With it on there are three sets of counters, each answering a question a sampling
+profile cannot:
+
+- **per compression method** — blocks, compressed and inflated bytes, nanoseconds. A profile
+  shows `Block::decode` as one frame whatever method the block used, so this is the only way to
+  tell gzip's cost from rANS's.
+- **per rANS order, and split between building the decode tables and decoding symbols**
+  (`decode/order_0.rs`, `decode/order_1.rs`). This is what showed that the setup cost more than
+  the decoding — see change 2.
+- **per stage of `Slice::records`** — fetching and digesting the reference, allocating the
+  record vector, reading the records, the auxiliary tags within that, and linking mates
+  (`slice.rs`, `slice/records.rs`). **Read its tag figure with care**: it puts a clock-read pair
+  around every record, and on 1.2 million records that overhead was most of the number it
+  reported. It is good for ranking stages and bad for sizing one.
 
 This is a measuring instrument, not a change to what noodles does, and it is not the kind of
 thing to send upstream.
