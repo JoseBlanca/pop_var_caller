@@ -27,7 +27,24 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. The psp-mode plan's own
 > ordering note carries the same thing.
 >
-> - **Last completed task (2026-09-04):** **psp mode's calling stage opens its cohort and
+> - **Last completed task (2026-09-04):** **psp-mode Milestone E is complete — a cohort of
+> stored files calls** (branch `ng-psp-mode`, at Checkpoint E; steps E2–E4:
+> [E2 report](doc/devel/reports/implementations/ng_psp_mode_e2_2026-09-04.md),
+> [E3+E4 report](doc/devel/reports/implementations/ng_psp_mode_e3_e4_2026-09-04.md)). Each drawn
+> record is renumbered from its own file's read-group numbering into the run's — the failure
+> that prevents is silent, since unrenumbered every sample's first group is identifier 0 and a
+> cohort of two would score four libraries against two calibrations with every number in range.
+> The caller then drives the loop Milestone D lifted, over one source per open psp, and returns
+> the calling tallies alone: a walker knows what its walk saw and a psp source knows none of it,
+> so what a run over stored files says about each sample is F1's question. `ng::run` 475 → 499
+> across the milestone; 24 mutations, 23 killed. **Two rulings owed by the owner, recorded at
+> Checkpoint E**: §6.2 asks for a duplicate-`@RG ID` refusal the psp format's own validator
+> declares legal and direct mode accepts, and §6.2's by-name parameters match cannot live in E1
+> because `RunParameters` carries no names. **Next: not Milestone F.**
+> [psp_head_compared_reads.md](doc/devel/ng/impl_plan/psp_head_compared_reads.md)'s Milestone H
+> lands first — see the standing sequencing note above.
+>
+> - **Earlier (2026-09-04):** **psp mode's calling stage opens its cohort and
 > refuses one it cannot call** (branch `ng-psp-mode`, plan step E1;
 > [report](doc/devel/reports/implementations/ng_psp_mode_e1_2026-09-04.md),
 > [review](doc/devel/reports/reviews/ng_psp_mode_e1_2026-09-04.md),

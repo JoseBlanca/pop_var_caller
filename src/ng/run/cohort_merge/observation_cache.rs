@@ -428,8 +428,15 @@ where
     /// observations that chain into it, so what limits it is the widest observation the
     /// generator can mint — the reach ceiling, `max_record_span` (spec §1.3) — times the
     /// length of the chain. On ground where observations overlap wall to wall (spec §7.1) one
-    /// cover can draw a whole segment. Nothing here reads or checks that ceiling: it is the
-    /// generator's, and the psp header field that would carry it is deferred (spec §13).
+    /// cover can draw a whole segment. **Nothing here reads or checks that ceiling**, and that
+    /// is unchanged now the psp header carries it (2026-09-04, `run_streaming.md` plan step
+    /// E4): the ceiling is a sizing fact and this cache has no capacity to size — it grows on
+    /// demand. What landed is that the number is now *available* to a run over stored files,
+    /// which takes the maximum over its cohort's files at open
+    /// ([`PspVariantCaller::observation_reach_ceiling`](crate::ng::run::PspVariantCaller)),
+    /// where before it existed only as the configured `max_record_span` of a walker that a
+    /// calling run over psps does not have. Spec §13's deferral is discharged; no refusal
+    /// accompanies it, as §13 says none is needed.
     ///
     /// **What a cover costs.** Each sweep visits every sample and re-reads its held window, so
     /// a cover is `sweeps × (samples + held)`. Two sweeps is the ordinary count; the worst

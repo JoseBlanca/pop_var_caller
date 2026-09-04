@@ -1074,11 +1074,14 @@ for the run).
 
 ## 13. Deferred, with a recommended home
 
-- **The psp header field for the observation reach ceiling** — to
-  [`run_streaming.md`](run_streaming.md) §6.1, which owns the header's contents. Flagged; not yet
-  in that document. No refusal accompanies it, and none is needed: the ceiling bounds only how far
-  the observation cache may have to reach (§5, §6.4), so a reader takes the maximum over the
-  cohort's files and sizes its cache accordingly.
+- ~~**The psp header field for the observation reach ceiling**~~ — **landed 2026-09-04**
+  ([`run_streaming.md`](run_streaming.md) §6.1's `observation_reach_ceiling_bp`, written by the
+  walk stage and read by the calling stage at open, which takes the maximum over the cohort's
+  files: `run_driver_psp_mode.md` steps A3 and E4). No refusal accompanies it, as this bullet
+  said none would. **What a reader does with it is still nothing**: the ceiling bounds how far
+  the observation cache may have to reach (§5, §6.4), and that cache grows on demand rather than
+  taking a capacity — so the number is exposed for the psp-mode performance work rather than
+  consumed by the merge.
 - **The position summary's encoding, carrying the reference span** — to the psp encoding spec
   ([`run_streaming.md`](run_streaming.md) §10). Phase 1 must serve position, reference span and
   non-reference count per record (§1.3); the sketch in [`run_streaming.md`](run_streaming.md)

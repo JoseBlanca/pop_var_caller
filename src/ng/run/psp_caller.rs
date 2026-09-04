@@ -36,6 +36,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::ng::calling::inference::LocusGenotyper;
 use crate::ng::calling::inference::RunnableCallingLoopConfig;
 use crate::ng::calling::run_parameters::RunParameters;
 use crate::ng::psp::{ContigIdentity, Header, PspReader};
@@ -46,14 +47,18 @@ use crate::ng::read::input::reference::OpenReference;
 use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::region_typing::GenomeRegions;
 use crate::ng::types::{Bp, ReadGroupId};
+use crate::ng::vcf::VcfRecord;
 
 use crate::ng::calling::allele_candidates::CandidateSelectionConfig;
 
 use super::callers::{
-    A_REFERENCE_WITH_NO_PATH, DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES, MergeParameters,
-    refuse_a_catalog_built_on_another_reference, refuse_parameters_assembled_for_another_cohort,
-    refuse_two_references_that_are_not_one,
+    A_REFERENCE_WITH_NO_PATH, CohortCallingInputs, CohortCallingOutcome, CohortCallingTallies,
+    DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES, MergeParameters,
+    call_cohort_from_sources_handing_each_record_over, refuse_a_catalog_built_on_another_reference,
+    refuse_parameters_assembled_for_another_cohort, refuse_two_references_that_are_not_one,
 };
+use super::cohort_merge::observation_cache::ObservationCache;
+use super::psp_source::PspObservationSource;
 use super::walker::WalkReference;
 use super::{RunError, Segmentation};
 
@@ -241,21 +246,15 @@ pub struct PspVariantCaller {
     cohort: OpenPspCohort,
     segmentation: Arc<Segmentation>,
     parameters: RunParameters,
-    /// **Checked and kept here, read at step E3.** These four are what the calling loop is
-    /// handed once this caller drives it, and they are settled at `open` for the reason every
-    /// other refusal is: a run whose reference cannot serve a padding base should be told
-    /// before a block is decoded rather than at its first locus.
+    /// **Checked at `open` and spent at
+    /// [`call_cohort_handing_each_record_over`](Self::call_cohort_handing_each_record_over).**
+    /// These four are what the calling loop is handed, and they are settled at `open` for the
+    /// reason every other refusal is: a run whose reference cannot serve a padding base should
+    /// be told before a block is decoded rather than at its first locus.
     ///
-    /// **`expect` rather than `allow`, so the first real reader turns the line into a compile
-    /// error** rather than leaving behind a suppression nobody removes — the rule this crate
-    /// already follows where it defers a field.
-    #[expect(dead_code, reason = "the calling loop reads it at plan step E3")]
     walk_reference: WalkReference,
-    #[expect(dead_code, reason = "the calling loop reads it at plan step E3")]
     calling_loop_config: RunnableCallingLoopConfig,
-    #[expect(dead_code, reason = "the calling loop reads it at plan step E3")]
     candidate_selection: CandidateSelectionConfig,
-    #[expect(dead_code, reason = "the calling loop reads it at plan step E3")]
     merge_parameters: MergeParameters,
 }
 
@@ -373,6 +372,23 @@ impl PspVariantCaller {
         &self.segmentation
     }
 
+    /// **The widest reference span an observation in this cohort can have** — the maximum over
+    /// the files' own ceilings (`cohort_merge.md` §13).
+    ///
+    /// **A sizing fact, not a correctness one**, which is why nothing refuses on it and why the
+    /// merge does not read it: what it bounds is how far the observation cache may have to
+    /// reach past a building region before a chain closes
+    /// ([`ObservationCache::cover`](super::cohort_merge::observation_cache::ObservationCache)),
+    /// and that cache grows on demand rather than being given a capacity. It is read at open
+    /// and exposed here so that whatever does size on it — the psp-mode performance work — has
+    /// the number without re-opening a file. Direct mode's counterpart is the configured
+    /// `max_record_span` its walkers are built with; a psp records it because the walk that
+    /// wrote the file is over.
+    #[must_use]
+    pub fn observation_reach_ceiling(&self) -> Bp {
+        self.cohort.observation_reach_ceiling()
+    }
+
     /// The cohort's open files and what their headers agreed on.
     #[must_use]
     pub fn cohort(&self) -> &OpenPspCohort {
@@ -383,6 +399,98 @@ impl PspVariantCaller {
     #[must_use]
     pub fn parameters(&self) -> &RunParameters {
         &self.parameters
+    }
+
+    /// **Call this cohort and hand every record over as it is finished, keeping none** — the
+    /// same body direct mode drives, over sources that decode rather than walk (spec §3.1).
+    ///
+    /// What this adds to
+    /// [`call_cohort_from_sources_handing_each_record_over`](super::callers::call_cohort_from_sources_handing_each_record_over)
+    /// is psp mode's one end: a source per open file, each carrying the map from its own
+    /// walk-local read groups into this run's numbering. Everything after that — the merge, the
+    /// genotyping, the records — cannot tell it is reading files rather than walking them.
+    ///
+    /// **It returns the calling tallies alone, where direct mode also returns per-sample walk
+    /// tallies.** That is not an omission: a walker carries what its walk saw — the regions it
+    /// handled, its generators' counts, its read filters' drops — and a psp source carries none
+    /// of it, because the walk happened in another process and what it counted is in that
+    /// file's provenance rather than in its records. What a run over stored files can say about
+    /// each sample is the run report's question, and it is the subcommand's (plan step F1).
+    ///
+    /// # Errors
+    ///
+    /// Everything the calling loop returns: the first sample whose file fails to decode
+    /// ([`RunError::SourceFailed`], naming it), the first record `hand_over` refuses, and a
+    /// padding base the reference will not serve.
+    pub fn call_cohort_handing_each_record_over<S, G, E>(
+        self,
+        genotyper: &G,
+        hand_over: &mut impl FnMut(&VcfRecord) -> Result<(), E>,
+    ) -> Result<CohortCallingTallies, RunError>
+    where
+        G: LocusGenotyper<S>,
+        S: Default,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let Self {
+            cohort,
+            segmentation,
+            walk_reference,
+            parameters,
+            calling_loop_config,
+            candidate_selection,
+            merge_parameters,
+        } = self;
+        // **One accessor for the whole run, never shared** — it walks forward with the merge
+        // and releases what it has passed, exactly as direct mode's does.
+        let padding_reference = walk_reference.accessor();
+        // **Destructured rather than reached through accessors**, so that the readers can be
+        // borrowed mutably while the table they are renumbered through is borrowed by the
+        // same expression: they are separate fields, and only a destructuring says so.
+        let OpenPspCohort {
+            mut psps,
+            read_groups,
+            ..
+        } = cohort;
+        let mut sources = Vec::with_capacity(psps.len());
+        for (psp, sample) in psps.iter_mut().zip(read_groups.read_groups_per_sample()) {
+            // **The one place two per-sample lists are walked together**, and a mis-pairing
+            // here would hand one sample's records another sample's read-group numbers —
+            // scored against another individual's calibration, with every number in range and
+            // nothing failing. Both lists were built in one pass at `open`, in the order the
+            // paths were given, so this cannot fire on any data; it fires on an edit.
+            assert_eq!(
+                psp.header().sample.as_str(),
+                &*sample.sample,
+                "the psp for {} was paired with {}'s read groups, so one sample's records \
+                 would be scored against another's calibration. This is a defect in ng rather \
+                 than anything about the data.",
+                psp.header().sample,
+                sample.sample,
+            );
+            sources.push(PspObservationSource::over(psp, &sample.read_groups)?);
+        }
+
+        let inputs = CohortCallingInputs {
+            segmentation: segmentation.as_ref(),
+            merge_parameters,
+            parameters: &parameters,
+            calling_loop_config: &calling_loop_config,
+            candidate_selection: &candidate_selection,
+            padding_reference,
+        };
+        let CohortCallingOutcome { calling, sources } =
+            call_cohort_from_sources_handing_each_record_over(
+                ObservationCache::over(sources),
+                inputs,
+                genotyper,
+                hand_over,
+            )?;
+        // **Dropped, and that is the whole of what psp mode does not add.** The sources come
+        // back so that a mode can turn them into per-sample facts; a psp source has none to
+        // give beyond the name its file already carries.
+        drop(sources);
+        Ok(calling)
     }
 }
 
@@ -624,8 +732,13 @@ fn refuse_if_more_descriptors_are_needed_than_allowed_for_psps(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ng::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
+    use crate::ng::calling::inference::summarise_condition::SummariseConditionLoop;
+    use crate::ng::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
     use crate::ng::calling::parameters_file::DeclaredInbreeding;
+    use crate::ng::locus_generation::SampleLocusObservations;
     use crate::ng::psp::writer::tests_support::a_header;
+    use crate::ng::psp::writer::tests_support::a_record;
     use crate::ng::psp::{PspWriter, ReadGroupIdentity};
     use crate::ng::read::input::test_fixtures::{
         fixture_reference, fixture_reference_from_its_index,
@@ -720,6 +833,25 @@ mod tests {
         )
     }
 
+    /// **The way a real run scores a locus**: the repeat-tract emission model and the genotype
+    /// prior this caller ships, so a test here calls what a run would rather than a stub that
+    /// would pass whatever the wiring did to the evidence. The same fixture `callers.rs` names.
+    fn the_shipped_genotyper()
+    -> SummariseConditionLoop<StutterSubstitutionEmission, MarginalizedDirichletPrior> {
+        SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior)
+    }
+
+    /// One record showing something other than the reference at `start`, with enough support to
+    /// clear the keep rule's floor of two reads.
+    fn a_variant_at(start: u64) -> SampleLocusObservations {
+        let mut record = a_record(0, start, 1);
+        // `a_record` gives the observation the reference's own bases; one different base is
+        // what makes it evidence of anything.
+        record.observations[0].bases = Box::from(&b"T"[..]);
+        record.reference_bases = Box::from(&b"A"[..]);
+        record
+    }
+
     /// One sample's psp: the fixture contig table, the run's own segmentation inputs, and no
     /// records at all — **E1 decodes no block, so an empty file exercises everything it does.**
     fn a_psp(
@@ -735,6 +867,26 @@ mod tests {
         edit(&mut header);
         let path = dir.path().join(format!("{sample}.psp"));
         let writer = PspWriter::create(&path, header).expect("the header writes");
+        let _ = writer.finish(b"").expect("the file seals");
+        path
+    }
+
+    /// The same, holding `records`.
+    fn a_psp_holding(
+        dir: &TempDir,
+        sample: &str,
+        segmentation: &Segmentation,
+        records: &[SampleLocusObservations],
+    ) -> PathBuf {
+        let mut header = a_header(1_000);
+        header.sample = sample.to_string();
+        header.contigs = fixture_contigs();
+        header.segmentation_inputs = segmentation.inputs().clone();
+        let path = dir.path().join(format!("{sample}.psp"));
+        let mut writer = PspWriter::create(&path, header).expect("the header writes");
+        for record in records {
+            writer.push(record).expect("the fixtures are in order");
+        }
         let _ = writer.finish(b"").expect("the file seals");
         path
     }
@@ -1385,6 +1537,62 @@ mod tests {
         };
         assert_eq!(counted, "the number of samples");
         assert_eq!((in_the_parameters, in_the_run), (1, 2));
+    }
+
+    /// **The cohort calls, through the same body direct mode drives.**
+    ///
+    /// Both samples show the same two variants, so the merge builds two cohort loci and each is
+    /// genotyped where it is built. What this pins is the join — stored records in, VCF records
+    /// out, in genome order — not the genotypes, which are the calling loop's own tests' and
+    /// which spec §12.3's mode-equivalence oracle compares against direct mode's at F2.
+    #[test]
+    fn a_cohort_of_stored_samples_calls_and_hands_its_records_over() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let segmentation = a_segmentation(ground(false));
+        let records = vec![a_variant_at(20), a_variant_at(30)];
+        let paths = vec![
+            a_psp_holding(&dir, "alpha", &segmentation, &records),
+            a_psp_holding(&dir, "beta", &segmentation, &records),
+        ];
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let cohort = OpenPspCohort::open(&paths).expect("the two files agree");
+        let parameters = parameters_for(cohort.read_groups());
+        let caller = open_the_caller(
+            cohort,
+            &reference,
+            Arc::try_unwrap(a_segmentation(ground(false))).expect("one handle"),
+            parameters,
+        )
+        .expect("the cohort matches the run");
+
+        let mut handed: Vec<GenomeRegion> = Vec::new();
+        let tallies = caller
+            .call_cohort_handing_each_record_over(
+                &the_shipped_genotyper(),
+                &mut |record: &VcfRecord| {
+                    handed.push(record.region());
+                    Ok::<(), std::io::Error>(())
+                },
+            )
+            .expect("a cohort of two stored samples calls");
+
+        assert_eq!(
+            tallies.records_written as usize,
+            handed.len(),
+            "the count and the records handed over are one fact",
+        );
+        assert_eq!(
+            tallies.loci_called(),
+            tallies.records_written + tallies.loci_called_but_not_written,
+        );
+        assert!(
+            tallies.loci_called() >= 2,
+            "both variants were built and called: {tallies:?}",
+        );
+        assert!(
+            handed.windows(2).all(|pair| pair[0].start <= pair[1].start),
+            "records leave in genome order: {handed:?}",
+        );
     }
 
     /// **A `.fai` holds no bases**, and a record with an empty allele is padded from the

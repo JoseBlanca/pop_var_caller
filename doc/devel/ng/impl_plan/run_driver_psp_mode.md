@@ -338,17 +338,55 @@ header's table (A2). Fixture: two samples whose local ids clash and whose librar
 pinned by the per-read-group outputs landing under the right sample. *Depends:* E1, A2.
 *Source:* spec §6.2 l.759-763, §6.1 l.703-708 (the rejected alternative).
 
-**E3. ☐ Call the cohort through the lifted tail.**
+**E3. ✅ Call the cohort through the lifted tail.**
 `call_cohort_handing_each_record_over` on `PspVariantCaller`: sources into
 `ObservationCache::over`, the D2 tail does the rest — merge, genotyping, records to the
 sink. *Depends:* D2, E1, E2. *Source:* spec §3.1, §3.5; arch §3.4.
 
-**E4. ☐ The reach ceiling read where the merge needs it.**
+**E4. ✅ The reach ceiling read where the merge needs it.**
 The A3 header field consumed at open per `cohort_merge.md` §13's routing (the deferred
 reader at `observation_cache.rs:420`). *Depends:* A3, E1. *Source:* `cohort_merge.md` §13.
 
 > **Checkpoint E: a cohort of psps calls, refusals all fire at construction. Pause for
 > review.**
+>
+> **Reached 2026-09-04.** `OpenPspCohort` reads every header and settles what the cohort is —
+> the ground the files agree on, one run-wide read-group numbering, the widest observation reach
+> any of them declares — and `PspVariantCaller` checks each file against the run and drives the
+> lifted calling loop over one source per open psp. `ng::run` 475 → 499; 24 mutations across the
+> milestone, 23 killed.
+>
+> **Three checks the spec asks for that nothing had**, all found by review and all now made: the
+> descriptor budget of §7.1a (before the first `open(2)`, or a cohort of thousands dies at the
+> 249th file on a macOS default limit, blaming an innocent one), direct mode's
+> catalog-against-reference refusal, and the psp header's own whole-assembly digest — the
+> field's one documented consumer.
+>
+> **Two rulings owed by the owner, both recorded where the code makes the choice:**
+>
+> 1. **§6.2's duplicate-`@RG ID` refusal is not made.** The spec's reason is that such a table
+>    "cannot be renumbered without guessing"; this format guesses nothing, because identity is
+>    the walk-local number, which is the entry's own position, and nothing in the merge reads
+>    the id. `psp/header.rs`'s own validator declares the case legal — a psp holds one *sample*,
+>    not one alignment file, and a sample sequenced across lanes may carry two entries with one
+>    id and different libraries — and direct mode calls that cohort. Refusing it would break
+>    §1.1's goal 1 for every multi-lane sample whose lanes reuse an id. **Recommendation: §6.2's
+>    clause should say what it means, which is the empty table.**
+> 2. **§6.2's by-name parameters match is F1's, not E1's.** `RunParameters` is assembled per
+>    sample by position and carries no names at all, so the match has to happen where the
+>    parameters *file* meets this cohort's sample list. E1 makes the count, exactly as direct
+>    mode does. **Recommendation: amend E1's entry above to say so.**
+>
+> **Carried into the rest of the plan:**
+> - **[`psp_head_compared_reads.md`](psp_head_compared_reads.md) goes next, before Milestone F**
+>   — see this plan's ordering note at the top;
+> - a run over stored files returns the calling tallies alone, where direct mode also returns
+>   per-sample walk tallies: a psp source has none to give, so **what such a run says about each
+>   sample is F1's to decide**;
+> - a psp records the library a walk resolved and not whether the file declared it, so the
+>   merged table marks every library `Synthesized` — the claim that cannot be false. A header
+>   field would let it say the true one; nothing reads the origin today;
+> - Milestone C's four carry-forwards are all still open, none touched by D or E.
 
 ### Milestone F — `call-from-psps`, and the oracle that justifies the design
 
