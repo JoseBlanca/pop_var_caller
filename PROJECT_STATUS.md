@@ -39,8 +39,11 @@ Skills and agents are instructed to leave it untouched.
 > This command's own advice is one invocation a sample; two invocations that seeded differently
 > would keep **disjoint** sets of positions and their samples could not be pooled at all. The two
 > counts beside it are the design's own figures — about two million positions, five thousand
-> tracts a stratum. **Whether the three become flags is open, and it is the same question
-> Milestone C recorded about the read filters and the locus-generator knobs.**
+> tracts a stratum. **Ruled by the owner (2026-09-04): these three, the read filters and the five
+> locus-generator knobs all stay constants until the fit stage exists** — nothing can read a
+> census yet, so a knob added now is one whose effect nobody can check, and a `--seed` flag in
+> particular is a way to break a cohort that walks perfectly and is refused hours later at the
+> fit.
 >
 > **A defect the milestone's own test caught before it shipped**: `PspWriter::create` records the
 > compression level into the header before encoding it, so a census built from the header the

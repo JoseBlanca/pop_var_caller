@@ -536,9 +536,13 @@ The command's report names both; a census that cannot be written fails the sampl
 > stored fields only a fit reads (the sum of squared mapping qualities, and the count of reads
 > that covered a locus without producing an observation), and nothing yet reads a census at all.
 >
-> **Still open, and both are the owner's:** whether the census selection's three numbers become
-> flags, and whether the read filters and the five locus-generator knobs do — one question, since
-> Milestone C recorded the second and G adds the first to it.
+> **Ruled by the owner, 2026-09-04: they all stay constants until the fit stage exists.** The
+> census selection's seed and two counts, the read filters, and the five locus-generator knobs —
+> one question, since Milestone C recorded the second half and G added the first. The reason is
+> that **nothing can read a census yet**, so a knob added now is one whose effect nobody can
+> check; and the seed in particular is a way to break a cohort silently, since two invocations
+> that seeded differently walk perfectly and are refused hours later at the fit. Revisit when the
+> fit stage lands and there is something to vary them against.
 
 ---
 
