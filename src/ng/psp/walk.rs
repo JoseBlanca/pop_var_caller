@@ -1361,44 +1361,81 @@ mod tests {
         }
     }
 
+    /// A finished psp holding exactly one record of the given kind.
+    fn a_one_block_psp(
+        kind: crate::ng::locus_generation::LocusKind,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let (dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000_000)).expect("a header");
+        let mut record = a_record(0, 1, 1);
+        record.kind = kind;
+        writer.push(&record).expect("in order");
+        let _ = writer.finish(b"").expect("it finishes");
+        (dir, path)
+    }
+
+    /// Where that file's one block sits, and what it holds once inflated.
+    fn the_only_block(path: &Path) -> (usize, Vec<u8>) {
+        let whole = bytes_of(path);
+        let psp = PspReader::open(path).expect("a finished psp opens");
+        assert_eq!(psp.block_index().len(), 1, "one block");
+        let at = psp.block_index()[0].block_offset as usize;
+        let ends = psp.footer().index_offset as usize;
+        let declared = u32::from_le_bytes(
+            whole[at..at + COMPRESSED_BLOCK_LENGTH_BYTES]
+                .try_into()
+                .expect("four bytes"),
+        ) as usize;
+        let frame_at = at + COMPRESSED_BLOCK_LENGTH_BYTES;
+        assert_eq!(frame_at + declared, ends, "the block runs up to the index");
+        let payload = zstd::decode_all(&whole[frame_at..frame_at + declared])
+            .expect("the block's own frame inflates");
+        (at, payload)
+    }
+
+    /// Put `payload` back in the file as its one block, recompressed, with the footer's offsets
+    /// moved to wherever the new frame ends — so the file still opens and only the bytes under
+    /// test have changed.
+    fn rewrite_the_only_block(path: &Path, block_at: usize, payload: &[u8]) {
+        use crate::ng::psp::block::BlockCompressor;
+
+        let header = PspReader::open(path)
+            .expect("a finished psp opens")
+            .header()
+            .clone();
+        let mut compressor =
+            BlockCompressor::from_manifest(&header.manifest).expect("the file's own compressor");
+        // `compress` hands back the whole on-disk block: its four-byte length, then its frame.
+        let reframed = compressor
+            .compress(payload)
+            .expect("it compresses")
+            .to_vec();
+
+        let whole = bytes_of(path);
+        let footer_at = whole.len() - FOOTER_BYTES;
+        let mut footer = footer_of(&whole);
+        let mut patched = Vec::new();
+        patched.extend_from_slice(&whole[..block_at]);
+        patched.extend_from_slice(&reframed);
+        let index_at = footer.index_offset as usize;
+        let new_index_at = patched.len() as u64;
+        let shift = new_index_at as i64 - footer.index_offset as i64;
+        patched.extend_from_slice(&whole[index_at..footer_at]);
+        footer.index_offset = new_index_at;
+        footer.trailer_offset = (footer.trailer_offset as i64 + shift) as u64;
+        patched.extend_from_slice(&encode_footer(&footer));
+        rewrite(path, &patched);
+    }
+
     /// A finished psp of one record whose locus-kind tag no build knows — what a **newer
-    /// writer's** file looks like to this reader, framed correctly and unreadable in its body.
+    /// writer's** file looks like to this reader, framed correctly and unreadable in its head.
     ///
     /// **The byte is located rather than hard-coded**: the same record is written twice, once
     /// `Generic` and once `SsrBundle`, and the two decompressed payloads differ in exactly the
     /// kind tag. The block is then recompressed and the footer's offsets moved with it, so the
-    /// file still opens and only the record's body is beyond this build.
+    /// file still opens and only the record's kind is beyond this build.
     fn a_psp_whose_record_this_build_cannot_read() -> (tempfile::TempDir, std::path::PathBuf) {
         use crate::ng::locus_generation::LocusKind;
-        use crate::ng::psp::block::BlockCompressor;
-
-        fn a_one_block_psp(kind: LocusKind) -> (tempfile::TempDir, std::path::PathBuf) {
-            let (dir, path) = a_file();
-            let mut writer = PspWriter::create(&path, a_header(1_000_000)).expect("a header");
-            let mut record = a_record(0, 1, 1);
-            record.kind = kind;
-            writer.push(&record).expect("in order");
-            let _ = writer.finish(b"").expect("it finishes");
-            (dir, path)
-        }
-
-        fn the_only_block(path: &Path) -> (usize, Vec<u8>) {
-            let whole = bytes_of(path);
-            let psp = PspReader::open(path).expect("a finished psp opens");
-            assert_eq!(psp.block_index().len(), 1, "one block");
-            let at = psp.block_index()[0].block_offset as usize;
-            let ends = psp.footer().index_offset as usize;
-            let declared = u32::from_le_bytes(
-                whole[at..at + COMPRESSED_BLOCK_LENGTH_BYTES]
-                    .try_into()
-                    .expect("four bytes"),
-            ) as usize;
-            let frame_at = at + COMPRESSED_BLOCK_LENGTH_BYTES;
-            assert_eq!(frame_at + declared, ends, "the block runs up to the index");
-            let payload = zstd::decode_all(&whole[frame_at..frame_at + declared])
-                .expect("the block's own frame inflates");
-            (at, payload)
-        }
 
         let (dir_a, path_a) = a_one_block_psp(LocusKind::Generic);
         let (_dir_b, path_b) = a_one_block_psp(LocusKind::SsrBundle);
@@ -1414,33 +1451,43 @@ mod tests {
 
         // A tag no kind uses.
         generic[kind_at] = 7;
-        let header = PspReader::open(&path_a)
-            .expect("a finished psp opens")
-            .header()
-            .clone();
-        let mut compressor =
-            BlockCompressor::from_manifest(&header.manifest).expect("the file's own compressor");
-        // `compress` hands back the whole on-disk block: its four-byte length, then its frame.
-        let reframed = compressor
-            .compress(&generic)
-            .expect("it compresses")
-            .to_vec();
-
-        let whole = bytes_of(&path_a);
-        let footer_at = whole.len() - FOOTER_BYTES;
-        let mut footer = footer_of(&whole);
-        let mut patched = Vec::new();
-        patched.extend_from_slice(&whole[..block_at]);
-        patched.extend_from_slice(&reframed);
-        let index_at = footer.index_offset as usize;
-        let new_index_at = patched.len() as u64;
-        let shift = new_index_at as i64 - footer.index_offset as i64;
-        patched.extend_from_slice(&whole[index_at..footer_at]);
-        footer.index_offset = new_index_at;
-        footer.trailer_offset = (footer.trailer_offset as i64 + shift) as u64;
-        patched.extend_from_slice(&encode_footer(&footer));
-        rewrite(&path_a, &patched);
+        rewrite_the_only_block(&path_a, block_at, &generic);
         (dir_a, path_a)
+    }
+
+    /// A finished psp of one repeat-tract record whose **body** this build cannot read, its head
+    /// entirely sound.
+    ///
+    /// **The fault is the stored motif emptied to no bases**, which `Motif::new` refuses where
+    /// the motif is minted. It is one byte's value and not a length, so the body is exactly as
+    /// long as its head declares and everything before the motif reads normally — which is what
+    /// makes this a body-only fault rather than a damaged record.
+    ///
+    /// **The byte is located from the end**: a tract's motif and its two flanks are the body's
+    /// last three fields, in that order, and this record's flanks are empty — so the last five
+    /// bytes of the block are the motif's length, its two bases, and a zero length for each
+    /// flank. The assertion below is what fails if that stops being true.
+    fn a_psp_whose_record_body_this_build_cannot_read() -> (tempfile::TempDir, std::path::PathBuf) {
+        use crate::ng::locus_generation::{LocusKind, SsrDetail};
+        use crate::ng::types::Motif;
+
+        let (dir, path) = a_one_block_psp(LocusKind::Ssr(SsrDetail {
+            motif: Motif::new(b"AT").expect("a dinucleotide is a motif"),
+            left_flank: Box::from(&b""[..]),
+            right_flank: Box::from(&b""[..]),
+        }));
+        let (block_at, mut payload) = the_only_block(&path);
+        let at_the_motif_length = payload.len() - 5;
+        assert_eq!(
+            &payload[at_the_motif_length..],
+            &[2, b'A', b'T', 0, 0],
+            "the block ends with the tract's motif and its two empty flanks"
+        );
+
+        // A motif of no bases: read as a motif, refused as one.
+        payload[at_the_motif_length] = 0;
+        rewrite_the_only_block(&path, block_at, &payload);
+        (dir, path)
     }
 
     /// **A record naming a locus kind this build does not know is *upgrade the reader*, not
@@ -1467,14 +1514,36 @@ mod tests {
 
     /// **A declined record's body is never decoded, not merely dropped.** That claim is what the
     /// selective walk is *for*, and only a body a full walk **cannot** read can hold it: this
-    /// file's one record carries a locus-kind tag no build knows, so a walk that builds it is
-    /// refused and a walk that declines it walks past without ever looking.
+    /// file's one record is a repeat tract whose stored motif has been emptied, so a walk that
+    /// builds it is refused where the motif is minted and a walk that declines it walks past
+    /// without ever looking.
+    ///
+    /// ⚠ **The fault has to be in the body, and the locus kind stopped qualifying.** This test
+    /// used to corrupt the kind tag, which was the body's last field until it moved into the
+    /// head — where an unknown tag now refuses a *declining* walk too, because a reader meets it
+    /// while deciding whether it wants the record at all.
     ///
     /// ⚠ **Every other test of the skip checks only that the body came back `None`**, which a
     /// decode-then-discard implementation satisfies exactly as well.
     #[test]
     fn a_declined_records_body_is_never_decoded() {
-        let (_dir, path) = a_psp_whose_record_this_build_cannot_read();
+        let (_dir, path) = a_psp_whose_record_body_this_build_cannot_read();
+
+        // The half that gives the other half its meaning: building this body does fail.
+        let refused = PspReader::open(&path)
+            .expect("the header and index are untouched")
+            .records()
+            .expect("the walk starts")
+            .next()
+            .expect("the walk reaches the record")
+            .expect_err("and the emptied motif cannot be minted");
+        // The displayed message stops at the block; the field it could not read is in the cause
+        // chain under it, which is what says the fault was the motif and not framing.
+        assert!(
+            format!("{refused:?}").contains("repeat-motif"),
+            "the refusal names the field it could not read: {refused:?}"
+        );
+
         let mut psp = PspReader::open(&path).expect("the header and index are untouched");
         let mut walk = psp.records_where(|_| false).expect("the walk starts");
         let found = walk

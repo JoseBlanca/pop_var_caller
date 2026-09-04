@@ -102,9 +102,10 @@ pub use index::{
 };
 pub use reader::{DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES, PspReader};
 pub use record::{
-    BodyByteCount, DecodedRecord, DecodedRecordBody, LocatedRecord, OffsetBase, RecordDecodeError,
-    RecordEncodeError, RecordEncoder, RecordHead, RecordLayout, RecordLayoutError, decode_record,
-    decode_record_body, decode_the_body_of, encode_record_body, read_record_head, record_fields,
+    BodyByteCount, DecodedRecord, DecodedRecordBody, LocatedRecord, LocusKindTag, OffsetBase,
+    RecordDecodeError, RecordEncodeError, RecordEncoder, RecordHead, RecordLayout,
+    RecordLayoutError, decode_record, decode_record_body, decode_the_body_of, encode_record_body,
+    read_record_head, record_fields,
 };
 pub use trailer::{FileAfterAFailedReplacement, TrailerReplacementFailure, replace_trailer};
 pub use walk::{RecordIter, SelectiveRecordIter};

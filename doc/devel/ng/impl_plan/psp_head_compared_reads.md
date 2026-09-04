@@ -57,7 +57,7 @@ checks, the fixtures, the owning documents — and the re-measurement of the hea
 
 ### Milestone H — the head carries the denominator
 
-**H1. ☐ The two head changes, end to end. Own commit, do not bundle.**
+**H1. ✅ The two head changes, end to end. Own commit, do not bundle.**
 `RECORD_HEAD_FIELDS` gains `("reads-compared-with-reference", FieldEncoding::Varint)` between
 `non-reference-reads` and `record-body-byte-count`, and the `locus-kind` tag moves in from the
 body (spec §3.1) — `put_kind`/`read_locus_kind` relocate to the head codec, the `SsrDetail`

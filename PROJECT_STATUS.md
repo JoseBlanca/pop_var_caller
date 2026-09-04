@@ -27,7 +27,28 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. The psp-mode plan's own
 > ordering note carries the same thing.
 >
-> - **Last completed task (2026-09-04):** **psp-mode Milestone E is complete — a cohort of
+> - **Last completed task (2026-09-04):** **the psp record head carries the keep rule's
+> denominator, and the locus kind's tag** (branch `ng-psp-mode`, plan step H1 of
+> [psp_head_compared_reads.md](doc/devel/ng/impl_plan/psp_head_compared_reads.md);
+> [report](doc/devel/reports/implementations/ng_psp_head_h1_2026-09-04.md)). The cohort merge
+> keeps a locus when some single sample shows at least `max(floor, share × its compared reads)`
+> non-reference reads, and the head carried the numerator alone — enough at three reads a
+> position, where the floor decides, and useless at three hundred, where the share does. The
+> derivation already computed both numbers and the writing line dropped one; it is now written.
+> The `locus-kind` tag moves in from the body at the same time, because the width bound and the
+> never-mix assertion both read a record's kind before any evidence is assembled. A move and not
+> a copy: the tract's motif and flanks stay body-side, and the body decoder takes the kind from
+> the head it is handed. `ng::psp` 417 → 421; library 6,153 → 6,157. **Two reviewers, no
+> Blockers, and the correctness one found two tests that passed with the feature broken** — the
+> head-only check exempting a zero denominator, and the numerator's head-against-body check
+> provoked in one direction only; both mutations left 421 tests green and both are now killed.
+> The head's pinned byte string was also not pinning the three bytes this step added, its fixture
+> making all of them a literal zero. **⛦ One ruling owed at Checkpoint H**: an unknown kind tag
+> now refuses a walk that would have *skipped* the record, which reading it out of the body did
+> not — a choice, not a consequence of the move, argued at `read_locus_kind_tag`. **Next:** H2,
+> the owning specs, then H3, the head's cost re-measured.
+>
+> - **Earlier (2026-09-04):** **psp-mode Milestone E is complete — a cohort of
 > stored files calls** (branch `ng-psp-mode`, at Checkpoint E; steps E2–E4:
 > [E2 report](doc/devel/reports/implementations/ng_psp_mode_e2_2026-09-04.md),
 > [E3+E4 report](doc/devel/reports/implementations/ng_psp_mode_e3_e4_2026-09-04.md)). Each drawn

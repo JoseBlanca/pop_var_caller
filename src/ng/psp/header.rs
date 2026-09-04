@@ -346,7 +346,7 @@ field_shapes! {
     ///
     /// Concretely: `mapq-sum` is a plain integer, so its shape is [`Scalar`](Self::Scalar) —
     /// yet a record with five observations holds five of them, because
-    /// `encode_record_body` writes it once per observation. Ten of the body's twenty-two
+    /// `encode_record_body` writes it once per observation. Ten of the body's twenty-one
     /// fields repeat that way and two more repeat once per witness run; **nothing in the
     /// manifest says so**, and a record's own counts are what a reader uses. So a later writer
     /// that appends a field repeating per observation writes a file this reader cannot step
@@ -2975,13 +2975,13 @@ mod tests {
         }
     }
 
-    /// **The record's own fields, and which two of the twenty-seven are lists.** A count and
+    /// **The record's own fields, and which two of the twenty-eight are lists.** A count and
     /// the names, so a field changing shape has to be changed here on purpose — the two halves
     /// of the chain-id column are the only counted runs a record carries.
     #[test]
     fn exactly_two_of_the_records_fields_are_lists() {
         let fields = crate::ng::psp::record::record_fields();
-        assert_eq!(fields.len(), 27);
+        assert_eq!(fields.len(), 28);
         let lists: Vec<&str> = fields
             .iter()
             .filter(|field| field.shape() == FieldShape::List)

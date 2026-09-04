@@ -4632,9 +4632,9 @@ mod tests {
             record_count: NonZeroU64::MIN,
         }
         .encode(&mut payload);
-        // position-offset 0, reference-span 1, non-reference-reads 0, and a body length larger
-        // than anything that follows.
-        payload.extend_from_slice(&[0x00, 0x01, 0x00]);
+        // position-offset 0, reference-span 1, locus-kind generic, neither of the keep rule's
+        // counts, and then a body length larger than anything that follows.
+        payload.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x00]);
         encode_u64_leb128(u64::from(u32::MAX), &mut payload);
         // No chain-id departures and no arrivals, so the head is whole and what the reader
         // cannot find the end of is the body.
@@ -5317,11 +5317,22 @@ mod tests {
     /// **every byte offset the reader can meet one at**, and every run must give the same
     /// records as a single-shot read.
     ///
-    /// **⚠ And on blocks this small it retries nothing**, which is a fact about zstd rather than
-    /// about the reader: it decodes in internal blocks and emits one whole, so a payload that
-    /// fits a single emission is delivered in one piece however slowly its input arrived. The
-    /// count is asserted below rather than left implicit, because the sibling test exists
-    /// entirely because of it — and because a docstring here once claimed the opposite.
+    /// **⚠ How often it retries is a fact about this fixture's framing, not about the reader**,
+    /// and it is asserted below rather than left implicit because a docstring here once claimed
+    /// the opposite of what was happening. **It claimed the sweep never retries, and that
+    /// stopped being true when the record head grew by the locus-kind tag and the compared-read
+    /// count.** Measured 2026-09-04 on the tree that made the change: **281 parses restarted**
+    /// over the 1,188 schedules — 34 at one byte a read, 17 at two, 2 at seventeen, still 1 at
+    /// 1,183 of the file's 1,188 bytes, and none when the whole file arrives at once.
+    ///
+    /// **The mechanism is not established and nothing here depends on it.** Thirteen of the
+    /// file's fourteen block payloads are 93 to 100 bytes and the last is 38; raising the
+    /// writer's block ceiling until they are 127 to 128 bytes takes every schedule back to zero,
+    /// which is the opposite direction from *larger payloads are cut more often*.
+    ///
+    /// **The sibling test is what covers a record straddling the buffer**, and that is a
+    /// different cause from anything here: nothing in this sweep comes near the 16 kB rolling
+    /// buffer.
     ///
     /// What this sweep does hold is every *compressed-side* alignment: it was among the killers
     /// of three mutations, which is why it stays.
@@ -5346,24 +5357,24 @@ mod tests {
             assert_eq!(back, records, "reading {most_bytes_a_read} bytes a read");
             ever_retried += retries;
         }
-        assert_eq!(
-            ever_retried, 0,
-            "blocks that fit one zstd emission are never straddled, whatever the input \
-             schedule — the fact the next test exists for"
+        assert!(
+            ever_retried > 0,
+            "the finest schedules do cut this fixture's blocks mid-record, so a run that \
+             retried nothing would mean the count stopped being taken"
         );
     }
 
     /// **And the same sweep over blocks the rolling buffer cannot hold, which is where a record
     /// actually straddles one.**
     ///
-    /// The sweep above moves the point at which *compressed* bytes arrive, and on small blocks
-    /// that turns out not to move where a *record* is cut in half: zstd decodes in internal
-    /// blocks and emits one whole, so a payload that fits a single emission is delivered in one
-    /// piece however slowly its input arrived. Measured on the fixture above — **837 schedules,
-    /// none of which retried a record even once**. A test that stopped there would have proved
-    /// the walk works and nothing about restarting it.
+    /// The sweep above moves the point at which *compressed* bytes arrive, and on blocks that
+    /// small it barely reaches the restart path at all: measured 2026-09-04, **281 parses
+    /// restarted over its 1,188 schedules**, and for most of the sweep's history the count was
+    /// zero (see that test's own note). A test that stopped there would have proved the walk
+    /// works and next to nothing about restarting it.
     ///
-    /// What straddles a record is the buffer running out, so the blocks here are larger than it.
+    /// What straddles a record here is the buffer running out, so the blocks are larger than it
+    /// — a cause the sweep above never meets, whatever its retry count happens to be.
     ///
     /// **⚠ The first version of this fixture was a single block.** Its 1,999 records all fell in
     /// cell 0 of the grid it named, so the sweep retried tens of thousands of times and never
