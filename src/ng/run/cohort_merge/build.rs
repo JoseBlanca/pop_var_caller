@@ -951,7 +951,14 @@ pub fn build_region_handing_over_windowed<'a>(
         }
 
         match locus.verdict {
-            Verdict::Build => keep(CohortObservation::over(&locus)),
+            // **The one place a locus's members stop being indices and become records**, and
+            // it is inside the surviving arm on purpose: a run over stored files has nothing
+            // to resolve them against until here, and at about one position in a hundred
+            // reaching this arm, the other ninety-nine never ask for the evidence at all
+            // (`spec/cohort_merge_psp_path.md` §3.1).
+            Verdict::Build => keep(CohortObservation::over(
+                &locus.resolved_against(observations_per_sample),
+            )),
             Verdict::Failed => refused.push(locus.region),
             Verdict::TooQuiet => {}
         }
@@ -2705,7 +2712,7 @@ mod tests {
         let tables: Vec<Vec<Vec<u8>>> = loci
             .iter()
             .map(|locus| {
-                AlleleTable::over(locus)
+                AlleleTable::over(&locus.clone().resolved_against(&[&here, &far_away]))
                     .alleles()
                     .iter()
                     .map(|allele| allele.to_vec())
@@ -4288,7 +4295,11 @@ mod tests {
         .collect();
         assert_eq!(loci.len(), 1, "one locus, held open by the deletion");
 
-        let observed = CohortObservation::over(&loci[0]);
+        let observed = CohortObservation::over(
+            &loci[0]
+                .clone()
+                .resolved_against(&[&covering, &nothing, &deletion]),
+        );
         assert_eq!(
             observed
                 .per_sample

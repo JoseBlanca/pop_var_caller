@@ -34,6 +34,91 @@ use crate::ng::types::{GenomePosition, GenomeRegion};
 /// which is a different fact from an entry with reference-only support, and stays one
 /// (spec §4.2).
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MemberRange {
+    /// Which sample, as an index into the run's sample order.
+    pub sample: usize,
+    /// The first of its observations inside the locus.
+    pub from: usize,
+    /// One past the last.
+    pub to: usize,
+}
+
+impl MemberRange {
+    /// How many observations this sample contributed to the locus.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.to - self.from
+    }
+
+    /// Whether it contributed none — which the closer never emits, since a sample with no
+    /// observation in a locus is not a member of it.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.from >= self.to
+    }
+}
+
+/// A closed locus as the walk knows it: **which observations are its members, by index**.
+///
+/// **The walk cannot name the records themselves, and that is the point.** A run over stored
+/// files closes its loci from summaries while the evidence is still compressed, so at this
+/// moment a member may be a record that has not been built — and for about ninety-nine
+/// positions in a hundred never will be, because the locus is dropped before anything is
+/// assembled (`spec/cohort_merge_psp_path.md` §3.1). Indices are what both paths can supply.
+///
+/// [`resolved_against`](Self::resolved_against) turns one into the [`ClosedLocus`] assembly
+/// takes, once the caller has records to point at.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClosedLocusRanges<'a> {
+    /// First position to furthest reach.
+    pub region: GenomeRegion,
+    /// The samples that covered it, in ascending sample order, as ranges into the window.
+    pub members: Vec<MemberRange>,
+    /// The cohort's non-reference reads over the locus.
+    pub non_reference_reads: u32,
+    /// What the two verdicts made of it.
+    pub verdict: Verdict,
+    /// The kind its members share.
+    pub kind: &'a LocusKind,
+}
+
+impl<'a> ClosedLocusRanges<'a> {
+    /// How many reference bases the locus covers — the width both verdicts are passed on.
+    #[must_use]
+    pub fn span(&self) -> u64 {
+        span_of(self.region)
+    }
+
+    /// The same locus with its members pointing at records.
+    ///
+    /// `observations_per_sample` must be the window the ranges were taken against — the
+    /// caller's to get right, and the reason both come from one place
+    /// (`observation_cache::WindowedCohort`).
+    #[must_use]
+    pub fn resolved_against(
+        self,
+        observations_per_sample: &[&'a [SampleLocusObservations]],
+    ) -> ClosedLocus<'a> {
+        let members = self
+            .members
+            .iter()
+            .map(|range| SampleMembers {
+                sample: range.sample,
+                observations: &observations_per_sample[range.sample][range.from..range.to],
+            })
+            .collect();
+        ClosedLocus {
+            region: self.region,
+            members,
+            non_reference_reads: self.non_reference_reads,
+            verdict: self.verdict,
+            kind: self.kind,
+        }
+    }
+}
+
+/// One sample's members, resolved to the records themselves.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SampleMembers<'a> {
     /// Index into the run's sample table — the order the walk was handed.
     pub sample: usize,
@@ -660,7 +745,7 @@ impl<'a> LocusCloser<'a> {
 }
 
 impl<'a> Iterator for LocusCloser<'a> {
-    type Item = ClosedLocus<'a>;
+    type Item = ClosedLocusRanges<'a>;
 
     /// **The walk always advances.** The first observation it looks at is the one that
     /// opened the locus, whose start *is* the reach so far and whose contig *is* the
@@ -813,10 +898,7 @@ impl<'a> Iterator for LocusCloser<'a> {
             let alt = std::mem::take(&mut self.alt_reads_per_sample[sample]);
             let compared = std::mem::take(&mut self.compared_reads_per_sample[sample]);
             some_sample_reached_the_threshold |= self.min_alt_reads.reached_by(alt, compared);
-            members.push(SampleMembers {
-                sample,
-                observations: &self.observations_per_sample[sample][from..to],
-            });
+            members.push(MemberRange { sample, from, to });
         }
 
         let region = GenomeRegion {
@@ -824,7 +906,7 @@ impl<'a> Iterator for LocusCloser<'a> {
             start,
             end: reach,
         };
-        Some(ClosedLocus {
+        Some(ClosedLocusRanges {
             region,
             members,
             non_reference_reads,
@@ -1044,8 +1126,8 @@ mod tests {
             vec![0, 1],
             "sample 2 covered nothing here and so has no entry at all"
         );
-        assert_eq!(first.members[0].observations.len(), 1);
-        assert_eq!(first.members[1].observations.len(), 1);
+        assert_eq!(first.members[0].len(), 1);
+        assert_eq!(first.members[1].len(), 1);
 
         let second = closer.next().expect("a locus at 50");
         assert_eq!(second.region, region(50, 50));
@@ -1071,9 +1153,10 @@ mod tests {
 
         assert_eq!(closed.region, region(10, 20));
         assert_eq!(closed.members[1].sample, 1);
-        assert_eq!(closed.members[1].observations.len(), 2);
-        assert_eq!(closed.members[1].observations[0].region, region(12, 12));
-        assert_eq!(closed.members[1].observations[1].region, region(14, 14));
+        assert_eq!(closed.members[1].len(), 2);
+        let resolved = closed.resolved_against(&[&wide, &two_inside]);
+        assert_eq!(resolved.members[1].observations[0].region, region(12, 12));
+        assert_eq!(resolved.members[1].observations[1].region, region(14, 14));
         assert!(closer.next().is_none());
     }
 
@@ -1577,6 +1660,8 @@ mod tests {
         assert_eq!(closed[0].verdict, Verdict::Failed);
         assert!(
             closed[0]
+                .clone()
+                .resolved_against(&[&first, &second, &third])
                 .members
                 .iter()
                 .flat_map(|members| members.observations)
@@ -1871,7 +1956,7 @@ mod tests {
         let total_members: usize = closed
             .iter()
             .flat_map(|locus| locus.members.iter())
-            .map(|members| members.observations.len())
+            .map(MemberRange::len)
             .sum();
         assert_eq!(
             total_members, 5,
@@ -1997,7 +2082,7 @@ mod tests {
             .map(|locus| {
                 let mut members = vec![0usize; samples];
                 for held in &locus.members {
-                    members[held.sample] += held.observations.len();
+                    members[held.sample] += held.len();
                 }
                 (locus.region, members)
             })
@@ -2015,7 +2100,8 @@ mod tests {
                 MaxCohortLocusSpan::DEFAULT,
                 MinAltReads::DEFAULT,
             ) {
-                for held in &locus.members {
+                let resolved = locus.clone().resolved_against(&per_sample);
+                for held in &resolved.members {
                     assert!(
                         !held.observations.is_empty(),
                         "seed {seed}: a member window with nothing in it",
@@ -2102,7 +2188,7 @@ mod tests {
             consumed += locus
                 .members
                 .iter()
-                .map(|held| held.observations.len())
+                .map(MemberRange::len)
                 .sum::<usize>();
             let unspent = (0..layouts.len())
                 .filter(|&sample| closer.cursors[sample] < layouts[sample].len())
