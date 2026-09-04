@@ -563,7 +563,14 @@ impl AlignedFilesVariantCaller {
         // `call_locus` runs before it reads anything.
         let mut shaping = GenericEvidenceScratch::default();
         let mut tract_shaping = SsrEvidenceScratch::default();
-        let tract_selection = SsrSelectionConfig::at_ploidy(frozen.ploidy());
+        // The discovery pre-pass is a *selection* pass (research doc
+        // tract_genotype_accuracy_2026-09-03 §6.5), so the loop configuration's discovery
+        // setting is honoured by handing selection its bar — `None`, the shipped default,
+        // runs no pre-pass and selects byte-identically.
+        let tract_selection = SsrSelectionConfig {
+            discovery: calling_loop_config.discovery.pre_pass_bar(),
+            ..SsrSelectionConfig::at_ploidy(frozen.ploidy())
+        };
         let mut scratch: CallingScratch<S> = CallingScratch::default();
         let mut called_loci = Vec::new();
         let mut loci_too_wide_to_assemble = Vec::new();
@@ -816,7 +823,14 @@ where
     let frozen = parameters.view();
     let mut shaping = GenericEvidenceScratch::default();
     let mut tract_shaping = SsrEvidenceScratch::default();
-    let tract_selection = SsrSelectionConfig::at_ploidy(frozen.ploidy());
+    // The discovery pre-pass is a *selection* pass (research doc
+    // tract_genotype_accuracy_2026-09-03 §6.5), so the loop configuration's discovery setting is
+    // honoured by handing selection its bar — `None`, the shipped default, runs no pre-pass and
+    // selects byte-identically. Same as `call_cohort`, which is the point of this function.
+    let tract_selection = SsrSelectionConfig {
+        discovery: calling_loop_config.discovery.pre_pass_bar(),
+        ..SsrSelectionConfig::at_ploidy(frozen.ploidy())
+    };
     let mut scratch: CallingScratch<S> = CallingScratch::default();
     let mut padding_scratch = Vec::new();
     let mut records_written = 0_u64;

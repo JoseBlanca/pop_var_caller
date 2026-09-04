@@ -38,6 +38,8 @@ pub mod report;
 pub mod segments;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
+#[cfg(test)]
+mod tract_junction_ownership;
 pub mod walker;
 
 pub use callers::{

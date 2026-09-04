@@ -1423,6 +1423,15 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// allocation per tract, which is the cost the repeat path pays and the SNP/indel path does
     /// not.
     tract_fits: crate::ng::calling::inference::repeat_tract_parameters::TractScoringFits,
+    /// How many per-locus slippage re-fit rounds the last locus adopted — zero at the shipped
+    /// configuration, and at every SNP/indel locus, where the round is structurally ignored
+    /// (`doc/devel/ng/spec/calling_em_loop.md` §5.1).
+    ///
+    /// **A record for a probe, not an input**: the loop's driver writes it after its rounds
+    /// have stopped and nothing on the scoring path reads it. It lives on the scratch because
+    /// [`LocusInference`] does not carry it and a test of the round's stopping rule needs
+    /// *something* the loop exposes to assert a round count against.
+    slippage_refit_rounds: u32,
     /// How many **rows** the buffers above are sized for. Zero means never prepared.
     ///
     /// **Rows, not the run's samples, and the difference is this type's whole shape**: a
@@ -1498,6 +1507,9 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
                  per-sample copies table longer than a usize can index"
             )
         });
+
+        // The last locus's round count must not survive onto a locus that runs none.
+        self.slippage_refit_rounds = 0;
 
         let unwritten = LogProb(UNWRITTEN_SCRATCH_VALUE);
         resize_and_fill(&mut self.genotype_likelihoods, table_len, unwritten);
@@ -2310,6 +2322,22 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         &self,
     ) -> &crate::ng::calling::inference::repeat_tract_parameters::TractScoringFits {
         &self.tract_fits
+    }
+
+    /// How many per-locus slippage re-fit rounds the last locus adopted — the loop's probe
+    /// for its own stopping rule, written by the driver after the rounds stop. Zero at the
+    /// shipped configuration and at every SNP/indel locus.
+    #[inline]
+    #[must_use]
+    pub fn slippage_refit_rounds(&self) -> u32 {
+        self.slippage_refit_rounds
+    }
+
+    /// Record how many slippage re-fit rounds this locus adopted — the driver's write behind
+    /// [`Self::slippage_refit_rounds`], once per locus after its rounds stop.
+    #[inline]
+    pub(crate) fn record_slippage_refit_rounds(&mut self, rounds: u32) {
+        self.slippage_refit_rounds = rounds;
     }
 
     /// **Everything a repeat tract's rows are scored from, borrowed from one scratch at once.**

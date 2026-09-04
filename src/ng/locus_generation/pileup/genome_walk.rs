@@ -43,11 +43,13 @@ use super::decompose::ReadEvent;
 use super::errors::WalkerError;
 use super::fast_column::FastColumnScratch;
 use super::open_record::{
-    OpenPileupRecord, OpenPileupRecordTable, ReadContribution, process_position,
+    JunctionAtRegionStart, OpenPileupRecord, OpenPileupRecordTable, ReadContribution,
+    process_position,
 };
 use super::read_sampling;
 use super::{PreparedRead, ReadLengthError, WalkerConfig};
 use crate::ng::ref_seq::RefSeq;
+use crate::ng::types::ContigId;
 
 /// Construct a [`PileupWalker`] over a coordinate-sorted stream of
 /// prepared reads. The walker is an `Iterator<Item = Result<PileupRecord,
@@ -474,13 +476,17 @@ where
     /// reposition had to lead "because the reset re-anchors, and that means peeking", which
     /// is untrue: the peek is after both. It leads because a source that cannot be
     /// repositioned leaves the walker untouched, which is the smaller mess.
+    /// `junction_start` is `Some(region.start)` when the base before the region is
+    /// repeat-path ground of the same contig — the caller knows the region stream, this
+    /// type does not — and arms the junction claim documented on `WalkerState::junction`.
     pub fn move_to_region(
         &mut self,
         region: GenomeRegion,
         stop_after: u32,
+        junction_start: Option<u32>,
     ) -> Result<(), I::Error> {
         self.reads.move_to_region(region)?;
-        self.state.begin_region(Some(stop_after));
+        self.state.begin_region(Some(stop_after), junction_start);
         // Records produced by the region being left and never collected. The per-region
         // walker took them to the grave; so does this.
         self.pending.clear();
@@ -711,6 +717,21 @@ struct WalkerState {
     /// on 2026-09-02 is a consequence of the design rather than a loss: *"the STR tract is only
     /// the tandem repeat"*, and the ground either side of it is somebody else's to explain.
     region_end: Option<u32>,
+    /// **The region's first base, when the base before it is repeat-path ground** — set by
+    /// `begin_region`, `None` at a contig start, a requested-region edge, or a walk that
+    /// was never pointed at a region. Held here until the first processed position, where
+    /// the reference is at hand to read the repeat's last base and resolve it into
+    /// [`JunctionAtRegionStart`].
+    junction_start_pending: Option<u32>,
+    /// The resolved junction at the region's first base, once
+    /// [`Self::junction_start_pending`] has been read against the reference. What it buys:
+    /// an insertion anchored one base before the region — between the repeat's last base
+    /// and this region's first — is claimed and re-homed onto the region's first base
+    /// whenever the repeat path's junction convention refuses its spelling, instead of
+    /// opening a record the region clamp then discards. See
+    /// [`claimed_junction_insertion`](super::open_record) for the rule and its measured
+    /// cost when absent.
+    junction: Option<JunctionAtRegionStart>,
     /// `None` until the first read is admitted. Tracks the
     /// chromosome the walker has been processing so the
     /// flush-on-chromosome-change logic knows whether to flush
@@ -796,6 +817,8 @@ impl WalkerState {
             walker_pos: 1,
             // A walker points at no region until it is told to; `move_to_region` sets it.
             region_end: None,
+            junction_start_pending: None,
+            junction: None,
             last_admitted_chrom_id: None,
             last_admitted_locus: None,
             active_reads: ActiveReads::new(),
@@ -878,7 +901,7 @@ impl WalkerState {
     ///
     /// The destructure is exhaustive on purpose: a field added to this struct is a compile
     /// error here until someone decides which side of that line it falls on.
-    fn begin_region(&mut self, bound: Option<u32>) {
+    fn begin_region(&mut self, bound: Option<u32>, junction_start: Option<u32>) {
         let Self {
             chrom_id,
             walker_pos,
@@ -886,6 +909,10 @@ impl WalkerState {
             // that kept the last region's would let a footprint reach past this one's end
             // wherever the two differ.
             region_end,
+            // Replaced outright, both halves, for the same reason as the bound: the
+            // junction belongs to the region being entered.
+            junction_start_pending,
+            junction,
             last_admitted_chrom_id,
             last_admitted_locus,
             active_reads,
@@ -917,6 +944,8 @@ impl WalkerState {
             ceiling_losses_by_end,
         } = self;
         *region_end = bound;
+        *junction_start_pending = junction_start;
+        *junction = None;
         *sealed = None;
         ceiling_losses_by_end.clear();
 
@@ -1069,6 +1098,33 @@ impl WalkerState {
         out: &mut VecDeque<SampleLocusObservations>,
     ) -> Result<(), WalkerError> {
         let walker_pos = self.walker_pos;
+        // **Resolve the region's junction on the first processed position** — not at
+        // `begin_region`, which holds no reference. One base is read, once per region
+        // that begins beside repeat ground, and only when the region has positions to
+        // process at all: a region with no reads never resolves and has nothing to claim.
+        // The base is safely resident — `release_reference_behind` keeps
+        // `max_record_span` bases before the region's start, and the walk has not gone
+        // past it yet.
+        if let Some(first_base) = self.junction_start_pending.take() {
+            let mut repeat_last_base = Vec::with_capacity(1);
+            reference
+                .fetch_into(
+                    ContigId(self.chrom_id),
+                    u64::from(first_base) - 1,
+                    1,
+                    &mut repeat_last_base,
+                )
+                .map_err(|source| WalkerError::Fasta {
+                    chrom_id: self.chrom_id,
+                    start: first_base - 1,
+                    start_plus_len: first_base,
+                    source,
+                })?;
+            self.junction = Some(JunctionAtRegionStart {
+                first_base,
+                repeat_last_base: repeat_last_base[0],
+            });
+        }
         // **Asked once per column, and read by both paths below.** See
         // [`ActiveReads::may_have_mate_overlap_at`]: `false` means no pair of this set's
         // reads has both alignments still on the reference here, so no two contributors can
@@ -1392,6 +1448,7 @@ impl WalkerState {
             &self.active_reads,
             reference,
             self.region_end,
+            self.junction,
         )?;
         self.summary.record_widen_events += outcome.widen_count;
 
@@ -2461,7 +2518,7 @@ mod tests {
         stop_after: u32,
     ) -> Vec<Locus> {
         walker
-            .move_to_region(region, stop_after)
+            .move_to_region(region, stop_after, None)
             .expect("the scripted source cannot fail");
         walker
             .by_ref()
@@ -2633,7 +2690,7 @@ mod tests {
         // Segment `15..=30`. `r8` runs 8..=27, so it overlaps and is served **first** — at
         // position 8, four positions before the last read the previous region admitted.
         walker
-            .move_to_region(scripted_region(15, 60), 30)
+            .move_to_region(scripted_region(15, 60), 30, None)
             .expect("the scripted source cannot fail");
         let second: Vec<_> = walker.by_ref().collect();
 
@@ -2671,7 +2728,7 @@ mod tests {
         // Take **one** locus of the first region and walk away, leaving its later positions
         // open in the table.
         walker
-            .move_to_region(scripted_region(1, 44), 14)
+            .move_to_region(scripted_region(1, 44), 14, None)
             .expect("the scripted source cannot fail");
         let abandoned = walker
             .next()

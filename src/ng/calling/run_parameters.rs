@@ -2317,7 +2317,7 @@ mod tests {
             report.repeat_tract_outlier_weight(),
             RepeatTractOutlierWeight::defaulted()
         );
-        assert_eq!(report.repeat_tract_outlier_weight().value(), 0.05);
+        assert_eq!(report.repeat_tract_outlier_weight().value(), 0.20);
         assert_eq!(
             report.repeat_tract_outlier_weight().provenance(),
             Provenance::Defaulted,

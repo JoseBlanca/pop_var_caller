@@ -27,7 +27,9 @@ use crate::ng::read::input::{IngestError, SampleReads};
 use crate::ng::ref_seq::RefSeqError;
 use crate::ng::region_typing::segment_criteria::{Motif, SsrSegment};
 use crate::ng::region_typing::{RegionKind, TypedRegion};
-use crate::ng::types::{GenomePosition, GenomeRegion, Position, ReadGroupId, SummedLogError};
+use crate::ng::types::{
+    ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId, SummedLogError,
+};
 use crate::pileup_record::ChainId;
 
 /// One sample's locus: the stretch of genome it covers, and what that sample's reads
@@ -464,6 +466,26 @@ pub trait LocusGenerator<S> {
     /// Start a new segment: reset progress. Does no gathering and cannot fail.
     fn begin_segment(&mut self, region: GenomeRegion);
 
+    /// [`begin_segment`](Self::begin_segment), told whether the base immediately before
+    /// `region.start` is repeat-path ground — a tract, bundle or satellite region of the
+    /// same contig ends at `region.start - 1`. Only the dispatcher can know this, because
+    /// it sees the region stream and a generator sees one region at a time.
+    ///
+    /// Defaulted to drop the fact, because only the generic pileup generator acts on it:
+    /// an insertion anchored on that last repeat base whose spelling the repeat path
+    /// refuses is the flank's to genotype, and the walk must know the neighbour exists to
+    /// claim it (`pileup/open_record.rs`, `claimed_junction_insertion`). A requested-region
+    /// edge is `false` — the ground before it is not this run's, and nothing may be pulled
+    /// across it.
+    fn begin_segment_after_repeat_ground(
+        &mut self,
+        region: GenomeRegion,
+        adjoins_repeat_ground: bool,
+    ) {
+        let _ = adjoins_repeat_ground;
+        self.begin_segment(region);
+    }
+
     /// The next locus of the segment begun, or `None` once it has no more.
     ///
     /// Called repeatedly with the same `segment` until it returns `None`; returning `None`
@@ -786,10 +808,16 @@ impl<S> GeneratorSlot<S> {
     /// Begin a region on this slot: reset a real generator, or account the region as
     /// unhandled. Returns whether a generator is filled, so the dispatcher knows whether
     /// there are loci to pull.
-    fn begin(&mut self, region: GenomeRegion, bp: u64, counts: &mut LocusCounts) -> bool {
+    fn begin(
+        &mut self,
+        region: GenomeRegion,
+        bp: u64,
+        counts: &mut LocusCounts,
+        adjoins_repeat_ground: bool,
+    ) -> bool {
         match self {
             GeneratorSlot::Generator(generator) => {
-                generator.begin_segment(region);
+                generator.begin_segment_after_repeat_ground(region, adjoins_repeat_ground);
                 true
             }
             GeneratorSlot::Unfilled(reason) => {
@@ -845,6 +873,14 @@ pub struct GeneratorSet {
     counts: LocusCounts,
     /// The region whose generator is mid-stream, if any. `None` between regions.
     current: Option<TypedRegion>,
+    /// The reach of the last repeat-path region dispatched — `Some((contig, end))` when the
+    /// previously begun region was a tract, bundle or satellite, `None` after a generic
+    /// one. What [`begin_region`](Self::begin_region) folds into the *next* region's
+    /// begin: a generic region starting one base after this reach adjoins repeat ground,
+    /// and its walk may claim a junction insertion anchored on that last repeat base
+    /// (`pileup/open_record.rs`, `claimed_junction_insertion`). Kept here because the
+    /// dispatcher is the only thing that sees the region stream whole.
+    repeat_ground_reach: Option<(ContigId, u64)>,
 }
 
 impl GeneratorSet {
@@ -860,6 +896,7 @@ impl GeneratorSet {
             ssr_bundle,
             counts: LocusCounts::default(),
             current: None,
+            repeat_ground_reach: None,
         }
     }
 
@@ -938,15 +975,33 @@ impl GeneratorSet {
         // Copied out (GenomeRegion is Copy) only for readability, so `region` can still move
         // into `current` below.
         let geometry = region.region;
+        // Whether the base before this region is repeat-path ground: the previously
+        // dispatched region was a tract, bundle or satellite and ends exactly one base
+        // earlier on the same contig. Typed regions tile each contig gap-free and in
+        // order, so this reads the stream rather than re-deriving the partition.
+        let adjoins_repeat_ground = self.repeat_ground_reach.is_some_and(|(contig, end)| {
+            contig == geometry.contig && end + 1 == geometry.start.get()
+        });
+        self.repeat_ground_reach = (!matches!(region.kind, RegionKind::Generic))
+            .then_some((geometry.contig, geometry.end.get()));
         let filled = match &region.kind {
             RegionKind::Satellite => {
                 self.counts
                     .record_unhandled(UnhandledReason::OutOfScope, bp);
                 false
             }
-            RegionKind::SsrSegment(_) => self.ssr.begin(geometry, bp, &mut self.counts),
-            RegionKind::Generic => self.generic.begin(geometry, bp, &mut self.counts),
-            RegionKind::SsrBundle { .. } => self.ssr_bundle.begin(geometry, bp, &mut self.counts),
+            RegionKind::SsrSegment(_) => {
+                self.ssr
+                    .begin(geometry, bp, &mut self.counts, adjoins_repeat_ground)
+            }
+            RegionKind::Generic => {
+                self.generic
+                    .begin(geometry, bp, &mut self.counts, adjoins_repeat_ground)
+            }
+            RegionKind::SsrBundle { .. } => {
+                self.ssr_bundle
+                    .begin(geometry, bp, &mut self.counts, adjoins_repeat_ground)
+            }
         };
         if filled {
             self.counts.regions_handled += 1;

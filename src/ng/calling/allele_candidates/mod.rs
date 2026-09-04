@@ -648,6 +648,17 @@ pub struct SelectionScratch {
     /// [`leftover_of`] is asked, rather than inferring it from "this sample earned it and it is
     /// gone". Empty at every locus the cap did not bind at, which is almost all of them.
     cap_cut_table_indices: Vec<u32>,
+    /// **One flag per allele of the merge's table: whether the discovery pre-pass nominated that
+    /// sequence** — some sample showed it with enough reads that booking them all as slippage
+    /// cannot be right ([`ssr::nominate_discovered_sequences`], and
+    /// `doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md` §6.5 for why the pre-pass
+    /// lives in selection).
+    ///
+    /// **Empty except on the repeat-tract path with discovery switched on** — the ordinary path
+    /// never fills it, and a tract with discovery off (the shipped default) leaves it as
+    /// [`reset_for`](Self::reset_for) did, so admission can tell "off" from "on and nothing
+    /// found" by its length.
+    discovery_nominated: Vec<bool>,
 }
 
 impl SelectionScratch {
@@ -682,6 +693,7 @@ impl SelectionScratch {
             promoted_rungs,
             rung_is_promoted,
             cap_cut_table_indices,
+            discovery_nominated,
         } = self;
         per_allele.clear();
         per_allele.resize(table_len, AlleleSummary::default());
@@ -692,6 +704,7 @@ impl SelectionScratch {
         promoted_rungs.clear();
         rung_is_promoted.clear();
         cap_cut_table_indices.clear();
+        discovery_nominated.clear();
     }
 
     /// How many alleles the buffers are currently sized for.
@@ -1625,6 +1638,7 @@ mod tests {
             cohort_reads: 42,
         };
         scratch.ranked_table_indices.push(1);
+        scratch.discovery_nominated.push(true);
 
         scratch.reset_for(4);
 
@@ -1641,6 +1655,12 @@ mod tests {
             scratch.ladder.rung_count(),
             0,
             "a reset locus must not see the previous tract's rungs"
+        );
+        assert!(
+            scratch.discovery_nominated.is_empty(),
+            "a reset locus must not see the previous tract's discovery nominations — and empty \
+             is also how admission reads *discovery off*, so a leftover flag would switch \
+             discovery on at a locus that never asked for it"
         );
     }
 
