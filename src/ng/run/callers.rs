@@ -50,9 +50,10 @@ use crate::ng::read::input::SampleReads;
 use crate::ng::read::input::read_groups::{ReadGroups, SampleReadGroups};
 use crate::ng::read::input::reference::OpenReference;
 use crate::ng::read::input::{AssemblyMismatch, check_assembly};
+use crate::ng::ref_seq::WindowedRefSeq;
 use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::run::cohort_merge::build::{CohortObservation, RegionOutcome};
-use crate::ng::run::cohort_merge::observation_cache::ObservationCache;
+use crate::ng::run::cohort_merge::observation_cache::{ObservationCache, ObservationSource};
 use crate::ng::run::cohort_merge::serial::{
     merge_cohort_handing_each_locus_over,
     merge_cohort_handing_each_locus_over_covering_samples_in_parallel, merge_cohort_through_cache,
@@ -621,54 +622,30 @@ impl AlignedFilesVariantCaller {
     /// run holds is then its open files, the merge's frontier and one record — spec §5.1's
     /// bound.
     ///
-    /// # Where this run's parallelism is (Milestone E, decided 2026-09-01)
+    /// **The calling itself is [`call_cohort_from_sources_handing_each_record_over`], which knows nothing about
+    /// alignment files** (spec §3.1: both modes drive one merge and one calling loop). What
+    /// this method adds is direct mode's two ends: opening every sample's files into a walker,
+    /// and turning those walkers, spent, into the per-sample tallies a run report states. The
+    /// parallelism, the loci that become no record, the padding base and the errors are all
+    /// that function's and are documented there.
     ///
-    /// **Each cover's samples are drawn forward concurrently; everything else is one
-    /// thread.** Measured on 63 tomato accessions, decoding reads is 88% of `call_cohort`
-    /// and genotyping 5–6%, so the parallelism went to the decode
-    /// ([`merge_cohort_handing_each_locus_over_covering_samples_in_parallel`]'s own note
-    /// carries the numbers) and no pool of genotyping workers was built. The output is
-    /// identical at every thread count — the cover reaches the same fixpoint by any
-    /// schedule, and assembly and calling stay on this thread in genome order — which is
-    /// spec §12.2's oracle: pinned at the driver by
-    /// `the_parallel_cover_gives_the_serial_drivers_answer`, and to be pinned end to end by
-    /// Milestone E2's concurrency-invariance fixture, which is not built yet.
+    /// **Direct mode's output is pinned at every thread count** by
+    /// [`the_record_path_is_byte_identical_at_every_thread_count`], spec §12.2's end-to-end
+    /// oracle, which compares this method's VCF bytes at pools of 1, 2, 4, 8 and 16. The
+    /// layer under it — that the parallel cover reaches the same fixpoint as the serial one —
+    /// is pinned at the merge instead, by `the_parallel_cover_gives_the_serial_drivers_answer`
+    /// and five others in [`cohort_merge`](super::cohort_merge), on fixtures that can hold a
+    /// locus wider than one position.
     ///
-    /// `hand_over` is given each record in genome order and may refuse. **The first refusal is
-    /// the run's answer**, naming the locus it was writing, and no record is handed over after
-    /// it — but the merge is not stopped, because its sink cannot say so (see the note beside
-    /// `stopped` in the body). So the walk finishes the analysed ground before the error is
-    /// returned.
-    ///
-    /// # Not every called locus becomes a record
-    ///
-    /// **A locus no written genotype carries an alternative at is not written** — spec §9's
-    /// rule, which is the whole of why this file has no gVCF and no reference blocks: the
-    /// record's absence says *nothing here*. The count of those is in the answer, because
-    /// *called* and *written* differing is a fact about a run and not an accident of it.
-    ///
-    /// # The reference is read once more, and only where a record needs it
-    ///
-    /// A record with an empty allele — an insertion's or a deletion's nature — is written by
-    /// padding every allele with the reference base beside the span, which the locus does not
-    /// carry. So this holds one reference accessor of its own for the whole run, over the index
-    /// and contig table the walkers already share, and reads one base per such record
-    /// ([`padding_base_beside`]). It is one more open file, and what it spends is the slack
-    /// inside [`DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES`] rather than a raise.
-    ///
-    /// **On today's path that base is never fetched**, because the generic mint anchors its
-    /// indels and so no generic allele is ever empty — see [`records`](super::records)'s own
-    /// note. The accessor is still opened, and the answer is still computed where a record needs
-    /// one, because [`VcfRecord::new`] asserts a padding base is carried exactly when some
-    /// allele is empty.
+    /// **The reference accessor this run mints is one more open file**, and what it spends is
+    /// the slack inside [`DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES`] rather than a
+    /// raise.
     ///
     /// # Errors
     ///
-    /// The first sample whose walk fails ends the run ([`RunError::SourceFailed`]); so does the
-    /// first record `hand_over` refuses ([`RunError::RecordNotWritten`]) and a padding base the
-    /// reference will not serve ([`RunError::PaddingBaseUnreadable`]). Calling itself cannot
-    /// fail: a locus whose loop did not settle comes back with `converged` false and is written
-    /// on the `EMNoConv` filter.
+    /// Everything [`call_cohort_from_sources_handing_each_record_over`] returns, plus the
+    /// failures of building this run's walkers — [`RunError::LocusGeneratorSettings`] and
+    /// [`RunError::TractGeneratorSettings`].
     pub fn call_cohort_handing_each_record_over<S, G, E>(
         self,
         genotyper: &G,
@@ -679,7 +656,6 @@ impl AlignedFilesVariantCaller {
         S: Default,
         E: std::error::Error + Send + Sync + 'static,
     {
-        let run_sample_count = self.samples.len();
         let sample_names: Vec<String> = self.sample_names().map(str::to_owned).collect();
         // **Minted before the walkers take the run apart**, because `walkers` consumes the
         // caller. One accessor for the whole run, never shared: it walks forward with the merge
@@ -696,119 +672,258 @@ impl AlignedFilesVariantCaller {
             assembly_check,
         } = pieces;
 
-        let frozen = parameters.view();
-        let mut shaping = GenericEvidenceScratch::default();
-        let mut tract_shaping = SsrEvidenceScratch::default();
-        let tract_selection = SsrSelectionConfig::at_ploidy(frozen.ploidy());
-        let mut scratch: CallingScratch<S> = CallingScratch::default();
-        let mut padding_scratch = Vec::new();
-        let mut records_written = 0_u64;
-        let mut loci_called_but_not_written = 0_u64;
-        let mut loci_too_wide_to_assemble = Vec::new();
-        let mut loci_with_nobody_to_call = Vec::new();
-        // Counted rather than collected — see the other driver.
-        let mut tracts = TractOutcomes::default();
-        // **The merge's sink cannot fail**, so the first failure is stashed and the sink does
-        // nothing after it. Reported ahead of whatever the merge itself then returns, because it
-        // happened first.
-        //
-        // **⚑ The walk does not stop, and that is a cost worth naming rather than a choice.**
-        // `merge_cohort_handing_each_locus_over` takes a sink that returns nothing
-        // (`cohort_merge/serial.rs`), so nothing this side can do ends the merge — it runs to the
-        // end of the analysed ground, decoding every remaining read of every sample, before the
-        // error is returned. On a fixture that is invisible; on a cohort whose disk fills at the
-        // first chromosome it is the rest of the genome decoded for nothing. Fixing it means the
-        // merge's sink saying *stop* — one `ControlFlow` through both drivers and the region
-        // builder — which is a change to the merge's interface and not this step's.
-        let mut stopped: Option<RunError> = None;
-
-        let mut cache = ObservationCache::over(walkers);
-        let merged = merge_cohort_handing_each_locus_over_covering_samples_in_parallel(
-            segmentation.analysed_regions(),
-            &mut cache,
-            merge_parameters.cohort_locus_builder_regions_len,
-            merge_parameters.max_cohort_locus_span,
-            merge_parameters.min_alt_reads,
-            &mut |observation| {
-                if stopped.is_some() {
-                    return;
-                }
-                let region = observation.region;
-                let built = call_one_cohort_locus(
-                    genotyper,
-                    &observation,
-                    &frozen,
-                    &candidate_selection,
-                    &tract_selection,
-                    &calling_loop_config,
-                    run_sample_count,
-                    &mut shaping,
-                    &mut tract_shaping,
-                    &mut tracts,
-                    &mut scratch,
-                    |inference, remap, unmatched, verdict| {
-                        // **Asked before the reference is read**, so a locus that establishes
-                        // no variant costs no fetch and no evidence gathering.
-                        if !a_written_genotype_carries_an_alternative(&inference) {
-                            return Ok(None);
-                        }
-                        let alleles = inference.alleles();
-                        let padding = padding_base_beside(
-                            &padding_reference,
-                            inference.region,
-                            alleles,
-                            &mut padding_scratch,
-                        )
-                        .map_err(|source| {
-                            RunError::PaddingBaseUnreadable {
-                                locus: inference.region,
-                                source,
-                            }
-                        })?;
-                        let evidence = evidence_for_output(
-                            &inference,
-                            &observation,
-                            remap,
-                            unmatched,
-                            verdict,
-                            padding,
-                        );
-                        Ok(Some(assemble_record(&inference, evidence)))
-                    },
-                );
-                match built {
-                    LocusOutcome::NobodyToCall => loci_with_nobody_to_call.push(region),
-                    // Both counted inside the dispatch, where the verdict that decided them is.
-                    LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {}
-                    LocusOutcome::Called(Err(error)) => stopped = Some(error),
-                    LocusOutcome::Called(Ok(None)) => loci_called_but_not_written += 1,
-                    LocusOutcome::Called(Ok(Some(record))) => match hand_over(&record) {
-                        Ok(()) => records_written += 1,
-                        Err(source) => {
-                            stopped = Some(RunError::RecordNotWritten {
-                                locus: region,
-                                source: Box::new(source),
-                            });
-                        }
-                    },
-                }
-            },
-            &mut loci_too_wide_to_assemble,
-        );
-        if let Some(stopped) = stopped {
-            return Err(stopped);
-        }
-        merged?;
-
+        let inputs = CohortCallingInputs {
+            segmentation: &segmentation,
+            merge_parameters,
+            parameters: &parameters,
+            calling_loop_config: &calling_loop_config,
+            candidate_selection: &candidate_selection,
+            padding_reference,
+        };
+        let CohortCallingOutcome { calling, sources } =
+            call_cohort_from_sources_handing_each_record_over(
+                ObservationCache::over(walkers),
+                inputs,
+                genotyper,
+                hand_over,
+            )?;
         Ok(WrittenCohort {
+            calling,
+            walk: CohortWalkTallies::of(sample_names, sources, assembly_check),
+        })
+    }
+}
+
+/// Everything a cohort is called with that is not its sources — grouped because the six travel
+/// together into [`call_cohort_from_sources_handing_each_record_over`] and neither mode wants a six-argument call.
+///
+/// **`AlignmentInputs` is the shape this follows**: what a run was configured with, by
+/// reference where it is shared and by value where the caller hands one over.
+pub(crate) struct CohortCallingInputs<'a> {
+    /// The ground the run loops over. Only its analysed regions are read here; the segments
+    /// themselves were spent when the sources were built.
+    pub segmentation: &'a Segmentation,
+    /// How the merge cuts and refuses its ground.
+    pub merge_parameters: MergeParameters,
+    /// The model's numbers. Frozen once, at the top of the loop.
+    pub parameters: &'a RunParameters,
+    /// How long a locus's calling loop may run and how it decides it has settled.
+    pub calling_loop_config: &'a RunnableCallingLoopConfig,
+    /// Which alleles a locus is called over.
+    pub candidate_selection: &'a CandidateSelectionConfig,
+    /// **Handed over rather than borrowed, and it is one accessor for the whole run.** A record
+    /// with an empty allele — an insertion's or a deletion's nature — is written by padding
+    /// every allele with the reference base beside its span, which the locus does not carry.
+    /// This walks forward with the merge and releases what it has passed; sharing one between
+    /// callers would collapse their windows onto each other.
+    pub padding_reference: WindowedRefSeq,
+}
+
+/// What calling a cohort produced, and the spent sources it was read from.
+///
+/// **The sources come back because a source is not only a reader** — direct mode's walker
+/// carries what its walk saw, and turning that into per-sample tallies is the *mode's* job
+/// rather than the calling loop's: a psp source has no regions handled and no generator counts
+/// to give. So the loop hands them back in the run's sample order and each caller says what its
+/// own kind of source knows ([`CohortWalkTallies`] is direct mode's answer).
+///
+/// Everything else here is [`WrittenCohort`] minus that, which is exactly the part that does not
+/// depend on where the observations came from.
+#[derive(Debug)]
+pub(crate) struct CohortCallingOutcome<S> {
+    /// What the calling produced — the value a run report is built from.
+    pub calling: CohortCallingTallies,
+    /// The sources back, spent, in the run's sample order — entry `i` is the sample the
+    /// cohort's `i`th entry describes. **They are spent, not merely finished**: this value is
+    /// built only after the two error returns, so a run that reaches it walked its whole
+    /// analysed ground.
+    pub sources: Vec<S>,
+}
+
+/// **Call one cohort and hand every record over as it is finished, keeping none — the body both
+/// modes drive** (spec §3.1: "both callers drive one merge and one calling loop").
+///
+/// This is the whole of what a calling run does once its sources exist, and it cannot tell a
+/// walk over alignment files from a read out of a psp: it is handed `k` sources in the run's
+/// sample order and everything else it needs beside them. Direct mode's
+/// [`AlignedFilesVariantCaller::call_cohort_handing_each_record_over`] is this function plus
+/// opening the files and turning the spent walkers into per-sample tallies; psp mode's caller
+/// is the same function plus opening the psps.
+///
+/// # Where this run's parallelism is (Milestone E, decided 2026-09-01)
+///
+/// **Each cover's samples are drawn forward concurrently; everything else is one thread.**
+/// Measured on 63 tomato accessions, decoding reads is 88% of `call_cohort` and genotyping
+/// 5–6%, so the parallelism went to the decode and no pool of genotyping workers was built. The
+/// output is identical at every thread count — the cover reaches the same fixpoint by any
+/// schedule, and assembly and calling stay on this thread in genome order — which is spec
+/// §12.2's oracle.
+///
+/// `hand_over` is given each record in genome order and may refuse. **The first refusal is the
+/// run's answer**, naming the locus it was writing, and no record is handed over after it — but
+/// the merge is not stopped, because its sink cannot say so (see the note beside `stopped` in
+/// the body). So the merge finishes the analysed ground before the error is returned.
+///
+/// # Not every called locus becomes a record
+///
+/// **A locus no written genotype carries an alternative at is not written** — spec §9's rule,
+/// which is the whole of why this file has no gVCF and no reference blocks: the record's absence
+/// says *nothing here*. The count of those is in the answer, because *called* and *written*
+/// differing is a fact about a run and not an accident of it.
+///
+/// # The reference is read once more, and only where a record needs it
+///
+/// A record with an empty allele is written by padding every allele with the reference base
+/// beside the span, which the locus does not carry — hence `padding_reference`, read one base
+/// per such record ([`padding_base_beside`]).
+///
+/// **On today's path that base is never fetched**, because the generic mint anchors its indels
+/// and so no generic allele is ever empty — see [`records`](super::records)'s own note. The
+/// answer is still computed where a record needs one, because [`VcfRecord::new`] asserts a
+/// padding base is carried exactly when some allele is empty.
+///
+/// # Errors
+///
+/// The first sample whose source fails ends the run ([`RunError::SourceFailed`]); so does the
+/// first record `hand_over` refuses ([`RunError::RecordNotWritten`]) and a padding base the
+/// reference will not serve ([`RunError::PaddingBaseUnreadable`]). Calling itself cannot fail: a
+/// locus whose loop did not settle comes back with `converged` false and is written on the
+/// `EMNoConv` filter.
+pub(crate) fn call_cohort_from_sources_handing_each_record_over<Source, S, G, E>(
+    mut cache: ObservationCache<Source>,
+    inputs: CohortCallingInputs<'_>,
+    genotyper: &G,
+    hand_over: &mut impl FnMut(&VcfRecord) -> Result<(), E>,
+) -> Result<CohortCallingOutcome<Source>, RunError>
+where
+    Source: ObservationSource<Error = RunError> + Send,
+    G: LocusGenotyper<S>,
+    S: Default,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let CohortCallingInputs {
+        segmentation,
+        merge_parameters,
+        parameters,
+        calling_loop_config,
+        candidate_selection,
+        padding_reference,
+    } = inputs;
+    // **The cohort's size is read off the cache rather than passed beside it**, so the number
+    // the genotyper is told and the number of sources actually being merged cannot become two
+    // different facts.
+    let run_sample_count = cache.sample_count();
+    let frozen = parameters.view();
+    let mut shaping = GenericEvidenceScratch::default();
+    let mut tract_shaping = SsrEvidenceScratch::default();
+    let tract_selection = SsrSelectionConfig::at_ploidy(frozen.ploidy());
+    let mut scratch: CallingScratch<S> = CallingScratch::default();
+    let mut padding_scratch = Vec::new();
+    let mut records_written = 0_u64;
+    let mut loci_called_but_not_written = 0_u64;
+    let mut loci_too_wide_to_assemble = Vec::new();
+    let mut loci_with_nobody_to_call = Vec::new();
+    // Counted rather than collected — see the other driver.
+    let mut tracts = TractOutcomes::default();
+    // **The merge's sink cannot fail**, so the first failure is stashed and the sink does
+    // nothing after it. Reported ahead of whatever the merge itself then returns, because it
+    // happened first.
+    //
+    // **⚑ The walk does not stop, and that is a cost worth naming rather than a choice.**
+    // `merge_cohort_handing_each_locus_over` takes a sink that returns nothing
+    // (`cohort_merge/serial.rs`), so nothing this side can do ends the merge — it runs to the
+    // end of the analysed ground, decoding every remaining read of every sample, before the
+    // error is returned. On a fixture that is invisible; on a cohort whose disk fills at the
+    // first chromosome it is the rest of the genome decoded for nothing. Fixing it means the
+    // merge's sink saying *stop* — one `ControlFlow` through both drivers and the region
+    // builder — which is a change to the merge's interface and not this step's.
+    let mut stopped: Option<RunError> = None;
+
+    let merged = merge_cohort_handing_each_locus_over_covering_samples_in_parallel(
+        segmentation.analysed_regions(),
+        &mut cache,
+        merge_parameters.cohort_locus_builder_regions_len,
+        merge_parameters.max_cohort_locus_span,
+        merge_parameters.min_alt_reads,
+        &mut |observation| {
+            if stopped.is_some() {
+                return;
+            }
+            let region = observation.region;
+            let built = call_one_cohort_locus(
+                genotyper,
+                &observation,
+                &frozen,
+                candidate_selection,
+                &tract_selection,
+                calling_loop_config,
+                run_sample_count,
+                &mut shaping,
+                &mut tract_shaping,
+                &mut tracts,
+                &mut scratch,
+                |inference, remap, unmatched, verdict| {
+                    // **Asked before the reference is read**, so a locus that establishes
+                    // no variant costs no fetch and no evidence gathering.
+                    if !a_written_genotype_carries_an_alternative(&inference) {
+                        return Ok(None);
+                    }
+                    let alleles = inference.alleles();
+                    let padding = padding_base_beside(
+                        &padding_reference,
+                        inference.region,
+                        alleles,
+                        &mut padding_scratch,
+                    )
+                    .map_err(|source| RunError::PaddingBaseUnreadable {
+                        locus: inference.region,
+                        source,
+                    })?;
+                    let evidence = evidence_for_output(
+                        &inference,
+                        &observation,
+                        remap,
+                        unmatched,
+                        verdict,
+                        padding,
+                    );
+                    Ok(Some(assemble_record(&inference, evidence)))
+                },
+            );
+            match built {
+                LocusOutcome::NobodyToCall => loci_with_nobody_to_call.push(region),
+                // Both counted inside the dispatch, where the verdict that decided them is.
+                LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {}
+                LocusOutcome::Called(Err(error)) => stopped = Some(error),
+                LocusOutcome::Called(Ok(None)) => loci_called_but_not_written += 1,
+                LocusOutcome::Called(Ok(Some(record))) => match hand_over(&record) {
+                    Ok(()) => records_written += 1,
+                    Err(source) => {
+                        stopped = Some(RunError::RecordNotWritten {
+                            locus: region,
+                            source: Box::new(source),
+                        });
+                    }
+                },
+            }
+        },
+        &mut loci_too_wide_to_assemble,
+    );
+    if let Some(stopped) = stopped {
+        return Err(stopped);
+    }
+    merged?;
+
+    Ok(CohortCallingOutcome {
+        calling: CohortCallingTallies {
             records_written,
             loci_called_but_not_written,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
             tracts,
-            walk: CohortWalkTallies::of(sample_names, cache.into_sources(), assembly_check),
-        })
-    }
+        },
+        sources: cache.into_sources(),
+    })
 }
 
 /// **What became of this run's repeat tracts** — the partition the run report prints, the way
@@ -1245,10 +1360,28 @@ pub struct CalledCohort {
 /// low depth and worth being able to see.
 #[derive(Debug)]
 pub struct WrittenCohort {
+    /// What the calling itself produced — the same value psp mode's caller gets back, because
+    /// none of it depends on where the observations came from.
+    pub calling: CohortCallingTallies,
+    /// What each sample's walk saw, and what the run could check about the assembly.
+    pub walk: CohortWalkTallies,
+}
+
+/// **What calling a cohort produced, whatever the observations were read from** — the part of
+/// a finished run that is the same in both modes.
+///
+/// It is a value of its own rather than fields on [`WrittenCohort`] because
+/// [`call_cohort_from_sources_handing_each_record_over`] produces exactly this, and both
+/// callers then add what only they know: direct mode its walkers' per-sample tallies, psp mode
+/// whatever its own files can say. Two copies of these five would be two places for a fact
+/// about a run to be recorded, and one place for it to be recorded wrongly.
+#[derive(Debug, Default)]
+pub struct CohortCallingTallies {
     /// Records handed over, which is the file's record count.
     pub records_written: u64,
     /// **Loci called where no written genotype carried an alternative**, and so left out of the
-    /// file. Add this to [`Self::records_written`] for the loci that were called.
+    /// file. Add this to [`Self::records_written`] for the loci that were called —
+    /// [`loci_called`](Self::loci_called) does it.
     pub loci_called_but_not_written: u64,
     /// **The ground of the loci the merge declined to assemble for being wider than
     /// `max_cohort_locus_span`**, in genome order — [`CalledCohort::loci_too_wide_to_assemble`].
@@ -1258,8 +1391,16 @@ pub struct WrittenCohort {
     pub loci_with_nobody_to_call: Vec<GenomeRegion>,
     /// **What became of this run's repeat tracts** — [`CalledCohort::tracts`].
     pub tracts: TractOutcomes,
-    /// What each sample's walk saw, and what the run could check about the assembly.
-    pub walk: CohortWalkTallies,
+}
+
+impl CohortCallingTallies {
+    /// How many loci were called — written, plus those that established no variant.
+    #[inline]
+    #[must_use]
+    pub fn loci_called(&self) -> u64 {
+        self.records_written
+            .saturating_add(self.loci_called_but_not_written)
+    }
 }
 
 impl WrittenCohort {
@@ -1267,8 +1408,7 @@ impl WrittenCohort {
     #[inline]
     #[must_use]
     pub fn loci_called(&self) -> u64 {
-        self.records_written
-            .saturating_add(self.loci_called_but_not_written)
+        self.calling.loci_called()
     }
 }
 
@@ -5174,16 +5314,116 @@ mod records_handed_over_as_the_run_finishes_them {
         open_over, read_of, sample_showing, sample_showing_on_reads, shipped_calling_loop,
     };
     use super::*;
+    use crate::ng::locus_generation::SampleLocusObservations;
     use crate::ng::read::input::test_fixtures::{
         fixture_reference_from_its_index, header, indexed_named_bam, matching_contigs,
     };
+    use crate::ng::run::WalkProgress;
+    use crate::ng::run::cohort_merge::CohortLocusBuilderRegionsLen;
     use crate::ng::types::{ContigId, Ploidy, Position};
     use crate::ng::vcf::header::{HeaderContig, VcfHeaderMetadata};
     use crate::ng::vcf::writer::VcfWriter;
     use crate::ng::vcf::{SampleCall, VcfRecord};
     use noodles_sam::alignment::RecordBuf;
+    use std::num::NonZeroU32;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    /// **A refused record is the run's answer even when the source fails afterwards** — the
+    /// refusal happened first, so it outranks the failure the merge itself comes back with.
+    ///
+    /// **Staging both at once needs a source the run cannot open**, which is why this drives
+    /// [`call_cohort_from_sources_handing_each_record_over`] directly rather than a caller: a
+    /// walker over real alignment files cannot be made to fail on cue. The walker's own
+    /// observations are drawn out first, so what is called is exactly what direct mode would
+    /// call, and the failure is appended behind them. That the lifted body takes any source is
+    /// what makes this test writable at all — and it is the only place the crate instantiates
+    /// it over something that is not a walker.
+    #[test]
+    fn a_refused_record_is_the_runs_answer_even_when_the_source_then_fails() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5, 20]);
+        let caller = open_over(std::slice::from_ref(&zeta), &reference);
+        // **Minted before `walkers` takes the run apart**, exactly as the run's own driver
+        // does — `walkers` consumes the caller.
+        let padding_reference = caller.walk_reference.accessor();
+        let RunReadyToWalk {
+            segmentation,
+            mut merge_parameters,
+            walkers,
+            parameters,
+            calling_loop_config,
+            candidate_selection,
+            assembly_check: _,
+        } = caller.walkers().expect("the fixture's one sample opens");
+
+        // **Ten bases a building region, and that is what makes the test possible.** A cover
+        // draws every sample before it builds anything, so a failure in the same batch as the
+        // first locus would come back before the sink was ever called and only one of the two
+        // failures would be live. At ten bases the locus at chr1:15 is built and refused in an
+        // earlier batch than the one that draws the failure.
+        merge_parameters.cohort_locus_builder_regions_len =
+            CohortLocusBuilderRegionsLen(NonZeroU32::new(10).expect("ten is not zero"));
+
+        // The walker's own observations, then the failure behind them. Drawn through
+        // `next_observation` because `AlignmentFilesWalker` is deliberately not an `Iterator`;
+        // the `Vec` that results is a source through the blanket implementation.
+        let mut drawn: Vec<Result<SampleLocusObservations, RunError>> = Vec::new();
+        for mut walker in walkers {
+            while let Some(next) = walker.next_observation(None) {
+                drawn.push(next);
+            }
+        }
+        drawn.push(Err(RunError::SourceFailed {
+            sample: "zeta".to_owned(),
+            reached: WalkProgress::NothingYet,
+            source: Box::new(std::io::Error::other("the source gave out")),
+        }));
+
+        let inputs = CohortCallingInputs {
+            segmentation: &segmentation,
+            merge_parameters,
+            parameters: &parameters,
+            calling_loop_config: &calling_loop_config,
+            candidate_selection: &candidate_selection,
+            padding_reference,
+        };
+        let mut handed = 0;
+        let outcome = call_cohort_from_sources_handing_each_record_over(
+            ObservationCache::over(vec![drawn.into_iter()]),
+            inputs,
+            &the_shipped_genotyper(),
+            &mut |_record| {
+                handed += 1;
+                Err::<(), std::io::Error>(std::io::Error::other("the disk is full"))
+            },
+        );
+        // Matched rather than `expect_err`, so the failure message can name which of the two
+        // came back.
+        let stopped = match outcome {
+            Ok(_) => panic!(
+                "the sink refused every record and the source failed, so the run cannot have \
+                 come back Ok"
+            ),
+            Err(error) => error,
+        };
+
+        assert_eq!(handed, 1, "the sink is not called again after it refuses");
+        match stopped {
+            RunError::RecordNotWritten { locus, source } => {
+                assert_eq!(
+                    locus.start,
+                    Position(15),
+                    "the first of the two positions, which is where the output stopped",
+                );
+                assert!(source.to_string().contains("the disk is full"));
+            }
+            other => panic!(
+                "the refusal happened before the source gave out, so it is the run's answer; \
+                 got {other:?}",
+            ),
+        }
+    }
 
     /// Collect every record a run hands over, and the counts beside them.
     fn records_of(caller: AlignedFilesVariantCaller) -> (Vec<VcfRecord>, WrittenCohort) {
@@ -5226,10 +5466,10 @@ mod records_handed_over_as_the_run_finishes_them {
             "every locus of this fixture carries an alternative somebody was called on, so the \
              two lists are the same spans in the same order",
         );
-        assert_eq!(written.records_written, records.len() as u64);
+        assert_eq!(written.calling.records_written, records.len() as u64);
         assert_eq!(written.loci_called(), called.called_loci.len() as u64);
         assert_eq!(
-            written.loci_called_but_not_written, 0,
+            written.calling.loci_called_but_not_written, 0,
             "nothing here was called all-reference",
         );
 
@@ -5319,9 +5559,9 @@ mod records_handed_over_as_the_run_finishes_them {
              against a floor of two",
         );
         assert!(records.is_empty(), "so nothing is written");
-        assert_eq!(written.records_written, 0);
+        assert_eq!(written.calling.records_written, 0);
         assert_eq!(
-            written.loci_called_but_not_written, 1,
+            written.calling.loci_called_but_not_written, 1,
             "the locus is counted, not lost: called and establishing nothing",
         );
         assert_eq!(written.loci_called(), 1);
@@ -5338,7 +5578,7 @@ mod records_handed_over_as_the_run_finishes_them {
         let (records, written) = records_of(open_over(std::slice::from_ref(&zeta), &reference));
 
         assert_eq!(
-            written.records_written, 2,
+            written.calling.records_written, 2,
             "the two positions zeta varies at"
         );
         assert_eq!(records.len(), 2);
@@ -5457,10 +5697,10 @@ mod records_handed_over_as_the_run_finishes_them {
         let (records, written) = records_of(open_over(std::slice::from_ref(&zeta), &reference));
 
         assert_eq!(
-            written.records_written,
+            written.calling.records_written,
             1,
             "the insertion is one record; got {} record(s) at {:?}",
-            written.records_written,
+            written.calling.records_written,
             records.iter().map(VcfRecord::region).collect::<Vec<_>>(),
         );
         let record = &records[0];
@@ -5537,7 +5777,7 @@ mod records_handed_over_as_the_run_finishes_them {
             "the samples in the run's own order, and got {heading}",
         );
         let records: Vec<&str> = text.lines().filter(|line| !line.starts_with('#')).collect();
-        assert_eq!(records.len(), written.records_written as usize);
+        assert_eq!(records.len(), written.calling.records_written as usize);
         assert_eq!(
             records
                 .iter()
@@ -5863,11 +6103,11 @@ mod records_handed_over_as_the_run_finishes_them {
         let (default_width_bytes, baseline) =
             mixed_cohort_vcf_in_a_pool(1, &paths, &reference, MergeParameters::DEFAULT);
         assert_eq!(
-            baseline.records_written, 3,
+            baseline.calling.records_written, 3,
             "the shared SNP, alpha's own SNP and iota's insertion reach the file",
         );
         assert_eq!(
-            baseline.loci_called_but_not_written, 1,
+            baseline.calling.loci_called_but_not_written, 1,
             "kappa's two-singletons locus is called and establishes nothing",
         );
         // **Every sample, not the first one.** A run hands one segmentation to the whole
@@ -5895,7 +6135,7 @@ mod records_handed_over_as_the_run_finishes_them {
              every thread count",
         );
         assert_eq!(
-            baseline.tracts.built(),
+            baseline.calling.tracts.built(),
             0,
             "no sample of this cohort varies inside the tract, so the merge finds it too quiet \
              to build and there is no locus to set aside — \
@@ -5936,21 +6176,24 @@ mod records_handed_over_as_the_run_finishes_them {
                         "the VCF differs between a pool of 1 and a pool of {threads} at a \
                          {width}-base building region (repetition {repetition})",
                     );
-                    assert_eq!(again.records_written, baseline.records_written);
                     assert_eq!(
-                        again.loci_called_but_not_written,
-                        baseline.loci_called_but_not_written
+                        again.calling.records_written,
+                        baseline.calling.records_written
                     );
                     assert_eq!(
-                        again.loci_too_wide_to_assemble,
-                        baseline.loci_too_wide_to_assemble
+                        again.calling.loci_called_but_not_written,
+                        baseline.calling.loci_called_but_not_written
                     );
                     assert_eq!(
-                        again.loci_with_nobody_to_call,
-                        baseline.loci_with_nobody_to_call
+                        again.calling.loci_too_wide_to_assemble,
+                        baseline.calling.loci_too_wide_to_assemble
                     );
                     assert_eq!(
-                        again.tracts, baseline.tracts,
+                        again.calling.loci_with_nobody_to_call,
+                        baseline.calling.loci_with_nobody_to_call
+                    );
+                    assert_eq!(
+                        again.calling.tracts, baseline.calling.tracts,
                         "the tract loci set aside at a pool of {threads}",
                     );
                     assert_eq!(
@@ -6172,7 +6415,7 @@ mod records_handed_over_as_the_run_finishes_them {
         );
         assert_eq!(
             called_regions.len() - written_regions.len(),
-            written.loci_called_but_not_written as usize,
+            written.calling.loci_called_but_not_written as usize,
             "and the difference is exactly the called-but-not-written count",
         );
 
@@ -6214,7 +6457,7 @@ mod records_handed_over_as_the_run_finishes_them {
             let width = merge.cohort_locus_builder_regions_len.get();
             let (serial_bytes, serial) = mixed_cohort_vcf_in_a_pool(1, alone, &reference, merge);
             assert_eq!(
-                serial.records_written, 1,
+                serial.calling.records_written, 1,
                 "zeta alone still carries its SNP at chr1:17",
             );
             for threads in [2, 8] {
@@ -6282,7 +6525,7 @@ mod records_handed_over_as_the_run_finishes_them {
                  — without this the comparisons below are of files holding none",
             );
             assert_eq!(
-                serial.tracts.bundles_set_aside, 0,
+                serial.calling.tracts.bundles_set_aside, 0,
                 "a tract is called rather than set aside; the count is bundles alone",
             );
             for threads in [2, 4, 8, 16] {
@@ -6295,7 +6538,7 @@ mod records_handed_over_as_the_run_finishes_them {
                          {width}-base building region (repetition {repetition})",
                     );
                     assert_eq!(
-                        again.tracts, serial.tracts,
+                        again.calling.tracts, serial.calling.tracts,
                         "the tract loci set aside at a pool of {threads}",
                     );
                     assert_eq!(

@@ -261,7 +261,7 @@ returns the error the merge's contract asks for, not an assertion (arch §8's co
 item). Unit tests over reader fixtures, including a head-only-skip block and a tract record.
 *Depends:* — (parallel to B/C). *Source:* spec §3.1, §3.4; arch §5, §8.
 
-**D2. ☐ Lift the calling tail. Own commit, do not bundle.**
+**D2. ✅ Lift the calling tail. Own commit, do not bundle.**
 Everything in `call_cohort_handing_each_record_over` from `parameters.view()` on
 (`callers.rs:705-…`) becomes a free function over `ObservationCache<S>` + parameters +
 segmentation + sink; `AlignedFilesVariantCaller` calls it. **No behaviour change: direct
@@ -271,6 +271,33 @@ slice — that oracle green on both sides of this one commit is the point of iso
 loop").
 
 > **Checkpoint D: two sources, one tail, direct mode provably untouched. Pause for review.**
+>
+> **Reached 2026-09-04.** `PspObservationSource` decodes a stored sample behind the same trait
+> direct mode's walker implements, and the calling loop both modes will drive is now a free
+> function over any source (`call_cohort_from_sources_handing_each_record_over`), with
+> `AlignedFilesVariantCaller` adding only what alignment files add: opening the walkers, and
+> turning them, spent, into per-sample tallies.
+>
+> **The oracle this milestone exists for is green.** Direct mode's VCF over six tomato
+> accessions and the first two 100 kb intervals of `benchmarks/tomato1/regions.bed` — **598
+> records, sha256 `5f0903cf…`** — is byte-identical either side of the lift, and so are the
+> parameters file and the whole run report.
+>
+> **Two things the reviews caught that the code did not**: after refusing a record the psp
+> source went on handing over the *next* one, so a swallowed error lost an observation in
+> silence (a refusal now ends the source and says so on every later draw); and the rule that a
+> refused record outranks a source failing afterwards had no test — the lift is what made one
+> writable, because the loop now takes a `Vec`'s iterator as a source.
+>
+> **Carried into Milestone E:**
+> - the E-milestone interface question is settled by compilation, not by argument: a reviewer
+>   wrote `PspVariantCaller`'s method as E will have to write it — `Vec<PspReader>` out of
+>   `self`, one source each, into `ObservationCache::over`, through the lifted loop, sources
+>   read back afterwards — and it type-checks. Nothing in the signature forces E to change it;
+> - arch §3.4's `PspVariantCaller::open` sketch still lists `callers_in_flight: CallersInFlight`,
+>   which arch §8 struck on 2026-09-01 and which no type in `src/` implements. The sketch is
+>   stale, not a constraint;
+> - Milestone C's four carry-forwards are all still open, none touched by D.
 
 ### Milestone E — `PspVariantCaller`
 

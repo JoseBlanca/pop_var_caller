@@ -479,12 +479,12 @@ fn run(
             println!(
                 "# loci called: {} — {} written as records, {} establishing no variant",
                 written.loci_called(),
-                written.records_written,
-                written.loci_called_but_not_written,
+                written.calling.records_written,
+                written.calling.loci_called_but_not_written,
             );
             println!(
                 "# loci the merge declined to assemble for being too wide: {}",
-                written.loci_too_wide_to_assemble.len(),
+                written.calling.loci_too_wide_to_assemble.len(),
             );
             report_where_the_time_went(calling_seconds, setup_seconds, compressed_bytes);
         }

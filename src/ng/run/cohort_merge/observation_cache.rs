@@ -216,6 +216,18 @@ impl<S> ObservationCache<S> {
             .map(|window| window.source)
             .collect()
     }
+
+    /// **How many samples this cache merges** — the cohort's size, and the length of every
+    /// per-sample list a consumer indexes by.
+    ///
+    /// It exists so that a caller driving the merge can read the cohort's size off the thing it
+    /// is merging rather than carry a second copy beside it: the two would be the same number
+    /// until the day they were not, and the failure is a genotyper told one cohort size while a
+    /// different number of samples is drawn.
+    #[must_use]
+    pub fn sample_count(&self) -> usize {
+        self.samples.len()
+    }
 }
 
 impl<S> ObservationCache<S> {

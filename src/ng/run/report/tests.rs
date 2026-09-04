@@ -18,7 +18,7 @@ use crate::ng::region_typing::GenomeRegions;
 use crate::ng::repeat_catalog::StrRepeatCriteria;
 use crate::ng::run::AssemblyCheckOutcome;
 use crate::ng::run::callers::TractOutcomes;
-use crate::ng::run::callers::{CohortWalkTallies, SampleWalkTallies};
+use crate::ng::run::callers::{CohortCallingTallies, CohortWalkTallies, SampleWalkTallies};
 use crate::ng::types::{ContigId, Ploidy, Position, ReadGroupId};
 
 /// The two contigs every fixture here names its spans on.
@@ -88,11 +88,13 @@ fn a_run(
     per_sample: Vec<SampleWalkTallies>,
 ) -> WrittenCohort {
     WrittenCohort {
-        records_written,
-        loci_called_but_not_written,
-        loci_too_wide_to_assemble: too_wide,
-        loci_with_nobody_to_call: nobody,
-        tracts: TractOutcomes::default(),
+        calling: CohortCallingTallies {
+            records_written,
+            loci_called_but_not_written,
+            loci_too_wide_to_assemble: too_wide,
+            loci_with_nobody_to_call: nobody,
+            tracts: TractOutcomes::default(),
+        },
         walk: CohortWalkTallies {
             per_sample,
             assembly_check: AssemblyCheckOutcome::NothingCouldBeChecked {
@@ -770,15 +772,13 @@ fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_ther
         "a run that built no tract prints no line for them, rather than a row of zeros: {text}",
     );
 
-    let some_built = WrittenCohort {
-        tracts: TractOutcomes {
-            called: 40,
-            not_periodic: 5,
-            too_many_alleles: 3,
-            without_whole_repeats: 1,
-            bundles_set_aside: 7,
-        },
-        ..a_run(3, 0, Vec::new(), Vec::new(), ground.clone())
+    let mut some_built = a_run(3, 0, Vec::new(), Vec::new(), ground.clone());
+    some_built.calling.tracts = TractOutcomes {
+        called: 40,
+        not_periodic: 5,
+        too_many_alleles: 3,
+        without_whole_repeats: 1,
+        bundles_set_aside: 7,
     };
     let text = rendered(&some_built, &read_groups, &parameters, 1_000);
 
@@ -819,12 +819,10 @@ fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_ther
 
     // **Each refusal's line appears only when it happened.** Four lines of zeros under a
     // headline is a report a reader stops reading.
-    let only_called = WrittenCohort {
-        tracts: TractOutcomes {
-            called: 40,
-            ..TractOutcomes::default()
-        },
-        ..a_run(3, 0, Vec::new(), Vec::new(), ground)
+    let mut only_called = a_run(3, 0, Vec::new(), Vec::new(), ground);
+    only_called.calling.tracts = TractOutcomes {
+        called: 40,
+        ..TractOutcomes::default()
     };
     let text = rendered(&only_called, &read_groups, &parameters, 1_000);
     assert!(text.contains("repeat tracts: 40 built, of which 40 called"));

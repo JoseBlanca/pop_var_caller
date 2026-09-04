@@ -145,12 +145,15 @@ impl<'a> RunReport<'a> {
 
     /// What reached the file, and what was called but established nothing.
     fn what_was_written(&self, lines: &mut Vec<String>) {
-        lines.push(format!("records written: {}", self.written.records_written));
+        lines.push(format!(
+            "records written: {}",
+            self.written.calling.records_written
+        ));
         lines.push(format!(
             "loci called: {} — {} written, {} establishing no variant and so left out",
             self.written.loci_called(),
-            self.written.records_written,
-            self.written.loci_called_but_not_written,
+            self.written.calling.records_written,
+            self.written.calling.loci_called_but_not_written,
         ));
     }
 
@@ -219,7 +222,7 @@ impl<'a> RunReport<'a> {
         // periodic is called over the reference tract alone, so every sample is homozygous
         // reference and no record is written; in the file it is indistinguishable from a tract
         // nobody varied at (`doc/devel/ng/spec/vcf_output.md` §9).
-        let tracts = &self.written.tracts;
+        let tracts = &self.written.calling.tracts;
         if tracts.built() > 0 {
             lines.push(format!(
                 "repeat tracts: {} built, of which {} called",
@@ -256,7 +259,7 @@ impl<'a> RunReport<'a> {
         self.refused_loci(
             lines,
             "loci the merge declined to assemble for being too wide",
-            &self.written.loci_too_wide_to_assemble,
+            &self.written.calling.loci_too_wide_to_assemble,
             &format!(
                 "the bound is --max-cohort-locus-span {}; raise it and call again if the \
                  lengths above cluster just past it",
@@ -266,7 +269,7 @@ impl<'a> RunReport<'a> {
         self.refused_loci(
             lines,
             "loci where the allele cap left no sample callable",
-            &self.written.loci_with_nobody_to_call,
+            &self.written.calling.loci_with_nobody_to_call,
             &format!(
                 "the cap is --max-candidate-alleles {}; raise it to keep more of what they vary \
                  over",

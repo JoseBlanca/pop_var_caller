@@ -19,7 +19,25 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-04):** **psp mode has its second source — a stored sample
+> - **Last completed task (2026-09-04):** **psp-mode Milestone D is complete — two sources, one
+> calling loop, direct mode provably untouched** (branch `ng-psp-mode`, at Checkpoint D; step D2:
+> [report](doc/devel/reports/implementations/ng_psp_mode_d2_2026-09-04.md),
+> [review](doc/devel/reports/reviews/ng_psp_mode_d2_2026-09-04.md),
+> [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-04_v2.md)). The calling loop is no
+> longer a method on the alignment-file caller: it is a free function over any observation
+> source, and `AlignedFilesVariantCaller` now adds only what alignment files add — opening the
+> walkers, and turning them, spent, into the per-sample tallies a run report states. **The
+> oracle the step exists for is green: direct mode's VCF is byte-identical across the lift** —
+> six tomato accessions over 200 kb of SL4.0, 598 records, sha256 `5f0903cf…`, with the
+> parameters file and the whole run report matching too. Both reviewers proved the body itself
+> unchanged by mechanical diff (four hunks, all intended), and one settled Milestone E's
+> interface question by writing `PspVariantCaller`'s method as E will have to write it and
+> type-checking it. What the review found instead was a rule with no test — that a refused
+> record outranks a source failing afterwards — which the lift is what made writable, since the
+> loop now takes a `Vec`'s iterator as a source. Next: Milestone E, `PspVariantCaller` — every
+> header read and every §6.2 refusal fired before a block is decoded.
+>
+> - **Earlier (2026-09-04):** **psp mode has its second source — a stored sample
 > now answers the merge the way an open CRAM does** (branch `ng-psp-mode`, plan step D1;
 > [report](doc/devel/reports/implementations/ng_psp_mode_d1_2026-09-04.md),
 > [review](doc/devel/reports/reviews/ng_psp_mode_d1_2026-09-04.md),
