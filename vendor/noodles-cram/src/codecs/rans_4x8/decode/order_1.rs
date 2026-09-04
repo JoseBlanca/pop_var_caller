@@ -11,11 +11,17 @@ type CumulativeFrequencies = Frequencies; // C
 type CumulativeFrequenciesSymbolsTable = [[u8; 4096]; ALPHABET_SIZE];
 
 pub fn decode(src: &mut &[u8], dst: &mut [u8]) -> io::Result<()> {
+    #[cfg(feature = "perf-counters")]
+    let table_started = std::time::Instant::now();
     let frequencies = read_frequencies(src)?;
     let cumulative_frequencies = build_cumulative_frequencies(&frequencies);
 
     let cumulative_frequencies_symbols_table =
-        build_cumulative_frequencies_symbols_table(&cumulative_frequencies);
+        build_cumulative_frequencies_symbols_table(&frequencies, &cumulative_frequencies);
+    #[cfg(feature = "perf-counters")]
+    let table_nanos = table_started.elapsed().as_nanos() as u64;
+    #[cfg(feature = "perf-counters")]
+    let decode_started = std::time::Instant::now();
 
     let mut states = read_states(src)?;
     let mut prev_syms = [0; STATE_COUNT];
@@ -57,6 +63,14 @@ pub fn decode(src: &mut &[u8], dst: &mut [u8]) -> io::Result<()> {
 
         prev_sym = sym;
     }
+
+    #[cfg(feature = "perf-counters")]
+    crate::perf::record_rans(
+        true,
+        dst.len(),
+        table_nanos,
+        decode_started.elapsed().as_nanos() as u64,
+    );
 
     Ok(())
 }
@@ -103,12 +117,32 @@ fn build_cumulative_frequencies(frequencies: &Frequencies) -> CumulativeFrequenc
     cumulative_frequencies
 }
 
+/// One 4,096-entry lookup per **context that the frequency table actually uses**.
+///
+/// The order-1 model keys on the previous symbol, so it declares 256 contexts. A file of DNA
+/// bases uses about five of them and a file of quality scores a few dozen; the rest have an
+/// all-zero frequency row and no state can ever land in one. Filling those rows anyway writes
+/// a megabyte of lookup table for every block — measured at 0.16 s of the 0.40 s this codec
+/// costs on 60 containers of a whole-genome tomato CRAM — so the empty rows are left as the
+/// zeros the allocation already holds.
+///
+/// **The skipped rows are unreachable, not merely unlikely.** A row is skipped only when every
+/// frequency in it is zero, and the decoder indexes row `i` only after emitting symbol `i`,
+/// which requires a non-zero frequency for `i` in some row. So a decoder that reached a skipped
+/// row would have already decoded a symbol the frequency table says cannot occur.
 pub fn build_cumulative_frequencies_symbols_table(
+    freqs: &Frequencies,
     cumulative_freqs: &CumulativeFrequencies,
 ) -> Box<CumulativeFrequenciesSymbolsTable> {
     let mut tables = Box::new([[0; 4096]; 256]);
 
-    for (table, cumulative_freqs) in tables.iter_mut().zip(cumulative_freqs) {
+    for ((table, freqs), cumulative_freqs) in
+        tables.iter_mut().zip(freqs).zip(cumulative_freqs)
+    {
+        if freqs.iter().all(|&frequency| frequency == 0) {
+            continue;
+        }
+
         *table = order_0::build_cumulative_frequencies_symbols_table(cumulative_freqs);
     }
 

@@ -79,3 +79,57 @@ pub fn reset_counters() {
         NANOS[method].store(0, Ordering::Relaxed);
     }
 }
+
+// ---------------------------------------------------------------------
+// rANS 4x8: order, and the split between building the decode tables and decoding
+// ---------------------------------------------------------------------
+
+static RANS_ORDER0_BLOCKS: AtomicU64 = AtomicU64::new(0);
+static RANS_ORDER1_BLOCKS: AtomicU64 = AtomicU64::new(0);
+static RANS_TABLE_NANOS: AtomicU64 = AtomicU64::new(0);
+static RANS_DECODE_NANOS: AtomicU64 = AtomicU64::new(0);
+static RANS_ORDER0_BYTES: AtomicU64 = AtomicU64::new(0);
+static RANS_ORDER1_BYTES: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn record_rans(order_one: bool, bytes: usize, table_nanos: u64, decode_nanos: u64) {
+    if order_one {
+        RANS_ORDER1_BLOCKS.fetch_add(1, Ordering::Relaxed);
+        RANS_ORDER1_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    } else {
+        RANS_ORDER0_BLOCKS.fetch_add(1, Ordering::Relaxed);
+        RANS_ORDER0_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+    RANS_TABLE_NANOS.fetch_add(table_nanos, Ordering::Relaxed);
+    RANS_DECODE_NANOS.fetch_add(decode_nanos, Ordering::Relaxed);
+}
+
+/// How the rANS 4x8 blocks split by order, and where their time went.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RansCost {
+    pub order_0_blocks: u64,
+    pub order_1_blocks: u64,
+    pub order_0_bytes: u64,
+    pub order_1_bytes: u64,
+    pub table_nanos: u64,
+    pub decode_nanos: u64,
+}
+
+pub fn read_rans_counters() -> RansCost {
+    RansCost {
+        order_0_blocks: RANS_ORDER0_BLOCKS.load(Ordering::Relaxed),
+        order_1_blocks: RANS_ORDER1_BLOCKS.load(Ordering::Relaxed),
+        order_0_bytes: RANS_ORDER0_BYTES.load(Ordering::Relaxed),
+        order_1_bytes: RANS_ORDER1_BYTES.load(Ordering::Relaxed),
+        table_nanos: RANS_TABLE_NANOS.load(Ordering::Relaxed),
+        decode_nanos: RANS_DECODE_NANOS.load(Ordering::Relaxed),
+    }
+}
+
+pub fn reset_rans_counters() {
+    RANS_ORDER0_BLOCKS.store(0, Ordering::Relaxed);
+    RANS_ORDER1_BLOCKS.store(0, Ordering::Relaxed);
+    RANS_ORDER0_BYTES.store(0, Ordering::Relaxed);
+    RANS_ORDER1_BYTES.store(0, Ordering::Relaxed);
+    RANS_TABLE_NANOS.store(0, Ordering::Relaxed);
+    RANS_DECODE_NANOS.store(0, Ordering::Relaxed);
+}

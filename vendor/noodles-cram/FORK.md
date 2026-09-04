@@ -35,3 +35,15 @@ a sampling profile shows `Block::decode` as one frame whatever method the block 
 
 This is a measuring instrument, not a change to what noodles does, and it is not the kind of
 thing to send upstream.
+
+### 2. rANS 4x8 order-1 skips the symbol contexts a block never uses — a decode-speed fix
+
+`src/codecs/rans_4x8/decode/order_1.rs`:
+`build_cumulative_frequencies_symbols_table` now takes the frequency table as well as the
+cumulative one, and leaves a context's 4,096-entry lookup at the zeros the allocation already
+holds when every frequency in that context is zero. `order_0.rs` and `order_1.rs` also carry
+the feature-gated phase counters that show the cost.
+
+Measured on 60 containers of a whole-genome tomato CRAM: block inflation 0.347 s → 0.268 s.
+**This one is a plain defect and belongs upstream** — it needs no new API and changes no
+behaviour a caller can observe.

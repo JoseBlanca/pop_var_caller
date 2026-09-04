@@ -590,6 +590,7 @@ fn print_codec_costs(
     offsets: &[u64],
 ) -> io::Result<()> {
     cram::perf::reset_counters();
+    cram::perf::reset_rans_counters();
     let _ = time_pass(reader, header, repository, offsets, Pass::Blocks)?;
     let counters = cram::perf::read_counters();
     println!("\nBlock decompression, by compression method (one pass):\n");
@@ -613,6 +614,21 @@ fn print_codec_costs(
             cost.uncompressed_bytes as f64 / 1e6,
             cost.nanos as f64 / 1e9,
             100.0 * (cost.nanos as f64 / 1e9) / decompression,
+        );
+    }
+
+    let rans = cram::perf::read_rans_counters();
+    if rans.order_0_blocks + rans.order_1_blocks > 0 {
+        println!(
+            "\nOf the rANS blocks: {} are order-0 over {:.1} MB and {} are order-1 over \
+             {:.1} MB.\nBuilding the decode tables costs {:.3} s and decoding the symbols \
+             {:.3} s.",
+            rans.order_0_blocks,
+            rans.order_0_bytes as f64 / 1e6,
+            rans.order_1_blocks,
+            rans.order_1_bytes as f64 / 1e6,
+            rans.table_nanos as f64 / 1e9,
+            rans.decode_nanos as f64 / 1e9,
         );
     }
 
