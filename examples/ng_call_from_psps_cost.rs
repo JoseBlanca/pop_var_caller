@@ -244,7 +244,10 @@ fn run(
     let calling = Instant::now();
     // The records are dropped where they are handed over: this measures the calling path, and
     // writing a VCF would time the disk beside it. The counts come back in the answer.
-    let written = caller.call_cohort_handing_each_record_over(
+    // **Two tallies since Milestone F1**: what the calling did, and what each stored sample
+    // contributed. This probe reports the first; the second is what the subcommand's run
+    // report states per sample, and nothing here needs it.
+    let (written, _per_sample) = caller.call_cohort_handing_each_record_over(
         &genotyper,
         &mut |_record| -> Result<(), std::io::Error> { Ok(()) },
     )?;

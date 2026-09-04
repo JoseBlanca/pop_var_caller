@@ -48,7 +48,10 @@ gates.
 - **F2's mode-equivalence oracle, before Milestone B changes anything** —
   [`run_driver_psp_mode.md`](run_driver_psp_mode.md) F2, **open as of 2026-09-04** and owned by
   the conversation running that plan. Milestone A needs no oracle, being measurement only;
-  **B onward do**, and the plan pauses at Checkpoint A if F2 has not landed by then.
+  **B onward do**. **Met 2026-09-04**: F1, F2 and F3 are merged, `call-from-psps` exists, and
+  the oracle passes on this branch over three tomato accessions — the two modes' VCFs identical
+  apart from the recorded command line, 2,253 records, same sha256, parameters file identical
+  too (`scripts/ng_mode_equivalence_oracle.sh`).
 - **The head carries the keep rule's denominator** —
   [`psp_head_compared_reads.md`](../spec/psp_head_compared_reads.md) Milestone H, **met**
   (main, `47d4c7e1`). Without it phase 1 cannot apply the keep rule at depth. The locus kind
@@ -66,7 +69,13 @@ gates.
 
 ### Milestone A — the baseline: what a psp-mode run costs today
 
-**A1. ☐ Time `call-from-psps` end to end and by stage.** Wall and peak resident at 1, 16 and
+**A1. ✅ Time `call-from-psps` end to end and by stage.** *Done 2026-09-04, spec §5 carries the
+numbers. Both depth corners measured against direct mode on the same ground: the calling phase
+is 2.05 s against 13.91 s at 63 tomato accessions and 0.05 s against 3.34 s at one HG002 sample,
+with reading records back 43% and 91% of it. The skip is worth 2.57× at the cohort's true keep
+rate of one record in eight and 2.66× at 280 reads a position — it does not shrink with depth,
+which is a prediction of the spec's this refuted. **Checkpoint A's condition is answered: decode
+plus merge is not a small share, so B–D are worth building.*** Wall and peak resident at 1, 16 and
 63 samples on the tomato benchmark and 1 sample on HG002; the run's time split into decode
 (the source), merge, and calling — instrumentation behind a feature or a throwaway probe, not
 shipped in the hot path. Report the merge's and decode's shares: these gate Milestone E.
