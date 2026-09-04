@@ -65,3 +65,26 @@ whose every field hashes the same both ways.
 **This one does not belong upstream as it stands.** It is an interface noodles has no other
 caller for, and proposing it is a conversation about a `write_*_into` family across the
 alignment-record traits, not a bug report.
+
+### 4. Records whose auxiliary tags are never read — a new API, and a check that says when it is safe
+
+`src/io/reader/container/slice.rs` gains `Slice::records_discarding_tags` beside `records`
+(both now call one private `read_records`); `src/io/reader/container/slice/tag_streams.rs`
+(new) decides whether the tags may be left unread; `slice/records.rs` gains a `TagPolicy` and
+acts on it.
+
+A caller that reads no tags — ng reads none, since a CRAM stores the read group as a number
+rather than a tag — was paying for every one of them. Skipping them is not simply a matter of
+not asking: CRAM decodes tags and data series out of the same streams, and a stream is a
+cursor, so a skipped read that something else depended on leaves every value after it wrong
+and says nothing. `tags_can_be_left_unread` decides the question from the compression header
+before any record is read, and answers *no* unless every tag reads only external blocks that
+no data series reads. When it answers no, the tags are decoded and their values discarded,
+which is smaller but always safe.
+
+Measured, whole-genome tomato: the read path 0.570 s → 0.454 s. On a GIAB human CRAM written
+by a different aligner, 0.551 s → 0.505 s. Records identical in both.
+
+**Not upstream as it stands**, for the same reason as change 3: it is an API with one caller.
+The `tag_streams` check would be the interesting part of any upstream proposal, since it is
+what makes the option safe to offer at all.

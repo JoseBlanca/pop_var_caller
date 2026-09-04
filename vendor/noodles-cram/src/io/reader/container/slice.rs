@@ -1,6 +1,9 @@
 mod header;
 pub mod records;
 
+mod tag_streams;
+
+use self::records::TagPolicy;
 use std::{borrow::Cow, io, sync::Arc};
 
 use noodles_core::Position;
@@ -101,6 +104,60 @@ impl<'c> Slice<'c> {
         core_data_src: &'c [u8],
         external_data_srcs: &'c [(block::ContentId, Cow<'c, [u8]>)],
     ) -> io::Result<Vec<Record<'c>>> {
+        self.read_records(
+            reference_sequence_repository,
+            header,
+            compression_header,
+            core_data_src,
+            external_data_srcs,
+            TagPolicy::Keep,
+        )
+    }
+
+    /// The slice's records, **with every auxiliary tag decoded and then thrown away**.
+    ///
+    /// A CRAM's tags are interleaved with everything else in the same encoded streams, so they
+    /// cannot be left unread — reading past them is what keeps the streams in step. What can be
+    /// skipped is turning each one into a value and storing it, which is a heap allocation per
+    /// record with a non-empty tag set and, on a whole-genome CRAM, most of what decoding a
+    /// record costs.
+    ///
+    /// **A record from here reports no tags at all.** `data()` is empty, and a caller that asks
+    /// it for a tag gets `None` rather than an error — so this is only for a caller that reads
+    /// none of them. The one exception is the read group, which a CRAM stores as a number
+    /// rather than a tag and which `data().get(&Tag::READ_GROUP)` answers from that number; it
+    /// is unaffected.
+    pub fn records_discarding_tags<'h: 'c, 'ch: 'c>(
+        &self,
+        reference_sequence_repository: fasta::Repository,
+        header: &'h sam::Header,
+        compression_header: &'ch CompressionHeader,
+        core_data_src: &'c [u8],
+        external_data_srcs: &'c [(block::ContentId, Cow<'c, [u8]>)],
+    ) -> io::Result<Vec<Record<'c>>> {
+        self.read_records(
+            reference_sequence_repository,
+            header,
+            compression_header,
+            core_data_src,
+            external_data_srcs,
+            if tag_streams::tags_can_be_left_unread(compression_header) {
+                TagPolicy::SkipStreams
+            } else {
+                TagPolicy::DiscardValues
+            },
+        )
+    }
+
+    fn read_records<'h: 'c, 'ch: 'c>(
+        &self,
+        reference_sequence_repository: fasta::Repository,
+        header: &'h sam::Header,
+        compression_header: &'ch CompressionHeader,
+        core_data_src: &'c [u8],
+        external_data_srcs: &'c [(block::ContentId, Cow<'c, [u8]>)],
+        tag_policy: TagPolicy,
+    ) -> io::Result<Vec<Record<'c>>> {
         let core_data_reader = BitReader::new(core_data_src);
 
         let mut external_data_readers = ExternalDataReaders::new();
@@ -118,7 +175,11 @@ impl<'c> Slice<'c> {
             external_data_readers,
             reference_sequence_context,
             initial_id,
+            tag_policy,
         );
+
+        #[cfg(feature = "perf-counters")]
+        let phase_started = std::time::Instant::now();
 
         let slice_reference_sequence = get_slice_reference_sequence(
             &reference_sequence_repository.clone(),
@@ -128,9 +189,32 @@ impl<'c> Slice<'c> {
             external_data_srcs,
         )?;
 
+        #[cfg(feature = "perf-counters")]
+        {
+            crate::perf::record_slice_phase(
+                crate::perf::SlicePhase::Reference,
+                phase_started.elapsed().as_nanos() as u64,
+            );
+            crate::perf::record_slice_records(self.header.record_count());
+        }
+
         let substitution_matrix = compression_header.preservation_map().substitution_matrix();
 
+        #[cfg(feature = "perf-counters")]
+        let phase_started = std::time::Instant::now();
+
         let mut records = vec![Record::default(); self.header.record_count()];
+
+        #[cfg(feature = "perf-counters")]
+        {
+            crate::perf::record_slice_phase(
+                crate::perf::SlicePhase::Allocate,
+                phase_started.elapsed().as_nanos() as u64,
+            );
+        }
+
+        #[cfg(feature = "perf-counters")]
+        let phase_started = std::time::Instant::now();
 
         for record in &mut records {
             reader.read_record(record)?;
@@ -148,7 +232,26 @@ impl<'c> Slice<'c> {
             }
         }
 
+        #[cfg(feature = "perf-counters")]
+        {
+            crate::perf::record_slice_phase(
+                crate::perf::SlicePhase::ReadRecords,
+                phase_started.elapsed().as_nanos() as u64,
+            );
+        }
+
+        #[cfg(feature = "perf-counters")]
+        let phase_started = std::time::Instant::now();
+
         resolve_mates(&mut records)?;
+
+        #[cfg(feature = "perf-counters")]
+        {
+            crate::perf::record_slice_phase(
+                crate::perf::SlicePhase::ResolveMates,
+                phase_started.elapsed().as_nanos() as u64,
+            );
+        }
 
         Ok(records)
     }

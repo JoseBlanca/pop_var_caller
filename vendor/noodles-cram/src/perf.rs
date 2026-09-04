@@ -133,3 +133,75 @@ pub fn reset_rans_counters() {
     RANS_TABLE_NANOS.store(0, Ordering::Relaxed);
     RANS_DECODE_NANOS.store(0, Ordering::Relaxed);
 }
+
+// ---------------------------------------------------------------------
+// Slice::records — where the record-decode layer's time goes
+// ---------------------------------------------------------------------
+
+static SLICE_ALLOC_NANOS: AtomicU64 = AtomicU64::new(0);
+static SLICE_REFERENCE_NANOS: AtomicU64 = AtomicU64::new(0);
+static SLICE_READ_NANOS: AtomicU64 = AtomicU64::new(0);
+static SLICE_TAG_NANOS: AtomicU64 = AtomicU64::new(0);
+static SLICE_MATE_NANOS: AtomicU64 = AtomicU64::new(0);
+static SLICE_RECORDS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn record_slice_phase(phase: SlicePhase, nanos: u64) {
+    match phase {
+        SlicePhase::Allocate => &SLICE_ALLOC_NANOS,
+        SlicePhase::Reference => &SLICE_REFERENCE_NANOS,
+        SlicePhase::ReadRecords => &SLICE_READ_NANOS,
+        SlicePhase::ReadTags => &SLICE_TAG_NANOS,
+        SlicePhase::ResolveMates => &SLICE_MATE_NANOS,
+    }
+    .fetch_add(nanos, Ordering::Relaxed);
+}
+
+pub(crate) fn record_slice_records(records: usize) {
+    SLICE_RECORDS.fetch_add(records as u64, Ordering::Relaxed);
+}
+
+/// One stage of turning a decoded slice into records.
+#[derive(Clone, Copy, Debug)]
+pub enum SlicePhase {
+    /// Building the `Vec<Record>` the slice's records are read into.
+    Allocate,
+    /// Fetching the slice's reference sequence, and verifying its digest.
+    Reference,
+    /// Reading every record out of the decoded blocks — tags excluded.
+    ReadRecords,
+    /// The auxiliary tags, within the above.
+    ReadTags,
+    /// Linking each record to its mate.
+    ResolveMates,
+}
+
+/// What each stage of `Slice::records` cost over the slices decoded so far.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SliceCost {
+    pub records: u64,
+    pub allocate_nanos: u64,
+    pub reference_nanos: u64,
+    pub read_nanos: u64,
+    pub tag_nanos: u64,
+    pub resolve_mates_nanos: u64,
+}
+
+pub fn read_slice_counters() -> SliceCost {
+    SliceCost {
+        records: SLICE_RECORDS.load(Ordering::Relaxed),
+        allocate_nanos: SLICE_ALLOC_NANOS.load(Ordering::Relaxed),
+        reference_nanos: SLICE_REFERENCE_NANOS.load(Ordering::Relaxed),
+        read_nanos: SLICE_READ_NANOS.load(Ordering::Relaxed),
+        tag_nanos: SLICE_TAG_NANOS.load(Ordering::Relaxed),
+        resolve_mates_nanos: SLICE_MATE_NANOS.load(Ordering::Relaxed),
+    }
+}
+
+pub fn reset_slice_counters() {
+    SLICE_RECORDS.store(0, Ordering::Relaxed);
+    SLICE_ALLOC_NANOS.store(0, Ordering::Relaxed);
+    SLICE_REFERENCE_NANOS.store(0, Ordering::Relaxed);
+    SLICE_READ_NANOS.store(0, Ordering::Relaxed);
+    SLICE_TAG_NANOS.store(0, Ordering::Relaxed);
+    SLICE_MATE_NANOS.store(0, Ordering::Relaxed);
+}

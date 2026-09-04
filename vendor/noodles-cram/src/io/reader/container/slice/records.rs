@@ -38,6 +38,20 @@ impl fmt::Display for ReadRecordError {
     }
 }
 
+/// What a record does with the auxiliary tags it is asked to read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TagPolicy {
+    /// Decode every tag and store it on the record.
+    Keep,
+    /// Decode every tag — which is what keeps the streams around it in step — and store none.
+    /// Saves the value parsing and the record's one heap allocation for them.
+    DiscardValues,
+    /// Do not read the tags at all. **Only sound when the container's tag encodings read no
+    /// shared stream**, which `tag_streams::tags_can_be_left_unread` decides from the
+    /// compression header; nothing here re-checks it.
+    SkipStreams,
+}
+
 pub struct Records<'c, 'ch: 'c> {
     compression_header: &'ch CompressionHeader,
     core_data_reader: BitReader<'c>,
@@ -45,6 +59,7 @@ pub struct Records<'c, 'ch: 'c> {
     reference_sequence_context: ReferenceSequenceContext,
     id: u64,
     prev_alignment_start: Option<Position>,
+    tag_policy: TagPolicy,
 }
 
 impl<'c, 'ch: 'c> Records<'c, 'ch> {
@@ -54,6 +69,7 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
         external_data_readers: ExternalDataReaders<'c>,
         reference_sequence_context: ReferenceSequenceContext,
         initial_id: u64,
+        tag_policy: TagPolicy,
     ) -> Self {
         let initial_alignment_start = match reference_sequence_context {
             ReferenceSequenceContext::Some(context) => Some(context.alignment_start()),
@@ -67,6 +83,7 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
             reference_sequence_context,
             id: initial_id,
             prev_alignment_start: initial_alignment_start,
+            tag_policy,
         }
     }
 
@@ -324,6 +341,18 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
     }
 
     fn read_data(&mut self, record: &mut Record<'c>) -> io::Result<()> {
+        #[cfg(feature = "perf-counters")]
+        let started = std::time::Instant::now();
+        let read = self.read_data_inner(record);
+        #[cfg(feature = "perf-counters")]
+        crate::perf::record_slice_phase(
+            crate::perf::SlicePhase::ReadTags,
+            started.elapsed().as_nanos() as u64,
+        );
+        read
+    }
+
+    fn read_data_inner(&mut self, record: &mut Record<'c>) -> io::Result<()> {
         let tag_set_id = self.read_tag_set_id()?;
 
         let tag_set = self
@@ -333,12 +362,18 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
             .get(tag_set_id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing tag set"))?;
 
-        record.data.reserve(tag_set.len());
+        if self.tag_policy == TagPolicy::SkipStreams {
+            return Ok(());
+        }
+
+        if self.tag_policy == TagPolicy::Keep {
+            record.data.reserve(tag_set.len());
+        }
 
         for &key in tag_set {
             let id = block::ContentId::from(key);
 
-            let value = self
+            let src = self
                 .compression_header
                 .tag_encodings()
                 .get(&id)
@@ -348,9 +383,17 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
                         ReadRecordError::MissingTagEncoding(key),
                     )
                 })?
-                .decode(&mut self.core_data_reader, &mut self.external_data_readers)
-                .and_then(|src| self::data::read_value(src, key.ty()))?;
+                .decode(&mut self.core_data_reader, &mut self.external_data_readers)?;
 
+            // **The decode above is not skippable and the rest is.** Every tag's bytes sit in
+            // the same streams as the fields around them, so reading past them is what keeps
+            // those streams in step; turning them into a value and storing it is what a caller
+            // reading no tags does not need.
+            if self.tag_policy == TagPolicy::DiscardValues {
+                continue;
+            }
+
+            let value = self::data::read_value(src, key.ty())?;
             record.data.push((key.tag(), value));
         }
 

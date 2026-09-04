@@ -166,6 +166,7 @@ fn run(args: &Args) -> io::Result<()> {
     let mut records = Duration::MAX;
     let mut convert = Duration::MAX;
     let mut direct = Duration::MAX;
+    let mut discard_tags = Duration::MAX;
     let mut digest = Duration::MAX;
 
     for _ in 0..args.repeats {
@@ -203,6 +204,13 @@ fn run(args: &Args) -> io::Result<()> {
             &repository,
             offsets,
             Pass::Direct,
+        )?);
+        discard_tags = discard_tags.min(time_pass(
+            &mut reader,
+            &header,
+            &repository,
+            offsets,
+            Pass::DiscardTags,
         )?);
         digest = digest.min(time_digest(&repository, &args.contig, &spans)?);
     }
@@ -258,9 +266,23 @@ fn run(args: &Args) -> io::Result<()> {
         (convert.as_secs_f64() - records.as_secs_f64()).max(0.0),
     );
 
+    println!(
+        "\nDecoding the auxiliary tags but not keeping them, which is every tag ng reads: \
+         {:.3} s for the whole walk against {:.3} s.",
+        discard_tags.as_secs_f64(),
+        direct.as_secs_f64(),
+    );
+
     let through_record_buf =
         checksum_pass(&mut reader, &header, &repository, offsets, Pass::Convert)?;
     let read_directly = checksum_pass(&mut reader, &header, &repository, offsets, Pass::Direct)?;
+    let without_tags = checksum_pass(
+        &mut reader,
+        &header,
+        &repository,
+        offsets,
+        Pass::DiscardTags,
+    )?;
     println!(
         "\nEvery decoded field of all {} records hashes to {through_record_buf} through \
          `RecordBuf` and to {read_directly} read directly — {}.",
@@ -271,12 +293,38 @@ fn run(args: &Args) -> io::Result<()> {
             "THESE DIFFER"
         },
     );
+    println!(
+        "With the tags decoded and discarded they hash to {without_tags} — {}.",
+        if without_tags == read_directly {
+            "still the same records"
+        } else {
+            "THESE DIFFER"
+        },
+    );
 
     println!(
         "\nThroughput at the last layer: {:.2} M records/s, {:.1} MiB/s of container bytes.",
         shape.records as f64 / total / 1e6,
         shape.container_bytes as f64 / total / (1024.0 * 1024.0),
     );
+
+    let slice = cram::perf::read_slice_counters();
+    if slice.records > 0 {
+        println!(
+            "\nTurning {} decoded slices' blocks into records:\n\
+             \x20 fetching and digesting the reference   {:.3} s\n\
+             \x20 allocating the record vector           {:.3} s\n\
+             \x20 reading the records                    {:.3} s, of which\n\
+             \x20   the auxiliary tags                   {:.3} s\n\
+             \x20 linking each record to its mate        {:.3} s",
+            slice.records,
+            slice.reference_nanos as f64 / 1e9,
+            slice.allocate_nanos as f64 / 1e9,
+            slice.read_nanos as f64 / 1e9,
+            slice.tag_nanos as f64 / 1e9,
+            slice.resolve_mates_nanos as f64 / 1e9,
+        );
+    }
 
     Ok(())
 }
@@ -290,6 +338,8 @@ enum Pass {
     /// What `Convert` does, but reading each field straight off the CRAM record into flat
     /// buffers instead of going through `RecordBuf` and the eight boxed accessors behind it.
     Direct,
+    /// What `Direct` does, and the auxiliary tags decoded but not kept.
+    DiscardTags,
 }
 
 fn time_pass(
@@ -355,19 +405,29 @@ fn time_pass_checked(
                 continue;
             }
 
-            let records = slice.records(
-                repository.clone(),
-                header,
-                &compression_header,
-                &core_data_src,
-                &external_data_srcs,
-            )?;
+            let records = if pass == Pass::DiscardTags {
+                slice.records_discarding_tags(
+                    repository.clone(),
+                    header,
+                    &compression_header,
+                    &core_data_src,
+                    &external_data_srcs,
+                )?
+            } else {
+                slice.records(
+                    repository.clone(),
+                    header,
+                    &compression_header,
+                    &core_data_src,
+                    &external_data_srcs,
+                )?
+            };
             if pass == Pass::Records {
                 sink.absorb_usize(records.len());
                 continue;
             }
 
-            if pass == Pass::Direct {
+            if pass == Pass::Direct || pass == Pass::DiscardTags {
                 for record in &records {
                     sink.absorb_usize(record.read_group_index().map_or(0, |index| index + 1));
                     if checksum {
@@ -688,6 +748,7 @@ fn print_codec_costs(
 ) -> io::Result<()> {
     cram::perf::reset_counters();
     cram::perf::reset_rans_counters();
+    cram::perf::reset_slice_counters();
     let _ = time_pass(reader, header, repository, offsets, Pass::Blocks)?;
     let counters = cram::perf::read_counters();
     println!("\nBlock decompression, by compression method (one pass):\n");
