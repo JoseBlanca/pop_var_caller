@@ -235,20 +235,56 @@ two-phase read needs them:
 
 ## 5. Performance: what is known, what is measured first, what is gated
 
-**Known:** the skip is 2.06× on the per-sample walk at three reads a position, and its value
-shrinks with depth — the chain-id changes ride in the head and grow from 0.432 bytes a position
-at 11.4 reads to 6.42 at 293, so at depth the head carries most of the bytes and the body the
-skip avoids is a smaller share ([`psp_record_encoding.md`](psp_record_encoding.md) §6;
-[`examples/ng_psp_skip_value.rs`](../../../../examples/ng_psp_skip_value.rs) exists to measure
-what survives). **Known of the merge:** its parallel driver gives 1.4× on 8 threads because the
-organiser's cover runs serially between rounds — tolerable in direct mode behind a generator
-14–23× its cost, and the whole ceiling in psp mode, where the generator is gone
+**Measured 2026-09-04, on ng's own store — the plan's Milestone A, and it replaces the
+prototype figures this section carried.** A psp-mode run had never been timed; both corners of
+the range now have been, against direct mode over the same ground, the same cohort and the same
+parallel path on the same day:
+
+| | 63 tomato accessions, 200 kb, ~3 reads a position | HG002, 76 kb, ~280 reads a position, one sample |
+|---|---|---|
+| calling phase, direct mode | 13.91 s | 3.34 s |
+| calling phase, psp mode | 2.05 s | 0.05 s |
+| reading the records back | 881 ms (42.9%) | 47.6 ms (91.2%) |
+| assembling the loci | 392 ms (19.1%) | 2.3 ms (4.4%) |
+| genotyping them | 713 ms (34.7%) | 1.4 ms (2.7%) |
+
+**Calling from stored files is 6.8× faster than calling from alignments at the cohort corner
+and 67× at the single high-depth sample**, and the run's centre of gravity moves: at 63
+accessions, reading records back is 43% of the work where decoding reads is 81% in direct mode,
+and the merge plus the genotyper rise from 18% of a direct run to 54% of a psp one.
+
+**What the skip is worth, and the prediction it refutes.** This section used to say the skip was
+2.06× and that *its value shrinks with depth*, because the chain-id changes ride in the head and
+grow from 0.432 bytes a position at 11.4 reads to 6.42 at 293
+([`psp_record_encoding.md`](psp_record_encoding.md) §6). **Measured on ng's own files, it does
+not shrink** ([`examples/ng_psp_skip_value.rs`](../../../../examples/ng_psp_skip_value.rs)):
+
+| store | reads a record | bodies kept | skipping against building everything |
+|---|---|---|---|
+| tomato accession | 8.5 | 1 in 8 — **the rate a 63-sample cohort actually needs** | **2.57×** |
+| tomato accession | 8.5 | 1 in 16 | 2.90× |
+| tomato accession | 8.5 | 1 in 100 | 2.91× |
+| HG002 | 281.9 | 1 in 53 — the rate one sample actually needs | **2.66×** |
+
+**The keep rate is per record, not per locus, and that correction matters more than the depth
+axis.** A kept cohort locus needs *every covering sample's* record built, so at 63 accessions
+24,538 kept loci ask for roughly 1.5 million of the 12.1 million records drawn — **one record in
+eight, not one in a hundred**. The design was sized against the locus rate in an earlier draft;
+at the true rate the skip is still 2.57×, which is why it survives the correction.
+
+**So the saving this design can take is about a quarter of the calling phase at the cohort
+corner** — 43% of the work running 2.57× faster — **and over half of it at the single
+high-depth sample**, where reading records back is 91% of a very short call. Both are estimates
+composed from a bare walk's speed-up applied to a run's measured share, not end-to-end
+measurements of the built design; Milestone E is what replaces them.
+
+**Known of the merge:** its parallel driver gives 1.4× on 8 threads because the organiser's
+cover runs serially between rounds — tolerable in direct mode behind a generator 14–23× its
+cost, and much more exposed in psp mode, where the generator is gone
 ([`cohort_merge.md`](cohort_merge.md) §6.2).
 
-**Never measured: a psp-mode run end to end.** The first measurement of the plan is the
-timing of `call-from-psps` — decode, merge, calling, as shares of wall — at one, sixteen and
-sixty-three samples, before and after the two-phase source. That number gates everything
-structural: per-sample cover parallelism, overlap of cover with building, and the rest of
+**What is still gated on measurement:** per-sample cover parallelism, overlapping the cover with
+building, and the rest of
 [`../research/cohort_merge_parallel_cost_plan.md`](../research/cohort_merge_parallel_cost_plan.md)'s
 psp half fold into this work **only if the share of a run they could recover says so**, and
 [`run_streaming.md`](run_streaming.md) §11 question 7 is where the conclusion is owed either
@@ -266,11 +302,15 @@ way.
   at the sweep's top end.
 - **Three reads a position.** The skip's best corner: bodies dominate records, one in a
   hundred is built.
-- **Three hundred reads.** The skip's worst corner, twice over: the head is most of the record,
-  and error alone clears the keep rule's floor at about 4 positions in 100 so more loci reach
-  assembly. The design degrades to what the decode-everything source already is, plus a small
-  head-walk overhead — it cannot be slower than today's path by more than that walk, which is
-  0.027 s per 7.69 M records.
+- **Three hundred reads.** Predicted to be the skip's worst corner, twice over — the head is
+  most of the record, and error alone clears the keep rule's floor at about 4 positions in 100
+  so more loci reach assembly. **Measured, it is not** (§5): on HG002 at 281.9 reads a record,
+  keeping the 1 record in 53 that sample's 1,439 kept loci actually need, the skipping walk is
+  **2.66×** a full one, against 2.57× on tomato at its own true keep rate. What does grow at
+  depth is the body: 40.97 bytes a record against tomato's 23.17, so each body skipped is worth
+  more, which offsets the head's growth rather than being swamped by it. The design's floor
+  argument stands unchanged either way — it degrades to what the decode-everything source
+  already is, plus one head walk.
 
 ## 7. Cross-cutting concerns
 
