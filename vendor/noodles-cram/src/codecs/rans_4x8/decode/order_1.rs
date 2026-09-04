@@ -1,23 +1,64 @@
 use std::io;
 
-use super::{order_0, read_states, state_cumulative_frequency, state_renormalize, state_step};
+use super::{order_0, read_states, state_renormalize, table};
 use crate::{
     codecs::rans_4x8::{ALPHABET_SIZE, STATE_COUNT},
     io::reader::num::read_u8,
 };
 
 type Frequencies = [[u16; ALPHABET_SIZE]; ALPHABET_SIZE]; // F
-type CumulativeFrequencies = Frequencies; // C
-type CumulativeFrequenciesSymbolsTable = [[u8; 4096]; ALPHABET_SIZE];
+
+/// The slot tables of the contexts this block actually uses, back to back.
+///
+/// The order-1 model keys on the previous symbol, so it declares 256 contexts. A block of DNA
+/// bases uses about five of them and a block of quality scores a few dozen; the rest have an
+/// all-zero frequency row that no state can ever reach, because the decoder indexes context
+/// *i* only after emitting symbol *i*. Holding only the used ones is why a block allocates
+/// tens of kilobytes here rather than the four megabytes 256 packed contexts would take.
+struct DecodeTables {
+    /// One fixed-size table per used context. Fixed-size rather than a flat `Vec` and an
+    /// offset **so that the inner loop's slot index needs no bounds check**: the index is a
+    /// state masked to twelve bits, which the compiler can see is below the row's length.
+    rows: Vec<[table::Slot; table::TOTAL_FREQUENCY]>,
+    /// Which row each context uses. An unused context is never indexed, and points at row zero
+    /// so that a corrupt stream reads a wrong byte rather than panicking in the inner loop.
+    row_of_context: [u16; ALPHABET_SIZE],
+}
+
+impl DecodeTables {
+    fn build(frequencies: &Frequencies) -> Self {
+        let mut rows = Vec::new();
+        let mut row_of_context = [0u16; ALPHABET_SIZE];
+
+        for (context, frequencies) in frequencies.iter().enumerate() {
+            if frequencies.iter().all(|&frequency| frequency == 0) {
+                continue;
+            }
+
+            row_of_context[context] = rows.len() as u16;
+            rows.push([0; table::TOTAL_FREQUENCY]);
+            let row = rows.last_mut().expect("a row was just pushed");
+            table::fill_context(frequencies, row);
+        }
+
+        if rows.is_empty() {
+            rows.push([0; table::TOTAL_FREQUENCY]);
+        }
+
+        Self {
+            rows,
+            row_of_context,
+        }
+    }
+}
 
 pub fn decode(src: &mut &[u8], dst: &mut [u8]) -> io::Result<()> {
     #[cfg(feature = "perf-counters")]
     let table_started = std::time::Instant::now();
-    let frequencies = read_frequencies(src)?;
-    let cumulative_frequencies = build_cumulative_frequencies(&frequencies);
 
-    let cumulative_frequencies_symbols_table =
-        build_cumulative_frequencies_symbols_table(&frequencies, &cumulative_frequencies);
+    let frequencies = read_frequencies(src)?;
+    let tables = DecodeTables::build(&frequencies);
+
     #[cfg(feature = "perf-counters")]
     let table_nanos = table_started.elapsed().as_nanos() as u64;
     #[cfg(feature = "perf-counters")]
@@ -33,14 +74,14 @@ pub fn decode(src: &mut &[u8], dst: &mut [u8]) -> io::Result<()> {
         let dsts = [d0, d1, d2, d3];
 
         for (state, (prev_sym, d)) in states.iter_mut().zip(prev_syms.iter_mut().zip(dsts)) {
-            let i = usize::from(*prev_sym);
-            let f = state_cumulative_frequency(*state);
-            let sym = cumulative_frequencies_symbols_table[i][usize::from(f)];
+            let row = &tables.rows[usize::from(tables.row_of_context[usize::from(*prev_sym)])];
+            let slot = row[(*state & 0x0fff) as usize];
+            let sym = table::symbol(slot);
 
             *d = sym;
 
-            let j = usize::from(sym);
-            *state = state_step(*state, frequencies[i][j], cumulative_frequencies[i][j]);
+            *state = table::frequency(slot) * (*state >> 12) + (*state & 0x0fff)
+                - table::range_start(slot);
             *state = state_renormalize(*state, src)?;
 
             *prev_sym = sym;
@@ -51,14 +92,14 @@ pub fn decode(src: &mut &[u8], dst: &mut [u8]) -> io::Result<()> {
     let mut prev_sym = prev_syms[3];
 
     for d in chunk_4 {
-        let i = usize::from(prev_sym);
-        let f = state_cumulative_frequency(state);
-        let sym = cumulative_frequencies_symbols_table[i][usize::from(f)];
+        let row = &tables.rows[usize::from(tables.row_of_context[usize::from(prev_sym)])];
+        let slot = row[(state & 0x0fff) as usize];
+        let sym = table::symbol(slot);
 
         *d = sym;
 
-        let j = usize::from(sym);
-        state = state_step(state, frequencies[i][j], cumulative_frequencies[i][j]);
+        state = table::frequency(slot) * (state >> 12) + (state & 0x0fff)
+            - table::range_start(slot);
         state = state_renormalize(state, src)?;
 
         prev_sym = sym;
@@ -105,48 +146,6 @@ fn read_frequencies(src: &mut &[u8]) -> io::Result<Frequencies> {
     }
 
     Ok(frequencies)
-}
-
-fn build_cumulative_frequencies(frequencies: &Frequencies) -> CumulativeFrequencies {
-    let mut cumulative_frequencies = [[0; ALPHABET_SIZE]; ALPHABET_SIZE];
-
-    for (f, g) in frequencies.iter().zip(&mut cumulative_frequencies) {
-        *g = order_0::build_cumulative_frequencies(f);
-    }
-
-    cumulative_frequencies
-}
-
-/// One 4,096-entry lookup per **context that the frequency table actually uses**.
-///
-/// The order-1 model keys on the previous symbol, so it declares 256 contexts. A file of DNA
-/// bases uses about five of them and a file of quality scores a few dozen; the rest have an
-/// all-zero frequency row and no state can ever land in one. Filling those rows anyway writes
-/// a megabyte of lookup table for every block — measured at 0.16 s of the 0.40 s this codec
-/// costs on 60 containers of a whole-genome tomato CRAM — so the empty rows are left as the
-/// zeros the allocation already holds.
-///
-/// **The skipped rows are unreachable, not merely unlikely.** A row is skipped only when every
-/// frequency in it is zero, and the decoder indexes row `i` only after emitting symbol `i`,
-/// which requires a non-zero frequency for `i` in some row. So a decoder that reached a skipped
-/// row would have already decoded a symbol the frequency table says cannot occur.
-pub fn build_cumulative_frequencies_symbols_table(
-    freqs: &Frequencies,
-    cumulative_freqs: &CumulativeFrequencies,
-) -> Box<CumulativeFrequenciesSymbolsTable> {
-    let mut tables = Box::new([[0; 4096]; 256]);
-
-    for ((table, freqs), cumulative_freqs) in
-        tables.iter_mut().zip(freqs).zip(cumulative_freqs)
-    {
-        if freqs.iter().all(|&frequency| frequency == 0) {
-            continue;
-        }
-
-        *table = order_0::build_cumulative_frequencies_symbols_table(cumulative_freqs);
-    }
-
-    tables
 }
 
 fn split_chunks(dst: &mut [u8]) -> [&mut [u8]; 5] {

@@ -1,23 +1,24 @@
 use std::io;
 
-use super::{read_states, state_cumulative_frequency, state_renormalize, state_step};
+use super::{read_states, state_renormalize, table};
 use crate::{
     codecs::rans_4x8::ALPHABET_SIZE,
     io::reader::num::{read_itf8_as, read_u8},
 };
 
 type Frequencies = [u16; ALPHABET_SIZE]; // F
-type CumulativeFrequencies = Frequencies; // C
-type CumulativeFrequenciesSymbolsTable = [u8; 4096];
 
 pub fn decode(src: &mut &[u8], dst: &mut [u8]) -> io::Result<()> {
     #[cfg(feature = "perf-counters")]
     let table_started = std::time::Instant::now();
-    let frequencies = read_frequencies(src)?;
-    let cumulative_frequencies = build_cumulative_frequencies(&frequencies);
 
-    let cumulative_frequencies_symbols_table =
-        build_cumulative_frequencies_symbols_table(&cumulative_frequencies);
+    let frequencies = read_frequencies(src)?;
+
+    // A fixed-size table, so the inner loop's index — a state masked to twelve bits — needs no
+    // bounds check.
+    let mut slots = Box::new([0; table::TOTAL_FREQUENCY]);
+    table::fill_context(&frequencies, slots.as_mut_slice());
+
     #[cfg(feature = "perf-counters")]
     let table_nanos = table_started.elapsed().as_nanos() as u64;
     #[cfg(feature = "perf-counters")]
@@ -27,13 +28,12 @@ pub fn decode(src: &mut &[u8], dst: &mut [u8]) -> io::Result<()> {
 
     for chunk in dst.chunks_mut(states.len()) {
         for (d, state) in chunk.iter_mut().zip(states.iter_mut()) {
-            let f = state_cumulative_frequency(*state);
-            let sym = cumulative_frequencies_symbols_table[usize::from(f)];
+            let slot = slots[(*state & 0x0fff) as usize];
 
-            *d = sym;
+            *d = table::symbol(slot);
 
-            let i = usize::from(sym);
-            *state = state_step(*state, frequencies[i], cumulative_frequencies[i]);
+            *state = table::frequency(slot) * (*state >> 12) + (*state & 0x0fff)
+                - table::range_start(slot);
             *state = state_renormalize(*state, src)?;
         }
     }
@@ -83,36 +83,6 @@ pub(super) fn read_frequencies(src: &mut &[u8]) -> io::Result<Frequencies> {
     Ok(frequencies)
 }
 
-pub(super) fn build_cumulative_frequencies(frequencies: &Frequencies) -> CumulativeFrequencies {
-    let mut cumulative_frequencies = [0; ALPHABET_SIZE];
-
-    let mut f = cumulative_frequencies[0];
-
-    for (next_f, g) in cumulative_frequencies[1..].iter_mut().zip(frequencies) {
-        *next_f = f + g;
-        f = *next_f;
-    }
-
-    cumulative_frequencies
-}
-
-pub(super) fn build_cumulative_frequencies_symbols_table(
-    cumulative_freqs: &CumulativeFrequencies,
-) -> CumulativeFrequenciesSymbolsTable {
-    let mut table = [0; 4096];
-    let mut sym = 0;
-
-    for (f, g) in (0u16..).zip(&mut table) {
-        while sym < u8::MAX && f >= cumulative_freqs[usize::from(sym + 1)] {
-            sym += 1;
-        }
-
-        *g = sym;
-    }
-
-    table
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,8 +114,10 @@ mod tests {
         Ok(())
     }
 
+    /// The same frequencies the test above reads, laid out as slots: every slot of a
+    /// symbol's range answers with that symbol, its frequency, and where its range starts.
     #[test]
-    fn test_build_cumulative_frequencies() {
+    fn a_slot_table_hands_each_slot_to_the_symbol_whose_range_covers_it() {
         let mut frequencies = [0; ALPHABET_SIZE];
         frequencies[usize::from(b'a')] = 5;
         frequencies[usize::from(b'b')] = 2;
@@ -153,14 +125,40 @@ mod tests {
         frequencies[usize::from(b'd')] = 1;
         frequencies[usize::from(b'r')] = 2;
 
-        let mut expected = [0; ALPHABET_SIZE];
-        expected[..usize::from(b'b')].fill(0);
-        expected[usize::from(b'b')..usize::from(b'c')].fill(5);
-        expected[usize::from(b'c')..usize::from(b'd')].fill(7);
-        expected[usize::from(b'd')..usize::from(b'e')].fill(8);
-        expected[usize::from(b'e')..usize::from(b's')].fill(9);
-        expected[usize::from(b's')..].fill(11);
+        let mut slots = vec![0; table::TOTAL_FREQUENCY];
+        table::fill_context(&frequencies, &mut slots);
 
-        assert_eq!(build_cumulative_frequencies(&frequencies), expected);
+        // 'a' owns 0..5, 'b' 5..7, 'c' 7..8, 'd' 8..9, 'r' 9..11.
+        for (slot, (symbol, frequency, range_start)) in [
+            (0, (b'a', 5, 0)),
+            (4, (b'a', 5, 0)),
+            (5, (b'b', 2, 5)),
+            (6, (b'b', 2, 5)),
+            (7, (b'c', 1, 7)),
+            (8, (b'd', 1, 8)),
+            (9, (b'r', 2, 9)),
+            (10, (b'r', 2, 9)),
+        ] {
+            assert_eq!(table::symbol(slots[slot]), symbol, "slot {slot}");
+            assert_eq!(table::frequency(slots[slot]), frequency, "slot {slot}");
+            assert_eq!(table::range_start(slots[slot]), range_start, "slot {slot}");
+        }
+    }
+
+    /// **A context with one symbol gives it every slot**, so its frequency is 4,096 — one more
+    /// than twelve bits hold, which is why the packing stores the frequency less one.
+    #[test]
+    fn a_single_symbol_context_packs_its_full_frequency() {
+        let mut frequencies = [0; ALPHABET_SIZE];
+        frequencies[usize::from(b'N')] = table::TOTAL_FREQUENCY as u16;
+
+        let mut slots = vec![0; table::TOTAL_FREQUENCY];
+        table::fill_context(&frequencies, &mut slots);
+
+        for slot in [0, 1, table::TOTAL_FREQUENCY - 1] {
+            assert_eq!(table::symbol(slots[slot]), b'N');
+            assert_eq!(table::frequency(slots[slot]), table::TOTAL_FREQUENCY as u32);
+            assert_eq!(table::range_start(slots[slot]), 0);
+        }
     }
 }

@@ -1,6 +1,7 @@
 mod header;
 mod order_0;
 mod order_1;
+mod table;
 
 use std::io;
 

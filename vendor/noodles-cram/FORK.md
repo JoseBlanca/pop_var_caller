@@ -36,17 +36,44 @@ a sampling profile shows `Block::decode` as one frame whatever method the block 
 This is a measuring instrument, not a change to what noodles does, and it is not the kind of
 thing to send upstream.
 
-### 2. rANS 4x8 order-1 skips the symbol contexts a block never uses — a decode-speed fix
+### 2. rANS 4x8 builds one packed lookup per used context, not three arrays over all 256
 
-`src/codecs/rans_4x8/decode/order_1.rs`:
-`build_cumulative_frequencies_symbols_table` now takes the frequency table as well as the
-cumulative one, and leaves a context's 4,096-entry lookup at the zeros the allocation already
-holds when every frequency in that context is zero. `order_0.rs` and `order_1.rs` also carry
-the feature-gated phase counters that show the cost.
+`src/codecs/rans_4x8/decode/table.rs` (new), and the decode loops in `decode/order_0.rs` and
+`decode/order_1.rs` rewritten around it. `order_0.rs` also loses `build_cumulative_frequencies`
+and `build_cumulative_frequencies_symbols_table`, which nothing needs any more.
 
-Measured on 60 containers of a whole-genome tomato CRAM: block inflation 0.347 s → 0.268 s.
-**This one is a plain defect and belongs upstream** — it needs no new API and changes no
-behaviour a caller can observe.
+Decoding a byte needs three numbers keyed on the same slot of the same context — which symbol
+owns the slot, that symbol's frequency, and where its range starts — and they lived in three
+arrays, all built over all 256 contexts whether the block used them or not. They are now one
+32-bit word per slot (range start, frequency less one, symbol), and only the contexts whose
+frequencies are non-zero get a table at all. A block of DNA bases uses about five of the 256
+and a block of quality scores a few dozen; the rest can never be reached, because the decoder
+indexes context *i* only after emitting symbol *i*.
+
+The frequency is stored less one because it does not otherwise fit: frequencies are normalised
+to sum to 4,096, so a single-symbol context has a frequency of 4,096 and needs thirteen bits.
+Its range then starts at zero and every other frequency is at most 4,095, so subtracting one
+makes symbol, frequency and range start fit in exactly 32 bits with nothing spare.
+
+Measured over 60 containers of a whole-genome tomato CRAM, 1,351 rANS blocks inflating 74.5 MB:
+
+| | building the tables | decoding the symbols | block inflation, all codecs |
+|---|---:|---:|---:|
+| before | 0.161 s | 0.196 s | 0.347 s |
+| after | **0.015 s** | 0.183 s | **0.227 s** |
+
+**Almost all of it is the table building, and that is the finding.** Three further attempts at
+the decode loop each moved it by 2 % or less and were dropped: the packed lookup itself
+(0.196 → 0.186 s), removing the inner bounds check by giving each context a fixed-size row
+(0.186 s, unmoved), and renormalising without an `io::Result` per byte (0.186 → 0.183 s). At
+352 MB/s the loop is bound by the dependency chain — each byte's table row is chosen by the
+byte before it — and the format's four interleaved states are all the parallelism there is.
+The packed table and the fixed-size rows are kept anyway, because they are what makes building
+only the used contexts natural; the renormalise change was reverted for earning nothing.
+
+**Upstream: yes.** It changes no API and no observable behaviour, and the 223 tests include two
+new ones for the packing, one of them for the single-symbol context that does not fit in twelve
+bits.
 
 ### 3. A decoded record's fields, written into buffers the caller owns — a new API
 
