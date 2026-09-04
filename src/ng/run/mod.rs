@@ -13,9 +13,11 @@
 //! source interface; [`callers`]'s [`AlignedFilesVariantCaller`], which drives that merge
 //! over one walker per sample and genotypes each cohort locus where it is built;
 //! [`records`], which turns each called locus into what a VCF record states; [`report`]'s
-//! [`RunReport`], what a finished run says about itself; and [`gatherer`]'s
+//! [`RunReport`], what a finished run says about itself; [`gatherer`]'s
 //! [`SampleObservationGatherer`], psp mode's walk stage — one sample's observations drained
-//! into a psp on disk (spec §5.2).
+//! into a psp on disk (spec §5.2); and [`psp_source`]'s [`PspObservationSource`], the same
+//! merge interface served from a psp instead of from alignment files — the one place the two
+//! calling modes differ (spec §3.1).
 //!
 //! **Three ways out, and only two are a real run's.**
 //! [`AlignedFilesVariantCaller::call_cohort`] collects every called locus and hands them back at
@@ -29,6 +31,7 @@
 pub mod callers;
 pub mod cohort_merge;
 pub mod gatherer;
+pub mod psp_source;
 pub mod records;
 pub mod report;
 pub mod segments;
@@ -41,6 +44,7 @@ pub use callers::{
     CohortWalkTallies, MergeParameters, SampleWalkTallies, WrittenCohort,
 };
 pub use gatherer::{SampleObservationGatherer, SampleWalkInputs};
+pub use psp_source::{PspObservationSource, PspSourceError};
 pub use report::RunReport;
 pub use segments::{Segmentation, SegmentationInputs};
 pub use walker::{AlignmentFilesWalker, RunSegments};

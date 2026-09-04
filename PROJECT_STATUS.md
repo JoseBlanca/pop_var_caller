@@ -19,7 +19,26 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-03):** **psp-mode Milestone C is complete — a cohort of
+> - **Last completed task (2026-09-04):** **psp mode has its second source — a stored sample
+> now answers the merge the way an open CRAM does** (branch `ng-psp-mode`, plan step D1;
+> [report](doc/devel/reports/implementations/ng_psp_mode_d1_2026-09-04.md),
+> [review](doc/devel/reports/reviews/ng_psp_mode_d1_2026-09-04.md),
+> [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-04_v1.md)). `PspObservationSource`
+> decodes one sample's psp behind the same trait direct mode's walker implements, so nothing
+> above it can tell which it is holding — spec §3.1's "the two callers differ only in what a
+> source is". Failures name the sample, read from the file's own header, and how far the read
+> had got. Three things a psp can be wrong about are refused rather than asserted or passed on:
+> records out of coordinate order (arch §8's owed item, discharged for the psp path), a record
+> whose body a selective walk never built, and any draw made after one of those — because
+> without that last one the next draw hands back the record *after* the refused one and the
+> stream goes on looking sound, one observation short. Both reviewers found that silent drop
+> independently; it was measured, not argued. The module is 15 tests, `ng::run` 459 → 474, and
+> a second mutation pass ran 8 and killed 7 — the survivor being an error arm no fixture can
+> reach through a `PspReader`, now marked uncovered where it sits. Next: D2, lifting the
+> calling loop out of `AlignedFilesVariantCaller` so both modes drive one body, with direct
+> mode's VCF byte-identical across the commit.
+>
+> - **Earlier (2026-09-03):** **psp-mode Milestone C is complete — a cohort of
 > psps from the command line** (branch `ng-psp-mode`, at Checkpoint C; steps C2+C3:
 > [report](doc/devel/reports/implementations/ng_psp_mode_c2_c3_2026-09-03.md),
 > [review](doc/devel/reports/reviews/ng_psp_mode_c2_c3_2026-09-03.md),

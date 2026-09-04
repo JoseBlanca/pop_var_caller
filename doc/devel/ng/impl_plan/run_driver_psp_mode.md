@@ -253,7 +253,7 @@ Kill-mid-write fixture at the command level: the half-written file is refused as
 
 ### Milestone D — the psp source, and one calling tail for both modes
 
-**D1. ☐ The psp-backed source.**
+**D1. ✅ The psp-backed source.**
 An iterator adapter over `PspReader::records()` mapping `StreamedRecord` to its record and
 `PspReadError` into `RunError::SourceFailed` naming the sample (arch §5) — the blanket
 `ObservationSource` impl does the rest. A source whose file yields observations out of order
