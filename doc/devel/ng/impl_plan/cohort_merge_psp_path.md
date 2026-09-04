@@ -89,12 +89,23 @@ Median of five runs with the spread, per the measurement hygiene in
 
 ### Milestone B — the two-state cached observation, in direct mode only
 
-**B1. ☐ The item type.** The cache's item becomes the two-state observation of spec §3.1 —
-summary always readable; evidence built on demand — with direct mode constructing the
-already-built state everywhere. The fold, grouping, both verdicts and ownership read
-summaries; assembly asks for evidence. *Depends:* —. *Source:* spec §3.1.
+**B1. ✅ The item type** — *done 2026-09-04 (`d22b505b`), and **narrower than this step was
+drafted**, which matters for C.*
 
-**B2. ☐ Prove it inert. Own commit, do not bundle.** Direct mode's VCF byte-identical either
+What this asked for was the cache's item becoming spec §3.1's two-state observation, with
+direct mode constructing the already-built state everywhere. **What landed is the half of that
+which can be proven inert:** `LocusSummary` — the region, the kind's discriminant, and the keep
+rule's two counts — with the closing walk routed through it, so no decision reaches past the
+summary any more. **The cache still holds a built record for every observation and still builds
+every one.** The second state, where the summary comes from a psp record's head and the
+evidence is built only where a locus survived, is C1's work.
+
+Splitting it there was not planned and is worth stating: a cached item with one state is not a
+type worth having, and giving it a second state that direct mode never constructs would have
+been dead code carried through a checkpoint. Routing the *decision* through the summary is the
+property C depends on, and it is testable today. *Depends:* —. *Source:* spec §3.1.
+
+**B2. ✅ Prove it inert. Own commit, do not bundle.** Direct mode's VCF byte-identical either
 side of B1 on the run fixtures and the tomato slice; the merge's own suite (partition
 invariance, k = 1, the failed-locus set) green unchanged. *Depends:* B1. *Source:* spec goal 2.
 
@@ -102,10 +113,15 @@ invariance, k = 1, the failed-locus set) green unchanged. *Depends:* B1. *Source
 
 ### Milestone C — the two-phase psp source
 
-**C1. ☐ The summary cursor and the retained window.** The source walks heads, hands summaries
-into the cache, retains each record's raw bytes; cover advances it, eviction drains it
-(spec §3.2, §3.3). Storage per §3.4's leaning (per-record boxes), eviction verified to return
-memory. *Depends:* B1. *Source:* spec §3.2, §3.3, §3.4.
+**C1. ☐ The cache's second state, and the summary cursor.** Two things, because B1 left the
+first of them: the cached item gains the state spec §3.1 describes — a summary that came from a
+record's head, with the evidence not yet built — and the psp source walks heads to produce it,
+retaining each record's raw bytes; cover advances it, eviction drains it (spec §3.2, §3.3).
+Storage per §3.4's leaning (per-record boxes), eviction verified to return memory.
+**Where a summary's locus kind comes from is the design question to settle first**: the tag is
+in the body, not the head (the owner's ruling of 2026-09-04), so a head-only reader looks it up
+from the coordinate against the run's segmentation, and this step is where that lookup is
+built. *Depends:* B1. *Source:* spec §2, §3.1, §3.2, §3.3, §3.4.
 
 **C2. ☐ The build cursor.** Evidence on demand: monotonic per-sample builds through the
 retained window, chain-id changes replayed, bodies built by the existing bounded decode; the
