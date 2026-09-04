@@ -863,10 +863,13 @@ mod tests {
         let records: Vec<_> = (0..reads)
             .map(|i| read_named_with_length(&format!("{stem}-r{i}"), 0, 1 + i, 30))
             .collect();
+        // The `@RG ID` carries it as well: one sample's two files may not declare the same id
+        // (the owner's ruling of 2026-09-04), and a real per-lane file has its own.
+        let read_group = format!("rg-{stem}");
         let header = header(
             Some("coordinate"),
             &matching_contigs(),
-            &[("rg1", Some(sample))],
+            &[(read_group.as_str(), Some(sample))],
         );
         let (dir, path) = named_bam(&header, &records, file_name);
         preflight_alignment_indexes(std::slice::from_ref(&path), true).expect("build index");
@@ -1100,7 +1103,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     use crate::ng::read::input::test_fixtures::{
-        FIXTURE_CONTIGS, bam_header, fixture_reference_bases,
+        FIXTURE_CONTIGS, bam_header, bam_header_with_read_group, fixture_reference_bases,
     };
     use crate::ng::ref_seq::InMemoryRefSeq;
 
@@ -1170,7 +1173,7 @@ mod tests {
             indexed_named_bam(&bam_header(&matching_contigs()), &reads, "only.bam");
         // Empty over contig 0: its only read is on the *second* contig.
         let (_empty_dir, empty) = indexed_named_bam(
-            &bam_header(&matching_contigs()),
+            &bam_header_with_read_group(&matching_contigs(), "rg-empty"),
             &[read_named_with_length("elsewhere", 1, 1, 30)],
             "empty.bam",
         );
@@ -1258,7 +1261,7 @@ mod tests {
     #[test]
     fn a_merged_cursor_outlives_the_sample_reads_it_was_made_from() {
         let (_first_dir, first) = indexed_named_bam(
-            &bam_header(&matching_contigs()),
+            &bam_header_with_read_group(&matching_contigs(), "rg-a"),
             &[
                 read_named_with_length("a1", 0, 1, 30),
                 read_named_with_length("a2", 0, 40, 30),
@@ -1266,7 +1269,7 @@ mod tests {
             "merged_outlives_a.bam",
         );
         let (_second_dir, second) = indexed_named_bam(
-            &bam_header(&matching_contigs()),
+            &bam_header_with_read_group(&matching_contigs(), "rg-b"),
             &[
                 read_named_with_length("b1", 0, 20, 30),
                 read_named_with_length("b2", 0, 60, 30),
@@ -1956,15 +1959,16 @@ mod tests {
             "first.bam",
         );
         // File two is NA12878's alone — a second library of the same individual,
-        // which is the case the whole design exists for.
+        // which is the case the whole design exists for. **Its read group's id differs from the
+        // one in file one**, because one sample's two files may not share an id.
         let (_second_dir, second) = indexed_named_bam(
             &header_with_read_groups(
                 Some("coordinate"),
                 &matching_contigs(),
-                &[FixtureReadGroup::new("rg1", Some("NA12878")).with_library("lib-C")],
+                &[FixtureReadGroup::new("rg3", Some("NA12878")).with_library("lib-C")],
             ),
             &[read_named_with_length_in_read_group(
-                "second-a", 0, 10, 30, "rg1",
+                "second-a", 0, 10, 30, "rg3",
             )],
             "second.bam",
         );
@@ -2093,7 +2097,7 @@ mod tests {
     #[test]
     fn each_read_carries_the_read_group_it_came_from() {
         let (_first_dir, first) = indexed_named_bam(
-            &bam_header(&matching_contigs()),
+            &bam_header_with_read_group(&matching_contigs(), "rg-first"),
             &[
                 read_named_with_length("a1", 0, 1, 30),
                 read_named_with_length("a2", 0, 50, 30),
@@ -2101,7 +2105,7 @@ mod tests {
             "first.bam",
         );
         let (_second_dir, second) = indexed_named_bam(
-            &bam_header(&matching_contigs()),
+            &bam_header_with_read_group(&matching_contigs(), "rg-second"),
             &[read_named_with_length("b1", 0, 25, 30)],
             "second.bam",
         );
@@ -2348,13 +2352,14 @@ mod tests {
     #[test]
     fn a_sample_cursor_covers_every_file_of_the_sample() {
         use crate::ng::read::input::test_fixtures::{
-            bam_header, fixture_reference, indexed_named_bam, matching_contigs,
-            read_named_with_length,
+            bam_header, bam_header_with_read_group, fixture_reference, indexed_named_bam,
+            matching_contigs, read_named_with_length,
         };
         use crate::ng::types::{ContigId, Position};
 
         let (_reference_dir, reference) = fixture_reference(false);
         let header = bam_header(&matching_contigs());
+        let second_header = bam_header_with_read_group(&matching_contigs(), "rg-b");
         // Two files, disjoint reads, so a cursor that skipped one would still answer
         // plausibly — which is the point.
         let (_dir_a, path_a) = indexed_named_bam(
@@ -2363,7 +2368,7 @@ mod tests {
             "a.bam",
         );
         let (_dir_b, path_b) = indexed_named_bam(
-            &header,
+            &second_header,
             &[read_named_with_length("from-b", 0, 41, 30)],
             "b.bam",
         );

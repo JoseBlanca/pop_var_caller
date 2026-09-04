@@ -335,8 +335,8 @@ did this sample show a non-reference read anywhere in this stretch?
 #   step 3 at every position the cohort kept, and must answer there in full.
 
 # step 2 — cheap, at every position of the segment
-how far does this record reach, what kind of locus is it, how many of this sample's
-reads were compared whole against the reference here, and how many of those varied?
+how far does this record reach, how many of this sample's reads were compared whole
+against the reference here, and how many of those varied?
 #   the merge puts every sample's answers together and decides which positions are
 #   worth calling. ⚠ Compared reads, not depth: see the ⚑ below.
 

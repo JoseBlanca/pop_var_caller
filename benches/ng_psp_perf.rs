@@ -13,8 +13,8 @@
 //! - `ng_psp/walk_full/*` — [`PspReader::records`], every body built. The shape a caller that
 //!   wants all the evidence reads in.
 //! - `ng_psp/walk_heads/*` — the same walk with a predicate that declines every record, so no body
-//!   is ever built and only the head is decoded: the position offset, the span, the locus kind,
-//!   the non-reference read count, the reads compared with the reference, the body length and the
+//!   is ever built and only the head is decoded: the position offset, the span, the
+//!   non-reference read count, the reads compared with the reference, the body length and the
 //!   chain ids' live-set changes. This is the
 //!   floor a walk cannot go below, because the bytes still arrive and the changes are still parsed
 //!   (spec `psp_file_format.md` §4.3).

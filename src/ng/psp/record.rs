@@ -30,8 +30,8 @@
 //! (spec §4.3; `examples/ng_psp_skip_value.rs`).
 //!
 //! **The head is not free.** Re-taken the same day, compressed bytes a record over the same
-//! bodies with and without it: the head costs **8.1 % of the file at 10.25 reads a position and
-//! 15.5 % at 280.32**. Most of that is not the length field. It is what skippability forces on
+//! bodies with and without it: the head costs **7.5 % of the file at 10.25 reads a position and
+//! 15.1 % at 280.32**. Most of that is not the length field. It is what skippability forces on
 //! the body — a record's coverage and its chain ids would otherwise be coded as differences from
 //! the previous record, and a reader that skips a body never sees those differences, so both
 //! restart at every record — plus the chain ids' live-set changes, which ride in the head and
@@ -107,66 +107,29 @@ pub struct RecordHead {
     /// position the floor is the whole rule and the numerator alone answers it; at three hundred
     /// the share is what filters, and without this field the rule cannot be applied to a head.
     ///
-    /// **The same subset both ways round, so `non_reference_reads` never exceeds it.** A read
-    /// whose witness stopped inside the locus is counted by neither, and neither is a read that
-    /// produced no observation at all. Depth would have been the wrong denominator: it would
-    /// raise the bar with reads that could never clear it.
-    pub reads_compared_with_reference: u32,
-    /// Which of the three kinds of locus this record holds, without the repeat tract's own
-    /// motif and flanks — those stay in the body, where nothing reads them before a locus is
-    /// assembled.
+    /// **The same subset both ways round, so `non_reference_reads` never exceeds it.**
     ///
-    /// **In the head because two of the cohort merge's decisions are taken before any body is
-    /// built**: the width bound applies to generic loci only, and a cohort locus may not hold a
-    /// generic and a repeat-tract member at once.
-    pub locus_kind: LocusKindTag,
+    /// **What is not in it, and each for the same reason — a read that was never compared cannot
+    /// be in the denominator of a ratio about comparisons:**
+    ///
+    /// - a read a filter turned away (mapping quality, flags, length, mismatch fraction). It
+    ///   never reached the locus generator, so it is in no observation.
+    /// - a read the **depth cap** discarded. The cap acts during the walk, before any record
+    ///   exists, so a capped read contributes to no observation either; the record counts them
+    ///   separately in `reads_discarded_by_cap`, which is how a reader knows the support counts
+    ///   are a subsample.
+    /// - a read that covered the locus and produced no observation at all
+    ///   (`reads_without_observation`).
+    /// - a read whose witness **stopped inside the locus**. Its bases end where its evidence
+    ///   ended, so there is nothing to compare them against — and it is out of the numerator for
+    ///   the same reason, which is what keeps the two counts over one subset.
+    ///
+    /// So this is the number a share of alternative reads is taken *of*, and nothing else.
+    /// **Depth would have been the wrong denominator**: it would raise the bar with reads that
+    /// could never clear it.
+    pub reads_compared_with_reference: u32,
     /// Length of the body that follows, in bytes.
     pub body_bytes: BodyByteCount,
-}
-
-/// Which kind of locus a record holds — what the head carries of
-/// [`LocusKind`](crate::ng::locus_generation::LocusKind), which is the kind **and** what that
-/// kind brings with it.
-///
-/// **The split is what lets the tag live in the head and the detail in the body.** A repeat
-/// tract's motif and flanks are several byte strings and no pre-assembly reader wants them; the
-/// one byte saying *this is a repeat tract* is wanted by every reader that judges a record
-/// without decoding it. So the head carries this and the body carries the rest, and the record
-/// is put back together from the two — never written twice, so there is no second copy to
-/// disagree with the first.
-///
-/// **`#[non_exhaustive]` for the same reason [`LocusKind`] is**: this mirrors that enum
-/// one-for-one and is public, so a kind added there would otherwise break every outside crate
-/// that matched on this exhaustively. The attribute binds other crates and not this one, so the
-/// codec's own matches stay exhaustive and a new kind is still a compile error here.
-///
-/// [`LocusKind`]: crate::ng::locus_generation::LocusKind
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocusKindTag {
-    /// Anywhere the reference is not a repeat tract.
-    Generic,
-    /// One repeat tract. Its motif and its two flanks are in the body.
-    Ssr,
-    /// Repeat tracts close enough together to be genotyped as one locus.
-    SsrBundle,
-}
-
-impl LocusKindTag {
-    /// What kind of locus `kind` is, dropping what that kind carries.
-    ///
-    /// **Exhaustive with no wildcard**, though [`LocusKind`] is `#[non_exhaustive]`: that
-    /// attribute binds other crates and not this one, so a kind added later is a compile error
-    /// here rather than a record whose head says the wrong thing about its body.
-    ///
-    /// [`LocusKind`]: crate::ng::locus_generation::LocusKind
-    pub fn of(kind: &LocusKind) -> Self {
-        match kind {
-            LocusKind::Generic => Self::Generic,
-            LocusKind::Ssr(_) => Self::Ssr,
-            LocusKind::SsrBundle => Self::SsrBundle,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------
@@ -179,7 +142,7 @@ impl LocusKindTag {
 /// **Variable-length integers, and that is an implementation choice with a measurement owed.**
 /// Spec `psp_file_format.md` §4.3 leaves the width to the manifest and records that a fixed width
 /// is quicker to read and costs less than it looks after compression — the head compressed on its
-/// own is **0.509 bytes a record at 10.25 reads a position and 3.945 at 280.32**, re-taken
+/// own is **0.498 bytes a record at 10.25 reads a position and 3.882 at 280.32**, re-taken
 /// 2026-09-04 — but that the two encodings had never been compared *in place*. **They have been
 /// since Milestone D2, and variable-length won on both samples and at every width tried**, so the
 /// choice here is settled by measurement rather than left open.
@@ -199,14 +162,9 @@ impl LocusKindTag {
 /// anything else — so a build that switched would reject every psp written before it, and a
 /// build before it would reject every psp written after. It costs nothing today because no psp
 /// exists; from Milestone F it costs a version.
-const RECORD_HEAD_FIELDS: [(&str, FieldEncoding); 7] = [
+const RECORD_HEAD_FIELDS: [(&str, FieldEncoding); 6] = [
     ("position-offset", FieldEncoding::Varint),
     ("reference-span", FieldEncoding::Varint),
-    // **Next to the span because the two are read together.** The cohort's bound on how wide a
-    // locus may be governs generic loci only — a repeat tract's span is the reference tract,
-    // which may lawfully be wider (spec `cohort_merge.md` §3.1) — so a reader that can measure
-    // a record but not say what kind it is fails every wide tract as an over-wide locus.
-    ("locus-kind", FieldEncoding::Varint),
     // **The keep rule's two numbers, adjacent**: a locus is built when some single sample shows
     // at least `max(floor, share × its compared reads)` non-reference reads
     // (spec `cohort_merge.md` §4.3), and no reader of one of them wants the other decoded from
@@ -223,10 +181,9 @@ const fn record_head_field(position: usize) -> &'static str {
 
 const POSITION_OFFSET: &str = record_head_field(0);
 const REFERENCE_SPAN: &str = record_head_field(1);
-const LOCUS_KIND: &str = record_head_field(2);
-const NON_REFERENCE_READS: &str = record_head_field(3);
-const READS_COMPARED_WITH_REFERENCE: &str = record_head_field(4);
-const RECORD_BODY_BYTE_COUNT: &str = record_head_field(5);
+const NON_REFERENCE_READS: &str = record_head_field(2);
+const READS_COMPARED_WITH_REFERENCE: &str = record_head_field(3);
+const RECORD_BODY_BYTE_COUNT: &str = record_head_field(4);
 
 // ---------------------------------------------------------------------
 // The body: one record's fields to bytes and back
@@ -264,7 +221,7 @@ const RECORD_BODY_BYTE_COUNT: &str = record_head_field(5);
 /// **The chain ids are not here either, and that is Milestone E.** A record's chain ids are
 /// dropped by [`encode_record_body`] and come back empty from [`decode_record_body`], which is
 /// stated on both and pinned by a test rather than left for a reader to discover.
-const BODY_FIELDS: [(&str, FieldEncoding); 21] = [
+const BODY_FIELDS: [(&str, FieldEncoding); 22] = [
     ("reference-bases", FieldEncoding::LengthPrefixedBytes),
     ("observation-count", FieldEncoding::Varint),
     // Which observation's reads are derived rather than stored, or the observation count for
@@ -293,9 +250,16 @@ const BODY_FIELDS: [(&str, FieldEncoding); 21] = [
     // Once per record again:
     ("reads-without-observation", FieldEncoding::Varint),
     ("reads-discarded-by-the-depth-cap", FieldEncoding::Varint),
-    // The last three only when the head's `locus-kind` says repeat tract — the tag itself is in
-    // the head, because two of the cohort merge's decisions read it before any body is built.
-    // A move and not a copy, so no reader has two answers to check against each other.
+    // **What kind of locus this is, and it stays here rather than in the head** (the owner's
+    // ruling of 2026-09-04). A record's kind is a function of its coordinate: it is the kind of
+    // the typed region the locus falls in, and typed regions come from the reference and the
+    // repeat catalog before any read is looked at. Every psp records the inputs its typing used
+    // and a calling run refuses a cohort that disagrees with its own segmentation, so a reader
+    // holding a coordinate can look the kind up rather than read it here — which is why nothing
+    // pre-assembly needs it in the head. It is kept in the record so that decoding a body needs
+    // no catalog: the tag is what says whether the three fields below follow.
+    ("locus-kind", FieldEncoding::Varint),
+    // The last three only when the locus kind is a repeat tract:
     ("repeat-motif", FieldEncoding::LengthPrefixedBytes),
     ("repeat-left-flank", FieldEncoding::LengthPrefixedBytes),
     ("repeat-right-flank", FieldEncoding::LengthPrefixedBytes),
@@ -330,9 +294,10 @@ const READS_STARTING_LEFT: &str = body_field(14);
 const OBSERVATION_READS: &str = body_field(15);
 const READS_WITHOUT_OBSERVATION: &str = body_field(16);
 const READS_DISCARDED_BY_THE_DEPTH_CAP: &str = body_field(17);
-const REPEAT_MOTIF: &str = body_field(18);
-const REPEAT_LEFT_FLANK: &str = body_field(19);
-const REPEAT_RIGHT_FLANK: &str = body_field(20);
+const LOCUS_KIND: &str = body_field(18);
+const REPEAT_MOTIF: &str = body_field(19);
+const REPEAT_LEFT_FLANK: &str = body_field(20);
+const REPEAT_RIGHT_FLANK: &str = body_field(21);
 
 /// The witness as a whole, for the two faults that are about the set rather than about one of
 /// its numbers. Not a declared field: the three `witness-run-*` entries are.
@@ -986,9 +951,7 @@ pub fn encode_record_body_reusing(
     }
     put_varint(out, u64::from(*reads_without_observation));
     put_varint(out, u64::from(*reads_discarded_by_cap));
-    // **The tag itself is not here** — it is the head's, written by [`put_kind_tag`]. What stays
-    // is what the kind brings with it, and only a repeat tract brings anything.
-    put_kind_detail(out, kind);
+    put_kind(out, kind);
 }
 
 /// Read one record's body back, and say how many bytes it took.
@@ -1026,7 +989,6 @@ pub fn encode_record_body_reusing(
 pub fn decode_record_body(
     bytes: &[u8],
     region: GenomeRegion,
-    locus_kind: LocusKindTag,
     live_reads: &LiveSet,
     layout: &RecordLayout,
 ) -> Result<DecodedRecordBody, RecordDecodeError> {
@@ -1106,7 +1068,7 @@ pub fn decode_record_body(
 
     let reads_without_observation = body.read_u32(READS_WITHOUT_OBSERVATION)?;
     let reads_discarded_by_cap = body.read_u32(READS_DISCARDED_BY_THE_DEPTH_CAP)?;
-    let kind = body.read_kind_detail(locus_kind)?;
+    let kind = body.read_locus_kind()?;
 
     for encoding in &layout.unknown_final_encodings {
         body.skip_unknown_field(*encoding)?;
@@ -1165,39 +1127,23 @@ fn put_witness(out: &mut Vec<u8>, witness: &ReadWitness) {
     }
 }
 
-/// The kind tag, which goes in the head.
+/// The kind tag, and whatever that kind carries.
 ///
-/// **What stops a kind gaining a write side and no read side is not here.** This matches on
-/// [`LocusKindTag`], so a kind added to [`LocusKind`] does not reach it — [`LocusKindTag::of`]
-/// is where that is a compile error, and `read_locus_kind_tag` cannot be made exhaustive at all,
-/// because it matches a number read from a file. `every_locus_kind_round_trips` is what holds
-/// the two sides together.
-fn put_kind_tag(out: &mut Vec<u8>, kind: LocusKindTag) {
+/// **Exhaustive with no wildcard**, though [`LocusKind`] is `#[non_exhaustive]`: that
+/// attribute binds other crates, not this one, so a kind added later is a compile error here
+/// rather than a record written without its payload. The decoder cannot be made exhaustive the
+/// same way — it matches a tag read from a file — so `every_locus_kind_round_trips` is what
+/// stops a kind gaining a write side and no read side.
+fn put_kind(out: &mut Vec<u8>, kind: &LocusKind) {
     match kind {
-        LocusKindTag::Generic => put_varint(out, KIND_GENERIC),
-        LocusKindTag::Ssr => put_varint(out, KIND_SSR),
-        LocusKindTag::SsrBundle => put_varint(out, KIND_SSR_BUNDLE),
-    }
-}
-
-/// Whatever the kind carries beyond the tag, which stays in the body — a repeat tract's motif
-/// and its two flanks, and nothing at all for the other two kinds.
-///
-/// **Nothing here writes which kind it is**, so a body read without its head cannot be
-/// interpreted. That is the point of the move: the tag exists once, in the head, where a reader
-/// that skips the body still sees it (spec `psp_head_compared_reads.md` §3.1).
-///
-/// **Exhaustive with no wildcard**, though [`LocusKind`] is `#[non_exhaustive]`: that attribute
-/// binds other crates, not this one, so a kind added later is a compile error here rather than a
-/// record written without its payload.
-fn put_kind_detail(out: &mut Vec<u8>, kind: &LocusKind) {
-    match kind {
-        LocusKind::Generic | LocusKind::SsrBundle => {}
+        LocusKind::Generic => put_varint(out, KIND_GENERIC),
         LocusKind::Ssr(detail) => {
+            put_varint(out, KIND_SSR);
             put_bytes(out, detail.motif.as_bytes());
             put_bytes(out, &detail.left_flank);
             put_bytes(out, &detail.right_flank);
         }
+        LocusKind::SsrBundle => put_varint(out, KIND_SSR_BUNDLE),
     }
 }
 
@@ -1446,45 +1392,12 @@ impl<'a> FieldReader<'a> {
         Ok(ReadWitness::Partial { positions })
     }
 
-    /// The head's kind tag. **A tag this build does not know is [`Unsupported`], not
-    /// malformed** — it is what a file from a later writer looks like, and the message names the
-    /// number so whoever holds the file can say which kind it is.
-    ///
-    /// **⚠ Refusing here refuses a walk that would have skipped the record**, which reading the
-    /// tag out of the body did not. It is a choice and not a consequence of the move: the tag is
-    /// a self-delimiting integer, so an `Unknown(u64)` arm would let a skipping walk carry on and
-    /// leave the refusal to whoever built the body. **What argues for refusing is what the tag is
-    /// in the head for** — two of the cohort merge's pre-assembly decisions read it, and the width
-    /// bound is applied differently to a repeat tract than to a generic locus, so a reader that
-    /// cannot classify a record cannot correctly decide it does not want it either. *Owner's to
-    /// rule at Checkpoint H; the spec does not settle it and
-    /// `a_locus_kind_from_a_later_writer_says_upgrade_the_reader` pins what is here now.*
-    ///
-    /// [`Unsupported`]: RecordDecodeError::Unsupported
-    fn read_locus_kind_tag(&mut self) -> Result<LocusKindTag, RecordDecodeError> {
+    fn read_locus_kind(&mut self) -> Result<LocusKind, RecordDecodeError> {
         let at = self.bytes_read;
         let tag = self.read_varint(LOCUS_KIND)?;
         match tag {
-            KIND_GENERIC => Ok(LocusKindTag::Generic),
-            KIND_SSR => Ok(LocusKindTag::Ssr),
-            KIND_SSR_BUNDLE => Ok(LocusKindTag::SsrBundle),
-            tag => Err(RecordDecodeError::Unsupported {
-                field: LOCUS_KIND,
-                bytes_in: at,
-                tag,
-            }),
-        }
-    }
-
-    /// The kind a body's tail spells, given the tag its head carried.
-    ///
-    /// **The tag decides whether there is anything to read**, which is how the body's last three
-    /// fields are present exactly when the head says repeat tract — by construction, so there is
-    /// no agreement between two copies to check.
-    fn read_kind_detail(&mut self, tag: LocusKindTag) -> Result<LocusKind, RecordDecodeError> {
-        match tag {
-            LocusKindTag::Generic => Ok(LocusKind::Generic),
-            LocusKindTag::Ssr => {
+            KIND_GENERIC => Ok(LocusKind::Generic),
+            KIND_SSR => {
                 let motif_bases = self.read_length_prefixed(REPEAT_MOTIF)?;
                 let motif = Motif::new(motif_bases)
                     .map_err(|source| self.malformed(REPEAT_MOTIF, source.to_string()))?;
@@ -1496,7 +1409,12 @@ impl<'a> FieldReader<'a> {
                     right_flank,
                 }))
             }
-            LocusKindTag::SsrBundle => Ok(LocusKind::SsrBundle),
+            KIND_SSR_BUNDLE => Ok(LocusKind::SsrBundle),
+            tag => Err(RecordDecodeError::Unsupported {
+                field: LOCUS_KIND,
+                bytes_in: at,
+                tag,
+            }),
         }
     }
 
@@ -1847,11 +1765,8 @@ impl RecordEncoder {
         // head did until the denominator joined it (spec `psp_head_compared_reads.md` §3).
         let (non_reference_reads, reads_compared_with_reference) =
             record.non_reference_and_compared_reads();
-        let locus_kind = LocusKindTag::of(&record.kind);
-
         put_varint(out, offset);
         put_varint(out, span);
-        put_kind_tag(out, locus_kind);
         put_varint(out, u64::from(non_reference_reads));
         put_varint(out, u64::from(reads_compared_with_reference));
         put_varint(out, u64::from(body_bytes));
@@ -1868,7 +1783,6 @@ impl RecordEncoder {
             region: record.region,
             non_reference_reads,
             reads_compared_with_reference,
-            locus_kind,
             body_bytes,
         };
         self.block.measured_from = OffsetBase::after(&head);
@@ -2010,8 +1924,6 @@ pub fn read_record_head<'a>(
             )
         })?;
 
-    let locus_kind = reader.read_locus_kind_tag()?;
-
     let non_reference_reads = reader.read_u32(NON_REFERENCE_READS)?;
     let reads_compared_with_reference = reader.read_u32(READS_COMPARED_WITH_REFERENCE)?;
     // **The only check that holds two of the head's counts against each other, and it is free.**
@@ -2065,7 +1977,6 @@ pub fn read_record_head<'a>(
             },
             non_reference_reads,
             reads_compared_with_reference,
-            locus_kind,
             body_bytes,
         },
         body,
@@ -2143,14 +2054,8 @@ pub fn decode_the_body_of(
     layout: &RecordLayout,
 ) -> Result<DecodedRecord, RecordDecodeError> {
     let head_bytes = found.record_bytes - found.body.len();
-    let decoded_body = decode_record_body(
-        found.body,
-        found.head.region,
-        found.head.locus_kind,
-        live_reads,
-        layout,
-    )
-    .map_err(|fault| fault.inside_a_bounded_body(head_bytes, found.body.len()))?;
+    let decoded_body = decode_record_body(found.body, found.head.region, live_reads, layout)
+        .map_err(|fault| fault.inside_a_bounded_body(head_bytes, found.body.len()))?;
     let (non_reference_reads, reads_compared_with_reference) =
         decoded_body.record.non_reference_and_compared_reads();
     if non_reference_reads != found.head.non_reference_reads {
@@ -2252,7 +2157,6 @@ mod tests {
             },
             non_reference_reads: 3,
             reads_compared_with_reference: 11,
-            locus_kind: LocusKindTag::Generic,
             body_bytes: 47,
         };
         let copied = head;
@@ -2277,7 +2181,6 @@ mod tests {
             },
             non_reference_reads: 162,
             reads_compared_with_reference: 198,
-            locus_kind: LocusKindTag::Generic,
             body_bytes: 231,
         };
         assert_eq!(deletion.region.len(), 7);
@@ -2392,7 +2295,6 @@ mod tests {
         let decoded = decode_record_body(
             &bytes,
             record.region,
-            LocusKindTag::of(&record.kind),
             &the_live_reads_of(record),
             &RecordLayout::as_this_build_writes_it(),
         )
@@ -2405,19 +2307,9 @@ mod tests {
     /// **With no reads live**, which is what a reader meets when the bytes are not a record this
     /// writer produced.
     fn decoded(bytes: &[u8]) -> Result<DecodedRecordBody, RecordDecodeError> {
-        decoded_as(bytes, LocusKindTag::Generic)
-    }
-
-    /// [`decoded`] for bytes whose head said something other than a generic locus — which is
-    /// what decides whether the body's last three fields are there at all.
-    fn decoded_as(
-        bytes: &[u8],
-        locus_kind: LocusKindTag,
-    ) -> Result<DecodedRecordBody, RecordDecodeError> {
         decode_record_body(
             bytes,
             a_region(1, 1),
-            locus_kind,
             &LiveSet::new(),
             &RecordLayout::as_this_build_writes_it(),
         )
@@ -2522,10 +2414,8 @@ mod tests {
                 0,  // observation-reads: none
                 // — the record's own tail —
                 12, // reads-without-observation
-                177,
-                2, // reads-discarded-by-the-depth-cap
-                   // and nothing more: the locus-kind tag is the head's, and a generic locus
-                   // brings nothing else with it
+                177, 2, // reads-discarded-by-the-depth-cap
+                0, // locus-kind: Generic
             ]
         );
     }
@@ -2558,9 +2448,10 @@ mod tests {
     /// without a read side — which compiles and passes every round-trip test otherwise,
     /// because each of those names one kind.
     ///
-    /// **⚠ It goes through the head, and it has to.** The tag is the head's field now and the
-    /// motif and flanks are the body's, so a body-only round trip would be handed the kind it
-    /// was about to check — proving nothing. This writes the whole record and reads it back.
+    /// **It goes through the whole record rather than the body alone**, which is what it does
+    /// differently from the round trips around it: a kind is written and read at the body's very
+    /// end, so a record encoded and decoded entire is the shape that would catch a tag stranded
+    /// behind a field that moved.
     #[test]
     fn every_locus_kind_round_trips() {
         let kinds = vec![
@@ -2595,11 +2486,6 @@ mod tests {
             )
             .expect("what this encoder wrote, this decoder reads");
             assert_eq!(decoded.record, written);
-            assert_eq!(
-                decoded.head.locus_kind,
-                LocusKindTag::of(&written.kind),
-                "the head says which kind, and it is the one written"
-            );
         }
     }
 
@@ -2620,7 +2506,7 @@ mod tests {
             (LocusKind::SsrBundle, 2),
         ] {
             let mut out = Vec::new();
-            put_kind_tag(&mut out, LocusKindTag::of(&kind));
+            put_kind(&mut out, &kind);
             assert_eq!(out[0], tag, "{kind:?}");
         }
     }
@@ -2788,7 +2674,6 @@ mod tests {
             vec![
                 "position-offset",
                 "reference-span",
-                "locus-kind",
                 "non-reference-reads",
                 "reads-compared-with-reference",
                 "record-body-byte-count",
@@ -2811,6 +2696,7 @@ mod tests {
                 "observation-reads",
                 "reads-without-observation",
                 "reads-discarded-by-the-depth-cap",
+                "locus-kind",
                 "repeat-motif",
                 "repeat-left-flank",
                 "repeat-right-flank",
@@ -2997,25 +2883,16 @@ mod tests {
     /// From the run driver's stored-file milestone onwards the same change would cost a format
     /// version instead.
     ///
-    /// **⚠ Which field the message names is not the denominator, and the spec guessed
-    /// otherwise.** Spec §6 expects `reads-compared-with-reference` named as missing; a genuine
-    /// pre-change file is refused one field earlier, at `locus-kind`, because the tag was placed
-    /// before the two counts and the spec left that placement soft. The second half below —
-    /// which does name the denominator — is **this build's** manifest cut short, not a file any
-    /// old writer produced.
+    /// **The message names the denominator, which is what spec §6 asks for.** A pre-change file
+    /// declares the head's four scalars and then `record-body-byte-count` where this build
+    /// expects `reads-compared-with-reference`, so the refusal lands on the new field by name.
     #[test]
-    fn a_manifest_from_before_the_head_carried_its_new_fields_is_refused_by_name() {
+    fn a_manifest_from_before_the_head_carried_the_denominator_is_refused_by_name() {
         // The head as it was: no kind tag, no compared-read count, and the kind declared among
-        // the body's fields instead — everything else in this build's order.
+        // everything else in this build's order.
         let old: Vec<FieldSpec> = record_fields()
             .into_iter()
-            .filter(|field| {
-                field.name.0 != "locus-kind" && field.name.0 != "reads-compared-with-reference"
-            })
-            .chain(std::iter::once(FieldSpec {
-                name: FieldName("locus-kind".to_string()),
-                encoding: FieldEncoding::Varint,
-            }))
+            .filter(|field| field.name.0 != "reads-compared-with-reference")
             .collect();
         match RecordLayout::from_manifest(&a_manifest_declaring(old)) {
             Err(RecordLayoutError::UnexpectedField {
@@ -3023,20 +2900,20 @@ mod tests {
                 expected,
                 found,
             }) => {
-                assert_eq!(position, 2);
-                assert_eq!(expected.0, "locus-kind");
-                assert_eq!(found.0, "non-reference-reads");
+                assert_eq!(position, 3);
+                assert_eq!(expected.0, "reads-compared-with-reference");
+                assert_eq!(found.0, "record-body-byte-count");
             }
-            other => panic!("expected the head's third field to disagree, got {other:?}"),
+            other => panic!("expected the head's fourth field to disagree, got {other:?}"),
         }
 
         // And a manifest that carries this build's head as far as the varying-read count and
         // stops names the denominator as the field it is missing.
         let mut stops_before_the_denominator = record_fields();
-        stops_before_the_denominator.truncate(4);
+        stops_before_the_denominator.truncate(3);
         match RecordLayout::from_manifest(&a_manifest_declaring(stops_before_the_denominator)) {
             Err(RecordLayoutError::MissingField { position, expected }) => {
-                assert_eq!(position, 4);
+                assert_eq!(position, 3);
                 assert_eq!(expected.0, "reads-compared-with-reference");
             }
             other => panic!("expected the denominator named as missing, got {other:?}"),
@@ -3114,7 +2991,6 @@ mod tests {
             let decoded = decode_record_body(
                 &newer_body,
                 record.region,
-                LocusKindTag::of(&record.kind),
                 &the_live_reads_of(&record),
                 &layout,
             )
@@ -3152,14 +3028,9 @@ mod tests {
         assert_eq!(layout.unknown_field_count(), 2);
 
         body.extend_from_slice(&[7, 7, 7, 7, 2, b'h', b'i']);
-        let decoded = decode_record_body(
-            &body,
-            record.region,
-            LocusKindTag::of(&record.kind),
-            &the_live_reads_of(&record),
-            &layout,
-        )
-        .expect("both are walked past");
+        let decoded =
+            decode_record_body(&body, record.region, &the_live_reads_of(&record), &layout)
+                .expect("both are walked past");
         assert_eq!(decoded.record, record);
         assert_eq!(decoded.bytes_read, body.len());
     }
@@ -3185,7 +3056,6 @@ mod tests {
             match decode_record_body(
                 &body[..cut],
                 record.region,
-                LocusKindTag::of(&record.kind),
                 &the_live_reads_of(&record),
                 &layout,
             ) {
@@ -3212,7 +3082,6 @@ mod tests {
             match decode_record_body(
                 &whole[..cut],
                 record.region,
-                LocusKindTag::of(&record.kind),
                 &the_live_reads_of(&record),
                 &RecordLayout::as_this_build_writes_it(),
             ) {
@@ -3227,7 +3096,6 @@ mod tests {
             decode_record_body(
                 &whole,
                 record.region,
-                LocusKindTag::of(&record.kind),
                 &the_live_reads_of(&record),
                 &RecordLayout::as_this_build_writes_it()
             )
@@ -3449,7 +3317,6 @@ mod tests {
         let decoded = decode_record_body(
             &stream,
             record.region,
-            LocusKindTag::of(&record.kind),
             &the_live_reads_of(&record),
             &RecordLayout::as_this_build_writes_it(),
         )
@@ -3550,27 +3417,26 @@ mod tests {
     /// the kind whose tag is next to it either, or a later writer's repeat tracts become SNP
     /// candidates.
     ///
-    /// ⚠ **It is refused by the head now, which is stricter than refusing it by the body.** The
-    /// tag moved into the head, so a reader meets an unknown kind while deciding whether it
-    /// wants the record at all — a walk that would have skipped this record refuses the file
-    /// rather than skipping past a locus whose kind it cannot judge.
+    /// **⚠ It is refused by the body, and that is a property worth keeping.** A reader skipping
+    /// this record never meets the tag, so a walk that declines it carries on — which is what
+    /// `a_declined_records_body_is_never_decoded` in `walk.rs` rests on.
     #[test]
     fn a_locus_kind_from_a_later_writer_says_upgrade_the_reader() {
-        let mut live_reads = a_live_set_reader();
         let record = a_rich_record();
-        let (mut bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
-        let at_the_tag = 2;
+        let mut body = Vec::new();
+        encode_record_body(&record, &mut body);
+        let last = body.len() - 1;
         assert_eq!(
-            bytes[at_the_tag], 0,
+            body[last], 0,
             "the fixture's kind is Generic, which is tag 0"
         );
-        bytes[at_the_tag] = 99;
+        body[last] = 99;
 
-        match read_a_record_head(
-            &mut live_reads,
-            &bytes,
-            A_CONTIG,
-            OffsetBase::at_block_start(block_starts_at),
+        match decode_record_body(
+            &body,
+            record.region,
+            &the_live_reads_of(&record),
+            &RecordLayout::as_this_build_writes_it(),
         ) {
             Err(RecordDecodeError::Unsupported { field, tag, .. }) => {
                 assert_eq!(field, "locus-kind");
@@ -3586,14 +3452,13 @@ mod tests {
     fn a_stored_motif_outside_the_repeat_period_range_is_refused() {
         for motif_bases in [&b""[..], &b"ATATATA"[..]] {
             // An empty reference, no observations, no observation derived, no reads either
-            // way, then the motif and two empty flanks — which are there because the head this
-            // body is decoded under says repeat tract.
-            let mut body = vec![0u8, 0, 0, 0, 0];
+            // way, kind 1, then the motif and two empty flanks.
+            let mut body = vec![0u8, 0, 0, 0, 0, 1];
             body.push(motif_bases.len() as u8);
             body.extend_from_slice(motif_bases);
             body.extend_from_slice(&[0, 0]);
 
-            match decoded_as(&body, LocusKindTag::Ssr) {
+            match decoded(&body) {
                 Err(RecordDecodeError::Malformed { field, .. }) => {
                     assert_eq!(field, "repeat-motif", "for {motif_bases:?}");
                 }
@@ -3692,7 +3557,6 @@ mod tests {
             let decoded = decode_record_body(
                 &bytes,
                 written.region,
-                LocusKindTag::of(&written.kind),
                 &the_live_reads_of(&written),
                 &RecordLayout::as_this_build_writes_it(),
             )
@@ -3927,8 +3791,8 @@ mod tests {
             let mut live_reads = a_live_set_reader();
             let (mut bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&varying));
             // The head's fourth byte is the varying count, and 19 fits in one byte.
-            assert_eq!(bytes[3], 19);
-            bytes[3] = wrong;
+            assert_eq!(bytes[2], 19);
+            bytes[2] = wrong;
 
             match decode_a_record(
                 &mut live_reads,
@@ -4006,6 +3870,54 @@ mod tests {
         }
     }
 
+    /// **The compared count is the reads a ratio may be taken of, and nothing else** — the
+    /// owner's ruling of 2026-09-04: reads a filter or the depth cap turned away must not be in
+    /// it.
+    ///
+    /// **Two of the three exclusions are structural and this test pins the third.** A read a
+    /// filter rejected never reaches the locus generator, and a read the depth cap discarded is
+    /// dropped during the walk before any record exists — neither can be in an observation, so
+    /// no fixture here can construct one that is. What a record *can* carry is the two counters
+    /// that say how many such reads there were, and the point is that those counters move the
+    /// compared count not at all: a record with 305 reads discarded by the cap and 12 that
+    /// produced nothing reports the same denominator as the same record with both at zero.
+    #[test]
+    fn reads_a_filter_or_the_cap_turned_away_are_not_in_the_compared_count() {
+        let mut live_reads = a_live_set_reader();
+        let with_counters = a_rich_record();
+        assert!(
+            with_counters.reads_discarded_by_cap > 0 && with_counters.reads_without_observation > 0,
+            "the fixture has to carry both counters for this to say anything: {} and {}",
+            with_counters.reads_discarded_by_cap,
+            with_counters.reads_without_observation
+        );
+
+        let mut without_counters = with_counters.clone();
+        without_counters.reads_discarded_by_cap = 0;
+        without_counters.reads_without_observation = 0;
+
+        assert_eq!(
+            with_counters.non_reference_and_compared_reads(),
+            without_counters.non_reference_and_compared_reads(),
+            "neither counter is in either half of the keep rule"
+        );
+
+        for record in [with_counters, without_counters] {
+            let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
+            let found = read_a_record_head(
+                &mut live_reads,
+                &bytes,
+                A_CONTIG,
+                OffsetBase::at_block_start(block_starts_at),
+            )
+            .expect("the head reads");
+            assert_eq!(
+                found.head.reads_compared_with_reference, 137,
+                "the one complete observation's reads, and only those"
+            );
+        }
+    }
+
     /// **A head whose varying count is larger than its compared count is refused without the
     /// body being touched.** The two are summed over the same observations, so the first counts
     /// a subset of the second; a head saying otherwise would put the keep rule's share above
@@ -4025,7 +3937,7 @@ mod tests {
         // Offset 0, span 1, kind Generic, then the two counts, an empty body, and no chain-id
         // changes either way.
         for (varying, compared) in [(5u8, 3u8), (5, 0), (1, 0)] {
-            let head = [0, 1, 0, varying, compared, 0, 0, 0];
+            let head = [0, 1, varying, compared, 0, 0, 0];
             let refused = read_a_record_head(
                 &mut live_reads,
                 &head,
@@ -4047,7 +3959,7 @@ mod tests {
 
         let nothing_varied_and_nothing_was_compared = read_a_record_head(
             &mut live_reads,
-            &[0, 1, 0, 0, 0, 0, 0, 0],
+            &[0, 1, 0, 0, 0, 0, 0],
             A_CONTIG,
             OffsetBase::at_block_start(Position(1_000)),
         )
@@ -4061,7 +3973,7 @@ mod tests {
 
         let all_of_them_varied = read_a_record_head(
             &mut live_reads,
-            &[0, 1, 0, 5, 5, 0, 0, 0],
+            &[0, 1, 5, 5, 0, 0, 0],
             A_CONTIG,
             OffsetBase::at_block_start(Position(1_000)),
         )
@@ -4087,7 +3999,7 @@ mod tests {
         for (byte, wrong) in [(0x8a, 138u32), (0x88, 136)] {
             let mut live_reads = a_live_set_reader();
             let (mut bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
-            let at_the_compared_count = 4;
+            let at_the_compared_count = 3;
             assert_eq!(
                 (
                     bytes[at_the_compared_count],
@@ -4174,11 +4086,10 @@ mod tests {
 
         let body_bytes = record_body_length(&record);
         assert_eq!(
-            bytes[..8],
+            bytes[..7],
             [
                 40, // position-offset: 1,040 − 1,000
                 7,  // reference-span: seven bases, inclusive
-                1,  // locus-kind: Ssr
                 2,  // non-reference-reads: the two reads a base off the reference
                 5,  // reads-compared-with-reference: both observations spanned the locus
                 body_bytes as u8,
@@ -4186,7 +4097,7 @@ mod tests {
                 0, // chain-id arrivals: and none started
             ]
         );
-        assert_eq!(bytes.len(), 8 + body_bytes);
+        assert_eq!(bytes.len(), 7 + body_bytes);
     }
 
     // -----------------------------------------------------------------
@@ -4543,7 +4454,7 @@ mod tests {
         // the varying-read count take one each, the compared-read count is 137 and takes two,
         // and the body's length is the seventh byte. (The chain-id changes follow it, and this
         // record names no reads.) The assertion below is what fails if that drifts.
-        let at_the_body_length = 6;
+        let at_the_body_length = 5;
         assert_eq!(usize::from(bytes[at_the_body_length]), body_bytes);
         bytes[at_the_body_length] = (body_bytes - 1) as u8;
 
@@ -4668,7 +4579,7 @@ mod tests {
         // The scalar head is seven bytes here — offset, span, kind and the varying-read count
         // one each, the compared-read count two, the body's length one — so the changes begin at
         // byte seven and this cut lands one byte into them.
-        let scalar_head_bytes = 7;
+        let scalar_head_bytes = 6;
         assert_eq!(
             usize::from(bytes[scalar_head_bytes - 1]),
             record_body_length(&record),
@@ -4724,14 +4635,9 @@ mod tests {
         encode_record_body(&record, &mut body);
         body.extend_from_slice(&trailing);
 
-        let decoded = decode_record_body(
-            &body,
-            record.region,
-            LocusKindTag::of(&record.kind),
-            &the_live_reads_of(&record),
-            &layout,
-        )
-        .expect("a field this reader does not know is measured, not refused");
+        let decoded =
+            decode_record_body(&body, record.region, &the_live_reads_of(&record), &layout)
+                .expect("a field this reader does not know is measured, not refused");
         assert_eq!(decoded.record, record);
         assert_eq!(
             decoded.bytes_read,
@@ -4854,7 +4760,6 @@ mod tests {
         let _ = decode_record_body(
             &bytes,
             record.region,
-            LocusKindTag::of(&record.kind),
             &live,
             &RecordLayout::as_this_build_writes_it(),
         )
@@ -4878,7 +4783,6 @@ mod tests {
             let refused = decode_record_body(
                 &spliced,
                 record.region,
-                LocusKindTag::of(&record.kind),
                 &live,
                 &RecordLayout::as_this_build_writes_it(),
             )
@@ -4927,7 +4831,6 @@ mod tests {
             let decoded = decode_record_body(
                 &bytes,
                 record.region,
-                LocusKindTag::of(&record.kind),
                 &live,
                 &RecordLayout::as_this_build_writes_it(),
             )
@@ -4965,14 +4868,9 @@ mod tests {
         encode_record_body(&record, &mut body);
         body.extend_from_slice(&trailing);
 
-        let decoded = decode_record_body(
-            &body,
-            record.region,
-            LocusKindTag::of(&record.kind),
-            &the_live_reads_of(&record),
-            &layout,
-        )
-        .expect("a field this reader does not know is measured, not refused");
+        let decoded =
+            decode_record_body(&body, record.region, &the_live_reads_of(&record), &layout)
+                .expect("a field this reader does not know is measured, not refused");
         assert_eq!(decoded.record, record);
         assert_eq!(
             decoded.bytes_read,
@@ -4994,7 +4892,6 @@ mod tests {
         let refused = decode_record_body(
             &body,
             a_region(1, 1),
-            LocusKindTag::Generic,
             &LiveSet::new(),
             &RecordLayout::as_this_build_writes_it(),
         )
@@ -5019,7 +4916,6 @@ mod tests {
         let decoded = decode_record_body(
             &none,
             names_nothing.region,
-            LocusKindTag::of(&names_nothing.kind),
             &LiveSet::new(),
             &RecordLayout::as_this_build_writes_it(),
         )
@@ -5055,7 +4951,6 @@ mod tests {
         let decoded = decode_record_body(
             &bytes,
             record.region,
-            LocusKindTag::of(&record.kind),
             &honest,
             &RecordLayout::as_this_build_writes_it(),
         )
@@ -5067,7 +4962,6 @@ mod tests {
         let refused = decode_record_body(
             &bytes,
             record.region,
-            LocusKindTag::of(&record.kind),
             &phantom,
             &RecordLayout::as_this_build_writes_it(),
         )
@@ -5257,12 +5151,12 @@ mod tests {
     fn a_head_count_too_large_for_its_field_is_refused_rather_than_narrowed() {
         let mut live_reads = a_live_set_reader();
         for (position, expected) in [
-            (3usize, "non-reference-reads"),
-            (4, "reads-compared-with-reference"),
-            (5, "record-body-byte-count"),
+            (2usize, "non-reference-reads"),
+            (3, "reads-compared-with-reference"),
+            (4, "record-body-byte-count"),
         ] {
-            let mut bytes = vec![0u8, 1, 0]; // offset 0, span 1, locus kind Generic
-            for at in 3..=5 {
+            let mut bytes = vec![0u8, 1]; // offset 0, span 1
+            for at in 2..=4 {
                 if at == position {
                     encode_u64_leb128(u64::from(u32::MAX) + 6, &mut bytes);
                 } else {
@@ -5311,8 +5205,8 @@ mod tests {
     #[test]
     fn a_head_declaring_a_body_no_buffer_holds_is_truncated_not_malformed() {
         let mut live_reads = a_live_set_reader();
-        // Offset 0, span 1, locus kind Generic, and neither of the keep rule's counts.
-        let mut bytes = vec![0u8, 1, 0, 0, 0];
+        // Offset 0, span 1, and neither of the keep rule's counts.
+        let mut bytes = vec![0u8, 1, 0, 0];
         encode_u64_leb128(u64::from(BodyByteCount::MAX), &mut bytes);
         // No departures and no arrivals, so the head is whole and what runs out is the body.
         bytes.extend_from_slice(&[0, 0]);
@@ -5975,7 +5869,6 @@ mod tests {
             let alone = decode_record_body(
                 &bytes[body.clone()],
                 head.region,
-                head.locus_kind,
                 &the_live_reads_of(&records[index]),
                 &layout,
             )
@@ -6072,7 +5965,6 @@ mod tests {
             let mut head = FieldReader::new(&widened);
             let offset = head.read_varint("position-offset").expect("the head reads");
             let span = head.read_varint("reference-span").expect("the head reads");
-            let kind = head.read_varint("locus-kind").expect("the head reads");
             let non_reference = head
                 .read_varint("non-reference-reads")
                 .expect("the head reads");
@@ -6085,7 +5977,6 @@ mod tests {
             widened.clear();
             put_varint(&mut widened, offset);
             put_varint(&mut widened, span);
-            put_varint(&mut widened, kind);
             put_varint(&mut widened, non_reference);
             put_varint(&mut widened, compared);
             put_varint(&mut widened, body.len() as u64);

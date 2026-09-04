@@ -132,8 +132,7 @@ Two more terms this document needs:
   ([`chain_id_allocator.rs`](../../../../src/ng/locus_generation/pileup/chain_id_allocator.rs)).
 - **the record head** — the fixed fields at the front of every record that let a reader decide
   whether it wants the record without building it: the position offset, the reference span, the
-  locus kind, the non-reference read count, the reads compared with the reference, and the body's
-  length (§4.3).
+  non-reference read count, the reads compared with the reference, and the body's length (§4.3).
 
 ---
 
@@ -393,15 +392,14 @@ is not.
 **Settled 2026-08-25, and it replaces a two-stream design that was adopted and then measured
 away.** A psp block is **one** compressed stream. Each record in it opens with a fixed head that
 answers, cheaply, every question a reader has before it decides whether it wants the record: what
-ground the record covers, what kind of locus it is, whether enough of the sample's reads varied
-there to be worth building, and how far to skip if not. *It answered the first and the last of
-those when this section was settled; the kind and the share's denominator joined them on
-2026-09-04, and the shape of the argument is unchanged.*
+ground the record covers, whether enough of the sample's reads varied there to be worth building,
+and how far to skip if not. *The first and the last were what it answered when this section was
+settled; the share's denominator joined them on 2026-09-04.*
 
 ```
-record = position_offset | reference_span | locus_kind | non_reference_reads
+record = position_offset | reference_span | non_reference_reads
        | reads_compared_with_reference | record_length | body
-         └──────────────────────── the head ───────────────────────────┘   └── skip this ──┘
+         └──────────────────── the head ────────────────────┘   └── skip this ──┘
 ```
 
 A reader takes the head, decides, and either builds the body or advances `record_length` bytes past
@@ -462,11 +460,11 @@ previous record — a format nothing has implemented, so there is nothing to mea
 
 | what the file carries | tomato, 10.25 reads a position | HG002 chr21, 280.32 |
 |---|---:|---:|
-| bodies alone, no head scalars | 4.752 | 14.870 |
-| + the head as it stood before 2026-09-04 | 4.944 (**+4.1 %**) | 15.831 (**+6.5 %**) |
-| **+ the head as it stands now** | **5.138 (+8.1 %)** | **17.178 (+15.5 %)** |
+| bodies alone, no head scalars | 4.778 | 14.920 |
+| + the head as it stood before 2026-09-04 | 4.944 (**+3.5 %**) | 15.831 (**+6.1 %**) |
+| **+ the head as it stands now** | **5.135 (+7.5 %)** | **17.176 (+15.1 %)** |
 
-**So the head costs 8.1 % of the file at ten reads a position and 15.5 % at 280** — against a
+**So the head costs 7.5 % of the file at ten reads a position and 15.1 % at 280** — against a
 denominator that is *not* the one the 9.2 % used, and the two numbers must not be read as a
 before-and-after of each other. Every row here keeps the chain ids' live-set changes, which are the
 head's and which no reader can skip; what the middle and last rows add to the first is the scalar
@@ -497,14 +495,6 @@ at the cost of two more head fields and a reader that maintains state while skip
   [`cohort_merge.md`](cohort_merge.md) names it as one of two things it asks of this document, because
   a record widened by a deletion covers more than one position, so a reader indexed by position
   cannot work out what a record reaches from its start alone.
-- **`locus_kind`** — generic, repeat tract, or bundle. **Here rather than in the body since
-  2026-09-04** ([`psp_head_compared_reads.md`](psp_head_compared_reads.md) §3.1), because two of the
-  merge's decisions are taken before any evidence is assembled: `max_cohort_locus_span` governs
-  *generic* loci only — a tract's span is its reference tract and may lawfully exceed the bound —
-  and a cohort locus may not hold a generic and a tract member at once. A reader that cannot say a
-  record's kind fails every wide tract as an over-wide locus. **A move and not a copy:** the tract's
-  motif and flanks stay in the body, present exactly when this says repeat tract, so nothing has two
-  answers to check against each other.
 - **`non_reference_reads`** — the reads at this position that supported something other than the
   reference. **The owner's correction of his own first suggestion, 2026-08-25**: a count of
   alternative *alleles* answers *does anything vary here* identically, since an allele exists only
@@ -537,31 +527,43 @@ tried**. A fixed width is quicker to read and does compress away almost all of w
 what survives is a few per cent of a file that is only a few bytes a record to begin with.
 
 **What the head costs on its own**, compressed with no body between the heads — the best case for a
-column of small repetitive values, and not what the file pays: **0.509 bytes a record on tomato at
-10.25 reads a position and 3.945 on HG002 chr21 at 280.32**, against 0.253 and 2.425 for the head
+column of small repetitive values, and not what the file pays: **0.498 bytes a record on tomato at
+10.25 reads a position and 3.882 on HG002 chr21 at 280.32**, against 0.253 and 2.425 for the head
 as it stood before 2026-09-04. *This supersedes "the four head fields compressed to 0.077 bytes a
 record", which was four scalars with the chain-id changes left out, on a psp built before the
 changes joined the head.*
 
-#### What the locus kind and the compared-read count cost
+#### What the compared-read count costs, and why the locus kind is not here
 
-**Measured 2026-09-04, both fields at once, on the corpora above** — the same records with the head
-written both ways, so nothing but the head differs:
+**Measured 2026-09-04 on the corpora above** — the same records with the head written both ways, so
+nothing but the head differs:
 
 | | tomato, 10.25 reads a position | HG002 chr21, 280.32 |
 |---|---:|---:|
 | raw bytes a record added | **+1.00** | **+1.93** |
-| compressed bytes a record added | +0.194 | +1.347 |
+| compressed bytes a record added | +0.191 | +1.345 |
 | **as a share of the compressed file** | **+3.9 %** | **+8.5 %** |
 
-**The raw cost is exactly what was predicted** — one byte a record at low depth, two at high — and
-the kind's move contributes none of it: the tag left the body as it joined the head. **What was not
-predicted is how little of it compression removes at depth**: 81 % of the added bytes disappear at
-ten reads a position and only 30 % at 280, because the compared-read count tracks depth and so
-varies record to record, where the non-reference count is almost always zero and a column of zeros
-costs nothing. **So the field is cheap where the flat floor already answered the rule, and dearest
-exactly where it is needed.** Whether 8.5 % of a deep file is worth the body decodes it saves is a
-question for the reader that consumes it, which does not exist yet.
+**The raw cost is one byte a record at low depth and two at high**, which is what the field's own
+arithmetic predicts. **What was not predicted is how little of it compression removes at depth**:
+81 % of the added bytes disappear at ten reads a position and only 30 % at 280, because the
+compared-read count tracks depth and so varies record to record, where the non-reference count is
+almost always zero and a column of zeros costs nothing. **So the field is cheap where the flat
+floor already answered the rule, and dearest exactly where it is needed.**
+
+**The locus kind is deliberately not in the head** (the owner's ruling of 2026-09-04, which
+reversed a draft that had put it there). A record's kind is a *function of its coordinate*: it is
+the kind of the typed region the locus falls in, and typed regions are computed from the reference
+and the repeat catalog before a read is looked at. Every psp records the segmentation inputs its
+typing used and a calling run refuses a cohort that disagrees with its own segmentation
+([`run_streaming.md`](run_streaming.md) §6.2), so a reader holding a coordinate can look the kind
+up. Nothing pre-assembly needs it in the head — including the width bound of
+[`cohort_merge.md`](cohort_merge.md) §3.1, which governs generic loci only. **The tag stays in the
+record body** so that decoding a body needs no catalog: it is what says whether the tract's motif
+and flanks follow.
+
+*Measured while it was briefly in the head: its move cost nothing either way, since the byte left
+the body as it arrived. The table above is the compared-read count alone.*
 
 ### 4.4 The reader's two buffers — 16 kB each
 

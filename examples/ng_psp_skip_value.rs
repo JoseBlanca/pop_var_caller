@@ -19,7 +19,7 @@
 //! On the wire a record is
 //!
 //! ```text
-//! position offset | reference span | locus kind | non-reference reads
+//! position offset | reference span | non-reference reads
 //! | reads compared with the reference | body bytes | chain-id changes | body
 //! ```
 //!

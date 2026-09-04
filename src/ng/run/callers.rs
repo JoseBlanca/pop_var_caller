@@ -1923,10 +1923,15 @@ mod tests {
     pub(super) fn unindexed_bam_for(sample: &str, file_name: &str) -> (TempDir, PathBuf) {
         let stem = file_name.split('.').next().unwrap_or(file_name);
         let records = vec![read_named_with_length(&format!("{stem}-r0"), 0, 1, 30)];
+        // **The `@RG ID` carries the file's name too**, for the same reason the read names do
+        // and for one more: one sample's two files may not declare the same id, which
+        // `build_read_groups` refuses (the owner's ruling of 2026-09-04). A real per-lane file
+        // has its own id, so this matches reality rather than working around the check.
+        let read_group = format!("rg-{stem}");
         let header = header(
             Some("coordinate"),
             &matching_contigs(),
-            &[("rg1", Some(sample))],
+            &[(read_group.as_str(), Some(sample))],
         );
         named_bam(&header, &records, file_name)
     }
@@ -2572,7 +2577,14 @@ mod construction_checks {
             .zip(checksums)
             .map(|((name, length, _), checksum)| (name, length, Some(checksum.as_str())))
             .collect();
-        let header = header(Some("coordinate"), &contigs, &[("rg1", Some(sample))]);
+        // The `@RG ID` carries the file's name: one sample's two files may not declare the same
+        // id, and this fixture is used for exactly that shape.
+        let read_group = format!("rg-{stem}");
+        let header = header(
+            Some("coordinate"),
+            &contigs,
+            &[(read_group.as_str(), Some(sample))],
+        );
         let (dir, path) = named_bam(&header, &records, file_name);
         crate::bam::index_preflight::preflight_alignment_indexes(std::slice::from_ref(&path), true)
             .expect("build index");

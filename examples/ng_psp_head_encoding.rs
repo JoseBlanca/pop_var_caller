@@ -1,4 +1,4 @@
-//! **Are a record head's six fields cheaper as variable-length integers or as fixed-width
+//! **Are a record head's five fields cheaper as variable-length integers or as fixed-width
 //! ones — after the block has been compressed?**
 //!
 //! The container spec leaves the width to the manifest and records that a fixed width is
@@ -22,11 +22,6 @@
 //!   anchors a record at one position and derives its span from the reference allele, so almost
 //!   every span is 1. ng widens a record across a deletion.
 //! - **non-reference-reads** — exact. It is derived from the same allele support.
-//! - **locus-kind** — **every record here is generic**, so this field is the one-byte tag 0 on
-//!   every record and compresses to almost nothing. ng's own store will carry tracts and
-//!   bundles among the generic loci, whose tags are 1 and 2; a column of three values that is
-//!   constant here would not be constant there. It is also a *move* rather than an addition —
-//!   the tag left the body as it joined the head — so its net cost is near zero either way.
 //! - **reads-compared-with-reference** — **approximate, and it reads high.** Production has no
 //!   read witness, so this harness marks every allele's reads as having spanned the locus (see
 //!   `as_an_ng_record`), which makes the denominator equal to the record's depth. ng's excludes
@@ -71,20 +66,18 @@ enum HeadEncoding {
     /// implemented. What this row isolates is narrower and exact: what the head's scalar fields
     /// cost, over bodies that are otherwise identical.
     NoHeadScalars,
+    /// **The head as it stood before `reads-compared-with-reference` was added**, which is four
+    /// scalars rather than five. The bodies are identical, so the difference between this row
+    /// and the varint row is the whole cost of the field.
+    VarintBeforeTheDenominator,
     /// What the format writes today: LEB128, a byte for a small value.
     Varint,
-    /// **The head as it stood before 2026-09-04**, reconstructed exactly: four scalars rather
-    /// than six, and the locus-kind tag written at the end of the *body*, which is where it
-    /// lived. The bodies are otherwise identical, so the difference between this row and the
-    /// varint row is the whole cost of the change — measured on one corpus in one run, rather
-    /// than by building two versions of the code.
-    VarintBeforeTheKindAndTheDenominator,
+
     /// Every field at a declared fixed width, little-endian. The widths have to hold every
     /// value the *format* allows, not every value this corpus happens to contain.
     Fixed {
         offset: u8,
         span: u8,
-        kind: u8,
         reads: u8,
         compared: u8,
         body: u8,
@@ -96,17 +89,14 @@ impl HeadEncoding {
         match self {
             Self::NoHeadScalars => "no head scalars".to_string(),
             Self::Varint => "varint".to_string(),
-            Self::VarintBeforeTheKindAndTheDenominator => {
-                "varint, head before 2026-09-04".to_string()
-            }
+            Self::VarintBeforeTheDenominator => "varint, head before 2026-09-04".to_string(),
             Self::Fixed {
                 offset,
                 span,
-                kind,
                 reads,
                 compared,
                 body,
-            } => format!("fixed {offset}/{span}/{kind}/{reads}/{compared}/{body}"),
+            } => format!("fixed {offset}/{span}/{reads}/{compared}/{body}"),
         }
     }
 }
@@ -119,7 +109,6 @@ impl HeadEncoding {
 struct HeadValues {
     offset: u64,
     span: u64,
-    kind: u64,
     reads: u64,
     compared: u64,
     body: u64,
@@ -133,14 +122,13 @@ fn put_head(
     let HeadValues {
         offset,
         span,
-        kind,
         reads,
         compared,
         body,
     } = values;
     match encoding {
         HeadEncoding::NoHeadScalars => Ok(()),
-        HeadEncoding::VarintBeforeTheKindAndTheDenominator => {
+        HeadEncoding::VarintBeforeTheDenominator => {
             for mut value in [offset, span, reads, body] {
                 while value >= 0x80 {
                     out.push((value as u8) | 0x80);
@@ -153,7 +141,7 @@ fn put_head(
         HeadEncoding::Varint => {
             // LEB128 by hand, so this harness needs nothing from a private module: seven
             // bits a byte, the top bit set while more follow.
-            for mut value in [offset, span, kind, reads, compared, body] {
+            for mut value in [offset, span, reads, compared, body] {
                 while value >= 0x80 {
                     out.push((value as u8) | 0x80);
                     value >>= 7;
@@ -165,7 +153,6 @@ fn put_head(
         HeadEncoding::Fixed {
             offset: offset_bytes,
             span: span_bytes,
-            kind: kind_bytes,
             reads: reads_bytes,
             compared: compared_bytes,
             body: body_bytes,
@@ -173,7 +160,6 @@ fn put_head(
             for (value, width, field) in [
                 (offset, offset_bytes, "position-offset"),
                 (span, span_bytes, "reference-span"),
-                (kind, kind_bytes, "locus-kind"),
                 (reads, reads_bytes, "non-reference-reads"),
                 (compared, compared_bytes, "reads-compared-with-reference"),
                 (body, body_bytes, "record-body-byte-count"),
@@ -190,17 +176,6 @@ fn put_head(
             }
             Ok(())
         }
-    }
-}
-
-/// The locus-kind tag as the head spells it. Every record this corpus makes is generic, so this
-/// is 0 throughout — see the module doc's note on what that does and does not tell you.
-fn kind_of(record: &SampleLocusObservations) -> u64 {
-    match record.kind {
-        LocusKind::Generic => 0,
-        LocusKind::Ssr(_) => 1,
-        LocusKind::SsrBundle => 2,
-        _ => unreachable!("LocusKind is non_exhaustive outside this crate"),
     }
 }
 
@@ -351,19 +326,8 @@ fn run(
 
         body.clear();
         encode_record_body(record, &mut body);
-        if matches!(encoding, HeadEncoding::VarintBeforeTheKindAndTheDenominator) {
-            // Where the tag lived until 2026-09-04: the body's last field before the tract's
-            // own three. Every record this corpus makes is generic, so nothing follows it.
-            let mut tag = kind_of(record);
-            while tag >= 0x80 {
-                body.push((tag as u8) | 0x80);
-                tag >>= 7;
-            }
-            body.push(tag as u8);
-        }
         let (non_reference_reads, reads_compared_with_reference) =
             record.non_reference_and_compared_reads();
-        let kind = kind_of(record);
         let offset = record.region.start.get() - measured_from.get();
         let span = record.region.end.get() - record.region.start.get() + 1;
 
@@ -374,7 +338,6 @@ fn run(
             HeadValues {
                 offset,
                 span,
-                kind,
                 reads: u64::from(non_reference_reads),
                 compared: u64::from(reads_compared_with_reference),
                 body: body.len() as u64,
@@ -551,17 +514,15 @@ fn main() {
     println!("records-whose-offset-passes-65535\t{over_a_two_byte_offset}");
     println!("read-seconds\t{:.1}", read_at.elapsed().as_secs_f64());
 
-    // Every field at the width the *format* allows: a position offset is bounded by the grid, a
-    // span and both read counts and a body length are each what a `u32` holds, and a locus kind
-    // is one of a closed set of tags that one byte holds 256 of.
+    // Every field at the width the *format* allows: a position offset is bounded by the grid, and
+    // a span, both read counts and a body length are each what a `u32` holds.
     let widths = [
         HeadEncoding::NoHeadScalars,
-        HeadEncoding::VarintBeforeTheKindAndTheDenominator,
+        HeadEncoding::VarintBeforeTheDenominator,
         HeadEncoding::Varint,
         HeadEncoding::Fixed {
             offset: 4,
             span: 4,
-            kind: 1,
             reads: 4,
             compared: 4,
             body: 4,
@@ -571,7 +532,6 @@ fn main() {
         HeadEncoding::Fixed {
             offset: 4,
             span: 2,
-            kind: 1,
             reads: 2,
             compared: 2,
             body: 4,
@@ -579,7 +539,6 @@ fn main() {
         HeadEncoding::Fixed {
             offset: 2,
             span: 1,
-            kind: 1,
             reads: 2,
             compared: 2,
             body: 2,
@@ -659,16 +618,16 @@ fn main() {
 mod tests {
     use super::*;
 
-    /// Read the six head fields back out of a fixed-width head, so the arm that produces the
+    /// Read the five head fields back out of a fixed-width head, so the arm that produces the
     /// comparison's fixed rows has an oracle of its own.
     ///
     /// **The varint arm is checked against the shipped `BlockBuilder` and the fixed arm was
     /// checked against nothing** — and the fixed arm is the one whose bytes the conclusion
     /// turns on. A field order or a width silently wrong there would report a difference
     /// between varint and *something nobody wrote*.
-    fn take_fixed_head(bytes: &[u8], widths: [u8; 6]) -> ([u64; 6], usize) {
+    fn take_fixed_head(bytes: &[u8], widths: [u8; 5]) -> ([u64; 5], usize) {
         let mut at = 0usize;
-        let mut values = [0u64; 6];
+        let mut values = [0u64; 5];
         for (index, width) in widths.into_iter().enumerate() {
             let mut whole = [0u8; 8];
             whole[..width as usize].copy_from_slice(&bytes[at..at + width as usize]);
@@ -680,19 +639,18 @@ mod tests {
 
     #[test]
     fn a_fixed_width_head_reads_back_field_for_field() {
-        let widths = [4u8, 2, 1, 2, 2, 4];
+        let widths = [4u8, 2, 2, 2, 4];
         let encoding = HeadEncoding::Fixed {
             offset: widths[0],
             span: widths[1],
-            kind: widths[2],
-            reads: widths[3],
-            compared: widths[4],
-            body: widths[5],
+            reads: widths[2],
+            compared: widths[3],
+            body: widths[4],
         };
         // Values that need every byte of their declared width, so a width read one short or
         // one long is visible rather than absorbed by leading zeros — and every one different
         // from every other, so a pair swapped is visible too.
-        let written = [3_000_000_007u64, 40_001, 2, 60_002, 60_003, 4_000_000_009];
+        let written = [3_000_000_007u64, 40_001, 60_002, 60_003, 4_000_000_009];
 
         let mut bytes = Vec::new();
         put_head(
@@ -701,10 +659,9 @@ mod tests {
             HeadValues {
                 offset: written[0],
                 span: written[1],
-                kind: written[2],
-                reads: written[3],
-                compared: written[4],
-                body: written[5],
+                reads: written[2],
+                compared: written[3],
+                body: written[4],
             },
         )
         .expect("every value fits its declared width");
@@ -712,10 +669,7 @@ mod tests {
         let (read, used) = take_fixed_head(&bytes, widths);
         assert_eq!(read, written, "field for field");
         assert_eq!(used, bytes.len(), "and nothing else was written");
-        assert_eq!(
-            used, 15,
-            "four plus two plus one plus two plus two plus four"
-        );
+        assert_eq!(used, 14, "four plus two plus two plus two plus four");
     }
 
     /// **The width bound is exact.** A value of exactly what a width holds is written; one more
@@ -728,7 +682,6 @@ mod tests {
             let encoding = HeadEncoding::Fixed {
                 offset: width,
                 span: 8,
-                kind: 8,
                 reads: 8,
                 compared: 8,
                 body: 8,
@@ -737,7 +690,6 @@ mod tests {
             let mostly_zero = |offset| HeadValues {
                 offset,
                 span: 0,
-                kind: 0,
                 reads: 0,
                 compared: 0,
                 body: 0,
@@ -745,7 +697,7 @@ mod tests {
             put_head(&mut bytes, encoding, mostly_zero(largest)).unwrap_or_else(|field| {
                 panic!("{largest} must fit {width} bytes; {field} refused")
             });
-            assert_eq!(bytes.len(), width as usize + 40);
+            assert_eq!(bytes.len(), width as usize + 32);
 
             let mut bytes = Vec::new();
             assert_eq!(
@@ -764,7 +716,6 @@ mod tests {
         let encoding = HeadEncoding::Fixed {
             offset: 8,
             span: 8,
-            kind: 8,
             reads: 8,
             compared: 8,
             body: 8,
@@ -776,15 +727,14 @@ mod tests {
             HeadValues {
                 offset: u64::MAX,
                 span: u64::MAX,
-                kind: u64::MAX,
                 reads: u64::MAX,
                 compared: u64::MAX,
                 body: u64::MAX,
             },
         )
         .expect("eight bytes hold a u64");
-        assert_eq!(bytes.len(), 48);
-        assert_eq!(take_fixed_head(&bytes, [8, 8, 8, 8, 8, 8]).0, [u64::MAX; 6]);
+        assert_eq!(bytes.len(), 40);
+        assert_eq!(take_fixed_head(&bytes, [8, 8, 8, 8, 8]).0, [u64::MAX; 5]);
     }
 
     /// The varint arm writes LEB128, checked against an independent decode rather than against
@@ -799,13 +749,12 @@ mod tests {
             HeadValues {
                 offset: 0,
                 span: 1,
-                kind: 2,
                 reads: 127,
                 compared: 128,
                 body: 300,
             },
         )
         .expect("varints never refuse");
-        assert_eq!(bytes, vec![0x00, 0x01, 0x02, 0x7f, 0x80, 0x01, 0xac, 0x02]);
+        assert_eq!(bytes, vec![0x00, 0x01, 0x7f, 0x80, 0x01, 0xac, 0x02]);
     }
 }

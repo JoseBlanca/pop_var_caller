@@ -160,8 +160,26 @@ pub(crate) fn header_with_read_groups(
 
 /// A header whose `@SQ` list is `contigs`, `SO:coordinate`, and one read group
 /// naming `NA12878` — the shape a file has to have to get past the gate.
+///
+/// **⚠ Two files built from this cannot be opened together**, because one sample may not
+/// declare the same `@RG ID` twice (the owner's ruling of 2026-09-04, refused by
+/// `build_read_groups`). A test that opens two files of one sample gives each its own id with
+/// [`bam_header_with_read_group`].
 pub(crate) fn bam_header(contigs: &[(&str, usize, Option<&str>)]) -> sam::Header {
-    header(Some("coordinate"), contigs, &[("rg1", Some("NA12878"))])
+    bam_header_with_read_group(contigs, "rg1")
+}
+
+/// [`bam_header`] with the `@RG ID` named — what a test opening several files of one sample
+/// needs, since their ids have to differ the way a real per-lane file's do.
+pub(crate) fn bam_header_with_read_group(
+    contigs: &[(&str, usize, Option<&str>)],
+    read_group: &str,
+) -> sam::Header {
+    header(
+        Some("coordinate"),
+        contigs,
+        &[(read_group, Some("NA12878"))],
+    )
 }
 
 /// How a fixture file's records resolve: every fixture header declares exactly

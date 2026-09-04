@@ -110,18 +110,16 @@ pub struct RecordHead {
     /// field above is summed over — so it is never smaller. The denominator of the
     /// merge's keep rule, whose numerator is that field.
     pub reads_compared_with_reference: u32,
-    /// Generic, repeat tract, or bundle. The tract's motif and flanks stay in the body;
-    /// only the tag is here, because the merge's width bound and its never-mix
-    /// assertion both read it before any evidence is assembled.
-    pub locus_kind: LocusKindTag,
     /// Length of the body that follows, in bytes.
     pub body_bytes: u32,
 }
 ```
 
-**The last two arrived on 2026-09-04** ([`../spec/psp_head_compared_reads.md`](../spec/psp_head_compared_reads.md)),
-which is also why `LocusKindTag` exists: it is `LocusKind` with the repeat tract's motif and flanks
-dropped, so the kind can live in a `Copy` head while its payload stays in the body.
+**`reads_compared_with_reference` arrived on 2026-09-04**
+([`../spec/psp_head_compared_reads.md`](../spec/psp_head_compared_reads.md)). **A record's
+`LocusKind` is deliberately not here**: it is a function of the coordinate, since it is the kind of
+the typed region the locus falls in, and the run has that partition already. The tag stays in the
+record body, where the body decoder needs it to know whether the tract's motif and flanks follow.
 
 **`GenomeRegion` rather than a position and a span** — the newtype exists
 ([`src/ng/types.rs:79`](../../../../src/ng/types.rs)) and holds exactly this pair, so a head that

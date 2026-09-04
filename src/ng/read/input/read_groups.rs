@@ -296,6 +296,7 @@ pub fn build_read_groups(paths: &[PathBuf]) -> Result<ReadGroups, ReadGroupError
         }
     }
 
+    reject_duplicate_read_group_ids(&read_groups)?;
     reject_colliding_synthesized_libraries(&read_groups)?;
     let per_sample = group_by_sample(&read_groups);
 
@@ -303,6 +304,40 @@ pub fn build_read_groups(paths: &[PathBuf]) -> Result<ReadGroups, ReadGroupError
         read_groups,
         per_sample,
     })
+}
+
+/// Fail if **one sample** declares the same `@RG ID` twice.
+///
+/// **The owner's ruling of 2026-09-04.** SAM makes an `@RG ID` unique within one file and says
+/// nothing across files, so a sample walked from several files — one per lane, the ordinary
+/// reason — *can* present two read groups with one id, and the identifiers this table mints would
+/// keep them apart. It is refused anyway, because in practice it is far more often a mistake than
+/// a deliberate collision: the same file passed twice, or read groups copied from one file to
+/// another. The cost of that mistake is silent — one lane's reads counted as another's library.
+///
+/// **Refused here, where the alignment files are opened**, so a run fails in a second rather than
+/// after hours of decoding, and the fix is the user's: give the read groups distinct ids
+/// (`samtools addreplacerg`).
+///
+/// **⚠ Two *different* samples sharing an id is not refused**, and the choice is worth its own
+/// sentence. A read group's identity in a run is its sample together with its id, so a collision
+/// across samples merges nothing — and it is what a cohort looks like when every sample was
+/// aligned by one pipeline that names its read group `1`. Widening this to the whole run is one
+/// line (key the map on the id alone) and it is the owner's to ask for.
+fn reject_duplicate_read_group_ids(read_groups: &[ReadGroup]) -> Result<(), ReadGroupError> {
+    let mut seen: HashMap<(&str, &str), &ReadGroup> = HashMap::new();
+
+    for group in read_groups {
+        if let Some(first) = seen.insert((&group.sample, &group.id), group) {
+            return Err(ReadGroupError::DuplicateReadGroupId {
+                read_group_id: group.id.to_string(),
+                sample: group.sample.to_string(),
+                paths: (first.file.to_path_buf(), group.file.to_path_buf()),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Fail if two read groups that had no `LB` ended up with the same library name.
@@ -713,6 +748,22 @@ pub enum ReadGroupError {
     MissingSampleName {
         path: PathBuf,
         read_group_id: String,
+    },
+
+    /// Two read groups declare the same `@RG ID`. Legal by the SAM specification across
+    /// files, and refused anyway (the owner's ruling of 2026-09-04): a repeated id is far more
+    /// often a mistake than a deliberate collision, and the mistake is silent.
+    #[error(
+        "sample '{sample}' declares @RG ID '{read_group_id}' twice, in '{first}' and in \
+         '{second}'. One sample's read groups have to be told apart by their ids; give them \
+         distinct ids (e.g. `samtools addreplacerg`) and try again",
+        first = paths.0.display(),
+        second = paths.1.display()
+    )]
+    DuplicateReadGroupId {
+        read_group_id: String,
+        sample: String,
+        paths: (PathBuf, PathBuf),
     },
 
     /// Two read groups without an `LB` tag would take the same synthesized
@@ -1247,7 +1298,7 @@ mod build_tests {
             "first.bam",
         );
         let (_second_dir, second) =
-            file_declaring(&[FixtureReadGroup::new("rg1", Some("HG002"))], "second.bam");
+            file_declaring(&[FixtureReadGroup::new("rg3", Some("HG002"))], "second.bam");
 
         let table = build_read_groups(&[first, second]).expect("both headers are valid");
 
@@ -1261,7 +1312,7 @@ mod build_tests {
             vec![
                 (0, "rg1", "NA12878"),
                 (1, "rg2", "NA12878"),
-                (2, "rg1", "HG002"),
+                (2, "rg3", "HG002"),
             ],
             "file order first, then header order within a file"
         );
@@ -1277,7 +1328,7 @@ mod build_tests {
             "first.bam",
         );
         let (_second_dir, second) = file_declaring(
-            &[FixtureReadGroup::new("rg1", Some("NA12878"))],
+            &[FixtureReadGroup::new("rg3", Some("NA12878"))],
             "second.bam",
         );
 
@@ -1300,24 +1351,113 @@ mod build_tests {
         );
     }
 
-    /// The residual collision the file name cannot prevent: two inputs with the
-    /// same name in different directories, whose read groups agree on sample and
-    /// `@RG ID` and declare no library. They would become indistinguishable, so
-    /// this is fatal rather than papered over.
+    /// **One sample's two files declaring one `@RG ID` are refused** (the owner's ruling of
+    /// 2026-09-04). The SAM specification makes an id unique within a file and says nothing
+    /// across files, so this is legal input; it is refused because in practice it is a mistake —
+    /// the same file passed twice, or read groups copied between files — and the mistake is
+    /// silent, scoring one lane's reads as another's library.
     #[test]
-    fn two_files_with_one_name_collide_on_a_synthesized_library() {
-        let (_first_dir, first) =
-            file_declaring(&[FixtureReadGroup::new("rg1", Some("NA12878"))], "run.bam");
-        let (_second_dir, second) =
-            file_declaring(&[FixtureReadGroup::new("rg1", Some("NA12878"))], "run.bam");
+    fn one_samples_two_files_declaring_one_read_group_id_are_refused() {
+        let (_first_dir, first) = file_declaring(
+            &[FixtureReadGroup::new("rg1", Some("NA12878")).with_library("lib-A")],
+            "first.bam",
+        );
+        let (_second_dir, second) = file_declaring(
+            &[FixtureReadGroup::new("rg1", Some("NA12878")).with_library("lib-B")],
+            "second.bam",
+        );
 
         let error = build_read_groups(&[first.clone(), second.clone()])
-            .expect_err("the two synthesized libraries collide");
+            .expect_err("one sample's read groups cannot share an id");
+
+        match &error {
+            ReadGroupError::DuplicateReadGroupId {
+                read_group_id,
+                sample,
+                paths,
+            } => {
+                assert_eq!(read_group_id, "rg1");
+                assert_eq!(sample, "NA12878");
+                assert_eq!(paths, &(first, second), "both paths, in input order");
+            }
+            other => panic!("expected DuplicateReadGroupId, got {other:?}"),
+        }
+        assert!(
+            error.to_string().contains("samtools addreplacerg"),
+            "the message says what to do: {error}"
+        );
+    }
+
+    /// **Two different samples may share an id, and must**, because that is what a cohort looks
+    /// like when every sample was aligned by one pipeline that names its read group the same
+    /// way. Their identity in the run is the sample together with the id, so nothing merges.
+    #[test]
+    fn two_samples_may_share_a_read_group_id() {
+        let (_first_dir, first) = file_declaring(
+            &[FixtureReadGroup::new("rg1", Some("NA12878"))],
+            "first.bam",
+        );
+        let (_second_dir, second) =
+            file_declaring(&[FixtureReadGroup::new("rg1", Some("HG002"))], "second.bam");
+
+        let built = build_read_groups(&[first, second]).expect("different samples do not collide");
+        assert_eq!(built.len(), 2);
+    }
+
+    /// **And distinct ids are the ordinary case** — the shape every benchmark cohort here has,
+    /// its read groups named by run accession.
+    #[test]
+    fn distinct_read_group_ids_across_files_are_one_table() {
+        let (_first_dir, first) = file_declaring(
+            &[FixtureReadGroup::new("SRR7279481", Some("SRS3394712"))],
+            "first.bam",
+        );
+        let (_second_dir, second) = file_declaring(
+            &[FixtureReadGroup::new("SRR7279488", Some("SRS3394687"))],
+            "second.bam",
+        );
+
+        let built = build_read_groups(&[first, second]).expect("distinct ids are fine");
+        assert_eq!(built.len(), 2);
+    }
+
+    /// **The synthesized-library collision is now unreachable through `build_read_groups`**, and
+    /// this is what still covers the function that guards it.
+    ///
+    /// A synthesized name is `sample:id:file-stem`, so two of them collide only when all three
+    /// agree — and the id check above refuses that input before this one sees it. The function
+    /// stays because it is the only thing standing between a synthesized name and a silent
+    /// merge, and because the id rule is a policy that could be relaxed while this one could
+    /// not; it is tested directly rather than through a door that no longer opens.
+    #[test]
+    fn two_synthesized_libraries_with_one_name_are_refused() {
+        let a_group = |file: &str| ReadGroup {
+            file: Arc::from(Path::new(file)),
+            id: Box::from("rg1"),
+            sample: Box::from("NA12878"),
+            library: NameWithOrigin {
+                value: Box::from("NA12878:rg1:run"),
+                origin: NameOrigin::Synthesized,
+            },
+            experiment: NameWithOrigin {
+                value: Box::from("NA12878:rg1:run"),
+                origin: NameOrigin::Synthesized,
+            },
+            platform: None,
+        };
+
+        let error =
+            reject_colliding_synthesized_libraries(&[a_group("a/run.bam"), a_group("b/run.bam")])
+                .expect_err("the two synthesized libraries collide");
 
         match &error {
             ReadGroupError::DuplicateSynthesizedLibrary { library, paths } => {
                 assert_eq!(library, "NA12878:rg1:run");
-                assert_eq!(paths, &(first, second), "both paths, in input order");
+                assert_eq!(
+                    paths,
+                    &(PathBuf::from("a/run.bam"), PathBuf::from("b/run.bam")),
+                    "both paths, in input order"
+                );
             }
             other => panic!("expected DuplicateSynthesizedLibrary, got {other:?}"),
         }
@@ -1335,8 +1475,11 @@ mod build_tests {
             &[FixtureReadGroup::new("rg1", Some("NA12878")).with_library("lib-A")],
             "run.bam",
         );
+        // **Different ids, same declared library** — one preparation across two lanes, which is
+        // the case this test is about. The ids have to differ since 2026-09-04, when a repeated
+        // `@RG ID` became a refusal of its own.
         let (_second_dir, second) = file_declaring(
-            &[FixtureReadGroup::new("rg1", Some("NA12878")).with_library("lib-A")],
+            &[FixtureReadGroup::new("rg2", Some("NA12878")).with_library("lib-A")],
             "run.bam",
         );
 
@@ -1359,7 +1502,7 @@ mod build_tests {
             "first.bam",
         );
         let (_second_dir, second) =
-            file_declaring(&[FixtureReadGroup::new("rg1", Some("HG002"))], "second.bam");
+            file_declaring(&[FixtureReadGroup::new("rg2", Some("HG002"))], "second.bam");
 
         let forward = build_read_groups(&[first.clone(), second.clone()]).expect("valid");
         let reversed = build_read_groups(&[second, first]).expect("valid");

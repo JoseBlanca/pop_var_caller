@@ -677,18 +677,22 @@ fn merge_the_read_group_tables(
 /// **One way it cannot be: a sample with no table at all**, because then nothing says which
 /// group a record's reads came from and no renumbering can be invented.
 ///
-/// **⚑ Spec §6.2 names a second — two entries of one sample sharing an `@RG ID` — and it is
-/// deliberately not refused here.** The reason the spec gives is that such a table "cannot be
-/// renumbered without guessing", and that is not this format's situation: a psp's identity is
-/// the walk-local *number*, which is the entry's own position, checked on both sides
-/// ([`ReadGroupIdentity`](crate::ng::psp::ReadGroupIdentity)) — nothing in the merge reads the
-/// id at all. And the format's own validator declares the case legal in as many words: a **psp
-/// holds one sample, not one alignment file**, and a sample sequenced across several files may
-/// carry two entries with one `@RG ID` and different libraries (`psp/header.rs`). Direct mode
-/// calls that cohort without complaint, so refusing it here would break spec §1.1's goal 1 for
-/// every multi-lane sample whose lanes reuse an id — common in real archives — and cost a
-/// re-walk nobody could avoid. **Raised for the owner at Checkpoint E: §6.2's clause should say
-/// what it means, which is the empty table.**
+/// **The other way it cannot be: two entries sharing an `@RG ID`** — spec §6.2's second clause,
+/// and the owner's ruling of 2026-09-04.
+///
+/// **⚠ Nothing here needs the ids to differ, and they are checked anyway.** A psp's read groups
+/// are identified by the walk-local *number*, which is an entry's own position, checked on both
+/// sides ([`ReadGroupIdentity`](crate::ng::psp::ReadGroupIdentity)); nothing in the merge reads
+/// the id. The format's own validator says as much and declares such a file well-formed
+/// (`psp/header.rs`), because a psp holds one sample rather than one alignment file, and a
+/// sample sequenced across several files *could* carry two entries with one id.
+///
+/// **It is refused because in practice it is a mistake, not a shape anyone means.** A run that
+/// walks alignment files refuses it before writing anything
+/// (`read_groups::reject_duplicate_read_group_ids`), so no psp this build writes can carry one;
+/// a psp that does was written by a build before that rule, or by hand, and the likeliest cause
+/// is the same file walked twice into one sample. Catching it here means a stored cohort is held
+/// to what a walked cohort is held to, rather than only the walk being checked.
 fn refuse_a_table_that_cannot_be_renumbered(header: &Header) -> Result<(), RunError> {
     if header.read_groups.is_empty() {
         return Err(RunError::PspReadGroupsCannotBeMerged {
@@ -697,6 +701,20 @@ fn refuse_a_table_that_cannot_be_renumbered(header: &Header) -> Result<(), RunEr
                       reads came from"
                 .to_string(),
         });
+    }
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for group in &header.read_groups {
+        if !seen.insert(group.id.as_str()) {
+            return Err(RunError::PspReadGroupsCannotBeMerged {
+                sample: header.sample.clone(),
+                problem: format!(
+                    "it names two read groups with the @RG ID '{}', and one sample's read \
+                     groups have to be told apart by their ids; the file was written before \
+                     that rule, or from alignment files that were walked twice",
+                    group.id
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -1134,16 +1152,17 @@ mod tests {
         assert!(problem.contains("no read groups"), "{problem}");
     }
 
-    /// **A sample sequenced across two files whose lanes reuse an `@RG ID` calls.**
+    /// **A sample whose table names one `@RG ID` twice is refused** — spec §6.2's second
+    /// clause, and the owner's ruling of 2026-09-04.
     ///
-    /// A psp holds one *sample*, not one alignment file, and SAM makes an id unique only within
-    /// one file — so this table is what the format's own validator declares legal and what
-    /// direct mode calls without complaint. Nothing in the merge reads the id: identity is the
-    /// walk-local number, which is the entry's position. Spec §6.2 names this as a refusal and
-    /// this is the fixture that says why it must not be one — refusing it would cost a re-walk
-    /// for a cohort direct mode calls.
+    /// **⚠ Nothing in the merge needs the ids to differ.** A psp identifies a read group by its
+    /// walk-local number, which is the entry's position, so these two lanes would stay apart on
+    /// their own and the format's own validator declares the file well-formed. It is refused
+    /// because it is a mistake rather than a shape anyone means — a walked run refuses it before
+    /// writing anything, so a psp that carries one was written by an older build or from files
+    /// walked twice into a sample.
     #[test]
-    fn a_sample_walked_across_two_files_sharing_a_read_group_id_calls() {
+    fn a_sample_whose_table_names_one_read_group_id_twice_is_refused() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let segmentation = a_segmentation(ground(false));
         let paths = vec![a_psp(&dir, "alpha", &segmentation, |header| {
@@ -1155,6 +1174,35 @@ mod tests {
                 },
                 ReadGroupIdentity {
                     id: "L1".to_string(),
+                    library: "lib-b".to_string(),
+                    walk_local_id: ReadGroupId(1),
+                },
+            ];
+        })];
+
+        let refused = OpenPspCohort::open(&paths).expect_err("one sample, one id, twice");
+        let RunError::PspReadGroupsCannotBeMerged { sample, problem } = refused else {
+            panic!("the sample must be named: {refused:?}");
+        };
+        assert_eq!(sample, "alpha");
+        assert!(problem.contains("'L1'"), "the id is named: {problem}");
+    }
+
+    /// **And two lanes with different ids are a cohort**, which is what a sample sequenced
+    /// across several files looks like once its files name their read groups apart.
+    #[test]
+    fn a_sample_walked_across_two_files_with_distinct_read_group_ids_calls() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let segmentation = a_segmentation(ground(false));
+        let paths = vec![a_psp(&dir, "alpha", &segmentation, |header| {
+            header.read_groups = vec![
+                ReadGroupIdentity {
+                    id: "L1".to_string(),
+                    library: "lib-a".to_string(),
+                    walk_local_id: ReadGroupId(0),
+                },
+                ReadGroupIdentity {
+                    id: "L2".to_string(),
                     library: "lib-b".to_string(),
                     walk_local_id: ReadGroupId(1),
                 },
