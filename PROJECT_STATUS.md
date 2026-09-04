@@ -39,7 +39,12 @@ Skills and agents are instructed to leave it untouched.
 > rather than the whole run, because a collision across samples merges nothing and the run-wide
 > rule failed 88 of this repository's own tests, 76 of them different samples sharing an id
 > incidentally. **The compared-read count already excluded filtered and depth-capped reads**, and
-> now says so with a test. **And the parameters file identifies samples by name and read groups by
+> now says so with a test. **The `@RG ID` rule was then widened to the whole run on the owner's
+> word** — no two read groups anywhere in a cohort may share one, whether they are one sample's or
+> two, refused when the alignment files are opened and again when stored files are; across samples
+> nothing merges, and it is refused for provenance, since every report and every error message
+> names a lane by its id. It cost 69 fixtures, all of them cohorts whose samples named their read
+> group alike. **And the parameters file identifies samples by name and read groups by
 > the sample and `@RG ID` together, never by position** — the same cohort's files passed in another
 > order used to turn a good file into a refusal. **⚠ One integration test fails and it is main's,
 > not this work's**: `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele`, confirmed

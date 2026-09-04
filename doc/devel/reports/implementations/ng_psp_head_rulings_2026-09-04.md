@@ -62,10 +62,19 @@ And `OpenPspCohort::open` refuses a stored file whose sample names one id twice,
 is held to what a walked cohort is held to. That reinstates spec §6.2's second clause, which this
 branch had recommended dropping at Checkpoint E; the recommendation is withdrawn.
 
-**⚠ Scoped to one sample, and the owner's two messages point at different scopes.** The first said
-*"an RG with the same id in two different psp files should be a hard fail"*, which reads run-wide;
-the second was answering a paragraph about **one sample walked from several alignment files**.
-Within a sample is implemented. What decided it, beyond the antecedent:
+**⚠ Widened to the whole run the same day, on the owner's word — *"yes, we need to do that."***
+It was first built scoped to one sample, because his two messages pointed at different scopes and
+the narrower one was unambiguous. The wider rule is now what ships: no two read groups anywhere in
+a run may share an id, whether they are one sample's or two, and a cohort of stored files is
+refused for it exactly as a cohort of alignment files is.
+
+**Across samples nothing merges, and it is refused anyway.** A lane's identity is the integer this
+caller mints, so two same-named lanes of different plants would stay apart on their own. What the
+rule buys is provenance: every report, every parameters file and every error message names a lane
+by its id. Within a sample the collision is worse than untraceable — one lane's reads counted as
+another's library, silently.
+
+What was measured while the narrower rule was in place, and what it cost to widen:
 
 - **A collision across samples merges nothing.** A read group's identity in a run is its sample
   together with its id, and the table keys on position, so two individuals whose files both say
@@ -78,8 +87,10 @@ Within a sample is implemented. What decided it, beyond the antecedent:
 - On the tomato benchmark cohort the wider rule would never fire: all six accessions name their
   read group by run accession (`SRR7279481`, `SRR7279488`, …).
 
-**Widening it to the whole run is one line** — key the map on the id alone — and the code says so
-at the check. It is the owner's to ask for, now with the 88 in front of him.
+**The widening cost 69 fixtures**, every one of them a cohort whose samples all named their read
+group `rg1`. The per-sample builders derive it from the plant now, `rg-{sample}`, and the psp
+fixtures from theirs — which is what real data carries: the tomato benchmark cohort's six
+accessions name their read groups by run accession, so the rule would never have fired on it.
 
 **Collateral, and it is worth naming.** `reject_colliding_synthesized_libraries` is now unreachable
 through `build_read_groups`: a synthesized library name is `sample:id:file-stem`, so two collide
