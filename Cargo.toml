@@ -396,3 +396,10 @@ required-features = ["bench-fixtures"]
 [[bench]]
 name = "ng_site_quality_perf"
 harness = false
+
+# **A vendored copy of noodles-cram, byte for byte the 0.93.0 the manifest already
+# names above**, so the CRAM read path can be changed and measured. What this copy has
+# that crates.io does not is listed in `vendor/noodles-cram/FORK.md`, and why in
+# `doc/devel/ng/research/cram_read_path_2026-09-04.md`.
+[patch.crates-io]
+noodles-cram = { path = "vendor/noodles-cram" }
