@@ -47,8 +47,10 @@ pub use callers::{
     CohortWalkTallies, MergeParameters, SampleWalkTallies, WrittenCohort,
 };
 pub use gatherer::{SampleObservationGatherer, SampleWalkInputs};
-pub use psp_caller::{OpenPspCohort, PspVariantCaller, StoredCohortInputs};
-pub use psp_source::{PspObservationSource, PspSourceError};
+pub use psp_caller::{
+    OpenPspCohort, PspVariantCaller, StoredCohortInputs, StoredCohortTallies, StoredSample,
+};
+pub use psp_source::{PspObservationSource, PspSourceError, StoredSampleTallies};
 pub use report::RunReport;
 pub use segments::{Segmentation, SegmentationInputs};
 pub use walker::{AlignmentFilesWalker, RunSegments};

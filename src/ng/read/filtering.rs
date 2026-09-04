@@ -90,6 +90,17 @@ pub const READ_FILTER_PROVENANCE_KEYS: [&str; 6] = [
     "read-filter-mismatch-bq-floor",
 ];
 
+/// **The prefix every one of those keys begins with**, so a reader can pick the whole family
+/// out of a header it did not write.
+///
+/// Both spellings are needed and they answer different questions.
+/// [`READ_FILTER_PROVENANCE_KEYS`] is *what this build records* — a writer clearing its own
+/// keys, or a test holding the set exhaustive, wants exactly those six. This is *what a read
+/// filter's key looks like*, which is what a reader comparing two psps written by different
+/// builds needs: a key a later ng added is a read-filter setting, and dropping it because this
+/// build's list does not name it would make two differently-filtered walks compare equal.
+pub const READ_FILTER_PROVENANCE_PREFIX: &str = "read-filter-";
+
 /// How an off filter is spelled in the header: a value, not an absent key — an absent
 /// key would read as "unrecorded", which is a different fact.
 const OFF: &str = "off";
@@ -518,6 +529,25 @@ mod tests {
             assert!(
                 READ_FILTER_PROVENANCE_KEYS.contains(&key.as_str()),
                 "{key} is missing from the published key family"
+            );
+        }
+    }
+
+    /// **Every published key begins with the published prefix**, which is what lets a reader
+    /// pick the whole family out of a header written by another build of ng.
+    ///
+    /// The two constants say different things — the list is *what this build records*, the
+    /// prefix is *what a read filter's key looks like* — and a reader comparing two psps takes
+    /// the prefix, so that a key a later ng added is still recognised as a read-filter setting
+    /// rather than dropped. If they drift apart, that reader silently compares fewer settings
+    /// than it reports.
+    #[test]
+    fn every_published_provenance_key_carries_the_published_prefix() {
+        for key in READ_FILTER_PROVENANCE_KEYS {
+            assert!(
+                key.starts_with(READ_FILTER_PROVENANCE_PREFIX),
+                "{key} does not begin with {READ_FILTER_PROVENANCE_PREFIX:?}, so a reader \
+                 matching on the prefix would not compare it",
             );
         }
     }

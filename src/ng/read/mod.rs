@@ -38,7 +38,7 @@ pub mod prepared_read;
 mod reference_free_first_filter;
 
 pub use aligned_read::AlignedRead;
-pub use filtering::{READ_FILTER_PROVENANCE_KEYS, ReadFilterConfig};
+pub use filtering::{READ_FILTER_PROVENANCE_KEYS, READ_FILTER_PROVENANCE_PREFIX, ReadFilterConfig};
 pub use prepared_read::{MateRole, PreparedRead, ReadLengthError};
 
 // **`ReadFilterConfig` is the only one of step 1's *types* re-exported here, because it is

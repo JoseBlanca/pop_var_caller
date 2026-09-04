@@ -57,6 +57,14 @@ use crate::pop_var_caller_exp::run_ground::{self, GroundError};
 #[cfg(test)]
 mod tests;
 
+/// **The extension every psp this command writes carries**, and the one `call-from-psps` looks
+/// for when it is pointed at a directory.
+///
+/// One constant for both, for [`SUBCOMMAND`]'s reason: a reader that hunted for another
+/// spelling would find no cohort in a directory full of them, and the failure would read as
+/// *the walk wrote nothing*.
+pub const PSP_FILE_EXTENSION: &str = "psp";
+
 /// What this subcommand is called on the command line, and what every psp it writes records
 /// as the subcommand that produced it.
 ///
@@ -694,5 +702,5 @@ fn provenance() -> Result<WriterProvenance, GeneratePspsCliError> {
 /// per-sample output flag would let two samples be written to one path with nothing noticing.
 #[must_use]
 pub fn psp_path_for(output_dir: &Path, sample: &str) -> PathBuf {
-    output_dir.join(format!("{sample}.psp"))
+    output_dir.join(format!("{sample}.{PSP_FILE_EXTENSION}"))
 }

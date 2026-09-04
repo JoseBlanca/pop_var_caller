@@ -27,7 +27,102 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-04):** **Milestone H is complete — the head answers the keep
+> - **Last completed task (2026-09-04):** **Milestone F is complete — psp mode exists, equals
+> direct mode, and every run-level invariance spec §12 asks of it holds** (branch `ng-psp-mode`,
+> Checkpoint F; [F3 report](doc/devel/reports/implementations/ng_psp_mode_f3_2026-09-04.md)).
+> The order the psps are named in does not change the calls; a cohort walked one sample at a time
+> calls what one invocation calls; ground a sample analysed and found empty is not ground it
+> never looked at. **The thread sweep is a script and the flag is why** — `--threads` builds
+> rayon's *global* pool, which a process may build once, so a test sweeping thread counts would
+> run every later count at the first one's width while reporting a sweep it did not do.
+> `scripts/ng_psp_concurrency_invariance.sh` gives **599 records at 1, 2, 4 and 8 threads,
+> byte-identical apart from `##commandline`**, which carries `--threads N`. **Next: Milestone G**,
+> the census written beside the psp.
+>
+> - **Earlier (2026-09-04):** **the oracle that justifies psp mode is a test, and it
+> can see four kinds of defect it could not see when it was written** (branch `ng-psp-mode`, plan
+> step F2; [report](doc/devel/reports/implementations/ng_psp_mode_f2_2026-09-04.md)). One cohort
+> called two ways gives one VCF: on **six tomato accessions over the two 100 kb intervals, 599
+> records byte-identical apart from the `##commandline` line**, parameters file identical too
+> (`scripts/ng_mode_equivalence_oracle.sh`, now in the repository so the run reproduces from a
+> fresh checkout); and in the suite, comparing the two routes' VCFs **whole** with nothing
+> filtered out, because inside one process both routes record the same command line.
+>
+> **The fixture had to be built for it.** The cohort the commands' own tests use has an all-`A`
+> reference, so the catalog routes every base to the repeat-tract path and a run over it writes
+> no record — two empty files are equal for the wrong reason. Each of the new fixture's four
+> discriminating properties closes a defect **measured surviving** without it: two samples
+> varying in different places (one sample's observations given to the other), a repeat tract with
+> a length variant (every stored locus written as `Generic`), alternative reads leaning to one
+> strand (the stored forward-read count zeroed), and a second comparison under parameters whose
+> three read groups carry multipliers of 0.25, 2.5 and 4.0 (the read-group renumbering deleted —
+> under `--defaults` every group scores alike, so identity reaches no genotype).
+>
+> **Where the oracle stops, stated rather than assumed**: it compares VCFs, so a stored locus
+> that produces no record is not compared — 578 of the 581 a sample; and neither route fits, so
+> what only a fit reads can be destroyed on write with both comparisons green. **Next: F3**, the
+> remaining run-level invariances — file order, a separately-walked cohort, analysed-but-empty,
+> and concurrency.
+>
+> - **Earlier (2026-09-04):** **psp mode calls from the command line, and what it
+> writes is direct mode's VCF** (branch `ng-psp-mode`, plan step F1;
+> [report](doc/devel/reports/implementations/ng_psp_mode_f1_2026-09-04.md),
+> [review](doc/devel/reports/reviews/ng_psp_mode_f1_2026-09-04.md)). `call-from-psps` opens a
+> cohort of stored psps — one `--psp` a sample, or a directory of them — and writes the VCF, the
+> parameters file and the run report `call-from-alignments` writes. **Measured on six tomato
+> accessions over the first two 100 kb intervals of `benchmarks/tomato1/regions.bed`: 599
+> records, and every byte but the `##commandline` line is direct mode's own** (sha256
+> `fd677c91…` on both sides once that line is removed), with the parameters file identical too.
+> That is F2's oracle passing early; F2 owns pinning it.
+>
+> **There is no `--regions` and that is spec §5.3**: a psp records the ground its walk covered,
+> the cohort is refused unless the files agree about it, and that agreed ground is what the run
+> calls over.
+>
+> **The owner's ruling on what a run over stored files says about each sample is built.** A psp
+> carries no count of what its walk kept or dropped, so the report states what this run drew —
+> how many stored loci it read out of each file, and how many reads went into the comparison at
+> one of them — plus a line, printed only where the cohort's psps disagree, naming the files
+> whose walk applied other read filters. **That average is not depth and the line does not call
+> it depth**: the head's count excludes filtered reads, depth-capped reads, and reads that
+> covered a locus without anchoring it.
+>
+> **Three lifts were made rather than a second copy written, all recorded**: the numbers both
+> calling commands score with (`src/pop_var_caller_exp/calling_run.rs` — parameters, the `NG_*`
+> switches, the round width, the output refusals, the VCF header, the report printer); the
+> on-disk cohort fixture, which closes a Milestone C carry-forward and turned out to matter,
+> since direct mode's private copy gave both samples no reads at all; and the read filters' key
+> prefix. **Direct mode is byte-identical across all of it.** Two reviews ran fifteen deliberate
+> defects; four survived and all four are now caught. **⚠ One integration test still fails and it
+> is main's, not this work's**: `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele`.
+> **Next: F2**, the mode-equivalence oracle as a test, then F3's run-level invariances.
+>
+> - **Earlier (2026-09-04):** **the owner's four rulings on Checkpoint H are built,
+> and the branch is merged into main** (`main` at the merge; the rulings' own report is
+> [ng_psp_head_rulings_2026-09-04.md](doc/devel/reports/implementations/ng_psp_head_rulings_2026-09-04.md)).
+> **The locus kind came back out of the record head** — it is a function of the coordinate, being
+> the kind of the typed region the locus falls in, and every psp records the segmentation inputs
+> its typing used, so a reader holding a coordinate can look it up; the head keeps
+> `reads-compared-with-reference` alone, which costs +3.86 % of the compressed file at 10.25 reads
+> a position and +8.50 % at 280.32. **One sample may not declare an `@RG ID` twice**, refused where
+> the alignment files are opened and again when a stored cohort is opened; scoped to one sample
+> rather than the whole run, because a collision across samples merges nothing and the run-wide
+> rule failed 88 of this repository's own tests, 76 of them different samples sharing an id
+> incidentally. **The compared-read count already excluded filtered and depth-capped reads**, and
+> now says so with a test. **The `@RG ID` rule was then widened to the whole run on the owner's
+> word** — no two read groups anywhere in a cohort may share one, whether they are one sample's or
+> two, refused when the alignment files are opened and again when stored files are; across samples
+> nothing merges, and it is refused for provenance, since every report and every error message
+> names a lane by its id. It cost 69 fixtures, all of them cohorts whose samples named their read
+> group alike. **And the parameters file identifies samples by name and read groups by
+> the sample and `@RG ID` together, never by position** — the same cohort's files passed in another
+> order used to turn a good file into a refusal. **⚠ One integration test fails and it is main's,
+> not this work's**: `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele`, confirmed
+> by running it against main alone; likely main's own adoption of the outlier weight at 0.20, with
+> the test not moved to match. **Next: psp-mode Milestone F**, whose one open question is what a run
+> over stored files says about each sample in its report.
+>
+> - **Earlier (2026-09-04):** **Milestone H is complete — the head answers the keep
 > rule at every depth, the specs say so, and the cost is a number** (branch `ng-psp-mode`, at
 > Checkpoint H; [H2 report](doc/devel/reports/implementations/ng_psp_head_h2_2026-09-04.md),
 > [H3 report](doc/devel/reports/implementations/ng_psp_head_h3_2026-09-04.md)). **The two new head

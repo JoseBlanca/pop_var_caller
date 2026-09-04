@@ -3278,7 +3278,7 @@ mod the_merge_over_walkers {
     use crate::ng::read::input::read_groups::build_read_groups;
     use crate::ng::read::input::test_fixtures::{
         fixture_reference_from_its_index, header, indexed_named_bam, matching_contigs,
-        read_named_with_length,
+        read_group_for, read_named_with_length,
     };
     use crate::ng::run::cohort_merge::build::REFERENCE_ALLELE;
     use crate::ng::types::{ContigId, GenomeRegion, Ploidy, Position};
@@ -3338,7 +3338,7 @@ mod the_merge_over_walkers {
             &header(
                 Some("coordinate"),
                 &matching_contigs(),
-                &[("rg1", Some(sample))],
+                &[(&read_group_for(sample), Some(sample))],
             ),
             &records,
             file_name,
@@ -3501,7 +3501,7 @@ mod the_merge_over_walkers {
             &header(
                 Some("coordinate"),
                 &matching_contigs(),
-                &[("rg1", Some(sample))],
+                &[(&read_group_for(sample), Some(sample))],
             ),
             &records,
             file_name,
@@ -3532,7 +3532,7 @@ mod the_merge_over_walkers {
             &header(
                 Some("coordinate"),
                 &matching_contigs(),
-                &[("rg1", Some(sample))],
+                &[(&read_group_for(sample), Some(sample))],
             ),
             &records,
             file_name,
@@ -3575,7 +3575,7 @@ mod the_merge_over_walkers {
             &header(
                 Some("coordinate"),
                 &matching_contigs(),
-                &[("rg1", Some(sample))],
+                &[(&read_group_for(sample), Some(sample))],
             ),
             &records,
             file_name,
@@ -3605,7 +3605,7 @@ mod the_merge_over_walkers {
             &header(
                 Some("coordinate"),
                 &matching_contigs(),
-                &[("rg1", Some(sample))],
+                &[(&read_group_for(sample), Some(sample))],
             ),
             &records,
             file_name,
@@ -5343,6 +5343,7 @@ mod records_handed_over_as_the_run_finishes_them {
     use crate::ng::locus_generation::SampleLocusObservations;
     use crate::ng::read::input::test_fixtures::{
         fixture_reference_from_its_index, header, indexed_named_bam, matching_contigs,
+        read_group_for,
     };
     use crate::ng::run::WalkProgress;
     use crate::ng::run::cohort_merge::CohortLocusBuilderRegionsLen;
@@ -5549,7 +5550,7 @@ mod records_handed_over_as_the_run_finishes_them {
             &header(
                 Some("coordinate"),
                 &matching_contigs(),
-                &[("rg1", Some(sample))],
+                &[(&read_group_for(sample), Some(sample))],
             ),
             &records,
             file_name,
@@ -5696,7 +5697,7 @@ mod records_handed_over_as_the_run_finishes_them {
             &header(
                 Some("coordinate"),
                 &matching_contigs(),
-                &[("rg1", Some(sample))],
+                &[(&read_group_for(sample), Some(sample))],
             ),
             &records,
             file_name,

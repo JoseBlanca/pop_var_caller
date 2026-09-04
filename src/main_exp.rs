@@ -24,8 +24,8 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use clap::Parser;
 use pop_var_caller::error_render::format_error_chain;
 use pop_var_caller::pop_var_caller_exp::{
-    Cli, PopVarCallerExpCommand, run_call_from_alignments, run_estimate_contamination,
-    run_generate_psps, run_repeat_catalog, run_typed_regions,
+    Cli, PopVarCallerExpCommand, run_call_from_alignments, run_call_from_psps,
+    run_estimate_contamination, run_generate_psps, run_repeat_catalog, run_typed_regions,
 };
 
 fn main() {
@@ -39,6 +39,9 @@ fn main() {
         }
         PopVarCallerExpCommand::CallFromAlignments(args) => {
             run_call_from_alignments(&args).map_err(|e| format_error_chain(&e))
+        }
+        PopVarCallerExpCommand::CallFromPsps(args) => {
+            run_call_from_psps(&args).map_err(|e| format_error_chain(&e))
         }
         PopVarCallerExpCommand::GeneratePsps(args) => {
             run_generate_psps(&args).map_err(|e| format_error_chain(&e))

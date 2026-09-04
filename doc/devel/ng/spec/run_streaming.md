@@ -779,9 +779,21 @@ and the command line.
 
 **The read-group tables are merged rather than compared.** Two samples that numbered their read
 groups from zero are the normal case, not an error (§6.1), so the calling stage builds one run-wide
-numbering from the tables it read and every sample's identifiers are remapped into it. What *is*
-refused is a table that cannot be merged — two read groups in one sample sharing an `@RG ID`, or a
-sample whose table is absent — because neither can be renumbered without guessing.
+numbering from the tables it read and every sample's identifiers are remapped into it.
+
+**Two things are refused, and only the first is about merging.** A sample whose table is absent
+cannot be renumbered at all — nothing says which group a record's reads came from. And **no two
+read groups anywhere in the cohort may share an `@RG ID`**, whether they are one sample's or two
+(the owner's ruling of 2026-09-04, and its scope was widened to the whole cohort the same day).
+
+**That second one is not needed for the merge and is required anyway.** A psp identifies a read
+group by its walk-local number, which is the entry's own position, so two same-named lanes would
+stay apart without it. It is refused because a walked run refuses it where the alignment files are
+opened ([`read_groups.md`](read_groups.md) §6) — so a stored cohort that accepted it would let psp
+mode call what direct mode turns down — and because a run whose lanes cannot be told apart by the
+name they carry is one whose provenance nobody can follow afterwards. **An earlier draft of this
+document asked for the within-a-sample half only, and the implementation recorded a recommendation
+to drop it; both are superseded.**
 
 ### 6.3 The header does not describe where the psp's blocks fall — **ruled, 2026-09-03**
 

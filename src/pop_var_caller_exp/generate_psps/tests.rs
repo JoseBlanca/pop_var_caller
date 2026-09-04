@@ -330,7 +330,9 @@ fn a_walk_that_stops_names_its_sample_and_leaves_the_earlier_samples_psps_writte
 /// would leave a stump every reader refuses.
 #[test]
 fn a_stopped_rewalk_does_not_destroy_the_psp_it_was_replacing() {
-    use crate::ng::read::input::test_fixtures::{header, matching_contigs, named_bam};
+    use crate::ng::read::input::test_fixtures::{
+        header, matching_contigs, named_bam, read_group_for,
+    };
 
     let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
     run_generate_psps(&args).expect("the cohort walks");
@@ -342,7 +344,7 @@ fn a_stopped_rewalk_does_not_destroy_the_psp_it_was_replacing() {
         &header(
             Some("coordinate"),
             &matching_contigs(),
-            &[("rg1", Some("zeta"))],
+            &[(&read_group_for("zeta"), Some("zeta"))],
         ),
         &[],
         "zeta.bam",
@@ -497,89 +499,18 @@ fn a_sample_name_that_cannot_be_a_file_name_is_refused_at_the_door() {
     }
 }
 
-/// **A reference, its catalog, and two samples' alignment files** — everything
-/// [`run_generate_psps`] needs, built on disk. The same shape `call-from-alignments`' own
-/// command test uses, and for the same reason: what it exercises is the command's wiring.
-///
-/// **The reference is the shared fixture's**, a hundred `A`s on `chr1` and two hundred on
-/// `chr2`, which is what the alignment fixtures declare in their `@SQ`. Every base of it is
-/// one mononucleotide run, so the catalog routes the whole genome to the repeat-tract
-/// generator — a walk over it writes few records or none, which is fine here: this is about
-/// which files appear and what their headers say, not about what the records hold.
 fn a_cohort_on_disk() -> (
     tempfile::TempDir,
     tempfile::TempDir,
     tempfile::TempDir,
     GeneratePspsArgs,
 ) {
-    use crate::ng::read::input::test_fixtures::{
-        FIXTURE_CONTIGS, header, indexed_named_bam, matching_contigs,
-        read_named_with_length_in_read_group,
-    };
-    use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
-    use crate::ng::repeat_catalog::RepeatCatalogBuilder;
-    use crate::ng::tandem_repeat::ScanParams;
-    use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
-    use noodles_sam::alignment::RecordBuf;
-
-    let specs: Vec<ContigSpec> = FIXTURE_CONTIGS
-        .iter()
-        .map(|(name, length)| ContigSpec {
-            name: (*name).to_string(),
-            length: *length as u64,
-        })
-        .collect();
-    let (reference_dir, fasta) = build_fasta(&specs).expect("a reference on disk");
-
-    let catalog_path = reference_dir.path().join("ref.fa.repeats.parquet");
-    let criteria = StrRepeatCriteria::default();
-    let mut builder = RepeatCatalogBuilder::create(
-        &catalog_path,
-        criteria.clone(),
-        ScanParams {
-            match_reward: 2,
-            mismatch_penalty: 7,
-            min_copies: 2,
-        },
-    )
-    .expect("a catalog to build into");
-    let reference = read_reference_info_observing(
-        ReferenceSource::Fasta {
-            fasta: fasta.clone(),
-            fai: None,
-        },
-        &mut builder,
-    )
-    .expect("the reference reads");
-    builder.finish(&reference).expect("the catalog is written");
-
-    let with_sample = |sample: &str, file: &str, records: &[RecordBuf]| {
-        indexed_named_bam(
-            &header(
-                Some("coordinate"),
-                &matching_contigs(),
-                &[("rg1", Some(sample))],
-            ),
-            records,
-            file,
-        )
-    };
-    // **zeta carries reads and alpha does not**, so one sample of the cohort exercises a walk
-    // that produces records and the other the analysed-but-empty case — and a wiring defect
-    // that walked the right sample over the wrong ground cannot hide behind two empty files.
-    let zeta_reads = [
-        read_named_with_length_in_read_group("z-r0", 0, 5, 30, "rg1"),
-        read_named_with_length_in_read_group("z-r1", 0, 20, 30, "rg1"),
-        read_named_with_length_in_read_group("z-r2", 1, 40, 30, "rg1"),
-    ];
-    let (zeta_dir, zeta) = with_sample("zeta", "zeta.bam", &zeta_reads);
-    let (alpha_dir, alpha) = with_sample("alpha", "alpha.bam", &[]);
-
+    let cohort = crate::pop_var_caller_exp::test_fixtures::a_cohort_on_disk();
     let args = GeneratePspsArgs {
-        reference: fasta,
-        catalog: Some(catalog_path),
-        alignments: vec![zeta, alpha],
-        output_dir: reference_dir.path().join("psps"),
+        reference: cohort.reference,
+        catalog: Some(cohort.catalog),
+        alignments: cohort.alignments,
+        output_dir: cohort.directory.path().join("psps"),
         regions: None,
         force: false,
         build_index_if_missing: false,
@@ -589,7 +520,7 @@ fn a_cohort_on_disk() -> (
         max_str_len: DEFAULT_MAX_STR_LEN,
         min_purity: DEFAULT_MIN_PURITY,
     };
-    (reference_dir, zeta_dir, alpha_dir, args)
+    (cohort.directory, cohort.zeta, cohort.alpha, args)
 }
 
 /// **The command writes one psp per sample, named for the sample, and each one opens.**

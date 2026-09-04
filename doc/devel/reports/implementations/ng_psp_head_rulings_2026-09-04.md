@@ -62,10 +62,19 @@ And `OpenPspCohort::open` refuses a stored file whose sample names one id twice,
 is held to what a walked cohort is held to. That reinstates spec §6.2's second clause, which this
 branch had recommended dropping at Checkpoint E; the recommendation is withdrawn.
 
-**⚠ Scoped to one sample, and the owner's two messages point at different scopes.** The first said
-*"an RG with the same id in two different psp files should be a hard fail"*, which reads run-wide;
-the second was answering a paragraph about **one sample walked from several alignment files**.
-Within a sample is implemented. What decided it, beyond the antecedent:
+**⚠ Widened to the whole run the same day, on the owner's word — *"yes, we need to do that."***
+It was first built scoped to one sample, because his two messages pointed at different scopes and
+the narrower one was unambiguous. The wider rule is now what ships: no two read groups anywhere in
+a run may share an id, whether they are one sample's or two, and a cohort of stored files is
+refused for it exactly as a cohort of alignment files is.
+
+**Across samples nothing merges, and it is refused anyway.** A lane's identity is the integer this
+caller mints, so two same-named lanes of different plants would stay apart on their own. What the
+rule buys is provenance: every report, every parameters file and every error message names a lane
+by its id. Within a sample the collision is worse than untraceable — one lane's reads counted as
+another's library, silently.
+
+What was measured while the narrower rule was in place, and what it cost to widen:
 
 - **A collision across samples merges nothing.** A read group's identity in a run is its sample
   together with its id, and the table keys on position, so two individuals whose files both say
@@ -78,8 +87,10 @@ Within a sample is implemented. What decided it, beyond the antecedent:
 - On the tomato benchmark cohort the wider rule would never fire: all six accessions name their
   read group by run accession (`SRR7279481`, `SRR7279488`, …).
 
-**Widening it to the whole run is one line** — key the map on the id alone — and the code says so
-at the check. It is the owner's to ask for, now with the 88 in front of him.
+**The widening cost 69 fixtures**, every one of them a cohort whose samples all named their read
+group `rg1`. The per-sample builders derive it from the plant now, `rg-{sample}`, and the psp
+fixtures from theirs — which is what real data carries: the tomato benchmark cohort's six
+accessions name their read groups by run accession, so the rule would never have fired on it.
 
 **Collateral, and it is worth naming.** `reject_colliding_synthesized_libraries` is now unreachable
 through `build_read_groups`: a synthesized library name is `sample:id:file-stem`, so two collide
@@ -117,17 +128,41 @@ the same record with both counters at zero.
 - **Direct mode's VCF is unchanged**: six tomato accessions over 200 kb of SL4.0, **598 records,
   sha256 `5f0903cf…`** — the hash on record since Milestone D2.
 
-## Still owed — the fourth ruling
+## 4. The parameters file identifies by name, not by position — done
 
-**The parameters file must identify samples and read groups by name, not by position.** Ruled, not
-yet built. What exists: the file already carries every read group's number, `@RG ID`, library and
-sample, and every sample's name; `refuse_if_not_this_runs_inputs` refuses a missing or extra
-sample naming it, and refuses any read group whose `@RG ID`, library or sample disagrees. What is
-wrong: samples are compared **name-against-name at the same position**, so the same cohort's files
-passed in a different order turn a good parameters file into a refusal — the run's sample order is
-first-seen order over the alignment files. The read-group axis has the same problem one level down,
-since the dense numbering is also first-seen.
+**Ruled:** *"The parameter file should not depend on the order to idenfity the RG or the samples,
+it should use the sample name and RG id."*
 
-The fix is to look the file's rows up by sample name and by `@RG ID`, and let the run assign the
-numbers — with a missing sample or a missing read group staying a hard fail. It touches
-`bindings.rs` and `to_run_parameters.rs`, and it is the next thing.
+It did depend on order, in two places at once: samples were compared name-against-name **at the
+same position**, and every per-sample and per-read-group table was projected into the *file's* own
+order. Both fail for one reason — a run's sample order and its read-group numbering are assigned
+first-seen over the alignment files it was given, so the same cohort handed over in another order
+lists its samples differently and numbers every lane differently, and a file fitted on that cohort
+is still the right file.
+
+Samples are matched as sets by name; read groups by **the sample and the `@RG ID` together** — the
+pair and not the id alone, since an id is unique within a sample and nothing makes it unique
+across them. A missing sample or lane is a hard fail naming it, in both directions. A matched
+lane whose library differs is refused naming both libraries. `WhereTheFilesRowsBelong` says where
+each of the file's rows goes: the file's own order where there is no run, the run's otherwise.
+
+**The proof is where the values land, not that the file is accepted.** Accepting a re-ordered file
+while still projecting into the file's order would be the silent mis-pairing the old refusal
+existed to prevent — every plant handed its neighbour's inbreeding coefficient — and would pass a
+test that only checked for `Ok`. Measured: replacing the run-order mapping with the identity leaves
+241 tests green and fails exactly the one that asserts each plant keeps its own coefficient and
+each lane its own evidence.
+
+Two tests asserted the overturned behaviour and are inverted rather than deleted, each carrying why
+it changed. One splits in two, because with the join on sample and id a row differing in either is
+a missing lane rather than a per-field mismatch.
+
+## Nothing further owed from the rulings
+
+All four are built. What is next is the plan's own next milestone — the `call-from-psps`
+subcommand — and it carries one open question of its own, recorded at Checkpoint E and unchanged:
+**what a run over stored files says about each sample in its report.** Direct mode reports
+per-sample walk tallies — regions handled, generator counts, read-filter drops — and a psp source
+has none of them, because the walk happened in another process and what it counted is in that
+file's provenance rather than its records. The caller returns the calling tallies alone. That is
+the owner's to settle, not the implementer's.
