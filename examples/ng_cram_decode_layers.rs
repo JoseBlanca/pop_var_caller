@@ -165,6 +165,7 @@ fn run(args: &Args) -> io::Result<()> {
     let mut blocks = Duration::MAX;
     let mut records = Duration::MAX;
     let mut convert = Duration::MAX;
+    let mut direct = Duration::MAX;
     let mut digest = Duration::MAX;
 
     for _ in 0..args.repeats {
@@ -195,6 +196,13 @@ fn run(args: &Args) -> io::Result<()> {
             &repository,
             offsets,
             Pass::Convert,
+        )?);
+        direct = direct.min(time_pass(
+            &mut reader,
+            &header,
+            &repository,
+            offsets,
+            Pass::Direct,
         )?);
         digest = digest.min(time_digest(&repository, &args.contig, &spans)?);
     }
@@ -241,9 +249,27 @@ fn run(args: &Args) -> io::Result<()> {
     print_codec_costs(&mut reader, &header, &repository, offsets)?;
 
     println!(
-        "\nEvery decoded field of all {} records hashes to {}.",
+        "\nReading each field straight off the CRAM record instead of through `RecordBuf`: \
+         {:.3} s for the whole walk against {:.3} s, so the last layer costs {:.3} s rather \
+         than {:.3} s.",
+        direct.as_secs_f64(),
+        convert.as_secs_f64(),
+        (direct.as_secs_f64() - records.as_secs_f64()).max(0.0),
+        (convert.as_secs_f64() - records.as_secs_f64()).max(0.0),
+    );
+
+    let through_record_buf =
+        checksum_pass(&mut reader, &header, &repository, offsets, Pass::Convert)?;
+    let read_directly = checksum_pass(&mut reader, &header, &repository, offsets, Pass::Direct)?;
+    println!(
+        "\nEvery decoded field of all {} records hashes to {through_record_buf} through \
+         `RecordBuf` and to {read_directly} read directly — {}.",
         shape.records,
-        checksum_pass(&mut reader, &header, &repository, offsets, Pass::Convert)?,
+        if through_record_buf == read_directly {
+            "the same records"
+        } else {
+            "THESE DIFFER"
+        },
     );
 
     println!(
@@ -261,6 +287,9 @@ enum Pass {
     Blocks,
     Records,
     Convert,
+    /// What `Convert` does, but reading each field straight off the CRAM record into flat
+    /// buffers instead of going through `RecordBuf` and the eight boxed accessors behind it.
+    Direct,
 }
 
 fn time_pass(
@@ -299,6 +328,13 @@ fn time_pass_checked(
     let mut container = cram::io::reader::Container::default();
     let mut record_buf = sam::alignment::RecordBuf::default();
     let mut sink = Sink::default();
+    // The buffers the direct pass reuses across every record of the walk, standing in for the
+    // flat buffers ng's decoded container keeps.
+    let mut bases: Vec<u8> = Vec::new();
+    let mut quality_scores: Vec<u8> = Vec::new();
+    let mut cigar: Vec<sam::alignment::record::cigar::Op> = Vec::new();
+    let mut payload: Vec<u8> = Vec::new();
+    let mut cigar_ops: Vec<sam::alignment::record::cigar::Op> = Vec::new();
 
     let started = Instant::now();
     for &offset in offsets {
@@ -331,6 +367,26 @@ fn time_pass_checked(
                 continue;
             }
 
+            if pass == Pass::Direct {
+                for record in &records {
+                    sink.absorb_usize(record.read_group_index().map_or(0, |index| index + 1));
+                    if checksum {
+                        hash_record_directly(&mut digest_of_records, record)?;
+                    }
+                    record.write_bases_into(&mut bases);
+                    record.write_quality_scores_into(&mut quality_scores);
+                    record.write_cigar_into(&mut cigar);
+                    payload.extend_from_slice(record.name_bytes().unwrap_or_default());
+                    payload.extend_from_slice(&bases);
+                    payload.extend_from_slice(&quality_scores);
+                    cigar_ops.extend_from_slice(&cigar);
+                    sink.absorb_usize(payload.len() + cigar_ops.len());
+                    payload.clear();
+                    cigar_ops.clear();
+                }
+                continue;
+            }
+
             for record in &records {
                 if checksum {
                     hash_record(&mut digest_of_records, header, record)?;
@@ -351,6 +407,47 @@ fn time_pass_checked(
     let digest: [u8; 16] = digest_of_records.finalize().into();
     let rendered = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     Ok((elapsed, rendered))
+}
+
+/// The same fold as [`hash_record`], over the fields read straight off the CRAM record. The
+/// two must agree: that is what says the direct path decodes what the boxed one does.
+fn hash_record_directly(digest: &mut Md5, record: &cram::Record<'_>) -> io::Result<()> {
+    use sam::alignment::Record as _;
+
+    let mut bases = Vec::new();
+    let mut quality_scores = Vec::new();
+    let mut cigar = Vec::new();
+
+    digest.update(record.flags()?.bits().to_le_bytes());
+    digest.update(
+        record
+            .alignment_start()
+            .transpose()?
+            .map_or(0u64, |position| usize::from(position) as u64)
+            .to_le_bytes(),
+    );
+    digest.update(
+        record
+            .mapping_quality()
+            .transpose()?
+            .map_or(255u8, u8::from)
+            .to_le_bytes(),
+    );
+    digest.update(record.name_bytes().unwrap_or_default());
+    record.write_bases_into(&mut bases);
+    for base in &bases {
+        digest.update([*base]);
+    }
+    record.write_quality_scores_into(&mut quality_scores);
+    for score in &quality_scores {
+        digest.update([*score]);
+    }
+    record.write_cigar_into(&mut cigar);
+    for op in &cigar {
+        digest.update([op.kind() as u8]);
+        digest.update((op.len() as u32).to_le_bytes());
+    }
+    Ok(())
 }
 
 /// Fold one decoded record's every field into the running digest.
@@ -620,9 +717,8 @@ fn print_codec_costs(
     let rans = cram::perf::read_rans_counters();
     if rans.order_0_blocks + rans.order_1_blocks > 0 {
         println!(
-            "\nOf the rANS blocks: {} are order-0 over {:.1} MB and {} are order-1 over \
-             {:.1} MB.\nBuilding the decode tables costs {:.3} s and decoding the symbols \
-             {:.3} s.",
+            "\nOf the rANS blocks: {} are order-0 over {:.1} MB and {} are order-1 over {:.1} MB.\n\
+             Building the decode tables costs {:.3} s and decoding the symbols {:.3} s.",
             rans.order_0_blocks,
             rans.order_0_bytes as f64 / 1e6,
             rans.order_1_blocks,

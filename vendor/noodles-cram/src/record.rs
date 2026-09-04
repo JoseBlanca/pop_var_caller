@@ -1,6 +1,7 @@
 //! CRAM record.
 
 mod cigar;
+mod direct;
 pub(crate) mod data;
 pub(crate) mod feature;
 mod flags;

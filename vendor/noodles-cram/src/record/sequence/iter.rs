@@ -31,7 +31,7 @@ impl<'c> ReferenceSequence<'c> {
     }
 }
 
-pub(super) struct Iter<'r, 'c: 'r> {
+pub(crate) struct Iter<'r, 'c: 'r> {
     reference_sequence: Option<ReferenceSequence<'c>>,
     substitution_matrix: SubstitutionMatrix,
     features: WithPositions<'r, 'c>,
@@ -42,7 +42,7 @@ pub(super) struct Iter<'r, 'c: 'r> {
 }
 
 impl<'r, 'c: 'r> Iter<'r, 'c> {
-    pub(super) fn new(
+    pub(crate) fn new(
         reference_sequence: Option<&'c [u8]>,
         substitution_matrix: SubstitutionMatrix,
         features: &'r [Feature<'c>],

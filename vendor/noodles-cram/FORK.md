@@ -47,3 +47,21 @@ the feature-gated phase counters that show the cost.
 Measured on 60 containers of a whole-genome tomato CRAM: block inflation 0.347 s → 0.268 s.
 **This one is a plain defect and belongs upstream** — it needs no new API and changes no
 behaviour a caller can observe.
+
+### 3. A decoded record's fields, written into buffers the caller owns — a new API
+
+`src/record/direct.rs` (new), declared in `src/record.rs`; `src/record/sequence.rs` gains
+`iter_concrete`, and its `iter` module and that module's `Iter` are widened to `pub(crate)` so
+the bases can be iterated without a `Box`.
+
+`Record`'s only published accessors are `sam::alignment::Record`'s, and each returns a
+`Box<dyn …>`: eight heap allocations per record before a byte is copied, whatever the caller
+wants. The new methods — `write_bases_into`, `write_quality_scores_into`, `write_cigar_into`,
+`name_bytes`, `read_group_index` — write into a `Vec` the caller supplies and reuses.
+
+Measured: building ng's read from each record 0.355 s → 0.140 s, 2.5×, over 600,000 reads
+whose every field hashes the same both ways.
+
+**This one does not belong upstream as it stands.** It is an interface noodles has no other
+caller for, and proposing it is a conversation about a `write_*_into` family across the
+alignment-record traits, not a bug report.

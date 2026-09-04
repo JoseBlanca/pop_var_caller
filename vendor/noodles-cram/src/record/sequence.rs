@@ -1,4 +1,4 @@
-mod iter;
+pub(crate) mod iter;
 
 use noodles_core::Position;
 use noodles_sam as sam;
@@ -16,6 +16,17 @@ pub(super) struct Sequence<'r, 'c: 'r> {
 }
 
 impl<'r, 'c: 'r> Sequence<'r, 'c> {
+    /// The bases, without the `Box<dyn Iterator>` the trait's `iter` returns.
+    pub(super) fn iter_concrete(&self) -> iter::Iter<'r, 'c> {
+        Iter::new(
+            self.reference_sequence,
+            self.substitution_matrix.clone(),
+            self.features,
+            self.alignment_start,
+            self.read_length,
+        )
+    }
+
     pub(super) fn new(
         reference_sequence: Option<&'c [u8]>,
         substitution_matrix: SubstitutionMatrix,
