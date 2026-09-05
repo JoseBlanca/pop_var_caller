@@ -344,8 +344,9 @@ where
                     min_alt_reads,
                     &mut timed_keep,
                     refused,
-                );
-            });
+                    &|sample, index| cache.build_at(sample, index),
+                )
+            })?;
             // **The sink's own work is inside this**, where the collecting form's push was
             // too: a run that calls each locus here charges the genotyping to the builder,
             // which is what the milestone-E measurement has to be able to see.
@@ -1167,12 +1168,14 @@ mod tests {
                     .cover(building_region)
                     .expect("the fixture sources hold");
                 let outcome = cache.with_observations(building_region, |window| {
-                    build_region_windowed(
+                    build_region_windowed::<std::convert::Infallible>(
                         building_region,
                         window,
                         max_cohort_locus_span,
                         min_alt_reads,
+                        &|_, _| unreachable!("the fixture's sources build every record"),
                     )
+                    .expect("an infallible build")
                 });
                 organiser.submit(RegionIndex(next_index), outcome);
                 next_index += 1;

@@ -823,24 +823,31 @@ pub fn build_region<'a>(
     max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_reads: MinAltReads,
 ) -> RegionOutcome {
-    build_region_windowed(
+    // **`Infallible` is the whole statement**: with records in hand, assembly reads nothing
+    // and so cannot fail, and the compiler is what says so rather than a comment.
+    match build_region_windowed::<std::convert::Infallible>(
         builder_region,
         &WindowedCohort {
-            observations: observations_per_sample,
+            observations: Some(observations_per_sample),
             summaries: None,
         },
         max_cohort_locus_span,
         min_alt_reads,
-    )
+        &|_, _| unreachable!("a window holding records never asks for one to be built"),
+    ) {
+        Ok(outcome) => outcome,
+        Err(never) => match never {},
+    }
 }
 
 /// [`build_region`] over a window whose summaries are already in hand — the cache's path.
-pub fn build_region_windowed<'a>(
+pub fn build_region_windowed<'a, E>(
     builder_region: GenomeRegion,
     window: &WindowedCohort<'a>,
     max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_reads: MinAltReads,
-) -> RegionOutcome {
+    build: &dyn Fn(usize, usize) -> Result<SampleLocusObservations, E>,
+) -> Result<RegionOutcome, E> {
     let mut outcome = RegionOutcome::default();
     // Destructured so the two sinks are two disjoint borrows of one outcome, which is what
     // lets the collecting form be written as the streaming one with `Vec::push` for a sink
@@ -856,8 +863,9 @@ pub fn build_region_windowed<'a>(
         min_alt_reads,
         &mut |built| cohort_observations.push(built),
         failed_locus_spans,
-    );
-    outcome
+        build,
+    )?;
+    Ok(outcome)
 }
 
 /// Build one region, **handing each surviving locus to `keep` the moment it is assembled**
@@ -890,37 +898,44 @@ pub fn build_region_handing_over<'a>(
     keep: &mut impl FnMut(CohortObservation),
     refused: &mut Vec<GenomeRegion>,
 ) {
-    build_region_handing_over_windowed(
+    match build_region_handing_over_windowed::<std::convert::Infallible>(
         builder_region,
         &WindowedCohort {
-            observations: observations_per_sample,
+            observations: Some(observations_per_sample),
             summaries: None,
         },
         max_cohort_locus_span,
         min_alt_reads,
         keep,
         refused,
-    );
+        &|_, _| unreachable!("a window holding records never asks for one to be built"),
+    ) {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
 }
 
 /// [`build_region_handing_over`] over a window whose summaries are already in hand.
-pub fn build_region_handing_over_windowed<'a>(
+pub fn build_region_handing_over_windowed<'a, E>(
     builder_region: GenomeRegion,
     window: &WindowedCohort<'a>,
     max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_reads: MinAltReads,
     keep: &mut impl FnMut(CohortObservation),
     refused: &mut Vec<GenomeRegion>,
-) {
-    let observations_per_sample = window.observations;
-    if no_locus_can_begin_in(builder_region, observations_per_sample) {
+    build: &dyn Fn(usize, usize) -> Result<SampleLocusObservations, E>,
+) -> Result<(), E> {
+    if no_locus_can_begin_in(builder_region, window) {
         super::timing::REGIONS_WITH_NO_LOCUS.add(1);
-        return;
+        return Ok(());
     }
 
     // The walk's setup is one allocation per sample several times over, so it is timed apart
     // from the walk itself (`super::timing`): it is the fixed cost a building region pays
     // whatever it holds, and the question is how much of the merge that comes to.
+    // **One buffer for the region, cleared per locus** — the load/use/clear/reload shape, so
+    // materialising a locus's members costs no allocation after the first that needed one.
+    let mut scratch: Vec<SampleLocusObservations> = Vec::new();
     let opening_the_walk = super::timing::Stopwatch::start();
     let closer = LocusCloser::over_windowed(window, max_cohort_locus_span, min_alt_reads);
     opening_the_walk.add_to(&super::timing::WALK_SETUP_NANOS);
@@ -956,13 +971,23 @@ pub fn build_region_handing_over_windowed<'a>(
             // to resolve them against until here, and at about one position in a hundred
             // reaching this arm, the other ninety-nine never ask for the evidence at all
             // (`spec/cohort_merge_psp_path.md` §3.1).
-            Verdict::Build => keep(CohortObservation::over(
-                &locus.resolved_against(observations_per_sample),
-            )),
+            Verdict::Build => {
+                let observation = match window.observations {
+                    // Records in hand: the members are slices of them, and nothing can fail.
+                    Some(records) => CohortObservation::over(&locus.resolved_against(records)),
+                    // Evidence still compressed: this is where it is decoded, and the only
+                    // place after the cover where a run can fail.
+                    None => {
+                        CohortObservation::over(&locus.resolved_into(build, &mut scratch)?)
+                    }
+                };
+                keep(observation);
+            }
             Verdict::Failed => refused.push(locus.region),
             Verdict::TooQuiet => {}
         }
     }
+    Ok(())
 }
 
 /// Whether no locus this builder could own can begin in `builder_region` — so the outcome is
@@ -993,21 +1018,17 @@ pub fn build_region_handing_over_windowed<'a>(
 /// yields is one the region owns. Refusing a region the walk owns a locus in loses that locus
 /// from the run, and nothing in a merge's output would show it — the ground would read as a
 /// cohort that was quiet there.
-fn no_locus_can_begin_in(
-    builder_region: GenomeRegion,
-    observations_per_sample: &[&[SampleLocusObservations]],
-) -> bool {
+fn no_locus_can_begin_in(builder_region: GenomeRegion, window: &WindowedCohort<'_>) -> bool {
     // `max`, because `GenomeRegion` has public fields and no constructor ordering them, and
     // an inverted region read the other way round would refuse ground it holds loci in.
     let last_base = GenomePosition {
         contig: builder_region.contig,
         position: builder_region.end.max(builder_region.start),
     };
-    !observations_per_sample.iter().any(|observations| {
-        observations
-            .first()
-            .is_some_and(|first| first.start_position() <= last_base)
-    })
+    // **Asked of the summaries, because a window may have no records at all.** A run whose
+    // evidence is still compressed knows where every observation begins without decoding one.
+    !(0..window.samples())
+        .any(|sample| window.first_start(sample).is_some_and(|first| first <= last_base))
 }
 
 /// One cohort locus, assembled: the ground, the alleles the cohort showed over it, and
@@ -5256,7 +5277,7 @@ mod tests {
                     })
                     .count();
 
-                if no_locus_can_begin_in(building_region, &windows) {
+                if no_locus_can_begin_in(building_region, &WindowedCohort::from(&windows[..])) {
                     refused += 1;
                     assert_eq!(
                         owned, 0,

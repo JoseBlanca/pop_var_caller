@@ -194,6 +194,10 @@ where
                                 window,
                                 max_cohort_locus_span,
                                 min_alt_reads,
+                                // **Where a run over stored evidence decodes**, on whichever
+                                // worker got the region: a body is built from its own bytes,
+                                // so this shares nothing mutable with the others.
+                                &|sample, index| cache.build_at(sample, index),
                             )
                         });
                     let busy = builder.elapsed_nanos();
@@ -203,7 +207,7 @@ where
                 }))
             };
             let round = timing::Stopwatch::start();
-            let outcomes = if beside_the_builders {
+            let outcomes: Result<Vec<RegionOutcome>, E> = if beside_the_builders {
                 let mut dead = std::mem::take(&mut graveyard);
                 let (outcomes, emptied) = rayon::join(build_the_round, move || {
                     dead.clear();
@@ -218,7 +222,7 @@ where
             timing::SLOWEST_BUILDER_NANOS.add(timing::SLOWEST_IN_THIS_ROUND_NANOS.take());
 
             let organising = timing::Stopwatch::start();
-            for outcome in outcomes {
+            for outcome in outcomes? {
                 // Destructured for the reason `organise.rs` gives at its own two consumers of
                 // this type: a field `RegionOutcome` gains has to be answered for here —
                 // gathered or dropped deliberately — rather than starting at its `Default` and
@@ -264,9 +268,15 @@ where
 /// `iter`, which would drop the parallelism and change nothing a test can see, and an adaptor
 /// that gives up the index (`filter`, `flat_map`) inserted before the collect, which would
 /// reorder the round and be caught only by whichever locus happened to move.
-fn in_region_order<I>(builders: I) -> Vec<RegionOutcome>
+/// **Collected in region order, and a failure in any builder ends the round.**
+///
+/// `collect` into a `Result` is what does it: rayon keeps the order and returns the first
+/// failure by that order, so which builder failed first is a fact about the genome rather than
+/// about the schedule — the same reason everything else here is ordered by region index.
+fn in_region_order<I, E>(builders: I) -> Result<Vec<RegionOutcome>, E>
 where
-    I: IndexedParallelIterator<Item = RegionOutcome>,
+    I: IndexedParallelIterator<Item = Result<RegionOutcome, E>>,
+    E: Send,
 {
     builders.collect()
 }

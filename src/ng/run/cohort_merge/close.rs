@@ -87,6 +87,51 @@ impl ClosedLocusRanges {
         span_of(self.region)
     }
 
+    /// The same locus with its members **built into `scratch`** by whoever kept them.
+    ///
+    /// **The fallible twin of [`resolved_against`](Self::resolved_against), and the only place
+    /// in the merge that can fail after the cover.** With records already in hand, assembling
+    /// cannot fail — nothing is read, only combined. When the evidence was kept compressed,
+    /// assembling *is* the decode, so a damaged block or a body that will not parse arrives
+    /// here, and it must reach the run naming the sample rather than aborting: a psp is written
+    /// by another process, possibly by another build.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `build` refuses for a member of this locus.
+    pub fn resolved_into<'s, E>(
+        &self,
+        build: &dyn Fn(usize, usize) -> Result<SampleLocusObservations, E>,
+        scratch: &'s mut Vec<SampleLocusObservations>,
+    ) -> Result<ClosedLocus<'s>, E> {
+        scratch.clear();
+        // Filled first and sliced after, because a slice of a vector cannot be taken while it
+        // is still being pushed into. The ranges are recorded on the way through.
+        let mut spans = Vec::with_capacity(self.members.len());
+        for member in &self.members {
+            let from = scratch.len();
+            for index in member.from..member.to {
+                scratch.push(build(member.sample, index)?);
+            }
+            spans.push((member.sample, from..scratch.len()));
+        }
+        let kind = &scratch[0].kind;
+        let members = spans
+            .iter()
+            .map(|(sample, span)| SampleMembers {
+                sample: *sample,
+                observations: &scratch[span.clone()],
+            })
+            .collect();
+        Ok(ClosedLocus {
+            region: self.region,
+            members,
+            non_reference_reads: self.non_reference_reads,
+            verdict: self.verdict,
+            kind,
+        })
+    }
+
     /// The same locus with its members pointing at records.
     ///
     /// `observations_per_sample` must be the window the ranges were taken against — the
@@ -621,7 +666,7 @@ impl<'a> LocusCloser<'a> {
         min_alt_reads: MinAltReads,
     ) -> Self {
         Self::over_parts(
-            observations_per_sample,
+            Some(observations_per_sample),
             None,
             max_cohort_locus_span,
             min_alt_reads,
@@ -651,12 +696,16 @@ impl<'a> LocusCloser<'a> {
     /// The one constructor: both public forms differ only in whether summaries came with the
     /// records.
     fn over_parts(
-        observations_per_sample: &[&'a [SampleLocusObservations]],
+        observations_per_sample: Option<&[&'a [SampleLocusObservations]]>,
         summaries_per_sample: Option<Vec<&'a [LocusSummary]>>,
         max_cohort_locus_span: MaxCohortLocusSpan,
         min_alt_reads: MinAltReads,
     ) -> Self {
-        let samples = observations_per_sample.len();
+        let samples = match (&summaries_per_sample, observations_per_sample) {
+            (Some(summaries), _) => summaries.len(),
+            (None, Some(records)) => records.len(),
+            (None, None) => 0,
+        };
         if let Some(summaries) = &summaries_per_sample {
             assert_eq!(
                 samples,
@@ -666,9 +715,10 @@ impl<'a> LocusCloser<'a> {
             );
         }
         let pending = PendingHeads::over((0..samples).map(|sample| {
-            let first = match &summaries_per_sample {
-                Some(summaries) => summaries[sample].first().copied(),
-                None => observations_per_sample[sample].first().map(LocusSummary::of),
+            let first = match (&summaries_per_sample, observations_per_sample) {
+                (Some(summaries), _) => summaries[sample].first().copied(),
+                (None, Some(records)) => records[sample].first().map(LocusSummary::of),
+                (None, None) => None,
             };
             first.map(LocusSummary::start_position)
         }));
@@ -677,7 +727,7 @@ impl<'a> LocusCloser<'a> {
             cursors_at_open: vec![0; samples],
             alt_reads_per_sample: vec![0; samples],
             compared_reads_per_sample: vec![0; samples],
-            observations_per_sample: observations_per_sample.to_vec(),
+            observations_per_sample: observations_per_sample.unwrap_or(&[]).to_vec(),
             summaries_per_sample,
             pending,
             max_cohort_locus_span,
@@ -697,8 +747,10 @@ impl<'a> LocusCloser<'a> {
         let index = self.cursors[sample];
         match &self.summaries_per_sample {
             Some(summaries) => summaries[sample].get(index).copied(),
-            None => self.observations_per_sample[sample]
-                .get(index)
+            None => self
+                .observations_per_sample
+                .get(sample)
+                .and_then(|records| records.get(index))
                 .map(LocusSummary::of),
         }
     }

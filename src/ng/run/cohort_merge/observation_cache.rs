@@ -334,6 +334,9 @@ struct SampleWindow<S> {
     /// which is why the two are parallel arrays rather than one array of pairs: only one of
     /// them is always present.
     held_summaries: Vec<LocusSummary>,
+    /// Where each held observation's evidence sits in its source, when the source kept it
+    /// rather than building it. Empty for a source that builds.
+    held_bodies: Vec<core::ops::Range<usize>>,
     /// Where the last observation drawn from `source` began — the ordering check's memory.
     last_drawn: Option<GenomePosition>,
 }
@@ -353,8 +356,14 @@ struct SampleWindow<S> {
 /// fills both, and pays for the second what it always paid.
 #[derive(Debug, Clone, Copy)]
 pub struct WindowedCohort<'a> {
-    /// One slice per sample: the evidence, in coordinate order.
-    pub observations: &'a [&'a [SampleLocusObservations]],
+    /// One slice per sample: the evidence, in coordinate order — **or `None` when the caller
+    /// has summaries and the evidence is still compressed**.
+    ///
+    /// Absent, nothing before assembly is affected: the closing walk reads summaries and the
+    /// two verdicts are passed on those. What changes is who materialises a surviving locus's
+    /// members, which becomes the source that kept them
+    /// (`spec/cohort_merge_psp_path.md` §3.1).
+    pub observations: Option<&'a [&'a [SampleLocusObservations]]>,
     /// One slice per sample at the same indices, or **`None` when the caller has records and
     /// no summaries beside them**.
     ///
@@ -374,8 +383,28 @@ impl<'a> WindowedCohort<'a> {
     pub fn summary_at(&self, sample: usize, index: usize) -> Option<LocusSummary> {
         match self.summaries {
             Some(summaries) => summaries[sample].get(index).copied(),
-            None => self.observations[sample].get(index).map(LocusSummary::of),
+            None => self
+                .observations
+                .expect("a window with neither summaries nor records describes nothing")[sample]
+                .get(index)
+                .map(LocusSummary::of),
         }
+    }
+
+    /// How many samples the window covers.
+    #[must_use]
+    pub fn samples(&self) -> usize {
+        match (self.summaries, self.observations) {
+            (Some(summaries), _) => summaries.len(),
+            (None, Some(observations)) => observations.len(),
+            (None, None) => 0,
+        }
+    }
+
+    /// Where sample `sample`'s first held observation begins, if it holds one.
+    #[must_use]
+    pub fn first_start(&self, sample: usize) -> Option<GenomePosition> {
+        self.summary_at(sample, 0).map(LocusSummary::start_position)
     }
 }
 
@@ -390,7 +419,7 @@ impl<'a> From<&WindowedCohort<'a>> for WindowedCohort<'a> {
 impl<'a> From<&'a [&'a [SampleLocusObservations]]> for WindowedCohort<'a> {
     fn from(observations: &'a [&'a [SampleLocusObservations]]) -> Self {
         Self {
-            observations,
+            observations: Some(observations),
             summaries: None,
         }
     }
@@ -412,6 +441,7 @@ impl<S> ObservationCache<S> {
                     spare: Vec::new(),
                     held_observations: Vec::new(),
                     held_summaries: Vec::new(),
+                    held_bodies: Vec::new(),
                     last_drawn: None,
                 })
                 .collect(),
@@ -515,17 +545,21 @@ impl<S> ObservationCache<S> {
             Vec::with_capacity(self.samples.len());
         let mut summaries_per_sample: Vec<&[LocusSummary]> = Vec::with_capacity(self.samples.len());
         for sample in &self.samples {
-            let held = &sample.held_observations;
-            let from = first_reaching_index(held, left_edge);
-            observations_per_sample.push(&held[from..]);
+            let from = first_reaching_summary(&sample.held_summaries, left_edge);
             summaries_per_sample.push(&sample.held_summaries[from..]);
+            if !sample.held_observations.is_empty() || sample.held_bodies.is_empty() {
+                observations_per_sample.push(&sample.held_observations[from..]);
+            }
         }
         windowing.add_to(&super::timing::WINDOW_NANOS);
+        let records = (observations_per_sample.len() == self.samples.len())
+            .then_some(&observations_per_sample[..]);
         f(&WindowedCohort {
-            observations: &observations_per_sample,
+            observations: records,
             summaries: Some(&summaries_per_sample),
         })
     }
+
 
     /// How many observations are held, summed across samples — the size of the window this
     /// cache is the memory of (spec §8).
@@ -559,17 +593,19 @@ impl<S> ObservationCache<S> {
     /// to what it drops rather than to the window, and not for a difference in what it keeps.
     pub(super) fn evict_before(&mut self, position: GenomePosition) {
         for sample in &mut self.samples {
-            let first_survivor = first_reaching_index(&sample.held_observations, position);
+            let first_survivor = first_reaching_summary(&sample.held_summaries, position);
             // **Destructured so that the drain and the spare list are two borrows, not
             // one.** Both live on the same `SampleWindow`, and a method call inside the
             // drain would borrow the whole of it a second time.
             let SampleWindow {
                 held_observations,
                 held_summaries,
+                held_bodies,
                 spare,
                 ..
             } = sample;
             held_summaries.drain(..first_survivor);
+            held_bodies.drain(..first_survivor.min(held_bodies.len()));
             let room = held_observations.len();
             for record in held_observations.drain(..first_survivor) {
                 if spare.len() < room {
@@ -612,14 +648,16 @@ impl<S> ObservationCache<S> {
             .samples
             .par_iter_mut()
             .map(|sample| {
-                let first_survivor = first_reaching_index(&sample.held_observations, position);
+                let first_survivor = first_reaching_summary(&sample.held_summaries, position);
                 let SampleWindow {
                     held_observations,
                     held_summaries,
+                    held_bodies,
                     spare,
                     ..
                 } = sample;
                 held_summaries.drain(..first_survivor);
+            held_bodies.drain(..first_survivor.min(held_bodies.len()));
                 let room = held_observations.len();
                 let mut dead = Vec::new();
                 for record in held_observations.drain(..first_survivor) {
@@ -642,6 +680,24 @@ impl<S, E> ObservationCache<S>
 where
     S: ObservationSource<Error = E>,
 {
+
+    /// Build sample `sample`'s evidence at `index`, which its source kept.
+    ///
+    /// **Takes `&self`, so several builders may call it at once** — sound because a stored
+    /// body is decoded from its own bytes alone, sharing nothing mutable
+    /// (`spec/cohort_merge_psp_path.md` §3.2).
+    ///
+    /// # Errors
+    ///
+    /// Whatever the sample's source refuses — a damaged block, or a body that will not parse.
+    pub(super) fn build_at(
+        &self,
+        sample: usize,
+        index: usize,
+    ) -> Result<SampleLocusObservations, E> {
+        let window = &self.samples[sample];
+        window.source.build(window.held_bodies[index].clone())
+    }
     /// Draw every sample forward until `region` is covered, and far enough past it to hold
     /// what a locus starting inside it can reach (spec §6.4).
     ///
@@ -796,15 +852,23 @@ where
         let mut reach_grew = false;
         let mut considered = 0;
         loop {
-            if considered == self.held_observations.len() {
+            if considered == self.held_summaries.len() {
                 // Nothing left in this sample: it cannot widen the reach again.
                 let Some(observation) = self.draw_next()? else {
                     break;
                 };
-                self.held_summaries.push(LocusSummary::of(&observation));
-                self.held_observations.push(observation);
+                match observation {
+                    Drawn::Built(record) => {
+                        self.held_summaries.push(LocusSummary::of(&record));
+                        self.held_observations.push(record);
+                    }
+                    Drawn::Kept { summary, body } => {
+                        self.held_summaries.push(summary);
+                        self.held_bodies.push(body);
+                    }
+                }
             }
-            let observation = &self.held_observations[considered];
+            let observation = self.held_summaries[considered];
             if observation.start_position() > *chain_reach {
                 // Held, but beyond the reach of any locus this cover can see. It stays in the
                 // window, and the next cover reconsiders it against a later reach.
@@ -821,7 +885,7 @@ where
     }
 
     /// The next observation from the source, or `None` once it is spent.
-    fn draw_next(&mut self) -> Result<Option<SampleLocusObservations>, E> {
+    fn draw_next(&mut self) -> Result<Option<Drawn>, E> {
         if self.spent {
             return Ok(None);
         }
@@ -829,7 +893,7 @@ where
         // fills this one instead of allocating; a source that cannot drops it and allocates,
         // which is what every plain iterator does.
         let spare = self.spare.pop();
-        let Some(next) = self.source.next_observation(spare).transpose()? else {
+        let Some(next) = self.source.next_drawn(spare).transpose()? else {
             self.spent = true;
             return Ok(None);
         };
@@ -837,7 +901,10 @@ where
         // prices Milestone G is taken here rather than at the mint: the generator's own
         // records include ones the region clamp discards, and those the merge never owns.
         super::timing::RECORDS_DRAWN.add(1);
-        super::timing::OBSERVATIONS_DRAWN.add(next.observations.len() as u64);
+        if let Drawn::Built(record) = &next {
+            super::timing::OBSERVATIONS_DRAWN.add(record.observations.len() as u64);
+        }
+        let summary = next.summary();
 
         // **A release check, not a `debug_assert!`** — the release profile is the one this
         // repo runs, and a source that goes backwards is silent otherwise: the draw loop stops
@@ -851,12 +918,12 @@ where
         // checks in `build.rs` — a source out of coordinate order is then a fact about the
         // file rather than a bug in this crate, and this is the first such check the psp path
         // reaches.
-        let start = next.start_position();
+        let start = summary.start_position();
         if let Some(previous) = self.last_drawn {
             assert!(
                 start >= previous,
                 "this sample's source is not in coordinate order: {} follows {previous:?}",
-                next.region,
+                summary.region,
             );
         }
         self.last_drawn = Some(start);
@@ -920,24 +987,12 @@ pub fn building_regions_of(
 
 /// The first held observation that reaches `position` or beyond — the window's left edge for
 /// a call at `position`, and the window's length when every one of them ends before it.
-fn first_reaching_index(
-    held_observations: &[SampleLocusObservations],
-    position: GenomePosition,
-) -> usize {
-    // **A bisection, and it is what makes the window's ordering load-bearing.** A sample's
-    // records are disjoint and ascending — `build_region` refuses a sample whose are not — so
-    // reach is monotone across the window and "does this one reach `position`" is false over a
-    // prefix and true over the rest, which is the shape `partition_point` needs. The scan this
-    // replaced would have given the same answer on a window that was not ordered; this one
-    // gives a wrong answer instead of a slow one, which is why the precondition is stated here
-    // rather than left to `evict_before`'s doc.
-    //
-    // It is worth nothing to the cached serial driver, whose window starts at the left edge
-    // because it evicts immediately before every cover, and about a tenth of the parallel
-    // driver's merge, where eviction opens a whole round and a region late in that round would
-    // otherwise walk past every earlier region's records first.
-    held_observations.partition_point(|observation| observation.reach_position() < position)
+/// [`first_reaching_index`] over summaries, which every window has and only some have records
+/// for.
+fn first_reaching_summary(held: &[LocusSummary], position: GenomePosition) -> usize {
+    held.partition_point(|summary| summary.reach_position() < position)
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -1023,6 +1078,7 @@ mod tests {
         cache.with_observations(span, |per_sample| {
             per_sample
                 .observations
+                .expect("the fixture's sources build every record")
                 .iter()
                 .map(|observations| {
                     observations
@@ -1887,7 +1943,17 @@ mod tests {
                 });
                 cache.cover(*at).expect("the fixture sources hold");
                 through_cache.push(cache.with_observations(*at, |windows| {
-                    format!("{:?}", build_region_windowed(*at, windows, max_span, keep))
+                    format!(
+                        "{:?}",
+                        build_region_windowed::<std::convert::Infallible>(
+                            *at,
+                            windows,
+                            max_span,
+                            keep,
+                            &|_, _| unreachable!("the fixture's sources build every record"),
+                        )
+                        .expect("an infallible build")
+                    )
                 }));
             }
 
