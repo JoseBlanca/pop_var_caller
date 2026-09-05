@@ -1361,6 +1361,64 @@ impl Sections {
 // The whole input to the fit
 // ---------------------------------------------------------------------
 
+/// **Who one read group is**, as the alignment file that produced it declared it.
+///
+/// **A census carries these because it is the fit's only input, and the fit has to name read
+/// groups to whoever reads its answers.** The parameters file identifies a read group by its
+/// `@RG ID`, its library and its sample together, never by a number
+/// (`doc/devel/ng/spec/parameters_file.md`), and the numbers themselves cannot travel: a walk
+/// sees one sample, so every census numbers its own groups from zero and two of them collide by
+/// construction. The names are what a cohort of censuses can be merged on.
+///
+/// The sample is not here because a census belongs to one, and holding it per group would let a
+/// file say two different things about which plant it is.
+///
+/// **Not `read_groups.rs`'s own `DeclaredReadGroup`**, which is a different thing with a
+/// confusable name: that one is what an `@RG` record literally said, library included only if
+/// the header gave one. This is the filled-in answer — the library here is the run's, synthesized
+/// where the file named none — which is what the parameters file has to carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedReadGroup {
+    /// The `@RG ID` the alignment file declares, verbatim. **Unique across a whole run** — not
+    /// merely within a file — which is what lets a cohort of censuses be merged on it.
+    pub declared_id: String,
+    /// The `@RG LB`, or the name this project synthesized when the file declared none. The
+    /// per-library error rates are keyed on groupings of this.
+    pub library: String,
+}
+
+impl NamedReadGroup {
+    /// **Names for a drawn sample's read groups** — for a harness or a test whose cohort has no
+    /// alignment files to take them from.
+    ///
+    /// **The names are made unique across the cohort by prefixing the sample**, because a
+    /// cohort of censuses is merged on the `@RG ID` and the run-wide rule is that no two read
+    /// groups anywhere in one run share one. A drawn cohort that named every sample's first
+    /// group the same thing would be one no real run can produce, and it would be refused at
+    /// the merge for a reason that says nothing about what was being tested.
+    ///
+    /// A real run does not call this: it takes the names from the alignment files, or from the
+    /// psp header that recorded them.
+    #[must_use]
+    pub fn drawn_for(
+        sample: &str,
+        groups: impl IntoIterator<Item = ReadGroupId>,
+    ) -> BTreeMap<ReadGroupId, Self> {
+        groups
+            .into_iter()
+            .map(|id| {
+                (
+                    id,
+                    Self {
+                        declared_id: format!("{sample}:rg{}", id.get()),
+                        library: format!("{sample}:lib{}", id.get()),
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
 /// One sample's evidence at the kept loci, plus the values the fit checks before pooling.
 ///
 /// **The sections are not public, and that is the whole point of the type — 2026-08-14.** A
@@ -1378,6 +1436,9 @@ impl Sections {
 pub struct SampleCensusEvidence {
     pub sample: String,
     pub terms: RecordingTerms,
+    /// **Who each of this sample's read groups is**, under the identifier its own sections are
+    /// keyed by. Empty only for a value a test built rather than a census read from a file.
+    declared: BTreeMap<ReadGroupId, NamedReadGroup>,
     sections: Sections,
 }
 
@@ -1386,11 +1447,13 @@ impl SampleCensusEvidence {
     pub fn resident(
         sample: String,
         terms: RecordingTerms,
+        declared: BTreeMap<ReadGroupId, NamedReadGroup>,
         sections: BTreeMap<SectionKey, Section>,
     ) -> Self {
         Self {
             sample,
             terms,
+            declared,
             sections: Sections::resident(sections),
         }
     }
@@ -1400,14 +1463,26 @@ impl SampleCensusEvidence {
     pub fn backed(
         sample: String,
         terms: RecordingTerms,
+        declared: BTreeMap<ReadGroupId, NamedReadGroup>,
         path: PathBuf,
         directory: BTreeMap<SectionKey, ByteExtent>,
     ) -> Self {
         Self {
             sample,
             terms,
+            declared,
             sections: Sections::backed(path, directory),
         }
+    }
+
+    /// **Who each of this sample's read groups is**, under the identifier its own sections are
+    /// keyed by.
+    ///
+    /// Empty where nothing named them, which is a value a test built rather than a census read
+    /// from a file: every census this build writes carries one entry a group.
+    #[must_use]
+    pub fn declared_read_groups(&self) -> &BTreeMap<ReadGroupId, NamedReadGroup> {
+        &self.declared
     }
 
     /// Every read group this sample recorded, in the order the fit visits them.
@@ -1961,6 +2036,9 @@ pub struct CensusWriter {
     /// discovering them would make a group's record start at its first read, and every
     /// position before that indistinguishable from never walked.
     read_groups: Vec<ReadGroupId>,
+    /// **Who each of those groups is** — the `@RG ID` and the library, which travel into the
+    /// census because a cohort of censuses can only be merged on them.
+    declared: BTreeMap<ReadGroupId, NamedReadGroup>,
     sample: String,
 }
 
@@ -2006,7 +2084,10 @@ impl CensusWriter {
     pub fn new(
         sample: String,
         loci: &CensusLoci,
-        read_groups: Vec<ReadGroupId>,
+        // **The sample's read groups and who each one is, in one argument** — two lists that
+        // had to agree would be a way for a census to record a library under another's
+        // identifier, with no symptom.
+        declared: BTreeMap<ReadGroupId, NamedReadGroup>,
         contig_of: &dyn Fn(&str) -> Option<ContigId>,
         terms: SelectionTerms,
         edges: DepthBinEdges,
@@ -2074,7 +2155,8 @@ impl CensusWriter {
             read_cap,
             depth_cap,
             stratum_counts: loci.ssr_stratum_counts().clone(),
-            read_groups,
+            read_groups: declared.keys().copied().collect(),
+            declared,
             sample,
         }
     }
@@ -2442,6 +2524,7 @@ impl CensusWriter {
                 depth_ladder: DepthLadderDigest::of(&self.edges),
                 depth_cap: self.depth_cap,
             },
+            self.declared,
             sections,
         )
     }
@@ -2559,6 +2642,7 @@ mod tests {
         let records = SampleCensusEvidence::resident(
             "s".to_string(),
             terms(),
+            NamedReadGroup::drawn_for("s", [ReadGroupId(0), ReadGroupId(1)]),
             BTreeMap::from([
                 (SectionKey::Generic(ReadGroupId(0)), Section::Generic(one)),
                 (SectionKey::Generic(ReadGroupId(1)), Section::Generic(two)),
@@ -3445,7 +3529,7 @@ mod tests {
         CensusWriter::new(
             "sample".to_string(),
             &loci,
-            groups.iter().map(|g| ReadGroupId(*g)).collect(),
+            NamedReadGroup::drawn_for("a-sample", groups.iter().map(|g| ReadGroupId(*g))),
             &|_| Some(ContigId(0)),
             selection_terms(),
             DepthBinEdges::for_census(),
@@ -3574,7 +3658,7 @@ mod tests {
         CensusWriter::new(
             sample_name.to_string(),
             &loci,
-            vec![group],
+            NamedReadGroup::drawn_for("a-sample", [group]),
             &|_| Some(ContigId(0)),
             selection_terms(),
             DepthBinEdges::for_census(),
@@ -3613,7 +3697,7 @@ mod tests {
         CensusWriter::new(
             "sample".to_string(),
             &loci,
-            vec![ReadGroupId(0)],
+            NamedReadGroup::drawn_for("a-sample", [ReadGroupId(0)]),
             &|_| Some(ContigId(0)),
             selection_terms(),
             DepthBinEdges::for_census(),

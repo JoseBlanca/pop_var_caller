@@ -251,30 +251,63 @@ own.
 
 ### Milestone C — the fit, from census files
 
-☐ **C1 — read a cohort of censuses.** Open them, build `CohortCensusEvidence`, and surface its
+**Two steps were added on 2026-09-05, before the four this milestone was written with**, because
+a cohort of censuses could not be assembled at all. Every census numbers its read groups from
+zero, since a walk sees one sample — so on a two-sample cohort both censuses claim read group 0
+and `CohortCensusEvidence::new` refuses them, correctly, as libraries that would be fitted as
+one. That is psp mode's normal state, not a corner: the advertised way to walk a cohort is one
+invocation a sample.
+
+**The owner's ruling, 2026-09-05: the census records who its read groups are** — the `@RG ID` and
+the library, per group — so a cohort merges on names alone and the fit's input stays the
+censuses. *Rejected: having the fit open the psps too and renumber from their headers, the way
+`call-from-psps` does.* It needs no format change, but it makes the fit's real input "the
+censuses **and** their psps", which takes away the thing that made a separate census file worth
+having — that the expensive half is done once and the fit re-runs off it alone. *Rejected without
+being offered: renumbering by the order the censuses are named*, since the identity would then
+depend on the argument order, and the parameters file still could not be written — it names a
+read group by its `@RG ID`, its library and its sample.
+
+✅ **C1 — the census records who its read groups are.** `DeclaredReadGroup` — the `@RG ID` and the
+library — carried per group in walk-local order, written into the census header and read back,
+with the format version bumped. Both producers supply it: the walk from its read-group table, the
+psp-driven one from the psp's own header. **The two must still agree byte for byte**, which is
+what says they are naming the groups the same way.
+*Depends:* B1. *Source:* [`parameters_file.md`](../spec/parameters_file.md) §4's read-group table,
+which is what these names have to reach.
+
+☐ **C2 — a cohort of censuses merges on those names.** `CohortCensusEvidence::new` stops refusing
+an index collision and instead **renumbers**: run-wide identifiers are assigned in (sample order,
+the sample's own group order), which is the rule `ReadGroups::of_merged_tables` already uses for
+alignment files, and each sample's section keys are relabelled to match. What it refuses instead
+is **two samples declaring the same `@RG ID`**, which is the run-wide uniqueness rule and a real
+error rather than a normal state.
+*Depends:* C1.
+
+☐ **C3 — read a cohort of censuses.** Open them, build `CohortCensusEvidence`, and surface its
 refusals as command errors that name the sample and the field that differs — samples that
 recorded under different terms, and a census whose named pileup identity does not match the
 pileup beside it. **A refusal, never a panic**: this is the door a stale census arrives at.
-*Depends:* B1. *Source:* [records spec](../spec/parameter_prepass_joint_records.md) §6.1;
+*Depends:* C2. *Source:* [records spec](../spec/parameter_prepass_joint_records.md) §6.1;
 [`fit.rs`](../../../../src/ng/parameter_estimation/joint/fit.rs) `CohortCensusEvidence::new`.
 
-☐ **C2 — both halves of the fit, giving the prototype's answers.** `fit_jointly` for the
+☐ **C4 — both halves of the fit, giving the prototype's answers.** `fit_jointly` for the
 generic half; `strata_of_kept_loci` → `gather_strata` → `fit_strata` for the repeat-tract half.
 **The fitted numbers must equal the ones `examples/ng_joint_records_walk.rs` gets on the same
 cohort** — this step changes where the evidence is read from, not the arithmetic.
-*Depends:* C1.
+*Depends:* C3.
 
-☐ **C3 — assemble a `RunParameters`, and write the file.** The fit's outputs into
+☐ **C5 — assemble a `RunParameters`, and write the file.** The fit's outputs into
 `RunParameters::assemble`, then the parameters file. **Each number carries the warrant it has
 earned**: fitted where the fit produced it, defaulted where it did not, and the base-quality
 calibration defaulted throughout (§3.4). The file names the reference it was fitted against and
 the read groups it names, because that is what a calling run checks it by.
-*Depends:* C2. *Source:* [`parameters_file.md`](../spec/parameters_file.md) §6, §7.
+*Depends:* C4. *Source:* [`parameters_file.md`](../spec/parameters_file.md) §6, §7.
 
-☐ **C4 — `estimate-parameters`, the command.** Censuses in, one parameters file out. It refuses
+☐ **C6 — `estimate-parameters`, the command.** Censuses in, one parameters file out. It refuses
 to write over a file it was handed, as a calling run does. Written twice from one cohort it
 produces the same bytes.
-*Depends:* C3.
+*Depends:* C5.
 
 > **Checkpoint C: a parameters file produced from data, for the first time in this tree.**
 > **The knobs question is re-opened here** — the census selection's seed and two counts, the
@@ -286,7 +319,7 @@ produces the same bytes.
 ☐ **D1 — the whole route on the tomato slice.** `generate-psps` → `generate-census` →
 `estimate-parameters` → `call-from-psps --parameters`, and the calling run's report names the
 file's numbers as fitted rather than defaulted. A script beside the existing oracles.
-*Depends:* C4.
+*Depends:* C6.
 
 ☐ **D2 — what the fitted numbers change.** The same cohort called with `--defaults` and with
 the fitted file: how many records each writes, and how many genotypes differ. **A measurement,
@@ -302,7 +335,7 @@ moves is as informative as one where much does.
 already decodes every record of every pileup; `minted_error_by_read_group` takes one locus's
 observations. Per read group, Σ `ln ε` and the read count, over complete observations at generic
 loci, before the depth cap.
-*Depends:* C4. *Source:*
+*Depends:* C6. *Source:*
 [`calibration.rs`](../../../../src/ng/parameter_estimation/generic/calibration.rs).
 
 ☐ **E2 — where the totals live, and it is a design question.** Two numbers per read group have
@@ -328,9 +361,9 @@ still says so.
 | A | one sample's census built two ways, byte for byte, on a fixture carrying a repeat tract (§7.12) |
 | B1-B2 | command-level fixtures; an unwritable census fails its sample; a pileup holding no selected locus is named |
 | B3 | wall time and peak resident memory of both routes, on the tomato slice and on one larger cohort |
-| C1 | every refusal provoked and named — mismatched recording terms, a census whose pileup identity has moved |
-| C2 | the fitted numbers equal `examples/ng_joint_records_walk.rs`'s on the same cohort |
-| C3-C4 | the file read back gives the same `RunParameters`; written twice, byte-identical; warrants match what was fitted |
+| C3 | every refusal provoked and named — mismatched recording terms, a census whose pileup identity has moved |
+| C4 | the fitted numbers equal `examples/ng_joint_records_walk.rs`'s on the same cohort |
+| C5-C6 | the file read back gives the same `RunParameters`; written twice, byte-identical; warrants match what was fitted |
 | D | the four commands compose on the tomato slice, and the calling run reports fitted numbers |
 | E | the calibration's warrant moves off `Defaulted`, and the fitted scale reproduces the rate |
 

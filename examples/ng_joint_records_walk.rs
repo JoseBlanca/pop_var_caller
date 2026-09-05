@@ -53,7 +53,8 @@ use pop_var_caller::ng::locus_generation::{
 };
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
-    CensusWriter, CohortCensusEvidence, DepthCap, DepthCode, ReadCap, SampleCensusEvidence,
+    CensusWriter, CohortCensusEvidence, DepthCap, DepthCode, NamedReadGroup, ReadCap,
+    SampleCensusEvidence,
 };
 use pop_var_caller::ng::parameter_estimation::joint::contamination::{
     ContaminationConfig, ContaminationEstimate, OwnCoordinates, fit_contamination,
@@ -1074,10 +1075,26 @@ fn walk_one(
             .position(|entry| entry.name == name)
             .map(|i| ContigId(i as u32))
     };
+    // **This sample's read groups and who each one is.** The names travel into the census
+    // because a cohort of censuses is merged on them rather than on the numbers.
+    let declared = sample
+        .read_groups
+        .iter()
+        .map(|id| {
+            let group = read_groups.get(*id);
+            (
+                *id,
+                NamedReadGroup {
+                    declared_id: group.id.to_string(),
+                    library: group.library.value.to_string(),
+                },
+            )
+        })
+        .collect();
     let mut writer = CensusWriter::new(
         sample.sample.to_string(),
         kept,
-        sample.read_groups.clone(),
+        declared,
         &contig_of,
         terms.clone(),
         DepthBinEdges::for_census(),

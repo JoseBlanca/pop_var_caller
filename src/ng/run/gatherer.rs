@@ -21,6 +21,7 @@
 //! [`open`](SampleObservationGatherer::open) and a file whose header cannot be built is
 //! refused before any walking starts.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -31,7 +32,9 @@ use crate::ng::locus_generation::{
     LocusCounts, SampleLocusObservations, SampleLocusObservationsIterator,
 };
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
-use crate::ng::parameter_estimation::joint::census::{CensusWriter, DepthCap, ReadCap};
+use crate::ng::parameter_estimation::joint::census::{
+    CensusWriter, DepthCap, NamedReadGroup, ReadCap,
+};
 use crate::ng::parameter_estimation::joint::census_file::{PileupIdentity, write_census};
 use crate::ng::parameter_estimation::joint::loci::{
     CatalogBuildSettings, CensusLoci, ReferenceDigest, RegionSetDigest, SelectableRegions,
@@ -246,8 +249,10 @@ impl CensusPlan {
     /// whether two call sites were kept in step
     /// (`parameter_prepass_joint_records.md` §7.12).
     ///
-    /// `read_groups` are the sample's own, numbered as its psp numbers them, and `segmentation`
-    /// is the ground its walk covered.
+    /// `declared` is the sample's own read groups — the identifier its census keys sections by,
+    /// and who each one is — and `segmentation` is the ground its walk covered. **The names
+    /// travel into the census** because a cohort of censuses is merged on them: every census
+    /// numbers its groups from zero, since a walk sees one sample.
     ///
     /// **Every generic stretch is marked walked before a locus arrives.** Without the marking a
     /// position no read reached is indistinguishable from a region the run never opened, because
@@ -258,7 +263,7 @@ impl CensusPlan {
     pub fn writer_for(
         &self,
         sample: String,
-        read_groups: Vec<ReadGroupId>,
+        declared: BTreeMap<ReadGroupId, NamedReadGroup>,
         segmentation: &Segmentation,
     ) -> CensusWriter {
         let contigs = Arc::clone(&self.contigs);
@@ -272,7 +277,7 @@ impl CensusPlan {
         let mut writer = CensusWriter::new(
             sample,
             &self.loci,
-            read_groups,
+            declared,
             &contig_of,
             self.terms.clone(),
             // **The census's own ladder, by name.** `DepthBinEdges::for_census` is the one
@@ -397,7 +402,18 @@ impl SampleObservationGatherer {
         let census = census.map(|plan| {
             plan.writer_for(
                 header.sample.clone(),
-                read_groups.iter().map(|(id, _)| id).collect(),
+                read_groups
+                    .iter()
+                    .map(|(id, group)| {
+                        (
+                            id,
+                            NamedReadGroup {
+                                declared_id: group.id.to_string(),
+                                library: group.library.value.to_string(),
+                            },
+                        )
+                    })
+                    .collect(),
                 &segmentation,
             )
         });

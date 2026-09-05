@@ -50,12 +50,13 @@ use std::path::Path;
 use crate::ng::parameter_estimation::joint::loci::{BlockDigest, CensusLociDigest};
 use crate::ng::repeat_catalog::StratumCounts;
 use crate::ng::types::{ContigId, ReadGroupId};
+use std::collections::BTreeMap;
 
 use super::census::{
     AlleleObservation, ByteExtent, CensusError, DEPTH_CODE_BITS, DepthCap, DepthLadderDigest,
-    GenericEvidence, GuardObservation, OFFSET_BUCKETS, ObservedAllele, OffsetCounts,
-    PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence, Section, SectionKey,
-    SelectionTermsDigest, SsrEvidence, Stratum, TractDifference, WalkedBits,
+    GenericEvidence, GuardObservation, NamedReadGroup, OFFSET_BUCKETS, ObservedAllele,
+    OffsetCounts, PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence, Section,
+    SectionKey, SelectionTermsDigest, SsrEvidence, Stratum, TractDifference, WalkedBits,
 };
 
 /// What every census file starts with, so a file that is not one is refused rather than decoded.
@@ -70,7 +71,7 @@ const MAGIC: &[u8; 8] = b"NGCENSUS";
 /// eight on one with a bin for every depth to the cap. A version-1 file's depth array is a
 /// different number of bytes for the same position count and its codes index a different
 /// ladder, so nothing about it can be salvaged by reading it more carefully.
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 
 /// Which pileup a census was built from.
 ///
@@ -249,6 +250,20 @@ pub fn write_census(
 
 fn encode_header(out: &mut Vec<u8>, census: &SampleCensusEvidence, pileup: Option<PileupIdentity>) {
     put_str(out, &census.sample);
+
+    // **Who the read groups are, beside who the sample is**, and in the sample's own numbering:
+    // entry `i` names the group its sections are keyed under as `i`. A cohort of censuses is
+    // merged on these — every census numbers its groups from zero, because a walk sees one
+    // sample, so the numbers collide by construction and only the names can tell two libraries
+    // apart.
+    let declared = census.declared_read_groups();
+    put_u32(out, declared.len() as u32);
+    for (id, group) in declared {
+        put_u32(out, id.get());
+        put_str(out, &group.declared_id);
+        put_str(out, &group.library);
+    }
+
     let terms = &census.terms;
 
     put_u16(out, terms.selection.fields().len() as u16);
@@ -393,7 +408,7 @@ pub fn decode_census(bytes: &[u8]) -> Result<CensusFile, CensusError> {
     if cursor.u16()? != VERSION {
         return Err(CensusError::Malformed);
     }
-    let (sample, terms, pileup) = decode_header(&mut cursor)?;
+    let (sample, declared, terms, pileup) = decode_header(&mut cursor)?;
     let directory = decode_directory(&mut cursor)?;
 
     let mut sections = std::collections::BTreeMap::new();
@@ -407,7 +422,7 @@ pub fn decode_census(bytes: &[u8]) -> Result<CensusFile, CensusError> {
     }
 
     Ok(CensusFile {
-        census: SampleCensusEvidence::resident(sample, terms, sections),
+        census: SampleCensusEvidence::resident(sample, terms, declared, sections),
         pileup,
     })
 }
@@ -438,13 +453,14 @@ pub fn open_census(
     if cursor.take(MAGIC.len())? != MAGIC || cursor.u16()? != VERSION {
         return Err(CensusError::Malformed);
     }
-    let (sample, terms, pileup) = decode_header(&mut cursor)?;
+    let (sample, declared, terms, pileup) = decode_header(&mut cursor)?;
     let directory = decode_directory(&mut cursor)?;
 
     Ok((
         SampleCensusEvidence::backed(
             sample,
             terms,
+            declared,
             path.to_path_buf(),
             directory.into_iter().collect(),
         ),
@@ -487,10 +503,31 @@ pub fn decode_directory_of(bytes: &[u8]) -> Result<Vec<(SectionKey, ByteExtent)>
     decode_directory(&mut cursor)
 }
 
-type Header = (String, RecordingTerms, Option<PileupIdentity>);
+type Header = (
+    String,
+    BTreeMap<ReadGroupId, NamedReadGroup>,
+    RecordingTerms,
+    Option<PileupIdentity>,
+);
 
 fn decode_header(cursor: &mut Cursor<'_>) -> Result<Header, CensusError> {
     let sample = cursor.string()?;
+
+    let declared_count = cursor.u32()? as usize;
+    let mut declared = BTreeMap::new();
+    for _ in 0..declared_count {
+        let id = ReadGroupId(cursor.u32()?);
+        let named = NamedReadGroup {
+            declared_id: cursor.string()?,
+            library: cursor.string()?,
+        };
+        // **Two entries under one identifier is a malformed file, not a last-one-wins.** They
+        // would name one section's read group two ways, and only one of the two could reach a
+        // cohort's merge.
+        if declared.insert(id, named).is_some() {
+            return Err(CensusError::Malformed);
+        }
+    }
 
     let field_count = cursor.u16()? as usize;
     let mut fields = Vec::with_capacity(field_count);
@@ -552,6 +589,7 @@ fn decode_header(cursor: &mut Cursor<'_>) -> Result<Header, CensusError> {
 
     Ok((
         sample,
+        declared,
         RecordingTerms {
             selection: SelectionTermsDigest::from_fields(fields),
             kept_loci: CensusLociDigest::from_parts(whole, blocks),
@@ -915,6 +953,7 @@ mod tests {
         SampleCensusEvidence::resident(
             "corners".to_string(),
             terms(),
+            NamedReadGroup::drawn_for("corners", [ReadGroupId(0)]),
             BTreeMap::from([
                 (
                     SectionKey::Generic(ReadGroupId(0)),
@@ -1336,6 +1375,7 @@ mod tests {
                 SampleCensusEvidence::resident(
                     format!("s{s}"),
                     terms.clone(),
+                    NamedReadGroup::drawn_for(&format!("s{s}"), [ReadGroupId(s)]),
                     BTreeMap::from([(
                         // **One read group a sample**: a library is one plant's DNA
                         // preparation, so a cohort's samples never share one, and the cohort's
@@ -1477,6 +1517,7 @@ mod tests {
         let generic_only = SampleCensusEvidence::resident(
             "generic".to_string(),
             terms(),
+            NamedReadGroup::drawn_for("generic", [ReadGroupId(0)]),
             BTreeMap::from([(
                 SectionKey::Generic(ReadGroupId(0)),
                 Section::Generic(GenericEvidence::never_walked(3)),
@@ -1487,11 +1528,107 @@ mod tests {
         let tracts_only = SampleCensusEvidence::resident(
             "tracts".to_string(),
             terms(),
+            NamedReadGroup::drawn_for("tracts", [ReadGroupId(0)]),
             BTreeMap::from([(
                 SectionKey::Ssr(ReadGroupId(0), AT_SIX_REPEATS),
                 Section::Ssr(SsrEvidence::never_walked(0)),
             )]),
         );
         assert_eq!(round_trip(&tracts_only, None).census, tracts_only);
+    }
+
+    /// **The read groups' names survive the round trip**, which is what a cohort of censuses is
+    /// merged on.
+    ///
+    /// `every_corner_state_survives_a_round_trip` compares the whole value and so covers this
+    /// too; this one exists because that comparison would go on passing if both sides recorded
+    /// *no* names, and a census that names none is one no cohort can be built from.
+    #[test]
+    fn the_read_groups_names_survive_the_round_trip() {
+        let census = SampleCensusEvidence::resident(
+            "named".to_string(),
+            terms(),
+            BTreeMap::from([
+                (
+                    ReadGroupId(0),
+                    NamedReadGroup {
+                        declared_id: "HK5N7.1".to_string(),
+                        library: "lib-A".to_string(),
+                    },
+                ),
+                (
+                    ReadGroupId(3),
+                    NamedReadGroup {
+                        declared_id: "HK5N7.2".to_string(),
+                        library: "lib-B".to_string(),
+                    },
+                ),
+            ]),
+            BTreeMap::from([(
+                SectionKey::Generic(ReadGroupId(0)),
+                Section::Generic(GenericEvidence::never_walked(3)),
+            )]),
+        );
+
+        let read = round_trip(&census, None);
+
+        let named = read.census.declared_read_groups();
+        assert_eq!(named.len(), 2, "both entries come back");
+        assert_eq!(named[&ReadGroupId(0)].declared_id, "HK5N7.1");
+        assert_eq!(named[&ReadGroupId(0)].library, "lib-A");
+        assert_eq!(
+            named[&ReadGroupId(3)].declared_id,
+            "HK5N7.2",
+            "an identifier that is not the entry's position comes back under its own number",
+        );
+        assert_eq!(named[&ReadGroupId(3)].library, "lib-B");
+    }
+
+    /// **A census naming one read group twice is malformed**, not a last-one-wins.
+    ///
+    /// Two entries under one identifier would name a section's read group two ways, and only one
+    /// of the two could reach a cohort's merge — so the file is refused rather than half-read.
+    ///
+    /// **The duplicate is made by encoding the header's own bytes twice**, rather than by poking
+    /// an offset this test computed: an offset would be a second copy of the layout, and would
+    /// break on a change to the layout that this refusal does not care about.
+    #[test]
+    fn a_census_that_names_one_read_group_twice_is_refused() {
+        let census = SampleCensusEvidence::resident(
+            "named".to_string(),
+            terms(),
+            NamedReadGroup::drawn_for("named", [ReadGroupId(0)]),
+            BTreeMap::from([(
+                SectionKey::Generic(ReadGroupId(0)),
+                Section::Generic(GenericEvidence::never_walked(1)),
+            )]),
+        );
+        let mut bytes = Vec::new();
+        write_census(&census, None, &mut bytes).expect("a vector accepts every write");
+
+        // What one entry looks like on the wire, and where the count of them sits: both built
+        // by the encoder rather than restated here.
+        let mut one_entry = Vec::new();
+        put_u32(&mut one_entry, 0);
+        put_str(&mut one_entry, "named:rg0");
+        put_str(&mut one_entry, "named:lib0");
+        let mut count_at = Vec::new();
+        count_at.extend_from_slice(MAGIC);
+        put_u16(&mut count_at, VERSION);
+        put_str(&mut count_at, "named");
+        let at = count_at.len();
+
+        assert_eq!(
+            &bytes[at + 4..at + 4 + one_entry.len()],
+            one_entry.as_slice(),
+            "the one entry is where the encoder puts it",
+        );
+        bytes[at..at + 4].copy_from_slice(&2_u32.to_le_bytes());
+        bytes.splice(at + 4..at + 4, one_entry);
+
+        assert!(
+            matches!(decode_census(&bytes), Err(CensusError::Malformed)),
+            "a second entry under one identifier is a malformed file",
+        );
     }
 }

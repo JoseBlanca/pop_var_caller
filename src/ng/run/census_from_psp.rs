@@ -25,12 +25,13 @@
 use std::path::{Path, PathBuf};
 
 use crate::ng::parameter_estimation::joint::census::{
-    CensusError, DepthCode, SampleCensusEvidence,
+    CensusError, DepthCode, NamedReadGroup, SampleCensusEvidence,
 };
 use crate::ng::parameter_estimation::joint::census_file::PileupIdentity;
 use crate::ng::psp::{self, PspReadError, PspReader};
 use crate::ng::run::{CensusPlan, Segmentation};
 use crate::ng::types::ReadGroupId;
+use std::collections::BTreeMap;
 
 /// One sample's census, built from its stored psp, and which psp it came from.
 #[derive(Debug)]
@@ -215,17 +216,27 @@ pub fn census_from_psp(
     let mut reader = PspReader::open(path).map_err(not_opened)?;
 
     let sample = reader.header().sample.clone();
-    // **Walk-local numbers, which is the grain a census is keyed at.** A census belongs to one
-    // sample, so the numbers its own psp gave its read groups are the right ones; renumbering
-    // across a cohort is the calling stage's business and happens later, elsewhere.
-    let read_groups: Vec<ReadGroupId> = reader
+    // **Walk-local numbers, and the names beside them.** A census belongs to one sample, so the
+    // numbers its own psp gave its read groups are the right ones to key its sections by — and
+    // the names are what a cohort of censuses is later merged on, since every census numbers its
+    // groups from zero and two of them collide by construction.
+    let declared: BTreeMap<ReadGroupId, NamedReadGroup> = reader
         .header()
         .read_groups
         .iter()
-        .map(|group| group.walk_local_id)
+        .map(|group| {
+            (
+                group.walk_local_id,
+                NamedReadGroup {
+                    declared_id: group.id.clone(),
+                    library: group.library.clone(),
+                },
+            )
+        })
         .collect();
+    let read_groups: Vec<ReadGroupId> = declared.keys().copied().collect();
 
-    let mut writer = plan.writer_for(sample.clone(), read_groups.clone(), segmentation);
+    let mut writer = plan.writer_for(sample.clone(), declared, segmentation);
     let mut records = 0u64;
     for streamed in reader.records().map_err(not_opened)? {
         let streamed = streamed.map_err(|source| CensusFromPspError::RecordsStopped {
@@ -368,6 +379,52 @@ mod tests {
             "the fixture's sample declares at least one read group, so an empty list here \
              would mean the header's table was not read at all",
         );
+    }
+
+    /// **The census names its read groups, with the `@RG ID`s the psp declares.**
+    ///
+    /// **The byte-for-byte agreement between the two producers cannot see this on its own**: two
+    /// censuses that both recorded *no* names would compare equal and be equally useless, and a
+    /// cohort of them could not be merged at all. So this asserts the names are there and are the
+    /// ones the alignment files declared.
+    #[test]
+    fn the_census_names_its_read_groups_as_the_psp_declares_them() {
+        let cohort = a_cohort_on_disk();
+        let (segmentation, plan) = a_census_plan_over(&cohort.reference, &cohort.catalog);
+        let psp = cohort.directory.path().join("zeta.psp");
+        let _ = gatherer_over(
+            &cohort.alignments[0],
+            &cohort.reference,
+            &segmentation,
+            Some(&plan),
+        )
+        .write_psp(&psp, None)
+        .expect("the walk writes its psp");
+
+        let stored = PspReader::open(&psp).expect("the psp opens");
+        let expected: Vec<(ReadGroupId, String, String)> = stored
+            .header()
+            .read_groups
+            .iter()
+            .map(|group| (group.walk_local_id, group.id.clone(), group.library.clone()))
+            .collect();
+        drop(stored);
+
+        let built = census_from_psp(&psp, &plan, &segmentation).expect("the psp is readable");
+        let named = built.evidence.declared_read_groups();
+
+        assert!(
+            !expected.is_empty(),
+            "the fixture's sample declares a read group"
+        );
+        assert_eq!(named.len(), expected.len(), "one entry a read group");
+        for (id, declared_id, library) in expected {
+            let entry = named
+                .get(&id)
+                .unwrap_or_else(|| panic!("read group {} is named", id.get()));
+            assert_eq!(entry.declared_id, declared_id);
+            assert_eq!(entry.library, library);
+        }
     }
 
     /// **A file that is not a psp is refused, and the refusal names the file.**
