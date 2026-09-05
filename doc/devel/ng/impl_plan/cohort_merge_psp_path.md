@@ -125,6 +125,23 @@ where that one per-locus kind comes from when no body has been decoded. The ruli
 2026-09-04 supplies the route — look it up from the coordinate against the run's segmentation —
 and this step builds that lookup. *Depends:* B1. *Source:* spec §2, §3.1, §3.2, §3.3, §3.4.
 
+**C2. ◐ The reading half is built; the join is not.** *2026-09-05.* Done: the walk can keep a
+declined body's bytes (`next_record_where_keeping`), a sample can be read as summaries with its
+evidence kept (`PspSummarySource`), and the source trait can hand the cache either shape
+(`Drawn`). Each is tested on its own — including, twice, that a kept body rebuilt **out of
+order** equals what a building walk built, which is the property the whole design's concurrency
+argument rests on.
+
+**What is left is the join, and it is larger than this step assumed for one reason: building
+evidence can fail, and the region walk currently cannot.** `build_region_handing_over` returns
+unit and `build_region` returns a `RegionOutcome`; neither has an error path, because with
+records already in hand assembly cannot fail. Materialising evidence at assembly time makes it
+fallible, so the failure has to travel out through the region walk, the serial and parallel
+drivers and the organiser — a contained refactor, but a real one, and it touches the two
+drivers rather than only the merge's inside.
+
+*The original text of this step follows, and its substance still stands.*
+
 **C2. ☐ The build cursor.** Evidence on demand: monotonic per-sample builds through the
 retained window, chain-id changes replayed, bodies built by the existing bounded decode; the
 two refusals (backwards ask, evicted ground) provoked by tests; `ObservationBodyNotBuilt`
