@@ -60,7 +60,7 @@ use super::callers::{
     refuse_parameters_assembled_for_another_cohort, refuse_two_references_that_are_not_one,
 };
 use super::cohort_merge::observation_cache::ObservationCache;
-use super::psp_source::{PspObservationSource, StoredSampleTallies};
+use super::psp_source::{PspSummarySource, StoredSampleTallies};
 use super::walker::WalkReference;
 use super::{RunError, Segmentation};
 
@@ -471,7 +471,10 @@ impl PspVariantCaller {
                 psp.header().sample,
                 sample.sample,
             );
-            sources.push(PspObservationSource::over(psp, &sample.read_groups)?);
+            // **The summary source, not the building one** — every body kept and none decoded
+            // until a locus survives, which at about one position in a hundred is the whole of
+            // what psp mode's deferred build buys (`spec/cohort_merge_psp_path.md` §3.1).
+            sources.push(PspSummarySource::over(psp, &sample.read_groups)?);
         }
 
         let inputs = CohortCallingInputs {

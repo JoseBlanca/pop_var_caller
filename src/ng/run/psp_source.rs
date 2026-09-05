@@ -246,6 +246,21 @@ pub struct KeptRecord {
     pub summary: LocusSummary,
     /// Where the body's bytes sit in the source's arena.
     pub body: core::ops::Range<usize>,
+    /// **The reads live at this record, which its body cannot be built without.**
+    ///
+    /// One observation in a record has its read list *derived* rather than stored — the
+    /// residual is this set minus every other observation's list, and the body declares what
+    /// that should come to. So a body is not self-contained after all: built against the wrong
+    /// set it is refused, which is how this field came to exist.
+    ///
+    /// **Kept per record, which is the simple answer and not yet the measured one.** The set is
+    /// the reads open at one position, so it grows with depth: at three reads a position it is
+    /// a handful of identifiers and at three hundred it is three hundred, over a window of a
+    /// few thousand records a sample. The alternatives both trade memory for work — a snapshot
+    /// every so many records with the changes replayed from it, or one per building region —
+    /// and choosing between them wants the measurement that has not been taken
+    /// (`spec/cohort_merge_psp_path.md` §3.2).
+    pub live: LiveSet,
 }
 
 impl<'a> PspSummarySource<'a> {
@@ -312,6 +327,11 @@ impl<'a> PspSummarySource<'a> {
                 Some(Ok(KeptRecord {
                     summary: LocusSummary::from(&streamed.head),
                     body,
+                    // **After the step, so the changes this record's head carried are in.**
+                    // The walk parses a head's live-set changes and applies them before
+                    // handing the record over, so this is the set as of this record and not
+                    // as of the one before it.
+                    live: self.walk.live_reads().clone(),
                 }))
             }
             Some(Err(failed)) => Some(Err(failed)),
@@ -594,7 +614,7 @@ impl ObservationSource for PspSummarySource<'_> {
             body: &self.kept[body.clone()],
             record_bytes: body.len(),
         };
-        let mut record = decode_the_body_of(&found, &LiveSet::default(), &self.layout)
+        let mut record = decode_the_body_of(&found, &kept.live, &self.layout)
             .map_err(|source| self.refuse(source))?
             .record;
         // **The same renumbering the building source makes, for the same reason**: every
