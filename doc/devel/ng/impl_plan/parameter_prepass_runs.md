@@ -428,7 +428,50 @@ still says so.
 - **The inbreeding coefficient on this route** — §2.
 - **The fit's memory ceiling and how many samples it holds at once** —
   [`parameter_prepass_joint_fit.md`](../spec/parameter_prepass_joint_fit.md) §11 q8, q10.
-- **Which walk knobs become flags** — re-opened at Checkpoint C, decided by the owner.
+### 9.2 The walk knobs: what the owner ruled at Checkpoint C, 2026-09-05
+
+**Fifteen settings are compiled in and no command exposes any of them**: the census selection's
+seed and its two counts, five read filters, and five locus-generator knobs. They were frozen on
+2026-09-04 because nothing could read a census, so a knob added then was one whose effect nobody
+could check. `estimate-parameters` changed that — but by different amounts, and the owner's
+answers differ by family.
+
+- **The two census counts — how many ordinary positions, and how many repeat tracts a stratum —
+  should become flags on the census subcommands.** Their whole purpose is to trade census size
+  against how well the fitted numbers are pinned, and that trade is now measurable in one command.
+- **The read filters are ordinary command-line parameters that subcommands will carry in
+  general — but not every subcommand.** On a command that builds a census *from psp files* most
+  of them mean nothing: they were already applied when the observations in the psp were built.
+  A setting offered where it can no longer act is a way to be quietly wrong.
+- **The seed stays compiled in.** Its argument was never about measurability: two invocations that
+  seed differently keep disjoint sets of positions and their samples cannot be pooled.
+
+**All fifteen stay frozen through Milestone D, and the command-line work is deferred to a session
+of its own** (owner, 2026-09-05).
+
+### 9.3 ⚠ Open: two commands ask for routing that their psps already record
+
+**`generate-census` and `estimate-parameters` both take `--min-copies`, `--min-period`,
+`--max-period`, `--max-str-len` and `--min-purity`, and neither checks them against the psps.**
+A psp's header records the repeat-tract criteria its walk routed under
+([`SegmentationInputs`](../../../../src/ng/segmentation_inputs.rs)), and **`call-from-psps`
+compares them and refuses a mismatch** — `RunError::SegmentationInputsDiffer`, "one walked under
+a different catalog or different repeat-tract criteria". The two new commands make no such
+comparison.
+
+What that costs: a `generate-census` run given other values builds its segmentation over a
+different set of tracts and writes censuses against it, with nothing at that command saying so.
+`estimate-parameters` is caught in practice — changing which stretches are repeat tracts also
+changes which positions are ordinary, so the kept-loci digest differs and the fit refuses — but
+the message is about the selection rather than about the flags, and the check is incidental
+rather than designed.
+
+**The fix is to take the criteria from the psps' own headers and drop the five flags**, which is
+the same shape as this plan's §2 ruling on the read filters: a setting that was already applied
+when the psp was written should not be offered again on a command that reads one. Deferred with
+the rest of the command-line work.
+
+- **Which walk knobs become flags** — answered above; the work is deferred.
 - **psp-mode performance** — `cohort_merge_psp_path.md`, on branch `ng-psp-calling`.
 
 ### 9.1 Open question: does skipping the loci nobody varied at speed the fit up too?
