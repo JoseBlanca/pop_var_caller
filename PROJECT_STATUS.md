@@ -27,7 +27,37 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-05):** **`generate-census` exists, and building a census
+> - **Last completed task (2026-09-05):** **a parameters file produced from data, for the first
+> time in this tree** (branch `ng-psp-mode`, Checkpoint C of
+> [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
+> [report](doc/devel/reports/implementations/ng_fit_stage_c_2026-09-05.md)).
+>
+> `estimate-parameters` fits a cohort from its census files and writes the file a calling run
+> scores with. Before this a run had two sources for its numbers and neither was a fit: the
+> constants compiled into the binary, or a file somebody handed it. One cohort fitted twice writes
+> the same bytes.
+>
+> **Two things had to be built that the plan did not see, and both were found by running.** A
+> cohort of censuses could not be assembled at all — every census numbers its read groups from
+> zero, because a walk sees one sample, so two of them collide by construction. The owner's ruling
+> was to put the `@RG ID` and the library in the census and merge on those. And
+> `RunParameters::assemble` refuses a fitted error rate with no minted read-error total, where the
+> plan had assumed a defaulted calibration; **Milestone E came forward to meet it**, so the census
+> now accumulates the totals as its loci go past and the calibration is fitted.
+>
+> The accumulation went into `CensusWriter` rather than into `generate-census`, which is better
+> than the step asked for: **both producers feed that writer**, so the byte-for-byte agreement
+> between the walk-time census and the psp-built one now checks the totals too.
+>
+> **What the fit still needs besides the censuses**: each census's psp beside it — not read, only
+> its header, for the digest the census names it by and the ground the walk covered — and the
+> reference and catalog, because a census stores a tract by its index within its stratum and the
+> selection has to be rebuilt. That rebuild is checked against a digest every census carries.
+>
+> **What it declares rather than fits**: the inbreeding coefficient, which comes from the other
+> pre-pass route. The file records it as `supplied`.
+>
+> - **Earlier (2026-09-05):** **`generate-census` exists, and building a census
 > during the walk is the cheaper of the two routes** (branch `ng-psp-mode`, Checkpoint B of
 > [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
 > [report](doc/devel/reports/implementations/ng_fit_stage_b_2026-09-05.md)).

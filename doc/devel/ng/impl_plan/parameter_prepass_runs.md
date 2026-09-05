@@ -311,12 +311,23 @@ calibration defaulted throughout (§3.4). The file names the reference it was fi
 the read groups it names, because that is what a calling run checks it by.
 *Depends:* C4. *Source:* [`parameters_file.md`](../spec/parameters_file.md) §6, §7.
 
-☐ **C6 — `estimate-parameters`, the command.** Censuses in, one parameters file out. It refuses
+✅ **C6 — `estimate-parameters`, the command.** Censuses in, one parameters file out. It refuses
 to write over a file it was handed, as a calling run does. Written twice from one cohort it
 produces the same bytes.
 *Depends:* C5.
 
 > **Checkpoint C: a parameters file produced from data, for the first time in this tree.**
+>
+> **Reached 2026-09-05**
+> ([report](../../reports/implementations/ng_fit_stage_c_2026-09-05.md)). `estimate-parameters`
+> fits a cohort from its censuses and writes the file a calling run scores with; one cohort
+> fitted twice writes the same bytes. **Milestone E landed inside this one**, because C5 could
+> not be written without it, so the base-quality calibration is fitted rather than defaulted and
+> §3.4 above is superseded.
+>
+> **Two things had to be built that this plan did not see**: a cohort of censuses could not be
+> assembled at all, since every census numbers its read groups from zero, and `assemble` refuses
+> a fitted rate with no minted total. Both were found by running, not by reading.
 > **The knobs question is re-opened here** — the census selection's seed and two counts, the
 > read filters and the locus-generator knobs were held as constants because nothing could read
 > a census; something can now. Pause for review.

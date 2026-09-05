@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use super::call_from_alignments::CallFromAlignmentsArgs;
 use super::call_from_psps::CallFromPspsArgs;
 use super::estimate_contamination::EstimateContaminationArgs;
+use super::estimate_parameters::EstimateParametersArgs;
 use super::generate_census::GenerateCensusArgs;
 use super::generate_psps::GeneratePspsArgs;
 use super::repeat_catalog::RepeatCatalogArgs;
@@ -85,6 +86,25 @@ pub enum PopVarCallerExpCommand {
     /// that agreed ground is what the positions are chosen from. Choosing them over other
     /// ground would produce censuses the cohort cannot be fitted from.
     GenerateCensus(GenerateCensusArgs),
+
+    /// Fit a cohort's parameters from its censuses and write them as a parameters file.
+    ///
+    /// This is the file a calling run scores with. Without one a run has two choices and
+    /// neither is a fit: the constants compiled into the binary, or a file somebody hands
+    /// it.
+    ///
+    /// It reads the censuses. It does not read the psps — but each census's psp must be
+    /// beside it, because a census names the psp it was built from and evidence from other
+    /// reads is otherwise indistinguishable from this run's. What is taken from each psp is
+    /// its header: one short read.
+    ///
+    /// The reference and the catalog are needed because a census stores a repeat tract by
+    /// its index within its stratum and nothing else, so the selection has to be rebuilt —
+    /// and the rebuild is checked against a digest every census carries.
+    ///
+    /// The inbreeding coefficient is declared rather than fitted here; --inbreeding states
+    /// one for the cohort and the file records it as supplied.
+    EstimateParameters(EstimateParametersArgs),
 
     /// Call a cohort of stored psps and write a VCF — psp mode's second stage.
     ///

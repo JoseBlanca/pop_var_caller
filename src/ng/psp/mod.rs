@@ -177,6 +177,19 @@ pub(crate) fn read_header_from(file: File, path: &Path) -> Result<(Header, usize
 /// malformed or truncated, or an I/O failure — the header's bytes are read the same way and only
 /// the decoding is skipped.
 pub fn header_digest(path: &Path) -> Result<[u8; 16], PspReadError> {
+    header_and_its_digest(path).map(|(_, digest)| digest)
+}
+
+/// **The header and its digest, from one read.**
+///
+/// A fit over stored censuses wants both of a psp: what its walk covered, and the digest its
+/// census names it by. Reading the file twice for them would be a second `open(2)` per sample in
+/// a cohort of thousands.
+///
+/// # Errors
+///
+/// The same refusals [`read_header`] makes.
+pub fn header_and_its_digest(path: &Path) -> Result<(Header, [u8; 16]), PspReadError> {
     let file = File::open(path).map_err(|source| PspReadError::Io {
         path: path.to_path_buf(),
         while_doing: "opening the file",
@@ -185,7 +198,8 @@ pub fn header_digest(path: &Path) -> Result<[u8; 16], PspReadError> {
     let whole_header = read_header_bytes_from(file, path)?;
     let mut hasher = Md5::new();
     hasher.update(&whole_header);
-    Ok(hasher.finalize().into())
+    let digest = hasher.finalize().into();
+    Header::decode(&whole_header, path).map(|(header, _)| (header, digest))
 }
 
 /// The header's bytes, framing included, exactly as they stand in the file.

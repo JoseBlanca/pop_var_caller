@@ -40,6 +40,8 @@ use crate::ng::psp::{self, PspReadError};
 use crate::ng::read::input::read_groups::{
     NameOrigin, NameWithOrigin, ReadGroup, ReadGroups, SampleReadGroups,
 };
+use crate::ng::region_typing::GenomeRegions;
+use crate::ng::run::SegmentationInputs;
 use crate::pop_var_caller_exp::generate_census::CENSUS_FILE_EXTENSION;
 use crate::pop_var_caller_exp::generate_psps::PSP_FILE_EXTENSION;
 
@@ -51,6 +53,12 @@ pub struct OpenCensusCohort {
     pub evidence: CohortCensusEvidence,
     /// One entry a sample, in the order the censuses were named.
     pub samples: Vec<CensusInCohort>,
+    /// **The ground every psp of the cohort agrees it was walked over**, read out of their
+    /// headers. A fit needs it because rebuilding the census selection means choosing it again
+    /// over the same ground.
+    pub analysed_regions: GenomeRegions,
+    /// What that ground was cut with — the repeat criteria the walk routed under.
+    pub segmentation_inputs: SegmentationInputs,
 }
 
 /// One census of a cohort, and where it came from.
@@ -131,6 +139,18 @@ pub enum CensusCohortError {
         sample: String,
     },
 
+    /// Two samples' psps were walked over different ground.
+    #[error(
+        "{first} and {second} were walked over different ground, so their censuses are not \
+         comparable and a selection cannot be rebuilt over both"
+    )]
+    GroundDiffers {
+        /// The first sample seen.
+        first: String,
+        /// The one that disagreed with it.
+        second: String,
+    },
+
     /// The samples cannot be fitted as one cohort.
     #[error("these censuses are not one cohort")]
     NotOneCohort {
@@ -159,6 +179,8 @@ pub fn open_census_cohort(paths: &[PathBuf]) -> Result<OpenCensusCohort, CensusC
 
     let mut opened = Vec::with_capacity(paths.len());
     let mut samples = Vec::with_capacity(paths.len());
+    let mut ground: Option<(String, GenomeRegions)> = None;
+    let mut inputs: Option<SegmentationInputs> = None;
     for path in paths {
         let (evidence, named) =
             open_census(path).map_err(|source| CensusCohortError::CensusNotRead {
@@ -170,8 +192,8 @@ pub fn open_census_cohort(paths: &[PathBuf]) -> Result<OpenCensusCohort, CensusC
 
         // **The digest, not the psp.** One short read of the file's own header bytes, which is
         // what a census names its psp by.
-        let header_in_hand = match psp.exists() {
-            true => Some(psp::header_digest(&psp).map_err(|source| {
+        let of_the_psp = match psp.exists() {
+            true => Some(psp::header_and_its_digest(&psp).map_err(|source| {
                 CensusCohortError::PspNotIdentified {
                     path: psp.clone(),
                     source: Box::new(source),
@@ -179,6 +201,7 @@ pub fn open_census_cohort(paths: &[PathBuf]) -> Result<OpenCensusCohort, CensusC
             })?),
             false => None,
         };
+        let header_in_hand = of_the_psp.as_ref().map(|(_, digest)| *digest);
 
         match freshness_by_header(named, header_in_hand) {
             Freshness::Fresh => {}
@@ -194,6 +217,26 @@ pub fn open_census_cohort(paths: &[PathBuf]) -> Result<OpenCensusCohort, CensusC
             }
         }
 
+        // **The ground comes from the psp's header**, which is where a walk records it — and
+        // every file of the cohort has to agree, for the reason a calling run makes the same
+        // check: samples analysed over different ground are not comparable.
+        if let Some((header, _)) = of_the_psp {
+            let its_ground = header.segmentation_inputs;
+            match &ground {
+                Some((first, agreed)) if *agreed != its_ground.analysed_regions => {
+                    return Err(CensusCohortError::GroundDiffers {
+                        first: first.clone(),
+                        second: sample,
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    ground = Some((sample.clone(), its_ground.analysed_regions.clone()));
+                    inputs = Some(its_ground);
+                }
+            }
+        }
+
         samples.push(CensusInCohort {
             sample,
             census: path.clone(),
@@ -206,7 +249,14 @@ pub fn open_census_cohort(paths: &[PathBuf]) -> Result<OpenCensusCohort, CensusC
         CohortCensusEvidence::new(opened).map_err(|source| CensusCohortError::NotOneCohort {
             source: Box::new(source),
         })?;
-    Ok(OpenCensusCohort { evidence, samples })
+    let (_, analysed_regions) = ground.expect("every census was checked against a psp above");
+    let segmentation_inputs = inputs.expect("the same psp supplied both");
+    Ok(OpenCensusCohort {
+        evidence,
+        samples,
+        analysed_regions,
+        segmentation_inputs,
+    })
 }
 
 /// The psp a census is checked against: the same stem, in the same directory.
