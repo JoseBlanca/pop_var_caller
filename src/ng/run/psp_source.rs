@@ -448,6 +448,8 @@ where
         // function, and it is a second reason to care what a streamed record carries.
         let StreamedRecord {
             block: _,
+            // This adapter builds every body, so nothing is ever kept for later.
+            body: _,
             head,
             record,
         } = match self.walk.next()? {

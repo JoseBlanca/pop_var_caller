@@ -1184,6 +1184,23 @@ pub struct StreamedRecord {
     /// The record, when the caller wanted it. **`None` is the skip**, and it is what the head
     /// exists for: the body was never decoded, only advanced past.
     pub record: Option<SampleLocusObservations>,
+    /// Where a declined body's bytes were put, when the caller asked for them to be kept.
+    ///
+    /// **A range into the caller's own buffer, not a buffer of its own.** A cohort run declines
+    /// every body on the way past and builds only the few a surviving locus asks for
+    /// (`spec/cohort_merge_psp_path.md` §3.1), so those bytes have to outlive the step that
+    /// read them — but giving each one a box would put an allocation and a copy on every record
+    /// in the window, which is the per-record cost skipping exists to remove (§3.4 there).
+    /// Appending to a buffer the caller reuses costs no allocation once it has grown.
+    ///
+    /// **A caller builds one later with [`decode_the_body_of`], and needs nothing else** — a
+    /// psp body writes every count absolutely and every read list from zero rather than as a
+    /// difference from the record before it, which is what lets a body be built later, on
+    /// another thread, and out of order.
+    ///
+    /// `None` when nothing was kept: no buffer was given, or the record was built and its bytes
+    /// are of no further use.
+    pub body: Option<core::ops::Range<usize>>,
 }
 
 /// Reads records back out of a run of compressed blocks, holding nothing that grows with them.
@@ -1528,6 +1545,25 @@ impl<R: std::io::Read> BlockStream<R> {
         self.next_record_where(|_| true)
     }
 
+    /// The next record, built only if `want` says so, **keeping the bytes of the ones it
+    /// declines** by appending them to `keep`.
+    ///
+    /// The range in [`StreamedRecord::body`] addresses `keep` as it stands after the call. A
+    /// caller that wants a declined record later builds it from those bytes with
+    /// [`decode_the_body_of`] — which needs nothing else, because a psp body writes every count
+    /// absolutely and every read list from zero rather than as a difference from the record
+    /// before it. That is what lets a body be built later, on another thread, out of order.
+    pub fn next_record_where_keeping<F>(
+        &mut self,
+        want: F,
+        keep: &mut Vec<u8>,
+    ) -> Option<Result<StreamedRecord, BlockReadError>>
+    where
+        F: FnMut(&RecordHead) -> bool,
+    {
+        self.step(want, Some(keep))
+    }
+
     /// The next record, built only if `want` says so.
     ///
     /// **This is the whole of the skip, and it is the reader's decision rather than a separate
@@ -1542,7 +1578,20 @@ impl<R: std::io::Read> BlockStream<R> {
     /// past.
     pub fn next_record_where<F>(
         &mut self,
+        want: F,
+    ) -> Option<Result<StreamedRecord, BlockReadError>>
+    where
+        F: FnMut(&RecordHead) -> bool,
+    {
+        self.step(want, None)
+    }
+
+    /// The one walk both public forms take, differing only in whether a declined body's bytes
+    /// are kept.
+    fn step<F>(
+        &mut self,
         mut want: F,
+        mut keep: Option<&mut Vec<u8>>,
     ) -> Option<Result<StreamedRecord, BlockReadError>>
     where
         F: FnMut(&RecordHead) -> bool,
@@ -1586,6 +1635,7 @@ impl<R: std::io::Read> BlockStream<R> {
                     // record is committed to.
                     let wanted = want(&head);
                     self.live_reads.apply_the_changes_just_parsed();
+                    let mut body = None;
                     let record = if wanted {
                         match decode_the_body_of(&found, self.live_reads.live(), &self.layout) {
                             Ok(decoded) => Some(decoded.record),
@@ -1594,6 +1644,11 @@ impl<R: std::io::Read> BlockStream<R> {
                             }
                         }
                     } else {
+                        if let Some(keep) = keep.as_deref_mut() {
+                            let from = keep.len();
+                            keep.extend_from_slice(found.body);
+                            body = Some(from..keep.len());
+                        }
                         None
                     };
                     self.cursor.rolling_at += record_bytes;
@@ -1608,6 +1663,7 @@ impl<R: std::io::Read> BlockStream<R> {
                         block,
                         head,
                         record,
+                        body,
                     }));
                 }
                 Err(RecordDecodeError::Truncated { .. }) => {
@@ -5731,4 +5787,56 @@ mod tests {
             prop_assert_eq!(walk_all(&blocks), records);
         }
     }
+
+    /// **A body kept on the way past builds the record a full walk builds** — the property the
+    /// cohort merge's deferred build is bought with.
+    ///
+    /// A run over stored files declines every body as it reads the heads, keeps the bytes, and
+    /// builds only the few that a surviving locus asks for — later, and on whichever thread got
+    /// there (`spec/cohort_merge_psp_path.md` §3.1, §3.2). That is only sound if a body is
+    /// self-contained: if building one needed the records before it, a record built out of the
+    /// stream's order would come out **wrong rather than refused**, since a body decoded
+    /// against the wrong live set is still a plausible body.
+    ///
+    /// So this walks one file twice over the same bytes — once building everything, once
+    /// building nothing and keeping every body — and builds the kept ones afterwards, in
+    /// reverse, from the buffer alone. Reverse because the order is the whole question: built
+    /// last-to-first they must still equal the records the forward walk built.
+    #[test]
+    fn a_body_kept_on_the_way_past_builds_what_a_full_walk_built() {
+        let records: Vec<_> = (1..60u64).map(an_incompressible_record).collect();
+        let bytes = blocks_on_disk(&records, Bp(200), None).bytes;
+
+        let forward = built(&stream_every_record(&bytes).expect("the file reads"));
+
+        let manifest = a_manifest();
+        let mut stream = BlockStream::new(&bytes[..], &manifest).expect("a valid manifest");
+        let mut kept = Vec::new();
+        let mut heads = Vec::new();
+        while let Some(next) = stream.next_record_where_keeping(|_| false, &mut kept) {
+            let met = next.expect("the file reads");
+            assert!(met.record.is_none(), "nothing was asked to be built");
+            let body = met.body.clone().expect("a declined body is kept");
+            heads.push((met.head, body));
+        }
+        assert_eq!(heads.len(), forward.len(), "the two walks met the same records");
+
+        let layout = RecordLayout::from_manifest(&manifest).expect("a valid manifest");
+        let live = crate::ng::psp::chain_ids::LiveSet::default();
+        for (at, (head, body)) in heads.iter().enumerate().rev() {
+            let found = crate::ng::psp::record::LocatedRecord {
+                head: *head,
+                body: &kept[body.clone()],
+                record_bytes: body.len(),
+            };
+            let rebuilt = decode_the_body_of(&found, &live, &layout)
+                .expect("a kept body builds on its own")
+                .record;
+            assert_eq!(
+                rebuilt, forward[at],
+                "record {at} built out of order differs from the one the forward walk built"
+            );
+        }
+    }
+
 }
