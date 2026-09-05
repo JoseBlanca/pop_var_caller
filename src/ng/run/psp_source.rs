@@ -202,6 +202,79 @@ pub enum PspSourceError {
 /// `PspVariantCaller::open` compares across the cohort, and the ceiling is read from the header
 /// where the merge needs it (plan steps E1 and E4). A source is asked one question and this is
 /// the whole of its answer.
+/// One sample's stored records read **as summaries, with their evidence kept but not built**.
+///
+/// This is the reading half of the deferred build (`spec/cohort_merge_psp_path.md` §3.1). It
+/// walks the file's record heads, hands back the [`LocusSummary`] each one carries, and appends
+/// the record's still-compressed-out body bytes to an arena of its own — so the cohort can
+/// decide which loci are worth calling before anything is decoded, and the roughly ninety-nine
+/// positions in a hundred no sample varied at are never built at all.
+///
+/// **The arena is one buffer per sample, not a box per record.** That is the measurement's
+/// doing rather than tidiness: a skipping walk's speed is the speed of a walk that allocates
+/// nothing, and a box per record would put an allocation back on every record in the window to
+/// save one on the eighth of them that gets built (§3.4 there).
+///
+/// **What it does not do is decide.** A per-sample predicate cannot: a sample showing no
+/// non-reference read at a position can never be the one that admits the locus, but its
+/// evidence is still needed at every locus another sample admits, because thirty reference
+/// reads and no reads at all are different genotypes. So this keeps every body it passes and
+/// lets the cohort choose.
+pub struct PspSummarySource<'a> {
+    walk: RecordIter<'a>,
+    kept: Vec<u8>,
+}
+
+/// One stored record, summarised, with its body waiting in the source's arena.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptRecord {
+    /// What the head said — everything the merge decides on before it assembles a locus.
+    pub summary: LocusSummary,
+    /// Where the body's bytes sit in the source's arena.
+    pub body: core::ops::Range<usize>,
+}
+
+impl<'a> PspSummarySource<'a> {
+    /// Walk `psp` from its first record, keeping every body.
+    ///
+    /// # Errors
+    ///
+    /// Whatever opening the walk refuses — a psp whose first block will not read.
+    pub fn over(psp: &'a mut PspReader) -> Result<Self, PspReadError> {
+        Ok(Self {
+            walk: psp.records()?,
+            kept: Vec::new(),
+        })
+    }
+
+    /// The bytes kept so far. A body's range addresses this.
+    #[must_use]
+    pub fn kept(&self) -> &[u8] {
+        &self.kept
+    }
+
+    /// The next record's summary, its body appended to the arena.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the walk refuses — a damaged block, or a record that will not parse.
+    pub fn next_summary(&mut self) -> Option<Result<KeptRecord, PspReadError>> {
+        match self.walk.next_keeping(&mut self.kept) {
+            Some(Ok(streamed)) => {
+                let body = streamed
+                    .body
+                    .expect("a walk that builds nothing keeps every body");
+                Some(Ok(KeptRecord {
+                    summary: LocusSummary::from(&streamed.head),
+                    body,
+                }))
+            }
+            Some(Err(failed)) => Some(Err(failed)),
+            None => None,
+        }
+    }
+}
+
 pub struct PspObservationSource<W> {
     /// The individual this file holds. **[`over`](Self::over) takes it from the psp's own
     /// header**, so on the path a run uses, the name a failure carries and the file it came
@@ -1177,6 +1250,90 @@ mod tests {
             mixed_head.non_reference_reads, 0,
             "and the complete reads all matched the reference"
         );
+    }
+
+
+    /// **Reading a sample as summaries sees exactly what reading it as records sees**, and the
+    /// kept bytes build the records that the building walk built.
+    ///
+    /// The two halves are the two claims the deferred build stands on. The first is that a run
+    /// deciding from heads decides on the same numbers a run holding records would: same
+    /// coordinates, same keep-rule numerator and denominator, same order, same count. The
+    /// second is that nothing is lost by not building — the evidence is still there, in the
+    /// arena, and comes back identical.
+    ///
+    /// Built here **in reverse**, because that is the order a cohort will not use and therefore
+    /// the one that would hide a dependence between records: a body decoded against the wrong
+    /// state is a plausible body, not a refusal.
+    #[test]
+    fn reading_as_summaries_sees_what_reading_as_records_sees() {
+        let mut records = a_sample();
+        let mut mixed = a_record(0, 5_000, 4);
+        let mut partial = mixed.observations[0].clone();
+        partial.read_witness = ReadWitness::Partial {
+            positions: WitnessedLocusPositions::one_run_from_offset_and_length(0, 2)
+                .expect("a two-base witness inside a four-base locus"),
+        };
+        partial.bases = Box::from(&b"AC"[..]);
+        partial.num_obs = 7;
+        mixed.observations.push(partial);
+        records.push(mixed);
+        records.sort_by_key(|record| (record.region.contig.get(), record.region.start.get()));
+
+        let (_dir, path) = a_psp_of(&records);
+
+        let built: Vec<_> = {
+            let mut psp = PspReader::open(&path).expect("the file opens");
+            psp.records()
+                .expect("the walk starts")
+                .map(|found| found.expect("the fixture reads back"))
+                .map(|found| found.record.expect("a full walk builds every body"))
+                .collect()
+        };
+
+        let mut psp = PspReader::open(&path).expect("the file opens again");
+        let mut source = PspSummarySource::over(&mut psp).expect("the summary walk starts");
+        let mut kept = Vec::new();
+        while let Some(next) = source.next_summary() {
+            kept.push(next.expect("the fixture reads back"));
+        }
+
+        assert_eq!(kept.len(), built.len(), "the two walks met the same records");
+        for (at, (summarised, record)) in kept.iter().zip(&built).enumerate() {
+            assert_eq!(
+                summarised.summary,
+                LocusSummary::of(record),
+                "record {at}: the summary read differs from the record's own"
+            );
+        }
+
+        // And the evidence is still there. Reverse, for the reason the doc gives.
+        let layout = {
+            let reference = PspReader::open(&path).expect("the file opens once more");
+            crate::ng::psp::record::RecordLayout::from_manifest(&reference.header().manifest)
+                .expect("the file's own manifest")
+        };
+        let live = crate::ng::psp::chain_ids::LiveSet::default();
+        for (at, kept_record) in kept.iter().enumerate().rev() {
+            let head = crate::ng::psp::RecordHead {
+                region: kept_record.summary.region,
+                non_reference_reads: kept_record.summary.non_reference_reads,
+                reads_compared_with_reference: kept_record.summary.reads_compared_with_reference,
+                body_bytes: u32::try_from(kept_record.body.len()).expect("a small body"),
+            };
+            let found = crate::ng::psp::record::LocatedRecord {
+                head,
+                body: &source.kept()[kept_record.body.clone()],
+                record_bytes: kept_record.body.len(),
+            };
+            let rebuilt = crate::ng::psp::record::decode_the_body_of(&found, &live, &layout)
+                .expect("a kept body builds on its own")
+                .record;
+            assert_eq!(
+                rebuilt, built[at],
+                "record {at} built out of order differs from the one the building walk built"
+            );
+        }
     }
 
 }

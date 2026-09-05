@@ -212,6 +212,28 @@ impl<'a> RecordIter<'a> {
     /// **Here rather than only on [`super::PspReader`]** so that every entry point gets the skip:
     /// `records_from(at)?.building_only_where(…)` is what a cohort reading one region of every sample
     /// writes, and spec §6.2's `records_where` is the whole-file case of it.
+    /// The next record with **no body built and its bytes kept**, appended to `keep`.
+    ///
+    /// The range in [`StreamedRecord::body`] addresses `keep` as it stands after the call. This
+    /// is the walk a cohort run takes over a sample it has not decided about yet: it reads
+    /// every head, builds nothing, and keeps what it would need to build later
+    /// (`spec/cohort_merge_psp_path.md` §3.1).
+    pub fn next_keeping(
+        &mut self,
+        keep: &mut Vec<u8>,
+    ) -> Option<Result<StreamedRecord, PspReadError>> {
+        match self.stream.next_record_where_keeping(|_| false, keep) {
+            Some(Ok(record)) => Some(Ok(record)),
+            Some(Err(failed)) => Some(Err(refuse(
+                self.path,
+                self.first_block,
+                self.stream.blocks_begun(),
+                failed,
+            ))),
+            None => None,
+        }
+    }
+
     pub fn building_only_where<F>(self, want: F) -> SelectiveRecordIter<'a, F>
     where
         F: FnMut(&RecordHead) -> bool,
