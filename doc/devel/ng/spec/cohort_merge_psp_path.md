@@ -212,29 +212,37 @@ gives back most of what the skip won — about 0.27 s a sample against the singl
 roughly 0.17 s, on the corpus above. It would win only if the retained window's memory turned
 out to matter more than the time, which §6's formulas say it does not at either end.
 
-### 3.4 Where the retained bytes live — settled, and not the implementer's after all
+### 3.4 Where the retained bytes live — an arena, and it is not yet released
 
-**One growing byte arena per sample, records appended and addressed by range.** An earlier
-draft left the choice open between that and a box per record, leaning towards the boxes and
-saying the arena could wait for an allocator profile. **That leaning was wrong, and the reason
-is the measurement this design is bought with.**
+**One growing byte arena per sample, records appended and addressed by range.** An earlier draft
+left the choice open between that and a box per record and leaned towards the boxes; that was
+wrong, and the reason is the measurement this design is bought with. A skipping walk is fast
+because it allocates nothing, and a box per retained record puts an allocation and a copy back
+on every record in the window — spending one on all eight to save a record's several on the one
+in eight that gets built. The arena spends none per record.
 
-The 2.57× a skipping walk gives (§5) is the speed of a walk that reads each head, advances past
-the body, and **keeps nothing** — no allocation anywhere in it. A box per retained record puts
-an allocation and a copy back on every record in the window, which is the per-record cost the
-skip exists to remove: what would be saved is the record's several allocations, and what would
-be spent is one, on every record rather than on the one in eight that gets built. The arena
-spends no allocation per record at all — the append is a memcpy into a buffer that is already
-long enough after the first window — so it keeps the shape the measurement was taken on.
+**⚠ The arena is never drained, so a psp-mode run's memory grows with the file and not with the
+window.** This is the design's own bounded-memory promise, unkept: `PspSummarySource` appends
+every body it passes and every record's live set, and nothing releases them — sixty-five
+megabytes of bodies across the tomato panel, and far more on a genome. **It is the first thing
+this design owes**, ahead of any further speed work.
 
-**The constraint that was already right stands: eviction must return memory.** An arena that
-only grows is the cache leak this module exists to avoid. Since the window advances in
-coordinate order and drops a prefix, what an arena needs is the same prefix drain the record
-window already does — the bytes behind the window's left edge go, and what survives moves down.
+**What was tried, and why it is not in the tree.** A release hook on the source, called from
+eviction — first by a count of records, then addressed by byte to be robust to the count
+drifting — refused a real cohort both ways: *"asked to build a body at 26725..26748 but 30683
+bytes have been released"*. The cache still held that handle in its own window while the source
+had released the bytes behind it, so the two go out of step somewhere between eviction and the
+window a builder is handed. Two hypotheses are ruled out: the handle is not another sample's (a
+debug assertion over the cache's own `held_bodies` does not fire), and it is not an index-versus
+-handle mistake (the window now carries the handle itself, which removed one real bug of exactly
+that kind without fixing this one). The remaining suspects are the prefix-drain approximation in
+`evict_before`, which deliberately keeps more than it must, and the parallel driver's round
+boundaries.
 
-*Unmeasured, and the first thing to look at if the memory is wrong: whether the drain's move
-costs more than it saves at large windows. It is the same move `held_observations` already
-makes, over bytes rather than records.*
+**Whoever picks this up should start by making the disagreement observable rather than by
+reasoning about it**: have the cache and the source each report what they hold at every
+eviction, on the three-sample fixture that reproduces it in seconds, and find the first
+eviction where the two stop agreeing.
 
 ## 4. The run-level companions
 
