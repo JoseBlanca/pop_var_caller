@@ -30,6 +30,7 @@
 
 pub mod callers;
 pub mod census_cohort;
+pub mod census_fit;
 pub mod census_from_psp;
 pub mod cohort_merge;
 pub mod gatherer;
@@ -49,6 +50,7 @@ pub use callers::{
     CohortWalkTallies, MergeParameters, SampleWalkTallies, WrittenCohort,
 };
 pub use census_cohort::{CensusCohortError, CensusInCohort, OpenCensusCohort, open_census_cohort};
+pub use census_fit::{CohortFit, CohortFitError, every_read_group_pooled, fit_a_cohort};
 pub use census_from_psp::{CensusFromPspError, CensusOfStoredPileup, CensusTally, census_from_psp};
 pub use gatherer::{CensusPlan, CensusSelection, SampleObservationGatherer, SampleWalkInputs};
 pub use psp_caller::{

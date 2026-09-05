@@ -291,7 +291,7 @@ pileup beside it. **A refusal, never a panic**: this is the door a stale census 
 *Depends:* C2. *Source:* [records spec](../spec/parameter_prepass_joint_records.md) §6.1;
 [`fit.rs`](../../../../src/ng/parameter_estimation/joint/fit.rs) `CohortCensusEvidence::new`.
 
-☐ **C4 — both halves of the fit, giving the prototype's answers.** `fit_jointly` for the
+✅ **C4 — both halves of the fit, giving the prototype's answers.** `fit_jointly` for the
 generic half; `strata_of_kept_loci` → `gather_strata` → `fit_strata` for the repeat-tract half.
 **The fitted numbers must equal the ones `examples/ng_joint_records_walk.rs` gets on the same
 cohort** — this step changes where the evidence is read from, not the arithmetic.

@@ -120,6 +120,20 @@ pub(crate) fn a_census_plan_over(
     reference_fasta: &Path,
     catalog_path: &Path,
 ) -> (Arc<Segmentation>, super::CensusPlan) {
+    a_census_plan_over_selecting(reference_fasta, catalog_path, 300)
+}
+
+/// The same, at a chosen budget of generic positions.
+///
+/// **A test that rebuilds the selection a command already made must use the command's own
+/// budget**, because the kept positions are a function of it: rebuilding at another budget keeps
+/// another set, and a fit is refused against it — which is the guard working, and a confusing
+/// way for a test to fail.
+pub(crate) fn a_census_plan_over_selecting(
+    reference_fasta: &Path,
+    catalog_path: &Path,
+    generic_target: u64,
+) -> (Arc<Segmentation>, super::CensusPlan) {
     use crate::ng::parameter_estimation::joint::loci::UnambiguousRuns;
     use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
     use crate::ng::region_typing::DEFAULT_MAX_STR_LEN;
@@ -163,7 +177,7 @@ pub(crate) fn a_census_plan_over(
         .expect("the fixture's catalog is this reference's");
     let plan = CensusPlan::of_run(
         CensusSelection {
-            generic_target: 300,
+            generic_target,
             ..CensusSelection::SHIPPED
         },
         &catalog,
