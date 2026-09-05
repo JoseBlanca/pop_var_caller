@@ -47,6 +47,7 @@ use md5::{Digest, Md5};
 use std::io::{Read, Write};
 use std::path::Path;
 
+use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
 use crate::ng::parameter_estimation::joint::loci::{BlockDigest, CensusLociDigest};
 use crate::ng::repeat_catalog::StratumCounts;
 use crate::ng::types::{ContigId, ReadGroupId};
@@ -71,7 +72,7 @@ const MAGIC: &[u8; 8] = b"NGCENSUS";
 /// eight on one with a bin for every depth to the cap. A version-1 file's depth array is a
 /// different number of bytes for the same position count and its codes index a different
 /// ladder, so nothing about it can be salvaged by reading it more carefully.
-const VERSION: u16 = 3;
+const VERSION: u16 = 4;
 
 /// Which pileup a census was built from.
 ///
@@ -299,6 +300,23 @@ fn encode_header(out: &mut Vec<u8>, census: &SampleCensusEvidence, pileup: Optio
         put_str(out, &group.library);
     }
 
+    // **What each library's own base qualities claimed**, in a table of its own rather than a
+    // field beside the names. A calibration is fitted from this and the run's measured error
+    // rate together, so a census that carried the rate's evidence and not this one could produce
+    // no calibration at all.
+    //
+    // **Its own length, so that "no entry" and "an entry that saw no reads" stay different on
+    // the wire.** Writing one entry per declared group would turn the first into the second on
+    // every round trip, and they are different claims: a group nothing was accumulated for
+    // against a group whose reads all had a quality of zero.
+    let minted = census.minted_read_errors();
+    put_u32(out, minted.len() as u32);
+    for (id, totals) in minted {
+        put_u32(out, id.get());
+        out.extend_from_slice(&totals.log_error_sum_scaled().to_le_bytes());
+        put_u64(out, totals.reads());
+    }
+
     let terms = &census.terms;
 
     put_u16(out, terms.selection.fields().len() as u16);
@@ -443,7 +461,7 @@ pub fn decode_census(bytes: &[u8]) -> Result<CensusFile, CensusError> {
     if cursor.u16()? != VERSION {
         return Err(CensusError::Malformed);
     }
-    let (sample, declared, terms, pileup) = decode_header(&mut cursor)?;
+    let (sample, declared, minted, terms, pileup) = decode_header(&mut cursor)?;
     let directory = decode_directory(&mut cursor)?;
 
     let mut sections = std::collections::BTreeMap::new();
@@ -457,7 +475,7 @@ pub fn decode_census(bytes: &[u8]) -> Result<CensusFile, CensusError> {
     }
 
     Ok(CensusFile {
-        census: SampleCensusEvidence::resident(sample, terms, declared, sections),
+        census: SampleCensusEvidence::resident(sample, terms, declared, minted, sections),
         pileup,
     })
 }
@@ -488,7 +506,7 @@ pub fn open_census(
     if cursor.take(MAGIC.len())? != MAGIC || cursor.u16()? != VERSION {
         return Err(CensusError::Malformed);
     }
-    let (sample, declared, terms, pileup) = decode_header(&mut cursor)?;
+    let (sample, declared, minted, terms, pileup) = decode_header(&mut cursor)?;
     let directory = decode_directory(&mut cursor)?;
 
     Ok((
@@ -496,6 +514,7 @@ pub fn open_census(
             sample,
             terms,
             declared,
+            minted,
             path.to_path_buf(),
             directory.into_iter().collect(),
         ),
@@ -541,6 +560,7 @@ pub fn decode_directory_of(bytes: &[u8]) -> Result<Vec<(SectionKey, ByteExtent)>
 type Header = (
     String,
     BTreeMap<ReadGroupId, NamedReadGroup>,
+    BTreeMap<ReadGroupId, MintedReadErrors>,
     RecordingTerms,
     Option<PileupIdentity>,
 );
@@ -560,6 +580,24 @@ fn decode_header(cursor: &mut Cursor<'_>) -> Result<Header, CensusError> {
         // would name one section's read group two ways, and only one of the two could reach a
         // cohort's merge.
         if declared.insert(id, named).is_some() {
+            return Err(CensusError::Malformed);
+        }
+    }
+
+    let minted_count = cursor.u32()? as usize;
+    let mut minted = BTreeMap::new();
+    for _ in 0..minted_count {
+        let id = ReadGroupId(cursor.u32()?);
+        let sum = i128::from_le_bytes(
+            cursor
+                .take(16)?
+                .try_into()
+                .map_err(|_| CensusError::Malformed)?,
+        );
+        if minted
+            .insert(id, MintedReadErrors::from_parts(sum, cursor.u64()?))
+            .is_some()
+        {
             return Err(CensusError::Malformed);
         }
     }
@@ -625,6 +663,7 @@ fn decode_header(cursor: &mut Cursor<'_>) -> Result<Header, CensusError> {
     Ok((
         sample,
         declared,
+        minted,
         RecordingTerms {
             selection: SelectionTermsDigest::from_fields(fields),
             kept_loci: CensusLociDigest::from_parts(whole, blocks),
@@ -989,6 +1028,7 @@ mod tests {
             "corners".to_string(),
             terms(),
             NamedReadGroup::drawn_for("corners", [ReadGroupId(0)]),
+            BTreeMap::new(),
             BTreeMap::from([
                 (
                     SectionKey::Generic(ReadGroupId(0)),
@@ -1411,6 +1451,7 @@ mod tests {
                     format!("s{s}"),
                     terms.clone(),
                     NamedReadGroup::drawn_for(&format!("s{s}"), [ReadGroupId(s)]),
+                    BTreeMap::new(),
                     BTreeMap::from([(
                         // **One read group a sample**: a library is one plant's DNA
                         // preparation, so a cohort's samples never share one, and the cohort's
@@ -1553,6 +1594,7 @@ mod tests {
             "generic".to_string(),
             terms(),
             NamedReadGroup::drawn_for("generic", [ReadGroupId(0)]),
+            BTreeMap::new(),
             BTreeMap::from([(
                 SectionKey::Generic(ReadGroupId(0)),
                 Section::Generic(GenericEvidence::never_walked(3)),
@@ -1564,6 +1606,7 @@ mod tests {
             "tracts".to_string(),
             terms(),
             NamedReadGroup::drawn_for("tracts", [ReadGroupId(0)]),
+            BTreeMap::new(),
             BTreeMap::from([(
                 SectionKey::Ssr(ReadGroupId(0), AT_SIX_REPEATS),
                 Section::Ssr(SsrEvidence::never_walked(0)),
@@ -1599,6 +1642,8 @@ mod tests {
                     },
                 ),
             ]),
+            // What each library's own base qualities claimed, which rides beside the names.
+            BTreeMap::from([(ReadGroupId(3), MintedReadErrors::from_parts(-4_096, 7))]),
             BTreeMap::from([(
                 SectionKey::Generic(ReadGroupId(0)),
                 Section::Generic(GenericEvidence::never_walked(3)),
@@ -1617,6 +1662,19 @@ mod tests {
             "an identifier that is not the entry's position comes back under its own number",
         );
         assert_eq!(named[&ReadGroupId(3)].library, "lib-B");
+
+        let minted = read.census.minted_read_errors();
+        assert_eq!(
+            minted[&ReadGroupId(3)],
+            MintedReadErrors::from_parts(-4_096, 7),
+            "the sum comes back as the scaled integer it went in as, not through a float",
+        );
+        assert!(
+            !minted.contains_key(&ReadGroupId(0)),
+            "a group the walk accumulated nothing for has no entry at all, which is a different \
+             claim from an entry whose sum is zero over some reads — and the table carries its \
+             own length so the two stay apart on the wire",
+        );
     }
 
     /// **A census naming one read group twice is malformed**, not a last-one-wins.
@@ -1633,6 +1691,7 @@ mod tests {
             "named".to_string(),
             terms(),
             NamedReadGroup::drawn_for("named", [ReadGroupId(0)]),
+            BTreeMap::new(),
             BTreeMap::from([(
                 SectionKey::Generic(ReadGroupId(0)),
                 Section::Generic(GenericEvidence::never_walked(1)),

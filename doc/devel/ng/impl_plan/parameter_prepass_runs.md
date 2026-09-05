@@ -297,25 +297,14 @@ generic half; `strata_of_kept_loci` → `gather_strata` → `fit_strata` for the
 cohort** — this step changes where the evidence is read from, not the arithmetic.
 *Depends:* C3.
 
-⚠ **C5 — assemble a `RunParameters`, and write the file. BLOCKED, 2026-09-05.**
+✅ **C5 — assemble a `RunParameters`, and write the file.**
 
-> **`assemble` refuses a read group that has a fitted error rate and no minted read-error
-> total**, and says why: the two come from one pass over one set of reads, so one without the
-> other means they saw different data (`checked_read_group_count_of`). **§3.4 assumed the pair
-> would fall back to a defaulted calibration. It does not — it panics.**
->
-> Three ways out, and the choice is the owner's. **Bring Milestone E forward**: accumulate the
-> minted totals while `generate-census` reads the psps and store them, at which point the
-> calibration is fitted and the pair is whole. **Or hand `assemble` a total that saw no reads**
-> beside each fitted rate, which satisfies the check by defeating it. **Or supply no rates
-> either**, at which point the run has no read-group axis and `assemble` refuses it outright, so
-> this route could write no parameters file at all.
->
-> Everything else of this step is written and compiles — the read-group table built from what the
-> censuses declare, the nine arguments assembled, the file constructed. Its three tests are
-> `#[ignore]`d with this reason.
-
-☐ **C5 — assemble a `RunParameters`, and write the file.** The fit's outputs into
+> **This step found the plan wrong and Milestone E moved to meet it, 2026-09-05.**
+> `RunParameters::assemble` refuses a read group with a fitted error rate and no minted
+> read-error total — the two come from one pass over one set of reads — where §3.4 had assumed
+> the pair would fall back to a defaulted calibration. **The owner's answer was to bring
+> Milestone E forward**, so the census now accumulates the totals as its loci go past and the
+> base-quality calibration is fitted rather than defaulted. §3.4 above is superseded. The fit's outputs into
 `RunParameters::assemble`, then the parameters file. **Each number carries the warrant it has
 earned**: fitted where the fit produced it, defaulted where it did not, and the base-quality
 calibration defaulted throughout (§3.4). The file names the reference it was fitted against and
@@ -349,26 +338,43 @@ moves is as informative as one where much does.
 
 ### Milestone E — the base-quality calibration
 
-☐ **E1 — accumulate the minted read errors while the census is built.** `generate-census`
+✅ **E1 — accumulate the minted read errors while the census is built.** `generate-census`
 already decodes every record of every pileup; `minted_error_by_read_group` takes one locus's
 observations. Per read group, Σ `ln ε` and the read count, over complete observations at generic
 loci, before the depth cap.
 *Depends:* C6. *Source:*
 [`calibration.rs`](../../../../src/ng/parameter_estimation/generic/calibration.rs).
 
-☐ **E2 — where the totals live, and it is a design question.** Two numbers per read group have
+✅ **E2 — where the totals live.** *Settled 2026-09-05: in the census, in a table of its own.* Two numbers per read group have
 to reach `estimate-parameters`. Putting them in the census changes the format and obliges the
 walk-time producer to record them too, or §7.12 stops holding; putting them in a small file
 beside it does not. **Bring both to the owner at the checkpoint rather than choosing here.**
 *Depends:* E1.
 
-☐ **E3 — the calibration is fitted, and the file says so.** The rates from the joint fit and
+✅ **E3 — the calibration is fitted, and the file says so.** The rates from the joint fit and
 the totals from E2 into `assemble` together, so `ReadGroupCalibration::from_fitted_rate` is
 reached and the warrant moves off `Defaulted`. A zero rate still takes the defaulted arm, and
 still says so.
 *Depends:* E2.
 
 > **Checkpoint E: every group of numbers in the file is fitted or honestly labelled.**
+>
+> **Reached 2026-09-05, out of order and inside Milestone C**, because C5 could not be written
+> without it. The accumulation went into `CensusWriter` rather than into `generate-census`, which
+> is better than the step asked for: **both producers feed that writer**, so the walk-time census
+> and the psp-built one accumulate the same totals — and §7.12's byte-for-byte agreement, which
+> still holds, now checks them too.
+>
+> The totals live in the census in a **table of their own** rather than as a field beside the
+> read-group names. One entry per declared group would turn *no entry* into *an entry that saw no
+> reads* on every round trip, and those are different claims: a group nothing was accumulated
+> for, against a group whose reads all carried a quality of zero.
+>
+> **What is accumulated is every generic locus the walk hands over, not only the kept ones** —
+> the accumulator the per-sample calibration pre-pass uses, with its unit unchanged. Restricting
+> it to the census's kept positions would be a second definition of a per-read-group total, and
+> the one number it feeds — how far a library's own base qualities may be trusted — is a property
+> of the library rather than of which positions were kept.
 
 ---
 

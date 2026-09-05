@@ -372,6 +372,7 @@ fn draw(
                     format!("s{s:02}"),
                     terms.clone(),
                     NamedReadGroup::drawn_for(&format!("s{s:02}"), [ReadGroupId(s as u32)]),
+                    BTreeMap::new(),
                     BTreeMap::from([(
                         SectionKey::Generic(ReadGroupId(s as u32)),
                         Section::Generic(GenericEvidence::from_parts(

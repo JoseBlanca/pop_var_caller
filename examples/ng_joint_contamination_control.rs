@@ -632,6 +632,7 @@ fn draw(
                         &format!("s{s:02}"),
                         (0..libraries.len()).map(|k| ReadGroupId((s * libraries.len() + k) as u32)),
                     ),
+                    BTreeMap::new(),
                     sections,
                 )
             })

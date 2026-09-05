@@ -45,6 +45,7 @@ use std::path::PathBuf;
 use md5::{Digest, Md5};
 
 use crate::ng::locus_generation::{LocusKind, ReadWitness, SampleLocusObservations};
+use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
 use crate::ng::parameter_estimation::generic::depth_bins::{DepthBin, DepthBinEdges};
 use crate::ng::parameter_estimation::joint::loci::{
     CensusLoci, CensusLociDigest, CensusLociDigester, SelectionTerms,
@@ -1475,6 +1476,9 @@ pub struct SampleCensusEvidence {
     /// **Who each of this sample's read groups is**, under the identifier its own sections are
     /// keyed by. Empty only for a value a test built rather than a census read from a file.
     declared: BTreeMap<ReadGroupId, NamedReadGroup>,
+    /// **What this sample's own base qualities claimed**, per read group — Σ `ln P(this read is
+    /// wrong)` and how many reads that ran over.
+    minted: BTreeMap<ReadGroupId, MintedReadErrors>,
     sections: Sections,
 }
 
@@ -1484,12 +1488,14 @@ impl SampleCensusEvidence {
         sample: String,
         terms: RecordingTerms,
         declared: BTreeMap<ReadGroupId, NamedReadGroup>,
+        minted: BTreeMap<ReadGroupId, MintedReadErrors>,
         sections: BTreeMap<SectionKey, Section>,
     ) -> Self {
         Self {
             sample,
             terms,
             declared,
+            minted,
             sections: Sections::resident(sections),
         }
     }
@@ -1500,6 +1506,7 @@ impl SampleCensusEvidence {
         sample: String,
         terms: RecordingTerms,
         declared: BTreeMap<ReadGroupId, NamedReadGroup>,
+        minted: BTreeMap<ReadGroupId, MintedReadErrors>,
         path: PathBuf,
         directory: BTreeMap<SectionKey, ByteExtent>,
     ) -> Self {
@@ -1507,6 +1514,7 @@ impl SampleCensusEvidence {
             sample,
             terms,
             declared,
+            minted,
             sections: Sections::backed(path, directory),
         }
     }
@@ -1521,6 +1529,17 @@ impl SampleCensusEvidence {
         &self.declared
     }
 
+    /// **What this sample's base qualities claimed, per read group.**
+    ///
+    /// A library's base-quality calibration is fitted from two numbers together: the error rate
+    /// the run measured, and what the qualities themselves said. A census carries the second, so
+    /// a fit over stored evidence can produce a calibration at all rather than falling back to
+    /// the constant.
+    #[must_use]
+    pub fn minted_read_errors(&self) -> &BTreeMap<ReadGroupId, MintedReadErrors> {
+        &self.minted
+    }
+
     /// The same sample under run-wide read-group identifiers.
     ///
     /// **The numbers a census carries are its own walk's**, and a walk sees one sample — so every
@@ -1533,6 +1552,11 @@ impl SampleCensusEvidence {
                 .declared
                 .into_iter()
                 .map(|(group, named)| (of[&group], named))
+                .collect(),
+            minted: self
+                .minted
+                .into_iter()
+                .filter_map(|(group, totals)| of.get(&group).map(|now| (*now, totals)))
                 .collect(),
             sections: self.sections.renumbered(of),
             ..self
@@ -2221,6 +2245,12 @@ pub struct CensusWriter {
     /// **Who each of those groups is** — the `@RG ID` and the library, which travel into the
     /// census because a cohort of censuses can only be merged on them.
     declared: BTreeMap<ReadGroupId, NamedReadGroup>,
+    /// **Σ `ln P(this read is wrong)` and the read count, per read group**, accumulated as the
+    /// loci go past. What a base-quality calibration is fitted from, and the half of it a census
+    /// carries — see [`SampleCensusEvidence::minted_read_errors`].
+    minted: BTreeMap<ReadGroupId, MintedReadErrors>,
+    /// Scratch for the accumulator, cleared and refilled once a locus rather than allocated.
+    minted_scratch: Vec<(ReadGroupId, MintedReadErrors)>,
     sample: String,
 }
 
@@ -2339,6 +2369,8 @@ impl CensusWriter {
             stratum_counts: loci.ssr_stratum_counts().clone(),
             read_groups: declared.keys().copied().collect(),
             declared,
+            minted: BTreeMap::new(),
+            minted_scratch: Vec::new(),
             sample,
         }
     }
@@ -2349,6 +2381,21 @@ impl CensusWriter {
     /// denominator, and a locus in a region never walked keeps [`DepthCode::NeverWalked`], so
     /// the three states survive.
     pub fn add_locus(&mut self, locus: &SampleLocusObservations) {
+        // **Every generic locus the walk hands over, not only the kept ones.** This is the
+        // accumulator the per-sample calibration pre-pass uses, with its own unit unchanged: a
+        // read at a position, counted once for every position it is seen at, at generic loci,
+        // over complete witnesses, before the per-position depth cap. Restricting it to the
+        // census's kept positions would be a second definition of a per-read-group total, and
+        // the one number it feeds — how far a library's own base qualities may be trusted — is
+        // a property of the library rather than of which positions were kept.
+        crate::ng::parameter_estimation::generic::calibration::minted_error_by_read_group(
+            locus,
+            &mut self.minted_scratch,
+        );
+        for (group, totals) in self.minted_scratch.drain(..) {
+            self.minted.entry(group).or_default().add(totals);
+        }
+
         match &locus.kind {
             LocusKind::Generic => self.add_generic(locus),
             LocusKind::Ssr(_) => self.add_ssr(locus),
@@ -2707,6 +2754,7 @@ impl CensusWriter {
                 depth_cap: self.depth_cap,
             },
             self.declared,
+            self.minted,
             sections,
         )
     }
@@ -2825,6 +2873,7 @@ mod tests {
             "s".to_string(),
             terms(),
             NamedReadGroup::drawn_for("s", [ReadGroupId(0), ReadGroupId(1)]),
+            BTreeMap::new(),
             BTreeMap::from([
                 (SectionKey::Generic(ReadGroupId(0)), Section::Generic(one)),
                 (SectionKey::Generic(ReadGroupId(1)), Section::Generic(two)),

@@ -3645,6 +3645,7 @@ pub mod bench_fixtures {
                             u32::try_from(s).expect("a drawn cohort fits in u32"),
                         )],
                     ),
+                    BTreeMap::new(),
                     BTreeMap::from([(
                         // **One read group a sample, because that is the only shape a real run
                         // can have**: a read group is one library preparation of one plant's

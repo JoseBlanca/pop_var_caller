@@ -204,6 +204,28 @@ impl MintedReadErrors {
         }
     }
 
+    /// **The scaled sum itself**, for a store that has to write it down and read it back.
+    ///
+    /// **Exposed as the raw scaled integer and not as a mean**, because a census records these
+    /// totals and a run reads them back: a mean and a count round-trip through a float and come
+    /// back a little different, and the whole point of the fixed-point sum is that it does not.
+    #[must_use]
+    pub fn log_error_sum_scaled(self) -> i128 {
+        self.log_error_sum_scaled
+    }
+
+    /// The same two numbers back, as a store read them.
+    ///
+    /// **The pair is only meaningful together**: a sum of zero over a million reads and a sum of
+    /// zero over none are different claims, which is why neither is reconstructed from the other.
+    #[must_use]
+    pub fn from_parts(log_error_sum_scaled: i128, reads: u64) -> Self {
+        Self {
+            log_error_sum_scaled,
+            reads,
+        }
+    }
+
     /// How many reads this ran over — see the field for what a "read" is counted as here.
     ///
     /// **Read-only, like the sum beside it**, and that is the point: the mean is meaningful only

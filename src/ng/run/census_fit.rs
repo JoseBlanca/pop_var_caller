@@ -31,6 +31,7 @@ use crate::ng::calling::parameters_file::{
     CensusIdentity, ParametersFile, ReadsBehindEachCalibration,
 };
 use crate::ng::calling::run_parameters::RunParameters;
+use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
 use crate::ng::parameter_estimation::joint::census::{
     CensusError, CohortCensusEvidence, RecordingTerms,
 };
@@ -198,16 +199,18 @@ pub fn every_read_group_pooled(cohort: &CohortCensusEvidence) -> BTreeMap<ReadGr
 /// [`fit_a_cohort`] unchanged, except the genotype prior's seed, which
 /// [`RunParameters::seed_from_moments`] solves in closed form from the fit's two moments.
 ///
-/// # The one group this route leaves at its constant, and why
+/// # The base-quality calibration, and where its two halves come from
 ///
-/// **The base-quality calibration is `Defaulted` throughout.** A read group's calibration needs
-/// its fitted error rate *and* its minted read-error total — Σ over reads of `ln P(this read is
-/// wrong)` — and only the first comes out of this fit. The totals are summed per read from each
-/// generic locus's complete observations, which no part of a census carries: a census holds a
-/// depth code per position per read group and the non-reference allele counts, and no per-read
-/// quality at all. Where either half is missing `assemble` takes
-/// `ReadGroupCalibration::defaulted`, scale one, and the parameters file says so — which is a
-/// smaller claim than the file could make and the honest one.
+/// A library's calibration is fitted from two numbers together: the error rate the run measured,
+/// and what the library's own base qualities claimed — Σ over reads of `ln P(this read is
+/// wrong)`, with the count it ran over. **`assemble` refuses one without the other**, and says
+/// why: they come from one pass over one set of reads.
+///
+/// The rate comes from this fit. The totals come from the census, which accumulates them as the
+/// loci go past — the same accumulator the per-sample calibration pre-pass uses, with its unit
+/// unchanged. **A read group whose census accumulated nothing is left out of both maps**, so the
+/// pair stays whole and that library takes the defaulted calibration rather than a fitted rate
+/// with no evidence behind it.
 ///
 /// `inbreeding` is one coefficient a sample, in the cohort's own sample order, and is a
 /// declaration rather than a fit on this route.
@@ -287,10 +290,24 @@ pub fn parameters_from_the_fit(
         }
     }
 
+    // **What each library's own base qualities claimed**, which every census carries beside who
+    // its read groups are. A calibration is fitted from this and the measured rate together;
+    // `assemble` refuses one without the other, and says why.
+    let minted_by_read_group: BTreeMap<ReadGroupId, MintedReadErrors> = cohort
+        .samples()
+        .iter()
+        .flat_map(|sample| {
+            sample
+                .minted_read_errors()
+                .iter()
+                .map(|(group, totals)| (*group, *totals))
+        })
+        .filter(|(group, _)| error_rate_by_read_group.contains_key(group))
+        .collect();
+
     RunParameters::assemble(
         &error_rate_by_read_group,
-        // **Empty, deliberately** — see this function's own note on the calibration.
-        &BTreeMap::new(),
+        &minted_by_read_group,
         &contamination_by_read_group,
         SequencingBatches::all_together_over(cohort.read_groups().len(), cohort.len()),
         inbreeding,
@@ -532,21 +549,14 @@ mod writing_the_parameters_file {
     //! **Plan step C5**: the fit's numbers, assembled and written as the file a calling run
     //! takes.
     //!
-    //! # ⚠ Every test here is ignored, and the reason is a contradiction the plan did not see
+    //! # What made this run at all
     //!
-    //! `RunParameters::assemble` **refuses a read group that has a fitted error rate and no
-    //! minted read-error total**, and says why: the two come from one pass over one set of reads,
-    //! so one without the other means they saw different data
-    //! (`checked_read_group_count_of`). The plan's §3.4 assumed the pair would simply fall back
-    //! to a defaulted calibration; it does not — it panics.
-    //!
-    //! That leaves this route three ways and none of them is the implementer's to choose:
-    //! accumulate the minted totals while `generate-census` reads the psps and store them, which
-    //! is Milestone E brought forward; hand `assemble` a total that saw no reads beside each
-    //! fitted rate, which defeats a check written for a real reason; or supply no rates either,
-    //! at which point the run has no read-group axis and `assemble` refuses it outright.
-    //!
-    //! The code below is written and compiles. It is held here, unrun, until that is settled.
+    //! `RunParameters::assemble` refuses a read group that has a fitted error rate and no minted
+    //! read-error total, and says why: the two come from one pass over one set of reads. The plan
+    //! had assumed the pair would fall back to a defaulted calibration; it does not, it panics,
+    //! and these tests found that on their first run. **The owner's answer, 2026-09-05, was to
+    //! bring Milestone E forward**: the census now accumulates the totals as its loci go past, so
+    //! both halves are present and the calibration is fitted rather than defaulted.
 
     use super::*;
     use crate::ng::calling::parameters_file::Warrant;
@@ -560,14 +570,17 @@ mod writing_the_parameters_file {
     /// says `defaulted` against it — because a read group's calibration needs its minted
     /// read-error total as well as its rate, and no part of a census carries one.
     #[test]
-    #[ignore = "assemble refuses a fitted rate with no minted read-error total; see this module's note"]
     fn the_fit_writes_a_parameters_file_that_says_what_it_fitted() {
         let (parameters, file) = a_fitted_cohorts_parameters();
 
         let toml = file.to_toml();
         assert!(
-            toml.contains("[[read_group]]"),
+            toml.contains("read_groups"),
             "the file names the run's read groups: {toml:.400}",
+        );
+        assert!(
+            toml.contains("fitted from reads"),
+            "and says how many of its groups of numbers were fitted at all: {toml:.400}",
         );
         for row in &file.fitted_from.read_groups {
             assert!(
@@ -583,28 +596,41 @@ mod writing_the_parameters_file {
         );
     }
 
-    /// **The base-quality calibration is defaulted, and the file says so.**
+    /// **The base-quality calibration is fitted, and the file says which library's it is.**
     ///
-    /// This is the claim plan §3.4 makes and the one a reader would otherwise take on trust.
+    /// Both halves are present: the rate from this fit, the minted totals from the census. A
+    /// library whose census accumulated nothing is left out of both maps and takes the defaulted
+    /// calibration — never a fitted rate with no evidence behind it.
     #[test]
-    #[ignore = "assemble refuses a fitted rate with no minted read-error total; see this module's note"]
-    fn the_base_quality_calibration_comes_out_defaulted() {
+    fn the_base_quality_calibration_says_where_it_came_from() {
         let (_parameters, file) = a_fitted_cohorts_parameters();
 
         assert!(!file.base_quality_calibration.by_read_group.is_empty());
         for row in &file.base_quality_calibration.by_read_group {
-            assert_eq!(
+            assert!(
+                matches!(
+                    row.error_probability_multiplier.warrant,
+                    Warrant::FittedHere | Warrant::Defaulted,
+                ),
+                "a calibration is either fitted from this library's own evidence or honestly \
+                 defaulted, never anything else: {:?}",
                 row.error_probability_multiplier.warrant,
-                Warrant::Defaulted,
-                "no minted read-error total reaches this route, so no calibration can be fitted",
             );
         }
+        assert!(
+            file.base_quality_calibration
+                .by_read_group
+                .iter()
+                .any(|row| row.error_probability_multiplier.warrant == Warrant::FittedHere),
+            "at least one library of the fixture has both halves, so at least one calibration \
+             is fitted — otherwise this route still cannot produce one and the change did \
+             nothing",
+        );
     }
 
     /// **The file names the census these numbers were fitted from**, term by term — which is
     /// what lets a calling run tell whether its own evidence was recorded the same way.
     #[test]
-    #[ignore = "assemble refuses a fitted rate with no minted read-error total; see this module's note"]
     fn the_file_names_the_census_it_was_fitted_from() {
         let (_parameters, file) = a_fitted_cohorts_parameters();
 

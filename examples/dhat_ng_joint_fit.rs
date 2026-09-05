@@ -567,6 +567,7 @@ fn drawn_generic_cohort(
                 format!("s{s}"),
                 terms.clone(),
                 NamedReadGroup::drawn_for(&format!("s{s}"), [ReadGroupId(s as u32)]),
+                BTreeMap::new(),
                 BTreeMap::from([(
                     SectionKey::Generic(ReadGroupId(s as u32)),
                     Section::Generic(GenericEvidence::from_parts(
@@ -639,6 +640,7 @@ fn drawn_ssr_cohort(
                 format!("s{s}"),
                 terms.clone(),
                 NamedReadGroup::drawn_for(&format!("s{s}"), [ReadGroupId(s as u32)]),
+                BTreeMap::new(),
                 sections,
             )
         })

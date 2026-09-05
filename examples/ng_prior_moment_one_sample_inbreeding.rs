@@ -419,6 +419,7 @@ fn fit_cohort(
                 format!("s{sample:03}"),
                 terms.clone(),
                 NamedReadGroup::drawn_for(&format!("s{sample:03}"), [ReadGroupId(sample as u32)]),
+                BTreeMap::new(),
                 BTreeMap::from([(
                     SectionKey::Generic(ReadGroupId(sample as u32)),
                     Section::Generic(GenericEvidence::from_parts(

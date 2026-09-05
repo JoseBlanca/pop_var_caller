@@ -1681,6 +1681,7 @@ mod tests {
                         &format!("s{s:02}"),
                         (0..libraries.len()).map(|k| read_group_of(s, k, libraries.len())),
                     ),
+                    BTreeMap::new(),
                     held,
                 )
             })
