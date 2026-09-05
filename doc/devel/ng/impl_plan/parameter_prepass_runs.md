@@ -223,7 +223,7 @@ locus is named as contributing nothing rather than omitted.
 *Depends:* B1. *Source:* the run-level reporting rule
 [`run_driver_psp_mode.md`](run_driver_psp_mode.md) Milestone F.
 
-☐ **B3 — the two routes, measured.** Wall time and peak resident memory of **one walk writing
+✅ **B3 — the two routes, measured.** Wall time and peak resident memory of **one walk writing
 both files** against **a walk writing the pileup, then `generate-census` reading it back**, on
 the six tomato accessions over the two 100 kb intervals and on one cohort large enough for the
 second pass's read to dominate. Recorded in the milestone's report; it decides nothing on its
@@ -232,6 +232,22 @@ own.
 
 > **Checkpoint B: two producers, one command, and a number for what each route costs.**
 > Pause for review.
+>
+> **Reached 2026-09-05**
+> ([report](../../reports/implementations/ng_fit_stage_b_2026-09-05.md)). `generate-census`
+> builds each stored psp's census without opening an alignment file, and on the six tomato
+> accessions over the two 100 kb intervals all six are byte-identical to the ones the walk wrote.
+>
+> **Building the census during the walk is the cheaper route: 1.28 s against 1.40 s over the
+> work, and 192 MB peak resident against 188 MB**, across three repetitions that moved by 0.02 s
+> and 1 MB. **That is on ground where the selection keeps 198,182 of 200,000 bases** — the budget
+> is two million positions and this BED is 200 kb — so the census carries a share of the walk here
+> that it would not carry on a whole genome, where the same budget keeps about 1 base in 400.
+>
+> The comparison's first run reported all six censuses different, and the cause was the harness:
+> it recorded the route word into each psp's provenance, so the two psps' headers differed by one
+> character and each census correctly named a different file. Sixteen bytes, in the digest. The
+> script compares the files as well as timing them for exactly this reason.
 
 ### Milestone C — the fit, from census files
 

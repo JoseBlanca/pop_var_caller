@@ -27,7 +27,30 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-04):** **a census built from a stored psp is the same census**
+> - **Last completed task (2026-09-05):** **`generate-census` exists, and building a census
+> during the walk is the cheaper of the two routes** (branch `ng-psp-mode`, Checkpoint B of
+> [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
+> [report](doc/devel/reports/implementations/ng_fit_stage_b_2026-09-05.md)).
+>
+> The command builds each stored psp's census without opening a single alignment file, and on the
+> six tomato accessions over the two 100 kb intervals all six are byte-identical to the ones the
+> walk wrote. **1.28 s against 1.40 s over the work, and 192 MB peak resident against 188 MB**,
+> across three repetitions that moved by 0.02 s and 1 MB.
+>
+> **That is measured where the selection keeps 198,182 of 200,000 bases.** The budget is two
+> million positions and this BED is 200 kb, so the census carries a share of the walk here it
+> would not carry on a whole genome, where the same budget keeps about 1 base in 400. The same
+> caveat applies to the file sizes — 1.31 MB of census against 3.59 MB of psp is a fact about a
+> 200 kb BED, not about the format.
+>
+> **The comparison's first run reported all six censuses different, and the harness was at
+> fault**: it recorded the route word into each psp's provenance, so the two psps' headers
+> differed by one character and each census correctly named a different file — sixteen bytes, in
+> the digest. `scripts/ng_census_route_cost.sh` compares the files as well as timing them for
+> exactly this reason: a timing comparison between two different outputs measures nothing, and
+> this failure looked exactly like a defect in the second producer.
+>
+> - **Earlier (2026-09-04):** **a census built from a stored psp is the same census**
 > (branch `ng-psp-mode`, Checkpoint A of
 > [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
 > [report](doc/devel/reports/implementations/ng_fit_stage_a_2026-09-04.md)).
