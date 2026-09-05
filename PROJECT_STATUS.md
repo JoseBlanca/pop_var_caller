@@ -27,7 +27,36 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-04):** **Milestone F is complete — psp mode exists, equals
+> - **Last completed task (2026-09-04):** **the psp-mode plan is finished — `generate-psps`
+> writes the census beside each psp from one pass over the reads** (branch `ng-psp-mode`,
+> Checkpoint G; [report](doc/devel/reports/implementations/ng_psp_mode_g_2026-09-04.md)).
+> Measured on the six tomato accessions over the two 100 kb intervals: **3,592,149 bytes of psp
+> and 1,305,915 bytes of census, in 5 s**, both named per sample in the run's report. The census
+> is fed at the walk's yield point rather than by the psp writer, so it records what the walk saw
+> and not what was stored.
+>
+> **The seed behind the census selection is a compiled-in constant, and that is load-bearing.**
+> This command's own advice is one invocation a sample; two invocations that seeded differently
+> would keep **disjoint** sets of positions and their samples could not be pooled at all. The two
+> counts beside it are the design's own figures — about two million positions, five thousand
+> tracts a stratum. **Ruled by the owner (2026-09-04): these three, the read filters and the five
+> locus-generator knobs all stay constants until the fit stage exists** — nothing can read a
+> census yet, so a knob added now is one whose effect nobody can check, and a `--seed` flag in
+> particular is a way to break a cohort that walks perfectly and is refused hours later at the
+> fit.
+>
+> **A defect the milestone's own test caught before it shipped**: `PspWriter::create` records the
+> compression level into the header before encoding it, so a census built from the header the
+> gatherer *holds* names a psp that does not exist — one line of TOML, every byte of the digest
+> different — and every freshness check would have said *rebuild* for ever, silently. `WriteStats`
+> now carries the digest of the header as written.
+>
+> **Next: `parameter_prepass_runs.md`** (unwritten) — reading a census back, building one from a
+> psp, and §7.12's byte-for-byte census-equality oracle. Two of the psp-mode plan's own gaps close
+> there: nothing yet reads a census, and the mode-equivalence oracle cannot see the stored fields
+> only a fit reads.
+>
+> - **Earlier (2026-09-04):** **Milestone F is complete — psp mode exists, equals
 > direct mode, and every run-level invariance spec §12 asks of it holds** (branch `ng-psp-mode`,
 > Checkpoint F; [F3 report](doc/devel/reports/implementations/ng_psp_mode_f3_2026-09-04.md)).
 > The order the psps are named in does not change the calls; a cohort walked one sample at a time

@@ -476,7 +476,18 @@ fn each_psp_is_named_for_its_sample_with_the_psp_extension() {
         })
         .collect();
     names.sort();
-    assert_eq!(names, vec!["alpha.psp".to_string(), "zeta.psp".to_string()]);
+    // **Two files a sample, and both named for it.** The census is the second file spec §2
+    // gives the walk stage; a run that wrote only the psp would force every sample to be walked
+    // again before it could be fitted.
+    assert_eq!(
+        names,
+        vec![
+            "alpha.census".to_string(),
+            "alpha.psp".to_string(),
+            "zeta.census".to_string(),
+            "zeta.psp".to_string(),
+        ],
+    );
 }
 
 /// **A sample whose `@RG SM` cannot be a file name is refused before anything is read.**
@@ -684,8 +695,8 @@ fn two_files_naming_one_sample_become_one_psp() {
         std::fs::read_dir(&args.output_dir)
             .expect("the output directory")
             .count(),
-        2,
-        "two samples, two psps",
+        4,
+        "two samples, and a psp and a census each",
     );
 }
 
@@ -961,10 +972,13 @@ fn the_per_sample_line_prints_the_numbers_it_names() {
     let outcome = SampleWalkOutcome {
         sample: "zeta".to_string(),
         psp: PathBuf::from("psps/zeta.psp"),
+        census: PathBuf::from("psps/zeta.census"),
+        census_bytes: 812,
         stats: crate::ng::psp::WriteStats {
             records: 41,
             blocks: 3,
             bytes: 6007,
+            header_digest: [0; 16],
         },
         counts: crate::ng::locus_generation::LocusCounts {
             regions_in: 17,
@@ -1012,10 +1026,13 @@ fn a_walk_that_covered_its_whole_ground_carries_no_uncovered_clause() {
     let outcome = SampleWalkOutcome {
         sample: "zeta".to_string(),
         psp: PathBuf::from("psps/zeta.psp"),
+        census: PathBuf::from("psps/zeta.census"),
+        census_bytes: 812,
         stats: crate::ng::psp::WriteStats {
             records: 41,
             blocks: 3,
             bytes: 6007,
+            header_digest: [0; 16],
         },
         counts: crate::ng::locus_generation::LocusCounts {
             regions_in: 11,
@@ -1105,4 +1122,158 @@ fn the_flag_the_refusal_names_is_the_flag_clap_answers_to() {
     let args = args_of(&argv);
 
     assert!(args.force, "clap answers to the flag the refusal names");
+}
+
+// ---------------------------------------------------------------------
+// The census beside the psp (spec §2, plan step G2)
+// ---------------------------------------------------------------------
+
+/// **Every sample gets a census beside its psp, and it names that psp.**
+///
+/// The identity is the psp header's digest and its record count, which is what a later fit
+/// compares before trusting a census — two censuses built from different reads are otherwise
+/// indistinguishable. A census naming the wrong psp is not a broken file: it is a file every
+/// freshness check refuses for ever, which is why this is checked at the command and not only
+/// in the gatherer.
+#[test]
+fn every_sample_gets_a_census_beside_its_psp_naming_that_psp() {
+    use crate::ng::parameter_estimation::joint::census_file::{PileupIdentity, open_census};
+
+    let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
+
+    run_generate_psps(&args).expect("the cohort walks");
+
+    for sample in ["zeta", "alpha"] {
+        let census = census_path_for(&args.output_dir, sample);
+        assert!(census.is_file(), "{sample}'s census is at {census:?}");
+        let (_evidence, named) = open_census(&census).expect("this build's own census");
+        let named = named.expect("a census this run wrote names the psp it was built from");
+
+        let mut psp = PspReader::open(&psp_path_for(&args.output_dir, sample))
+            .expect("the psp beside it opens");
+        let records = psp.records().expect("the walk starts").count() as u64;
+        let expected = PileupIdentity::of_header(
+            &psp.header().encode().expect("the header re-encodes"),
+            records,
+        );
+        assert_eq!(
+            named, expected,
+            "{sample}'s census names its own psp — the header in the file, and the records the \
+             file holds",
+        );
+    }
+}
+
+/// **Two samples of one run keep the same census positions**, which is what makes them poolable
+/// at the fit — and the property that would be lost if the selection were made per sample or
+/// seeded from a clock.
+#[test]
+fn the_samples_of_one_run_keep_the_same_census_positions() {
+    use crate::ng::parameter_estimation::joint::census_file::open_census;
+
+    let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
+
+    run_generate_psps(&args).expect("the cohort walks");
+
+    let terms_of = |sample: &str| {
+        open_census(&census_path_for(&args.output_dir, sample))
+            .expect("this build's own census")
+            .0
+            .terms
+    };
+    assert_eq!(
+        terms_of("zeta"),
+        terms_of("alpha"),
+        "one run, one selection — a cohort whose samples selected differently cannot be fitted",
+    );
+}
+
+/// **Two separate invocations of this command keep the same census positions too.**
+///
+/// This is the one that matters for how psp mode is used: the command's own advice is to spread
+/// a cohort by running it once per sample, so the selection has to agree across *processes*. It
+/// does because the seed is a compiled-in constant rather than something a run draws — a seed
+/// from a clock would give every invocation a disjoint set of positions and no cohort could ever
+/// be assembled.
+#[test]
+fn two_invocations_keep_the_same_census_positions() {
+    use crate::ng::parameter_estimation::joint::census_file::open_census;
+
+    let (_reference_dir, _zeta_dir, _alpha_dir, mut args) = a_cohort_on_disk();
+    let both = args.alignments.clone();
+
+    args.alignments = vec![both[0].clone()];
+    args.output_dir = args.output_dir.join("first");
+    run_generate_psps(&args).expect("the first sample walks on its own");
+    let first = open_census(&census_path_for(&args.output_dir, "zeta"))
+        .expect("this build's own census")
+        .0
+        .terms;
+
+    args.alignments = vec![both[1].clone()];
+    args.output_dir = args.output_dir.parent().expect("its parent").join("second");
+    run_generate_psps(&args).expect("the second sample walks on its own");
+    let second = open_census(&census_path_for(&args.output_dir, "alpha"))
+        .expect("this build's own census")
+        .0
+        .terms;
+
+    assert_eq!(
+        first, second,
+        "two invocations of one cohort must select the same positions, or their samples cannot \
+         be pooled",
+    );
+}
+
+/// **A stopped walk leaves neither file at the sample's own path.**
+///
+/// Both go to a scratch name and are renamed only once whole, so a stopped re-walk leaves the
+/// pair it was replacing intact — the property C3 established for the psp, extended to the file
+/// beside it.
+#[test]
+fn a_stopped_walk_leaves_neither_file_at_the_samples_own_path() {
+    let (_reference_dir, _zeta_dir, _alpha_dir, mut args) = a_cohort_on_disk();
+    // A file that is not an alignment file: the first sample walks, the second stops.
+    let not_an_alignment = _reference_dir.path().join("not-a-bam.bam");
+    std::fs::write(&not_an_alignment, b"not a BAM").expect("the file writes");
+    args.alignments = vec![args.alignments[0].clone(), not_an_alignment];
+
+    let refused = run_generate_psps(&args).expect_err("the second sample cannot be walked");
+
+    let rendered = crate::error_render::format_error_chain(&refused);
+    assert!(!rendered.is_empty(), "the run says what stopped it");
+    let names: Vec<String> = std::fs::read_dir(&args.output_dir)
+        .expect("the output directory")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        names.iter().all(|name| !name.ends_with(".partial")),
+        "no scratch file is left behind: {names:?}",
+    );
+}
+
+/// **The report names both files and how big each is.**
+#[test]
+fn the_report_names_the_census_beside_the_psp() {
+    let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
+
+    let report = walk_every_sample(&args).expect("the cohort walks");
+
+    let lines = report.lines().join("\n");
+    for sample in ["zeta", "alpha"] {
+        assert!(
+            lines.contains(&format!("{sample}.census")),
+            "{sample}'s census is named in the report:\n{lines}",
+        );
+    }
+    assert!(
+        report.samples.iter().all(|sample| sample.census_bytes > 0),
+        "and each census has a size, which a file that was never written would not",
+    );
 }

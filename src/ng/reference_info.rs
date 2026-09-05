@@ -1173,6 +1173,56 @@ fn read_fai_remembering_the_fasta(
 /// **Skipping is not available when the `.fai` is missing**, and that is not an oversight:
 /// writing the index requires reading the FASTA, so there is nothing left to skip. That arm
 /// scans and returns verified info regardless of `check`.
+/// [`read_reference_verifying_or_creating_fai`], **reading the FASTA on this thread and telling
+/// `observer` about every base it passes**.
+///
+/// **A separate entry point because an observation cannot be cached.** The other one hands the
+/// FASTA pass to a background thread and takes its result from
+/// [`ReferenceInfoCache`], which is shared: a second caller asking the same question gets the
+/// first one's answer, and there is no way to give it the first one's *observations*. So a run
+/// that needs to know where the reference is sequence at all — which is what choosing census
+/// positions needs, since a position inside a run of `N` has no base to compare a read against —
+/// reads it here instead, once, synchronously.
+///
+/// **It is the same pass, not an extra one.** The `.fai` is read first so a bad index fails
+/// before the whole-genome scan, exactly as the background route does; what changes is which
+/// thread does the scan and that the observer sees it. A caller that wants no observation should
+/// use the other one and keep the overlap.
+///
+/// # Errors
+///
+/// Everything [`read_reference_info_observing`] refuses, plus
+/// [`ReferenceInfoError::FaiWrite`] where there was no `.fai` and one could not be written.
+pub fn read_reference_observing_or_creating_fai(
+    fasta: PathBuf,
+    check: ReferenceCheck,
+    observer: &mut dyn ReferenceBasesObserver,
+) -> Result<ReferenceInfo, ReferenceInfoError> {
+    let fai = sibling_fai_path(&fasta);
+    if !fai.exists() {
+        // No `.fai`: scan now — verified, with the MD5s, and observed — then index it ourselves.
+        let info =
+            read_reference_info_observing(ReferenceSource::Fasta { fasta, fai: None }, observer)?;
+        write_fai(&info.contigs, &fai)
+            .map_err(|source| ReferenceInfoError::FaiWrite { path: fai, source })?;
+        return Ok(info);
+    }
+    read_reference_info_observing(
+        ReferenceSource::Fasta {
+            fasta,
+            // **`TrustIndexWithoutChecking` still reads the FASTA here**, because the bases are
+            // what the observer is for; what the flag drops is the comparison against the index,
+            // not the pass. The other entry point can skip the pass entirely because nothing
+            // there needs the bases.
+            fai: match check {
+                ReferenceCheck::VerifyAgainstIndex => Some(fai),
+                ReferenceCheck::TrustIndexWithoutChecking => None,
+            },
+        },
+        observer,
+    )
+}
+
 pub fn read_reference_verifying_or_creating_fai(
     cache: &Arc<ReferenceInfoCache>,
     fasta: PathBuf,
