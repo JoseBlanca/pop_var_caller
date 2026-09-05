@@ -17,7 +17,7 @@
 //!   was given by showing the result differs from the shipped default's, which is only a
 //!   proof while this value is not the default.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::ng::read::ReadFilterConfig;
@@ -94,5 +94,153 @@ pub(crate) fn unusual_read_filters() -> ReadFilterConfig {
     ReadFilterConfig {
         min_mapq: Some(MapQual(37)),
         ..ReadFilterConfig::default()
+    }
+}
+
+// ---------------------------------------------------------------------
+// The census plan, and a walk over one sample of the fixture cohort
+// ---------------------------------------------------------------------
+
+/// **The ground of a fixture cohort, and a census selection over it.**
+///
+/// Both producers of a census need this — the one that builds it while the reads are walked
+/// ([`gatherer`](super::gatherer)) and the one that builds it afterwards from the stored psp
+/// ([`census_from_psp`](super::census_from_psp)) — and the byte-for-byte comparison between
+/// them is only a statement about the psp while both are selecting the same loci. So the
+/// selection is made here, once, rather than in each test module.
+///
+/// **The reference is read with an observer**, because the selection has to know where the
+/// genome is sequence at all: a position inside a run of `N` has no reference base to compare a
+/// read against, and keeping one would leave a permanent hole in every sample's records.
+///
+/// **A target of one position per base**, so a 300-base fixture keeps some. The shipped budget
+/// is two million positions; at that number the threshold keeps everything here, which is what
+/// a test of the wiring wants — but saying so is better than relying on it.
+pub(crate) fn a_census_plan_over(
+    reference_fasta: &Path,
+    catalog_path: &Path,
+) -> (Arc<Segmentation>, super::CensusPlan) {
+    a_census_plan_over_selecting(reference_fasta, catalog_path, 300)
+}
+
+/// The same, at a chosen budget of generic positions.
+///
+/// **A test that rebuilds the selection a command already made must use the command's own
+/// budget**, because the kept positions are a function of it: rebuilding at another budget keeps
+/// another set, and a fit is refused against it — which is the guard working, and a confusing
+/// way for a test to fail.
+pub(crate) fn a_census_plan_over_selecting(
+    reference_fasta: &Path,
+    catalog_path: &Path,
+    generic_target: u64,
+) -> (Arc<Segmentation>, super::CensusPlan) {
+    use crate::ng::parameter_estimation::joint::loci::UnambiguousRuns;
+    use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
+    use crate::ng::region_typing::DEFAULT_MAX_STR_LEN;
+    use crate::ng::region_typing::segment_criteria::{
+        DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
+    };
+    use crate::ng::repeat_catalog::RepeatCatalog;
+    use crate::ng::run::{CensusPlan, CensusSelection};
+    use crate::pop_var_caller_exp::run_ground::{self, GroundRequest, RepeatRouting};
+
+    let mut callable = UnambiguousRuns::default();
+    let reference = read_reference_info_observing(
+        ReferenceSource::Fasta {
+            fasta: reference_fasta.to_path_buf(),
+            fai: None,
+        },
+        &mut callable,
+    )
+    .expect("the fixture's reference reads");
+    let unambiguous = callable
+        .into_selectable()
+        .expect("maximal runs are disjoint");
+
+    let request = GroundRequest {
+        reference: reference_fasta,
+        catalog: Some(catalog_path),
+        regions: None,
+        routing: RepeatRouting {
+            min_copies: MinCopies::default(),
+            min_period: DEFAULT_MIN_PERIOD,
+            max_period: DEFAULT_MAX_PERIOD,
+            max_str_len: DEFAULT_MAX_STR_LEN,
+            min_purity: DEFAULT_MIN_PURITY,
+        },
+    };
+    let analysed = run_ground::analysed_regions(&request, &reference.contig_list())
+        .expect("the whole reference");
+    let segmentation =
+        Arc::new(run_ground::segments_over(&request, &analysed, &reference).expect("it types"));
+    let catalog = RepeatCatalog::open_checking_against_reference(catalog_path, &reference)
+        .expect("the fixture's catalog is this reference's");
+    let plan = CensusPlan::of_run(
+        CensusSelection {
+            generic_target,
+            ..CensusSelection::SHIPPED
+        },
+        &catalog,
+        &analysed,
+        &unambiguous,
+        &reference,
+        &segmentation.inputs().repeat_tract_criteria,
+    )
+    .expect("the fixture's ground can be selected from");
+    (segmentation, plan)
+}
+
+/// A walk over one sample of a fixture cohort, with a census plan or without one.
+pub(crate) fn gatherer_over(
+    alignment: &PathBuf,
+    reference: &Path,
+    segmentation: &Arc<Segmentation>,
+    plan: Option<&super::CensusPlan>,
+) -> super::SampleObservationGatherer {
+    use crate::ng::locus_generation::pileup::PileupGeneratorConfig;
+    use crate::ng::read::ReadFilterConfig;
+    use crate::ng::read::input::reference::OpenReference;
+    use crate::ng::reference_info::{
+        ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
+    };
+    use crate::ng::run::{SampleObservationGatherer, SampleWalkInputs};
+
+    let cache = Arc::new(ReferenceInfoCache::new());
+    let (info, _) = read_reference_verifying_or_creating_fai(
+        &cache,
+        reference.to_path_buf(),
+        ReferenceCheck::TrustIndexWithoutChecking,
+    )
+    .expect("the reference reads");
+    let open_reference = OpenReference::new(info);
+    SampleObservationGatherer::open(
+        SampleWalkInputs {
+            alignments: std::slice::from_ref(alignment),
+            reference: &open_reference,
+            read_filters: ReadFilterConfig::default(),
+            locus_generator_settings: PileupGeneratorConfig::default(),
+            build_index_if_missing: false,
+        },
+        Arc::clone(segmentation),
+        walk_provenance(),
+        plan,
+    )
+    .expect("the sample opens")
+}
+
+/// What a fixture walk records about the program that produced its psp.
+pub(crate) fn walk_provenance() -> crate::ng::psp::WriterProvenance {
+    use crate::ng::psp::{ParameterValue, WriterProvenance};
+    use std::collections::BTreeMap;
+
+    WriterProvenance {
+        tool: "ng".to_string(),
+        version: "0.0.0-test".to_string(),
+        subcommand: "generate-psps".to_string(),
+        input_alignments: vec!["to-be-overwritten".to_string()],
+        input_reference: "to-be-overwritten".to_string(),
+        command_line: "ng generate-psps --test".to_string(),
+        parameters: BTreeMap::from([("depth-cap".to_string(), ParameterValue::Integer(300))]),
+        created: "2026-09-03T00:00:00Z".parse().expect("a datetime"),
     }
 }

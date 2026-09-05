@@ -1387,6 +1387,7 @@ fn solve(a: &[f64], b: &[f64], width: usize) -> Option<Vec<f64>> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::census::NamedReadGroup;
     use super::*;
 
     /// **`(components + 1) / samples` is the panel's *mean* leverage, not every sample's.**
@@ -1673,7 +1674,16 @@ mod tests {
                         )
                     })
                     .collect();
-                SampleCensusEvidence::resident(format!("s{s:02}"), terms.clone(), held)
+                SampleCensusEvidence::resident(
+                    format!("s{s:02}"),
+                    terms.clone(),
+                    NamedReadGroup::drawn_for(
+                        &format!("s{s:02}"),
+                        (0..libraries.len()).map(|k| read_group_of(s, k, libraries.len())),
+                    ),
+                    BTreeMap::new(),
+                    held,
+                )
             })
             .collect()
     }

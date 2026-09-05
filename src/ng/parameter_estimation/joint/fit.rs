@@ -453,6 +453,28 @@ pub enum JointFitError {
         second: String,
         read_group: ReadGroupId,
     },
+    /// **Two samples declare one `@RG ID`**, which is unique across a whole run — so these
+    /// censuses were not built from one cohort. Raised where the cohort is built.
+    #[error(
+        "samples {first} and {second} both declare the read group {declared_id:?}; an @RG ID is \
+         unique across a whole run, so these censuses were not built from one cohort and their \
+         libraries would be fitted as one"
+    )]
+    SharedDeclaredId {
+        first: String,
+        second: String,
+        declared_id: String,
+    },
+    /// **A sample holds evidence for a read group it does not name**, so there is no run-wide
+    /// identifier to move that evidence onto and dropping it would lose a library silently.
+    #[error(
+        "sample {sample} holds evidence for read group {read_group} and does not name it, so \
+         there is no identifier to move that evidence onto"
+    )]
+    SectionOfAnUndeclaredReadGroup {
+        sample: String,
+        read_group: ReadGroupId,
+    },
     /// A sample whose census is a file the fit could not read. **The estimator's own failure to
     /// obtain evidence, not a property of the evidence** — see [`CensusError`].
     #[error("a sample's census could not be read")]
@@ -680,6 +702,17 @@ impl From<CohortRefusal> for JointFitError {
                 second: refusal.second,
                 read_group: refusal.read_group,
             },
+            CohortRefusal::SharedDeclaredId(refusal) => Self::SharedDeclaredId {
+                first: refusal.first,
+                second: refusal.second,
+                declared_id: refusal.declared_id,
+            },
+            CohortRefusal::SectionOfAnUndeclaredReadGroup(refusal) => {
+                Self::SectionOfAnUndeclaredReadGroup {
+                    sample: refusal.sample,
+                    read_group: refusal.read_group,
+                }
+            }
         }
     }
 }
@@ -3606,6 +3639,13 @@ pub mod bench_fixtures {
                 SampleCensusEvidence::resident(
                     format!("s{s}"),
                     terms.clone(),
+                    crate::ng::parameter_estimation::joint::census::NamedReadGroup::drawn_for(
+                        &format!("s{s}"),
+                        [ReadGroupId(
+                            u32::try_from(s).expect("a drawn cohort fits in u32"),
+                        )],
+                    ),
+                    BTreeMap::new(),
                     BTreeMap::from([(
                         // **One read group a sample, because that is the only shape a real run
                         // can have**: a read group is one library preparation of one plant's

@@ -27,7 +27,133 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-04):** **the psp-mode plan is finished — `generate-psps`
+> - **Last completed task (2026-09-05):** **the fit stage is finished — the four commands compose,
+> and fitted numbers change the calls** (branch `ng-psp-mode`, Checkpoint D of
+> [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
+> [report](doc/devel/reports/implementations/ng_fit_stage_d_2026-09-05.md)).
+>
+> `generate-psps` → `generate-census` → `estimate-parameters` → `call-from-psps` runs end to end
+> on six tomato accessions over the two 100 kb intervals, and the two routes to a census still
+> agree byte for byte on real reads.
+>
+> **Calling with numbers fitted from the cohort's own data rather than the compiled-in constants
+> removes 82 of 599 records and changes 115 genotypes in 3,102.** The 82 are the marginal ones —
+> median QUAL 5.5 against 125.3 for the 517 records both runs called, and the highest QUAL among
+> the dropped, 88.9, sits below the median of the kept.
+>
+> **Read it narrowly.** The comparison is a tomato cohort called with a *human* heterozygosity —
+> the defaults' prior is `stated_heterozygosity`, which the parameters file itself calls "the one
+> that rests on nothing this run measured" — against the same cohort called with its own fitted
+> curve. On a human cohort the two would sit closer and nothing here says how much. And 599
+> records over 200 kb at three reads a position is a small corner: on this ground the census keeps
+> 198,182 of 200,000 bases, where on a whole tomato genome the same budget keeps about 1 in 400.
+>
+> **Contamination was not fitted and the file says so.** Six samples is below what that estimator
+> needs, so no `[contamination]` section is written — which the file distinguishes from a measured
+> zero. It reports 5 of its 7 groups of numbers as fitted, and names the two that were not.
+>
+> - **Earlier (2026-09-05):** **a parameters file produced from data, for the first
+> time in this tree** (branch `ng-psp-mode`, Checkpoint C of
+> [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
+> [report](doc/devel/reports/implementations/ng_fit_stage_c_2026-09-05.md)).
+>
+> `estimate-parameters` fits a cohort from its census files and writes the file a calling run
+> scores with. Before this a run had two sources for its numbers and neither was a fit: the
+> constants compiled into the binary, or a file somebody handed it. One cohort fitted twice writes
+> the same bytes.
+>
+> **Two things had to be built that the plan did not see, and both were found by running.** A
+> cohort of censuses could not be assembled at all — every census numbers its read groups from
+> zero, because a walk sees one sample, so two of them collide by construction. The owner's ruling
+> was to put the `@RG ID` and the library in the census and merge on those. And
+> `RunParameters::assemble` refuses a fitted error rate with no minted read-error total, where the
+> plan had assumed a defaulted calibration; **Milestone E came forward to meet it**, so the census
+> now accumulates the totals as its loci go past and the calibration is fitted.
+>
+> The accumulation went into `CensusWriter` rather than into `generate-census`, which is better
+> than the step asked for: **both producers feed that writer**, so the byte-for-byte agreement
+> between the walk-time census and the psp-built one now checks the totals too.
+>
+> **What the fit still needs besides the censuses**: each census's psp beside it — not read, only
+> its header, for the digest the census names it by and the ground the walk covered — and the
+> reference and catalog, because a census stores a tract by its index within its stratum and the
+> selection has to be rebuilt. That rebuild is checked against a digest every census carries.
+>
+> **What it declares rather than fits**: the inbreeding coefficient, which comes from the other
+> pre-pass route. The file records it as `supplied`.
+>
+> - **Earlier (2026-09-05):** **`generate-census` exists, and building a census
+> during the walk is the cheaper of the two routes** (branch `ng-psp-mode`, Checkpoint B of
+> [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
+> [report](doc/devel/reports/implementations/ng_fit_stage_b_2026-09-05.md)).
+>
+> The command builds each stored psp's census without opening a single alignment file, and on the
+> six tomato accessions over the two 100 kb intervals all six are byte-identical to the ones the
+> walk wrote. **1.28 s against 1.40 s over the work, and 192 MB peak resident against 188 MB**,
+> across three repetitions that moved by 0.02 s and 1 MB.
+>
+> **That is measured where the selection keeps 198,182 of 200,000 bases.** The budget is two
+> million positions and this BED is 200 kb, so the census carries a share of the walk here it
+> would not carry on a whole genome, where the same budget keeps about 1 base in 400. The same
+> caveat applies to the file sizes — 1.31 MB of census against 3.59 MB of psp is a fact about a
+> 200 kb BED, not about the format.
+>
+> **The comparison's first run reported all six censuses different, and the harness was at
+> fault**: it recorded the route word into each psp's provenance, so the two psps' headers
+> differed by one character and each census correctly named a different file — sixteen bytes, in
+> the digest. `scripts/ng_census_route_cost.sh` compares the files as well as timing them for
+> exactly this reason: a timing comparison between two different outputs measures nothing, and
+> this failure looked exactly like a defect in the second producer.
+>
+> - **Earlier (2026-09-04):** **a census built from a stored psp is the same census**
+> (branch `ng-psp-mode`, Checkpoint A of
+> [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
+> [report](doc/devel/reports/implementations/ng_fit_stage_a_2026-09-04.md)).
+>
+> One sample's census built while its reads are walked, and built again afterwards from the psp
+> that walk wrote, are the same file byte for byte — on both samples of the fixture cohort with
+> a ten-copy `GT` tract and three read groups. **That is a statement about the psp**, not about
+> the new code: a record format that dropped a read's read group, its per-position witness or
+> its length at a tract would still read back, still call, and still produce a census, one that
+> differs only here.
+>
+> **Both producers now build their writer through `CensusPlan::writer_for`**, so the comparison
+> cannot degrade into a test of whether two hand-copied constructor call sites were kept in step.
+>
+> **Four deliberate defects were run against the comparison**
+> (`scripts/ng_census_agreement_mutations.sh`): skipping repeat-tract loci fails all three tests,
+> losing one read at every locus fails two, crediting every read to read group 0 fails one — the
+> sample with a single read group cannot see it — and **changing a read's minted error fails
+> none.** The last is a fact about the format rather than a hole in the test: a census holds a
+> depth code per position per read group and the non-reference allele counts, and no per-read
+> quality at all. So the per-read-group minted-error totals `RunParameters::assemble` needs
+> cannot be read out of a census as it stands, which is what plan step E2 has to settle.
+>
+> - **Earlier (2026-09-04):** **the fit stage has a plan, and psp mode is on `main`**
+> ([parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md); branch
+> `ng-psp-mode` fast-forwarded onto `main` at `e7eeab1c`, 6,229 lib tests green in the container).
+>
+> The plan's route is four files on disk: alignments → psp → census → parameters file → VCF, so
+> any stage can be re-run without repeating the one before it. Five milestones — a census built
+> from a stored psp and §7.12's byte-for-byte agreement with the walk-time one; `generate-census`;
+> the fit and the parameters file it writes; the four commands end to end; the base-quality
+> calibration.
+>
+> **Two rulings by the owner shaped it (2026-09-04).** `generate-psps` keeps writing the census it
+> already writes — the second producer is added beside it, not in place of it, and the two are
+> measured against each other on wall time and peak memory. And the fit reads census files rather
+> than fitting during the walk, so nothing else reaches the estimates for now.
+>
+> **What the plan found before it was written:** `RunParameters::assemble` is called 36 times in
+> this tree and 35 are inside test modules, so **no program has ever produced a fitted parameters
+> file**; a run today scores with the compiled-in defaults or a file somebody hands it. It also
+> takes a per-read-group sum of `ln P(read is wrong)` that the joint fit does not produce, so the
+> first parameters files this route writes carry a **defaulted** base-quality calibration and say
+> so. Milestone E closes that: a stored psp decodes back to exactly the observations the
+> accumulator sums, with `q_sum` held in integer steps, so the totals can be taken on a pass that
+> is already being made.
+>
+> - **Earlier (2026-09-04):** **the psp-mode plan is finished — `generate-psps`
 > writes the census beside each psp from one pass over the reads** (branch `ng-psp-mode`,
 > Checkpoint G; [report](doc/devel/reports/implementations/ng_psp_mode_g_2026-09-04.md)).
 > Measured on the six tomato accessions over the two 100 kb intervals: **3,592,149 bytes of psp
@@ -51,10 +177,10 @@ Skills and agents are instructed to leave it untouched.
 > different — and every freshness check would have said *rebuild* for ever, silently. `WriteStats`
 > now carries the digest of the header as written.
 >
-> **Next: `parameter_prepass_runs.md`** (unwritten) — reading a census back, building one from a
-> psp, and §7.12's byte-for-byte census-equality oracle. Two of the psp-mode plan's own gaps close
-> there: nothing yet reads a census, and the mode-equivalence oracle cannot see the stored fields
-> only a fit reads.
+> **Next: execute [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md)**
+> — reading a census back, building one from a psp, and §7.12's byte-for-byte census-equality
+> oracle. Two of the psp-mode plan's own gaps close there: nothing yet reads a census, and the
+> mode-equivalence oracle cannot see the stored fields only a fit reads.
 >
 > - **Earlier (2026-09-04):** **Milestone F is complete — psp mode exists, equals
 > direct mode, and every run-level invariance spec §12 asks of it holds** (branch `ng-psp-mode`,

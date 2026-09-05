@@ -56,7 +56,8 @@ use crate::ng::locus_generation::{
 };
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::joint::census::{
-    CensusWriter, CohortCensusEvidence, CohortRefusal, DepthCap, ReadCap, SampleCensusEvidence,
+    CensusWriter, CohortCensusEvidence, CohortRefusal, DepthCap, NamedReadGroup, ReadCap,
+    SampleCensusEvidence,
 };
 use crate::ng::parameter_estimation::joint::contamination::{
     ContaminationConfig, ContaminationEstimate, ContaminationSource, DEFAULT_COMPONENTS,
@@ -764,10 +765,27 @@ fn walk_one_sample(
             .position(|entry| entry.name == name)
             .map(|i| ContigId(i as u32))
     };
+    // **This sample's read groups and who each one is.** The names travel into the census
+    // because a cohort of censuses is merged on them rather than on the numbers, which every
+    // census mints from zero.
+    let declared = sample
+        .read_groups
+        .iter()
+        .map(|id| {
+            let group = read_groups.get(*id);
+            (
+                *id,
+                NamedReadGroup {
+                    declared_id: group.id.to_string(),
+                    library: group.library.value.to_string(),
+                },
+            )
+        })
+        .collect();
     let mut writer = CensusWriter::new(
         sample.sample.to_string(),
         &prepared.kept,
-        sample.read_groups.clone(),
+        declared,
         &contig_of,
         prepared.terms.clone(),
         DepthBinEdges::for_census(),

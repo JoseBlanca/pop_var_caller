@@ -6,6 +6,8 @@ use clap::{Parser, Subcommand};
 use super::call_from_alignments::CallFromAlignmentsArgs;
 use super::call_from_psps::CallFromPspsArgs;
 use super::estimate_contamination::EstimateContaminationArgs;
+use super::estimate_parameters::EstimateParametersArgs;
+use super::generate_census::GenerateCensusArgs;
 use super::generate_psps::GeneratePspsArgs;
 use super::repeat_catalog::RepeatCatalogArgs;
 use super::typed_regions::TypedRegionsArgs;
@@ -62,10 +64,47 @@ pub enum PopVarCallerExpCommand {
     /// each sample's walk is independent, so a cohort is spread by running this command
     /// once per sample rather than by threading one invocation.
     ///
-    /// Each psp is named for the sample its reads declare, inside --output-dir. Two things
-    /// this stage does not do yet: it writes no census beside the psp (the file a
-    /// parameters fit reads), and it does not refuse to overwrite a psp already there.
+    /// Each psp is named for the sample its reads declare, inside --output-dir, and beside
+    /// it goes that sample's census — the smaller file a parameters fit reads — from the
+    /// same single pass over the reads. A psp already in --output-dir is refused before
+    /// anything is walked; --force replaces it.
     GeneratePsps(GeneratePspsArgs),
+
+    /// Build each stored psp's census, without re-reading a single alignment file.
+    ///
+    /// A census is the small file a parameters fit reads: what one sample showed at a
+    /// fixed set of positions and repeat tracts chosen for the whole run, so the fit can
+    /// ask the same question of every sample and compare their answers.
+    ///
+    /// `generate-psps` already writes one beside each psp. This is for the cases that
+    /// cannot re-walk the reads: psps written before censuses existed, a census lost or
+    /// built under settings since changed, and a census wanted larger than the one on
+    /// disk.
+    ///
+    /// There is no --regions, for the reason call-from-psps has none. The psps record the
+    /// ground they were walked over and the cohort is refused unless they agree about it;
+    /// that agreed ground is what the positions are chosen from. Choosing them over other
+    /// ground would produce censuses the cohort cannot be fitted from.
+    GenerateCensus(GenerateCensusArgs),
+
+    /// Fit a cohort's parameters from its censuses and write them as a parameters file.
+    ///
+    /// This is the file a calling run scores with. Without one a run has two choices and
+    /// neither is a fit: the constants compiled into the binary, or a file somebody hands
+    /// it.
+    ///
+    /// It reads the censuses. It does not read the psps — but each census's psp must be
+    /// beside it, because a census names the psp it was built from and evidence from other
+    /// reads is otherwise indistinguishable from this run's. What is taken from each psp is
+    /// its header: one short read.
+    ///
+    /// The reference and the catalog are needed because a census stores a repeat tract by
+    /// its index within its stratum and nothing else, so the selection has to be rebuilt —
+    /// and the rebuild is checked against a digest every census carries.
+    ///
+    /// The inbreeding coefficient is declared rather than fitted here; --inbreeding states
+    /// one for the cohort and the file records it as supplied.
+    EstimateParameters(EstimateParametersArgs),
 
     /// Call a cohort of stored psps and write a VCF — psp mode's second stage.
     ///

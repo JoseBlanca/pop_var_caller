@@ -51,7 +51,7 @@ use std::env;
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
     AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
-    GenericEvidence, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,
+    GenericEvidence, NamedReadGroup, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,
     SampleCensusEvidence, Section, SectionKey, SelectionTermsDigest,
 };
 use pop_var_caller::ng::parameter_estimation::joint::fit::{
@@ -418,6 +418,8 @@ fn fit_cohort(
             SampleCensusEvidence::resident(
                 format!("s{sample:03}"),
                 terms.clone(),
+                NamedReadGroup::drawn_for(&format!("s{sample:03}"), [ReadGroupId(sample as u32)]),
+                BTreeMap::new(),
                 BTreeMap::from([(
                     SectionKey::Generic(ReadGroupId(sample as u32)),
                     Section::Generic(GenericEvidence::from_parts(

@@ -41,7 +41,7 @@ use std::time::Instant;
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
     AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
-    GenericEvidence, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,
+    GenericEvidence, NamedReadGroup, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,
     SampleCensusEvidence, Section, SectionKey, SelectionTermsDigest,
 };
 use pop_var_caller::ng::parameter_estimation::joint::fit::{JointFitConfig, fit_jointly};
@@ -386,6 +386,8 @@ fn draw(samples: usize, positions: usize, arm: Arm, seed: u64) -> Drawn {
                 SampleCensusEvidence::resident(
                     format!("s{s:02}"),
                     terms.clone(),
+                    NamedReadGroup::drawn_for(&format!("s{s:02}"), [ReadGroupId(s as u32)]),
+                    BTreeMap::new(),
                     BTreeMap::from([(
                         SectionKey::Generic(ReadGroupId(s as u32)),
                         Section::Generic(GenericEvidence::from_parts(

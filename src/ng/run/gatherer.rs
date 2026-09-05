@@ -21,6 +21,7 @@
 //! [`open`](SampleObservationGatherer::open) and a file whose header cannot be built is
 //! refused before any walking starts.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -31,7 +32,9 @@ use crate::ng::locus_generation::{
     LocusCounts, SampleLocusObservations, SampleLocusObservationsIterator,
 };
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
-use crate::ng::parameter_estimation::joint::census::{CensusWriter, DepthCap, ReadCap};
+use crate::ng::parameter_estimation::joint::census::{
+    CensusWriter, DepthCap, NamedReadGroup, ReadCap,
+};
 use crate::ng::parameter_estimation::joint::census_file::{PileupIdentity, write_census};
 use crate::ng::parameter_estimation::joint::loci::{
     CatalogBuildSettings, CensusLoci, ReferenceDigest, RegionSetDigest, SelectableRegions,
@@ -49,7 +52,7 @@ use crate::ng::reference_info::{ContigInfo, ReferenceInfo};
 use crate::ng::region_typing::GenomeRegions;
 use crate::ng::region_typing::RegionKind;
 use crate::ng::repeat_catalog::{RepeatCatalog, StrRepeatCriteria};
-use crate::ng::types::{Bp, ContigId};
+use crate::ng::types::{Bp, ContigId, ReadGroupId};
 
 use super::walker::{WalkReference, generic_path_generators};
 use super::{RunError, RunSegments, Segmentation, WalkProgress};
@@ -236,6 +239,62 @@ impl CensusPlan {
             depth_cap: DEPTH_CAP,
         })
     }
+
+    /// **The census writer for one sample, ready to be fed loci.**
+    ///
+    /// **Both producers build their writer here**, so that a census built while the reads are
+    /// walked and a census built afterwards from the stored psp cannot differ by a constructor
+    /// argument. That is what makes comparing the two files byte for byte a statement about the
+    /// psp — whether it carries everything a census needs — rather than a statement about
+    /// whether two call sites were kept in step
+    /// (`parameter_prepass_joint_records.md` §7.12).
+    ///
+    /// `declared` is the sample's own read groups — the identifier its census keys sections by,
+    /// and who each one is — and `segmentation` is the ground its walk covered. **The names
+    /// travel into the census** because a cohort of censuses is merged on them: every census
+    /// numbers its groups from zero, since a walk sees one sample.
+    ///
+    /// **Every generic stretch is marked walked before a locus arrives.** Without the marking a
+    /// position no read reached is indistinguishable from a region the run never opened, because
+    /// the generic locus generator emits nothing where there is no read — measured on tomato
+    /// SRR7279482 at 25×, 1 in 21 kept positions, every one of them data that would be reported
+    /// as a defect (`census.rs`'s own note on `mark_walked`).
+    #[must_use]
+    pub fn writer_for(
+        &self,
+        sample: String,
+        declared: BTreeMap<ReadGroupId, NamedReadGroup>,
+        segmentation: &Segmentation,
+    ) -> CensusWriter {
+        let contigs = Arc::clone(&self.contigs);
+        let contig_of = move |name: &str| {
+            contigs
+                .entries
+                .iter()
+                .position(|entry| entry.name == name)
+                .map(|index| ContigId(index as u32))
+        };
+        let mut writer = CensusWriter::new(
+            sample,
+            &self.loci,
+            declared,
+            &contig_of,
+            self.terms.clone(),
+            // **The census's own ladder, by name.** `DepthBinEdges::for_census` is the one
+            // ladder a census is recorded on — exact depths to 124 and ten widening rungs
+            // above — so it is called here rather than carried in the plan, where it would
+            // read as a knob a run may set and is not.
+            DepthBinEdges::for_census(),
+            self.read_cap,
+            self.depth_cap,
+        );
+        for region in segmentation.segments() {
+            if region.kind == RegionKind::Generic {
+                writer.mark_walked(region.region);
+            }
+        }
+        writer
+    }
 }
 
 /// **Where a position's reads stop being counted one by one**, and its allele counts are thinned
@@ -338,40 +397,25 @@ impl SampleObservationGatherer {
             // by construction.
             segmentation.inputs(),
         )?;
-        // **Built before the walk, and every generic stretch marked walked before a locus
-        // arrives.** Without the marking a position no read reached is indistinguishable from a
-        // region the run never opened, because the generic generator emits no locus where there
-        // is no read — measured on tomato SRR7279482 at 25×, 1 in 21 kept positions, every one
-        // of them data reported as a defect (`census.rs`'s own note on `mark_walked`).
+        // **Built before the walk**, with every generic stretch already marked walked —
+        // `CensusPlan::writer_for` says why.
         let census = census.map(|plan| {
-            let contigs = Arc::clone(&plan.contigs);
-            let contig_of = move |name: &str| {
-                contigs
-                    .entries
-                    .iter()
-                    .position(|entry| entry.name == name)
-                    .map(|index| ContigId(index as u32))
-            };
-            let mut writer = CensusWriter::new(
+            plan.writer_for(
                 header.sample.clone(),
-                &plan.loci,
-                read_groups.iter().map(|(id, _)| id).collect(),
-                &contig_of,
-                plan.terms.clone(),
-                // **The census's own ladder, by name.** `DepthBinEdges::for_census` is the one
-                // ladder a census is recorded on — exact depths to 124 and ten widening rungs
-                // above — so it is called here rather than carried in the plan, where it would
-                // read as a knob a run may set and is not.
-                DepthBinEdges::for_census(),
-                plan.read_cap,
-                plan.depth_cap,
-            );
-            for region in segmentation.segments() {
-                if region.kind == RegionKind::Generic {
-                    writer.mark_walked(region.region);
-                }
-            }
-            writer
+                read_groups
+                    .iter()
+                    .map(|(id, group)| {
+                        (
+                            id,
+                            NamedReadGroup {
+                                declared_id: group.id.to_string(),
+                                library: group.library.value.to_string(),
+                            },
+                        )
+                    })
+                    .collect(),
+                &segmentation,
+            )
         });
         Ok(Self {
             header,
@@ -673,7 +717,6 @@ mod tests {
     use crate::regions::ContigBounds;
     use noodles_sam::alignment::RecordBuf;
     use noodles_sam::alignment::record::MappingQuality;
-    use std::collections::BTreeMap;
     use tempfile::TempDir;
 
     /// The two fixture contigs, as the fixture reference declares them.
@@ -714,18 +757,7 @@ mod tests {
     /// What only the caller knows, with one parameter of its own — so a test can see the
     /// gatherer *add* to the map rather than replace it — and a fixed timestamp, because a
     /// gatherer stamps nothing itself.
-    pub(super) fn provenance() -> WriterProvenance {
-        WriterProvenance {
-            tool: "ng".to_string(),
-            version: "0.0.0-test".to_string(),
-            subcommand: "generate-psps".to_string(),
-            input_alignments: vec!["to-be-overwritten".to_string()],
-            input_reference: "to-be-overwritten".to_string(),
-            command_line: "ng generate-psps --test".to_string(),
-            parameters: BTreeMap::from([("depth-cap".to_string(), ParameterValue::Integer(300))]),
-            created: "2026-09-03T00:00:00Z".parse().expect("a datetime"),
-        }
-    }
+    pub(super) use crate::ng::run::test_fixtures::walk_provenance as provenance;
 
     // -----------------------------------------------------------------
     // Settings that are NOT their type's default — a gatherer that dropped what it was
@@ -1507,106 +1539,15 @@ mod census_tests {
     use super::*;
     use crate::ng::parameter_estimation::joint::census_file::open_census;
     use crate::ng::psp::PspReader;
-    use crate::ng::region_typing::DEFAULT_MAX_STR_LEN;
-    use crate::ng::region_typing::segment_criteria::{
-        DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
-    };
-    use crate::pop_var_caller_exp::run_ground::{self, GroundRequest, RepeatRouting};
+    use crate::ng::run::test_fixtures::gatherer_over;
     use crate::pop_var_caller_exp::test_fixtures::{ACohortOnDisk, a_cohort_on_disk};
 
     /// The fixture cohort, its ground, and a census plan over it.
     fn a_cohort_with_a_census_plan() -> (ACohortOnDisk, Arc<Segmentation>, CensusPlan) {
-        use crate::ng::parameter_estimation::joint::loci::UnambiguousRuns;
-        use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
-        use crate::ng::repeat_catalog::RepeatCatalog;
-
         let cohort = a_cohort_on_disk();
-        // **The reference is read with an observer**, because the selection needs to know where
-        // the genome is sequence at all: a position inside a run of `N` has no reference base to
-        // compare a read against.
-        let mut callable = UnambiguousRuns::default();
-        let reference = read_reference_info_observing(
-            ReferenceSource::Fasta {
-                fasta: cohort.reference.clone(),
-                fai: None,
-            },
-            &mut callable,
-        )
-        .expect("the fixture's reference reads");
-        let unambiguous = callable
-            .into_selectable()
-            .expect("maximal runs are disjoint");
-
-        let request = GroundRequest {
-            reference: &cohort.reference,
-            catalog: Some(&cohort.catalog),
-            regions: None,
-            routing: RepeatRouting {
-                min_copies: MinCopies::default(),
-                min_period: DEFAULT_MIN_PERIOD,
-                max_period: DEFAULT_MAX_PERIOD,
-                max_str_len: DEFAULT_MAX_STR_LEN,
-                min_purity: DEFAULT_MIN_PURITY,
-            },
-        };
-        let analysed = run_ground::analysed_regions(&request, &reference.contig_list())
-            .expect("the whole reference");
-        let segmentation =
-            Arc::new(run_ground::segments_over(&request, &analysed, &reference).expect("it types"));
-        let catalog = RepeatCatalog::open_checking_against_reference(&cohort.catalog, &reference)
-            .expect("the fixture's catalog is this reference's");
-        // **A target of one position per base, so the fixture keeps some.** The shipped budget
-        // is two million positions and this genome is 300 bases; at the shipped number the
-        // threshold keeps everything, which is what a test of the wiring wants — but saying so
-        // is better than relying on it.
-        let plan = CensusPlan::of_run(
-            CensusSelection {
-                generic_target: 300,
-                ..CensusSelection::SHIPPED
-            },
-            &catalog,
-            &analysed,
-            &unambiguous,
-            &reference,
-            &segmentation.inputs().repeat_tract_criteria,
-        )
-        .expect("the fixture's ground can be selected from");
+        let (segmentation, plan) =
+            crate::ng::run::test_fixtures::a_census_plan_over(&cohort.reference, &cohort.catalog);
         (cohort, segmentation, plan)
-    }
-
-    /// Open a gatherer over one of the fixture's samples.
-    fn gatherer_over(
-        cohort: &ACohortOnDisk,
-        which: usize,
-        segmentation: &Arc<Segmentation>,
-        plan: Option<&CensusPlan>,
-    ) -> SampleObservationGatherer {
-        use crate::ng::read::input::reference::OpenReference;
-        use crate::ng::reference_info::{
-            ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
-        };
-
-        let cache = Arc::new(ReferenceInfoCache::new());
-        let (info, _) = read_reference_verifying_or_creating_fai(
-            &cache,
-            cohort.reference.clone(),
-            ReferenceCheck::TrustIndexWithoutChecking,
-        )
-        .expect("the reference reads");
-        let reference = OpenReference::new(info);
-        SampleObservationGatherer::open(
-            SampleWalkInputs {
-                alignments: std::slice::from_ref(&cohort.alignments[which]),
-                reference: &reference,
-                read_filters: ReadFilterConfig::default(),
-                locus_generator_settings: PileupGeneratorConfig::default(),
-                build_index_if_missing: false,
-            },
-            Arc::clone(segmentation),
-            super::tests::provenance(),
-            plan,
-        )
-        .expect("the sample opens")
     }
 
     /// **The walk writes both files, and the census names the psp it was built from.**
@@ -1626,9 +1567,14 @@ mod census_tests {
         let psp = cohort.directory.path().join("zeta.psp");
         let census = cohort.directory.path().join("zeta.census");
 
-        let (stats, _) = gatherer_over(&cohort, 0, &segmentation, Some(&plan))
-            .write_psp(&psp, Some(&census))
-            .expect("the walk writes both files");
+        let (stats, _) = gatherer_over(
+            &cohort.alignments[0],
+            &cohort.reference,
+            &segmentation,
+            Some(&plan),
+        )
+        .write_psp(&psp, Some(&census))
+        .expect("the walk writes both files");
 
         assert!(census.is_file(), "the census is at {census:?}");
         let (_evidence, named) = open_census(&census).expect("this build's own census");
@@ -1654,9 +1600,14 @@ mod census_tests {
         let (cohort, segmentation, _plan) = a_cohort_with_a_census_plan();
         let psp = cohort.directory.path().join("zeta.psp");
 
-        let _ = gatherer_over(&cohort, 0, &segmentation, None)
-            .write_psp(&psp, None)
-            .expect("the walk writes its psp");
+        let _ = gatherer_over(
+            &cohort.alignments[0],
+            &cohort.reference,
+            &segmentation,
+            None,
+        )
+        .write_psp(&psp, None)
+        .expect("the walk writes its psp");
 
         assert!(psp.is_file());
         assert!(
@@ -1680,9 +1631,14 @@ mod census_tests {
             .join("no-such-directory")
             .join("zeta.census");
 
-        let refused = gatherer_over(&cohort, 0, &segmentation, Some(&plan))
-            .write_psp(&psp, Some(&census))
-            .expect_err("there is nowhere to write the census");
+        let refused = gatherer_over(
+            &cohort.alignments[0],
+            &cohort.reference,
+            &segmentation,
+            Some(&plan),
+        )
+        .write_psp(&psp, Some(&census))
+        .expect_err("there is nowhere to write the census");
 
         let rendered = crate::error_render::format_error_chain(&refused);
         assert!(
@@ -1705,9 +1661,14 @@ mod census_tests {
         for (which, sample) in ["zeta", "alpha"].iter().enumerate() {
             let psp = cohort.directory.path().join(format!("{sample}.psp"));
             let census = cohort.directory.path().join(format!("{sample}.census"));
-            let _ = gatherer_over(&cohort, which, &segmentation, Some(&plan))
-                .write_psp(&psp, Some(&census))
-                .expect("the walk writes both files");
+            let _ = gatherer_over(
+                &cohort.alignments[which],
+                &cohort.reference,
+                &segmentation,
+                Some(&plan),
+            )
+            .write_psp(&psp, Some(&census))
+            .expect("the walk writes both files");
             written.push(std::fs::read(&census).expect("the census reads"));
         }
 

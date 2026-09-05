@@ -45,6 +45,7 @@ use std::path::PathBuf;
 use md5::{Digest, Md5};
 
 use crate::ng::locus_generation::{LocusKind, ReadWitness, SampleLocusObservations};
+use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
 use crate::ng::parameter_estimation::generic::depth_bins::{DepthBin, DepthBinEdges};
 use crate::ng::parameter_estimation::joint::loci::{
     CensusLoci, CensusLociDigest, CensusLociDigester, SelectionTerms,
@@ -1224,6 +1225,42 @@ pub enum Sections {
 }
 
 impl Sections {
+    /// The same sections under new read-group identifiers.
+    ///
+    /// **A relabelling and not a rewrite**: the bytes of a file-backed census are untouched and
+    /// its extents keep their offsets, because what changes is only the number a section is
+    /// filed under. `of` maps a sample's own identifier to the run-wide one.
+    fn renumbered(self, of: &BTreeMap<ReadGroupId, ReadGroupId>) -> Self {
+        let moved = |key: SectionKey| match key {
+            SectionKey::Generic(group) => SectionKey::Generic(of[&group]),
+            SectionKey::Ssr(group, stratum) => SectionKey::Ssr(of[&group], stratum),
+        };
+        match self {
+            Self::Resident(sections) => Self::Resident(
+                sections
+                    .into_iter()
+                    .map(|(key, section)| (moved(key), section))
+                    .collect(),
+            ),
+            Self::Backed { path, directory } => Self::Backed {
+                path,
+                directory: directory
+                    .into_iter()
+                    .map(|(key, extent)| (moved(key), extent))
+                    .collect(),
+            },
+        }
+    }
+
+    /// Every read group any of these sections is filed under.
+    fn read_groups_used(&self) -> std::collections::BTreeSet<ReadGroupId> {
+        let keys: Box<dyn Iterator<Item = SectionKey> + '_> = match self {
+            Self::Resident(sections) => Box::new(sections.keys().copied()),
+            Self::Backed { directory, .. } => Box::new(directory.keys().copied()),
+        };
+        keys.map(SectionKey::read_group).collect()
+    }
+
     /// The sections a walk built, checked against their own keys.
     ///
     /// # Panics
@@ -1361,6 +1398,64 @@ impl Sections {
 // The whole input to the fit
 // ---------------------------------------------------------------------
 
+/// **Who one read group is**, as the alignment file that produced it declared it.
+///
+/// **A census carries these because it is the fit's only input, and the fit has to name read
+/// groups to whoever reads its answers.** The parameters file identifies a read group by its
+/// `@RG ID`, its library and its sample together, never by a number
+/// (`doc/devel/ng/spec/parameters_file.md`), and the numbers themselves cannot travel: a walk
+/// sees one sample, so every census numbers its own groups from zero and two of them collide by
+/// construction. The names are what a cohort of censuses can be merged on.
+///
+/// The sample is not here because a census belongs to one, and holding it per group would let a
+/// file say two different things about which plant it is.
+///
+/// **Not `read_groups.rs`'s own `DeclaredReadGroup`**, which is a different thing with a
+/// confusable name: that one is what an `@RG` record literally said, library included only if
+/// the header gave one. This is the filled-in answer — the library here is the run's, synthesized
+/// where the file named none — which is what the parameters file has to carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedReadGroup {
+    /// The `@RG ID` the alignment file declares, verbatim. **Unique across a whole run** — not
+    /// merely within a file — which is what lets a cohort of censuses be merged on it.
+    pub declared_id: String,
+    /// The `@RG LB`, or the name this project synthesized when the file declared none. The
+    /// per-library error rates are keyed on groupings of this.
+    pub library: String,
+}
+
+impl NamedReadGroup {
+    /// **Names for a drawn sample's read groups** — for a harness or a test whose cohort has no
+    /// alignment files to take them from.
+    ///
+    /// **The names are made unique across the cohort by prefixing the sample**, because a
+    /// cohort of censuses is merged on the `@RG ID` and the run-wide rule is that no two read
+    /// groups anywhere in one run share one. A drawn cohort that named every sample's first
+    /// group the same thing would be one no real run can produce, and it would be refused at
+    /// the merge for a reason that says nothing about what was being tested.
+    ///
+    /// A real run does not call this: it takes the names from the alignment files, or from the
+    /// psp header that recorded them.
+    #[must_use]
+    pub fn drawn_for(
+        sample: &str,
+        groups: impl IntoIterator<Item = ReadGroupId>,
+    ) -> BTreeMap<ReadGroupId, Self> {
+        groups
+            .into_iter()
+            .map(|id| {
+                (
+                    id,
+                    Self {
+                        declared_id: format!("{sample}:rg{}", id.get()),
+                        library: format!("{sample}:lib{}", id.get()),
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
 /// One sample's evidence at the kept loci, plus the values the fit checks before pooling.
 ///
 /// **The sections are not public, and that is the whole point of the type — 2026-08-14.** A
@@ -1378,6 +1473,12 @@ impl Sections {
 pub struct SampleCensusEvidence {
     pub sample: String,
     pub terms: RecordingTerms,
+    /// **Who each of this sample's read groups is**, under the identifier its own sections are
+    /// keyed by. Empty only for a value a test built rather than a census read from a file.
+    declared: BTreeMap<ReadGroupId, NamedReadGroup>,
+    /// **What this sample's own base qualities claimed**, per read group — Σ `ln P(this read is
+    /// wrong)` and how many reads that ran over.
+    minted: BTreeMap<ReadGroupId, MintedReadErrors>,
     sections: Sections,
 }
 
@@ -1386,11 +1487,15 @@ impl SampleCensusEvidence {
     pub fn resident(
         sample: String,
         terms: RecordingTerms,
+        declared: BTreeMap<ReadGroupId, NamedReadGroup>,
+        minted: BTreeMap<ReadGroupId, MintedReadErrors>,
         sections: BTreeMap<SectionKey, Section>,
     ) -> Self {
         Self {
             sample,
             terms,
+            declared,
+            minted,
             sections: Sections::resident(sections),
         }
     }
@@ -1400,13 +1505,61 @@ impl SampleCensusEvidence {
     pub fn backed(
         sample: String,
         terms: RecordingTerms,
+        declared: BTreeMap<ReadGroupId, NamedReadGroup>,
+        minted: BTreeMap<ReadGroupId, MintedReadErrors>,
         path: PathBuf,
         directory: BTreeMap<SectionKey, ByteExtent>,
     ) -> Self {
         Self {
             sample,
             terms,
+            declared,
+            minted,
             sections: Sections::backed(path, directory),
+        }
+    }
+
+    /// **Who each of this sample's read groups is**, under the identifier its own sections are
+    /// keyed by.
+    ///
+    /// Empty where nothing named them, which is a value a test built rather than a census read
+    /// from a file: every census this build writes carries one entry a group.
+    #[must_use]
+    pub fn declared_read_groups(&self) -> &BTreeMap<ReadGroupId, NamedReadGroup> {
+        &self.declared
+    }
+
+    /// **What this sample's base qualities claimed, per read group.**
+    ///
+    /// A library's base-quality calibration is fitted from two numbers together: the error rate
+    /// the run measured, and what the qualities themselves said. A census carries the second, so
+    /// a fit over stored evidence can produce a calibration at all rather than falling back to
+    /// the constant.
+    #[must_use]
+    pub fn minted_read_errors(&self) -> &BTreeMap<ReadGroupId, MintedReadErrors> {
+        &self.minted
+    }
+
+    /// The same sample under run-wide read-group identifiers.
+    ///
+    /// **The numbers a census carries are its own walk's**, and a walk sees one sample — so every
+    /// census of a cohort numbers its groups from zero and two of them mean different libraries
+    /// by the same number. A cohort assigns run-wide identifiers and moves each sample onto them
+    /// here; the sections are relabelled, not rewritten.
+    fn renumbered(self, of: &BTreeMap<ReadGroupId, ReadGroupId>) -> Self {
+        Self {
+            declared: self
+                .declared
+                .into_iter()
+                .map(|(group, named)| (of[&group], named))
+                .collect(),
+            minted: self
+                .minted
+                .into_iter()
+                .filter_map(|(group, totals)| of.get(&group).map(|now| (*now, totals)))
+                .collect(),
+            sections: self.sections.renumbered(of),
+            ..self
         }
     }
 
@@ -1686,6 +1839,10 @@ pub enum CohortRefusal {
     Terms(TermsDisagreement),
     /// Two samples claim one read group, so their identifiers were minted separately.
     SharedReadGroup(SharedReadGroup),
+    /// Two samples declare one `@RG ID`, which is unique across a whole run.
+    SharedDeclaredId(SharedDeclaredId),
+    /// A sample holds evidence for a read group it does not name.
+    SectionOfAnUndeclaredReadGroup(SectionOfAnUndeclaredReadGroup),
 }
 
 impl std::fmt::Display for CohortRefusal {
@@ -1693,6 +1850,8 @@ impl std::fmt::Display for CohortRefusal {
         match self {
             Self::Terms(refusal) => refusal.fmt(f),
             Self::SharedReadGroup(refusal) => refusal.fmt(f),
+            Self::SharedDeclaredId(refusal) => refusal.fmt(f),
+            Self::SectionOfAnUndeclaredReadGroup(refusal) => refusal.fmt(f),
         }
     }
 }
@@ -1708,6 +1867,68 @@ impl From<TermsDisagreement> for CohortRefusal {
 impl From<SharedReadGroup> for CohortRefusal {
     fn from(refusal: SharedReadGroup) -> Self {
         Self::SharedReadGroup(refusal)
+    }
+}
+
+/// **Two samples declare one `@RG ID`**, which no run can produce.
+///
+/// The identifier is unique across a whole run rather than within a file, and it is what a
+/// cohort of censuses is merged on. Two censuses claiming one either came from different runs or
+/// from alignment files that were never checked against each other; pooling their libraries into
+/// a single error rate is the silent damage, so the cohort is refused instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedDeclaredId {
+    pub first: String,
+    pub second: String,
+    pub declared_id: String,
+}
+
+impl std::fmt::Display for SharedDeclaredId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "samples {} and {} both declare the read group {:?}; an @RG ID is unique across a \
+             whole run, so these censuses were not built from one cohort and their libraries \
+             would be fitted as one",
+            self.first, self.second, self.declared_id
+        )
+    }
+}
+
+impl std::error::Error for SharedDeclaredId {}
+
+impl From<SharedDeclaredId> for CohortRefusal {
+    fn from(refusal: SharedDeclaredId) -> Self {
+        Self::SharedDeclaredId(refusal)
+    }
+}
+
+/// **A sample holds evidence for a read group it does not name.**
+///
+/// Renumbering onto run-wide identifiers has nowhere to put that section, and the alternative —
+/// dropping it — would lose a library's evidence with no symptom.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionOfAnUndeclaredReadGroup {
+    pub sample: String,
+    pub read_group: ReadGroupId,
+}
+
+impl std::fmt::Display for SectionOfAnUndeclaredReadGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "sample {} holds evidence for read group {} and does not name it, so there is no \
+             identifier to move that evidence onto",
+            self.sample, self.read_group
+        )
+    }
+}
+
+impl std::error::Error for SectionOfAnUndeclaredReadGroup {}
+
+impl From<SectionOfAnUndeclaredReadGroup> for CohortRefusal {
+    fn from(refusal: SectionOfAnUndeclaredReadGroup) -> Self {
+        Self::SectionOfAnUndeclaredReadGroup(refusal)
     }
 }
 
@@ -1757,6 +1978,7 @@ impl CohortCensusEvidence {
                 }
             }
         }
+        let samples = Self::onto_run_wide_read_groups(samples)?;
         let read_groups = Self::read_groups_of(&samples)?;
         let strata = samples
             .iter()
@@ -1769,6 +1991,65 @@ impl CohortCensusEvidence {
             read_groups,
             strata,
         })
+    }
+
+    /// **Move every sample onto identifiers that mean one thing across the whole cohort.**
+    ///
+    /// A census numbers its read groups as its own walk did, and a walk sees one sample — so
+    /// every census of a cohort starts again at zero and two of them name different libraries by
+    /// the same number. **That is the normal state of psp mode**, whose advertised way to walk a
+    /// cohort is one invocation a sample, so it is renumbered rather than refused.
+    ///
+    /// **Run-wide identifiers are assigned in (sample order, the sample's own group order)**,
+    /// which is the rule [`ReadGroups::of_merged_tables`](crate::ng::read::input::read_groups)
+    /// already uses when a run opens alignment files. So a cohort assembled from censuses and the
+    /// same cohort assembled from alignment files number their read groups the same way.
+    ///
+    /// **What is refused is two samples declaring one `@RG ID`.** The identifier is unique
+    /// across a whole run — not merely within a file — so two censuses claiming one are not a
+    /// cohort a run could have produced, and pooling their libraries into a single error rate is
+    /// exactly the silent damage this check exists to prevent.
+    ///
+    /// **A sample whose sections name a read group it does not declare is refused too**, as a
+    /// census that cannot be renumbered without losing evidence: the alternative is dropping a
+    /// section, which has no symptom.
+    fn onto_run_wide_read_groups(
+        samples: Vec<SampleCensusEvidence>,
+    ) -> Result<Vec<SampleCensusEvidence>, CohortRefusal> {
+        let mut claimed: BTreeMap<&str, String> = BTreeMap::new();
+        let mut maps: Vec<BTreeMap<ReadGroupId, ReadGroupId>> = Vec::with_capacity(samples.len());
+        let mut next = 0_u32;
+        for sample in &samples {
+            let mut of = BTreeMap::new();
+            for (own, named) in &sample.declared {
+                if let Some(first) = claimed.insert(&named.declared_id, sample.sample.clone()) {
+                    return Err(SharedDeclaredId {
+                        first,
+                        second: sample.sample.clone(),
+                        declared_id: named.declared_id.clone(),
+                    }
+                    .into());
+                }
+                of.insert(*own, ReadGroupId(next));
+                next += 1;
+            }
+            // Every section has to have somewhere to go.
+            for used in sample.sections.read_groups_used() {
+                if !of.contains_key(&used) {
+                    return Err(SectionOfAnUndeclaredReadGroup {
+                        sample: sample.sample.clone(),
+                        read_group: used,
+                    }
+                    .into());
+                }
+            }
+            maps.push(of);
+        }
+        Ok(samples
+            .into_iter()
+            .zip(maps)
+            .map(|(sample, of)| sample.renumbered(&of))
+            .collect())
     }
 
     /// The union of the samples' read groups, refusing the cohort where two samples claim one.
@@ -1961,6 +2242,15 @@ pub struct CensusWriter {
     /// discovering them would make a group's record start at its first read, and every
     /// position before that indistinguishable from never walked.
     read_groups: Vec<ReadGroupId>,
+    /// **Who each of those groups is** — the `@RG ID` and the library, which travel into the
+    /// census because a cohort of censuses can only be merged on them.
+    declared: BTreeMap<ReadGroupId, NamedReadGroup>,
+    /// **Σ `ln P(this read is wrong)` and the read count, per read group**, accumulated as the
+    /// loci go past. What a base-quality calibration is fitted from, and the half of it a census
+    /// carries — see [`SampleCensusEvidence::minted_read_errors`].
+    minted: BTreeMap<ReadGroupId, MintedReadErrors>,
+    /// Scratch for the accumulator, cleared and refilled once a locus rather than allocated.
+    minted_scratch: Vec<(ReadGroupId, MintedReadErrors)>,
     sample: String,
 }
 
@@ -2006,7 +2296,10 @@ impl CensusWriter {
     pub fn new(
         sample: String,
         loci: &CensusLoci,
-        read_groups: Vec<ReadGroupId>,
+        // **The sample's read groups and who each one is, in one argument** — two lists that
+        // had to agree would be a way for a census to record a library under another's
+        // identifier, with no symptom.
+        declared: BTreeMap<ReadGroupId, NamedReadGroup>,
         contig_of: &dyn Fn(&str) -> Option<ContigId>,
         terms: SelectionTerms,
         edges: DepthBinEdges,
@@ -2074,7 +2367,10 @@ impl CensusWriter {
             read_cap,
             depth_cap,
             stratum_counts: loci.ssr_stratum_counts().clone(),
-            read_groups,
+            read_groups: declared.keys().copied().collect(),
+            declared,
+            minted: BTreeMap::new(),
+            minted_scratch: Vec::new(),
             sample,
         }
     }
@@ -2085,6 +2381,21 @@ impl CensusWriter {
     /// denominator, and a locus in a region never walked keeps [`DepthCode::NeverWalked`], so
     /// the three states survive.
     pub fn add_locus(&mut self, locus: &SampleLocusObservations) {
+        // **Every generic locus the walk hands over, not only the kept ones.** This is the
+        // accumulator the per-sample calibration pre-pass uses, with its own unit unchanged: a
+        // read at a position, counted once for every position it is seen at, at generic loci,
+        // over complete witnesses, before the per-position depth cap. Restricting it to the
+        // census's kept positions would be a second definition of a per-read-group total, and
+        // the one number it feeds — how far a library's own base qualities may be trusted — is
+        // a property of the library rather than of which positions were kept.
+        crate::ng::parameter_estimation::generic::calibration::minted_error_by_read_group(
+            locus,
+            &mut self.minted_scratch,
+        );
+        for (group, totals) in self.minted_scratch.drain(..) {
+            self.minted.entry(group).or_default().add(totals);
+        }
+
         match &locus.kind {
             LocusKind::Generic => self.add_generic(locus),
             LocusKind::Ssr(_) => self.add_ssr(locus),
@@ -2442,6 +2753,8 @@ impl CensusWriter {
                 depth_ladder: DepthLadderDigest::of(&self.edges),
                 depth_cap: self.depth_cap,
             },
+            self.declared,
+            self.minted,
             sections,
         )
     }
@@ -2559,6 +2872,8 @@ mod tests {
         let records = SampleCensusEvidence::resident(
             "s".to_string(),
             terms(),
+            NamedReadGroup::drawn_for("s", [ReadGroupId(0), ReadGroupId(1)]),
+            BTreeMap::new(),
             BTreeMap::from([
                 (SectionKey::Generic(ReadGroupId(0)), Section::Generic(one)),
                 (SectionKey::Generic(ReadGroupId(1)), Section::Generic(two)),
@@ -2974,15 +3289,18 @@ mod tests {
         assert_eq!(refusal.field, "depth ladder edges");
     }
 
-    /// **The refusal this whole check exists for.** A driver that identifies each sample's read
-    /// groups on its own — one call per alignment file — gives every sample's first read group
-    /// the identifier `0`, and a cohort that took them would fit one sequencing-error rate over
-    /// every sample's library and report it as one library's.
+    /// **Two censuses that both numbered their read groups from zero are renumbered, not
+    /// refused** — and that is the whole point of the names.
     ///
-    /// The two samples here are otherwise perfect: same selection, same ladder, same units.
-    /// Only the identifiers collide, and that alone must be enough to refuse.
+    /// This is psp mode's normal state rather than a corner: a walk sees one sample, so every
+    /// census starts its numbering again at zero, and the advertised way to walk a cohort is one
+    /// invocation a sample. Before the names existed this pair was refused, which would have made
+    /// a stored cohort unfittable.
+    ///
+    /// **What must not happen is the two being fitted as one library**, so the run-wide
+    /// identifiers have to come out different — which is what the last assertion checks.
     #[test]
-    fn a_cohort_refuses_two_samples_whose_read_groups_were_identified_separately() {
+    fn two_samples_that_both_numbered_from_zero_are_renumbered_apart() {
         let separately_minted: Vec<SampleCensusEvidence> = ["a", "b"]
             .iter()
             .map(|name| {
@@ -2991,20 +3309,83 @@ mod tests {
                 writer.finish()
             })
             .collect();
-        let refusal = CohortCensusEvidence::new(separately_minted)
-            .expect_err("two samples cannot share one read group");
-        let CohortRefusal::SharedReadGroup(refusal) = refusal else {
-            panic!("a collision of identifiers is not a disagreement about terms");
+
+        let cohort = CohortCensusEvidence::new(separately_minted)
+            .expect("two censuses that both numbered from zero are a cohort, renumbered");
+
+        assert_eq!(
+            cohort.read_groups(),
+            &[ReadGroupId(0), ReadGroupId(1)],
+            "the two libraries end up under different identifiers, which is what keeps their \
+             error rates apart",
+        );
+        let named: Vec<&str> = cohort
+            .samples()
+            .iter()
+            .flat_map(|sample| {
+                sample
+                    .declared_read_groups()
+                    .values()
+                    .map(|group| group.declared_id.as_str())
+            })
+            .collect();
+        assert_eq!(
+            named,
+            vec!["a:rg0", "b:rg0"],
+            "and each keeps the name it was declared under, which is what they were merged on",
+        );
+    }
+
+    /// **Two samples declaring one `@RG ID` are refused**, because no run can produce that: the
+    /// identifier is unique across a whole run rather than within a file.
+    #[test]
+    fn a_cohort_refuses_two_samples_that_declare_one_read_group_id() {
+        let mut samples: Vec<SampleCensusEvidence> = ["a", "b"]
+            .iter()
+            .map(|name| {
+                let mut writer = ssr_writer_for(name, ReadGroupId(0));
+                writer.add_locus(&ssr_locus(vec![observation(b"ATATATATATAT", 0, 2)]));
+                writer.finish()
+            })
+            .collect();
+        // The second sample's group is renamed to the first's, which is the state a cohort
+        // assembled out of two different runs' files would be in.
+        let clash = samples[0].declared_read_groups()[&ReadGroupId(0)].clone();
+        samples[1].declared = BTreeMap::from([(ReadGroupId(0), clash)]);
+
+        let refusal =
+            CohortCensusEvidence::new(samples).expect_err("an @RG ID is unique across a whole run");
+
+        let CohortRefusal::SharedDeclaredId(refusal) = refusal else {
+            panic!("two samples declaring one identifier is its own refusal");
         };
         assert_eq!(refusal.first, "a");
         assert_eq!(refusal.second, "b");
-        assert_eq!(refusal.read_group, ReadGroupId(0));
+        assert_eq!(refusal.declared_id, "a:rg0");
         assert!(
-            refusal
-                .to_string()
-                .contains("a read group belongs to one sample"),
+            refusal.to_string().contains("unique across a whole run"),
             "the refusal has to say what it caught: {refusal}"
         );
+    }
+
+    /// **A sample holding evidence for a read group it does not name is refused**, because
+    /// renumbering has nowhere to put that section and dropping it would lose a library with no
+    /// symptom.
+    #[test]
+    fn a_cohort_refuses_a_sample_whose_sections_name_a_group_it_does_not_declare() {
+        let mut writer = ssr_writer_for("a", ReadGroupId(0));
+        writer.add_locus(&ssr_locus(vec![observation(b"ATATATATATAT", 0, 2)]));
+        let mut sample = writer.finish();
+        sample.declared = BTreeMap::new();
+
+        let refusal =
+            CohortCensusEvidence::new(vec![sample]).expect_err("the section has nowhere to go");
+
+        let CohortRefusal::SectionOfAnUndeclaredReadGroup(refusal) = refusal else {
+            panic!("an unnamed section is its own refusal");
+        };
+        assert_eq!(refusal.sample, "a");
+        assert_eq!(refusal.read_group, ReadGroupId(0));
     }
 
     /// A cohort whose read groups **were** identified once is taken, and its union is the two
@@ -3445,7 +3826,7 @@ mod tests {
         CensusWriter::new(
             "sample".to_string(),
             &loci,
-            groups.iter().map(|g| ReadGroupId(*g)).collect(),
+            NamedReadGroup::drawn_for("sample", groups.iter().map(|g| ReadGroupId(*g))),
             &|_| Some(ContigId(0)),
             selection_terms(),
             DepthBinEdges::for_census(),
@@ -3574,7 +3955,9 @@ mod tests {
         CensusWriter::new(
             sample_name.to_string(),
             &loci,
-            vec![group],
+            // **Named after this sample**, so two writers built for two samples do not
+            // declare one identifier — an `@RG ID` is unique across a whole run.
+            NamedReadGroup::drawn_for(sample_name, [group]),
             &|_| Some(ContigId(0)),
             selection_terms(),
             DepthBinEdges::for_census(),
@@ -3613,7 +3996,7 @@ mod tests {
         CensusWriter::new(
             "sample".to_string(),
             &loci,
-            vec![ReadGroupId(0)],
+            NamedReadGroup::drawn_for("sample", [ReadGroupId(0)]),
             &|_| Some(ContigId(0)),
             selection_terms(),
             DepthBinEdges::for_census(),

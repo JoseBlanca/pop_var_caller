@@ -99,9 +99,9 @@ use std::sync::Arc;
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
     AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
-    GenericEvidence, ObservedAllele, OffsetCounts, PackedDepthCodes, ReadCap, RecordingTerms,
-    SampleCensusEvidence, Section, SectionKey, SelectionTermsDigest, SsrEvidence, Stratum,
-    WalkedBits,
+    GenericEvidence, NamedReadGroup, ObservedAllele, OffsetCounts, PackedDepthCodes, ReadCap,
+    RecordingTerms, SampleCensusEvidence, Section, SectionKey, SelectionTermsDigest, SsrEvidence,
+    Stratum, WalkedBits,
 };
 use pop_var_caller::ng::parameter_estimation::joint::fit::{JointFitConfig, fit_jointly};
 use pop_var_caller::ng::parameter_estimation::joint::loci::{
@@ -566,6 +566,8 @@ fn drawn_generic_cohort(
             SampleCensusEvidence::resident(
                 format!("s{s}"),
                 terms.clone(),
+                NamedReadGroup::drawn_for(&format!("s{s}"), [ReadGroupId(s as u32)]),
+                BTreeMap::new(),
                 BTreeMap::from([(
                     SectionKey::Generic(ReadGroupId(s as u32)),
                     Section::Generic(GenericEvidence::from_parts(
@@ -634,7 +636,13 @@ fn drawn_ssr_cohort(
                     )
                 })
                 .collect::<BTreeMap<_, _>>();
-            SampleCensusEvidence::resident(format!("s{s}"), terms.clone(), sections)
+            SampleCensusEvidence::resident(
+                format!("s{s}"),
+                terms.clone(),
+                NamedReadGroup::drawn_for(&format!("s{s}"), [ReadGroupId(s as u32)]),
+                BTreeMap::new(),
+                sections,
+            )
         })
         .collect();
 

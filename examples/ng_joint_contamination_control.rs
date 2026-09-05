@@ -60,7 +60,7 @@ use std::time::Instant;
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
     AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
-    GenericEvidence, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,
+    GenericEvidence, NamedReadGroup, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,
     SampleCensusEvidence, Section, SectionKey, SelectionTermsDigest,
 };
 use pop_var_caller::ng::parameter_estimation::joint::contamination::{
@@ -625,7 +625,16 @@ fn draw(
                         )
                     })
                     .collect();
-                SampleCensusEvidence::resident(format!("s{s:02}"), terms.clone(), sections)
+                SampleCensusEvidence::resident(
+                    format!("s{s:02}"),
+                    terms.clone(),
+                    NamedReadGroup::drawn_for(
+                        &format!("s{s:02}"),
+                        (0..libraries.len()).map(|k| ReadGroupId((s * libraries.len() + k) as u32)),
+                    ),
+                    BTreeMap::new(),
+                    sections,
+                )
             })
             .collect(),
     }
