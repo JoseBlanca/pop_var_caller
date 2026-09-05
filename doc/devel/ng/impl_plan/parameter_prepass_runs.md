@@ -334,18 +334,37 @@ produces the same bytes.
 
 ### Milestone D — the four stages, end to end
 
-☐ **D1 — the whole route on the tomato slice.** `generate-psps` → `generate-census` →
+✅ **D1 — the whole route on the tomato slice.** `generate-psps` → `generate-census` →
 `estimate-parameters` → `call-from-psps --parameters`, and the calling run's report names the
 file's numbers as fitted rather than defaulted. A script beside the existing oracles.
 *Depends:* C6.
 
-☐ **D2 — what the fitted numbers change.** The same cohort called with `--defaults` and with
+✅ **D2 — what the fitted numbers change.** The same cohort called with `--defaults` and with
 the fitted file: how many records each writes, and how many genotypes differ. **A measurement,
 not a pass/fail** — it is the first look at what the fit is worth, and a run where nothing
 moves is as informative as one where much does.
 *Depends:* D1.
 
 > **Checkpoint D: the four commands compose. Pause for review.**
+>
+> **Reached 2026-09-05**
+> ([report](../../reports/implementations/ng_fit_stage_d_2026-09-05.md)). The four commands run
+> end to end on six tomato accessions over the two 100 kb intervals, and the two routes to a
+> census still agree byte for byte on real reads — now including the minted read-error totals.
+>
+> **Calling with numbers fitted from the cohort's own data rather than the compiled-in constants
+> removes 82 of 599 records and changes 115 genotypes in 3,102.** The 82 are the marginal ones:
+> median QUAL 5.5, against 125.3 for the 517 records both runs called.
+>
+> **The honest reading is narrower than the numbers look.** The comparison is a tomato cohort
+> called with a *human* heterozygosity — the defaults' prior is `stated_heterozygosity`, which
+> the file itself calls "the one that rests on nothing this run measured" — against the same
+> cohort called with its own fitted curve. On a human cohort the two would sit closer, and
+> nothing here says how much closer.
+>
+> **Contamination was not fitted and the file says so**: six samples is below what the estimator
+> needs, and no `[contamination]` section is written, which is distinguishable from a measured
+> zero.
 
 ### Milestone E — the base-quality calibration
 

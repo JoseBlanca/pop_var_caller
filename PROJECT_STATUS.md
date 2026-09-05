@@ -27,7 +27,32 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-05):** **a parameters file produced from data, for the first
+> - **Last completed task (2026-09-05):** **the fit stage is finished — the four commands compose,
+> and fitted numbers change the calls** (branch `ng-psp-mode`, Checkpoint D of
+> [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
+> [report](doc/devel/reports/implementations/ng_fit_stage_d_2026-09-05.md)).
+>
+> `generate-psps` → `generate-census` → `estimate-parameters` → `call-from-psps` runs end to end
+> on six tomato accessions over the two 100 kb intervals, and the two routes to a census still
+> agree byte for byte on real reads.
+>
+> **Calling with numbers fitted from the cohort's own data rather than the compiled-in constants
+> removes 82 of 599 records and changes 115 genotypes in 3,102.** The 82 are the marginal ones —
+> median QUAL 5.5 against 125.3 for the 517 records both runs called, and the highest QUAL among
+> the dropped, 88.9, sits below the median of the kept.
+>
+> **Read it narrowly.** The comparison is a tomato cohort called with a *human* heterozygosity —
+> the defaults' prior is `stated_heterozygosity`, which the parameters file itself calls "the one
+> that rests on nothing this run measured" — against the same cohort called with its own fitted
+> curve. On a human cohort the two would sit closer and nothing here says how much. And 599
+> records over 200 kb at three reads a position is a small corner: on this ground the census keeps
+> 198,182 of 200,000 bases, where on a whole tomato genome the same budget keeps about 1 in 400.
+>
+> **Contamination was not fitted and the file says so.** Six samples is below what that estimator
+> needs, so no `[contamination]` section is written — which the file distinguishes from a measured
+> zero. It reports 5 of its 7 groups of numbers as fitted, and names the two that were not.
+>
+> - **Earlier (2026-09-05):** **a parameters file produced from data, for the first
 > time in this tree** (branch `ng-psp-mode`, Checkpoint C of
 > [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
 > [report](doc/devel/reports/implementations/ng_fit_stage_c_2026-09-05.md)).
