@@ -157,6 +157,36 @@ impl LocusSummary {
 /// nothing to do with it. Making it an obligation would mean a source could not decide per
 /// record whether reuse is possible — which a decoder must, since a record whose buffers are
 /// the wrong size is cheaper to allocate than to reshape.
+/// What a source hands over when the cache draws from it.
+///
+/// **Two shapes, because two sources answer differently and the merge must not care.** A walker
+/// over alignment files has just minted the record and gives it whole; a reader over a stored
+/// sample gives the summary its head carried and leaves the evidence in its own arena, to be
+/// built only if a locus survives (`spec/cohort_merge_psp_path.md` §3.1). At about one position
+/// in a hundred surviving, the second shape is what makes the other ninety-nine free.
+pub enum Drawn {
+    /// The record itself, already built.
+    Built(SampleLocusObservations),
+    /// Its summary, with the evidence kept by the source under `body`.
+    Kept {
+        /// Everything the merge decides on before assembling.
+        summary: LocusSummary,
+        /// Where the source is holding the evidence — meaningful only to that source.
+        body: core::ops::Range<usize>,
+    },
+}
+
+impl Drawn {
+    /// What the merge decides on, whichever shape arrived.
+    #[must_use]
+    pub fn summary(&self) -> LocusSummary {
+        match self {
+            Self::Built(record) => LocusSummary::of(record),
+            Self::Kept { summary, .. } => *summary,
+        }
+    }
+}
+
 pub trait ObservationSource {
     /// What a failed read is. The cache adds nothing to it and passes it through, so it must
     /// name the sample it came from (arch §5).
@@ -177,6 +207,35 @@ pub trait ObservationSource {
         &mut self,
         spare: Option<SampleLocusObservations>,
     ) -> Option<Result<SampleLocusObservations, Self::Error>>;
+
+    /// The next observation in whichever shape this source gives, **and the one the cache
+    /// actually calls**.
+    ///
+    /// The default builds every record, which is what a walker over alignment files does
+    /// anyway and what every fixture in this module expects. A source that can answer more
+    /// cheaply — a reader over a stored sample, which has the summary in the record's head and
+    /// need not decode the body behind it — overrides this and keeps its evidence, at the cost
+    /// of implementing [`build`](Self::build).
+    fn next_drawn(&mut self, spare: Option<SampleLocusObservations>) -> Option<Result<Drawn, Self::Error>> {
+        Some(self.next_observation(spare)?.map(Drawn::Built))
+    }
+
+    /// Build the evidence this source kept at `body`.
+    ///
+    /// **Called from a shared reference, on whichever thread got there, in any order** — which
+    /// a psp reader can serve because a stored body is decoded from its own bytes alone
+    /// (`spec/cohort_merge_psp_path.md` §3.2). A source whose [`next_drawn`](Self::next_drawn)
+    /// only ever returns [`Drawn::Built`] is never asked, and the default says so.
+    ///
+    /// # Errors
+    ///
+    /// Whatever building the evidence refuses.
+    fn build(&self, body: core::ops::Range<usize>) -> Result<SampleLocusObservations, Self::Error> {
+        unreachable!(
+            "a source that keeps no evidence was asked to build bytes {body:?}: only a source \
+             whose `next_drawn` returns `Drawn::Kept` is ever asked, and this one does not"
+        )
+    }
 }
 
 /// Every iterator of one sample's observations is a source that does not reuse.

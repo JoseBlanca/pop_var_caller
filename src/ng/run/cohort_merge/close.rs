@@ -69,7 +69,7 @@ impl MemberRange {
 /// [`resolved_against`](Self::resolved_against) turns one into the [`ClosedLocus`] assembly
 /// takes, once the caller has records to point at.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ClosedLocusRanges<'a> {
+pub struct ClosedLocusRanges {
     /// First position to furthest reach.
     pub region: GenomeRegion,
     /// The samples that covered it, in ascending sample order, as ranges into the window.
@@ -78,11 +78,9 @@ pub struct ClosedLocusRanges<'a> {
     pub non_reference_reads: u32,
     /// What the two verdicts made of it.
     pub verdict: Verdict,
-    /// The kind its members share.
-    pub kind: &'a LocusKind,
 }
 
-impl<'a> ClosedLocusRanges<'a> {
+impl ClosedLocusRanges {
     /// How many reference bases the locus covers — the width both verdicts are passed on.
     #[must_use]
     pub fn span(&self) -> u64 {
@@ -95,7 +93,7 @@ impl<'a> ClosedLocusRanges<'a> {
     /// caller's to get right, and the reason both come from one place
     /// (`observation_cache::WindowedCohort`).
     #[must_use]
-    pub fn resolved_against(
+    pub fn resolved_against<'a>(
         self,
         observations_per_sample: &[&'a [SampleLocusObservations]],
     ) -> ClosedLocus<'a> {
@@ -107,12 +105,16 @@ impl<'a> ClosedLocusRanges<'a> {
                 observations: &observations_per_sample[range.sample][range.from..range.to],
             })
             .collect();
+        // **The kind comes off the first member, and only here.** It is a fact about the
+        // locus, its members share it, and by this point they are records — so a walk that
+        // never resolved a locus never needed one (`spec/cohort_merge_psp_path.md` §2).
+        let kind = &observations_per_sample[self.members[0].sample][self.members[0].from].kind;
         ClosedLocus {
             region: self.region,
             members,
             non_reference_reads: self.non_reference_reads,
             verdict: self.verdict,
-            kind: self.kind,
+            kind,
         }
     }
 }
@@ -193,10 +195,10 @@ pub enum Verdict {
 /// (run spec §4.3), so no chain of overlapping observations can either (§4.1) — every
 /// member of a locus comes from one segment, and an STR tract's observations can never
 /// chain with a generic stretch's. The walk asserts it rather than assuming it.
-fn judge(
+fn judge<'k>(
     span: u64,
     some_sample_reached_the_threshold: bool,
-    kind: &LocusKind,
+    kind: impl FnOnce() -> &'k LocusKind,
     max_cohort_locus_span: MaxCohortLocusSpan,
 ) -> Verdict {
     // **The quiet verdict is asked first, and the kind is not consulted until it passes**
@@ -218,7 +220,7 @@ fn judge(
 
     // Exhaustive on purpose: a new kind of locus should not silently inherit either
     // answer, so adding one is a compile error here until somebody decides.
-    let bounded_by_policy = match kind {
+    let bounded_by_policy = match kind() {
         LocusKind::Generic => true,
         LocusKind::Ssr(_) | LocusKind::SsrBundle => false,
     };
@@ -683,6 +685,13 @@ impl<'a> LocusCloser<'a> {
         }
     }
 
+    /// Sample `sample`'s records, when the walk was given any — `None` when it was handed
+    /// summaries alone and the evidence is still compressed.
+    fn records_of(&self, sample: usize) -> Option<&'a [SampleLocusObservations]> {
+        let records = self.observations_per_sample.get(sample)?;
+        (!records.is_empty()).then_some(*records)
+    }
+
     /// The summary of sample `sample`'s head, if it has one left.
     fn head_summary(&self, sample: usize) -> Option<LocusSummary> {
         let index = self.cursors[sample];
@@ -692,11 +701,6 @@ impl<'a> LocusCloser<'a> {
                 .get(index)
                 .map(LocusSummary::of),
         }
-    }
-
-    /// The head of sample `sample`, if it has one left.
-    fn head(&self, sample: usize) -> Option<&'a SampleLocusObservations> {
-        self.observations_per_sample[sample].get(self.cursors[sample])
     }
 
     /// Consume the head the tournament is showing, and put that sample's next beginning in
@@ -720,32 +724,10 @@ impl<'a> LocusCloser<'a> {
         self.pending.replace_head(sample, next);
     }
 
-    /// The sample whose head starts earliest, **ties to the lowest sample index** — read
-    /// from the top of the heap without consuming it, so a caller can look at the next
-    /// observation and decide whether it belongs to the open locus.
-    ///
-    /// **Nothing in a closed locus depends on the tie-break today**, and saying so is
-    /// the point: the members come out in ascending sample order because they are
-    /// collected that way, the reach is a `max` and the total a sum, and *which*
-    /// observations land inside a locus is fixed by the growing-reach condition rather
-    /// than by the order they were visited in. A tie-break toward the highest sample
-    /// index would give identical loci.
-    ///
-    /// The rule is fixed anyway, at no cost — it falls out of the key's second field. It
-    /// is the read layer's rule for the same merge (`MergedCursors::argmin`,
-    /// `read/input/sample_cursor.rs`), and a later step that emitted members in the order
-    /// they were consumed — rather than collecting them by sample afterwards — would need
-    /// it.
-    fn sample_with_earliest_head(&self) -> Option<(usize, &'a SampleLocusObservations)> {
-        // The head comes back with the sample it was found in, so no caller looks it up a
-        // second time or has to state an invariant the tournament already knows.
-        let sample = self.pending.earliest()?;
-        Some((sample, self.head(sample).expect("a key implies a head")))
-    }
 }
 
 impl<'a> Iterator for LocusCloser<'a> {
-    type Item = ClosedLocusRanges<'a>;
+    type Item = ClosedLocusRanges;
 
     /// **The walk always advances.** The first observation it looks at is the one that
     /// opened the locus, whose start *is* the reach so far and whose contig *is* the
@@ -756,10 +738,13 @@ impl<'a> Iterator for LocusCloser<'a> {
     /// production's release-level `StalledCut` guard has no counterpart here (spec §10,
     /// lesson 2).
     fn next(&mut self) -> Option<Self::Item> {
-        let (_, opening) = self.sample_with_earliest_head()?;
+        let opening_sample = self.pending.earliest()?;
+        let opening_at = (opening_sample, self.cursors[opening_sample]);
+        let opening = self
+            .head_summary(opening_sample)
+            .expect("the tournament showed a head, so its summary is at the same index");
         let contig = opening.region.contig;
         let start = opening.region.start;
-        let kind = &opening.kind;
 
         // Where each sample stands now. What it consumes before the locus closes is its
         // run of members, so no second scan is needed to find them.
@@ -772,10 +757,13 @@ impl<'a> Iterator for LocusCloser<'a> {
 
         // Take heads while the next one begins inside the reach, extending the reach as
         // we go.
-        while let Some((sample, head)) = self.sample_with_earliest_head() {
+        while let Some(sample) = self.pending.earliest() {
             // A locus never crosses a contig, and neither does an observation, so a
             // change of contig closes the locus whatever the positions say.
-            if head.region.contig != contig || head.region.start > reach {
+            let summary = self
+                .head_summary(sample)
+                .expect("the tournament showed a head, so its summary is at the same index");
+            if summary.region.contig != contig || summary.region.start > reach {
                 break;
             }
             // **The argmin is a merge only if each sample's own slice ascends**, and
@@ -800,9 +788,6 @@ impl<'a> Iterator for LocusCloser<'a> {
             // build the roughly ninety-nine positions in a hundred that no sample varied at
             // (`spec/cohort_merge_psp_path.md` §2). Direct mode pays exactly what it paid
             // before: the same single walk over the record's sequences.
-            let summary = self
-                .head_summary(sample)
-                .expect("the tournament showed a head, so its summary is at the same index");
             assert!(
                 summary.region.start >= start,
                 "sample {sample}'s observations are not in coordinate order: {} starts \
@@ -826,19 +811,27 @@ impl<'a> Iterator for LocusCloser<'a> {
             // ordering check above, because a mixed locus must never reach a verdict.
             // Comparing discriminants keeps it O(1): `LocusKind`'s payload holds boxed
             // flanks, and comparing those per observation would not be affordable.
-            // **Read from the record and not from the summary, because a locus's kind is not
-            // a fact about an observation** (`observation_cache::LocusSummary`): the width
-            // bound is passed once on the closed locus from the kind the opening observation
-            // carried, and this is a release assertion guarding something segments already
-            // guarantee. How a run whose evidence stays undecoded reaches a kind is Milestone
-            // C's to settle; nothing here should oblige every observation to carry one.
-            assert!(
-                std::mem::discriminant(&head.kind) == std::mem::discriminant(kind),
-                "a cohort locus at {contig:?}:{} mixes locus kinds — {:?} with {:?}",
-                start.get(),
-                kind,
-                head.kind,
-            );
+            // **A release assertion that a locus never mixes a generic observation with a
+            // repeat tract's, and it runs only where the walk has the records to ask.** A
+            // kind is not in a summary and not in a record's head (the owner's ruling of
+            // 2026-09-04), so a walk over a sample whose evidence is still compressed cannot
+            // answer it without building a body — which is precisely what it must not do for
+            // the ninety-nine loci in a hundred it is about to drop. What it guards is
+            // structural rather than probable: segments are the reference's own partition and
+            // no observation crosses one, so no chain of overlapping observations can mix two
+            // kinds. Direct mode checks it anyway, at the cost of a discriminant compare, and
+            // a run over stored files takes the guarantee on the segmentation's word.
+            if let Some(records) = self.records_of(sample) {
+                let opening_kind = &self.observations_per_sample[opening_at.0][opening_at.1].kind;
+                assert!(
+                    std::mem::discriminant(&records[self.cursors[sample]].kind)
+                        == std::mem::discriminant(opening_kind),
+                    "a cohort locus at {contig:?}:{} mixes locus kinds — {:?} with {:?}",
+                    start.get(),
+                    opening_kind,
+                    records[self.cursors[sample]].kind,
+                );
+            }
             reach = reach.max(summary.reach());
             // **Each sample's two totals are kept apart, because the keep rule asks each
             // sample about its own reads** (spec §4.3). Summing them into one cohort
@@ -913,10 +906,14 @@ impl<'a> Iterator for LocusCloser<'a> {
             verdict: judge(
                 span_of(region),
                 some_sample_reached_the_threshold,
-                kind,
+                // **Read only when the locus is not quiet**, which is the whole reason the
+                // quiet verdict is asked first: a walk whose evidence is still compressed
+                // cannot answer for a kind without building a body, and a locus nobody varied
+                // at must never cost one. For a locus that survives, the record is one the
+                // caller is about to assemble anyway.
+                || &self.observations_per_sample[opening_at.0][opening_at.1].kind,
                 self.max_cohort_locus_span,
             ),
-            kind,
         })
     }
 }
@@ -1519,19 +1516,34 @@ mod tests {
         let over_a_tract: Vec<_> =
             LocusCloser::over(&[&tract], max_span(100), keep_at(2)).collect();
         assert_eq!(over_a_tract.len(), 1);
-        assert_eq!(over_a_tract[0].kind, &tract[0].kind);
+        assert_eq!(
+            over_a_tract[0].clone().resolved_against(&[&tract]).kind,
+            &tract[0].kind
+        );
 
         let over_generic: Vec<_> =
             LocusCloser::over(&[&generic], max_span(100), keep_at(2)).collect();
         assert_eq!(over_generic.len(), 1);
-        assert_eq!(over_generic[0].kind, &LocusKind::Generic);
+        assert_eq!(
+            over_generic[0].clone().resolved_against(&[&generic]).kind,
+            &LocusKind::Generic
+        );
     }
 
-    /// **The kind travels on a locus the caller refused, too.** A failed or too-quiet
-    /// locus is still handed out — it owns its ground and displaces what overlaps it — so
-    /// a reader that groups refusals by what kind of ground they sat on can do that.
+    /// **A refused locus states its ground and no longer its kind, and that is a capability
+    /// deliberately given up.**
+    ///
+    /// It used to carry the kind, so that a reader could group refusals by what sort of ground
+    /// they sat on. Nothing ever did — the driver keeps a refused locus's region and drops the
+    /// rest — and keeping it is not free any more: a kind lives in a record, and a run whose
+    /// evidence is still compressed would have to build one for every locus it is about to
+    /// throw away, which is ninety-nine in a hundred (`spec/cohort_merge_psp_path.md` §2). So
+    /// the kind is read only when a locus survives and its members are resolved.
+    ///
+    /// What still holds is the part that mattered: **a refused locus is handed out**, owning
+    /// its ground and displacing what overlaps it, and it still states the verdict it earned.
     #[test]
-    fn a_refused_locus_still_states_its_kind() {
+    fn a_refused_locus_states_its_ground_but_not_its_kind() {
         let quiet_tract = [SampleLocusObservations {
             kind: str_observation(region(10, 69), 0).kind,
             ..all_reference_observation(region(10, 69), 9)
@@ -1539,7 +1551,8 @@ mod tests {
 
         let closed: Vec<_> = LocusCloser::over(&[&quiet_tract], max_span(10), keep_at(2)).collect();
         assert_eq!(closed[0].verdict, Verdict::TooQuiet);
-        assert_eq!(closed[0].kind, &quiet_tract[0].kind);
+        assert_eq!(closed[0].region, region(10, 69), "it still owns its ground");
+        assert_eq!(closed[0].members.len(), 1, "and still names its members");
     }
 
     /// A bundle is exempt from the width bound for the same reason a tract is — spec
@@ -1680,19 +1693,19 @@ mod tests {
         let quiet = false;
 
         assert_eq!(
-            judge(narrow, loud, &LocusKind::Generic, max_span(10)),
+            judge(narrow, loud, || &LocusKind::Generic, max_span(10)),
             Verdict::Build
         );
         assert_eq!(
-            judge(narrow, quiet, &LocusKind::Generic, max_span(10)),
+            judge(narrow, quiet, || &LocusKind::Generic, max_span(10)),
             Verdict::TooQuiet
         );
         assert_eq!(
-            judge(wide, loud, &LocusKind::Generic, max_span(10)),
+            judge(wide, loud, || &LocusKind::Generic, max_span(10)),
             Verdict::Failed
         );
         assert_eq!(
-            judge(wide, quiet, &LocusKind::Generic, max_span(10)),
+            judge(wide, quiet, || &LocusKind::Generic, max_span(10)),
             Verdict::TooQuiet,
             "qualifies for both: the quiet verdict is the one that stands, so that no kind \
              has to be found out for a locus nobody varied at"
@@ -2148,8 +2161,9 @@ mod tests {
             MinAltReads::DEFAULT,
         );
 
-        let (named, _) = closer
-            .sample_with_earliest_head()
+        let named = closer
+            .pending
+            .earliest()
             .expect("three heads, all at base 10");
         assert_eq!(named, 0, "ties go to the lowest sample index");
     }
