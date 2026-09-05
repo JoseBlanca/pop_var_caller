@@ -24,7 +24,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::ng::parameter_estimation::joint::census::SampleCensusEvidence;
+use crate::ng::parameter_estimation::joint::census::{
+    CensusError, DepthCode, SampleCensusEvidence,
+};
 use crate::ng::parameter_estimation::joint::census_file::PileupIdentity;
 use crate::ng::psp::{self, PspReadError, PspReader};
 use crate::ng::run::{CensusPlan, Segmentation};
@@ -43,6 +45,38 @@ pub struct CensusOfStoredPileup {
     pub sample: String,
     /// Every read group the psp declares, numbered as that psp numbers them.
     pub read_groups: Vec<ReadGroupId>,
+}
+
+/// **What one sample actually put into its census** — the counts a run reports about it.
+///
+/// **Two numbers a piece, because one alone cannot be read.** A sample with reads at 900 kept
+/// positions has done well or badly depending on whether the selection kept a thousand of them
+/// or two million, and a reader who is told only the first cannot tell which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub struct CensusTally {
+    /// Kept ordinary positions this sample has at least one read at.
+    pub positions_with_reads: u64,
+    /// Kept ordinary positions the selection holds at all — **the same for every sample of the
+    /// run**, since the selection is the run's and not the sample's.
+    pub positions_kept: u64,
+    /// Kept repeat tracts this sample has at least one read at.
+    pub tracts_with_reads: u64,
+    /// Kept repeat tracts the selection holds at all.
+    pub tracts_kept: u64,
+}
+
+impl CensusTally {
+    /// **Whether this sample's census would tell a fit anything at all.**
+    ///
+    /// A psp whose walk covered ground the selection kept nothing in, or whose reads reached
+    /// none of what it did keep, produces a census that is entirely denominator. That is a
+    /// legitimate outcome and not an error — but a run that omitted such a sample from its
+    /// report would leave somebody hunting for a file that was written exactly as asked.
+    #[must_use]
+    pub fn contributes_nothing(self) -> bool {
+        self.positions_with_reads == 0 && self.tracts_with_reads == 0
+    }
 }
 
 /// Why a census could not be built from a stored psp.
@@ -76,6 +110,72 @@ pub enum CensusFromPspError {
         #[source]
         source: Box<PspReadError>,
     },
+}
+
+impl CensusOfStoredPileup {
+    /// Count what this sample put into its census.
+    ///
+    /// **Read off the census itself rather than counted while it was built**, so the numbers a
+    /// run reports and the file it wrote cannot come to disagree. A position counts when any of
+    /// the sample's read groups saw a read there; the depth ladder's bin 0 is zero reads, which
+    /// is a walked position with nothing at it and not the same as a position never walked.
+    ///
+    /// # Errors
+    ///
+    /// [`CensusError`] when a section cannot be read, which for a census still resident in
+    /// memory cannot happen.
+    pub fn tally(&mut self) -> Result<CensusTally, CensusError> {
+        let groups = self.evidence.read_groups();
+        let strata = self.evidence.strata();
+
+        let positions = self.evidence.with_generic(&groups, |lent| {
+            let kept = lent.first().map_or(0, |evidence| evidence.depth().len());
+            let mut with_reads = 0_u64;
+            for index in 0..kept {
+                let any = lent.iter().any(|evidence| {
+                    matches!(evidence.depth().get(index), DepthCode::Binned(bin) if bin.get() > 0)
+                });
+                if any {
+                    with_reads += 1;
+                }
+            }
+            (with_reads, kept as u64)
+        })?;
+
+        let mut tracts_with_reads = 0_u64;
+        let mut tracts_kept = 0_u64;
+        for stratum in &strata {
+            let counted =
+                self.evidence
+                    .with_strata(groups[0], std::slice::from_ref(stratum), |lent| {
+                        lent.first().map_or(0, |section| section.len())
+                    })?;
+            tracts_kept += counted as u64;
+            for locus in 0..counted {
+                let mut reached = false;
+                for group in &groups {
+                    reached |= self.evidence.with_strata(
+                        *group,
+                        std::slice::from_ref(stratum),
+                        |lent| {
+                            lent.first()
+                                .is_some_and(|section| section.offsets(locus).total() > 0)
+                        },
+                    )?;
+                }
+                if reached {
+                    tracts_with_reads += 1;
+                }
+            }
+        }
+
+        Ok(CensusTally {
+            positions_with_reads: positions.0,
+            positions_kept: positions.1,
+            tracts_with_reads,
+            tracts_kept,
+        })
+    }
 }
 
 /// **Build one sample's census from its stored psp.**

@@ -13,6 +13,7 @@ pub mod call_from_psps;
 pub mod calling_run;
 pub mod cli;
 pub mod estimate_contamination;
+pub mod generate_census;
 pub mod generate_psps;
 pub mod mode_equivalence;
 pub mod repeat_catalog;
@@ -28,6 +29,10 @@ pub use call_from_psps::{CallFromPspsArgs, CallFromPspsCliError, run_call_from_p
 pub use cli::{Cli, PopVarCallerExpCommand};
 pub use estimate_contamination::{
     EstimateContaminationArgs, EstimateContaminationCliError, run_estimate_contamination,
+};
+pub use generate_census::{
+    CensusReport, GenerateCensusArgs, GenerateCensusCliError, SampleCensusOutcome,
+    run_generate_census,
 };
 pub use generate_psps::{GeneratePspsArgs, GeneratePspsCliError, run_generate_psps};
 pub use repeat_catalog::{RepeatCatalogArgs, RepeatCatalogCliError, run_repeat_catalog};

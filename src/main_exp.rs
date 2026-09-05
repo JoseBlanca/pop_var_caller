@@ -25,7 +25,8 @@ use clap::Parser;
 use pop_var_caller::error_render::format_error_chain;
 use pop_var_caller::pop_var_caller_exp::{
     Cli, PopVarCallerExpCommand, run_call_from_alignments, run_call_from_psps,
-    run_estimate_contamination, run_generate_psps, run_repeat_catalog, run_typed_regions,
+    run_estimate_contamination, run_generate_census, run_generate_psps, run_repeat_catalog,
+    run_typed_regions,
 };
 
 fn main() {
@@ -45,6 +46,9 @@ fn main() {
         }
         PopVarCallerExpCommand::GeneratePsps(args) => {
             run_generate_psps(&args).map_err(|e| format_error_chain(&e))
+        }
+        PopVarCallerExpCommand::GenerateCensus(args) => {
+            run_generate_census(&args).map_err(|e| format_error_chain(&e))
         }
         PopVarCallerExpCommand::EstimateContamination(args) => {
             run_estimate_contamination(&args).map_err(|e| format_error_chain(&e))

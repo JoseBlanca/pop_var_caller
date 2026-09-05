@@ -210,14 +210,14 @@ survive the round trip, and a census that lost it fits a stutter model on nothin
 
 ### Milestone B — `generate-census`, and the two routes measured
 
-☐ **B1 — the command.** A cohort of pileups in, one census beside each. `--psp` once per sample
+✅ **B1 — the command.** A cohort of pileups in, one census beside each. `--psp` once per sample
 or a directory, as `call-from-psps` takes it; `--output-dir` as `generate-psps` takes it. A
 census that cannot be written fails that sample rather than leaving a short one behind, and the
 file appears whole or not at all.
 *Depends:* A2. *Source:* [records spec](../spec/parameter_prepass_joint_records.md) §6.1;
 [`census_file.md`](census_file.md) C3.
 
-☐ **B2 — the report, and what it says about each sample.** Per sample: the pileup read, the
+✅ **B2 — the report, and what it says about each sample.** Per sample: the pileup read, the
 census written, both sizes, and the loci that went into it. A pileup holding no census-selected
 locus is named as contributing nothing rather than omitted.
 *Depends:* B1. *Source:* the run-level reporting rule

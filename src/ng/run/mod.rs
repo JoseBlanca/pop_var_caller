@@ -47,7 +47,7 @@ pub use callers::{
     AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, CalledCohort,
     CohortWalkTallies, MergeParameters, SampleWalkTallies, WrittenCohort,
 };
-pub use census_from_psp::{CensusFromPspError, CensusOfStoredPileup, census_from_psp};
+pub use census_from_psp::{CensusFromPspError, CensusOfStoredPileup, CensusTally, census_from_psp};
 pub use gatherer::{CensusPlan, CensusSelection, SampleObservationGatherer, SampleWalkInputs};
 pub use psp_caller::{
     OpenPspCohort, PspVariantCaller, StoredCohortInputs, StoredCohortTallies, StoredSample,
