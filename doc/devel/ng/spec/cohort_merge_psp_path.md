@@ -221,13 +221,29 @@ gives back most of what the skip won — about 0.27 s a sample against the singl
 roughly 0.17 s, on the corpus above. It would win only if the retained window's memory turned
 out to matter more than the time, which §6's formulas say it does not at either end.
 
-### 3.4 Open, before the builder is coded
+### 3.4 Where the retained bytes live — settled, and not the implementer's after all
 
-**Where the retained bytes live** — one growing arena per sample with offsets, or a
-`VecDeque` of per-record boxes — is the implementer's, with one constraint from the design:
-eviction must actually return memory (an arena that only grows is the cache leak this module
-exists to avoid). *Leaning: per-record boxes first, arena only if the allocator share says
-so.*
+**One growing byte arena per sample, records appended and addressed by range.** An earlier
+draft left the choice open between that and a box per record, leaning towards the boxes and
+saying the arena could wait for an allocator profile. **That leaning was wrong, and the reason
+is the measurement this design is bought with.**
+
+The 2.57× a skipping walk gives (§5) is the speed of a walk that reads each head, advances past
+the body, and **keeps nothing** — no allocation anywhere in it. A box per retained record puts
+an allocation and a copy back on every record in the window, which is the per-record cost the
+skip exists to remove: what would be saved is the record's several allocations, and what would
+be spent is one, on every record rather than on the one in eight that gets built. The arena
+spends no allocation per record at all — the append is a memcpy into a buffer that is already
+long enough after the first window — so it keeps the shape the measurement was taken on.
+
+**The constraint that was already right stands: eviction must return memory.** An arena that
+only grows is the cache leak this module exists to avoid. Since the window advances in
+coordinate order and drops a prefix, what an arena needs is the same prefix drain the record
+window already does — the bytes behind the window's left edge go, and what survives moves down.
+
+*Unmeasured, and the first thing to look at if the memory is wrong: whether the drain's move
+costs more than it saves at large windows. It is the same move `held_observations` already
+makes, over bytes rather than records.*
 
 ## 4. The run-level companions
 
