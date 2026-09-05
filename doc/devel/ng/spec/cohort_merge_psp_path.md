@@ -156,40 +156,31 @@ reader:
 - **The retained window** is the raw bytes of every record between the two cursors, per
   sample — a FIFO the cover advances and eviction drains, the same rhythm the cache already
   has ([`observation_cache.rs:113-118`](../../../../src/ng/run/cohort_merge/observation_cache.rs)).
-- **Building a body needs nothing but its own bytes**, so any thread may do it, at any time,
-  in any order. That is a property of the format rather than a convenience of this design: a
-  psp body writes every count absolutely and every observation's read list from zero rather
-  than as a difference from the record before it, **which is the reason a skipped body costs
-  nothing in the first place** ([`record.rs:828-846`](../../../../src/ng/psp/record.rs)). A
-  reader that never saw the records in between has missed nothing it needs.
+- **Building a body needs its own bytes *and* the live set as of its own record**, and the
+  second half is what an earlier draft of this section got wrong.
 
-**So there is no build cursor, and an earlier draft of this section invented one.** It had a
-second cursor trailing the first, replaying each skipped record's chain-id changes into its own
-live set before building — and argued at length why replaying beat storing a snapshot per
-record. Both were answers to a problem the format does not pose. **The state a reader carries
-across records lives in the head, not the body**, and every reader parses every head whether or
-not it wants the record ([`record.rs:1881-1902`](../../../../src/ng/psp/record.rs)); the one
-thing the body decoder is handed from outside is the live set the head walk already produced.
+**⚠ A body is not self-contained, and the run refused when I assumed it was.** The claim here
+was that a psp body writes every count absolutely and every read list from zero, so any thread
+could build one from its bytes alone, in any order — and that this dissolved the concurrency
+question. **Measured, it does not.** One observation in a record has its read list *derived*
+rather than stored: the residual is the live set minus every other observation's listed reads,
+and the body declares how many reads that should come to. Built against an empty live set, a
+real cohort refused with *"a derived list of 0 reads where the record says 10; the live set and
+the lists stored beside it do not agree"* ([`record.rs:694-706`](../../../../src/ng/psp/record.rs)).
 
-**Which resolves the concurrency question this design would otherwise have had.** The merge
-hands several builders one shared window at a time and they run together, so a build that
-needed mutable state — a cursor to advance, a live set to replay into — would need either a
-lock per sample or a serial build phase between deciding and assembling, and the second would
-put decoding, which is 43% of a psp-mode run at 63 samples (§5), on one thread. Neither is
-needed: the retained bytes are immutable, a body is built from them alone, and builders share
-nothing but read-only memory. **The one piece of state a run must still carry is the live set,
-and the head walk carries it** — so what the window retains beside each record's bytes is the
-set as the head walk left it, at the one place it is asked for.
+**Why the earlier reasoning looked sound and was not.** The encoder does drop chain ids from the
+*body* — that much is true and is why an isolated fixture builds fine against an empty set. But
+the *head* still writes the live-set changes from the record's ids, so a walk that reads heads
+in order carries a populated set, and the residual is derived against it. The two facts sit in
+different files and I checked only the first.
 
-⚠ **This rests on the body staying self-contained, and today that is under-tested because the
-chain ids are not yet written.** `encode_record_body` drops them — a record read back has empty
-lists where it had ids ([`record.rs:830-835`](../../../../src/ng/psp/record.rs)) — so the live
-set is inert in every file this caller currently produces, and the residual read list a body
-derives from it is trivial. When the encoding's Milestone E writes them, the body's own
-guarantee is what must continue to hold; if it does not, this section's argument fails and the
-lock-or-serial-phase question returns. **The test that would catch it is the record-equality
-oracle of §1.1 goal 1 run on a file whose records carry chain ids**, and it does not exist
-because such a file cannot yet be written.
+**So the build cursor is back**, and this section's deleted paragraph was right: a builder
+needs the live set as of the record it is building, which means either a snapshot kept per
+retained record or a replay of the retained heads' changes from a point where the set is known.
+A psp block resets every running difference at its boundary, so a block start is such a point.
+**Which of the two, and what it costs, is unmeasured and is the next thing this design owes** —
+the snapshot is bounded by the window rather than the file, and the replay is bounded by the
+block, which is far larger.
 
 **What this replaces:** the adapter's refusal of head-only records
 (`ObservationBodyNotBuilt`, [`psp_source.rs:95-112`](../../../../src/ng/run/psp_source.rs))

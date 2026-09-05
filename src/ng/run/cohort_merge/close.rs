@@ -240,6 +240,49 @@ pub enum Verdict {
 /// (run spec §4.3), so no chain of overlapping observations can either (§4.1) — every
 /// member of a locus comes from one segment, and an STR tract's observations can never
 /// chain with a generic stretch's. The walk asserts it rather than assuming it.
+/// **Whether the width bound applies to a locus of this kind.** It governs generic loci and
+/// not repeat tracts or bundles, whose span the reference fixes rather than the reads (spec
+/// §3.1).
+///
+/// Exhaustive on purpose: a new kind of locus should not silently inherit either answer.
+#[must_use]
+pub fn bounded_by_policy(kind: &LocusKind) -> bool {
+    match kind {
+        LocusKind::Generic => true,
+        LocusKind::Ssr(_) | LocusKind::SsrBundle => false,
+    }
+}
+
+/// Whether a locus of this span and kind is wider than the caller undertakes to build.
+#[must_use]
+pub fn too_wide(span: u64, kind: &LocusKind, max_cohort_locus_span: MaxCohortLocusSpan) -> bool {
+    bounded_by_policy(kind) && span > u64::from(max_cohort_locus_span.get())
+}
+
+/// [`judge`], or the quiet half of it alone when the walk has no records to read a kind from.
+///
+/// **A walk over stored evidence cannot pass the width verdict and does not try.** The bound
+/// governs generic loci and not repeat tracts, so passing it needs the locus's kind, and a kind
+/// lives in a record — which such a walk has not built and, for a quiet locus, never will. So
+/// the width half moves to whoever resolves the members, which is the one place a kind is in
+/// hand ([`too_wide`]). The quiet half is unaffected: it reads the summaries' two counts and
+/// nothing else, which is what keeps a quiet locus free either way.
+fn judge_here<'k>(
+    deferred: bool,
+    span: u64,
+    some_sample_reached_the_threshold: bool,
+    kind: impl FnOnce() -> &'k LocusKind,
+    max_cohort_locus_span: MaxCohortLocusSpan,
+) -> Verdict {
+    if !some_sample_reached_the_threshold {
+        return Verdict::TooQuiet;
+    }
+    if deferred {
+        return Verdict::Build;
+    }
+    judge(span, true, kind, max_cohort_locus_span)
+}
+
 fn judge<'k>(
     span: u64,
     some_sample_reached_the_threshold: bool,
@@ -263,14 +306,7 @@ fn judge<'k>(
         return Verdict::TooQuiet;
     }
 
-    // Exhaustive on purpose: a new kind of locus should not silently inherit either
-    // answer, so adding one is a compile error here until somebody decides.
-    let bounded_by_policy = match kind() {
-        LocusKind::Generic => true,
-        LocusKind::Ssr(_) | LocusKind::SsrBundle => false,
-    };
-
-    if bounded_by_policy && span > u64::from(max_cohort_locus_span.get()) {
+    if too_wide(span, kind(), max_cohort_locus_span) {
         Verdict::Failed
     } else {
         Verdict::Build
@@ -955,7 +991,8 @@ impl<'a> Iterator for LocusCloser<'a> {
             region,
             members,
             non_reference_reads,
-            verdict: judge(
+            verdict: judge_here(
+                self.observations_per_sample.is_empty(),
                 span_of(region),
                 some_sample_reached_the_threshold,
                 // **Read only when the locus is not quiet**, which is the whole reason the

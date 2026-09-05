@@ -978,7 +978,22 @@ pub fn build_region_handing_over_windowed<'a, E>(
                     // Evidence still compressed: this is where it is decoded, and the only
                     // place after the cover where a run can fail.
                     None => {
-                        CohortObservation::over(&locus.resolved_into(build, &mut scratch)?)
+                        let resolved = locus.resolved_into(build, &mut scratch)?;
+                        // **The width verdict, passed here because this is where a kind
+                        // exists.** The closing walk could not: the bound spares repeat
+                        // tracts, whose span the reference fixes, and a kind lives in a
+                        // record it had not built. So a locus wide enough to refuse is
+                        // built and then refused — which costs, and costs rarely, since a
+                        // refused locus is one wider than the caller undertakes to call.
+                        if super::close::too_wide(
+                            span_of(resolved.region),
+                            resolved.kind,
+                            max_cohort_locus_span,
+                        ) {
+                            refused.push(resolved.region);
+                            continue;
+                        }
+                        CohortObservation::over(&resolved)
                     }
                 };
                 keep(observation);

@@ -46,8 +46,10 @@ use crate::ng::psp::{PspReadError, PspReader, RecordIter, StreamedRecord};
 use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 
 use super::cohort_merge::observation_cache::ObservationSource;
-use super::cohort_merge::observation_cache::LocusSummary;
+use super::cohort_merge::observation_cache::{Drawn, LocusSummary};
 use crate::ng::psp::RecordHead;
+use crate::ng::psp::record::{LocatedRecord, RecordLayout, decode_the_body_of};
+use crate::ng::psp::chain_ids::LiveSet;
 
 /// **A stored record's head is a summary** — the claim the whole deferred-build design rests
 /// on, written down as a conversion so it can be tested rather than asserted.
@@ -223,6 +225,18 @@ pub enum PspSourceError {
 pub struct PspSummarySource<'a> {
     walk: RecordIter<'a>,
     kept: Vec<u8>,
+    /// The individual this file holds, so a failure names them.
+    sample: String,
+    /// How far the walk has got — the other half of locating a failure.
+    reached: WalkProgress,
+    /// This file's own record layout, kept so a body can be built later without the walk.
+    layout: RecordLayout,
+    /// Walk-local read-group identifier `i` is this run's `read_groups[i]` (spec §6.2).
+    read_groups: Vec<ReadGroupId>,
+    /// The heads handed over so far, so a body can be located and described when it is built.
+    heads: Vec<KeptRecord>,
+    /// What this sample contributed, for the run report.
+    read: StoredSampleTallies,
 }
 
 /// One stored record, summarised, with its body waiting in the source's arena.
@@ -240,11 +254,42 @@ impl<'a> PspSummarySource<'a> {
     /// # Errors
     ///
     /// Whatever opening the walk refuses — a psp whose first block will not read.
-    pub fn over(psp: &'a mut PspReader) -> Result<Self, PspReadError> {
+    pub fn over(psp: &'a mut PspReader, read_groups: &[ReadGroupId]) -> Result<Self, RunError> {
+        let sample = psp.header().sample.clone();
+        let layout = RecordLayout::from_manifest(&psp.header().manifest)
+            .map_err(|source| source_failed(&sample, WalkProgress::NothingYet, source))?;
+        let read_groups = read_groups.to_vec();
+        let walk = psp
+            .records()
+            .map_err(|source| source_failed(&sample, WalkProgress::NothingYet, source))?;
         Ok(Self {
-            walk: psp.records()?,
+            walk,
             kept: Vec::new(),
+            sample,
+            reached: WalkProgress::NothingYet,
+            layout,
+            read_groups,
+            heads: Vec::new(),
+            read: StoredSampleTallies::default(),
         })
+    }
+
+    /// A failure of this sample's walk, named and located.
+    fn refuse(&self, cause: impl std::error::Error + Send + Sync + 'static) -> RunError {
+        source_failed(&self.sample, self.reached, cause)
+    }
+
+    /// The individual this file holds.
+    #[must_use]
+    pub fn sample_name(&self) -> &str {
+        &self.sample
+    }
+
+    /// What this sample contributed to the run — **counted from the heads**, which is where
+    /// both numbers live, so a run that never builds a body still reports them.
+    #[must_use]
+    pub fn read(&self) -> StoredSampleTallies {
+        self.read
     }
 
     /// The bytes kept so far. A body's range addresses this.
@@ -472,6 +517,101 @@ impl<'a> PspObservationSource<RecordIter<'a>> {
             // covered.
             .map_err(|source| source_failed(&sample, WalkProgress::NothingYet, source))?;
         Ok(Self::new(sample, walk, read_groups))
+    }
+}
+
+
+/// **Reading a stored sample the way a cohort run wants it read.**
+///
+/// Every draw is a [`Drawn::Kept`]: the head's summary, and the body left in this source's
+/// arena. The cohort decides from the summaries and asks for evidence only where a locus
+/// survived, which at about one position in a hundred is what makes the other ninety-nine free
+/// (`spec/cohort_merge_psp_path.md` §3.1).
+impl ObservationSource for PspSummarySource<'_> {
+    type Error = RunError;
+
+    /// **Kept and then built at once** — the shape a caller wanting every record takes.
+    ///
+    /// It exists because the trait requires it and because a source must still be usable by
+    /// something that wants everything; the cache calls [`next_drawn`](Self::next_drawn)
+    /// instead, which is the whole point of this type.
+    fn next_observation(
+        &mut self,
+        spare: Option<SampleLocusObservations>,
+    ) -> Option<Result<SampleLocusObservations, RunError>> {
+        match self.next_drawn(spare)? {
+            Ok(Drawn::Kept { body, .. }) => Some(self.build(body)),
+            Ok(Drawn::Built(record)) => Some(Ok(record)),
+            Err(failed) => Some(Err(failed)),
+        }
+    }
+
+    fn next_drawn(
+        &mut self,
+        spare: Option<SampleLocusObservations>,
+    ) -> Option<Result<Drawn, RunError>> {
+        drop(spare);
+        let kept = match self.next_summary()? {
+            Ok(kept) => kept,
+            Err(failed) => return Some(Err(self.refuse(failed))),
+        };
+        self.reached = WalkProgress::After(kept.summary.reach_position());
+        self.read.loci_read += 1;
+        self.read.reads_compared_with_reference +=
+            u64::from(kept.summary.reads_compared_with_reference);
+        self.heads.push(kept.clone());
+        Some(Ok(Drawn::Kept {
+            summary: kept.summary,
+            body: kept.body,
+        }))
+    }
+
+    /// Build the body kept at `body`.
+    ///
+    /// **⚠ Decoded against an empty live set, which is right today and will not always be.**
+    /// A body needs the set of reads live at its own record only to derive the one observation
+    /// whose read list is stored as a residual; the encoder does not yet write chain ids at all
+    /// (`psp/record.rs`, `encode_record_body`), so every file this caller produces has an empty
+    /// set everywhere and the residual is trivial. When the encoding's Milestone E writes them,
+    /// the set as of *this* record has to reach here — and since the head walk is what carries
+    /// it, that means keeping it beside the bytes or replaying the heads to reach it. Building
+    /// against the wrong set is the failure that does not announce itself: a body decoded
+    /// against a plausible-but-wrong set is a plausible body.
+    fn build(&self, body: core::ops::Range<usize>) -> Result<SampleLocusObservations, RunError> {
+        let kept = self
+            .heads
+            .binary_search_by_key(&body.start, |kept| kept.body.start)
+            .map(|at| &self.heads[at])
+            .expect("a body range this source handed out");
+        let head = RecordHead {
+            region: kept.summary.region,
+            non_reference_reads: kept.summary.non_reference_reads,
+            reads_compared_with_reference: kept.summary.reads_compared_with_reference,
+            body_bytes: u32::try_from(body.len()).expect("a body this source wrote down"),
+        };
+        let found = LocatedRecord {
+            head,
+            body: &self.kept[body.clone()],
+            record_bytes: body.len(),
+        };
+        let mut record = decode_the_body_of(&found, &LiveSet::default(), &self.layout)
+            .map_err(|source| self.refuse(source))?
+            .record;
+        // **The same renumbering the building source makes, for the same reason**: every
+        // sample numbers its read groups from zero, so without it every sample's first group
+        // would reach the merge as identifier 0 and the cohort would score them as one lane.
+        for observation in &mut record.observations {
+            let walk_local = observation.read_group.get() as usize;
+            let Some(run_wide) = self.read_groups.get(walk_local).copied() else {
+                return Err(self.refuse(PspSourceError::ReadGroupNotInThisFilesTable {
+                    at: record.region,
+                    names: observation.read_group.get(),
+                    in_the_table: self.read_groups.len(),
+                }));
+            };
+            observation.read_group = run_wide;
+        }
+        Ok(record)
     }
 }
 
@@ -1292,7 +1432,7 @@ mod tests {
         };
 
         let mut psp = PspReader::open(&path).expect("the file opens again");
-        let mut source = PspSummarySource::over(&mut psp).expect("the summary walk starts");
+        let mut source = PspSummarySource::over(&mut psp, &as_walked()).expect("the summary walk starts");
         let mut kept = Vec::new();
         while let Some(next) = source.next_summary() {
             kept.push(next.expect("the fixture reads back"));
@@ -1332,6 +1472,58 @@ mod tests {
             assert_eq!(
                 rebuilt, built[at],
                 "record {at} built out of order differs from the one the building walk built"
+            );
+        }
+    }
+
+
+    /// **The summary source, driven as the cache drives it, yields the records the building
+    /// source yields** — every draw kept, every body built afterwards and out of order.
+    ///
+    /// This is the deferred build end to end at the source's own level: the cohort's decisions
+    /// would be made on the summaries this returns, and its evidence on the records these
+    /// builds produce. If the two sources can disagree, psp mode calls something direct mode
+    /// does not, and nothing downstream would say so.
+    #[test]
+    fn keeping_and_building_later_gives_what_building_at_once_gives() {
+        let records = a_sample();
+        let (_dir, path) = a_psp_of(&records);
+        let groups = as_walked();
+
+        let built: Vec<_> = {
+            let mut psp = PspReader::open(&path).expect("the file opens");
+            let mut source =
+                PspObservationSource::over(&mut psp, &groups).expect("the walk starts");
+            std::iter::from_fn(|| source.next_observation(None))
+                .map(|next| next.expect("the fixture reads back"))
+                .collect()
+        };
+
+        let mut psp = PspReader::open(&path).expect("the file opens again");
+        let mut source = PspSummarySource::over(&mut psp, &groups).expect("the walk starts");
+        let mut drawn = Vec::new();
+        while let Some(next) = source.next_drawn(None) {
+            match next.expect("the fixture reads back") {
+                Drawn::Kept { summary, body } => drawn.push((summary, body)),
+                Drawn::Built(_) => panic!("this source keeps every body"),
+            }
+        }
+
+        assert_eq!(drawn.len(), built.len(), "the two sources met the same records");
+        for (at, ((summary, _), record)) in drawn.iter().zip(&built).enumerate() {
+            assert_eq!(
+                *summary,
+                LocusSummary::of(record),
+                "record {at}: the kept summary differs from the built record's own"
+            );
+        }
+
+        // Out of order, because that is the order a cohort will not use.
+        for (at, (_, body)) in drawn.iter().enumerate().rev() {
+            let rebuilt = source.build(body.clone()).expect("a kept body builds");
+            assert_eq!(
+                rebuilt, built[at],
+                "record {at} built out of order differs from the one built at once"
             );
         }
     }

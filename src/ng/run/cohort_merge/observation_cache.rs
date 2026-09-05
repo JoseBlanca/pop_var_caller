@@ -286,6 +286,14 @@ where
 pub struct ObservationCache<S> {
     /// One per sample, in the run's sample order — the order every consumer indexes by.
     samples: Vec<SampleWindow<S>>,
+    /// **Whether any source has kept its evidence rather than building it**, latched on the
+    /// first such draw and never cleared.
+    ///
+    /// A window's records cannot be inferred from a sample's holding none: a sample that has
+    /// drawn nothing yet, or whose window was just emptied, holds no records either way. Read
+    /// that as "records present" and a builder indexes an empty slice for a locus whose
+    /// members came from summaries — which is a panic, and was one.
+    keeps_evidence: bool,
     /// How far a **successful** [`cover`](Self::cover) has drawn, genome-wide.
     ///
     /// A cover that failed does not move it, which is what lets
@@ -337,6 +345,8 @@ struct SampleWindow<S> {
     /// Where each held observation's evidence sits in its source, when the source kept it
     /// rather than building it. Empty for a source that builds.
     held_bodies: Vec<core::ops::Range<usize>>,
+    /// Whether this source has ever kept a body — latched, so an emptied window still says so.
+    keeps_evidence: bool,
     /// Where the last observation drawn from `source` began — the ordering check's memory.
     last_drawn: Option<GenomePosition>,
 }
@@ -442,10 +452,12 @@ impl<S> ObservationCache<S> {
                     held_observations: Vec::new(),
                     held_summaries: Vec::new(),
                     held_bodies: Vec::new(),
+                    keeps_evidence: false,
                     last_drawn: None,
                 })
                 .collect(),
             covered_to: None,
+            keeps_evidence: false,
         }
     }
 
@@ -547,13 +559,12 @@ impl<S> ObservationCache<S> {
         for sample in &self.samples {
             let from = first_reaching_summary(&sample.held_summaries, left_edge);
             summaries_per_sample.push(&sample.held_summaries[from..]);
-            if !sample.held_observations.is_empty() || sample.held_bodies.is_empty() {
+            if !self.keeps_evidence {
                 observations_per_sample.push(&sample.held_observations[from..]);
             }
         }
         windowing.add_to(&super::timing::WINDOW_NANOS);
-        let records = (observations_per_sample.len() == self.samples.len())
-            .then_some(&observations_per_sample[..]);
+        let records = (!self.keeps_evidence).then_some(&observations_per_sample[..]);
         f(&WindowedCohort {
             observations: records,
             summaries: Some(&summaries_per_sample),
@@ -607,7 +618,7 @@ impl<S> ObservationCache<S> {
             held_summaries.drain(..first_survivor);
             held_bodies.drain(..first_survivor.min(held_bodies.len()));
             let room = held_observations.len();
-            for record in held_observations.drain(..first_survivor) {
+            for record in held_observations.drain(..first_survivor.min(room)) {
                 if spare.len() < room {
                     spare.push(record);
                 }
@@ -660,7 +671,7 @@ impl<S> ObservationCache<S> {
             held_bodies.drain(..first_survivor.min(held_bodies.len()));
                 let room = held_observations.len();
                 let mut dead = Vec::new();
-                for record in held_observations.drain(..first_survivor) {
+                for record in held_observations.drain(..first_survivor.min(room)) {
                     if spare.len() < room {
                         spare.push(record);
                     } else {
@@ -759,6 +770,7 @@ where
         // The fixpoint: sweep until a whole sweep moves nothing.
         while self.sweep(&mut chain_reach)? {}
 
+        self.keeps_evidence |= self.samples.iter().any(|sample| sample.keeps_evidence);
         self.covered_to = Some(
             self.covered_to
                 .map_or(chain_reach, |reached| reached.max(chain_reach)),
@@ -808,6 +820,7 @@ where
             chain_reach = widest;
         }
 
+        self.keeps_evidence |= self.samples.iter().any(|sample| sample.keeps_evidence);
         self.covered_to = Some(
             self.covered_to
                 .map_or(chain_reach, |reached| reached.max(chain_reach)),
@@ -863,6 +876,7 @@ where
                         self.held_observations.push(record);
                     }
                     Drawn::Kept { summary, body } => {
+                        self.keeps_evidence = true;
                         self.held_summaries.push(summary);
                         self.held_bodies.push(body);
                     }
