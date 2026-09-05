@@ -284,7 +284,7 @@ is **two samples declaring the same `@RG ID`**, which is the run-wide uniqueness
 error rather than a normal state.
 *Depends:* C1.
 
-☐ **C3 — read a cohort of censuses.** Open them, build `CohortCensusEvidence`, and surface its
+✅ **C3 — read a cohort of censuses.** Open them, build `CohortCensusEvidence`, and surface its
 refusals as command errors that name the sample and the field that differs — samples that
 recorded under different terms, and a census whose named pileup identity does not match the
 pileup beside it. **A refusal, never a panic**: this is the door a stale census arrives at.

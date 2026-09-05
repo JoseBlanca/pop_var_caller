@@ -49,8 +49,7 @@ use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::types::{ExpectedAlternativeFrequency, ExpectedHeterozygosity, Ploidy, ReadGroupId};
 
 use super::census::{
-    CensusError, CohortCensusEvidence, CohortRefusal, DepthCap, DepthCode, NamedReadGroup,
-    SampleGenericSections,
+    CensusError, CohortCensusEvidence, CohortRefusal, DepthCap, DepthCode, SampleGenericSections,
 };
 use super::census_moments::CensusMomentSums;
 use super::contamination::{
@@ -3640,7 +3639,7 @@ pub mod bench_fixtures {
                 SampleCensusEvidence::resident(
                     format!("s{s}"),
                     terms.clone(),
-                    NamedReadGroup::drawn_for(
+                    crate::ng::parameter_estimation::joint::census::NamedReadGroup::drawn_for(
                         &format!("s{s}"),
                         [ReadGroupId(
                             u32::try_from(s).expect("a drawn cohort fits in u32"),

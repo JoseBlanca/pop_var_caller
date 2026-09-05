@@ -152,6 +152,41 @@ pub fn freshness(named: Option<PileupIdentity>, in_hand: Option<PileupIdentity>)
     }
 }
 
+/// **Whether a census may be used, judged on its psp's header alone** — which is all a fit can
+/// afford to check.
+///
+/// [`freshness`] compares the whole identity: the digest of the psp's header *and* how many
+/// records it holds. A fit can get the first for the price of one short read
+/// ([`psp::header_digest`](crate::ng::psp::header_digest)). **It cannot cheaply get the second.**
+/// A psp's footer carries its block count and its byte offsets and no record count, and the
+/// per-block counts sit inside each block's compressed stream — so obtaining one means
+/// decompressing the psp, at every fit, for every sample. That is the cost psp mode exists to
+/// avoid.
+///
+/// **What that leaves unchecked, precisely**: a psp whose header is unchanged and whose records
+/// are not. Only [`PspWriter::append`](crate::ng::psp::PspWriter::append) can produce one — it
+/// reopens a finished file and carries the header forward — and nothing in the shipped commands
+/// calls it. **The fix is to put a record count in the psp's footer**, which makes both halves
+/// one cheap read; that is a psp format change and belongs with the walk stage rather than here.
+///
+/// `named` is what the census says it was built from and `header_in_hand` is the digest of the
+/// psp beside it, `None` when there is no psp there.
+#[must_use]
+pub fn freshness_by_header(
+    named: Option<PileupIdentity>,
+    header_in_hand: Option<[u8; 16]>,
+) -> Freshness {
+    match (named, header_in_hand) {
+        (Some(named), Some(here)) if named.header == here => Freshness::Fresh,
+        (Some(_), Some(_)) => Freshness::Rebuild("the pileup's header"),
+        (Some(_), None) => Freshness::Refused("the pileup it was built from, which is not here"),
+        (None, Some(_)) => {
+            Freshness::Rebuild("the pileup it was built from, which it does not name")
+        }
+        (None, None) => Freshness::Refused("the pileup it was built from, which it does not name"),
+    }
+}
+
 thread_local! {
     /// Bytes this thread has read out of census files, section by section.
     static BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
