@@ -27,8 +27,8 @@
 //! ([`freshness_by_header`]). That function's own documentation says precisely what a
 //! header-only check leaves out.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::ng::parameter_estimation::joint::census::{
     CensusError, CohortCensusEvidence, CohortRefusal,
@@ -37,6 +37,9 @@ use crate::ng::parameter_estimation::joint::census_file::{
     Freshness, freshness_by_header, open_census,
 };
 use crate::ng::psp::{self, PspReadError};
+use crate::ng::read::input::read_groups::{
+    NameOrigin, NameWithOrigin, ReadGroup, ReadGroups, SampleReadGroups,
+};
 use crate::pop_var_caller_exp::generate_census::CENSUS_FILE_EXTENSION;
 use crate::pop_var_caller_exp::generate_psps::PSP_FILE_EXTENSION;
 
@@ -223,27 +226,56 @@ fn psp_beside(census: &Path) -> PathBuf {
     psp
 }
 
-/// Which read groups each sample of the cohort holds, by the sample's name — what a fit needs to
-/// name its per-library answers to whoever reads them.
+/// **The run's read-group table, built from what the censuses declare.**
 ///
-/// **Keyed by name and not by position**, the rule the parameters file follows: a run that
-/// reordered its censuses would otherwise put one sample's libraries under another's.
+/// A parameters file names a read group by its `@RG ID`, its library and its sample, and the
+/// table is where those three meet. The censuses carry all three, so no alignment file and no psp
+/// is opened to build it — which is the whole reason the names went into the census (step C1).
+///
+/// **The identifiers are the cohort's, not each census's own.** Assembling the cohort renumbered
+/// every sample onto run-wide identifiers; this walks the samples in that order and mints the
+/// same numbering, so the table and the evidence agree by construction.
+///
+/// **The library's origin is recorded as synthesized**, which is the weaker of the two claims and
+/// the one that cannot be false: a census records the library the walk *resolved* — `@RG LB`, or
+/// the name the walk invented where the file declared none — and not which of the two it was.
+/// The calling stage's own table over stored files says the same thing for the same reason.
 #[must_use]
-pub fn read_groups_by_sample(
-    cohort: &CohortCensusEvidence,
-) -> BTreeMap<String, Vec<(crate::ng::types::ReadGroupId, String, String)>> {
-    cohort
-        .samples()
-        .iter()
-        .map(|sample| {
-            let groups = sample
-                .declared_read_groups()
-                .iter()
-                .map(|(id, named)| (*id, named.declared_id.clone(), named.library.clone()))
-                .collect();
-            (sample.sample.clone(), groups)
-        })
-        .collect()
+pub fn read_groups_of(cohort: &CohortCensusEvidence, censuses: &[CensusInCohort]) -> ReadGroups {
+    let mut groups = Vec::new();
+    let mut per_sample = Vec::with_capacity(cohort.len());
+    for (index, sample) in cohort.samples().iter().enumerate() {
+        // Only for a message to be able to name a file; nothing keys on it.
+        let file: Arc<Path> = censuses.get(index).map_or_else(
+            || Arc::from(Path::new("")),
+            |it| Arc::from(it.census.as_path()),
+        );
+        let mut mine = Vec::new();
+        for (id, named) in sample.declared_read_groups() {
+            groups.push(ReadGroup {
+                file: Arc::clone(&file),
+                id: named.declared_id.clone().into_boxed_str(),
+                sample: sample.sample.clone().into_boxed_str(),
+                library: NameWithOrigin {
+                    value: named.library.clone().into_boxed_str(),
+                    origin: NameOrigin::Synthesized,
+                },
+                // The experiment is the library copied, because nothing reads an experiment tag
+                // yet — direct mode's own rule.
+                experiment: NameWithOrigin {
+                    value: named.library.clone().into_boxed_str(),
+                    origin: NameOrigin::Synthesized,
+                },
+                platform: None,
+            });
+            mine.push(*id);
+        }
+        per_sample.push(SampleReadGroups {
+            sample: sample.sample.clone().into_boxed_str(),
+            read_groups: mine,
+        });
+    }
+    ReadGroups::of_merged_tables(groups, per_sample)
 }
 
 #[cfg(test)]

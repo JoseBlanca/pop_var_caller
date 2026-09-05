@@ -297,6 +297,24 @@ generic half; `strata_of_kept_loci` → `gather_strata` → `fit_strata` for the
 cohort** — this step changes where the evidence is read from, not the arithmetic.
 *Depends:* C3.
 
+⚠ **C5 — assemble a `RunParameters`, and write the file. BLOCKED, 2026-09-05.**
+
+> **`assemble` refuses a read group that has a fitted error rate and no minted read-error
+> total**, and says why: the two come from one pass over one set of reads, so one without the
+> other means they saw different data (`checked_read_group_count_of`). **§3.4 assumed the pair
+> would fall back to a defaulted calibration. It does not — it panics.**
+>
+> Three ways out, and the choice is the owner's. **Bring Milestone E forward**: accumulate the
+> minted totals while `generate-census` reads the psps and store them, at which point the
+> calibration is fitted and the pair is whole. **Or hand `assemble` a total that saw no reads**
+> beside each fitted rate, which satisfies the check by defeating it. **Or supply no rates
+> either**, at which point the run has no read-group axis and `assemble` refuses it outright, so
+> this route could write no parameters file at all.
+>
+> Everything else of this step is written and compiles — the read-group table built from what the
+> censuses declare, the nine arguments assembled, the file constructed. Its three tests are
+> `#[ignore]`d with this reason.
+
 ☐ **C5 — assemble a `RunParameters`, and write the file.** The fit's outputs into
 `RunParameters::assemble`, then the parameters file. **Each number carries the warrant it has
 earned**: fitted where the fit produced it, defaulted where it did not, and the base-quality
