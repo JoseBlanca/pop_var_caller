@@ -276,7 +276,7 @@ what says they are naming the groups the same way.
 *Depends:* B1. *Source:* [`parameters_file.md`](../spec/parameters_file.md) §4's read-group table,
 which is what these names have to reach.
 
-☐ **C2 — a cohort of censuses merges on those names.** `CohortCensusEvidence::new` stops refusing
+✅ **C2 — a cohort of censuses merges on those names.** `CohortCensusEvidence::new` stops refusing
 an index collision and instead **renumbers**: run-wide identifiers are assigned in (sample order,
 the sample's own group order), which is the rule `ReadGroups::of_merged_tables` already uses for
 alignment files, and each sample's section keys are relabelled to match. What it refuses instead

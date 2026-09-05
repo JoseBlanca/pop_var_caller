@@ -287,3 +287,58 @@ fn a_sample_name_that_is_not_a_file_name_is_refused() {
     }
     refuse_a_sample_name_that_is_not_a_file_name("zeta").expect("an ordinary name is fine");
 }
+
+/// **The censuses this command writes assemble into a cohort a fit can read.**
+///
+/// This is what steps C1 and C2 exist for, end to end. Every census numbers its read groups from
+/// zero, because a walk sees one sample — so before the names were recorded, two censuses of one
+/// cohort both claimed read group 0 and were refused as libraries that would be fitted as one.
+/// Now they are merged on the `@RG ID`s each declares and renumbered apart.
+#[test]
+fn the_censuses_it_writes_assemble_into_a_cohort() {
+    use crate::ng::parameter_estimation::joint::census::CohortCensusEvidence;
+    use crate::ng::parameter_estimation::joint::census_file::open_census;
+
+    let (cohort, psps) = a_walked_cohort();
+    let rebuilt = cohort.directory.path().join("rebuilt");
+    let report = build_every_census(&args_over(&cohort, &psps, rebuilt)).expect("the psps read");
+
+    let mut samples = Vec::new();
+    for entry in &report.samples {
+        let (evidence, _) = open_census(&entry.census).expect("this build wrote it");
+        assert_eq!(
+            evidence.read_groups(),
+            vec![crate::ng::types::ReadGroupId(0)],
+            "{}'s census numbers its own groups from zero, which is what makes the merge \
+             necessary",
+            entry.sample,
+        );
+        samples.push(evidence);
+    }
+    assert_eq!(samples.len(), 2, "the fixture has two samples");
+
+    let built = CohortCensusEvidence::new(samples)
+        .expect("two censuses of one cohort are a cohort, renumbered onto run-wide identifiers");
+
+    assert_eq!(
+        built.read_groups().len(),
+        2,
+        "the two samples' libraries end up under different identifiers, which is what keeps \
+         their sequencing-error rates apart",
+    );
+    let declared: Vec<&str> = built
+        .samples()
+        .iter()
+        .flat_map(|sample| {
+            sample
+                .declared_read_groups()
+                .values()
+                .map(|group| group.declared_id.as_str())
+        })
+        .collect();
+    assert_eq!(
+        declared.len(),
+        2,
+        "and each keeps the @RG ID it was declared under: {declared:?}",
+    );
+}

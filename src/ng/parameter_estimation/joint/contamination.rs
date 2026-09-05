@@ -1677,7 +1677,10 @@ mod tests {
                 SampleCensusEvidence::resident(
                     format!("s{s:02}"),
                     terms.clone(),
-                    NamedReadGroup::drawn_for(&format!("s{s:02}"), [ReadGroupId(s as u32)]),
+                    NamedReadGroup::drawn_for(
+                        &format!("s{s:02}"),
+                        (0..libraries.len()).map(|k| read_group_of(s, k, libraries.len())),
+                    ),
                     held,
                 )
             })
