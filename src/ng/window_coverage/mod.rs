@@ -32,10 +32,10 @@
 //! what it costs is that neither module can be moved or read without the other.
 
 mod accumulator;
-/// **Published only until plan step C2 supplies its caller.** Its two items have none
-/// today, so `mod depth;` would be a dead-code warning; when the merge's cache calls the
-/// rule, this becomes `mod depth;` with a `pub(crate) use`, as `accumulator` is.
-pub mod depth;
+/// The rule that turns a drawn record into covered positions. `pub(crate)` since plan step C2
+/// supplied its caller — the merge's cache — because nothing outside this crate builds a
+/// [`LocusSummary`](crate::ng::run::cohort_merge::observation_cache::LocusSummary) to hand it.
+pub(crate) mod depth;
 
 #[cfg(test)]
 mod production_parity;

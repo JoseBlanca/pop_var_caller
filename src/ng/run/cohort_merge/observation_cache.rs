@@ -44,7 +44,11 @@
 use super::CohortLocusBuilderRegionsLen;
 use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::ref_seq::{EvictableRefSeq, RefSeq, RefSeqError};
-use crate::ng::types::{GenomePosition, GenomeRegion, Position};
+use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position};
+use crate::ng::window_coverage::depth::{EvidenceForOneRecord, for_each_reported_depth};
+use crate::ng::window_coverage::{
+    self, WindowCoverage, WindowCoverageAccumulator, WindowCoverageConfig,
+};
 
 /// What the merge asks of a reference: bases, and the release of what it has walked past.
 ///
@@ -407,6 +411,177 @@ struct SampleWindow<S> {
     keeps_evidence: bool,
     /// Where the last observation drawn from `source` began — the ordering check's memory.
     last_drawn: Option<GenomePosition>,
+    /// This sample's window-coverage measurement, at whatever stage the pass has reached it.
+    ///
+    /// **One per sample and never shared**, because a window is over *that sample's* covered
+    /// positions: the GC is averaged over the positions that contributed the depth, so two
+    /// samples covering different ground have different windows at the same centre.
+    window_coverage: WindowCoverageInProgress,
+}
+
+/// One sample's window-coverage measurement while the pass is still running: the accumulator
+/// being fed, the windows it has finalised, and how far it has read.
+///
+/// **The three are one thing and move together**, which is why they are a type rather than
+/// three fields on [`SampleWindow`]: the cursor is only meaningful against the accumulator it
+/// guards, eviction touches only the finalised windows, and the step that finishes the pass
+/// (plan step C5) moves the whole of this out by value.
+struct WindowCoverageInProgress {
+    /// Every covered position this sample has a record at, fed in coordinate order, giving
+    /// back the mean depth and GC of the window centred on each
+    /// (`spec/window_coverage.md` §3.3).
+    accumulator: WindowCoverageAccumulator,
+    /// The windows the accumulator has finalised and nothing has evicted, oldest first — the
+    /// values a builder reads at a locus.
+    ///
+    /// **A `Vec` drained from the front, for the reason `held_summaries` is one**: a consumer
+    /// is handed a contiguous slice of it, and a deque's two halves are not one.
+    finalised: Vec<(GenomePosition, WindowCoverage)>,
+    /// Where the record the accumulator last saw began, or `None` before the first.
+    ///
+    /// **The cursor that makes a record observed exactly once.** A record is held across as
+    /// many covers as it reaches into, and every one of those covers reads ground that contains
+    /// it; without this, its positions would be counted once per cover and the sample's depth
+    /// would rise with how many covers happened to overlap it. Records reach the accumulator in
+    /// ascending order and never repeat a start — a sample's records are disjoint and ascending
+    /// — so a start is enough to say what has been seen.
+    observed_through: Option<GenomePosition>,
+}
+
+impl WindowCoverageInProgress {
+    /// A measurement that has seen nothing, configured from the run's constants.
+    ///
+    /// **The configuration is spelled here and nowhere else**, which is what
+    /// `WindowCoverageConfig`'s own doc asks for: it has no `Default`, so the run's values live
+    /// at the one site that builds an accumulator.
+    fn new() -> Self {
+        Self {
+            accumulator: WindowCoverageAccumulator::new(WindowCoverageConfig {
+                window_bp: window_coverage::WINDOW_BP,
+                gc_bins: window_coverage::GC_BINS,
+                depth_bins: window_coverage::DEPTH_BINS,
+                depth_scale_windows: window_coverage::DEPTH_SCALE_WINDOWS,
+                depth_range_in_medians: window_coverage::DEPTH_RANGE_IN_MEDIANS,
+                min_window_positions: window_coverage::MIN_WINDOW_POSITIONS,
+            }),
+            finalised: Vec::new(),
+            observed_through: None,
+        }
+    }
+
+    /// Where in `held` the records this has not seen begin.
+    ///
+    /// A sample's records are disjoint and ascending, so what has not been seen is a suffix and
+    /// where it starts is a partition rather than a scan of the whole window.
+    fn first_not_yet_observed(&self, held: &[LocusSummary]) -> usize {
+        self.observed_through.map_or(0, |seen| {
+            held.partition_point(|summary| summary.start_position() <= seen)
+        })
+    }
+
+    /// The summaries in `held` this has not seen.
+    fn summaries_not_yet_observed<'h>(&self, held: &'h [LocusSummary]) -> &'h [LocusSummary] {
+        &held[self.first_not_yet_observed(held)..]
+    }
+
+    /// Feed one record's reported positions to the accumulator, against `bases`, and keep
+    /// whatever windows that finalises.
+    ///
+    /// `summary` must be `evidence`'s own, and `bases` must hold every position the record
+    /// reports — the ground a cover reads is computed from the very records it then observes
+    /// ([`ObservationCache::ground_this_cover_holds_on`]), so a position with no base is a
+    /// defect in that computation rather than an absent value, and it says so.
+    ///
+    /// # Errors
+    ///
+    /// Whatever building a kept record's evidence refuses, unchanged.
+    fn observe<E>(
+        &mut self,
+        summary: LocusSummary,
+        evidence: EvidenceForOneRecord<'_>,
+        build: impl FnOnce(core::ops::Range<usize>) -> Result<SampleLocusObservations, E>,
+        bases: &[u8],
+        bases_from: GenomePosition,
+    ) -> Result<(), E> {
+        let Self {
+            accumulator,
+            finalised,
+            observed_through,
+        } = self;
+        for_each_reported_depth(summary, evidence, build, |at, depth| {
+            let base = base_in(bases, bases_from, at).unwrap_or_else(|| {
+                panic!(
+                    "the cover read no reference base at {at:?}, where this sample holds a \
+                     record — the ground a cover reads is computed from the records it holds, \
+                     so this is that computation and not the data"
+                )
+            });
+            accumulator.observe(at.contig, at.position, base, depth);
+        })?;
+        *observed_through = Some(summary.start_position());
+        while let Some(window) = accumulator.pop_ready() {
+            finalised.push(window);
+        }
+        Ok(())
+    }
+
+    /// Drop the finalised windows centred before `position`.
+    ///
+    /// **By the windows' own coordinates and not by the records'**: a window is centred on a
+    /// position, and the record that position came from may already be gone. Dropped ones can
+    /// never be asked for again — a builder reads a window at the locus it is building, and the
+    /// organiser releases ground only once nothing can reach back into it.
+    ///
+    /// **A prefix drain, for the reason the summaries' is one**: the windows are ascending, so
+    /// the survivors are a suffix, and the cost is proportional to what is dropped rather than
+    /// to the window.
+    fn evict_before(&mut self, position: GenomePosition) {
+        let first_survivor = self
+            .finalised
+            .partition_point(|(centre, _)| *centre < position);
+        self.finalised.drain(..first_survivor);
+    }
+}
+
+impl<S> SampleWindow<S> {
+    /// Drop everything this sample holds that ends before `position`, offering the records back
+    /// to its own spare list and pushing what will not fit onto `dead`.
+    ///
+    /// **One body, called by both evictors** — the serial one frees `dead` itself and the
+    /// parallel one hands it to the caller's graveyard. They differ in what becomes of the
+    /// overflow and in nothing else, and a statement added to one and not the other would
+    /// leak a sample's window without failing to compile.
+    fn evict_before(&mut self, position: GenomePosition, dead: &mut Vec<SampleLocusObservations>) {
+        let first_survivor = first_reaching_summary(&self.held_summaries, position);
+        // **Destructured so that the drain and the spare list are two borrows, not one.** Both
+        // live on the same `SampleWindow`, and a method call inside the drain would borrow the
+        // whole of it a second time.
+        // **Every field named, none absorbed by a `..`.** A field added to `SampleWindow` that
+        // an eviction has to drain would otherwise compile here and leak.
+        let Self {
+            held_observations,
+            held_summaries,
+            held_bodies,
+            spare,
+            window_coverage,
+            source: _,
+            spent: _,
+            keeps_evidence: _,
+            last_drawn: _,
+        } = self;
+        // The finalised windows go with the records, by their own coordinates.
+        window_coverage.evict_before(position);
+        held_summaries.drain(..first_survivor);
+        held_bodies.drain(..first_survivor.min(held_bodies.len()));
+        let room = held_observations.len();
+        for record in held_observations.drain(..first_survivor.min(room)) {
+            if spare.len() < room {
+                spare.push(record);
+            } else {
+                dead.push(record);
+            }
+        }
+    }
 }
 
 /// The cohort's window over one stretch of ground: what every sample recorded there, in the
@@ -443,6 +618,16 @@ pub struct WindowedCohort<'a> {
     /// records and no summaries; both must be expressible or one of them needs a second
     /// merge.
     pub summaries: Option<&'a [&'a [LocusSummary]]>,
+    /// One slice per sample at the same index again: the windows that sample's coverage
+    /// accumulator has finalised and nothing has evicted, oldest first.
+    ///
+    /// **Not parallel to the other two** — a window is centred on a position, not on a record,
+    /// and a sample has one per covered position while it has one record per locus. It is read
+    /// by position, through [`window_coverage_at`](Self::window_coverage_at).
+    ///
+    /// `None` for a window built from records alone, which is what every fixture that predates
+    /// the measurement hands over.
+    pub finalised_windows: Option<&'a [&'a [(GenomePosition, WindowCoverage)]]>,
 }
 
 impl<'a> WindowedCohort<'a> {
@@ -474,6 +659,25 @@ impl<'a> WindowedCohort<'a> {
     pub fn first_start(&self, sample: usize) -> Option<GenomePosition> {
         self.summary_at(sample, 0).map(LocusSummary::start_position)
     }
+
+    /// Sample `sample`'s window centred on `at`, or `None` where it has none there.
+    ///
+    /// **`None` is an ordinary answer and not a gap in the measurement.** A sample has a window
+    /// at a position only if it has a record there — coverage begins a base later, a repeat
+    /// tract emits no loci, no read reached — and the filter that reads this skips a sample it
+    /// has no window for, which is what its scorer already does for an absent sample.
+    ///
+    /// A binary search, because the windows are in ascending coordinate order: a sample holds
+    /// one per covered position, so a scan would be linear in the window's ground.
+    #[must_use]
+    pub fn window_coverage_at(&self, sample: usize, at: GenomePosition) -> Option<WindowCoverage> {
+        let per_sample = self.finalised_windows?;
+        let windows = per_sample.get(sample)?;
+        let found = windows
+            .binary_search_by_key(&at, |(centre, _)| *centre)
+            .ok()?;
+        windows.get(found).map(|(_, window)| *window)
+    }
 }
 
 /// A borrowed window is a window — so a caller handed one by the cache can pass it on.
@@ -489,6 +693,7 @@ impl<'a> From<&'a [&'a [SampleLocusObservations]]> for WindowedCohort<'a> {
         Self {
             observations: Some(observations),
             summaries: None,
+            finalised_windows: None,
         }
     }
 }
@@ -522,6 +727,7 @@ impl<S> ObservationCache<S> {
                     held_bodies: Vec::new(),
                     keeps_evidence: false,
                     last_drawn: None,
+                    window_coverage: WindowCoverageInProgress::new(),
                 })
                 .collect(),
             covered_to: None,
@@ -589,28 +795,22 @@ impl<S> ObservationCache<S> {
     /// nothing can fill the buffer this reads, so a wider accessor could only ever answer
     /// `None`.
     #[must_use]
-    // **`not(test)`, because the tests below are its only callers today.** The merge's own
-    // reader arrives at plan step C2, which puts one window-coverage accumulator per sample
-    // into the cache and feeds it these bases; until then this would be dead code in a build
-    // without them, and the compiler asks for the attribute back the moment C2 lands.
+    // **`not(test)`, because the tests below are still its only callers.** C2 was expected to
+    // make it live and did not: the measurement reads the buffer through [`base_in`], which is
+    // this accessor's own arithmetic lifted out so the two cannot drift. What the accessor adds
+    // is the `&self` form the tests pin the buffer's edges with; it turns live at plan step C4,
+    // where a builder reads a base at a locus.
     #[cfg_attr(
         not(test),
         expect(
             dead_code,
-            reason = "read by plan step C2, which puts the window-coverage accumulator into \
-                      the cache; exercised by this module's tests until then"
+            reason = "the cover reads the buffer through `base_in`; this `&self` form is what \
+                      the module's tests pin the buffer's edges with, and plan step C4's \
+                      builder is its first non-test caller"
         )
     )]
     pub(super) fn reference_base_at(&self, at: GenomePosition) -> Option<u8> {
-        let from = self.reference_bases_from?;
-        if from.contig != at.contig || at.position < from.position {
-            return None;
-        }
-        // The guard above is what makes this subtraction total.
-        let offset = at.position.get() - from.position.get();
-        self.reference_bases
-            .get(usize::try_from(offset).ok()?)
-            .copied()
+        base_in(&self.reference_bases, self.reference_bases_from?, at)
     }
 }
 
@@ -676,9 +876,16 @@ impl<S> ObservationCache<S> {
         let mut observations_per_sample: Vec<&[SampleLocusObservations]> =
             Vec::with_capacity(self.samples.len());
         let mut summaries_per_sample: Vec<&[LocusSummary]> = Vec::with_capacity(self.samples.len());
+        // **The whole of what each sample holds, not the part from `left_edge`.** A window is
+        // centred on a position and a builder asks for it by position, so trimming a prefix
+        // would only make the search shorter while giving the caller a slice whose start is not
+        // where it thinks; eviction is what bounds this, as it bounds the other two.
+        let mut finalised_windows_per_sample: Vec<&[(GenomePosition, WindowCoverage)]> =
+            Vec::with_capacity(self.samples.len());
         for sample in &self.samples {
             let from = first_reaching_summary(&sample.held_summaries, left_edge);
             summaries_per_sample.push(&sample.held_summaries[from..]);
+            finalised_windows_per_sample.push(&sample.window_coverage.finalised);
             if !self.keeps_evidence {
                 observations_per_sample.push(&sample.held_observations[from..]);
             }
@@ -688,6 +895,7 @@ impl<S> ObservationCache<S> {
         f(&WindowedCohort {
             observations: records,
             summaries: Some(&summaries_per_sample),
+            finalised_windows: Some(&finalised_windows_per_sample),
         })
     }
 
@@ -723,32 +931,13 @@ impl<S> ObservationCache<S> {
     /// could have been dropped. The prefix form is chosen for its cost, which is proportional
     /// to what it drops rather than to the window, and not for a difference in what it keeps.
     pub(super) fn evict_before(&mut self, position: GenomePosition) {
+        // The records that will not fit in a sample's spare list. The serial evictor has
+        // nowhere to send them, so it frees each sample's before moving to the next — which is
+        // where they were freed before this walk and the parallel one shared a body.
+        let mut dead = Vec::new();
         for sample in &mut self.samples {
-            let first_survivor = first_reaching_summary(&sample.held_summaries, position);
-            // **Destructured so that the drain and the spare list are two borrows, not
-            // one.** Both live on the same `SampleWindow`, and a method call inside the
-            // drain would borrow the whole of it a second time.
-            // **Every field named, none absorbed by a `..`.** A field added to `SampleWindow`
-            // that an eviction has to drain — the window-coverage plan's next step adds two —
-            // would otherwise compile here and leak, in one of the two evictors or in both.
-            let SampleWindow {
-                held_observations,
-                held_summaries,
-                held_bodies,
-                spare,
-                source: _,
-                spent: _,
-                keeps_evidence: _,
-                last_drawn: _,
-            } = sample;
-            held_summaries.drain(..first_survivor);
-            held_bodies.drain(..first_survivor.min(held_bodies.len()));
-            let room = held_observations.len();
-            for record in held_observations.drain(..first_survivor.min(room)) {
-                if spare.len() < room {
-                    spare.push(record);
-                }
-            }
+            sample.evict_before(position, &mut dead);
+            dead.clear();
         }
     }
 
@@ -785,29 +974,8 @@ impl<S> ObservationCache<S> {
             .samples
             .par_iter_mut()
             .map(|sample| {
-                let first_survivor = first_reaching_summary(&sample.held_summaries, position);
-                // Every field named, for the reason the serial evictor's destructure gives.
-                let SampleWindow {
-                    held_observations,
-                    held_summaries,
-                    held_bodies,
-                    spare,
-                    source: _,
-                    spent: _,
-                    keeps_evidence: _,
-                    last_drawn: _,
-                } = sample;
-                held_summaries.drain(..first_survivor);
-            held_bodies.drain(..first_survivor.min(held_bodies.len()));
-                let room = held_observations.len();
                 let mut dead = Vec::new();
-                for record in held_observations.drain(..first_survivor.min(room)) {
-                    if spare.len() < room {
-                        spare.push(record);
-                    } else {
-                        dead.push(record);
-                    }
-                }
+                sample.evict_before(position, &mut dead);
                 dead
             })
             .collect();
@@ -979,7 +1147,7 @@ where
     where
         E: From<ReferenceUnreadable>,
     {
-        self.fetch_the_ground_this_cover_reached(region, chain_reach)?;
+        self.read_the_ground_and_measure_coverage_over_it(region, chain_reach)?;
         self.keeps_evidence |= self.samples.iter().any(|sample| sample.keeps_evidence);
         self.covered_to = Some(
             self.covered_to
@@ -988,38 +1156,34 @@ where
         Ok(())
     }
 
-    /// The reference bases over the ground this cover holds, into the buffer every sample
-    /// reads by offset.
+    /// Read the reference over the ground this cover holds and feed every record it added to
+    /// its sample's accumulator — **one contig at a time**, in ascending order, ending on the
+    /// region's own.
     ///
-    /// **The ground is what the cache holds, not what the region asked for**, and the two are
-    /// different at both ends. Past the region: an observation chaining beyond it widens the
-    /// reach, and every sample is drawn one observation *past* that reach — the only way to know
-    /// a record is beyond the reach is to draw it, and once drawn it is held rather than thrown
-    /// away. Before the region: a record drawn by an earlier cover and still held is handed to
-    /// the builders again, and this buffer is refilled rather than appended to, so the bases the
-    /// cover that drew it fetched are gone. So the ground runs from the earliest position any
-    /// sample still holds a record at to the furthest any of them reaches — widened to the
-    /// region either way, so a caller's offsets are against ground it asked for at the least.
+    /// **A cover crosses contigs, and a buffer is one contig's.** Drawing stops at the first
+    /// record past the reach, and a reach on a later contig is past every position of an
+    /// earlier one — so the cover that first reaches contig *n* also draws whatever the sample
+    /// still had on contig *n − 1*. Those records are real covered positions of that sample and
+    /// their bases are on the contig they sit on, so this reads each contig the cover added
+    /// records on before observing the records there.
     ///
-    /// **After the fixpoint and not before it**, for the same reason: what the cache holds is
-    /// not known until the drawing has stopped.
+    /// **The region's contig is read last and always**, even where the cover added no record on
+    /// it, so the buffer a builder later reads through
+    /// [`reference_base_at`](Self::reference_base_at) is the ground of the region it asked for.
     ///
-    /// **One fetch a cover, whatever the cohort's size.** The bases are the same for every
-    /// sample; only which of them a sample's records fall on differs.
+    /// **Each record exactly once**, which the per-sample cursor is for: a record is held across
+    /// every cover it reaches into, and each of those covers reads ground containing it.
     ///
-    /// **Records held on a contig this cover has left are not in it**, and cannot be: a buffer
-    /// is one contig's. Nothing asks — a cover on a new contig evicts every record of the old
-    /// one before it draws — and [`reference_base_at`](Self::reference_base_at) answers `None`
-    /// rather than reading across.
+    /// **A record spanning more than one base has its evidence built here in psp mode**, which
+    /// is the one place this measurement costs a run over stored files anything. Plan step B2
+    /// measured how often that is: about one record in a thousand on the tomato stores it
+    /// walked.
     ///
     /// # Errors
     ///
-    /// A failed fetch, named by the ground it was over. It ends the cover rather than being
-    /// absorbed: one failure costs every sample its coverage over that stretch, and a run that
-    /// carried on would report a window whose denominator quietly excluded it. **A region whose
-    /// first base is 0 fails here too** — there is no position 0 on a contig, and the fetch
-    /// refuses rather than translating a caller's bug into a base.
-    fn fetch_the_ground_this_cover_reached(
+    /// A failed reference fetch, named by the ground it was over — and whatever building a kept
+    /// record's evidence refuses, unchanged.
+    fn read_the_ground_and_measure_coverage_over_it(
         &mut self,
         region: GenomeRegion,
         chain_reach: GenomePosition,
@@ -1027,7 +1191,71 @@ where
     where
         E: From<ReferenceUnreadable>,
     {
-        let ground = self.ground_this_cover_holds(region, chain_reach);
+        for contig in self.contigs_this_cover_must_read(region) {
+            let ground = self.ground_this_cover_holds_on(contig, region, chain_reach);
+            self.fetch_the_ground(ground)?;
+            // **Destructured so the buffer and the samples are two borrows.** The bases belong
+            // to the cache and the accumulators to the samples, and a method call would borrow
+            // the whole of `self` for both.
+            let Self {
+                samples,
+                reference_bases,
+                reference_bases_from,
+                reference: _,
+                keeps_evidence: _,
+                covered_to: _,
+            } = self;
+            // **The buffer's own first position, not the ground's**, so that which contig the
+            // bases are on and where they start cannot be two answers: `fetch_the_ground` is
+            // what set it, and it is `None` only when the fetch failed and `?` already left.
+            let bases_from = reference_bases_from
+                .expect("a fetch that returned `Ok` recorded where its bases start");
+            for sample in &mut *samples {
+                sample.measure_coverage_on(reference_bases, bases_from)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The contigs this cover must read the reference over, ascending, with the region's own
+    /// last: every contig a record no accumulator has seen sits on, plus the region's.
+    ///
+    /// **Two at most in practice** — the one the cover is leaving and the one it is on — so
+    /// this is a short sorted list rather than a set.
+    fn contigs_this_cover_must_read(&self, region: GenomeRegion) -> Vec<ContigId> {
+        let mut contigs = vec![region.contig];
+        for sample in &self.samples {
+            let unobserved = sample
+                .window_coverage
+                .summaries_not_yet_observed(&sample.held_summaries);
+            for summary in unobserved {
+                let contig = summary.region.contig;
+                if !contigs.contains(&contig) {
+                    contigs.push(contig);
+                }
+            }
+        }
+        contigs.sort_unstable();
+        contigs
+    }
+
+    /// The reference bases over one stretch of one contig, into the buffer every sample reads
+    /// by offset.
+    ///
+    /// **One fetch a contig a cover, whatever the cohort's size.** The bases are the same for
+    /// every sample; only which of them a sample's records fall on differs.
+    ///
+    /// # Errors
+    ///
+    /// A failed fetch, named by the ground it was over. It ends the cover rather than being
+    /// absorbed: one failure costs every sample its coverage over that stretch, and a run that
+    /// carried on would report a window whose denominator quietly excluded it. **A ground whose
+    /// first base is 0 fails here too** — there is no position 0 on a contig, and the fetch
+    /// refuses rather than translating a caller's bug into a base.
+    fn fetch_the_ground(&mut self, ground: GenomeRegion) -> Result<(), E>
+    where
+        E: From<ReferenceUnreadable>,
+    {
         // **The old ground stops being answerable the moment a new one is asked for.** A failed
         // fetch leaves the buffer as it was (`RefSeq::fetch_into`'s contract), so without this
         // a caller that retried a cover would read the previous cover's bases as this one's.
@@ -1059,36 +1287,53 @@ where
         Ok(())
     }
 
-    /// The stretch of one contig this cover's records lie on: the region it was asked for,
-    /// widened to every record any sample still holds on that contig.
+    /// The stretch of `contig` this cover's records lie on: every record any sample still holds
+    /// there, widened to the region when `contig` is the region's own.
     ///
-    /// Held records on **another** contig are ignored rather than widening the ground: a fetch
-    /// is one contig's, and a cover on a new contig has evicted the old one's records before it
-    /// draws.
-    fn ground_this_cover_holds(
+    /// **The ground is what the cache holds, not what the region asked for**, and the two are
+    /// different at both ends. Past the region: an observation chaining beyond it widens the
+    /// reach, and every sample is drawn one observation *past* that reach — the only way to
+    /// know a record is beyond the reach is to draw it, and once drawn it is held rather than
+    /// thrown away. Before the region: a record drawn by an earlier cover and still held is
+    /// handed to the builders again, and this buffer is refilled rather than appended to, so
+    /// the bases the cover that drew it fetched are gone.
+    fn ground_this_cover_holds_on(
         &self,
+        contig: ContigId,
         region: GenomeRegion,
         chain_reach: GenomePosition,
     ) -> GenomeRegion {
         // `min`/`max` for the reason `SampleLocusObservations::reach` uses them: `GenomeRegion`
         // has public fields and no constructor enforcing `start <= end`.
-        let mut first_base = region.start.min(region.end);
-        let mut last_base = chain_reach.position.max(first_base);
+        let on_the_regions_own_contig = contig == region.contig;
+        let mut first_base = None;
+        let mut last_base = None;
+        if on_the_regions_own_contig {
+            first_base = Some(region.start.min(region.end));
+            last_base = Some(chain_reach.position.max(region.start.min(region.end)));
+        }
         for sample in &self.samples {
-            let held_on_this_contig = |summary: &LocusSummary| {
-                (summary.region.contig == region.contig).then_some(*summary)
-            };
-            if let Some(first) = sample.held_summaries.first().and_then(held_on_this_contig) {
-                first_base = first_base.min(first.start_position().position);
+            // **Ends, not a scan.** A sample's held summaries ascend in `(contig, position)`
+            // (`draw_next`'s ordering check), so the ones on `contig` are a contiguous run, and
+            // reach is monotone across a window of disjoint ascending records — which is what
+            // `evict_before`'s prefix drain already rests on. Scanning instead would cost this
+            // `samples × held` per contig on every cover.
+            let held = summaries_on(&sample.held_summaries, contig);
+            if let Some(first) = held.first() {
+                let start = first.start_position().position;
+                first_base = Some(first_base.map_or(start, |first: Position| first.min(start)));
             }
-            if let Some(last) = sample.held_summaries.last().and_then(held_on_this_contig) {
-                last_base = last_base.max(last.reach());
+            if let Some(last) = held.last() {
+                let reach = last.reach();
+                last_base = Some(last_base.map_or(reach, |last: Position| last.max(reach)));
             }
         }
+        // A contig reaches this function only because the region names it or a record sits on
+        // it, so both ends are set; the fallback is the region's own ground and cannot fire.
         GenomeRegion {
-            contig: region.contig,
-            start: first_base,
-            end: last_base,
+            contig,
+            start: first_base.unwrap_or(region.start.min(region.end)),
+            end: last_base.unwrap_or(region.end.max(region.start)),
         }
     }
 
@@ -1160,6 +1405,58 @@ where
             }
         }
         Ok(reach_grew)
+    }
+
+    /// Feed this sample's accumulator the records it holds on `bases_from`'s contig that the
+    /// accumulator has not seen, against the bases just read for that contig.
+    ///
+    /// `bases` is that contig's ground and `bases_from` where its first byte sits — **one
+    /// argument for both, so which contig the bases are on cannot be two answers.** Every
+    /// record this walks lies inside them, because the ground is computed from these very
+    /// records ([`ObservationCache::ground_this_cover_holds_on`]).
+    ///
+    /// **Records on a later contig are left for that contig's turn**, and the cursor stops with
+    /// them: the caller walks the contigs in ascending order, so a record skipped here is
+    /// reached by a later call of the same cover.
+    ///
+    /// # Errors
+    ///
+    /// Whatever building a kept record's evidence refuses, unchanged.
+    fn measure_coverage_on(&mut self, bases: &[u8], bases_from: GenomePosition) -> Result<(), E> {
+        // Destructured so that the source can be asked to build while the measurement beside
+        // it is borrowed mutably: they are separate fields, and only a destructuring says so.
+        let Self {
+            source,
+            held_summaries,
+            held_observations,
+            held_bodies,
+            window_coverage,
+            spent: _,
+            spare: _,
+            keeps_evidence: _,
+            last_drawn: _,
+        } = self;
+        let first_new = window_coverage.first_not_yet_observed(held_summaries);
+        for index in first_new..held_summaries.len() {
+            let summary = held_summaries[index];
+            if summary.region.contig != bases_from.contig {
+                // Ascending, so this and everything after it belongs to a later contig's turn.
+                break;
+            }
+            let evidence = match held_observations.get(index) {
+                Some(record) => EvidenceForOneRecord::InHand(record),
+                // The psp path holds bytes where direct mode holds records, at the same index.
+                None => EvidenceForOneRecord::Kept(held_bodies[index].clone()),
+            };
+            window_coverage.observe(
+                summary,
+                evidence,
+                |body| source.build(body),
+                bases,
+                bases_from,
+            )?;
+        }
+        Ok(())
     }
 
     /// The next observation from the source, or `None` once it is spent.
@@ -1267,6 +1564,29 @@ pub fn building_regions_of(
 /// a call at `position`, and the window's length when every one of them ends before it.
 /// [`first_reaching_index`] over summaries, which every window has and only some have records
 /// for.
+/// The base at `at` in a buffer whose first byte is `bases_from`, or `None` where the buffer
+/// does not hold that position.
+///
+/// **One derivation of the offset, read by both the cache's accessor and the measurement.**
+/// The two would agree until the day one of them was changed, and the failure is a window
+/// filled from bases one position over.
+fn base_in(bases: &[u8], bases_from: GenomePosition, at: GenomePosition) -> Option<u8> {
+    if bases_from.contig != at.contig || at.position < bases_from.position {
+        return None;
+    }
+    // The guard above is what makes this subtraction total.
+    let offset = at.position.get() - bases_from.position.get();
+    bases.get(usize::try_from(offset).ok()?).copied()
+}
+
+/// The stretch of `held` that sits on `contig` — a contiguous run, because a sample's summaries
+/// ascend in `(contig, position)` (`SampleWindow::draw_next`'s ordering check).
+fn summaries_on(held: &[LocusSummary], contig: ContigId) -> &[LocusSummary] {
+    let from = held.partition_point(|summary| summary.region.contig < contig);
+    let to = held.partition_point(|summary| summary.region.contig <= contig);
+    &held[from..to]
+}
+
 fn first_reaching_summary(held: &[LocusSummary], position: GenomePosition) -> usize {
     held.partition_point(|summary| summary.reach_position() < position)
 }
@@ -1446,6 +1766,172 @@ mod tests {
         let source = a_source(vec![Ok(observation_over(region(40, 40)))]);
         let cache = ObservationCache::over_fixture(vec![source]);
         assert_eq!(cache.reference_base_at(position_on(0, 40)), None);
+    }
+
+    /// One sample's records over `1..=bases`, one per position, each seen by `reads` reads —
+    /// the shape the generic walk emits, and long enough that windows in the middle of it
+    /// finalise: a centre closes only once the stream has passed 250 bases beyond it.
+    fn one_record_a_position(
+        bases: u64,
+        reads: u32,
+    ) -> std::vec::IntoIter<Result<SampleLocusObservations, SourceFailed>> {
+        (1..=bases)
+            .map(|at| {
+                let mut record = observation_over(region(at, at));
+                record.observations[0].num_obs = reads;
+                Ok(record)
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    /// **The measurement, end to end through the cache.** Each of 600 positions carries three
+    /// reads, and the reference repeats `ACGT`, so the window centred on 300 — the covered
+    /// positions of 50 through 550 — is a mean depth of exactly 3 over 501 positions, 251 of
+    /// which are `G` or `C`.
+    #[test]
+    fn a_builder_reads_the_window_a_sample_has_at_a_position() {
+        let mut cache = ObservationCache::over_fixture(vec![one_record_a_position(600, 3)]);
+        cache
+            .cover(region(1, 600))
+            .expect("the fixture source and reference hold");
+
+        let window = cache.with_observations(region(1, 600), |window| {
+            window.window_coverage_at(0, position_on(0, 300))
+        });
+        let window = window.expect("the sample has a window at 300");
+        assert_eq!(
+            window.mean_depth, 3.0,
+            "the window's depth is not the three reads every position carries",
+        );
+        assert!(
+            (f64::from(window.gc_fraction) - 251.0 / 501.0).abs() < 1e-6,
+            "the window's GC is {} where the reference gives 251 of 501",
+            window.gc_fraction,
+        );
+    }
+
+    /// **A record is observed once, however many covers hold it.** A record is held across
+    /// every cover it reaches into, and each of those covers reads ground containing it; a
+    /// second observation would fold the same centre twice, so the check is that every centre a
+    /// sample holds is distinct and ascending — which is also what `window_coverage_at`'s search assumes.
+    #[test]
+    fn a_record_held_across_two_covers_is_observed_by_one_of_them() {
+        let mut over_two = ObservationCache::over_fixture(vec![one_record_a_position(600, 3)]);
+        over_two
+            .cover(region(1, 300))
+            .expect("the fixture source and reference hold");
+        over_two
+            .cover(region(301, 600))
+            .expect("the fixture source and reference hold");
+
+        let centres: Vec<GenomePosition> = over_two.samples[0]
+            .window_coverage
+            .finalised
+            .iter()
+            .map(|(centre, _)| *centre)
+            .collect();
+        let mut distinct = centres.clone();
+        distinct.dedup();
+        assert_eq!(
+            centres, distinct,
+            "a centre was finalised twice, so a record was observed by both covers holding it",
+        );
+        assert!(
+            centres.windows(2).all(|pair| pair[0] < pair[1]),
+            "the finalised centres are not ascending, which `window_coverage_at`'s search assumes",
+        );
+
+        // And the same ground covered in one go gives the same windows, which is what says the
+        // division into covers is not visible in the measurement.
+        let mut in_one = ObservationCache::over_fixture(vec![one_record_a_position(600, 3)]);
+        in_one
+            .cover(region(1, 600))
+            .expect("the fixture source and reference hold");
+        assert_eq!(
+            over_two.samples[0].window_coverage.finalised,
+            in_one.samples[0].window_coverage.finalised,
+            "covering the same ground in two goes gave different windows from covering it in one",
+        );
+    }
+
+    /// **A cover that crosses a contig reads both.** Drawing stops at the first record past the
+    /// reach, and a reach on a later contig is past every position of an earlier one — so the
+    /// cover that first reaches contig 1 also draws whatever the sample still had on contig 0.
+    /// Those are real covered positions of that sample, and their bases are on the contig they
+    /// sit on.
+    #[test]
+    fn a_cover_that_crosses_a_contig_observes_the_records_left_on_the_one_it_leaves() {
+        let mut records: Vec<Result<SampleLocusObservations, SourceFailed>> = (1..=600)
+            .map(|at| Ok(observation_over(region_on(0, at, at))))
+            .collect();
+        records.extend((1..=600).map(|at| Ok(observation_over(region_on(1, at, at)))));
+        let mut cache = ObservationCache::over_fixture(vec![records.into_iter()]);
+
+        // A first cover that stops well short of contig 0's records, so plenty are left for the
+        // cover that moves to contig 1 to draw.
+        cache
+            .cover(region_on(0, 1, 100))
+            .expect("the fixture source and reference hold");
+        cache
+            .cover(region_on(1, 1, 600))
+            .expect("the fixture source and reference hold");
+
+        let held = &cache.samples[0].window_coverage.finalised;
+        assert!(
+            held.iter().any(|(centre, _)| centre.contig == ContigId(0)),
+            "the records left on the contig the cover left were never observed",
+        );
+        assert!(
+            held.iter().any(|(centre, _)| centre.contig == ContigId(1)),
+            "the records on the contig the cover moved to were never observed",
+        );
+    }
+
+    /// Eviction drops the windows behind it and keeps the rest — by the windows' own
+    /// coordinates, because a window is centred on a position and the record that position came
+    /// from may already be gone.
+    #[test]
+    fn eviction_drops_the_windows_behind_it_and_keeps_the_rest() {
+        let mut cache = ObservationCache::over_fixture(vec![one_record_a_position(600, 3)]);
+        cache
+            .cover(region(1, 600))
+            .expect("the fixture source and reference hold");
+        let before = cache.samples[0].window_coverage.finalised.len();
+        assert!(before > 0, "the cover finalised no window to evict");
+
+        cache.evict_before(position_on(0, 200));
+
+        let after = &cache.samples[0].window_coverage.finalised;
+        assert!(
+            after.len() < before,
+            "eviction dropped no window, so the deque grows with the contig",
+        );
+        assert!(
+            after
+                .iter()
+                .all(|(centre, _)| centre.position >= Position(200)),
+            "a window behind the evicted position survived",
+        );
+    }
+
+    /// A sample with no record at a position has no window there, and that is an ordinary
+    /// answer: the filter that reads this skips a sample it has no window for.
+    #[test]
+    fn a_sample_with_no_record_at_a_position_has_no_window_there() {
+        let mut cache = ObservationCache::over_fixture(vec![one_record_a_position(600, 3)]);
+        cache
+            .cover(region(1, 600))
+            .expect("the fixture source and reference hold");
+
+        let window = cache.with_observations(region(1, 600), |window| {
+            window.window_coverage_at(0, position_on(0, 599))
+        });
+        assert_eq!(
+            window, None,
+            "a centre the stream has not passed by half a window is not finalised, so there is \
+             no window to read there yet",
+        );
     }
 
     /// **Every record the cache holds has a base**, which is the property the whole step

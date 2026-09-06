@@ -45,21 +45,19 @@ use crate::ng::locus_generation::{LocusKind, SampleLocusObservations};
 use crate::ng::run::cohort_merge::observation_cache::{Drawn, LocusSummary};
 use crate::ng::types::{GenomePosition, Position};
 
-/// Call `report` once for every reference position `drawn` speaks for, with this sample's
+/// Call `report` once for every reference position this record speaks for, with this sample's
 /// depth there, in increasing position order and all on the record's own contig.
 ///
-/// `summary` must be `drawn`'s own — **checked in release, not only in debug**, because a
-/// summary belonging to another record would silently attribute one record's ground to
-/// another's and the accumulator downstream would fill the wrong window. The parameter exists
-/// so that a built record's sequences are not walked again here: the cache derives the summary
-/// as it draws and holds it, and deriving it once more is a walk of every observation the
-/// record carries. A kept record needs no such economy — its summary travels inside the draw —
-/// so that one is used and the parameter is only checked against it.
+/// **`summary` and `evidence` must be one record's**, which is the shape the merge's cache
+/// keeps: one summary per held record, and — depending on the mode — either the record beside
+/// it or the bytes its source kept. The asserts below say so, and they run in release, because
+/// a summary belonging to another record would silently attribute one record's ground to
+/// another's and the accumulator downstream would fill the wrong window.
 ///
 /// `build` is how the evidence is obtained for a record that arrived without it, and it is
 /// **called at most once, and only for a record spanning more than one base**: a one-base
 /// record is answered from its summary, so psp mode never decodes the bytes it kept for one —
-/// on the stores B2 measured, all but about one record in a thousand (the module doc above).
+/// on the stores B2 measured, all but about one record in 900.
 ///
 /// A position with a record but no reads is reported at depth `0`. That is a covered position
 /// — the sample has a record there — and dropping it would leave the window's denominator
@@ -76,56 +74,31 @@ use crate::ng::types::{GenomePosition, Position};
 /// failed is the one that can name itself. Nothing is reported for a record whose evidence
 /// could not be built, so a caller's accumulator is never left holding half of one.
 pub fn for_each_reported_depth<E>(
-    drawn: &Drawn,
     summary: LocusSummary,
+    evidence: EvidenceForOneRecord<'_>,
     build: impl FnOnce(Range<usize>) -> Result<SampleLocusObservations, E>,
     mut report: impl FnMut(GenomePosition, u32),
 ) -> Result<(), E> {
-    // **A release check and not a `debug_assert!`** — the release profile is the one this repo
-    // runs (`Cargo.toml`'s `[profile.release]` leaves `debug-assertions` off, and
-    // `[profile.soak]` exists to turn them back on), and the same reasoning put a release
-    // assert on the cache's own ordering check one file away. A mismatch here is not a caught
-    // error but a silent one: the positions would come from this summary and the depths from
-    // another record.
-    let summary = match drawn {
-        Drawn::Built(record) => {
-            assert_eq!(
-                record.region, summary.region,
-                "the summary handed in is not this record's",
-            );
-            summary
-        }
-        // The summary a kept draw carries is this record's by construction, so it is the one
-        // used; the parameter is checked against it whole, which covers the head count as well
-        // as the ground — and the head count is the number a one-base record reports.
-        Drawn::Kept {
-            summary: its_own, ..
-        } => {
-            assert_eq!(
-                *its_own, summary,
-                "the summary handed in is not this record's",
-            );
-            *its_own
-        }
-    };
-
     let first_base = summary.start_position();
     if first_base.position == summary.reach() {
         report(first_base, summary.reads_compared_with_reference);
         return Ok(());
     }
 
-    match drawn {
-        Drawn::Built(record) => report_body_depths(record, first_base, &mut report),
-        // `summary: _` rather than `..`: the summary this arm has already used is right there
-        // in the variant, and naming it is what makes ignoring it here a decision. A third
-        // field on `Drawn::Kept` then fails to compile at the one site that walks every record.
-        Drawn::Kept { body, summary: _ } => {
-            let record = build(body.clone())?;
+    match evidence {
+        EvidenceForOneRecord::InHand(record) => {
+            assert_eq!(
+                record.region, summary.region,
+                "the summary handed in is not this record's",
+            );
+            report_body_depths(record, first_base, &mut report);
+        }
+        EvidenceForOneRecord::Kept(body) => {
+            let record = build(body)?;
             // A fact about the file, in psp mode: a stored head that claims other ground than
-            // the body behind it. At plan step C2, where the source doing the building is a psp
-            // reader, this becomes a `RunError` naming the sample, beside the other
-            // producer-guarantee checks the merge already makes.
+            // the body behind it. Once the merge's own error type reaches here this becomes a
+            // `RunError` naming the sample, beside the other producer-guarantee checks it
+            // already makes.
             assert_eq!(
                 record.region, summary.region,
                 "the body built for this record covers other ground than its head claimed",
@@ -134,6 +107,36 @@ pub fn for_each_reported_depth<E>(
         }
     }
     Ok(())
+}
+
+/// One record's evidence, in whichever form its holder has it — the borrowed counterpart of
+/// [`Drawn`], which owns what it carries.
+///
+/// **Two shapes because two holders answer differently**, and it is the same split [`Drawn`]
+/// makes: direct mode has the record, a run over stored files has the bytes and builds on
+/// demand. A borrowed form exists because the merge's cache keeps the two apart — one array of
+/// records, one of byte ranges — rather than keeping the `Drawn` it drew.
+pub enum EvidenceForOneRecord<'a> {
+    /// The record itself, already built.
+    InHand(&'a SampleLocusObservations),
+    /// Where the source is holding it — meaningful only to that source.
+    Kept(Range<usize>),
+}
+
+/// A draw's evidence, borrowed. **It lives here and not on [`Drawn`]** because it is this
+/// module that wants the borrowed shape: the cache's own holder keeps a summary and its
+/// evidence apart and never builds a [`Drawn`] to convert. Written the other way round, the
+/// merge would name a `window_coverage` type in a method it does not itself call.
+impl<'a> From<&'a Drawn> for EvidenceForOneRecord<'a> {
+    fn from(drawn: &'a Drawn) -> Self {
+        match drawn {
+            // `summary: _` rather than `..`: the summary is right there in the variant and
+            // naming it is what makes ignoring it a decision, so a third field on
+            // `Drawn::Kept` fails to compile here.
+            Drawn::Built(record) => Self::InHand(record),
+            Drawn::Kept { body, summary: _ } => Self::Kept(body.clone()),
+        }
+    }
 }
 
 /// The positions a built record reports, and the depth at each, decided by its kind.
@@ -286,7 +289,7 @@ mod tests {
         build: impl FnOnce(Range<usize>) -> Result<SampleLocusObservations, E>,
     ) -> Vec<(GenomePosition, u32)> {
         let mut reported = Vec::new();
-        for_each_reported_depth(drawn, summary, build, |position, depth| {
+        for_each_reported_depth(summary, drawn.into(), build, |position, depth| {
             reported.push((position, depth));
         })
         .expect("this fixture's build does not fail");
@@ -319,9 +322,14 @@ mod tests {
             body: 100..180,
         };
         let mut reported = Vec::new();
-        for_each_reported_depth(&drawn, summary, build_refused, |position, depth| {
-            reported.push((position, depth));
-        })
+        for_each_reported_depth(
+            summary,
+            (&drawn).into(),
+            build_refused,
+            |position, depth| {
+                reported.push((position, depth));
+            },
+        )
         .expect("the summary answers this record");
         assert_eq!(reported, vec![(at(42), 7)]);
     }
@@ -490,8 +498,8 @@ mod tests {
         };
         let mut reported = Vec::new();
         let outcome = for_each_reported_depth(
-            &drawn,
             summary,
+            (&drawn).into(),
             |_| Err::<SampleLocusObservations, _>("the source could not read this record"),
             |position, depth| reported.push((position, depth)),
         );
@@ -583,21 +591,31 @@ mod tests {
         let _ = collect_reported(&Drawn::Built(record), summary_of(region(10, 12), 99));
     }
 
-    /// The same refusal on a kept draw, where the summary the draw carries is the one that is
-    /// used and the parameter is the one checked against it.
+    /// **A draw's evidence, borrowed, is the evidence the draw carries** — the mapping the
+    /// merge's cache relies on, since it keeps a summary and its evidence side by side rather
+    /// than the draw it drew. A built draw hands over the record it holds; a kept one hands
+    /// over the bytes its source kept, unchanged.
     #[test]
-    #[should_panic(expected = "the summary handed in is not this record's")]
-    fn a_kept_draw_whose_own_summary_disagrees_with_the_parameter_is_refused() {
-        let drawn = Drawn::Kept {
+    fn a_draws_evidence_borrowed_is_the_evidence_the_draw_carries() {
+        let record = tract_record(region(10, 12), vec![obs(ReadWitness::Complete, 4)]);
+        let built = Drawn::Built(record.clone());
+        match EvidenceForOneRecord::from(&built) {
+            EvidenceForOneRecord::InHand(borrowed) => assert_eq!(*borrowed, record),
+            EvidenceForOneRecord::Kept(body) => {
+                panic!("a built draw handed over bytes at {body:?} rather than its record")
+            }
+        }
+
+        let kept = Drawn::Kept {
             summary: summary_of(region(10, 12), 99),
-            body: 0..1,
+            body: 4_096..4_224,
         };
-        let _ = collect_reported_building_with(&drawn, summary_of(region(50, 52), 99), |_| {
-            Ok::<_, &'static str>(tract_record(
-                region(10, 12),
-                vec![obs(ReadWitness::Complete, 4)],
-            ))
-        });
+        match EvidenceForOneRecord::from(&kept) {
+            EvidenceForOneRecord::Kept(body) => assert_eq!(body, 4_096..4_224),
+            EvidenceForOneRecord::InHand(_) => {
+                panic!("a kept draw handed over a record it does not hold")
+            }
+        }
     }
 
     /// A stored head that claims other ground than the body behind it is refused rather than

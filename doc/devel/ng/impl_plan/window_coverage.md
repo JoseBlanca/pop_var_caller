@@ -119,7 +119,7 @@ minted beside the run's padding one (`walk_reference.accessor()`, both callers);
 the cover's ground once into a scratch buffer with `fetch_into`; a fetch failure is a `RunError`
 naming the region. Direct mode's VCF byte-identical. *Depends:* —. *Source:* spec §3.2.
 
-**C2. ☐ The accumulator in the per-sample window.** `SampleWindow` gains one accumulator and a
+**C2. ✅ The accumulator in the per-sample window.** `SampleWindow` gains one accumulator and a
 deque of finalised `(position, WindowCoverage)`; `draw_to` observes each drawn record through
 B1's rule against the fetched bases and drains `pop_ready` into the deque; `evict_before` and its
 parallel twin drain the deque with the summaries; `WindowedCohort` gains a third view over it,

@@ -4373,12 +4373,13 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     no position can cross, and an assert names the premise if it breaks again.
 
 #### Window coverage — each sample's depth and GC around a locus, and the histogram behind it
-- **Status:** `implemented` — **Milestones A and B complete, Milestone C step C1 written and not
-  yet reviewed** (branch `ng-window-coverage`): the accumulator, the floor, the per-sample depth
+- **Status:** `fixes-applied` — **Milestones A and B complete, Milestone C steps C1 and C2
+  complete** (branch `ng-window-coverage`): the accumulator, the floor, the per-sample depth
   scale, the rule that turns one drawn record into covered positions with a depth at each, the
-  measurement that says the rule's cheapest branch is sound on real data, and the reference in the
-  merge's cache. The accumulator itself is still uncalled; it goes into the cache's per-sample
-  state at C2.
+  measurement that says the rule's cheapest branch is sound on real data, the reference in the
+  merge's cache, and the accumulator itself in each sample's window there. **The measurement now
+  runs on real data in both modes and no VCF byte has moved.** Next: C3, the half-window
+  look-ahead, which the plan lands alone.
 - **Plan:** [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md);
   **Spec:** [window_coverage.md](doc/devel/ng/spec/window_coverage.md). No architecture
   document — the spec's §3 type blocks are the code shape. Its consumer, built separately:
@@ -4403,7 +4404,9 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   9 Minor), [B2](doc/devel/reports/reviews/ng_window_coverage_b2_2026-09-06.md) (3 Major,
   11 Minor), [C1](doc/devel/reports/reviews/ng_window_coverage_c1_2026-09-06.md) (1 Blocker,
   6 Major, 8 Minor) — all applied or deferred with a home; each step's fixes are in its own
-  commit.
+  commit. **C2's design review is applied and its correctness review was still running when the
+  session ended**: its per-category file lands in `tmp/review_2026-09-06_window-coverage-c2/` and
+  is the first thing to read before C3.
 - **A1 done (the accumulator, copied):** production's `SlidingWindowCoverageAccumulator`
   ([coverage.rs](src/sample_summary/coverage.rs)) transcribed with its eleven sliding-window
   tests, under spec §3.6's names and ng's coordinate types; the fixed-tile accumulator and the
@@ -4480,6 +4483,30 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   cover rather than being absorbed, because one failure would cost every sample its coverage over
   that stretch. Five tests; **the oracle is unmoved either side — 2,311 records, sha256
   `84ad19c2…`, on both routes.**
+- **C1 done (the reference into the cache):** the merge's observation cache holds a reference
+  accessor of its own and reads, **once per cover**, the ground that cover's records lie on, into
+  a buffer every sample reads by offset. **The fetch happens after the cover's fixpoint**, because
+  what the cache holds is not known until the drawing has stopped. A failed fetch ends the cover
+  naming the ground rather than being absorbed. **The review found the ground itself wrong**, from
+  two directions independently: the first cut fetched region-to-reach, which misses the record
+  each sample is drawn *past* the reach and the head of every record held from an earlier cover.
+  **And the accessor never released what the merge had walked past** — `RefSeq` alone has no
+  `evict_before`, and a merge that never released would end a contig holding every base it passed,
+  about 250 MB on human chromosome 1 against a 25 MB peak. Ten tests.
+- **C2 done (the accumulator in the cache):** every sample carries a window-coverage accumulator
+  inside the merge's cache, is fed every record it holds **exactly once** — a per-sample cursor is
+  what makes it once, since a record is held across every cover it reaches into — and a builder
+  reads the window at a position through `window_coverage_at`. **The oracle is unmoved: 2,311
+  records, sha256 `84ad19c2…`, on both routes**, and this is the first step where the measurement
+  runs on real data. **Implementation found what the design had not**: a cover crosses contigs,
+  because drawing stops at the first record past the reach and a reach on a later contig is past
+  every position of an earlier one — so the cover that first reaches contig *n* also draws
+  whatever a sample still had on contig *n − 1*. Seven existing tests failed the moment the
+  accumulator was wired in; a cover now reads each contig it added records on, ending on the
+  region's own. Ten tests. **Left open for C4:** `window_coverage_at` answers `None` both for a
+  sample with no window there and for a window carrying no measurement at all, and the oracle
+  C4's plan names as its green criterion runs through the second — so it would pass by comparing
+  absent against absent.
 - **Open:** the floor's default (spec §3.3) and the histogram's three bin constants (spec §3.4)
   are soft until plan steps D1 and D2 measure them.
 - **Checkpoint A ruled by the owner, 2026-09-06, and the spec updated with it:** `finish` hands

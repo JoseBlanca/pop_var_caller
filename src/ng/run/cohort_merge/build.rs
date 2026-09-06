@@ -830,6 +830,7 @@ pub fn build_region<'a>(
         &WindowedCohort {
             observations: Some(observations_per_sample),
             summaries: None,
+            finalised_windows: None,
         },
         max_cohort_locus_span,
         min_alt_reads,
@@ -903,6 +904,7 @@ pub fn build_region_handing_over<'a>(
         &WindowedCohort {
             observations: Some(observations_per_sample),
             summaries: None,
+            finalised_windows: None,
         },
         max_cohort_locus_span,
         min_alt_reads,
