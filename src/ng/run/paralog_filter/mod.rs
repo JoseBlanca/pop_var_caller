@@ -18,12 +18,16 @@
 //! `doc/devel/ng/impl_plan/hidden_paralog_filter.md`.
 //!
 //! **What exists so far:** [`spill`]'s entry and its codec — what pass one writes and passes
-//! two and three read back. Nothing writes one yet: the file's lifecycle, the sink that fills
-//! it, the scoring context and the three passes are later steps of the plan above.
+//! two and three read back — and [`spill_file`]'s [`SpillFile`], which says where those bytes
+//! live and makes the file go away when the run ends, whatever way it ends. Nothing fills one
+//! yet: the sink that appends to it, the scoring context and the three passes are later steps
+//! of the plan above.
 
 pub mod spill;
+pub mod spill_file;
 
 pub use spill::{SpillEntry, SpillError, SpillReader, SpillWriter, SpilledSample};
+pub use spill_file::{SpillFile, SpillFileError};
 
 /// One sample's coverage at one locus: the GC fraction of the window centred on it and that
 /// window's mean read depth. **Both fields `NaN` where the sample has no usable window

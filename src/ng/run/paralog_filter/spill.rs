@@ -89,9 +89,22 @@ mod field {
 ///
 /// **8,192 samples, so 128 KiB reserved at the cap** (a [`SpilledSample`] is 16 bytes). The
 /// largest cohort spec §4 contemplates is three thousand samples, which reserves its exact
-/// count in one allocation and never grows. A run above 8,192 decodes correctly and pays `Vec`
-/// growth — this is a reservation policy, not a limit.
+/// count in one allocation and never grows. A run between 8,192 and [`MAX_SAMPLES`] decodes
+/// correctly and pays `Vec` growth — this is a reservation policy, not a limit.
 const MAX_SAMPLES_RESERVED_UP_FRONT: usize = 8192;
+
+/// The largest sample count the decoder will believe.
+///
+/// **The reservation cap above bounds what is reserved and not what is built.** Without a limit
+/// on the count itself, a corrupt one keeps the loop decoding until the file runs out, so the
+/// memory held is the rest of the file rather than one entry — the same failure
+/// [`MAX_LINE_BYTES`] closes on the other variable-length field, and against spec §5's one
+/// entry in hand at a time.
+///
+/// **A million samples, so 16 MB of `SpilledSample` at the ceiling.** Spec §4's largest cohort
+/// is three thousand, so this leaves room for three hundred times it — a count past here is
+/// corruption, not a cohort.
+const MAX_SAMPLES: usize = 1_000_000;
 
 /// The longest record line the decoder will read.
 ///
@@ -162,6 +175,7 @@ pub struct SpilledSample {
 /// [`RunError`](crate::ng::run::RunError) naming the file (spec §5). The record's ordinal is
 /// the caller's too; the sample's index is only this module's, so it is here.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SpillError {
     /// The sink refused the bytes.
     #[error("the paralog spill could not be written")]
@@ -219,6 +233,21 @@ pub enum SpillError {
         field: &'static str,
         /// The byte found there.
         byte: u8,
+    },
+
+    /// The file ended at an entry boundary holding a different number of entries than were
+    /// written — fewer, if it lost its tail; more, if something else wrote to it.
+    ///
+    /// **Nothing in the file itself says how many it should hold** — a spill cut on a boundary
+    /// is byte for byte the prefix of a longer one — so the count comes from the writer, through
+    /// [`SpillReader::new`]. Without it a lost tail reads back as a complete, shorter spill,
+    /// and pass three writes a VCF short by its last records with no panic and no message.
+    #[error("the paralog spill holds {read} record(s) where {expected} were written")]
+    TheWrongNumberOfRecords {
+        /// How many the writer counted.
+        expected: u64,
+        /// How many the reader found.
+        read: u64,
     },
 
     /// A record is marked as both a repeat tract and a biallelic SNP, which spec §3.2 excludes.
@@ -337,14 +366,27 @@ pub struct SpillReader<R: BufRead> {
     source: R,
     /// Set by the first failure; after it, the reader yields nothing.
     failed: bool,
+    /// How many entries the writer counted. **An argument rather than a setting**: a reader
+    /// that could be built without it would make a short file undetectable, and forgetting a
+    /// call is silent where forgetting an argument does not compile.
+    entries_expected: u64,
+    entries_read: u64,
 }
 
 impl<R: BufRead> SpillReader<R> {
-    /// Start reading from `source`, which must be positioned at an entry boundary.
-    pub fn new(source: R) -> Self {
+    /// Start reading from `source`, which must be positioned at an entry boundary, expecting
+    /// `entries_expected` of them.
+    ///
+    /// **The count is required because a spill that lost its tail on an entry boundary is byte
+    /// for byte the prefix of a complete one**, so nothing in the bytes can tell the two apart.
+    /// It has to come from the side that wrote them, and a reader that could be built without
+    /// it would make the shortfall silent again.
+    pub fn new(source: R, entries_expected: u64) -> Self {
         Self {
             source,
             failed: false,
+            entries_expected,
+            entries_read: 0,
         }
     }
 
@@ -352,8 +394,10 @@ impl<R: BufRead> SpillReader<R> {
     ///
     /// # Errors
     ///
-    /// If the stream fails, ends inside an entry, or holds a value no entry can carry. **A
-    /// stream that ends *inside* an entry is an error, not an end.**
+    /// If the stream fails, ends inside an entry, holds a value no entry can carry, or — where
+    /// [`Self::expecting`] was told how many were written — ends after fewer than that. **A
+    /// stream that ends *inside* an entry is an error, not an end**, and so is one that ends
+    /// on a boundary too early.
     pub fn next_entry(&mut self) -> Option<Result<SpillEntry, SpillError>> {
         if self.failed {
             return None;
@@ -369,11 +413,19 @@ impl<R: BufRead> SpillReader<R> {
             }
         };
         if at_an_entry_boundary_and_out_of_bytes {
+            if self.entries_read != self.entries_expected {
+                self.failed = true;
+                return Some(Err(SpillError::TheWrongNumberOfRecords {
+                    expected: self.entries_expected,
+                    read: self.entries_read,
+                }));
+            }
             return None;
         }
         let decoded = decode_entry(&mut self.source);
-        if decoded.is_err() {
-            self.failed = true;
+        match &decoded {
+            Ok(_) => self.entries_read += 1,
+            Err(_) => self.failed = true,
         }
         Some(decoded)
     }
@@ -442,6 +494,12 @@ fn decode_entry<R: BufRead>(source: &mut R) -> Result<SpillEntry, SpillError> {
     let line = read_line(source)?;
 
     let sample_count = read_usize(source, field::SAMPLE_COUNT)?;
+    if sample_count > MAX_SAMPLES {
+        return Err(SpillError::OutOfRange {
+            field: field::SAMPLE_COUNT,
+            value: sample_count as u64,
+        });
+    }
     let mut per_sample = Vec::with_capacity(sample_count.min(MAX_SAMPLES_RESERVED_UP_FRONT));
     for index in 0..sample_count {
         let sample = decode_sample(source).map_err(|source| SpillError::InSample {

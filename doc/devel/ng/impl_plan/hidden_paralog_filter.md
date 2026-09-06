@@ -99,7 +99,7 @@ destructuring the entry exhaustively, floats by bits; round-trip tests over entr
 pairs, zero samples, a `FILTER` already set, and an `INFO` of `.`. *Depends:* —. *Source:* spec
 §3.4, §3.7.
 
-**B2. ☐ The lifecycle.** The file at `<output>.paralog-spill.tmp`, created on first write,
+**B2. ✅ The lifecycle.** The file at `<output>.paralog-spill.tmp`, created on first write,
 removed by a guard on every exit path — success, a `RunError`, a panic unwinding through the
 run — with a test for each. *Depends:* B1. *Source:* spec §3.4.
 

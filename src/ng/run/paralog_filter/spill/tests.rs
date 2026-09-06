@@ -165,7 +165,7 @@ fn encoded_bytes(entries: &[SpillEntry]) -> Vec<u8> {
 
 /// Encode the entries and read them back.
 fn round_trip(entries: &[SpillEntry]) -> Vec<SpillEntry> {
-    SpillReader::new(Cursor::new(encoded_bytes(entries)))
+    SpillReader::new(Cursor::new(encoded_bytes(entries)), entries.len() as u64)
         .map(|entry| entry.expect("every entry the writer wrote reads back"))
         .collect()
 }
@@ -509,7 +509,7 @@ fn a_stream_of_records_comes_back_in_the_order_it_was_written() {
 
 #[test]
 fn an_empty_file_yields_no_entries() {
-    let mut reader = SpillReader::new(Cursor::new(Vec::new()));
+    let mut reader = SpillReader::new(Cursor::new(Vec::new()), 0);
     assert!(reader.next_entry().is_none());
 }
 
@@ -578,7 +578,7 @@ fn a_file_cut_anywhere_inside_a_record_names_the_field_the_bytes_ran_out_in() {
     );
 
     for &(cut, field) in expected {
-        let mut reader = SpillReader::new(Cursor::new(whole[..cut].to_vec()));
+        let mut reader = SpillReader::new(Cursor::new(whole[..cut].to_vec()), 1);
         match reader.next_entry() {
             Some(Err(error)) => assert_eq!(
                 truncated_field(&error),
@@ -608,9 +608,10 @@ fn a_failure_inside_the_samples_names_which_sample() {
     let bytes_per_sample = (whole.len() - head) / 3;
     let two_bytes_into_the_second_sample = head + bytes_per_sample + 2;
 
-    let mut reader = SpillReader::new(Cursor::new(
-        whole[..two_bytes_into_the_second_sample].to_vec(),
-    ));
+    let mut reader = SpillReader::new(
+        Cursor::new(whole[..two_bytes_into_the_second_sample].to_vec()),
+        1,
+    );
 
     match reader.next_entry() {
         Some(Err(SpillError::InSample { index, source })) => {
@@ -625,7 +626,7 @@ fn a_failure_inside_the_samples_names_which_sample() {
 fn a_tract_flag_byte_that_is_neither_zero_nor_one_is_refused() {
     let mut bytes = encoded_bytes(&[a_tiny_record()]);
     bytes[TRACT_FLAG_OFFSET_IN_TINY_RECORD] = 2;
-    let mut reader = SpillReader::new(Cursor::new(bytes));
+    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::NotABoolean { field, byte })) => {
@@ -640,7 +641,7 @@ fn a_tract_flag_byte_that_is_neither_zero_nor_one_is_refused() {
 fn a_biallelic_flag_byte_that_is_neither_zero_nor_one_is_refused() {
     let mut bytes = encoded_bytes(&[a_tiny_record()]);
     bytes[BIALLELIC_FLAG_OFFSET_IN_TINY_RECORD] = 2;
-    let mut reader = SpillReader::new(Cursor::new(bytes));
+    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::NotABoolean { field, byte })) => {
@@ -657,7 +658,7 @@ fn a_record_marked_as_both_a_tract_and_a_biallelic_snp_is_refused_by_the_reader(
     // holding it is corrupt, and absorbing it would hand a tract the SNP allele term.
     let mut bytes = encoded_bytes(&[a_tiny_record()]);
     bytes[TRACT_FLAG_OFFSET_IN_TINY_RECORD] = 1;
-    let mut reader = SpillReader::new(Cursor::new(bytes));
+    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::TractMarkedAsABiallelicSnp { contig, position })) => {
@@ -696,7 +697,7 @@ fn a_contig_too_large_for_the_field_is_refused_rather_than_wrapped() {
     // hand because the encoder cannot produce it.
     let mut bytes = Vec::new();
     encode_u64_leb128(1 << 32, &mut bytes);
-    let mut reader = SpillReader::new(Cursor::new(bytes));
+    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::OutOfRange { field, value })) => {
@@ -723,7 +724,7 @@ fn a_read_count_too_large_for_its_field_is_refused() {
     encode_u64_leb128(1 << 32, &mut bytes); // ref_reads, one past the field
     encode_u64_leb128(0, &mut bytes);
 
-    let mut reader = SpillReader::new(Cursor::new(bytes));
+    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::InSample { index, source })) => {
@@ -745,7 +746,7 @@ fn an_over_long_varint_is_refused() {
     // Eleven continuation bytes: longer than any `u64` needs, so corruption rather than a
     // value.
     let bytes = vec![0xFF; 11];
-    let mut reader = SpillReader::new(Cursor::new(bytes));
+    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::OverlongVarint { field })) => assert_eq!(field, "contig"),
@@ -760,7 +761,7 @@ fn a_ten_byte_varint_holding_more_than_a_u64_is_refused_rather_than_truncated() 
     // the high bits dropped; this codec refuses corruption rather than absorbing it.
     let mut bytes = vec![0x80; 9];
     bytes.push(0x7F);
-    let mut reader = SpillReader::new(Cursor::new(bytes));
+    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::OverlongVarint { field })) => assert_eq!(field, "contig"),
@@ -781,7 +782,7 @@ fn a_line_longer_than_the_ceiling_is_refused_before_it_is_read() {
     encode_u64_leb128(u64::from(u32::MAX), &mut bytes); // a line of four billion bytes
     bytes.extend_from_slice(&vec![b'X'; 4096]);
 
-    let mut reader = SpillReader::new(Cursor::new(bytes));
+    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::OutOfRange { field, value })) => {
@@ -794,8 +795,10 @@ fn a_line_longer_than_the_ceiling_is_refused_before_it_is_read() {
 
 #[test]
 fn a_sample_count_larger_than_the_file_is_an_error_and_not_an_allocation() {
-    // The count says four billion samples and the file ends there. The decoder must fail on
-    // the bytes it does not have rather than reserve for the count it was told.
+    // Nine hundred thousand samples — under the ceiling, so the decoder believes the count —
+    // and a file that ends immediately. It must fail on the bytes it does not have rather
+    // than reserve for the count it was told: without the reservation cap this allocates
+    // 900,000 x 16 bytes before reading one.
     let mut bytes = vec![
         0x00, // contig 0
         0x01, // position 1
@@ -803,8 +806,8 @@ fn a_sample_count_larger_than_the_file_is_an_error_and_not_an_allocation() {
         0x00, // not a biallelic SNP
         0x00, // an empty line
     ];
-    encode_u64_leb128(4_026_531_840, &mut bytes);
-    let mut reader = SpillReader::new(Cursor::new(bytes));
+    encode_u64_leb128(900_000, &mut bytes);
+    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::InSample { index, source })) => {
@@ -812,6 +815,95 @@ fn a_sample_count_larger_than_the_file_is_an_error_and_not_an_allocation() {
             assert_eq!(truncated_field(&source), "gc_fraction");
         }
         other => panic!("expected a truncated sample, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_sample_count_past_the_ceiling_is_refused_before_the_samples_are_built() {
+    // The reservation cap bounds what is *reserved*; without a cap on the count itself the
+    // loop keeps decoding until the file runs out, so the memory held is the rest of the file
+    // rather than one entry. The bytes below are a header followed by a count of ten million
+    // and enough sample bytes that a decoder without the ceiling would build them all.
+    let mut bytes = vec![
+        0x00, // contig 0
+        0x01, // position 1
+        0x00, // not a tract
+        0x00, // not a biallelic SNP
+        0x00, // an empty line
+    ];
+    encode_u64_leb128(10_000_000, &mut bytes);
+    bytes.extend_from_slice(&vec![0u8; 4096]);
+    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
+
+    match reader.next_entry() {
+        Some(Err(SpillError::OutOfRange { field, value })) => {
+            assert_eq!(field, "sample_count");
+            assert_eq!(value, 10_000_000);
+        }
+        other => panic!("expected a refused sample count, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_file_holding_more_records_than_were_written_is_refused() {
+    // The completeness check runs in both directions: a file that grew is as wrong as one that
+    // lost its tail, and a comparison written as "fewer than expected" would miss this.
+    let bytes = encoded_bytes(&[a_tiny_record(), a_tiny_record()]);
+    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
+
+    assert!(reader.next_entry().expect("the first entry").is_ok());
+    match reader.next_entry() {
+        Some(Ok(_)) => match reader.next_entry() {
+            Some(Err(SpillError::TheWrongNumberOfRecords { expected, read })) => {
+                assert_eq!(expected, 1);
+                assert_eq!(read, 2);
+            }
+            other => panic!("expected the extra record to be refused, got {other:?}"),
+        },
+        other => panic!("expected a second entry, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_source_that_fails_mid_float_says_the_read_failed_and_not_that_the_file_ended() {
+    // A device failure and a file that ends are different things, and the field's four bytes
+    // are the one place the codec has to tell them apart by hand.
+    struct FailsAfterTheHeader {
+        remaining: Vec<u8>,
+    }
+
+    impl std::io::Read for FailsAfterTheHeader {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if self.remaining.is_empty() {
+                return Err(std::io::Error::other("the device went away"));
+            }
+            let taken = out.len().min(self.remaining.len());
+            out[..taken].copy_from_slice(&self.remaining[..taken]);
+            self.remaining.drain(..taken);
+            Ok(taken)
+        }
+    }
+
+    let head = vec![
+        0x00, // contig 0
+        0x01, // position 1
+        0x00, // not a tract
+        0x00, // not a biallelic SNP
+        0x00, // an empty line
+        0x01, // one sample
+    ];
+    let source = std::io::BufReader::with_capacity(1, FailsAfterTheHeader { remaining: head });
+    let mut reader = SpillReader::new(source, 1);
+
+    match reader.next_entry() {
+        Some(Err(SpillError::InSample { index, source })) => {
+            assert_eq!(index, 0);
+            match *source {
+                SpillError::Read { field, .. } => assert_eq!(field, "gc_fraction"),
+                other => panic!("expected a read failure, got {other:?}"),
+            }
+        }
+        other => panic!("expected a read failure inside the sample, got {other:?}"),
     }
 }
 
@@ -825,7 +917,7 @@ fn the_reader_stops_after_a_decode_error() {
     // of an entry would decode — plausibly — into a record that was never written.
     let mut bytes = vec![0x01, 0x01, 0x02]; // contig, position, then a flag byte of 2
     bytes.extend_from_slice(&encoded_bytes(&[a_tiny_record()]));
-    let mut reader = SpillReader::new(Cursor::new(bytes));
+    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
 
     assert!(matches!(
         reader.next_entry(),
