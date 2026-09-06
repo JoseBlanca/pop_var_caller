@@ -1,0 +1,920 @@
+//! What the codec has to survive: an absent sample, a cohort of none, a cohort of a thousand,
+//! a record that already carries a filter, a record with no annotations at all, and every way
+//! a file can be cut or corrupted.
+//!
+//! **The comparison is by bit pattern throughout.** An absent sample is the `NaN` pair, and
+//! `NaN == NaN` is false, so an equality-based round-trip test would fail on the one input the
+//! file exists to carry — while a test that compared the two floats numerically at all would
+//! pass on a codec that turned every absence into a zero (spec §6 trap 4).
+//!
+//! **[`holds_the_same_bits`] is what nine round trips assert, so it has its own negative
+//! test.** A comparator that stopped discriminating would disarm all of them at once, and four
+//! of the nine would then assert nothing but *the decode did not panic*.
+//!
+//! The tests that corrupt bytes by index all work on [`a_tiny_record`], whose whole encoding is
+//! written out in [`the_encoding_matches_the_layout_the_spec_fixes`]; the offsets they use are
+//! read off that list rather than counted from a fixture that could change under them.
+
+use std::io::Cursor;
+
+use proptest::prelude::*;
+
+use super::{SpillEntry, SpillError, SpillReader, SpillWriter, SpilledSample};
+use crate::ng::run::paralog_filter::WindowCoverage;
+use crate::ng::types::{ContigId, Position};
+use crate::psp::varint::encode_u64_leb128;
+
+/// A sample with a window and both allele counts.
+fn a_sample_with_a_window(
+    gc_fraction: f32,
+    mean_depth: f32,
+    ref_reads: u32,
+    alt_reads: u32,
+) -> SpilledSample {
+    SpilledSample {
+        window: WindowCoverage {
+            gc_fraction,
+            mean_depth,
+        },
+        ref_reads,
+        alt_reads,
+    }
+}
+
+/// A sample with no usable window at this locus — the `NaN` pair — but reads all the same.
+fn a_sample_without_a_window(ref_reads: u32, alt_reads: u32) -> SpilledSample {
+    SpilledSample {
+        window: WindowCoverage {
+            gc_fraction: f32::NAN,
+            mean_depth: f32::NAN,
+        },
+        ref_reads,
+        alt_reads,
+    }
+}
+
+/// A biallelic SNP two samples covered, one of them with no window.
+fn a_snp_two_samples_covered() -> SpillEntry {
+    SpillEntry {
+        contig: ContigId(3),
+        position: Position(1_000_000),
+        is_repeat_tract: false,
+        is_biallelic_snp: true,
+        line: b"SL4.0ch04\t1000000\t.\tA\tG\t42.5\tPASS\tAF=0.5;AC=1\tGT:GQ:AD\t0/1:30:5,5\t0/0:99:8,0"
+            .to_vec(),
+        per_sample: vec![
+            a_sample_with_a_window(0.41, 6.25, 5, 5),
+            a_sample_without_a_window(8, 0),
+        ],
+    }
+}
+
+/// The smallest entry with every field non-trivial, whose encoding is short enough to write
+/// out byte by byte. Every test that corrupts a byte by index uses this one.
+fn a_tiny_record() -> SpillEntry {
+    SpillEntry {
+        contig: ContigId(1),
+        position: Position(300),
+        is_repeat_tract: false,
+        is_biallelic_snp: true,
+        line: b"AB".to_vec(),
+        per_sample: vec![a_sample_with_a_window(0.5, 2.0, 3, 130)],
+    }
+}
+
+/// Offsets into [`a_tiny_record`]'s encoding, read off the byte list in
+/// [`the_encoding_matches_the_layout_the_spec_fixes`].
+const TRACT_FLAG_OFFSET_IN_TINY_RECORD: usize = 3;
+const BIALLELIC_FLAG_OFFSET_IN_TINY_RECORD: usize = 4;
+
+/// Whether two entries hold the same bytes and the same bit patterns — the only comparison
+/// that is meaningful over fields that can be `NaN`.
+///
+/// **Destructured, not field-accessed**: this is what "came back unchanged" means for every
+/// round-trip test in this module, so a field either struct gains has to be answered for here
+/// or it drops out of all of them at once. The precedents are the two this module's own header
+/// cites — `var_calling::types`'s `LocusWindowCoverage` and `cohort_merge`'s `render`.
+fn holds_the_same_bits(left: &SpillEntry, right: &SpillEntry) -> bool {
+    let SpillEntry {
+        contig,
+        position,
+        is_repeat_tract,
+        is_biallelic_snp,
+        line,
+        per_sample,
+    } = left;
+    let SpillEntry {
+        contig: other_contig,
+        position: other_position,
+        is_repeat_tract: other_is_repeat_tract,
+        is_biallelic_snp: other_is_biallelic_snp,
+        line: other_line,
+        per_sample: other_per_sample,
+    } = right;
+
+    contig == other_contig
+        && position == other_position
+        && is_repeat_tract == other_is_repeat_tract
+        && is_biallelic_snp == other_is_biallelic_snp
+        && line == other_line
+        && per_sample.len() == other_per_sample.len()
+        && per_sample
+            .iter()
+            .zip(other_per_sample)
+            .all(|(one, other)| sample_holds_the_same_bits(one, other))
+}
+
+/// One sample's four numbers, compared by bit pattern. Destructured for the same reason.
+fn sample_holds_the_same_bits(one: &SpilledSample, other: &SpilledSample) -> bool {
+    let SpilledSample {
+        window,
+        ref_reads,
+        alt_reads,
+    } = one;
+    let SpilledSample {
+        window: other_window,
+        ref_reads: other_ref_reads,
+        alt_reads: other_alt_reads,
+    } = other;
+    let WindowCoverage {
+        gc_fraction,
+        mean_depth,
+    } = window;
+    let WindowCoverage {
+        gc_fraction: other_gc_fraction,
+        mean_depth: other_mean_depth,
+    } = other_window;
+
+    gc_fraction.to_bits() == other_gc_fraction.to_bits()
+        && mean_depth.to_bits() == other_mean_depth.to_bits()
+        && ref_reads == other_ref_reads
+        && alt_reads == other_alt_reads
+}
+
+/// The bytes the writer produces for these entries.
+fn encoded_bytes(entries: &[SpillEntry]) -> Vec<u8> {
+    let mut writer = SpillWriter::new(Vec::new());
+    for entry in entries {
+        writer
+            .append(entry)
+            .expect("a Vec sink never refuses bytes");
+    }
+    assert_eq!(writer.entries_written(), entries.len() as u64);
+    writer.finish().expect("a Vec sink never refuses a flush")
+}
+
+/// Encode the entries and read them back.
+fn round_trip(entries: &[SpillEntry]) -> Vec<SpillEntry> {
+    SpillReader::new(Cursor::new(encoded_bytes(entries)))
+        .map(|entry| entry.expect("every entry the writer wrote reads back"))
+        .collect()
+}
+
+/// Assert one entry survives the file unchanged, and hand back what came out of it.
+fn assert_round_trips(entry: &SpillEntry) -> SpillEntry {
+    let mut read = round_trip(std::slice::from_ref(entry));
+    assert_eq!(read.len(), 1, "one entry in, one entry out");
+    let came_back = read.remove(0);
+    assert!(
+        holds_the_same_bits(entry, &came_back),
+        "the entry came back changed:\n  wrote {entry:?}\n  read  {came_back:?}"
+    );
+    came_back
+}
+
+/// The field a truncation blames, reached through the sample wrapper where there is one.
+fn truncated_field(error: &SpillError) -> &'static str {
+    match error {
+        SpillError::Truncated { field } => field,
+        SpillError::InSample { source, .. } => truncated_field(source),
+        other => panic!("expected a truncation, got {other:?}"),
+    }
+}
+
+/// A sink that refuses every byte and every flush, so the `Write` and `Flush` variants are
+/// reachable from a test. Without it nothing in this module ever meets a stream that fails.
+struct RefusesEverything;
+
+impl std::io::Write for RefusesEverything {
+    fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("the disk is full"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other("the disk is full"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The comparator every round trip rests on
+// ---------------------------------------------------------------------------
+
+#[test]
+fn holds_the_same_bits_separates_entries_that_differ_in_any_one_field() {
+    let base = a_snp_two_samples_covered();
+    assert!(
+        holds_the_same_bits(&base, &base.clone()),
+        "an entry matches itself"
+    );
+
+    let differing: Vec<(&str, SpillEntry)> = vec![
+        (
+            "contig",
+            SpillEntry {
+                contig: ContigId(4),
+                ..base.clone()
+            },
+        ),
+        (
+            "position",
+            SpillEntry {
+                position: Position(1_000_001),
+                ..base.clone()
+            },
+        ),
+        (
+            "is_repeat_tract",
+            SpillEntry {
+                is_repeat_tract: true,
+                is_biallelic_snp: false,
+                ..base.clone()
+            },
+        ),
+        (
+            "is_biallelic_snp",
+            SpillEntry {
+                is_biallelic_snp: false,
+                ..base.clone()
+            },
+        ),
+        (
+            "line",
+            SpillEntry {
+                line: b"X".to_vec(),
+                ..base.clone()
+            },
+        ),
+        (
+            "the sample count",
+            SpillEntry {
+                per_sample: base.per_sample[..1].to_vec(),
+                ..base.clone()
+            },
+        ),
+        (
+            "gc_fraction",
+            SpillEntry {
+                per_sample: vec![
+                    a_sample_with_a_window(0.42, 6.25, 5, 5),
+                    a_sample_without_a_window(8, 0),
+                ],
+                ..base.clone()
+            },
+        ),
+        (
+            "mean_depth",
+            SpillEntry {
+                per_sample: vec![
+                    a_sample_with_a_window(0.41, 6.26, 5, 5),
+                    a_sample_without_a_window(8, 0),
+                ],
+                ..base.clone()
+            },
+        ),
+        (
+            "an absent window against a zeroed one",
+            SpillEntry {
+                per_sample: vec![
+                    a_sample_with_a_window(0.41, 6.25, 5, 5),
+                    a_sample_with_a_window(0.0, 0.0, 8, 0),
+                ],
+                ..base.clone()
+            },
+        ),
+        (
+            "ref_reads",
+            SpillEntry {
+                per_sample: vec![
+                    a_sample_with_a_window(0.41, 6.25, 6, 5),
+                    a_sample_without_a_window(8, 0),
+                ],
+                ..base.clone()
+            },
+        ),
+        (
+            "alt_reads",
+            SpillEntry {
+                per_sample: vec![
+                    a_sample_with_a_window(0.41, 6.25, 5, 6),
+                    a_sample_without_a_window(8, 0),
+                ],
+                ..base.clone()
+            },
+        ),
+    ];
+
+    for (what_differs, other) in differing {
+        assert!(
+            !holds_the_same_bits(&base, &other),
+            "the comparator agreed on two entries differing in {what_differs}, so every round \
+             trip that rests on it is asserting only that decoding did not panic"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Round trips
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_snp_with_a_sample_that_has_no_window_comes_back_with_the_absence_intact() {
+    let entry = a_snp_two_samples_covered();
+    let came_back = assert_round_trips(&entry);
+
+    let absent = came_back.per_sample[1].window;
+    assert!(
+        absent.gc_fraction.is_nan() && absent.mean_depth.is_nan(),
+        "the absent sample came back as {absent:?}, and an absent sample that reads as a \
+         number is a sample with no evidence looking like one with average coverage"
+    );
+}
+
+#[test]
+fn a_nan_comes_back_as_the_same_nan_and_not_merely_as_a_nan() {
+    // A NaN with a payload of its own: a codec that reconstructed absence by writing
+    // `f32::NAN` on the way out would pass an `is_nan()` test and fail this one.
+    let odd_nan = f32::from_bits(0x7F80_0001);
+    let entry = SpillEntry {
+        per_sample: vec![SpilledSample {
+            window: WindowCoverage {
+                gc_fraction: odd_nan,
+                mean_depth: f32::NAN,
+            },
+            ref_reads: 0,
+            alt_reads: 0,
+        }],
+        ..a_snp_two_samples_covered()
+    };
+
+    let came_back = assert_round_trips(&entry);
+
+    assert_eq!(
+        came_back.per_sample[0].window.gc_fraction.to_bits(),
+        0x7F80_0001,
+        "the float came back through arithmetic rather than as its bits"
+    );
+}
+
+#[test]
+fn a_record_with_no_samples_at_all_round_trips() {
+    let entry = SpillEntry {
+        per_sample: Vec::new(),
+        ..a_snp_two_samples_covered()
+    };
+    assert!(assert_round_trips(&entry).per_sample.is_empty());
+}
+
+#[test]
+fn the_columns_the_verdict_will_touch_are_carried_opaquely() {
+    // The codec writes the line with `extend_from_slice` and reads it back by length, so
+    // nothing branches on its contents: these two shapes cannot take a path the other round
+    // trips do not. They are here because the plan names them, and what they prove is that a
+    // record arriving with a `FILTER` already set, or with no annotations at all, is handed to
+    // pass three exactly as it was written — the patch that rewrites those two columns is a
+    // later step's.
+    let lines: [&[u8]; 2] = [
+        b"SL4.0ch04\t1000000\t.\tA\tG\t12.0\tEMNoConv\tAF=0.5;AC=1\tGT:GQ:AD\t0/1:12:3,3",
+        b"SL4.0ch04\t1000000\t.\tA\t.\t0\tPASS\t.\tGT\t./.\t./.",
+    ];
+
+    for line in lines {
+        let entry = SpillEntry {
+            is_biallelic_snp: false,
+            line: line.to_vec(),
+            ..a_snp_two_samples_covered()
+        };
+        assert_eq!(assert_round_trips(&entry).line, line);
+    }
+}
+
+#[test]
+fn a_repeat_tract_round_trips_with_its_tract_flag_and_no_alternative_counts() {
+    let entry = SpillEntry {
+        contig: ContigId(0),
+        position: Position(1),
+        is_repeat_tract: true,
+        is_biallelic_snp: false,
+        line: b"SL4.0ch00\t1\t.\tATATAT\tATATATAT\t61.0\tPASS\tAF=0.25\tGT:GQ:AD\t0/1:20:4,4"
+            .to_vec(),
+        per_sample: vec![
+            a_sample_with_a_window(0.19, 3.5, 4, 0),
+            a_sample_without_a_window(0, 0),
+        ],
+    };
+    let came_back = assert_round_trips(&entry);
+    assert!(came_back.is_repeat_tract && !came_back.is_biallelic_snp);
+}
+
+#[test]
+fn an_empty_line_round_trips() {
+    // Not something the encoder produces, but the length prefix has to mean zero when it
+    // says zero rather than run to the end of the entry.
+    let entry = SpillEntry {
+        line: Vec::new(),
+        ..a_snp_two_samples_covered()
+    };
+    assert_round_trips(&entry);
+}
+
+#[test]
+fn values_at_the_edges_of_their_fields_round_trip() {
+    // `-0.0` is the one a bit-pattern codec can lose in a way `==` hides, which is the same
+    // argument the module makes for `NaN`: `-0.0 == 0.0` is true.
+    let entry = SpillEntry {
+        contig: ContigId(u32::MAX),
+        position: Position(u64::MAX),
+        per_sample: vec![
+            a_sample_with_a_window(f32::MAX, f32::MIN_POSITIVE, u32::MAX, u32::MAX),
+            a_sample_with_a_window(-0.0, f32::INFINITY, 0, 0),
+            a_sample_with_a_window(f32::NEG_INFINITY, 0.0, 1, 1),
+        ],
+        ..a_snp_two_samples_covered()
+    };
+    let came_back = assert_round_trips(&entry);
+    assert_eq!(
+        came_back.per_sample[1].window.gc_fraction.to_bits(),
+        (-0.0f32).to_bits(),
+        "a negative zero came back as a positive one"
+    );
+}
+
+#[test]
+fn a_line_longer_than_one_varint_byte_round_trips() {
+    // Every other fixture's line is under 128 bytes, so its length prefix is one byte. A real
+    // record's is not: a 63-sample tomato line runs to several hundred bytes, and at a
+    // thousand samples it is kilobytes.
+    let long_line = vec![b'X'; 300];
+    let entry = SpillEntry {
+        line: long_line.clone(),
+        ..a_tiny_record()
+    };
+    assert_eq!(assert_round_trips(&entry).line, long_line);
+}
+
+#[test]
+fn a_cohort_of_a_thousand_samples_round_trips() {
+    // The sample count's prefix is one byte below 128 and two above it, and every other
+    // fixture has 0, 1 or 2 samples.
+    let entry = SpillEntry {
+        per_sample: (0..1000u32)
+            .map(|index| {
+                if index % 3 == 0 {
+                    a_sample_without_a_window(index, 0)
+                } else {
+                    a_sample_with_a_window(0.4, index as f32, index, index + 1)
+                }
+            })
+            .collect(),
+        ..a_tiny_record()
+    };
+    let came_back = assert_round_trips(&entry);
+    assert_eq!(came_back.per_sample.len(), 1000);
+    assert_eq!(came_back.per_sample[999].ref_reads, 999);
+}
+
+#[test]
+fn a_stream_of_records_comes_back_in_the_order_it_was_written() {
+    let first = a_snp_two_samples_covered();
+    let second = SpillEntry {
+        position: Position(1_000_001),
+        is_repeat_tract: true,
+        is_biallelic_snp: false,
+        line: b"SL4.0ch04\t1000001\t.\tAT\tATAT\t9.0\tPASS\t.\tGT\t0/1\t0/0".to_vec(),
+        ..a_snp_two_samples_covered()
+    };
+    let third = SpillEntry {
+        contig: ContigId(4),
+        position: Position(7),
+        per_sample: Vec::new(),
+        ..a_snp_two_samples_covered()
+    };
+
+    let read = round_trip(&[first.clone(), second.clone(), third.clone()]);
+
+    assert_eq!(read.len(), 3);
+    assert!(holds_the_same_bits(&first, &read[0]));
+    assert!(holds_the_same_bits(&second, &read[1]));
+    assert!(holds_the_same_bits(&third, &read[2]));
+}
+
+#[test]
+fn an_empty_file_yields_no_entries() {
+    let mut reader = SpillReader::new(Cursor::new(Vec::new()));
+    assert!(reader.next_entry().is_none());
+}
+
+// ---------------------------------------------------------------------------
+// The bytes themselves
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_encoding_matches_the_layout_the_spec_fixes() {
+    // Pins the field order and each field's width. A codec whose encoder and decoder agree
+    // with each other but not with §3.4 passes every round trip above and fails this.
+    assert_eq!(
+        encoded_bytes(&[a_tiny_record()]),
+        vec![
+            0x01, // contig 1, one varint byte                          — offset 0
+            0xAC, 0x02, // position 300, two varint bytes               — offsets 1, 2
+            0x00, // is_repeat_tract = false                            — offset 3
+            0x01, // is_biallelic_snp = true                            — offset 4
+            0x02, // the line is two bytes long                         — offset 5
+            b'A', b'B', // the line                                     — offsets 6, 7
+            0x01, // one sample                                         — offset 8
+            0x00, 0x00, 0x00, 0x3F, // gc_fraction 0.5, an f32's bits little-endian
+            0x00, 0x00, 0x00, 0x40, // mean_depth 2.0
+            0x03, // ref_reads 3
+            0x82, 0x01, // alt_reads 130, two varint bytes
+        ]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Files that are cut, and files that are corrupt
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_file_cut_anywhere_inside_a_record_names_the_field_the_bytes_ran_out_in() {
+    // A file that fails is not enough: the field name is the whole diagnostic a spill failure
+    // carries, so every cut has to blame the right one. The offsets are a_tiny_record's, from
+    // the byte list above.
+    let expected: &[(usize, &str)] = &[
+        (1, "position"),
+        (2, "position"),
+        (3, "is_repeat_tract"),
+        (4, "is_biallelic_snp"),
+        (5, "line_length"),
+        (6, "line"),
+        (7, "line"),
+        (8, "sample_count"),
+        (9, "gc_fraction"),
+        (10, "gc_fraction"),
+        (11, "gc_fraction"),
+        (12, "gc_fraction"),
+        (13, "mean_depth"),
+        (14, "mean_depth"),
+        (15, "mean_depth"),
+        (16, "mean_depth"),
+        (17, "ref_reads"),
+        (18, "alt_reads"),
+        (19, "alt_reads"),
+    ];
+
+    let whole = encoded_bytes(&[a_tiny_record()]);
+    assert_eq!(
+        whole.len(),
+        20,
+        "the byte list moved and the offsets below move with it"
+    );
+
+    for &(cut, field) in expected {
+        let mut reader = SpillReader::new(Cursor::new(whole[..cut].to_vec()));
+        match reader.next_entry() {
+            Some(Err(error)) => assert_eq!(
+                truncated_field(&error),
+                field,
+                "a file cut after {cut} bytes blamed {} rather than {field}",
+                truncated_field(&error)
+            ),
+            other => panic!("a file cut after {cut} bytes gave {other:?} rather than failing"),
+        }
+    }
+}
+
+#[test]
+fn a_failure_inside_the_samples_names_which_sample() {
+    // At a cohort of three thousand a message that names only the field points at three
+    // thousand places at once.
+    let entry = SpillEntry {
+        per_sample: vec![a_sample_with_a_window(0.5, 2.0, 1, 1); 3],
+        ..a_tiny_record()
+    };
+    let whole = encoded_bytes(std::slice::from_ref(&entry));
+    let head = encoded_bytes(&[SpillEntry {
+        per_sample: Vec::new(),
+        ..entry
+    }])
+    .len();
+    let bytes_per_sample = (whole.len() - head) / 3;
+    let two_bytes_into_the_second_sample = head + bytes_per_sample + 2;
+
+    let mut reader = SpillReader::new(Cursor::new(
+        whole[..two_bytes_into_the_second_sample].to_vec(),
+    ));
+
+    match reader.next_entry() {
+        Some(Err(SpillError::InSample { index, source })) => {
+            assert_eq!(index, 1);
+            assert_eq!(truncated_field(&source), "gc_fraction");
+        }
+        other => panic!("expected a failure naming its sample, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_tract_flag_byte_that_is_neither_zero_nor_one_is_refused() {
+    let mut bytes = encoded_bytes(&[a_tiny_record()]);
+    bytes[TRACT_FLAG_OFFSET_IN_TINY_RECORD] = 2;
+    let mut reader = SpillReader::new(Cursor::new(bytes));
+
+    match reader.next_entry() {
+        Some(Err(SpillError::NotABoolean { field, byte })) => {
+            assert_eq!(field, "is_repeat_tract");
+            assert_eq!(byte, 2);
+        }
+        other => panic!("expected a refused flag byte, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_biallelic_flag_byte_that_is_neither_zero_nor_one_is_refused() {
+    let mut bytes = encoded_bytes(&[a_tiny_record()]);
+    bytes[BIALLELIC_FLAG_OFFSET_IN_TINY_RECORD] = 2;
+    let mut reader = SpillReader::new(Cursor::new(bytes));
+
+    match reader.next_entry() {
+        Some(Err(SpillError::NotABoolean { field, byte })) => {
+            assert_eq!(field, "is_biallelic_snp");
+            assert_eq!(byte, 2);
+        }
+        other => panic!("expected a refused flag byte, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_record_marked_as_both_a_tract_and_a_biallelic_snp_is_refused_by_the_reader() {
+    // Spec §3.2 scores a repeat tract on coverage alone, so the pair cannot occur; a file
+    // holding it is corrupt, and absorbing it would hand a tract the SNP allele term.
+    let mut bytes = encoded_bytes(&[a_tiny_record()]);
+    bytes[TRACT_FLAG_OFFSET_IN_TINY_RECORD] = 1;
+    let mut reader = SpillReader::new(Cursor::new(bytes));
+
+    match reader.next_entry() {
+        Some(Err(SpillError::TractMarkedAsABiallelicSnp { contig, position })) => {
+            assert_eq!(contig, 1);
+            assert_eq!(position, 300);
+        }
+        other => panic!("expected a refused tract-and-SNP record, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_record_marked_as_both_a_tract_and_a_biallelic_snp_is_refused_by_the_writer() {
+    let entry = SpillEntry {
+        is_repeat_tract: true,
+        ..a_tiny_record()
+    };
+    let mut writer = SpillWriter::new(Vec::new());
+
+    match writer.append(&entry) {
+        Err(SpillError::TractMarkedAsABiallelicSnp { contig, position }) => {
+            assert_eq!(contig, 1);
+            assert_eq!(position, 300);
+        }
+        other => panic!("expected the writer to refuse the record, got {other:?}"),
+    }
+    assert_eq!(
+        writer.entries_written(),
+        0,
+        "a record the writer refused is not counted"
+    );
+}
+
+#[test]
+fn a_contig_too_large_for_the_field_is_refused_rather_than_wrapped() {
+    // A varint holding 2^32 — one past the largest contig index there can be. Written by
+    // hand because the encoder cannot produce it.
+    let mut bytes = Vec::new();
+    encode_u64_leb128(1 << 32, &mut bytes);
+    let mut reader = SpillReader::new(Cursor::new(bytes));
+
+    match reader.next_entry() {
+        Some(Err(SpillError::OutOfRange { field, value })) => {
+            assert_eq!(field, "contig");
+            assert_eq!(value, 1 << 32);
+        }
+        other => panic!("expected a refused contig, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_read_count_too_large_for_its_field_is_refused() {
+    // `ref_reads` and `alt_reads` are `u32` behind a `u64` varint; a decoder that read them
+    // with `read_varint` instead of `read_u32` would wrap silently.
+    let mut bytes = Vec::new();
+    encode_u64_leb128(0, &mut bytes); // contig
+    encode_u64_leb128(1, &mut bytes); // position
+    bytes.push(0); // not a tract
+    bytes.push(0); // not a biallelic SNP
+    encode_u64_leb128(0, &mut bytes); // an empty line
+    encode_u64_leb128(1, &mut bytes); // one sample
+    bytes.extend_from_slice(&0.5f32.to_bits().to_le_bytes());
+    bytes.extend_from_slice(&1.0f32.to_bits().to_le_bytes());
+    encode_u64_leb128(1 << 32, &mut bytes); // ref_reads, one past the field
+    encode_u64_leb128(0, &mut bytes);
+
+    let mut reader = SpillReader::new(Cursor::new(bytes));
+
+    match reader.next_entry() {
+        Some(Err(SpillError::InSample { index, source })) => {
+            assert_eq!(index, 0);
+            match *source {
+                SpillError::OutOfRange { field, value } => {
+                    assert_eq!(field, "ref_reads");
+                    assert_eq!(value, 1 << 32);
+                }
+                other => panic!("expected a refused read count, got {other:?}"),
+            }
+        }
+        other => panic!("expected a refused read count, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_over_long_varint_is_refused() {
+    // Eleven continuation bytes: longer than any `u64` needs, so corruption rather than a
+    // value.
+    let bytes = vec![0xFF; 11];
+    let mut reader = SpillReader::new(Cursor::new(bytes));
+
+    match reader.next_entry() {
+        Some(Err(SpillError::OverlongVarint { field })) => assert_eq!(field, "contig"),
+        other => panic!("expected an over-long varint, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_ten_byte_varint_holding_more_than_a_u64_is_refused_rather_than_truncated() {
+    // Ten bytes is a legal LEB128 width, but the tenth byte contributes `data << 63`, so all
+    // but its lowest bit falls off the top of the `u64`. The psp primitive returns `Ok` with
+    // the high bits dropped; this codec refuses corruption rather than absorbing it.
+    let mut bytes = vec![0x80; 9];
+    bytes.push(0x7F);
+    let mut reader = SpillReader::new(Cursor::new(bytes));
+
+    match reader.next_entry() {
+        Some(Err(SpillError::OverlongVarint { field })) => assert_eq!(field, "contig"),
+        other => panic!("expected a refused varint, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_line_longer_than_the_ceiling_is_refused_before_it_is_read() {
+    // Without the ceiling the length is believed and every byte the file still holds is
+    // appended before the short-read check fires — on a spill the size of a genome's VCF,
+    // that is the rest of the file in one `Vec`.
+    let mut bytes = Vec::new();
+    encode_u64_leb128(0, &mut bytes); // contig
+    encode_u64_leb128(1, &mut bytes); // position
+    bytes.push(0); // not a tract
+    bytes.push(0); // not a biallelic SNP
+    encode_u64_leb128(u64::from(u32::MAX), &mut bytes); // a line of four billion bytes
+    bytes.extend_from_slice(&vec![b'X'; 4096]);
+
+    let mut reader = SpillReader::new(Cursor::new(bytes));
+
+    match reader.next_entry() {
+        Some(Err(SpillError::OutOfRange { field, value })) => {
+            assert_eq!(field, "line_length");
+            assert_eq!(value, u64::from(u32::MAX));
+        }
+        other => panic!("expected a refused line length, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_sample_count_larger_than_the_file_is_an_error_and_not_an_allocation() {
+    // The count says four billion samples and the file ends there. The decoder must fail on
+    // the bytes it does not have rather than reserve for the count it was told.
+    let mut bytes = vec![
+        0x00, // contig 0
+        0x01, // position 1
+        0x00, // not a tract
+        0x00, // not a biallelic SNP
+        0x00, // an empty line
+    ];
+    encode_u64_leb128(4_026_531_840, &mut bytes);
+    let mut reader = SpillReader::new(Cursor::new(bytes));
+
+    match reader.next_entry() {
+        Some(Err(SpillError::InSample { index, source })) => {
+            assert_eq!(index, 0);
+            assert_eq!(truncated_field(&source), "gc_fraction");
+        }
+        other => panic!("expected a truncated sample, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The reader stops, and the writer reports its sink
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_reader_stops_after_a_decode_error() {
+    // A stream that failed once is not at an entry boundary any more, so bytes from the middle
+    // of an entry would decode — plausibly — into a record that was never written.
+    let mut bytes = vec![0x01, 0x01, 0x02]; // contig, position, then a flag byte of 2
+    bytes.extend_from_slice(&encoded_bytes(&[a_tiny_record()]));
+    let mut reader = SpillReader::new(Cursor::new(bytes));
+
+    assert!(matches!(
+        reader.next_entry(),
+        Some(Err(SpillError::NotABoolean { .. }))
+    ));
+    let after = reader.next_entry();
+    assert!(
+        after.is_none(),
+        "the reader kept going after an error and produced {after:?}"
+    );
+}
+
+#[test]
+fn append_reports_a_sink_that_refused_the_bytes_and_does_not_count_the_entry() {
+    let mut writer = SpillWriter::new(RefusesEverything);
+    assert!(matches!(
+        writer.append(&a_tiny_record()),
+        Err(SpillError::Write { .. })
+    ));
+    assert_eq!(writer.entries_written(), 0);
+}
+
+#[test]
+fn finish_reports_a_flush_that_failed() {
+    // A `finish` that swallowed this would report a complete spill for a truncated one, and
+    // pass two would score a cohort missing its last records.
+    assert!(matches!(
+        SpillWriter::new(RefusesEverything).finish(),
+        Err(SpillError::Flush { .. })
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// The round-trip law, over generated entries
+// ---------------------------------------------------------------------------
+
+/// Floats the fixtures reach for by hand, plus any bit pattern at all.
+fn any_float() -> impl Strategy<Value = f32> {
+    prop_oneof![
+        Just(f32::NAN),
+        Just(f32::from_bits(0x7F80_0001)),
+        Just(0.0f32),
+        Just(-0.0f32),
+        Just(f32::INFINITY),
+        Just(f32::NEG_INFINITY),
+        any::<u32>().prop_map(f32::from_bits),
+    ]
+}
+
+/// An entry of any shape the writer will accept — lines and cohorts on both sides of the
+/// 128-byte varint boundary, and never a tract marked as a biallelic SNP.
+fn any_entry() -> impl Strategy<Value = SpillEntry> {
+    (
+        any::<u32>(),
+        any::<u64>(),
+        any::<bool>(),
+        any::<bool>(),
+        prop::collection::vec(any::<u8>(), 0..400),
+        prop::collection::vec(
+            (any_float(), any_float(), any::<u32>(), any::<u32>()),
+            0..300,
+        ),
+    )
+        .prop_map(
+            |(contig, position, is_repeat_tract, snp, line, samples)| SpillEntry {
+                contig: ContigId(contig),
+                position: Position(position),
+                is_repeat_tract,
+                is_biallelic_snp: snp && !is_repeat_tract,
+                line,
+                per_sample: samples
+                    .into_iter()
+                    .map(|(gc, depth, ref_reads, alt_reads)| {
+                        a_sample_with_a_window(gc, depth, ref_reads, alt_reads)
+                    })
+                    .collect(),
+            },
+        )
+}
+
+proptest! {
+    #[test]
+    fn any_stream_of_entries_comes_back_bit_for_bit(
+        entries in prop::collection::vec(any_entry(), 1..8)
+    ) {
+        let read = round_trip(&entries);
+        prop_assert_eq!(read.len(), entries.len());
+        for (wrote, came_back) in entries.iter().zip(&read) {
+            prop_assert!(holds_the_same_bits(wrote, came_back));
+        }
+    }
+}

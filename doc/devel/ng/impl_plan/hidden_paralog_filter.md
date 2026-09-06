@@ -93,7 +93,7 @@ A1. *Source:* spec §3.2, §7, §10.
 
 ### Milestone B — the spill
 
-**B1. ☐ The entry and its codec.** `src/ng/run/paralog_filter/spill.rs`: `SpillEntry` and
+**B1. ✅ The entry and its codec.** `src/ng/run/paralog_filter/spill.rs`: `SpillEntry` and
 `SpilledSample` as spec §3.7; a writer and a reader over the varint primitives, the encoder
 destructuring the entry exhaustively, floats by bits; round-trip tests over entries with absent
 pairs, zero samples, a `FILTER` already set, and an `INFO` of `.`. *Depends:* —. *Source:* spec

@@ -34,6 +34,7 @@ pub mod census_fit;
 pub mod census_from_psp;
 pub mod cohort_merge;
 pub mod gatherer;
+pub mod paralog_filter;
 pub mod psp_caller;
 pub mod psp_source;
 pub mod records;
