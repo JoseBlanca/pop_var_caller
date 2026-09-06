@@ -24,8 +24,18 @@
 //! production's would report a number; and the depth bin width is fitted to each sample rather
 //! than configured, so the two sides' histograms are cut on different axes and only the windows
 //! are still comparable.
+//!
+//! **Which way this module depends.** The accumulator depends on nothing above it; [`depth`],
+//! the rule that turns a drawn record into covered positions, names two types from the cohort
+//! merge (`Drawn` and `LocusSummary`), and at plan step C2 the merge will call back into this
+//! module — so from C2 the two import each other. Rust compiles that and nothing will flag it;
+//! what it costs is that neither module can be moved or read without the other.
 
 mod accumulator;
+/// **Published only until plan step C2 supplies its caller.** Its two items have none
+/// today, so `mod depth;` would be a dead-code warning; when the merge's cache calls the
+/// rule, this becomes `mod depth;` with a `pub(crate) use`, as `accumulator` is.
+pub mod depth;
 
 #[cfg(test)]
 mod production_parity;

@@ -4373,9 +4373,10 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     no position can cross, and an assert names the premise if it breaks again.
 
 #### Window coverage — each sample's depth and GC around a locus, and the histogram behind it
-- **Status:** `fixes-applied` — **Milestone A complete** (branch `ng-window-coverage`): the
-  accumulator, the floor, and the per-sample depth scale. Nothing calls the module yet; the
-  merge's observation cache learns to feed it at Milestone C.
+- **Status:** `fixes-applied` — **Milestone A complete, Milestone B step B1 complete** (branch
+  `ng-window-coverage`): the accumulator, the floor, the per-sample depth scale, and the rule that
+  turns one drawn record into covered positions with a depth at each. Nothing calls the module
+  yet; the merge's observation cache learns to feed it at Milestone C.
 - **Plan:** [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md);
   **Spec:** [window_coverage.md](doc/devel/ng/spec/window_coverage.md). No architecture
   document — the spec's §3 type blocks are the code shape. Its consumer, built separately:
@@ -4383,15 +4384,19 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Code:** [src/ng/window_coverage/](src/ng/window_coverage/) —
   [mod.rs](src/ng/window_coverage/mod.rs) (`WindowCoverageConfig`, `WindowCoverage`,
   `CoverageByGcHistogram`), [accumulator.rs](src/ng/window_coverage/accumulator.rs)
-  (`WindowCoverageAccumulator`), [production_parity.rs](src/ng/window_coverage/production_parity.rs).
+  (`WindowCoverageAccumulator`), [depth.rs](src/ng/window_coverage/depth.rs)
+  (`for_each_depth_the_record_reports`),
+  [production_parity.rs](src/ng/window_coverage/production_parity.rs).
 - **Impl reports:** [A1](doc/devel/reports/implementations/ng_window_coverage_a1_2026-09-06.md),
   [A2](doc/devel/reports/implementations/ng_window_coverage_a2_2026-09-06.md),
-  [A3](doc/devel/reports/implementations/ng_window_coverage_a3_2026-09-06.md);
+  [A3](doc/devel/reports/implementations/ng_window_coverage_a3_2026-09-06.md),
+  [B1](doc/devel/reports/implementations/ng_window_coverage_b1_2026-09-06.md);
   **reviews:** [A1](doc/devel/reports/reviews/ng_window_coverage_a1_2026-09-06.md) (1 Blocker,
   5 Major, 18 Minor), [A2](doc/devel/reports/reviews/ng_window_coverage_a2_2026-09-06.md)
   (4 Major, 4 Minor), [A3](doc/devel/reports/reviews/ng_window_coverage_a3_2026-09-06.md)
-  (1 Blocker, 3 Major, 8 Minor) — all applied or deferred with a home; each step's fixes are in
-  its own commit.
+  (1 Blocker, 3 Major, 8 Minor),
+  [B1](doc/devel/reports/reviews/ng_window_coverage_b1_2026-09-06.md) (2 Blocker, 3 Major,
+  9 Minor) — all applied or deferred with a home; each step's fixes are in its own commit.
 - **A1 done (the accumulator, copied):** production's `SlidingWindowCoverageAccumulator`
   ([coverage.rs](src/sample_summary/coverage.rs)) transcribed with its eleven sliding-window
   tests, under spec §3.6's names and ng's coordinate types; the fixed-tile accumulator and the
@@ -4421,6 +4426,21 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   windows emitted and two folded — so the width is now three-state and latches unfittable. The
   differential against production keeps the windows and gives up the histogram cells, which is
   why A1's review gave the four behaviours it used to guard alone their own unit tests first.
+- **B1 done (which positions a record reports depth at):** one function turns a drawn record into
+  covered positions with a depth at each. A record spanning **one base** reports the count its
+  summary already carries and decodes nothing; a **generic** record spanning more reports at its
+  first base only, because the positions inside it have records of their own; a **repeat tract**
+  reports at every position of its span, because nothing else covers that ground. **The span
+  decides which rule applies, never the shape the draw arrived in** — so a one-base record is
+  answered from its summary even in direct mode, where the evidence is in hand, which is what
+  stops the two modes computing different numbers. **The review found two wrong-result paths with
+  no test between them**: a generic record arriving from a stored file could have spread a
+  deletion's depth over its whole span in psp mode alone, and a failing body decode could have
+  been swallowed, taking that record's positions out of the window and the histogram while the run
+  reported success. Both are now pinned, and the guard that makes the summary parameter safe is a
+  release assert rather than a debug-only one, because this repo ships with debug assertions off.
+  Eighteen tests including a property test over the whole small domain; thirteen mutations run,
+  each caught, five by exactly one test.
 - **Open:** the floor's default (spec §3.3) and the histogram's three bin constants (spec §3.4)
   are soft until plan steps D1 and D2 measure them.
 - **Checkpoint A ruled by the owner, 2026-09-06, and the spec updated with it:** `finish` hands

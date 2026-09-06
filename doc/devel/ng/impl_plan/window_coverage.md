@@ -97,7 +97,7 @@ empty one. *Depends:* A1. *Source:* spec §3.4.
 
 ### Milestone B — the depth at a position
 
-**B1. ☐ The depth rule over a `Drawn`.** A pure function: given a `Drawn` and, for a kept
+**B1. ✅ The depth rule over a `Drawn`.** A pure function: given a `Drawn` and, for a kept
 record spanning more than one base, the source's `build`, yield the positions the record speaks
 for and the depth at each — the head count at a single-base record; the body's
 `num_obs_along_locus()` at the anchor only for a generic record, at every position for a tract.
