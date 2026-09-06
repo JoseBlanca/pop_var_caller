@@ -29,7 +29,10 @@ struct CoveredPosition {
 /// Fed one sample's covered positions in coordinate order through [`observe`](Self::observe).
 /// A position `p` is **finalised** — its centred window can gain no more positions — once the
 /// stream reaches `p + window_bp / 2`, at which point its [`WindowCoverage`] is queued for
-/// [`pop_ready`](Self::pop_ready) and folded into the histogram. [`finish`](Self::finish)
+/// [`pop_ready`](Self::pop_ready) and folded into the histogram. **Unless the window holds
+/// fewer than `min_window_positions` distinct covered positions**, in which case it is queued
+/// absent and folded nowhere: a window too thin to report a depth is also too thin to train the
+/// yardstick a depth is judged against. [`finish`](Self::finish)
 /// finalises the tail (windows truncated at the last observed position or a contig end) and
 /// returns it together with the histogram in one consuming call, so the tail cannot be
 /// silently dropped.
@@ -66,7 +69,8 @@ pub struct WindowCoverageAccumulator {
     half_window_bp: u64,
     /// Row-major `[gc_bin][depth_bin]` counts, length `config.cell_count()`.
     counts: Vec<u32>,
-    /// Windows finalised so far — one per covered position.
+    /// Windows folded into the histogram so far — one per covered position, minus the ones
+    /// the floor silenced.
     windows_folded: u64,
     /// Contig currently being folded; `None` before the first position.
     contig: Option<ContigId>,
@@ -80,8 +84,16 @@ pub struct WindowCoverageAccumulator {
     /// shrink-left step has removed the entries left of it.
     sum_depth: u64,
     sum_gc: u64,
-    /// How many positions those sums cover — the divisor of both means.
+    /// How many observations those sums cover — the divisor of both means, and production's.
     summed_positions: u64,
+    /// How many **different** coordinates those observations sit on — the number the floor is
+    /// judged against.
+    ///
+    /// The two differ only when a stream observes one coordinate more than once, which
+    /// [`observe`](Self::observe)'s non-decreasing order rule permits. Five records at one base
+    /// are one base's worth of evidence, and a floor that counted them as five would pass
+    /// exactly the window it exists to silence.
+    distinct_positions_summed: u64,
     /// Finalised windows awaiting the caller, oldest first.
     ready: VecDeque<(GenomePosition, WindowCoverage)>,
     /// The previous [`observe`](Self::observe)'s position, for the coordinate-order assert.
@@ -105,6 +117,7 @@ impl WindowCoverageAccumulator {
             sum_depth: 0,
             sum_gc: 0,
             summed_positions: 0,
+            distinct_positions_summed: 0,
             ready: VecDeque::new(),
             last_observed: None,
         }
@@ -193,6 +206,9 @@ impl WindowCoverageAccumulator {
             gc_bins,
             depth_bin_width,
             depth_bins,
+            // Not a bin scheme: the floor decides which windows are folded, and a consumer
+            // reading a cell does not need it.
+            min_window_positions: _,
         } = self.config;
         let histogram = CoverageByGcHistogram {
             window_bp,
@@ -207,8 +223,10 @@ impl WindowCoverageAccumulator {
 
     /// Finalise the centre at `centre_offset`: complete its window (extend the running sums
     /// right to `centre + half_window_bp`, shrink them left past `centre − half_window_bp`),
-    /// emit the pair, and fold it into the histogram. `summed_positions >= 1` always — the
-    /// centre lies in its own window.
+    /// emit the pair, and fold it into the histogram — unless the window holds fewer than
+    /// `min_window_positions` distinct covered positions, in which case it emits the absent
+    /// pair and folds nothing. `summed_positions >= 1` always — the centre lies in its own
+    /// window.
     fn finalise_centre(&mut self) {
         let centre = self.positions[self.centre_offset].position;
         // `saturating_add` clamps a centre within `half_window_bp` of `u64::MAX`, which no
@@ -223,6 +241,13 @@ impl WindowCoverageAccumulator {
             && self.positions[self.summed_offset].position <= right_edge
         {
             let entry = self.positions[self.summed_offset];
+            // The buffer is sorted, so an entry starts a new coordinate exactly when it differs
+            // from the one before it.
+            if self.summed_offset == 0
+                || self.positions[self.summed_offset - 1].position != entry.position
+            {
+                self.distinct_positions_summed += 1;
+            }
             self.sum_depth += u64::from(entry.depth);
             self.sum_gc += u64::from(entry.is_gc);
             self.summed_positions += 1;
@@ -235,6 +260,12 @@ impl WindowCoverageAccumulator {
         // here (see the type's `# Invariants`).
         while let Some(front) = self.positions.front() {
             if front.position < left_edge {
+                // The coordinate leaves when its last entry does. Entries sharing a coordinate
+                // are always summed together — they compare equal against the right edge — so
+                // the one behind the front is summed too whenever it exists.
+                if self.positions.len() == 1 || self.positions[1].position != front.position {
+                    self.distinct_positions_summed -= 1;
+                }
                 self.sum_depth -= u64::from(front.depth);
                 self.sum_gc -= u64::from(front.is_gc);
                 self.summed_positions -= 1;
@@ -246,32 +277,44 @@ impl WindowCoverageAccumulator {
             }
         }
 
-        let divisor = self.summed_positions as f64;
-        let gc_fraction = self.sum_gc as f64 / divisor;
-        let mean_depth = self.sum_depth as f64 / divisor;
-        self.ready.push_back((
-            GenomePosition {
-                // PANIC-FREE: `observe` sets `contig` before buffering any position, and
-                // `reset_contig` deliberately leaves it set, so a centre is only ever
-                // finalised while a contig is active.
-                contig: self.contig.expect("centre finalised within a contig"),
-                position: Position(centre),
-            },
+        // PANIC-FREE: `observe` sets `contig` before buffering any position, and
+        // `reset_contig` deliberately leaves it set, so a centre is only ever finalised while
+        // a contig is active.
+        let at = GenomePosition {
+            contig: self.contig.expect("centre finalised within a contig"),
+            position: Position(centre),
+        };
+        let window = if self.distinct_positions_summed < u64::from(self.config.min_window_positions)
+        {
+            // **Too thin to speak, so it says nothing — and it trains nothing either.** The
+            // spec (§3.3) settles that such a window comes back absent; that it is also kept
+            // out of the histogram is this module's decision, and the reason is arithmetic:
+            // `NaN` divided by the bin width casts to 0, so folding an absent window would pile
+            // every too-sparse window into the lowest-GC, lowest-depth cell — and the yardstick
+            // the filter fits would carry a spike of windows that had no depth to report.
+            WindowCoverage::absent()
+        } else {
+            let divisor = self.summed_positions as f64;
+            let gc_fraction = self.sum_gc as f64 / divisor;
+            let mean_depth = self.sum_depth as f64 / divisor;
+            // Saturating rather than wrapping: a cell takes at most one count per covered
+            // position, so it can only reach `u32::MAX` on a reference above about 4.3 Gbp. A
+            // saturated cell under-reports; a wrapped one reports a near-empty cell where the
+            // single-copy peak is, and the filter's fit anchors on exactly that mode.
+            let cell = &mut self.counts[self.config.cell_index(gc_fraction, mean_depth)];
+            *cell = cell.saturating_add(1);
+            self.windows_folded += 1;
             WindowCoverage {
                 gc_fraction: gc_fraction as f32,
                 // The stored `f32` holds a *mean* depth, bounded by the per-position depth and
                 // far under `f32`'s ~1.6e7 exact-integer limit, so the narrowing loses nothing
                 // in practice.
                 mean_depth: mean_depth as f32,
-            },
-        ));
-        // Saturating rather than wrapping: a cell takes at most one count per covered
-        // position, so it can only reach `u32::MAX` on a reference above about 4.3 Gbp. A
-        // saturated cell under-reports; a wrapped one reports a near-empty cell where the
-        // single-copy peak is, and the filter's fit anchors on exactly that mode.
-        let cell = &mut self.counts[self.config.cell_index(gc_fraction, mean_depth)];
-        *cell = cell.saturating_add(1);
-        self.windows_folded += 1;
+            }
+        };
+        // One push and one cursor advance, on both paths: `finalise_all` loops on that cursor,
+        // so an exit that forgot it would hang the run rather than fail a test.
+        self.ready.push_back((at, window));
         self.centre_offset += 1;
     }
 
@@ -291,6 +334,7 @@ impl WindowCoverageAccumulator {
         self.sum_depth = 0;
         self.sum_gc = 0;
         self.summed_positions = 0;
+        self.distinct_positions_summed = 0;
     }
 }
 
@@ -307,6 +351,9 @@ mod tests {
             gc_bins: 2,
             depth_bin_width: 1.0,
             depth_bins: 40,
+            // The floor off, so these keep testing production's window: at 1 every window
+            // clears it, because a window always holds at least its own centre.
+            min_window_positions: 1,
         }
     }
 
@@ -594,6 +641,7 @@ mod tests {
             gc_bins: 3,
             depth_bin_width: 0.7,
             depth_bins: 5,
+            min_window_positions: 1,
         };
         let (_, histogram) = run_sliding(config, 0, &[(1u64, b'G', 3u32)]);
         assert_eq!(histogram.window_bp, config.window_bp);
@@ -619,6 +667,7 @@ mod tests {
             gc_bins: 2,
             depth_bin_width: 1.0,
             depth_bins: 4,
+            min_window_positions: 1,
         };
         let (_, histogram) = run_sliding(config, 0, &[(1u64, b'A', 4u32)]);
         // GC 0 → gc bin 0; depth 4.0 → overflow column 4; cell = 0 * 5 + 4.
@@ -634,6 +683,7 @@ mod tests {
             gc_bins: 2,
             depth_bin_width: 1.0,
             depth_bins: 4,
+            min_window_positions: 1,
         };
         let (_, histogram) = run_sliding(config, 0, &[(1u64, b'G', 1u32)]);
         // GC 1.0 → floor(1.0 * 2) = 2, clamped to 1; depth 1.0 → bin 1; cell = 1 * 5 + 1.
@@ -733,6 +783,237 @@ mod tests {
 
     // -- the two panicking contracts ---------------------------------------------------
 
+    // -- the floor: ng's one departure from production's window -----------------------
+
+    /// A configuration whose floor is `at_least`, over a window wide enough that a run of
+    /// consecutive positions all share one window.
+    fn floored_config(at_least: u32) -> WindowCoverageConfig {
+        WindowCoverageConfig {
+            window_bp: 10,
+            gc_bins: 2,
+            depth_bin_width: 1.0,
+            depth_bins: 40,
+            min_window_positions: at_least,
+        }
+    }
+
+    /// A window holding exactly the floor's worth of covered positions still speaks; one
+    /// position fewer does not.
+    ///
+    /// Five consecutive positions at depth 10, `half = 5`, so every one of the five lies in
+    /// every other's window and each window holds all five. At a floor of 5 that is enough and
+    /// the mean is 10; at a floor of 6 it is one short and every window comes back absent.
+    /// The two runs differ only in the floor, so nothing else can explain the difference.
+    #[test]
+    fn a_window_at_the_floor_speaks_and_one_position_short_of_it_does_not() {
+        let stream: Vec<(u64, u8, u32)> = (1..=5u64).map(|p| (p, b'G', 10)).collect();
+
+        let (at_the_floor, _) = run_sliding(floored_config(5), 0, &stream);
+        assert_eq!(at_the_floor.len(), 5);
+        for (at, window) in &at_the_floor {
+            assert!(
+                !window.is_absent(),
+                "position {} holds all five covered positions, which meets a floor of 5",
+                at.position.get(),
+            );
+            assert!((window.mean_depth - 10.0).abs() < 1e-6);
+        }
+
+        let (one_short, _) = run_sliding(floored_config(6), 0, &stream);
+        assert_eq!(one_short.len(), 5, "an absent window is still emitted");
+        for (at, window) in &one_short {
+            assert!(
+                window.is_absent(),
+                "position {} holds five positions against a floor of 6, so it must be \
+                 absent, got mean {}",
+                at.position.get(),
+                window.mean_depth,
+            );
+        }
+    }
+
+    /// An absent window is absent in **both** numbers, and compares equal to the absent value
+    /// by bit pattern rather than by IEEE comparison — which is what lets a consumer store it,
+    /// hand it on, and compare two runs.
+    #[test]
+    fn an_absent_window_is_absent_in_both_fields_and_compares_by_bits() {
+        let (windows, _) = run_sliding(floored_config(6), 0, &[(1u64, b'G', 10u32)]);
+        let (_, only) = &windows[0];
+        assert!(only.gc_fraction.is_nan(), "GC fraction must be absent too");
+        assert!(only.mean_depth.is_nan());
+        assert_eq!(
+            *only,
+            WindowCoverage::absent(),
+            "an absent window equals the absent value; a derived PartialEq would not",
+        );
+    }
+
+    /// **An absent window trains no yardstick.** It is emitted, but it is not folded, so the
+    /// histogram carries no cell for it and `windows_folded` does not count it.
+    ///
+    /// Without this, `NaN / depth_bin_width` casts to 0 and every window too sparse to speak
+    /// would pile into the histogram's first cell — the one nearest where a fit looks for the
+    /// single-copy peak.
+    #[test]
+    fn a_window_under_the_floor_is_emitted_but_not_folded() {
+        // Two positions 100 apart at a window of 10: each window holds only its own centre, so
+        // both are one short of a floor of 2.
+        let stream = [(1u64, b'G', 7u32), (101, b'G', 7)];
+        let (windows, histogram) = run_sliding(floored_config(2), 0, &stream);
+        assert_eq!(windows.len(), 2, "both centres are still emitted");
+        assert!(windows.iter().all(|(_, w)| w.is_absent()));
+        assert_eq!(histogram.windows_folded, 0);
+        assert_eq!(
+            histogram.counts.iter().sum::<u32>(),
+            0,
+            "no cell may take an absent window",
+        );
+
+        // The same stream with the floor off folds both, which is what makes the assertions
+        // above about the floor rather than about the fixture.
+        let (windows, histogram) = run_sliding(floored_config(1), 0, &stream);
+        assert!(windows.iter().all(|(_, w)| !w.is_absent()));
+        assert_eq!(histogram.windows_folded, 2);
+        assert_eq!(histogram.counts.iter().sum::<u32>(), 2);
+    }
+
+    /// The floor counts covered positions, not reference span: an `N` inside the window does
+    /// not help a window reach it.
+    #[test]
+    fn an_n_position_does_not_count_toward_the_floor() {
+        // Three positions in one window of 10, the middle one `N`: two covered, floor of 3.
+        let stream = [(1u64, b'G', 8u32), (2, b'N', 8), (3, b'G', 8)];
+        let (windows, _) = run_sliding(floored_config(3), 0, &stream);
+        assert_eq!(windows.len(), 2, "the N emits no window of its own");
+        assert!(
+            windows.iter().all(|(_, w)| w.is_absent()),
+            "two covered positions do not meet a floor of three",
+        );
+
+        // The control: the same two covered positions do clear a floor of two, so the
+        // assertion above is about the `N` not counting and not about the fixture being thin.
+        let (windows, _) = run_sliding(floored_config(2), 0, &stream);
+        assert!(windows.iter().all(|(_, w)| !w.is_absent()));
+    }
+
+    /// **The floor is decided per window, not once per stream.** One isolated position and a
+    /// run of four, at a floor of 3: the lone window holds one position and must be absent, the
+    /// four hold four each and must speak — in one stream, from one accumulator, so a verdict
+    /// that carried forward from the first window would show.
+    #[test]
+    fn a_stream_holding_both_a_silent_window_and_a_speaking_one_is_scored_per_window() {
+        let stream: Vec<(u64, u8, u32)> = std::iter::once((1u64, b'G', 9u32))
+            .chain((100..=103u64).map(|p| (p, b'G', 9u32)))
+            .collect();
+        let (windows, histogram) = run_sliding(floored_config(3), 0, &stream);
+        assert_eq!(windows.len(), 5);
+        assert!(windows[0].1.is_absent(), "the lone position is one of one");
+        for (at, window) in &windows[1..] {
+            assert!(
+                !window.is_absent(),
+                "position {} sits in a run of four, which clears a floor of 3",
+                at.position.get(),
+            );
+        }
+        assert_eq!(
+            histogram.windows_folded, 4,
+            "only the four that spoke train the yardstick",
+        );
+    }
+
+    /// **The floor counts distinct coordinates, not records.** One base observed five times is
+    /// one base: the window over it is as thin as any single-position window, and must not
+    /// clear a floor of five because five records arrived. The order rule is non-decreasing, so
+    /// such a stream is legal, and production's own accumulator averages all five.
+    #[test]
+    fn a_repeated_position_does_not_clear_the_floor_on_its_own() {
+        let stream: Vec<(u64, u8, u32)> = (0..5).map(|_| (7u64, b'G', 10u32)).collect();
+        let (windows, histogram) = run_sliding(floored_config(5), 0, &stream);
+        assert_eq!(
+            windows.len(),
+            5,
+            "one window per observation, as production emits"
+        );
+        assert!(windows.iter().all(|(_, w)| w.is_absent()));
+        assert_eq!(histogram.windows_folded, 0);
+    }
+
+    /// **A window never spans contigs, and neither does the floor's count.** Five positions on
+    /// each of two contigs: every window holds its own contig's five, so a floor of 6 silences
+    /// all ten and a floor of 5 lets all ten speak. Ten positions in total, so a count that
+    /// leaked across the boundary would clear the floor of 6.
+    #[test]
+    fn the_floor_counts_the_positions_of_its_own_contig() {
+        fn run(floor: u32) -> (Vec<(GenomePosition, WindowCoverage)>, CoverageByGcHistogram) {
+            let mut accumulator = WindowCoverageAccumulator::new(floored_config(floor));
+            let mut out = Vec::new();
+            for contig in 0..2u32 {
+                for position in 1..=5u64 {
+                    accumulator.observe(ContigId(contig), Position(position), b'G', 10);
+                    while let Some(window) = accumulator.pop_ready() {
+                        out.push(window);
+                    }
+                }
+            }
+            let (tail, histogram) = accumulator.finish();
+            out.extend(tail);
+            (out, histogram)
+        }
+
+        let (windows, histogram) = run(6);
+        assert_eq!(windows.len(), 10);
+        assert!(
+            windows.iter().all(|(_, w)| w.is_absent()),
+            "five per contig is short of six",
+        );
+        assert_eq!(histogram.windows_folded, 0);
+
+        let (windows, histogram) = run(5);
+        assert!(
+            windows.iter().all(|(_, w)| !w.is_absent()),
+            "five per contig meets five",
+        );
+        assert_eq!(histogram.windows_folded, 10);
+    }
+
+    /// **A pair is absent if either number is.** The two are meant to go missing together and
+    /// the accumulator only ever produces them that way, but the fields are `pub`, so the
+    /// predicate is what holds the line: a real depth over a missing GC fraction is not a usable
+    /// measurement.
+    #[test]
+    fn is_absent_is_true_when_only_one_field_is_missing() {
+        let no_depth = WindowCoverage {
+            gc_fraction: 0.4,
+            mean_depth: f32::NAN,
+        };
+        let no_gc = WindowCoverage {
+            gc_fraction: f32::NAN,
+            mean_depth: 12.0,
+        };
+        assert!(no_depth.is_absent());
+        assert!(
+            no_gc.is_absent(),
+            "a real depth over a missing GC fraction is not a usable pair",
+        );
+    }
+
+    /// **Ask `is_absent`, not `== absent()`.** Bitwise equality is right for comparing two runs
+    /// and wrong for asking whether a value is missing: a `NaN` that arrived through a codec or
+    /// an `f64` round trip carries a different payload, so it compares unequal to this module's
+    /// own absent value while still being absent.
+    #[test]
+    fn is_absent_accepts_any_nan_payload_but_equality_does_not() {
+        let foreign = WindowCoverage {
+            gc_fraction: f32::from_bits(0x7fc0_1234),
+            mean_depth: f32::from_bits(0x7fc0_1234),
+        };
+        assert!(foreign.is_absent());
+        assert!(
+            foreign != WindowCoverage::absent(),
+            "bitwise equality is payload-sensitive, which is why `is_absent` exists",
+        );
+    }
+
     #[test]
     #[should_panic(expected = "window_bp must be >= 1")]
     fn new_panics_on_zero_window_bp() {
@@ -749,6 +1030,32 @@ mod tests {
         let config = WindowCoverageConfig {
             gc_bins: 0,
             ..sliding_config()
+        };
+        let _ = WindowCoverageAccumulator::new(config);
+    }
+
+    /// Zero is the floor's only value below the valid range: one is met by every window,
+    /// since a window always holds at least its own centre.
+    #[test]
+    #[should_panic(expected = "min_window_positions must be >= 1")]
+    fn new_panics_on_a_zero_floor() {
+        let config = WindowCoverageConfig {
+            min_window_positions: 0,
+            ..sliding_config()
+        };
+        let _ = WindowCoverageAccumulator::new(config);
+    }
+
+    /// A floor above what the window is wide enough to hold would silence every window of every
+    /// sample and report nothing about it — the failure a run tuning this number could most
+    /// easily walk into.
+    #[test]
+    #[should_panic(expected = "is more positions than a 10-base window can hold")]
+    fn new_panics_on_a_floor_no_window_could_reach() {
+        // window_bp 10 spans [p-5, p+5] — eleven bases, so eleven positions at most.
+        let config = WindowCoverageConfig {
+            min_window_positions: 12,
+            ..floored_config(1)
         };
         let _ = WindowCoverageAccumulator::new(config);
     }

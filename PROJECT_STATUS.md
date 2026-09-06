@@ -4383,9 +4383,12 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   [mod.rs](src/ng/window_coverage/mod.rs) (`WindowCoverageConfig`, `WindowCoverage`,
   `CoverageByGcHistogram`), [accumulator.rs](src/ng/window_coverage/accumulator.rs)
   (`WindowCoverageAccumulator`), [production_parity.rs](src/ng/window_coverage/production_parity.rs).
-- **Impl report:** [A1](doc/devel/reports/implementations/ng_window_coverage_a1_2026-09-06.md);
-  **review:** [A1](doc/devel/reports/reviews/ng_window_coverage_a1_2026-09-06.md) (1 Blocker,
-  5 Major, 18 Minor — all applied or deferred with a home; the fixes are in the same commit).
+- **Impl reports:** [A1](doc/devel/reports/implementations/ng_window_coverage_a1_2026-09-06.md),
+  [A2](doc/devel/reports/implementations/ng_window_coverage_a2_2026-09-06.md);
+  **reviews:** [A1](doc/devel/reports/reviews/ng_window_coverage_a1_2026-09-06.md) (1 Blocker,
+  5 Major, 18 Minor), [A2](doc/devel/reports/reviews/ng_window_coverage_a2_2026-09-06.md)
+  (4 Major, 4 Minor) — all applied or deferred with a home; each step's fixes are in its own
+  commit.
 - **A1 done (the accumulator, copied):** production's `SlidingWindowCoverageAccumulator`
   ([coverage.rs](src/sample_summary/coverage.rs)) transcribed with its eleven sliding-window
   tests, under spec §3.6's names and ng's coordinate types; the fixed-tile accumulator and the
@@ -4400,8 +4403,19 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   byte what it writes today. Baseline taken 2026-09-06 on six tomato accessions over the first
   two 100 kb intervals of `benchmarks/tomato1/regions.bed` — 2,311 records, direct mode and psp
   mode identical apart from `##commandline` (sha256 `84ad19c2…`).
+- **A2 done (the floor):** a window built from fewer than `min_window_positions` **distinct**
+  covered positions comes back absent — both numbers `NaN` — and is kept out of the histogram,
+  so a window too thin to report a depth also trains no yardstick. Provisionally 50 of 500,
+  which plan step D1 measures. **The review caught a real defect, not only missing tests:** the
+  floor first counted records rather than distinct coordinates, so one base observed five times
+  cleared a floor of five and was folded. Seven mutations run on the fixed tree, each caught.
 - **Open:** the floor's default (spec §3.3) and the histogram's three bin constants (spec §3.4)
   are soft until plan steps D1 and D2 measure them.
+- **⚠ Three items owed to the owner at Checkpoint A**, none of them the implementer's to change:
+  spec §3.4's "Every finalised window is folded" now contradicts the code (an absent window is
+  finalised and not folded); a `windows_under_the_floor` counter on the histogram is recommended
+  but changes the type the hidden-paralog filter plan reads; and spec §5 budgets a 12-byte entry
+  for the ready deque where the entry spec §3.6 specifies is 24 bytes.
 
 ---
 

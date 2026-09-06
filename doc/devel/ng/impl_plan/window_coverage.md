@@ -80,7 +80,7 @@ the histogram type) and `accumulator.rs`: `SlidingWindowCoverageAccumulator`, `C
 the fixed-tile accumulator and the heterozygosity fields are not brought over. Green as
 transcribed. *Depends:* —. *Source:* spec §3.3, §3.4, §7.
 
-**A2. ☐ The floor.** `min_window_positions` on the config; a centre finalised over fewer covered
+**A2. ✅ The floor.** `min_window_positions` on the config; a centre finalised over fewer covered
 positions emits `NaN` in both fields. Tests: a window at the floor emits a value, one below it
 emits `NaN`, and the `NaN` compares by bits. *Depends:* A1. *Source:* spec §3.3.
 

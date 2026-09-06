@@ -19,9 +19,10 @@
 //! transcribed with its tests under the freeze rule that `src/sample_summary/` is not edited).
 //! The copy is deliberate and is held to its original by a differential test
 //! (`production_parity.rs`) — a later reader who is tempted to delete it and call
-//! production instead should know that ng's version is about to diverge: a floor under how
-//! many covered positions a window may speak for, and a depth bin width fitted to the sample,
-//! arrive in the next two steps of the plan.
+//! production instead should know that ng's version has already diverged: a window built from
+//! fewer than [`WindowCoverageConfig::min_window_positions`] covered positions reports nothing,
+//! where production's would report a number. One further departure is still to come, a depth
+//! bin width fitted to the sample.
 
 mod accumulator;
 
@@ -46,16 +47,30 @@ pub const WINDOW_BP: u32 = 500;
 /// in the spec and are settled by measurement, in plan steps D1 and D2.
 pub const GC_BINS: u32 = 50;
 
+/// How many covered positions a window must hold before it is allowed to speak — **soft, and
+/// set by measurement at plan step D1** (spec §3.3's open question). Until then, 50 of 500.
+///
+/// A window built from a handful of positions looks exactly as confident as one built from five
+/// hundred, and in ng the holes are not scattered: a repeat-tract region that emits no loci, an
+/// analysed-region edge, a stretch no read reached. Below this many, the window comes back
+/// absent instead.
+pub const MIN_WINDOW_POSITIONS: u32 = 50;
+
 /// How wide the window is and how the histogram's cells are cut.
 ///
 /// Production's `CoverageBinScheme` transcribed, under the name spec §3.6 gives it. Every
 /// field must be positive (`depth_bin_width` finite and `> 0`); [`assert_valid`] asserts that
 /// in both debug and release rather than silently using a scheme the caller never chose.
 ///
-/// **There is no `Default`**, and the settled values live in [`WINDOW_BP`] and [`GC_BINS`]
-/// instead: every field here changes what the run measures, so the configuration is spelled at
-/// the site that builds the accumulator — plan step C2, inside the merge's observation cache —
-/// and a misconfigured run fails there rather than quietly measuring something else.
+/// **There is no `Default`**, and the values live in the constants above instead: every field
+/// here changes what the run measures, so the configuration is spelled at the site that builds
+/// the accumulator — plan step C2, inside the merge's observation cache — and a misconfigured
+/// run fails there rather than quietly measuring something else.
+///
+/// **The three constants are not of the same kind.** [`WINDOW_BP`] and [`GC_BINS`] are
+/// production's, inherited and not re-argued here. [`MIN_WINDOW_POSITIONS`] is ng's own and is
+/// provisional: a reader who finds a run's behaviour turning on it is looking at a value nobody
+/// has yet defended with data, and plan step D1 is where that happens.
 ///
 /// [`assert_valid`]: WindowCoverageConfig::assert_valid
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -70,6 +85,12 @@ pub struct WindowCoverageConfig {
     pub depth_bin_width: f64,
     /// Number of regular depth bins; one overflow bin follows them.
     pub depth_bins: u32,
+    /// Fewest covered positions a window may be built from and still report a number; below
+    /// this it comes back absent. Provisionally [`MIN_WINDOW_POSITIONS`] — see spec §3.3.
+    ///
+    /// **This is ng's one departure from production's window**, which lets a single covered
+    /// position emit a window over itself alone.
+    pub min_window_positions: u32,
 }
 
 impl WindowCoverageConfig {
@@ -94,6 +115,23 @@ impl WindowCoverageConfig {
         assert!(self.window_bp >= 1, "window_bp must be >= 1");
         assert!(self.gc_bins >= 1, "gc_bins must be >= 1");
         assert!(self.depth_bins >= 1, "depth_bins must be >= 1");
+        assert!(
+            self.min_window_positions >= 1,
+            "min_window_positions must be >= 1",
+        );
+        // The widest a window ever gets is its own centre plus half a window either side, so a
+        // floor above that many bases can never be met and every window of every sample would
+        // come back absent — silently, which is the one thing this configuration's docs say it
+        // will not do.
+        let widest_window_in_bases = 2 * u64::from(self.window_bp / 2) + 1;
+        assert!(
+            u64::from(self.min_window_positions) <= widest_window_in_bases,
+            "min_window_positions {} is more positions than a {}-base window can hold ({}), so \
+             every window would be absent",
+            self.min_window_positions,
+            self.window_bp,
+            widest_window_in_bases,
+        );
         assert!(
             self.depth_bin_width.is_finite() && self.depth_bin_width > 0.0,
             "depth_bin_width must be finite and > 0, got {}",
@@ -123,13 +161,12 @@ impl WindowCoverageConfig {
 /// that centre — spec §3.5's shape, so that a locus can carry one pair per sample without
 /// repeating a coordinate every consumer already knows.
 ///
-/// **From the next step of the plan on, both fields are `NaN` where the sample has no usable
-/// window there** — a value, not an error. Nothing at this step produces one: a window always
-/// holds at least its own centre, so neither quotient can be `NaN`. [`PartialEq`] compares bit
-/// patterns *ahead* of that need rather than after it, because a derived one would make an
-/// absent window unequal to itself the moment the floor lands, and the tests that would then
-/// start failing are the ones that compare two runs — a failure that would arrive a step away
-/// from its cause. Production's `LocusWindowCoverage`
+/// **Both fields are `NaN` where the sample has no usable window there** — a value, not an
+/// error, built and tested through [`absent`](Self::absent) and [`is_absent`](Self::is_absent)
+/// so that the two numbers can only go missing together: a half-absent pair would divide a real
+/// depth by a missing yardstick. [`PartialEq`] compares bit patterns for that reason — a derived
+/// one would make an absent window unequal to itself and break every comparison of two runs.
+/// Production's `LocusWindowCoverage`
 /// ([`types.rs:233`](../../../src/var_calling/types.rs)) compares the same way and for the
 /// same reason, and withholds `Eq`/`Hash` as this does: bitwise equality separates `+0.0` from
 /// `-0.0`, which is right for comparing two runs and wrong for a lookup key.
@@ -139,6 +176,38 @@ pub struct WindowCoverage {
     pub gc_fraction: f32,
     /// Mean read depth over the window's covered positions.
     pub mean_depth: f32,
+}
+
+impl WindowCoverage {
+    /// The value for a position where the sample has no usable window: no covered record
+    /// there, or a window under the configured floor.
+    ///
+    /// **Both numbers go absent together**, which is why this is built here rather than written
+    /// as a pair of `f32::NAN`s at each site that needs one.
+    #[must_use]
+    pub fn absent() -> Self {
+        Self {
+            gc_fraction: f32::NAN,
+            mean_depth: f32::NAN,
+        }
+    }
+
+    /// Whether either number is missing.
+    ///
+    /// **Ask this rather than comparing against [`absent`](Self::absent).** Equality here is
+    /// bitwise, which is what comparing two runs needs and what asking "is this missing" does
+    /// not: a `NaN` that arrived through a codec or an `f64` round trip carries a different
+    /// payload and compares unequal, while this accepts it.
+    ///
+    /// **Fail-closed on either field.** The two numbers are meant to go missing together, and
+    /// the accumulator only ever produces them that way; but both fields are `pub`, so a depth
+    /// without the GC fraction that says what depth to expect there is representable, and it is
+    /// not a usable measurement. Answering "absent" for it is the safe half of the answer — and
+    /// this is a question, so it reports rather than panicking.
+    #[must_use]
+    pub fn is_absent(self) -> bool {
+        self.mean_depth.is_nan() || self.gc_fraction.is_nan()
+    }
 }
 
 impl PartialEq for WindowCoverage {
@@ -179,8 +248,10 @@ pub struct CoverageByGcHistogram {
     /// `depth_bins * depth_bin_width` — follows them, so each GC row holds `depth_bins + 1`
     /// cells.
     pub depth_bins: u32,
-    /// How many finalised windows were folded in. Every covered position finalises exactly
-    /// one window, so this also counts the sample's covered positions.
+    /// How many windows were folded in. Every covered position finalises exactly one window,
+    /// but a window under the configured floor comes back absent and trains no yardstick, so
+    /// this counts the sample's covered positions **minus** the ones whose window was too
+    /// sparse to speak.
     pub windows_folded: u64,
     /// Row-major `[gc_bin][depth_bin]` counts. Length is exactly `gc_bins * (depth_bins + 1)`.
     ///

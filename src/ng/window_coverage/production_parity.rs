@@ -13,9 +13,10 @@
 //! in two other places (`ng/scanner_parity.rs`, `calling::genotype_table_parity`); nothing
 //! shipped depends on `src/sample_summary/`.
 //!
-//! **This will narrow as ng's accumulator earns its two additions.** The floor
-//! (spec §3.3) and the per-sample depth bin width (spec §3.4) are deliberate departures, so
-//! the histogram half of the comparison stops being meaningful once the width is fitted; the
+//! **This narrows as ng's accumulator earns its two additions.** The floor (spec §3.3) has
+//! landed and is switched off here; the per-sample depth bin width (spec §3.4) is the other
+//! deliberate departure, and once it is fitted the histogram half of the comparison stops
+//! being meaningful. The
 //! window means and GC fractions stay production's and are what this exists to hold. Four
 //! behaviours that the transcribed unit tests leave entirely to this file — the overflow
 //! column's boundary, the GC clamp, lowercase bases, and the closing frontier — were given
@@ -90,6 +91,10 @@ fn the_transcription_matches_production_on_streams_neither_test_was_written_for(
             gc_bins: 5,
             depth_bin_width: 0.7,
             depth_bins: 17,
+            // The floor at 1 is the floor switched off — every window holds at least its own
+            // centre — which is what keeps this comparable with production, whose window has
+            // no floor at all. The floor is ng's own and is unit-tested.
+            min_window_positions: 1,
         };
         // Production's scheme is built from ng's configuration rather than typed a second
         // time: the differential's premise is that both run the same numbers.
@@ -175,6 +180,13 @@ fn the_transcription_matches_production_on_streams_neither_test_was_written_for(
             );
             windows_compared += 1;
         }
+        assert!(
+            transcribed_windows
+                .iter()
+                .all(|(_, window)| !window.is_absent()),
+            "seed {seed}: the floor is set to 1 here so that this stays a comparison with \
+             production, whose window has no floor — an absent window means it bound",
+        );
         assert_eq!(
             production_histogram.counts, transcribed_histogram.counts,
             "seed {seed}: histogram cells differ",
