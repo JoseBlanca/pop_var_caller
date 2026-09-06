@@ -998,6 +998,20 @@ pub fn build_region_handing_over_windowed<'a, E>(
                         CohortObservation::over(&resolved)
                     }
                 };
+                // **What this run read, for something outside it to check** — off unless the run
+                // was asked for it, and the only way the cover's look-ahead is observable at
+                // all, since the measurement changes no VCF byte (`super::recorded_windows`).
+                // **Here rather than at the record sink, and only until the next plan step**: the
+                // loci built are exactly the loci written, and this is the read the filter will
+                // make. Once the pair travels on the observation (step C4), the sink is where
+                // "at every written record" is decided and this call belongs there.
+                super::recorded_windows::record_the_windows_at(
+                    crate::ng::types::GenomePosition {
+                        contig: observation.region.contig,
+                        position: observation.region.start,
+                    },
+                    window,
+                );
                 keep(observation);
             }
             Verdict::Failed => refused.push(locus.region),

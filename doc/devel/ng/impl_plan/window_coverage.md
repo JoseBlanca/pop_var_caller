@@ -126,7 +126,7 @@ parallel twin drain the deque with the summaries; `WindowedCohort` gains a third
 `window_at(sample, position) -> Option<WindowCoverage>`. The parallel cover's per-sample `&mut`
 covers the new state. VCF byte-identical. *Depends:* A3, B1, C1. *Source:* spec §3.3, §3.5.
 
-**C3. ☐ The look-ahead. Own commit, do not bundle.** `cover` draws to the region's reach plus
+**C3. ✅ The look-ahead. Own commit, do not bundle.** `cover` draws to the region's reach plus
 half a window. The probe from B2 is extended to record every position's pair by spec §3.3's rule
 independently of the cache (the whole-store recomputation, spec §10); a test-only hook reads the
 cache's deque at every built locus and asserts bit-identity with the probe, on the six-accession

@@ -5364,6 +5364,8 @@ mod records_handed_over_as_the_run_finishes_them {
         fixture_reference_from_its_index, header, indexed_named_bam, matching_contigs,
         read_group_for,
     };
+    use crate::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion};
+    use crate::ng::repeat_catalog::StrRepeatCriteria;
     use crate::ng::run::WalkProgress;
     use crate::ng::run::cohort_merge::CohortLocusBuilderRegionsLen;
     use crate::ng::types::{ContigId, Ploidy, Position};
@@ -5374,6 +5376,44 @@ mod records_handed_over_as_the_run_finishes_them {
     use std::num::NonZeroU32;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    /// A segmentation over **both** of the fixture's contigs, all generic.
+    ///
+    /// **The run's own covers `chr1` alone, and that is not enough for the test below**, which
+    /// needs the merge to reach past the record it shields `chr1` with. `chr1` is a hundred bases
+    /// and a cover draws half a window — 250 — past its region, so every cover on `chr1` reaches
+    /// that contig's end: nothing placed on `chr1` can stop a draw there, and the source failure
+    /// behind it would never be drawn at all.
+    fn segmentation_over_both_fixture_contigs() -> Segmentation {
+        let bounds: Vec<crate::regions::ContigBounds<'_>> =
+            crate::ng::read::input::test_fixtures::FIXTURE_CONTIGS
+                .iter()
+                .map(|(name, length)| crate::regions::ContigBounds {
+                    name,
+                    length: *length as u32,
+                })
+                .collect();
+        let pieces: Vec<TypedRegion> = bounds
+            .iter()
+            .enumerate()
+            .map(|(contig, entry)| TypedRegion {
+                region: GenomeRegion {
+                    contig: ContigId(contig as u32),
+                    start: Position(1),
+                    end: Position(u64::from(entry.length)),
+                },
+                kind: RegionKind::Generic,
+            })
+            .collect();
+        Segmentation::build(
+            pieces.into_iter().map(Ok),
+            GenomeRegions::whole_contigs(&bounds),
+            crate::ng::run::test_fixtures::catalog_header(),
+            StrRepeatCriteria::default(),
+            PathBuf::from("/genomes/test.catalog.parquet"),
+        )
+        .expect("a clean stream builds")
+    }
 
     /// **A refused record is the run's answer even when the source fails afterwards** — the
     /// refusal happened first, so it outranks the failure the merge itself comes back with.
@@ -5398,7 +5438,7 @@ mod records_handed_over_as_the_run_finishes_them {
         // at the record, and one accessor cannot serve both.
         let reference_for_the_merge = caller.walk_reference.accessor();
         let RunReadyToWalk {
-            segmentation,
+            segmentation: _,
             mut merge_parameters,
             walkers,
             parameters,
@@ -5406,6 +5446,11 @@ mod records_handed_over_as_the_run_finishes_them {
             candidate_selection,
             assembly_check: _,
         } = caller.walkers().expect("the fixture's one sample opens");
+        // **Both contigs analysed, not the run's own `chr1` alone**, so that the merge reaches
+        // the ground the record below shields `chr1` with and the source failure behind it is
+        // really drawn. Without it this test asserts a precedence between two failures of which
+        // only one ever happens.
+        let segmentation = segmentation_over_both_fixture_contigs();
 
         // **Ten bases a building region, and that is what makes the test possible.** A cover
         // draws every sample before it builds anything, so a failure in the same batch as the
@@ -5424,6 +5469,25 @@ mod records_handed_over_as_the_run_finishes_them {
                 drawn.push(next);
             }
         }
+        // **One record on the next contig, so that the failure behind it is not drawn in the
+        // same batch as the first locus.** A cover draws half a window past its region
+        // (`spec/window_coverage.md` §3.3) and the fixture's `chr1` is a hundred bases, so the
+        // first cover would otherwise reach the end of this source and come back with the
+        // failure before the sink had been called once — which is the staging this test needs
+        // and the ten-base regions above were doing on their own before the look-ahead landed.
+        // A record on another contig is past every reach on this one, so it is drawn, held, and
+        // stops the draw there.
+        let mut on_the_next_contig = drawn
+            .first()
+            .and_then(|first| first.as_ref().ok())
+            .expect("the walker made at least one observation")
+            .clone();
+        on_the_next_contig.region = crate::ng::types::GenomeRegion {
+            contig: ContigId(1),
+            start: Position(150),
+            end: Position(150),
+        };
+        drawn.push(Ok(on_the_next_contig));
         drawn.push(Err(RunError::SourceFailed {
             sample: "zeta".to_owned(),
             reached: WalkProgress::NothingYet,

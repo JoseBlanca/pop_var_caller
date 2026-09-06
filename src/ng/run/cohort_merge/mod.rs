@@ -40,6 +40,7 @@ pub mod close;
 pub mod observation_cache;
 pub mod organise;
 pub mod parallel;
+pub mod recorded_windows;
 pub mod serial;
 pub mod timing;
 
@@ -307,6 +308,14 @@ pub(super) mod fixtures {
             dst: &mut Vec<u8>,
         ) -> Result<(), crate::ng::ref_seq::RefSeqError> {
             self.bases.fetch_into(contig, start_1based, length, dst)
+        }
+    }
+
+    /// The lengths the cover's look-ahead stops at, forwarded from the bases behind this
+    /// counter so that the two cannot describe different contigs.
+    impl crate::ng::ref_seq::ContigTable for ReferenceCountingItsReleases {
+        fn contigs(&self) -> &crate::fasta::ContigList {
+            self.bases.contigs()
         }
     }
 

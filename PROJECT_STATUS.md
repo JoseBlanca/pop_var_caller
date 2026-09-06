@@ -4373,13 +4373,14 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     no position can cross, and an assert names the premise if it breaks again.
 
 #### Window coverage — each sample's depth and GC around a locus, and the histogram behind it
-- **Status:** `fixes-applied` — **Milestones A and B complete, Milestone C steps C1 and C2
+- **Status:** `fixes-applied` — **Milestones A and B complete, Milestone C steps C1, C2 and C3
   complete** (branch `ng-window-coverage`): the accumulator, the floor, the per-sample depth
   scale, the rule that turns one drawn record into covered positions with a depth at each, the
   measurement that says the rule's cheapest branch is sound on real data, the reference in the
-  merge's cache, and the accumulator itself in each sample's window there. **The measurement now
-  runs on real data in both modes and no VCF byte has moved.** Next: C3, the half-window
-  look-ahead, which the plan lands alone.
+  merge's cache, the accumulator itself in each sample's window there, and the half-window
+  look-ahead that stops each region's last centres being absent. **The measurement runs on real
+  data in both modes, no VCF byte has moved, and what the run reads now equals a whole-store
+  recomputation bit for bit.** Next: C4, the pair on the locus and beside the record.
 - **Plan:** [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md);
   **Spec:** [window_coverage.md](doc/devel/ng/spec/window_coverage.md). No architecture
   document — the spec's §3 type blocks are the code shape. Its consumer, built separately:
@@ -4395,7 +4396,9 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   [A3](doc/devel/reports/implementations/ng_window_coverage_a3_2026-09-06.md),
   [B1](doc/devel/reports/implementations/ng_window_coverage_b1_2026-09-06.md),
   [B2](doc/devel/reports/implementations/ng_window_coverage_b2_2026-09-06.md),
-  [C1](doc/devel/reports/implementations/ng_window_coverage_c1_2026-09-06.md);
+  [C1](doc/devel/reports/implementations/ng_window_coverage_c1_2026-09-06.md),
+  [C2](doc/devel/reports/implementations/ng_window_coverage_c2_2026-09-06.md),
+  [C3](doc/devel/reports/implementations/ng_window_coverage_c3_2026-09-06.md);
   **reviews:** [A1](doc/devel/reports/reviews/ng_window_coverage_a1_2026-09-06.md) (1 Blocker,
   5 Major, 18 Minor), [A2](doc/devel/reports/reviews/ng_window_coverage_a2_2026-09-06.md)
   (4 Major, 4 Minor), [A3](doc/devel/reports/reviews/ng_window_coverage_a3_2026-09-06.md)
@@ -4403,10 +4406,11 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   [B1](doc/devel/reports/reviews/ng_window_coverage_b1_2026-09-06.md) (2 Blocker, 3 Major,
   9 Minor), [B2](doc/devel/reports/reviews/ng_window_coverage_b2_2026-09-06.md) (3 Major,
   11 Minor), [C1](doc/devel/reports/reviews/ng_window_coverage_c1_2026-09-06.md) (1 Blocker,
-  6 Major, 8 Minor) — all applied or deferred with a home; each step's fixes are in its own
-  commit. **C2's design review is applied and its correctness review was still running when the
-  session ended**: its per-category file lands in `tmp/review_2026-09-06_window-coverage-c2/` and
-  is the first thing to read before C3.
+  6 Major, 8 Minor), [C2](doc/devel/reports/reviews/ng_window_coverage_c2_2026-09-06.md) (4 Major,
+  2 Minor), [C3](doc/devel/reports/reviews/ng_window_coverage_c3_2026-09-06.md) (5 Major, 9 Minor)
+  — all applied or raised with a home; each step's fixes are in its own commit. **C2's correctness
+  review ran a session late**, its design half having landed inside C2's own commit; its findings
+  are fixed forward in their own commit after C3.
 - **A1 done (the accumulator, copied):** production's `SlidingWindowCoverageAccumulator`
   ([coverage.rs](src/sample_summary/coverage.rs)) transcribed with its eleven sliding-window
   tests, under spec §3.6's names and ng's coordinate types; the fixed-tile accumulator and the
@@ -4507,6 +4511,35 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   sample with no window there and for a window carrying no measurement at all, and the oracle
   C4's plan names as its green criterion runs through the second — so it would pass by comparing
   absent against absent.
+- **C3 done (the look-ahead, and the oracle that can see it):** each cover draws half a window
+  past the region it was asked for, clamped to the contig's end, and the number comes from
+  `window_coverage::WINDOW_BP` rather than being retyped. **Its failure was invisible from inside
+  the run** — a region's last centres finalise after their builder has run, and the VCF is
+  unchanged either way — so this step also builds the two things that can see it: a recorder in
+  the run (`NG_WINDOW_COVERAGE_FILE`) that writes every sample's window at every built locus as
+  bit patterns, and a whole-store recomputation in the probe that walks the same store end to end
+  with no covers and no eviction. **On the six-accession slice, of 26,754 sample-loci: without the
+  look-ahead 571 have no window in the run and one in the walk; with it, 12** — and those 12 are
+  two positions, the same in all six samples, at the end of the last analysed interval, where no
+  later record exists to close the centre and only `finish` (step C5) can. **0 disagreements
+  either way**, so the look-ahead moves only which windows exist, never their values. The oracle
+  is unmoved: 2,311 records, sha256 `84ad19c2…`, on both routes. Six existing fixtures moved their
+  coordinates — one written when a cover stopped at its region's end is drawn whole by the first
+  cover now — and one in `callers.rs` gained a record on the next contig to keep staging a refusal
+  ahead of a source failure. Nine tests added. **The review found three defects rather than three
+  clarities.** A cover that draws a sample onto the next contig ended holding *that* contig's bases,
+  so the accessor a builder reads at C4 would answer nothing over its own region — found
+  independently by both C3 agents and by C2's re-run correctness review, three times from three
+  directions, and fixed here because the look-ahead turns it from a corner into the ordinary case at
+  every contig boundary. The `callers.rs` fixture this step changed stopped testing its own name:
+  its subject is that a refused record outranks a source failure behind it, and the record added to
+  stage the two stopped the draw for the whole of `chr1`, so the failure was never drawn — swapping
+  the two arms left all 515 tests green. And every field the recorder writes, plus the whole of the
+  comparison, had no test: four deliberate defects survived the suite, the worst of them a bit
+  comparison replaced by float equality, which would report a **correct** run as disagreeing at
+  every window the floor silenced. All four are caught now. **Raised, not fixed:** the example
+  `ng_cohort_merge_real_cost` does not compile, and has not on `main` either; C1 added two further
+  errors to it, and repairing it needs a decision about a module another branch is working in.
 - **Open:** the floor's default (spec §3.3) and the histogram's three bin constants (spec §3.4)
   are soft until plan steps D1 and D2 measure them.
 - **Checkpoint A ruled by the owner, 2026-09-06, and the spec updated with it:** `finish` hands

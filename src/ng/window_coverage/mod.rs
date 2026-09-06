@@ -32,10 +32,12 @@
 //! what it costs is that neither module can be moved or read without the other.
 
 mod accumulator;
-/// The rule that turns a drawn record into covered positions. `pub(crate)` since plan step C2
-/// supplied its caller — the merge's cache — because nothing outside this crate builds a
-/// [`LocusSummary`](crate::ng::run::cohort_merge::observation_cache::LocusSummary) to hand it.
-pub(crate) mod depth;
+/// The rule that turns a drawn record into covered positions. **`pub` since plan step C3**, whose
+/// whole-store recomputation
+/// ([`examples/ng_window_coverage_probe.rs`](../../../examples/ng_window_coverage_probe.rs)) is
+/// the second caller: an oracle that reimplemented the rule would be testing its own copy of it
+/// rather than the cache's walk, which is the only thing that differs between them.
+pub mod depth;
 
 #[cfg(test)]
 mod production_parity;

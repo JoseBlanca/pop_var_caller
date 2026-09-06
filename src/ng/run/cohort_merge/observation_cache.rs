@@ -43,7 +43,7 @@
 
 use super::CohortLocusBuilderRegionsLen;
 use crate::ng::locus_generation::SampleLocusObservations;
-use crate::ng::ref_seq::{EvictableRefSeq, RefSeq, RefSeqError};
+use crate::ng::ref_seq::{ContigTable, EvictableRefSeq, RefSeq, RefSeqError};
 use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position};
 use crate::ng::window_coverage::depth::{EvidenceForOneRecord, for_each_reported_depth};
 use crate::ng::window_coverage::{
@@ -59,9 +59,15 @@ use crate::ng::window_coverage::{
 /// chromosome 1, against a walk that otherwise peaks near 25 MB
 /// ([`ref_seq`](crate::ng::ref_seq)'s `a_forward_walk_holds_the_whole_span_unless_it_releases`).
 /// Asking for [`RefSeq`] alone would make releasing unavailable rather than merely unused.
-pub trait MergeReference: RefSeq + EvictableRefSeq {}
+///
+/// **And the contig table, because the look-ahead has to stop at a contig's end.** A cover draws
+/// half a window past the region it was asked for ([`cover`](ObservationCache::cover)), and the
+/// ground it then reads runs that far too — so on the last region of a contig the read would run
+/// off the end and the fetch would refuse it. The lengths are the only thing that says where to
+/// stop, and every reference this merge is given already carries them.
+pub trait MergeReference: RefSeq + EvictableRefSeq + ContigTable {}
 
-impl<T: RefSeq + EvictableRefSeq + ?Sized> MergeReference for T {}
+impl<T: RefSeq + EvictableRefSeq + ContigTable + ?Sized> MergeReference for T {}
 
 /// The reference bases over ground a cover holds could not be read.
 ///
@@ -1007,13 +1013,16 @@ where
         let window = &self.samples[sample];
         window.source.build(window.held_bodies[index].clone())
     }
-    /// Draw every sample forward until `region` is covered, and far enough past it to hold
-    /// what a locus starting inside it can reach (spec §6.4).
+    /// Draw every sample forward until `region` is covered, and far enough past it to hold two
+    /// things: what a locus starting inside it can reach (spec §6.4), and half a window more,
+    /// which is what the coverage measurement's last centres need (`window_coverage.md` §3.3).
     ///
-    /// **The second half is the whole difficulty, and it is a fixpoint across samples.** A
+    /// **The first of those is the whole difficulty, and it is a fixpoint across samples.** A
     /// locus opening inside `region` closes only when the next observation begins beyond its
     /// reach, and each observation the reach pulls in may push it further — so the chain's
-    /// reach starts at `region`'s last base and grows with every observation that begins at or
+    /// reach starts half a window past `region`'s last base
+    /// ([`where_the_chain_reaches_before_any_sweep`](Self::where_the_chain_reaches_before_any_sweep))
+    /// and grows with every observation that begins at or
     /// before it, which is the same `<=` the closer chains on (spec §4.1). One sample's
     /// deletion is what makes another sample's later observation part of the locus, so the
     /// samples are swept repeatedly until a whole sweep moves the reach no further. A single
@@ -1022,8 +1031,8 @@ where
     /// (`a_chain_that_needs_a_third_sweep_is_drawn_whole`): the sweep count is a property of
     /// the data, not of the code.
     ///
-    /// **How far past `region` this can go is not bounded here.** The reach grows only through
-    /// observations that chain into it, so what limits it is the widest observation the
+    /// **How far past the look-ahead this can go is not bounded here.** The reach grows only
+    /// through observations that chain into it, so what limits it is the widest observation the
     /// generator can mint — the reach ceiling, `max_record_span` (spec §1.3) — times the
     /// length of the chain. On ground where observations overlap wall to wall (spec §7.1) one
     /// cover can draw a whole segment. **Nothing here reads or checks that ceiling**, and that
@@ -1045,7 +1054,10 @@ where
     /// region at 3,000 samples. The `held` term stays short **only while the organiser evicts
     /// at the pace it releases ground**, which this module cannot enforce — `evict_before` is
     /// the organiser's call (milestone E). At 1,000 samples the same walk costs 616 µs a cover
-    /// with 4 observations held per sample and 1,028 µs with 200.
+    /// with 4 observations held per sample and 1,028 µs with 200. **The look-ahead adds to the
+    /// `held` term rather than to the sweep count**: half a window more of held summaries per
+    /// sample, which `window_coverage.md` §3.3 prices at about 250 at three reads a position and
+    /// some tens of kilobytes across a thousand samples.
     ///
     /// **The window overshoots by at most one observation per sample**, and that is what a
     /// forward reader costs: the only way to know whether the next observation begins beyond
@@ -1060,18 +1072,71 @@ where
     where
         E: From<ReferenceUnreadable>,
     {
-        // `max` for the same reason `SampleLocusObservations::reach` uses it: `GenomeRegion`
-        // has public fields and no constructor enforcing `start <= end`, and an inverted
-        // region must not put the chain's reach before the ground it is meant to cover.
-        let mut chain_reach = GenomePosition {
-            contig: region.contig,
-            position: region.end.max(region.start),
-        };
+        let mut chain_reach = self.where_the_chain_reaches_before_any_sweep(region);
 
         // The fixpoint: sweep until a whole sweep moves nothing.
         while self.sweep(&mut chain_reach)? {}
 
         self.close_the_cover(region, chain_reach)
+    }
+
+    /// How far the chain reaches before a single sweep has run: **half a window past the
+    /// region's last base**, stopped at the contig's end. The sweeps then widen it.
+    ///
+    /// **The half window is the accumulator's look-ahead, and getting it wrong is silent** (spec
+    /// `window_coverage.md` §3.3, §6 trap 3). A window centred at `p` is finalised once that
+    /// sample's stream **reaches** `p + WINDOW_BP / 2` — the accumulator closes a centre at
+    /// `centre + half <= position`, not past it, which is what makes half a window exactly
+    /// enough rather than one base short. A cover that stopped at its region's last base would
+    /// leave the region's last centres unfinalised: the builder handed that region would find no
+    /// window there and every sample would read as absent at exactly the loci nearest each region
+    /// boundary. No test fails, no VCF byte moves, and the only thing that can see it is the
+    /// whole-store recomputation (`cohort_merge::recorded_windows`, and the probe that reads what
+    /// it writes).
+    ///
+    /// **Drawing that far is not the same as finalising**, and the difference is what makes this
+    /// enough rather than merely necessary. What closes a centre is a *position* at or beyond
+    /// `p + WINDOW_BP / 2`, not a reach — but the draw stops at the first record starting past
+    /// the chain ([`draw_to`](SampleWindow::draw_to)) and **holds** it, and every held record no
+    /// accumulator has seen is observed by this same cover
+    /// ([`read_the_ground_and_measure_coverage_over_it`](Self::read_the_ground_and_measure_coverage_over_it)).
+    /// So a sample with any record at all past the chain has had it observed here. What is left
+    /// over is a sample with no such record — the last half-window of its last records on its last
+    /// contig — whose centres a contig change closes, or, at the very end of a sample's stream,
+    /// nothing in the merge does: `WindowCoverageAccumulator::finish` has no caller until plan
+    /// step C5.
+    ///
+    /// **The contig's end is a hard stop**, because the ground a cover reads runs to the chain
+    /// ([`ground_this_cover_holds_on`](Self::ground_this_cover_holds_on)) and a fetch past a
+    /// contig's last base is refused rather than truncated
+    /// ([`RefSeqError::OutOfBounds`](crate::ng::ref_seq::RefSeqError)). It costs nothing where it
+    /// does not bind: nothing sits past a contig's end for a chain to reach.
+    ///
+    /// `max` on the region's own ends for the reason `SampleLocusObservations::reach` uses it:
+    /// `GenomeRegion` has public fields and no constructor enforcing `start <= end`, and an
+    /// inverted region must not put the chain's reach before the ground it is meant to cover.
+    fn where_the_chain_reaches_before_any_sweep(&self, region: GenomeRegion) -> GenomePosition {
+        let last_base = region.end.max(region.start).get();
+        // **A contig the table does not name gets no clamp**, and needs none: the fetch over its
+        // ground refuses it by name (`RefSeqError::UnknownContig`) whatever the reach was, which
+        // is what `a_failed_fetch_names_the_ground_the_cover_held` covers.
+        let contig_length = self
+            .reference
+            .contigs()
+            .entries
+            .get(region.contig.get() as usize)
+            .map_or(u64::MAX, |contig| contig.length);
+        // **The clamp may not pull the reach *back*.** A region already at or past its contig's
+        // last base — which a caller may hand over, since nothing here checks a region against the
+        // table — would otherwise be given a chain behind the ground its own builder was handed,
+        // and `with_observations` would then refuse that builder's window.
+        let no_further_than = contig_length.max(last_base);
+        let with_the_look_ahead =
+            last_base.saturating_add(u64::from(window_coverage::WINDOW_BP / 2));
+        GenomePosition {
+            contig: region.contig,
+            position: Position(with_the_look_ahead.min(no_further_than)),
+        }
     }
 
     /// [`cover`](Self::cover), with each sweep's samples swept concurrently.
@@ -1092,10 +1157,7 @@ where
     {
         use rayon::prelude::*;
 
-        let mut chain_reach = GenomePosition {
-            contig: region.contig,
-            position: region.end.max(region.start),
-        };
+        let mut chain_reach = self.where_the_chain_reaches_before_any_sweep(region);
         loop {
             let snapshot = chain_reach;
             let widest = self
@@ -1167,9 +1229,15 @@ where
     /// their bases are on the contig they sit on, so this reads each contig the cover added
     /// records on before observing the records there.
     ///
-    /// **The region's contig is read last and always**, even where the cover added no record on
-    /// it, so the buffer a builder later reads through
-    /// [`reference_base_at`](Self::reference_base_at) is the ground of the region it asked for.
+    /// **The buffer is left holding the region's own ground, and that takes a second fetch on the
+    /// covers that crossed.** The contigs are observed *ascending*, because that is the order the
+    /// accumulators demand; the region's own is last only while no contig sorts after it, and one
+    /// regularly does — a sample is drawn one record past the reach, that record can be the first
+    /// of the next contig, and the next contig sorts after. So a cover that ended on another
+    /// contig reads the region's ground again before returning, observing nothing, because every
+    /// record on it was observed on the first visit. Without it the buffer a builder reads through
+    /// [`reference_base_at`](Self::reference_base_at) is the *next* contig's, and that accessor
+    /// answers `None` at every position of the region the builder owns.
     ///
     /// **Each record exactly once**, which the per-sample cursor is for: a record is held across
     /// every cover it reaches into, and each of those covers reads ground containing it.
@@ -1191,7 +1259,11 @@ where
     where
         E: From<ReferenceUnreadable>,
     {
-        for contig in self.contigs_this_cover_must_read(region) {
+        let contigs = self.contigs_this_cover_must_read(region);
+        // Which contig the buffer will be left holding, so the refetch below can say whether it
+        // is the region's.
+        let last_contig_read = contigs.last().copied();
+        for contig in contigs {
             let ground = self.ground_this_cover_holds_on(contig, region, chain_reach);
             self.fetch_the_ground(ground)?;
             // **Destructured so the buffer and the samples are two borrows.** The bases belong
@@ -1214,14 +1286,21 @@ where
                 sample.measure_coverage_on(reference_bases, bases_from)?;
             }
         }
+        // **The region's ground back in the buffer**, where observing ascending did not leave it
+        // there. Nothing is observed against it: every record on this contig was seen on its own
+        // turn above, and each sample's cursor is past them.
+        if last_contig_read != Some(region.contig) {
+            let ground = self.ground_this_cover_holds_on(region.contig, region, chain_reach);
+            self.fetch_the_ground(ground)?;
+        }
         Ok(())
     }
 
-    /// The contigs this cover must read the reference over, ascending, with the region's own
-    /// last: every contig a record no accumulator has seen sits on, plus the region's.
+    /// The contigs this cover must read the reference over, ascending: every contig a record no
+    /// accumulator has seen sits on, plus the region's.
     ///
-    /// **Two at most in practice** — the one the cover is leaving and the one it is on — so
-    /// this is a short sorted list rather than a set.
+    /// **Three at most in practice** — the one the cover is leaving, the region's own, and the one
+    /// the overshoot draw reached ahead of it — so this is a short sorted list rather than a set.
     fn contigs_this_cover_must_read(&self, region: GenomeRegion) -> Vec<ContigId> {
         let mut contigs = vec![region.contig];
         for sample in &self.samples {
@@ -1697,22 +1776,27 @@ mod tests {
     /// **The ground is the cover's reach and not the region's end**, which is the whole reason
     /// the fetch happens after the fixpoint rather than before it: an observation chaining past
     /// the region widens what was drawn, and every position of it needs a base.
+    ///
+    /// The observation reaches well past the look-ahead's own half window
+    /// ([`where_the_chain_reaches_before_any_sweep`](ObservationCache::where_the_chain_reaches_before_any_sweep)), so that what the
+    /// ground follows here is the chain and not the constant.
     #[test]
     fn the_ground_read_reaches_as_far_as_the_cover_drew_and_no_further() {
-        // One observation opens inside the region and reaches ten bases past its end.
-        let source = a_source(vec![Ok(observation_over(region(48, 60)))]);
+        // One observation opens inside the region and reaches far past its end — past the
+        // look-ahead too, so widening it is what decides the ground.
+        let source = a_source(vec![Ok(observation_over(region(48, 400)))]);
         let mut cache = ObservationCache::over_fixture(vec![source]);
         cache
             .cover(region(40, 50))
             .expect("the fixture source and reference hold");
 
         assert_eq!(
-            cache.reference_base_at(position_on(0, 60)),
-            Some(fixture_base_at(60)),
+            cache.reference_base_at(position_on(0, 400)),
+            Some(fixture_base_at(400)),
             "the last base the cover drew to has no reference base",
         );
         assert_eq!(
-            cache.reference_base_at(position_on(0, 61)),
+            cache.reference_base_at(position_on(0, 401)),
             None,
             "a base past the cover's reach was fetched, so the ground is not the one drawn",
         );
@@ -1720,6 +1804,111 @@ mod tests {
             cache.reference_base_at(position_on(0, 39)),
             None,
             "a base before the region's own start was fetched",
+        );
+    }
+
+    /// **A cover reads half a window past its region even where nothing chains there**, which is
+    /// the look-ahead (`spec/window_coverage.md` §3.3): a window centred on the region's last
+    /// base is finalised only once that sample's stream has passed it by half a window, and a
+    /// cover stopping at the region's end would leave the builder nothing there.
+    ///
+    /// **Its failure is silent** — no panic, no moved VCF byte — so this is a test rather than an
+    /// oracle's business, and the number comes from the constant rather than being retyped.
+    #[test]
+    fn a_cover_reads_half_a_window_past_its_region_with_nothing_chaining_there() {
+        let half_a_window = u64::from(crate::ng::window_coverage::WINDOW_BP / 2);
+        let source = a_source(vec![Ok(observation_over(region(40, 45)))]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+        cache
+            .cover(region(40, 50))
+            .expect("the fixture source and reference hold");
+
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 50 + half_a_window)),
+            Some(fixture_base_at(50 + half_a_window)),
+            "the cover stopped short of half a window past its region, so that region's last \
+             centres will be finalised after their builder has run",
+        );
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 50 + half_a_window + 1)),
+            None,
+            "the look-ahead is half a window and no more",
+        );
+    }
+
+    /// **A cover that reached onto the next contig still leaves the region's ground in the
+    /// buffer.** The contigs are read ascending, because the accumulators demand it, and the
+    /// record a sample is drawn one *past* the reach can be the first of the next contig — which
+    /// sorts after the region's. A cover that stopped there would leave a builder an accessor
+    /// answering `None` at every position of its own region, and with the look-ahead clamped at a
+    /// contig's end this is the ordinary case at every contig boundary rather than a corner.
+    #[test]
+    fn a_record_held_on_the_next_contig_does_not_take_the_buffer_with_it() {
+        let source = a_source(vec![
+            Ok(observation_over(region_on(0, 40, 45))),
+            Ok(observation_over(region_on(1, 10, 10))),
+        ]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+        cache
+            .cover(region_on(0, 40, 50))
+            .expect("the fixture source and reference hold");
+
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 45)),
+            Some(fixture_base_at(45)),
+            "the cover ended holding another contig's bases, so a builder over its own region \
+             finds none",
+        );
+        assert_eq!(
+            cache.reference_base_at(position_on(1, 10)),
+            None,
+            "the buffer is one contig's, and the one it holds is the region's",
+        );
+    }
+
+    /// **A region already past its contig's end keeps its own ground**, rather than having the
+    /// clamp pull the chain back behind it. `GenomeRegion` has public fields and nothing here
+    /// checks a region against the contig table, so this is representable; a chain behind the
+    /// region would leave `with_observations` refusing the very builder the cover was made for.
+    #[test]
+    fn a_region_past_its_contigs_end_is_not_clamped_back_behind_itself() {
+        let source = a_source(vec![Ok(observation_over(region(1_900, 1_900)))]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+        // The fixture reference's contigs are 2,000 bases; this region ends past that.
+        cache
+            .cover(region(1_900, 2_400))
+            .expect_err("ground past the contig's last base cannot be read");
+
+        // The chain was not pulled back: had it been, the ground would have ended at 2,000 and
+        // the fetch would have succeeded rather than refusing.
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 1_950)),
+            None,
+            "a cover that could not read its ground left bases readable",
+        );
+    }
+
+    /// **The look-ahead stops at the contig's end**, because the ground a cover reads runs to the
+    /// chain and a fetch past a contig's last base is refused rather than truncated. The fixture
+    /// reference's contigs are 2,000 bases, so a region ending inside half a window of that is
+    /// the case: without the clamp the fetch asks for base 2,150 and the cover fails.
+    #[test]
+    fn the_look_ahead_stops_at_the_contigs_last_base() {
+        let source = a_source(vec![Ok(observation_over(region(1_890, 1_895)))]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+        cache
+            .cover(region(1_890, 1_900))
+            .expect("a region within half a window of the contig's end is covered, not refused");
+
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 2_000)),
+            Some(fixture_base_at(2_000)),
+            "the ground stops short of the contig's last base",
+        );
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 2_001)),
+            None,
+            "the ground ran past the contig's last base",
         );
     }
 
@@ -2031,9 +2220,12 @@ mod tests {
         let refused = cache
             .cover(region_on(9, 40, 50))
             .expect_err("contig 9 is past the fixture reference's four");
+        // **Half a window past the region, not the observation's own last base**: the
+        // look-ahead is what the cover drew to, so it is what the failure has to name.
+        let half_a_window = u64::from(crate::ng::window_coverage::WINDOW_BP / 2);
         assert_eq!(
             refused,
-            ReferenceFailureRecorded(Some(region_on(9, 40, 60))),
+            ReferenceFailureRecorded(Some(region_on(9, 40, 50 + half_a_window))),
             "the failure names other ground than the cover held",
         );
     }
@@ -2292,25 +2484,29 @@ mod tests {
     }
 
     /// **The window overshoots by exactly one observation per sample, and stops.** The
-    /// observation at 60 is beyond the reach and had to be drawn to find that out; the one at
-    /// 80 was never read at all.
+    /// observation at 800 is beyond the reach and had to be drawn to find that out; the one at
+    /// 900 was never read at all.
+    ///
+    /// 800 is past the 750 the region's own look-ahead reaches
+    /// ([`where_the_chain_reaches_before_any_sweep`](ObservationCache::where_the_chain_reaches_before_any_sweep)),
+    /// so the draw that ends the chain is the second record and not the third.
     #[test]
     fn drawing_stops_one_observation_past_the_reach() {
-        let (source, drawn) = source_over(&[region(45, 45), region(60, 60), region(80, 80)]);
+        let (source, drawn) = source_over(&[region(450, 450), region(800, 800), region(900, 900)]);
         let mut cache = ObservationCache::over_fixture(vec![source]);
 
         cache
-            .cover(region(40, 50))
+            .cover(region(400, 500))
             .expect("the fixture source holds");
 
         assert_eq!(
             drawn.get(),
             2,
-            "45 is inside the region and 60 is the one draw that says the chain has ended",
+            "450 is inside the region and 800 is the one draw that says the chain has ended",
         );
         assert_eq!(
-            handed_out(&cache, region(40, 50)),
-            vec![vec![region(45, 45), region(60, 60)]],
+            handed_out(&cache, region(400, 500)),
+            vec![vec![region(450, 450), region(800, 800)]],
             "the overshoot is held rather than thrown away, and a later cover reconsiders it",
         );
     }
@@ -2438,35 +2634,40 @@ mod tests {
     }
 
     /// **The window's own observations are re-read at every cover, so an eviction leaves no
-    /// mark to correct.** After the eviction, 30–80 is still what a locus in 51–70 chains
-    /// through, so it must widen the reach again — a cover that remembered where the last
-    /// sweep stopped would skip it, stop at 70, and draw one observation too far.
+    /// mark to correct.** After the eviction, 300–800 is still what a locus in 510–540 chains
+    /// through, so it must widen the reach again.
+    ///
+    /// **The positions are wide apart because the look-ahead is 250 bases**
+    /// ([`where_the_chain_reaches_before_any_sweep`](ObservationCache::where_the_chain_reaches_before_any_sweep)): a chain that
+    /// reaches less than half a window past its region widens nothing a cover had not already
+    /// asked for, and the widening this test is about would be invisible. 300–800 reaches 800,
+    /// which is past the second cover's own 790.
     #[test]
     fn a_survivor_of_an_eviction_still_widens_the_next_reach() {
         let (source, drawn) = source_over(&[
-            region(20, 21),
-            region(30, 80),
-            region(90, 90),
-            region(200, 200),
+            region(200, 210),
+            region(300, 800),
+            region(900, 900),
+            region(1_500, 1_500),
         ]);
         let mut cache = ObservationCache::over_fixture(vec![source]);
         cache
-            .cover(region(40, 50))
+            .cover(region(400, 500))
             .expect("the fixture source holds");
-        cache.evict_before(position_on(0, 40));
+        cache.evict_before(position_on(0, 400));
 
         cache
-            .cover(region(51, 70))
+            .cover(region(510, 540))
             .expect("the fixture source holds");
 
         assert_eq!(
             drawn.get(),
             3,
-            "30–80 reaches to 80, and 90 is the draw that ends the chain there",
+            "300–800 reaches to 800, and 900 is the draw that ends the chain there",
         );
         assert_eq!(
-            handed_out(&cache, region(1, 80)),
-            vec![vec![region(30, 80), region(90, 90)]],
+            handed_out(&cache, region(1, 800)),
+            vec![vec![region(300, 800), region(900, 900)]],
         );
     }
 
@@ -2474,27 +2675,30 @@ mod tests {
     /// remembered across covers would be not merely stale but out of range.
     #[test]
     fn two_evicted_at_once_leave_the_window_sound() {
+        // Wide apart for the reason `a_survivor_of_an_eviction_still_widens_the_next_reach` is:
+        // a cover draws half a window past its region whatever chains there, so a fixture
+        // packed inside 250 bases is drawn whole by the first cover and has nothing to evict.
         let (source, _drawn) = source_over(&[
-            region(10, 11),
-            region(20, 21),
-            region(30, 80),
-            region(100, 150),
-            region(160, 160),
-            region(400, 400),
+            region(100, 110),
+            region(200, 210),
+            region(300, 800),
+            region(1_000, 1_500),
+            region(1_600, 1_600),
+            region(1_800, 1_800),
         ]);
         let mut cache = ObservationCache::over_fixture(vec![source]);
         cache
-            .cover(region(40, 50))
+            .cover(region(400, 500))
             .expect("the fixture source holds");
-        cache.evict_before(position_on(0, 40));
+        cache.evict_before(position_on(0, 400));
 
         cache
-            .cover(region(51, 70))
+            .cover(region(510, 540))
             .expect("the fixture source holds");
 
         assert_eq!(
-            handed_out(&cache, region(1, 80)),
-            vec![vec![region(30, 80), region(100, 150)]],
+            handed_out(&cache, region(1, 800)),
+            vec![vec![region(300, 800), region(1_000, 1_500)]],
             "both of the evicted pair are gone and the window behind them is intact",
         );
     }
@@ -2585,29 +2789,31 @@ mod tests {
     #[test]
     #[should_panic(expected = "cover has only reached")]
     fn a_window_over_ground_no_cover_reached_is_refused() {
-        let (source, _drawn) = source_over(&[region(45, 45), region(120, 120)]);
+        // 1,000 onwards is past the look-ahead's own half window as well as past the chain, so
+        // the ground below is ground no cover reached however far the region alone would carry.
+        let (source, _drawn) = source_over(&[region(450, 450), region(1_200, 1_200)]);
         let mut cache = ObservationCache::over_fixture(vec![source]);
         cache
-            .cover(region(40, 50))
+            .cover(region(400, 500))
             .expect("the fixture source holds");
 
-        let _ = handed_out(&cache, region(100, 130));
+        let _ = handed_out(&cache, region(1_000, 1_300));
     }
 
     /// And a window is refused for reaching **past** covered ground, not merely for starting
-    /// past it: the span below opens at 45, which was drawn, and ends at 130, which was not.
+    /// past it: the span below opens at 450, which was drawn, and ends at 1,300, which was not.
     /// That is the shape a builder handed too wide a region takes, and the loci it would lose
     /// are the ones in the ground the reader never reached.
     #[test]
     #[should_panic(expected = "cover has only reached")]
     fn a_window_reaching_past_the_covered_ground_is_refused() {
-        let (source, _drawn) = source_over(&[region(45, 45), region(120, 120)]);
+        let (source, _drawn) = source_over(&[region(450, 450), region(1_200, 1_200)]);
         let mut cache = ObservationCache::over_fixture(vec![source]);
         cache
-            .cover(region(40, 50))
+            .cover(region(400, 500))
             .expect("the fixture source holds");
 
-        let _ = handed_out(&cache, region(45, 130));
+        let _ = handed_out(&cache, region(450, 1_300));
     }
 
     /// **A cover that failed can be made again**, and the sample whose source failed is drawn

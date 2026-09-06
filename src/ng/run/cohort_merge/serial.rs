@@ -1726,11 +1726,17 @@ mod tests {
     /// only place from outside where the driver's *drawing pace* is visible. A driver that
     /// covered the whole analysed region instead of each building region would evict down to the
     /// same window by the end, and every other test here would still pass.
+    ///
+    /// **The records are sixty bases apart rather than ten**, because a cover draws half a
+    /// window — 250 bases — past its region (`spec/window_coverage.md` §3.3): at ten bases apart
+    /// this fixture held **26** of its thirty at the moment of failure (measured, when the
+    /// look-ahead first landed) and the window was no longer visibly short. Six is what it holds
+    /// here, against the thirty a whole-region cover would.
     #[test]
     fn the_window_stays_short_up_to_a_failure() {
         let mut records: Vec<Result<SampleLocusObservations, SourceFailed>> = (0..30)
             .map(|locus| {
-                let at = 10 * locus + 1;
+                let at = 60 * locus + 1;
                 Ok(member(region(at, at), b"A", b"T"))
             })
             .collect();
@@ -1738,9 +1744,9 @@ mod tests {
         let mut cache = ObservationCache::over_fixture(vec![records.into_iter()]);
 
         let outcome = merge_cohort_through_cache(
-            &[region(1, 600)],
+            &[region(1, 1_800)],
             &mut cache,
-            width(20),
+            width(60),
             MaxCohortLocusSpan::DEFAULT,
             MinAltReads::DEFAULT,
         );
@@ -1748,7 +1754,7 @@ mod tests {
         assert!(outcome.is_err());
         assert_eq!(
             cache.held_observations_len(),
-            2,
+            6,
             "the window at the moment of failure, not the thirty records behind it",
         );
     }
