@@ -198,3 +198,25 @@ set). Plan step D3 prices the milestone; this is the shape of what it will find.
 - **`finish` has no caller in the merge**, so the last contig's final half-window of every sample is
   never finalised. That is C5's scheduled work and not a C2 defect; a contig change does finalise the
   previous contig's tail.
+
+---
+
+## What was applied, and where
+
+Findings 2, 3 and 4 are fixed in the commit this file names at the top, with three regression
+tests: a source with two records at one start is refused; a source whose records overlap is
+refused **naming the order and not the ground**, which is what says both the ground fix and the
+release assert landed; and the two probes the review recommended keeping, which compare the two
+covers' windows and the two evictors' directly — the only check that the module's standing oracle
+holds for what C2 added, since no output carries a window yet.
+
+**Finding 1 is fixed in C3's commit instead**, because C3's own review found it independently and
+C3's look-ahead is what turns it from a corner into the ordinary case at every contig boundary.
+
+Every prose correction above is marked in C2's implementation report **in place**, beside the
+sentence it corrects, rather than edited away.
+
+Validation after the fixes, in the container: `cargo test --lib --all-features` 6,370 passed, 0
+failed, 15 ignored; three `needless_lifetimes` clippy warnings, all predating this branch;
+`observation_cache.rs` still at its four pre-existing rustfmt hunks and `accumulator.rs` clean; the
+standing oracle unmoved at 2,311 records, sha256 `84ad19c2…`, on both routes.

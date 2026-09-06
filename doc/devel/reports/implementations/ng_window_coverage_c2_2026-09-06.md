@@ -28,9 +28,13 @@ once: seven existing tests failed the moment the accumulator was wired in, every
 fixture that crosses a contig.
 
 They are real covered positions of that sample and their bases are on the contig they sit on, so
-**the cover now reads each contig it added records on, in ascending order, ending on the region's
-own** — which leaves the buffer holding the region's ground, as C1's tests require. In practice
-that is one fetch per cover and two at a contig boundary.
+**the cover now reads each contig it added records on, in ascending order.** In practice that is
+one fetch per cover and two at a contig boundary.
+
+**This paragraph said "ending on the region's own", and the correctness review measured that
+false**: ascending puts the region's contig last only while no contig sorts after it, and the
+record a sample is drawn one *past* the reach is routinely the first of the next contig. C3's own
+commit adds the second fetch that puts the region's ground back in the buffer.
 
 This is a correction to code C1 committed, made here rather than amended into it, because it was
 the accumulator that showed the gap.
@@ -62,11 +66,11 @@ the accumulator that showed the gap.
 
 - **[`observation_cache.rs`](../../../../src/ng/run/cohort_merge/observation_cache.rs)** —
   `SampleWindow` gains the accumulator, the finalised windows and the cursor; `over` spells the
-  configuration, which is the one site that does; `read_the_ground_and_observe_what_this_cover_added`
+  configuration, which is the one site that does; `read_the_ground_and_measure_coverage_over_it`
   walks the contigs a cover added records on, fetching each and observing the records there;
-  `observe_its_new_records_on` is the per-sample half; both evictors drop the windows behind the
+  `measure_coverage_on` is the per-sample half; both evictors drop the windows behind the
   evicted position; `WindowedCohort` gains the third view and `window_at`.
-- **[`depth.rs`](../../../../src/ng/window_coverage/depth.rs)** — `for_each_reported_depth_of`,
+- **[`depth.rs`](../../../../src/ng/window_coverage/depth.rs)** — `for_each_reported_depth`,
   the rule over borrowed evidence, and `EvidenceForOneRecord`, the borrowed counterpart of
   `Drawn`.
 - **[`build.rs`](../../../../src/ng/run/cohort_merge/build.rs)** — the two `WindowedCohort`
@@ -88,9 +92,14 @@ passed 250 bases beyond it, so a fixture shorter than that emits nothing.
 | `eviction_drops_the_windows_behind_it_and_keeps_the_rest` | the deque does not grow with the contig, and nothing before the evicted position survives |
 | `a_sample_with_no_record_at_a_position_has_no_window_there` | a centre the stream has not passed by half a window is not finalised, and reading it gives `None` rather than a fabricated pair |
 
-**The seven existing tests that failed when the accumulator was first wired in are the strongest
-evidence here**, and they all pass now: five of them are the two drivers' agreement tests and the
-end-to-end command tests, which cross contigs on real fixtures.
+**This paragraph claimed the seven existing tests that failed when the accumulator was first wired
+in were the strongest evidence here, and the correctness review measured that false.** Reverting
+the multi-contig read on the committed tree fails **no** pre-existing test — only
+`a_cover_that_crosses_a_contig_observes_the_records_left_on_the_one_it_leaves`, which this step
+wrote. The seven were real of an intermediate tree that had the accumulator without the contig
+`break` in the observation pass; with that break a record on another contig is silently skipped
+rather than panicking on a missing base. One test guards the multi-contig read, and it is this
+step's own.
 
 ## Validation results
 
@@ -102,22 +111,26 @@ In the container, on this worktree:
 - `cargo clippy --lib --all-features` — 3 warnings, all `needless_lifetimes` in
   `src/ng/run/cohort_merge/`, all predating this branch.
 - `rustfmt --check` — every touched file back at exactly the hunk count it had before this step
-  (`observation_cache.rs` 5, the rest unchanged); `depth.rs` clean.
+  (`observation_cache.rs` **4**, one fewer than before this step because the evictor extraction
+  rewrote a hunk out of existence; the rest unchanged); `depth.rs` clean.
 - **The standing oracle after this step**: 2,311 records, sha256 `84ad19c2…0590d` on both routes.
   **This is the first step where the measurement runs on real data**, so it is the first oracle run
   that could have moved and did not.
 
 ## What the review changed
 
-**A design review ran on this step and its fixes are in this commit; a correctness review was
-still running when the session ended and is the first thing the next session should read**
-(`tmp/review_2026-09-06_window-coverage-c2/`).
+**A design review ran on this step and its fixes are in this commit. The correctness review was
+still running when the session ended and wrote nothing**; it was re-run against this commit a
+session later, found four Major defects and six wrong figures in this report, and is written up
+at [ng_window_coverage_c2_2026-09-06.md](../reviews/ng_window_coverage_c2_2026-09-06.md). Its
+fixes are in their own commit after C3, and the corrections it forced are marked in place above
+rather than edited away.
 
 - **`ground_this_cover_holds_on` scanned every sample's whole held window, once per contig, per
   cover.** Held summaries ascend in `(contig, position)`, so one contig's are a contiguous run
   and its ends are two binary searches. Against `cover`'s own measured shape — 3,000 samples,
-  200 held each — the scan was about **1.2 million summary reads a cover** where the ends are
-  6,000.
+  200 held each — the scan was **600,000 summary reads a contig** where the ends are 6,000, and
+  a cover at a contig boundary reads two.
 - **The measurement's three fields left `SampleWindow` for a `WindowCoverageInProgress` of their
   own.** They shared nothing with the other eight, and keeping them apart is what collapses the
   cursor's partition, which existed twice verbatim, and what makes C5's move-out one field.
@@ -127,7 +140,7 @@ still running when the session ended and is the first thing the next session sho
   per-position closure, and that copy dropped the contig check the accessor makes. One free
   function, `base_in`, is what both read — the same argument the depth rule makes one level
   down about two derivations of "depth".
-- **`observe_its_new_records_on` took the contig twice**, once directly and once inside the
+- **`measure_coverage_on` took the contig twice**, once directly and once inside the
   buffer's origin, and had to be trusted to get both the same. It takes the origin alone now.
 - **`Drawn::evidence` became `impl From<&Drawn> for EvidenceForOneRecord`**, in the module that
   owns the borrowed type: written the other way, the merge named a `window_coverage` type in a
@@ -136,7 +149,7 @@ still running when the session ended and is the first thing the next session sho
   and the compiler then said the other had none outside its own tests. One rule, one way in;
   its contract prose moved with it, and the one test whose subject was the deleted check now
   pins the `From` mapping instead.
-- **`window_at` is `window_coverage_at`**, and `WindowedCohort::coverage` is
+- **`window_at` became `window_coverage_at`**, and `WindowedCohort::coverage` became
   `finalised_windows`, because "coverage" already means read depth in this file and "window" a
   stretch of held records.
 

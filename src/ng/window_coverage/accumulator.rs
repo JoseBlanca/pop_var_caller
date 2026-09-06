@@ -206,10 +206,14 @@ impl WindowCoverageAccumulator {
     /// Fold one covered reference position. `reference_base` is that position's reference base
     /// (any case); `depth` is the depth there.
     ///
-    /// Positions must arrive in non-decreasing genome order, which is debug-asserted — the
-    /// same guard production carries, kept because each sample's records reach its own
-    /// accumulator in that sample's own coordinate order. Whether the check should hold in
-    /// release too is a question for the step that supplies the caller (plan step C2). An `N`
+    /// Positions must arrive in non-decreasing genome order, **and that is a release assert**.
+    /// Production carries the same guard as a `debug_assert!`; this repository ships with debug
+    /// assertions off, so there it would never run, and what it stops is not a panic but a wrong
+    /// number: a position behind the frontier finalises no centre and joins the buffer out of
+    /// place, so the windows around it average over the wrong positions, the finalised list stops
+    /// ascending, and the binary search a builder reads it with is then searching unsorted ground.
+    /// One comparison per covered position, which is what the cache's own two release asserts
+    /// cost. An `N`
     /// reference base is **not** a covered position: it becomes no centre and contributes to
     /// no window's sums, but it still advances the finalisation frontier. Windows finalised by
     /// this position are queued for [`pop_ready`](Self::pop_ready).
@@ -221,7 +225,7 @@ impl WindowCoverageAccumulator {
         depth: u32,
     ) {
         let here = GenomePosition { contig, position };
-        debug_assert!(
+        assert!(
             self.last_observed.is_none_or(|previous| here >= previous),
             "window coverage observed out of order: {here:?} after {:?}",
             self.last_observed,

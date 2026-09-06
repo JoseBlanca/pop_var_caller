@@ -1244,8 +1244,8 @@ where
     ///
     /// **A record spanning more than one base has its evidence built here in psp mode**, which
     /// is the one place this measurement costs a run over stored files anything. Plan step B2
-    /// measured how often that is: about one record in a thousand on the tomato stores it
-    /// walked.
+    /// measured how often that is: 1 record in 871 on the six-accession slice and 1 in 1,221 on the
+    /// wider store.
     ///
     /// # Errors
     ///
@@ -1392,18 +1392,29 @@ where
             last_base = Some(chain_reach.position.max(region.start.min(region.end)));
         }
         for sample in &self.samples {
-            // **Ends, not a scan.** A sample's held summaries ascend in `(contig, position)`
-            // (`draw_next`'s ordering check), so the ones on `contig` are a contiguous run, and
-            // reach is monotone across a window of disjoint ascending records — which is what
-            // `evict_before`'s prefix drain already rests on. Scanning instead would cost this
-            // `samples × held` per contig on every cover.
+            // **The first base is an end, not a scan.** A sample's held summaries ascend in
+            // `(contig, position)` (`draw_next`'s ordering check), so the ones on `contig` are a
+            // contiguous run and the earliest of them is the first. Scanning instead would cost
+            // this `samples × held` per contig on every cover.
             let held = summaries_on(&sample.held_summaries, contig);
             if let Some(first) = held.first() {
                 let start = first.start_position().position;
                 first_base = Some(first_base.map_or(start, |first: Position| first.min(start)));
             }
-            if let Some(last) = held.last() {
-                let reach = last.reach();
+            // **The last base is an end only on the region's own contig**, and the difference is
+            // what a source out of order can turn into a wrong answer. There, the chain already
+            // dominates every held record: each one starting at or before it widened the chain to
+            // its own reach, and at most one record begins past it, which is the last. On a contig
+            // the cover is *leaving* there is no chain reach to lean on, and `held.last()` is the
+            // furthest only while reaches are monotone — which nothing here checks, since
+            // `draw_next` compares starts. A record reaching past its successor would then have
+            // ground the fetch never read, and the measurement would panic on a missing base.
+            let furthest = if on_the_regions_own_contig {
+                held.last().map(|summary| summary.reach())
+            } else {
+                held.iter().map(|summary| summary.reach()).max()
+            };
+            if let Some(reach) = furthest {
                 last_base = Some(last_base.map_or(reach, |last: Position| last.max(reach)));
             }
         }
@@ -1572,11 +1583,26 @@ where
         // checks in `build.rs` — a source out of coordinate order is then a fact about the
         // file rather than a bug in this crate, and this is the first such check the psp path
         // reaches.
+        // **Strictly after, not at or after, and the measurement is what tightened it.** The
+        // per-sample cursor that makes a record observed exactly once is a *start*, compared with
+        // `<=` ([`WindowCoverageInProgress::first_not_yet_observed`]) — so two records sharing a
+        // start are one record to it. Inside a single cover both are still observed, because the
+        // observation walks by index; split across two covers the second falls out of the
+        // not-yet-observed suffix and **never reaches the accumulator at all**, leaving that
+        // sample short of one record's positions with nothing to say so. Refusing the shape here
+        // is what keeps the cursor's representation adequate to what the window can hold.
+        //
+        // **It is still not the disjointness the window is really read by.** Two records that
+        // start apart and overlap pass this, and `build_region`'s own producer-guarantee
+        // assertion is what catches them — deliberately, since
+        // `parallel.rs`'s `a_builder_that_panics_leaves_the_cache_in_the_callers_hands_and_advanced`
+        // passes exactly such a pair through this cache to reach it.
         let start = summary.start_position();
         if let Some(previous) = self.last_drawn {
             assert!(
-                start >= previous,
-                "this sample's source is not in coordinate order: {} follows {previous:?}",
+                start > previous,
+                "this sample's source is not in coordinate order: {} does not begin after \
+                 {previous:?}",
                 summary.region,
             );
         }
@@ -2041,6 +2067,75 @@ mod tests {
             over_two.samples[0].window_coverage.finalised,
             in_one.samples[0].window_coverage.finalised,
             "covering the same ground in two goes gave different windows from covering it in one",
+        );
+    }
+
+    /// **The two covers finalise the same windows**, which nothing else in this module checks.
+    ///
+    /// The standing oracle for the merge is that its serial and parallel paths do not drift, and
+    /// it is a comparison of *output* — but no output carries a window yet, so a parallel cover
+    /// that observed a record twice, or missed one, would move nothing a VCF or a driver's
+    /// agreement test can see. This compares the windows directly.
+    #[test]
+    fn the_two_covers_finalise_the_same_windows() {
+        let three_covers = [region(1, 200), region(201, 400), region(401, 600)];
+        let mut serially = ObservationCache::over_fixture(vec![
+            one_record_a_position(600, 3),
+            one_record_a_position(600, 5),
+        ]);
+        let mut in_parallel = ObservationCache::over_fixture(vec![
+            one_record_a_position(600, 3),
+            one_record_a_position(600, 5),
+        ]);
+        for ground in three_covers {
+            serially
+                .cover(ground)
+                .expect("the fixture source and reference hold");
+            in_parallel
+                .cover_in_parallel(ground)
+                .expect("the fixture source and reference hold");
+        }
+
+        for sample in 0..2 {
+            assert_eq!(
+                serially.samples[sample].window_coverage.finalised,
+                in_parallel.samples[sample].window_coverage.finalised,
+                "sample {sample}'s windows differ between the two covers",
+            );
+        }
+        assert!(
+            !serially.samples[0].window_coverage.finalised.is_empty(),
+            "no window was finalised, so this compared two empty lists",
+        );
+    }
+
+    /// **The two evictors drop the same windows**, for the reason above: eviction touches the
+    /// finalised windows, and nothing downstream can yet show that one path dropped more than the
+    /// other.
+    #[test]
+    fn the_two_evictors_drop_the_same_windows() {
+        let mut serially = ObservationCache::over_fixture(vec![one_record_a_position(600, 3)]);
+        let mut in_parallel = ObservationCache::over_fixture(vec![one_record_a_position(600, 3)]);
+        serially
+            .cover(region(1, 600))
+            .expect("the fixture source and reference hold");
+        in_parallel
+            .cover(region(1, 600))
+            .expect("the fixture source and reference hold");
+        let before = serially.samples[0].window_coverage.finalised.len();
+
+        serially.evict_before(position_on(0, 200));
+        let mut graveyard = Vec::new();
+        in_parallel.evict_before_in_parallel(position_on(0, 200), &mut graveyard);
+
+        assert_eq!(
+            serially.samples[0].window_coverage.finalised,
+            in_parallel.samples[0].window_coverage.finalised,
+            "the two evictors left different windows behind",
+        );
+        assert!(
+            serially.samples[0].window_coverage.finalised.len() < before,
+            "nothing was evicted, so this compared two untouched lists",
         );
     }
 
@@ -2902,12 +2997,62 @@ mod tests {
         let _ = cache.cover(region(40, 50));
     }
 
+    /// **A source whose records overlap is refused by the measurement's own order check, and it
+    /// is refused for the right reason.**
+    ///
+    /// Two things had to be right for that. The ground a cover reads on a contig it is *leaving*
+    /// has no chain reach to lean on, so it is the furthest reach of what that contig holds —
+    /// taking the last held record's would be right only while reaches are monotone, which
+    /// nothing checks, since `draw_next` compares starts. Here a repeat tract reaches to 1,500
+    /// and the record after it stops at 400, so a ground ending at 400 leaves the tract's own
+    /// positions with no base, and the cover panics **blaming its own ground computation** for
+    /// what is a fact about the source. With the ground right, the stream reaches the
+    /// accumulator and its order check says what is really wrong — and says it in release, which
+    /// is the profile this repository ships.
+    ///
+    /// **Nothing mints such a pair today** — the generic walk's records are disjoint — but a run
+    /// over stored files reads them from a file, and `draw_next`'s own comment already says an
+    /// out-of-order source is a fact about the file rather than a bug in this crate.
+    #[test]
+    #[should_panic(expected = "observed out of order")]
+    fn a_source_whose_records_overlap_is_refused_naming_the_order_and_not_the_ground() {
+        let mut tract = observation_over(region_on(0, 300, 1_500));
+        tract.kind = LocusKind::Ssr(crate::ng::locus_generation::SsrDetail {
+            motif: crate::ng::types::Motif::new(b"AT").expect("a two-base motif"),
+            left_flank: Box::from(&b"CCC"[..]),
+            right_flank: Box::from(&b"GGG"[..]),
+        });
+        // A cover whose region is on contig 1 draws every contig-0 record the sample still has,
+        // all of them unobserved, and then reads contig 0 as a contig it is leaving.
+        let source = a_source(vec![
+            Ok(tract),
+            Ok(observation_over(region_on(0, 400, 400))),
+            Ok(observation_over(region_on(1, 10, 10))),
+        ]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+
+        let _ = cache.cover(region_on(1, 10, 20));
+    }
+
+    /// **Two records at one start are refused**, because the measurement's cursor cannot tell
+    /// them apart: it is a *start*, so the second falls out of the not-yet-observed suffix the
+    /// moment a cover boundary separates the two, and never reaches the accumulator at all —
+    /// leaving that sample short of one record's positions with nothing to say so.
+    #[test]
+    #[should_panic(expected = "does not begin after")]
+    fn a_source_with_two_records_at_one_start_is_refused() {
+        let (source, _drawn) = source_over(&[region(45, 45), region(45, 47)]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+
+        let _ = cache.cover(region(40, 50));
+    }
+
     /// And one that goes back to an **earlier contig** is refused too, though its positions
     /// rise. `GenomePosition`'s order is contig first, so this is the same check — but a
     /// source merging per-contig files is where it actually fires, and a comparison made only
     /// within a contig would let it through.
     #[test]
-    #[should_panic(expected = "not in coordinate order")]
+    #[should_panic(expected = "does not begin after")]
     fn a_source_that_goes_back_a_contig_is_refused() {
         let (source, _drawn) = source_over(&[region_on(1, 45, 45), region_on(0, 90, 90)]);
         let mut cache = ObservationCache::over_fixture(vec![source]);

@@ -4507,7 +4507,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   every position of an earlier one — so the cover that first reaches contig *n* also draws
   whatever a sample still had on contig *n − 1*. Seven existing tests failed the moment the
   accumulator was wired in; a cover now reads each contig it added records on, ending on the
-  region's own. Ten tests. **Left open for C4:** `window_coverage_at` answers `None` both for a
+  region's own. Five tests. **Left open for C4:** `window_coverage_at` answers `None` both for a
   sample with no window there and for a window carrying no measurement at all, and the oracle
   C4's plan names as its green criterion runs through the second — so it would pass by comparing
   absent against absent.
