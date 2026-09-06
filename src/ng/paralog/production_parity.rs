@@ -65,6 +65,16 @@
 //! **nothing** usable. Three of the four each killed a mutation to ng's copy that the sweep
 //! alone missed.
 //!
+//! # The rest of the calibration, on the same terms
+//!
+//! The score is one of four copied quantities and the others are compared here too: the
+//! prior — how common hidden duplications are in this run, fitted from the run's own scores
+//! by an EM — the tail false-discovery curve built over the same histogram bins, and the cut
+//! that curve resolves for an operator's target. Each is a pure function of a stream of
+//! likelihood ratios, so the differential folds one randomised stream into both trees'
+//! histograms and compares π, the convergence flag, the whole curve and the cut, again by
+//! bit pattern.
+//!
 //! # What the stream must contain
 //!
 //! Every count this file states is pinned exactly rather than as a floor, and the reason is
@@ -652,5 +662,418 @@ fn the_drawn_stream_contains_every_shape_the_differential_claims() {
         "in {drawn_total} draws: absent, zero-read, alt-exceeds-total, degenerate σ₀, past \
          the winsor cap, below zero. Pinned, so a change to a draw rate has to be looked at \
          — a floor would pass through a 99-in-100 narrowing"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// The prior, the curve and the cut
+// ---------------------------------------------------------------------------------------
+
+/// Likelihood-ratio streams the calibration differential folds, each a shape the run can
+/// actually produce.
+///
+/// Named rather than drawn uniformly because the EM's answer depends on the *shape* of the
+/// distribution, not on its spread: a run where nothing is a duplication and one where a
+/// tenth are exercise different parts of the fixed-point iteration, and a stream with
+/// non-finite values exercises the histogram's refusal to fold them (spec §3.3 — a
+/// non-finite ratio is not a valid Bayes factor and enters neither π nor the curve).
+enum RatioStream {
+    /// Every locus a real variant: ratios well below zero.
+    NothingIsDuplicated,
+    /// About one locus in ten strongly positive, the rest negative — a plausible run.
+    OneInTen,
+    /// Every locus strongly positive, which drives π toward its ceiling.
+    EverythingIsDuplicated,
+    /// A mixture with `NaN` and infinities among it, which the histogram must refuse.
+    WithUnscorableValues,
+    /// Ratios past the histogram's `[-100, 100]`, which the run can produce and the histogram
+    /// is documented to saturate into its end bins. Without them every bin below 790 and above
+    /// 1997 stays empty in every stream, so the two clamps in `bin_index` are compared by
+    /// nothing — narrowing either one leaves the differential green.
+    BeyondTheHistogramsRange,
+}
+
+impl RatioStream {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::NothingIsDuplicated => "nothing is duplicated",
+            Self::OneInTen => "one locus in ten",
+            Self::EverythingIsDuplicated => "everything is duplicated",
+            Self::WithUnscorableValues => "with unscorable values",
+            Self::BeyondTheHistogramsRange => "beyond the histogram's range",
+        }
+    }
+
+    /// Draw `count` ratios of this shape.
+    fn draw(&self, rng: &mut Splitmix64, count: usize) -> Vec<f64> {
+        (0..count)
+            .map(|_| match self {
+                Self::NothingIsDuplicated => -20.0 * rng.next_unit() - 1.0,
+                Self::OneInTen => {
+                    if rng.next_below(10) == 0 {
+                        5.0 + 25.0 * rng.next_unit()
+                    } else {
+                        -20.0 * rng.next_unit() - 1.0
+                    }
+                }
+                Self::EverythingIsDuplicated => 5.0 + 25.0 * rng.next_unit(),
+                Self::WithUnscorableValues => match rng.next_below(12) {
+                    0 => f64::NAN,
+                    1 => f64::INFINITY,
+                    2 => f64::NEG_INFINITY,
+                    3..=5 => 5.0 + 25.0 * rng.next_unit(),
+                    _ => -20.0 * rng.next_unit() - 1.0,
+                },
+                Self::BeyondTheHistogramsRange => match rng.next_below(4) {
+                    0 => -100.0 - 500.0 * rng.next_unit(),
+                    1 => 100.0 + 500.0 * rng.next_unit(),
+                    _ => -20.0 * rng.next_unit() - 1.0,
+                },
+            })
+            .collect()
+    }
+}
+
+/// The target false-discovery rates the cut is resolved at: the shipped default, one an
+/// order of magnitude looser, one tighter, and two that no run can reach from either end.
+const TARGET_FALSE_DISCOVERY_RATES: [f64; 5] = [0.01, 0.1, 0.001, 0.0, 1.0];
+
+/// **The prior, the curve and the cut agree with production's, bit for bit.**
+///
+/// One randomised stream of likelihood ratios per shape, folded into both trees' histograms
+/// and taken through the EM, the curve and the threshold. Everything is compared: π and
+/// whether the EM converged; the curve's answer at fifteen probe ratios spanning the axis,
+/// including values outside it that the curve saturates; and the resolved cut at five
+/// targets, `None` included, since an unreachable target must be unreachable on both sides.
+#[test]
+fn the_copied_prior_and_curve_agree_with_productions_bit_for_bit() {
+    let mut streams_folded = 0usize;
+    for shape in [
+        RatioStream::NothingIsDuplicated,
+        RatioStream::OneInTen,
+        RatioStream::EverythingIsDuplicated,
+        RatioStream::WithUnscorableValues,
+        RatioStream::BeyondTheHistogramsRange,
+    ] {
+        let mut rng = Splitmix64(0xca11_b7a7_e000_0000 ^ streams_folded as u64);
+        let ratios = shape.draw(&mut rng, 5_000);
+
+        let mut their_histogram = production::ParalogLrHistogram::with_defaults();
+        let mut our_histogram = ng::ParalogLrHistogram::with_defaults();
+        for &lr in &ratios {
+            their_histogram.push(lr);
+            our_histogram.push(lr);
+        }
+        let case = shape.name();
+        assert_eq!(
+            our_histogram.total(),
+            their_histogram.total(),
+            "{case}: the two histograms folded different numbers of ratios"
+        );
+
+        let their_prior =
+            production::ParalogPrior::estimate(&their_histogram, &production::EmConfig::default());
+        let our_prior = ng::ParalogPrior::estimate(&our_histogram, &ng::EmConfig::default());
+        assert_eq!(
+            our_prior.prior_probability.to_bits(),
+            their_prior.prior_probability.to_bits(),
+            "{case}: pi differs — ng {}, src/paralog/ {}",
+            our_prior.prior_probability,
+            their_prior.prior_probability,
+        );
+        assert_eq!(
+            our_prior.converged, their_prior.converged,
+            "{case}: the two EMs disagree about whether they converged"
+        );
+
+        let their_curve =
+            production::ParalogFdrCurve::from_histogram(&their_histogram, &their_prior);
+        let our_curve = ng::ParalogFdrCurve::from_histogram(&our_histogram, &our_prior);
+        for probe in [
+            -1e6, -100.0, -30.0, -10.0, -1.0, 0.0, 1.0, 5.0, 10.0, 20.0, 30.0, 50.0, 100.0, 1e6,
+            0.5,
+        ] {
+            assert_eq!(
+                our_curve.q_of_lr(probe).to_bits(),
+                their_curve.q_of_lr(probe).to_bits(),
+                "{case}: the tail FDR at a ratio of {probe} differs — ng {}, src/paralog/ {}",
+                our_curve.q_of_lr(probe),
+                their_curve.q_of_lr(probe),
+            );
+        }
+        for target in TARGET_FALSE_DISCOVERY_RATES {
+            let theirs = their_curve.lr_threshold_for_fdr(target);
+            let ours = our_curve.lr_threshold_for_fdr(target);
+            assert_eq!(
+                ours.map(f64::to_bits),
+                theirs.map(f64::to_bits),
+                "{case}: the cut for a target of {target} differs — ng {ours:?}, \
+                 src/paralog/ {theirs:?}. An unreachable target must be unreachable on both \
+                 sides, or one tree flags what the other keeps",
+            );
+        }
+        streams_folded += 1;
+    }
+    assert_eq!(streams_folded, 5, "every stream shape is folded");
+}
+
+/// **The histogram refuses a ratio that is not a number, on both sides and by the same
+/// count.**
+///
+/// Spec §3.3: a non-finite likelihood ratio is not a valid Bayes factor, so it enters
+/// neither π nor the curve — and spec §6 trap 4 turns on that, because downstream a `NaN`
+/// means *unscored*. A port that folded them would put an unscored locus into the estimate
+/// of how many loci are duplicated.
+#[test]
+fn an_unscorable_ratio_is_folded_by_neither_tree() {
+    let finite = [-3.0, 0.0, 4.5, 19.0];
+    let unscorable = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+
+    let mut their_histogram = production::ParalogLrHistogram::with_defaults();
+    let mut our_histogram = ng::ParalogLrHistogram::with_defaults();
+    for &lr in finite.iter().chain(unscorable.iter()) {
+        their_histogram.push(lr);
+        our_histogram.push(lr);
+    }
+    assert_eq!(
+        our_histogram.total(),
+        their_histogram.total(),
+        "the two histograms disagree about what they folded"
+    );
+    assert_eq!(
+        our_histogram.total(),
+        finite.len() as u64,
+        "the histogram's total must be the count of *finite* ratios: {} finite and {} \
+         unscorable went in",
+        finite.len(),
+        unscorable.len(),
+    );
+}
+
+/// **On a narrow histogram, where the end bins are not saturated, the two trees still
+/// agree — and that is the only way the bin indexing itself can be compared.**
+///
+/// The shipped histogram spans `[-100, 100]`. Its lowest bin's centre is `-99.95` and its
+/// highest `99.95`, and the logistic that turns a likelihood ratio into a probability
+/// saturates long before either: `σ(-99.95 + logit π)` and `σ(99.95 + logit π)` are exactly
+/// `0` and `1` in `f64` for any usable π. **So a bin-index error at either end is invisible
+/// through π and the curve, however far outside the range the ratios reach** — measured:
+/// narrowing the low clamp from bin 0 to bin 1, and the high clamp from the last bin to the
+/// one below it, both leave the default-range comparison green even on a stream where 1,251
+/// of 5,000 ratios fall below `-100` and 1,250 above `+100`.
+///
+/// A histogram over `[-6, 6]` puts its end bins where the logistic is still moving, and the
+/// same mutations then change π and the curve on both sides differently. `ParalogLrHistogram::new`
+/// is public on both sides, so this costs one more case rather than a new mechanism — and it
+/// is also the only place the differential runs at a model setting other than the shipped one.
+#[test]
+fn a_narrow_histogram_agrees_on_both_sides_where_the_shipped_one_saturates() {
+    const NARROW_LO: f64 = -6.0;
+    const NARROW_HI: f64 = 6.0;
+    const NARROW_BINS: usize = 20;
+
+    let mut compared = 0usize;
+    for shape in [
+        RatioStream::NothingIsDuplicated,
+        RatioStream::OneInTen,
+        RatioStream::BeyondTheHistogramsRange,
+    ] {
+        let mut rng = Splitmix64(0x0a11_0e17_0000_0000 ^ compared as u64);
+        let ratios = shape.draw(&mut rng, 5_000);
+        let mut theirs = production::ParalogLrHistogram::new(NARROW_LO, NARROW_HI, NARROW_BINS)
+            .expect("a narrow range is a valid one");
+        let mut ours = ng::ParalogLrHistogram::new(NARROW_LO, NARROW_HI, NARROW_BINS)
+            .expect("a narrow range is a valid one");
+        for &lr in &ratios {
+            theirs.push(lr);
+            ours.push(lr);
+        }
+        let case = format!("a narrow histogram over {}", shape.name());
+        assert_eq!(ours.total(), theirs.total(), "{case}: different totals");
+
+        let their_prior =
+            production::ParalogPrior::estimate(&theirs, &production::EmConfig::default());
+        let our_prior = ng::ParalogPrior::estimate(&ours, &ng::EmConfig::default());
+        assert_eq!(
+            our_prior.prior_probability.to_bits(),
+            their_prior.prior_probability.to_bits(),
+            "{case}: pi differs — ng {}, src/paralog/ {}",
+            our_prior.prior_probability,
+            their_prior.prior_probability,
+        );
+        assert_eq!(our_prior.converged, their_prior.converged, "{case}");
+
+        let their_curve = production::ParalogFdrCurve::from_histogram(&theirs, &their_prior);
+        let our_curve = ng::ParalogFdrCurve::from_histogram(&ours, &our_prior);
+        // Every bin centre, and past both ends, so each bin index is read at least once.
+        for step in 0..=(NARROW_BINS + 4) {
+            let probe = NARROW_LO - 2.0
+                + step as f64 * (NARROW_HI - NARROW_LO + 4.0) / (NARROW_BINS + 4) as f64;
+            assert_eq!(
+                our_curve.q_of_lr(probe).to_bits(),
+                their_curve.q_of_lr(probe).to_bits(),
+                "{case}: the tail FDR at a ratio of {probe} differs — ng {}, src/paralog/ {}",
+                our_curve.q_of_lr(probe),
+                their_curve.q_of_lr(probe),
+            );
+            compared += 1;
+        }
+        for target in TARGET_FALSE_DISCOVERY_RATES {
+            assert_eq!(
+                our_curve.lr_threshold_for_fdr(target).map(f64::to_bits),
+                their_curve.lr_threshold_for_fdr(target).map(f64::to_bits),
+                "{case}: the cut for a target of {target} differs"
+            );
+        }
+    }
+    assert_eq!(compared, 3 * (NARROW_BINS + 5), "every probe is compared");
+}
+
+/// **The verdict itself agrees with production's: which loci are flagged, and what
+/// probability each carries.**
+///
+/// Everything above stops one step short of the decision. These two functions are the
+/// decision: whether a record is dropped, and what number goes in its `PARALOG_POST` field.
+/// Production's are reachable from a test in the same crate, so they are compared here rather
+/// than left to ng's own tests, which use the implementation as its own oracle.
+#[test]
+fn the_copied_verdict_agrees_with_productions_bit_for_bit() {
+    use crate::var_calling::paralog_filter::calibrate::ParalogCalibration as TheirCalibration;
+
+    let mut compared = 0usize;
+    for shape in [
+        RatioStream::NothingIsDuplicated,
+        RatioStream::OneInTen,
+        RatioStream::EverythingIsDuplicated,
+        RatioStream::BeyondTheHistogramsRange,
+    ] {
+        let mut rng = Splitmix64(0xd3c1_5104_0000_0000 ^ compared as u64);
+        let ratios = shape.draw(&mut rng, 5_000);
+        let mut their_histogram = production::ParalogLrHistogram::with_defaults();
+        let mut our_histogram = ng::ParalogLrHistogram::with_defaults();
+        for &lr in &ratios {
+            their_histogram.push(lr);
+            our_histogram.push(lr);
+        }
+        let their_prior =
+            production::ParalogPrior::estimate(&their_histogram, &production::EmConfig::default());
+        let our_prior = ng::ParalogPrior::estimate(&our_histogram, &ng::EmConfig::default());
+        let their_curve =
+            production::ParalogFdrCurve::from_histogram(&their_histogram, &their_prior);
+        let our_curve = ng::ParalogFdrCurve::from_histogram(&our_histogram, &our_prior);
+
+        for target_fdr in TARGET_FALSE_DISCOVERY_RATES {
+            let theirs = TheirCalibration {
+                prior: their_prior,
+                curve: their_curve.clone(),
+                lr_threshold: their_curve.lr_threshold_for_fdr(target_fdr),
+                target_fdr,
+            };
+            let ours = ng::ParalogCalibration {
+                prior: our_prior,
+                curve: our_curve.clone(),
+                lr_threshold: our_curve.lr_threshold_for_fdr(target_fdr),
+                target_fdr,
+            };
+            for lr in [
+                -1e6,
+                -100.0,
+                -30.0,
+                -8.0,
+                -1.0,
+                0.0,
+                1.0,
+                5.0,
+                12.0,
+                18.0,
+                30.0,
+                100.0,
+                1e6,
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ] {
+                let case = format!("{}, target {target_fdr}, ratio {lr}", shape.name());
+                assert_eq!(
+                    ours.flags(lr),
+                    theirs.flags(lr),
+                    "{case}: the two trees disagree about whether this record is dropped"
+                );
+                assert_eq!(
+                    ours.posterior(lr).map(f64::to_bits),
+                    theirs.posterior(lr).map(f64::to_bits),
+                    "{case}: the two trees disagree about the probability that goes in \
+                     PARALOG_POST — ng {:?}, src/var_calling/ {:?}",
+                    ours.posterior(lr),
+                    theirs.posterior(lr),
+                );
+                compared += 1;
+            }
+        }
+    }
+    // **A run where nothing is flagged would agree trivially**, so at least one of the
+    // comparisons above has to be a locus both trees drop.
+    assert!(compared >= 4 * 5 * 16, "every case is compared: {compared}");
+}
+
+/// **The prior falls back where the EM cannot converge, and both trees fall back the same
+/// way — including on an empty histogram, which is the one-sample end of the range.**
+///
+/// Neither state is reachable from a five-thousand-ratio stream that converges in seven
+/// steps, and both are states the run can be in: a cohort of one whose only sample scores
+/// nothing folds an empty histogram, and `DEFAULT_FALLBACK_PARALOG_PRIOR` exists precisely
+/// for a run whose EM does not settle.
+#[test]
+fn an_empty_histogram_and_an_unconverged_em_agree_on_both_sides() {
+    let their_empty = production::ParalogLrHistogram::with_defaults();
+    let our_empty = ng::ParalogLrHistogram::with_defaults();
+    assert_eq!(our_empty.total(), 0, "the fixture must actually be empty");
+
+    let their_prior =
+        production::ParalogPrior::estimate(&their_empty, &production::EmConfig::default());
+    let our_prior = ng::ParalogPrior::estimate(&our_empty, &ng::EmConfig::default());
+    assert_eq!(
+        our_prior.prior_probability.to_bits(),
+        their_prior.prior_probability.to_bits(),
+        "an empty histogram must give both trees the same pi — ng {}, src/paralog/ {}",
+        our_prior.prior_probability,
+        their_prior.prior_probability,
+    );
+    assert!(
+        !our_prior.converged,
+        "an empty histogram has nothing to converge on, so the flag must say so"
+    );
+    assert_eq!(our_prior.converged, their_prior.converged);
+
+    // An EM given one iteration and an impossible tolerance cannot settle.
+    let mut rng = Splitmix64(0x0e37_a11e_d000_0000);
+    let ratios = RatioStream::OneInTen.draw(&mut rng, 5_000);
+    let mut theirs = production::ParalogLrHistogram::with_defaults();
+    let mut ours = ng::ParalogLrHistogram::with_defaults();
+    for &lr in &ratios {
+        theirs.push(lr);
+        ours.push(lr);
+    }
+    let their_cramped = production::EmConfig {
+        max_iter: 1,
+        tol: 1e-300,
+        ..production::EmConfig::default()
+    };
+    let our_cramped = ng::EmConfig {
+        max_iter: 1,
+        tol: 1e-300,
+        ..ng::EmConfig::default()
+    };
+    let their_prior = production::ParalogPrior::estimate(&theirs, &their_cramped);
+    let our_prior = ng::ParalogPrior::estimate(&ours, &our_cramped);
+    assert!(
+        !our_prior.converged,
+        "one iteration at a tolerance of 1e-300 cannot converge, so the flag must say so"
+    );
+    assert_eq!(our_prior.converged, their_prior.converged);
+    assert_eq!(
+        our_prior.prior_probability.to_bits(),
+        their_prior.prior_probability.to_bits(),
+        "an unconverged pi must be the same on both sides"
     );
 }

@@ -17,9 +17,11 @@
 //! four: step 8's [`calling::genotype_prior`], as its folder and the four files the plan
 //! fills, and step 6's [`calling::allele_candidates`], so far the two constants its
 //! admission rule is made of); and step 11a's hidden-duplication filter
-//! ([`paralog`] — production's statistics copied in: so far the per-sample coverage model
-//! that says what one copy's depth looks like, and the per-locus score that weighs a
-//! collapsed pair of gene copies against a real variant).
+//! ([`paralog`] — production's statistics copied in, all four of them: the per-sample
+//! coverage model that says what one copy's depth looks like, the per-locus score that
+//! weighs a collapsed pair of gene copies against a real variant, how common hidden
+//! duplications are in this run, and the false-discovery curve that turns the operator's
+//! target into a cut).
 //!
 //! **Production is frozen.** ng is a from-scratch caller: it does not edit
 //! `src/ssr/` or `src/regions.rs` — nor, since the generic locus generator's port,
@@ -32,8 +34,11 @@
 //! **A test may read production as an oracle, and a handful do** — [`scanner_parity`]
 //! against `src/ssr/` and [`calling::genotype_table_parity`] against `src/var_calling/`
 //! were the first two; there are now several more, and the way to find them is
-//! `grep -rn 'use crate::' src/ng | grep -v 'use crate::ng'` rather than a list here that
-//! goes stale. Every one is `#[cfg(test)]`, so nothing shipped depends on production; the
+//! `grep -rnE 'use crate::|include_str!\("\.\./\.\.' src/ng | grep -v 'crate::ng'` rather
+//! than a list here that goes stale. **The second alternative matters**: the copy guards
+//! (`paralog/copy_fidelity.rs`, `locus_generation/pileup/copy_fidelity.rs`) read production's
+//! source as *text* at compile time rather than importing from it, and a `use`-only sweep
+//! does not see them at all. Every one is `#[cfg(test)]`, so nothing shipped depends on production; the
 //! direction that matters is the other one, and production still depends on nothing in ng.
 //! A port's whole claim is that it agrees with what it was ported from, and only production
 //! can settle that. **Every occurrence outside a `#[cfg(test)]` module needs a stated
@@ -48,6 +53,15 @@
 //! precisely rather than quietly: **ng may widen a production item's visibility so a
 //! parity test can see it, and may change nothing else**; anything that would alter what
 //! production computes is still a copy-into-ng, not an edit.
+//!
+//! **The mirror rule, and it is a different one with a different subject: ng may widen its
+//! own copy's visibility where production's module was private and ng's is not.**
+//! [`paralog::calibration`] is a span of `src/var_calling/paralog_filter/calibrate.rs`, which
+//! production keeps `pub(crate)` inside a private module; ng re-exports the same names from
+//! [`paralog`], and a `pub use` cannot re-export a `pub(crate)` item, so five lines read
+//! `pub` where production reads `pub(crate)`. **Production is untouched.** Each such line is
+//! declared and checked in `paralog/copy_fidelity.rs`, and the check is exact: the two lines
+//! must be identical once `pub(crate)` becomes `pub`.
 //!
 //! **The heaviest instance of that rule so far is
 //! [`locus_generation::pileup`]** — begun as a verbatim copy of `src/pileup/walker/`

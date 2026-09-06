@@ -83,7 +83,7 @@ sizes 1, 2, 10, 63; zero-read samples included — and asserts the ratio, both l
 the counts **bit-identical**. `N = 1` is in the differential deliberately (spec §4). *Depends:*
 A1. *Source:* spec §3.2, §7, §10.
 
-**A3. ☐ The prior, the curve, the calibration.** `prior.rs`: `ParalogLrHistogram`,
+**A3. ✅ The prior, the curve, the calibration.** `prior.rs`: `ParalogLrHistogram`,
 `ParalogPrior::estimate`, `ParalogFdrCurve`, `lr_threshold_for_fdr`, with production's tests; the
 `ParalogCalibration` type with `flags` and `posterior` and the fallback prior, copied from
 `calibrate.rs`. *Depends:* —. *Source:* spec §3.3, §7.
