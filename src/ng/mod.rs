@@ -17,8 +17,9 @@
 //! four: step 8's [`calling::genotype_prior`], as its folder and the four files the plan
 //! fills, and step 6's [`calling::allele_candidates`], so far the two constants its
 //! admission rule is made of); and step 11a's hidden-duplication filter
-//! ([`paralog`] — production's statistics copied in, so far the per-sample
-//! coverage model that says what one copy's depth looks like).
+//! ([`paralog`] — production's statistics copied in: so far the per-sample coverage model
+//! that says what one copy's depth looks like, and the per-locus score that weighs a
+//! collapsed pair of gene copies against a real variant).
 //!
 //! **Production is frozen.** ng is a from-scratch caller: it does not edit
 //! `src/ssr/` or `src/regions.rs` — nor, since the generic locus generator's port,
@@ -28,12 +29,16 @@
 //! what costs production nothing. Winning steps are ported back only after the
 //! experiments ng exists to run have decided something.
 //!
-//! **A test may read production as an oracle, and two do** — [`scanner_parity`]
-//! against `src/ssr/`, [`calling::genotype_table_parity`] against `src/var_calling/`.
-//! Both are `#[cfg(test)]`, so nothing shipped depends on production; the direction
-//! that matters is the other one, and production still depends on nothing in ng. A
-//! port's whole claim is that it agrees with what it was ported from, and only
-//! production can settle that.
+//! **A test may read production as an oracle, and a handful do** — [`scanner_parity`]
+//! against `src/ssr/` and [`calling::genotype_table_parity`] against `src/var_calling/`
+//! were the first two; there are now several more, and the way to find them is
+//! `grep -rn 'use crate::' src/ng | grep -v 'use crate::ng'` rather than a list here that
+//! goes stale. Every one is `#[cfg(test)]`, so nothing shipped depends on production; the
+//! direction that matters is the other one, and production still depends on nothing in ng.
+//! A port's whole claim is that it agrees with what it was ported from, and only production
+//! can settle that. **Every occurrence outside a `#[cfg(test)]` module needs a stated
+//! reason** — `paralog::coverage_model` has the one that exists today, and its own header
+//! gives the reason and the date it ends.
 //!
 //! **One such oracle cost production one line, and it is the only edit ng has made to
 //! a frozen tree.** `posterior_engine.rs` declared `mod shape;` privately, which put

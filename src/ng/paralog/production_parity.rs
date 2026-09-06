@@ -1,0 +1,656 @@
+//! **ng's copied scorer computes what production's does — asserted on randomised loci, by
+//! bit pattern.**
+//!
+//! `copy_fidelity` says the *text* is production's. This says the *numbers* are, which is
+//! the property the port actually claims (`doc/devel/ng/spec/hidden_paralog_filter.md`
+//! §7's reuse map: *"the parity oracle is bit-identical ratios against production's on
+//! identical synthetic inputs"*). The two are not the same statement, and **neither is
+//! strictly stronger than the other.** The text guard would still pass if a build flag or a
+//! platform difference made one tree evaluate the same source differently. The differential
+//! only sees what it draws: a review of this file found four input classes it did not reach,
+//! and for those four the text guard was the one catching the divergence. Both are kept, and
+//! the differential's reach is now pinned rather than described (see *What the stream must
+//! contain*), because `copy_fidelity.rs` already schedules one file for release — and once a
+//! file is released this is the only guard left on it.
+//!
+//! Production's own tests are transcribed into `locus_score.rs` beside the copy, so they
+//! pass on both trees whatever either computes — which is exactly why they cannot serve
+//! as the oracle here.
+//!
+//! # What is compared, and why every number rather than the ratio alone
+//!
+//! `ParalogScore` carries five values, and all five are asserted equal. The ratio is the
+//! one the filter acts on, but it is a difference of two log-likelihoods: two errors that
+//! shift both by the same amount would cancel in it and be invisible. The two counts —
+//! samples used, and confident hom-alt carriers — pin the sample-admission rules that
+//! decide *which* evidence reached the arithmetic at all. Both scores are **destructured**
+//! rather than read field by field, so a sixth value added to `ParalogScore` is a compile
+//! error here instead of a value this file quietly stops comparing.
+//!
+//! Equality is **by bit pattern**, not by tolerance. A port that agrees to within
+//! `1e-12` is a port that has diverged; the question is not whether the difference matters
+//! but whether there is one.
+//!
+//! # The cohort sizes, and why one sample is among them
+//!
+//! 1, 2, 10 and 63. **`N = 1` is deliberate** (spec §4): the folded site-frequency-spectrum
+//! prior runs over `[1/2N, 1 − 1/2N]`, which at one sample is the single point `[½, ½]`, so
+//! the grid degenerates and every weight collapses onto it. Production has never been run
+//! there — its filter is a cohort filter — and ng's range commitment starts at one sample,
+//! so the copied precompute meets that case here for the first time. 63 is the tomato
+//! cohort's size; 2 and 10 sit between. **Nothing here reaches spec §4's other end**, a
+//! cohort of three thousand: the precompute's tables are `grid points × samples`, so that is
+//! a size and wall-clock question rather than a correctness one, and it belongs to the plan's
+//! D milestone.
+//!
+//! # The generator
+//!
+//! A fixed-seed splitmix64, not a crate: the codebase's idiom for a reproducible test
+//! stream (`parameter_estimation/subsample.rs` uses splitmix64 for the same reason;
+//! `calling/parameters_file/to_toml.rs` uses a fixed-seed xorshift), and a failure has to be
+//! reproducible from the seed alone with nothing installed. The draws deliberately include
+//! the shapes that decide which branch of the scorer runs:
+//!
+//! - **absent samples** (`None`), which the cohort size still counts toward the SFS floor;
+//! - **zero-read samples**, whose allele term vanishes under every genotype — the case
+//!   spec §3.2 rests the coverage-only score on;
+//! - **degenerate σ₀** (zero, negative, `NaN`, infinite), which the scorer drops;
+//! - **`alt_reads > total_reads`**, which the scorer clamps rather than underflowing;
+//! - **copy numbers on both sides of the winsor cap**, negative ones included, which it
+//!   clips at zero and at four.
+//!
+//! Four more shapes are too rare or too structural to draw, and are put to both scorers
+//! directly, one test each: a σ₀ slice **longer** than the cohort, a precompute built for a
+//! **different** cohort, a carrier set that keeps **no** configuration, and a locus with
+//! **nothing** usable. Three of the four each killed a mutation to ng's copy that the sweep
+//! alone missed.
+//!
+//! # What the stream must contain
+//!
+//! Every count this file states is pinned exactly rather than as a floor, and the reason is
+//! the defect pinning would have caught. The first draft drew σ₀ from four cases in seven
+//! rather than four in twenty-eight, so **4 samples in 7 were degenerate** against the 1 in 7
+//! its own comment claimed; at one sample that leaves most loci with nothing usable, scoring
+//! the neutral verdict two implementations agree on while computing nothing. A `count > 0`
+//! assertion passes through a 99-in-100 narrowing of any of these rates. An exact count does
+//! not, and a deliberate change to a rate then has to be looked at rather than absorbed.
+
+use crate::ng::paralog as ng;
+use crate::paralog as production;
+
+/// A reproducible stream of pseudo-random `u64`, seeded once per case.
+///
+/// splitmix64: one multiply-xorshift chain per draw, no state beyond the counter, and the
+/// same sequence on every platform. A failing case is reproduced from its seed alone.
+struct Splitmix64(u64);
+
+impl Splitmix64 {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// A `f64` in `[0, 1)`, from the top 53 bits.
+    fn next_unit(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// A `u32` in `[0, bound)`. `bound` must be non-zero — every call site passes a literal
+    /// or `total_reads + 1`. The modulo is slightly biased for bounds that do not divide
+    /// `2^64`, which is fine for drawing test shapes and is not claimed otherwise.
+    fn next_below(&mut self, bound: u32) -> u32 {
+        (self.next_u64() % u64::from(bound)) as u32
+    }
+}
+
+/// The stream one cohort size is drawn from.
+///
+/// Named once and derived from the size, so that every test inspecting the sweep inspects
+/// the same draws. Typing the seed base and the size a second time is how a check on the
+/// stream and the stream itself come apart without anything failing.
+fn stream_for(cohort_size: usize) -> Splitmix64 {
+    Splitmix64(0x5eed_0000_0000_0000 ^ cohort_size as u64)
+}
+
+/// One sample's evidence, drawn so that every branch of the scorer's admission rules is
+/// reachable — and built twice, once as each tree's own type, from the *same* numbers.
+struct DrawnSample {
+    relative_copy_number: f64,
+    alt_reads: u32,
+    total_reads: u32,
+    inbreeding_coefficient: f64,
+    /// σ₀, drawn alongside because the scorer takes it in a parallel slice.
+    single_copy_depth_sd: f64,
+    /// Whether this sample is absent from the locus entirely.
+    absent: bool,
+}
+
+/// Draw one cohort's worth of evidence at one locus.
+fn draw_locus(rng: &mut Splitmix64, cohort_size: usize) -> Vec<DrawnSample> {
+    (0..cohort_size)
+        .map(|_| {
+            // One draw in eight is absent; the cohort size still counts it.
+            let absent = rng.next_below(8) == 0;
+            // One in six has no reads — the coverage-only case.
+            let total_reads = if rng.next_below(6) == 0 {
+                0
+            } else {
+                rng.next_below(400)
+            };
+            // One in ten is malformed with more ALT reads than total, to reach the clamp.
+            let alt_reads = if rng.next_below(10) == 0 {
+                total_reads.saturating_add(1 + rng.next_below(50))
+            } else if total_reads == 0 {
+                0
+            } else {
+                rng.next_below(total_reads + 1)
+            };
+            // **Both sides of the winsor cap**, over `[−1, 9)`. A fitted coverage model can
+            // hand back a negative relative depth, and the clamp has a lower arm as well as
+            // an upper one: with `[0, 9)` alone, narrowing ng's `clamp(0.0, cmax)` to
+            // `min(cmax)` was a change no drawn locus could see.
+            let relative_copy_number = rng.next_unit() * 10.0 - 1.0;
+            // **One σ₀ in seven is degenerate**, which drops the sample from the score —
+            // four cases in twenty-eight draws, not four in seven. Drawn from 28 rather than
+            // 7 for exactly that reason: at four in seven, 57 in 100 samples are dropped and
+            // a one-sample locus scores nothing 5 times in 8, which would leave the
+            // differential comparing two neutral verdicts and calling it agreement.
+            let single_copy_depth_sd = match rng.next_below(28) {
+                0 => 0.0,
+                1 => -rng.next_unit(),
+                2 => f64::NAN,
+                3 => f64::INFINITY,
+                _ => 0.02 + rng.next_unit() * 0.6,
+            };
+            DrawnSample {
+                relative_copy_number,
+                alt_reads,
+                total_reads,
+                inbreeding_coefficient: rng.next_unit() * 0.99,
+                single_copy_depth_sd,
+                absent,
+            }
+        })
+        .collect()
+}
+
+/// How one drawn locus is handed to the two scorers.
+///
+/// The two lengths are separate fields rather than one cohort size because the scorer's
+/// precondition (spec §6, trap 3) treats a disagreement between them as a failure that must
+/// return the neutral verdict — and each disagreement is its own input class: a σ₀ slice
+/// shorter *or longer* than the locus, and per-pass tables built for a cohort the locus does
+/// not have. The carrier set is here for the same reason: emptied, it is the one input that
+/// makes a *scored* locus produce a `NaN` if the scorer stops refusing it.
+struct HandedToBothScorers<'a> {
+    drawn: &'a [DrawnSample],
+    /// Length of the σ₀ slice: short ones are truncated, long ones padded.
+    sigma0_slice_length: usize,
+    /// Cohort size the per-pass tables are built for.
+    precompute_cohort_size: usize,
+    /// The carrier copy numbers under H2. Empty keeps no configuration at all.
+    carrier_copy_numbers: Vec<u32>,
+}
+
+impl<'a> HandedToBothScorers<'a> {
+    /// The ordinary case: every length agrees, and the model is the shipped default.
+    fn agreeing(drawn: &'a [DrawnSample]) -> Self {
+        Self {
+            drawn,
+            sigma0_slice_length: drawn.len(),
+            precompute_cohort_size: drawn.len(),
+            carrier_copy_numbers: production::ParalogModelParams::default().carrier_copy_numbers,
+        }
+    }
+}
+
+/// Score one drawn locus through both trees and return the two verdicts.
+///
+/// Both sides are built from the same `DrawnSample` values, field by field, so a
+/// divergence can only come from the scorers. The two return types differ, so the two
+/// verdicts cannot be transposed by accident.
+fn score_through_both(
+    handed: &HandedToBothScorers,
+) -> (production::ParalogScore, ng::ParalogScore) {
+    let HandedToBothScorers {
+        drawn,
+        sigma0_slice_length,
+        precompute_cohort_size,
+        carrier_copy_numbers,
+    } = handed;
+
+    let inbreeding: Vec<f64> = (0..*precompute_cohort_size)
+        .map(|index| {
+            drawn
+                .get(index)
+                .map_or(0.0, |sample| sample.inbreeding_coefficient)
+        })
+        .collect();
+    // A σ₀ slice longer than the locus is padded with a healthy value rather than truncated,
+    // so that the length disagreement is the only thing under test.
+    let sigma0: Vec<f64> = (0..*sigma0_slice_length)
+        .map(|index| {
+            drawn
+                .get(index)
+                .map_or(0.3, |sample| sample.single_copy_depth_sd)
+        })
+        .collect();
+
+    let production_samples: Vec<Option<production::SampleObservation>> = drawn
+        .iter()
+        .map(|s| {
+            (!s.absent).then_some(production::SampleObservation {
+                relative_copy_number: s.relative_copy_number,
+                alt_reads: s.alt_reads,
+                total_reads: s.total_reads,
+                inbreeding_coefficient: s.inbreeding_coefficient,
+            })
+        })
+        .collect();
+    let ng_samples: Vec<Option<ng::SampleObservation>> = drawn
+        .iter()
+        .map(|s| {
+            (!s.absent).then_some(ng::SampleObservation {
+                relative_copy_number: s.relative_copy_number,
+                alt_reads: s.alt_reads,
+                total_reads: s.total_reads,
+                inbreeding_coefficient: s.inbreeding_coefficient,
+            })
+        })
+        .collect();
+
+    let production_params = production::ParalogModelParams {
+        carrier_copy_numbers: carrier_copy_numbers.clone(),
+        ..production::ParalogModelParams::default()
+    };
+    let ng_params = ng::ParalogModelParams {
+        carrier_copy_numbers: carrier_copy_numbers.clone(),
+        ..ng::ParalogModelParams::default()
+    };
+
+    (
+        production::score_locus_for_paralogy(
+            &production::LocusObservations {
+                samples: &production_samples,
+            },
+            &sigma0,
+            &production::ParalogScorePrecompute::new(&production_params, &inbreeding),
+        ),
+        ng::score_locus_for_paralogy(
+            &ng::LocusObservations {
+                samples: &ng_samples,
+            },
+            &sigma0,
+            &ng::ParalogScorePrecompute::new(&ng_params, &inbreeding),
+        ),
+    )
+}
+
+/// Assert every field of the two verdicts equal, floats by bit pattern.
+///
+/// `NaN != NaN` under `==`, and a `NaN` is what a divergence in the arithmetic tends to
+/// produce, so a derived comparison would either fail on two agreeing `NaN`s or — with a
+/// tolerance — pass on a real divergence. (The scorer's *own* refusal is not a `NaN`:
+/// `ParalogScore::neutral` sets every float to `0.0`. Spec §6 trap 4's `NaN` is the
+/// unscored-record sentinel the run wiring carries, and that arrives at step B1.)
+fn assert_bit_identical(
+    case: &str,
+    production_score: &production::ParalogScore,
+    ng_score: &ng::ParalogScore,
+) {
+    // **Destructured, not field-accessed**, so that a value added to `ParalogScore` is a
+    // compile error here rather than a value the differential quietly stops comparing.
+    let production::ParalogScore {
+        paralog_log_likelihood_ratio: their_ratio,
+        samples_used: their_samples_used,
+        confident_homalt_carriers: their_carriers,
+        log_likelihood_real_variant: their_real_variant,
+        log_likelihood_hidden_paralog: their_hidden_paralog,
+    } = *production_score;
+    let ng::ParalogScore {
+        paralog_log_likelihood_ratio: our_ratio,
+        samples_used: our_samples_used,
+        confident_homalt_carriers: our_carriers,
+        log_likelihood_real_variant: our_real_variant,
+        log_likelihood_hidden_paralog: our_hidden_paralog,
+    } = *ng_score;
+
+    for (field, theirs, ours) in [
+        ("paralog_log_likelihood_ratio", their_ratio, our_ratio),
+        (
+            "log_likelihood_real_variant",
+            their_real_variant,
+            our_real_variant,
+        ),
+        (
+            "log_likelihood_hidden_paralog",
+            their_hidden_paralog,
+            our_hidden_paralog,
+        ),
+    ] {
+        assert_eq!(
+            ours.to_bits(),
+            theirs.to_bits(),
+            "{case}: {field} differs — ng {ours} ({:#018x}), src/paralog/ {theirs} \
+             ({:#018x}). The copied scorer must agree with production's bit for bit; a \
+             difference here means the port computes something else",
+            ours.to_bits(),
+            theirs.to_bits(),
+        );
+    }
+    assert_eq!(
+        our_samples_used, their_samples_used,
+        "{case}: samples_used differs — the two trees admitted different evidence"
+    );
+    assert_eq!(
+        our_carriers, their_carriers,
+        "{case}: confident_homalt_carriers differs — the hom-alt veto counted differently"
+    );
+}
+
+/// Cohort sizes the differential runs at. **One is deliberate** — see the module header.
+const COHORT_SIZES: [usize; 4] = [1, 2, 10, 63];
+
+/// Loci drawn per cohort size. 200 at four sizes is 800 loci, and at 63 samples that is
+/// 12,600 drawn observations; the whole test runs well inside a second.
+const LOCI_PER_COHORT_SIZE: usize = 200;
+
+/// **The differential: 800 randomised loci, every number bit-identical.**
+#[test]
+fn the_copied_scorer_agrees_with_productions_bit_for_bit() {
+    let mut loci_scored = 0usize;
+    let mut loci_that_reached_the_arithmetic = [0usize; COHORT_SIZES.len()];
+    for (size_index, cohort_size) in COHORT_SIZES.into_iter().enumerate() {
+        let mut rng = stream_for(cohort_size);
+        for locus in 0..LOCI_PER_COHORT_SIZE {
+            let drawn = draw_locus(&mut rng, cohort_size);
+            let (theirs, ours) = score_through_both(&HandedToBothScorers::agreeing(&drawn));
+            assert_bit_identical(
+                &format!("cohort size {cohort_size}, locus {locus}"),
+                &theirs,
+                &ours,
+            );
+            loci_scored += 1;
+            // `samples_used > 0`, not `ratio.is_finite()`: the neutral verdict a locus with
+            // nothing usable gets is `0.0`, which *is* finite, so counting finite ratios
+            // would count loci that agreed by both computing nothing.
+            loci_that_reached_the_arithmetic[size_index] += usize::from(ours.samples_used > 0);
+            assert!(
+                ours.paralog_log_likelihood_ratio.is_finite(),
+                "cohort size {cohort_size}, locus {locus}: the ratio is not finite"
+            );
+        }
+    }
+
+    assert_eq!(
+        loci_scored,
+        COHORT_SIZES.len() * LOCI_PER_COHORT_SIZE,
+        "every drawn locus is scored"
+    );
+
+    // **Without this the test could pass on a stream that scores nothing.** A generator
+    // that drew every sample absent, or every σ₀ degenerate, would give 800 neutral
+    // verdicts that two implementations agree on trivially — and every one of them would
+    // have a finite ratio, because the neutral verdict is `0.0`.
+    //
+    // At one sample, a locus has its only sample drawn absent (1 draw in 8) or with a
+    // degenerate σ₀ (1 in 7), so the expected share of unscored loci is
+    // `1 − (7/8)(6/7) = 25 in 100`. Nothing is unscored at 10 samples or 63; those two pins
+    // carry little on their own and are here so that a change which *did* start emptying
+    // large cohorts could not pass.
+    assert_eq!(
+        loci_that_reached_the_arithmetic, LOCI_THAT_SHOULD_SCORE,
+        "the drawn stream must reach the arithmetic as often as it did when this was \
+         written — at cohort sizes {COHORT_SIZES:?}, out of {LOCI_PER_COHORT_SIZE} loci each"
+    );
+}
+
+/// Loci admitting at least one sample, per cohort size, in `COHORT_SIZES` order.
+const LOCI_THAT_SHOULD_SCORE: [usize; COHORT_SIZES.len()] = [144, 189, 200, 200];
+
+/// **At one sample the two agree, the one sample is actually scored, and the score is a
+/// real number.**
+///
+/// Called out separately from the sweep because it is spec §4's open question and §9's
+/// second OPEN: the site-frequency-spectrum grid degenerates to the single point `[½, ½]`
+/// at `N = 1`, and nothing had run the copied precompute there.
+///
+/// **Three assertions, and the middle one is the load-bearing one.** That the two trees
+/// agree is the parity claim. That the ratio is finite is nearly free — the neutral verdict
+/// a locus with no usable sample gets is `0.0`, which is finite, so on its own that
+/// assertion is satisfied by a locus that computed nothing. So the count of loci whose
+/// single sample was actually admitted is asserted too, and it must be every locus where
+/// the sample was drawn usable at all.
+#[test]
+fn one_sample_scores_finitely_and_identically() {
+    let mut rng = Splitmix64(0x0e5a_3d17);
+    let (mut usable_samples_drawn, mut loci_that_scored) = (0usize, 0usize);
+    for locus in 0..LOCI_PER_COHORT_SIZE {
+        let drawn = draw_locus(&mut rng, 1);
+        let sample_is_usable = !drawn[0].absent
+            && drawn[0].single_copy_depth_sd.is_finite()
+            && drawn[0].single_copy_depth_sd > 0.0;
+        let (theirs, ours) = score_through_both(&HandedToBothScorers::agreeing(&drawn));
+        assert_bit_identical(&format!("one sample, locus {locus}"), &theirs, &ours);
+        assert!(
+            ours.paralog_log_likelihood_ratio.is_finite(),
+            "one sample, locus {locus}: the ratio is not finite"
+        );
+        usable_samples_drawn += usize::from(sample_is_usable);
+        loci_that_scored += usize::from(ours.samples_used == 1);
+    }
+    assert_eq!(
+        loci_that_scored, usable_samples_drawn,
+        "every locus whose one sample was usable must be scored with it"
+    );
+    assert!(
+        loci_that_scored * 2 > LOCI_PER_COHORT_SIZE,
+        "most of the {LOCI_PER_COHORT_SIZE} one-sample loci must actually be scored, or \
+         this test agrees with production about nothing; {loci_that_scored} were"
+    );
+}
+
+/// **A negative copy number is winsorised at zero on both sides.**
+///
+/// A fitted coverage model can hand back a negative relative depth, and the winsor clamp has
+/// a lower arm as well as an upper one. Given its own case as well as a place in the stream,
+/// because it is the arm a port is most likely to drop: narrowing ng's `clamp(0.0, cmax)` to
+/// `min(cmax)` changes nothing a non-negative draw can see, and left ng scoring one locus at
+/// more than twice production's value with every other test green.
+#[test]
+fn a_negative_copy_number_is_winsorised_at_zero_on_both_sides() {
+    let drawn: Vec<DrawnSample> = [
+        (-3.0, 5u32, 10u32),
+        (-0.5, 0, 8),
+        (1.0, 10, 20),
+        (7.0, 3, 6),
+    ]
+    .into_iter()
+    .map(
+        |(relative_copy_number, alt_reads, total_reads)| DrawnSample {
+            relative_copy_number,
+            alt_reads,
+            total_reads,
+            inbreeding_coefficient: 0.0,
+            single_copy_depth_sd: 0.26,
+            absent: false,
+        },
+    )
+    .collect();
+    let (theirs, ours) = score_through_both(&HandedToBothScorers::agreeing(&drawn));
+    assert_bit_identical("a negative copy number", &theirs, &ours);
+    assert_eq!(ours.samples_used, 4, "every sample here is usable");
+}
+
+/// **A σ₀ slice out of step with the cohort is neutral on both sides, in both directions.**
+///
+/// The scorer treats a length mismatch as a precondition failure rather than truncating the
+/// cohort, because the site-frequency-spectrum floor `1/2N` would still count the dropped
+/// samples (spec §6, trap 3). A port that instead zipped and truncated would give a
+/// plausible, wrong number. **Longer as well as shorter**: a port writing `< cohort_size`
+/// where production writes `!= cohort_size` refuses the short case and accepts the long one,
+/// and the sweep can never draw a long one because it builds the slice from the locus.
+#[test]
+fn a_mismatched_sigma_slice_is_neutral_on_both_sides() {
+    let mut rng = Splitmix64(0xbad_5123);
+    for cohort_size in [2usize, 10] {
+        for slice_length in [
+            cohort_size - 1,
+            cohort_size.saturating_sub(3).max(1),
+            cohort_size + 1,
+            cohort_size + 7,
+        ] {
+            let drawn = draw_locus(&mut rng, cohort_size);
+            let (theirs, ours) = score_through_both(&HandedToBothScorers {
+                sigma0_slice_length: slice_length,
+                ..HandedToBothScorers::agreeing(&drawn)
+            });
+            let case = format!("cohort size {cohort_size}, sigma slice of {slice_length}");
+            assert_bit_identical(&case, &theirs, &ours);
+            assert_eq!(
+                ours.samples_used, 0,
+                "{case}: a mismatched slice must score nothing, not a truncated cohort"
+            );
+            assert_eq!(ours.paralog_log_likelihood_ratio, 0.0, "{case}");
+        }
+    }
+}
+
+/// **Per-pass tables built for another cohort are neutral on both sides.**
+///
+/// The tables are `grid points × samples` and the site-frequency floor is `1/2N`, so tables
+/// built for a different `N` do not describe this locus; the scorer refuses rather than
+/// indexing into them (spec §6, trap 3). This is the mismatch the run wiring is most likely
+/// to produce, because step B1 builds one set of tables per pass and calls the scorer once
+/// per locus — and the sweep can never draw it, because it builds both from the same locus.
+#[test]
+fn tables_built_for_another_cohort_are_neutral_on_both_sides() {
+    let mut rng = Splitmix64(0x9ab1_2c3d);
+    for (locus_size, table_size) in [(5usize, 10usize), (10, 5), (1, 2), (63, 62)] {
+        let drawn = draw_locus(&mut rng, locus_size);
+        let (theirs, ours) = score_through_both(&HandedToBothScorers {
+            precompute_cohort_size: table_size,
+            ..HandedToBothScorers::agreeing(&drawn)
+        });
+        let case = format!("a locus of {locus_size}, tables built for {table_size}");
+        assert_bit_identical(&case, &theirs, &ours);
+        assert_eq!(
+            ours.samples_used, 0,
+            "{case}: tables for another cohort must score nothing"
+        );
+        assert_eq!(ours.paralog_log_likelihood_ratio, 0.0, "{case}");
+    }
+}
+
+/// **A carrier set that keeps no configuration is neutral on both sides, not `NaN`.**
+///
+/// With no carrier copy numbers there is no hidden-paralog story to marginalise, and the
+/// scorer refuses before computing one. The refusal matters more than it looks: without it
+/// the marginal is a log-sum-exp over an empty set, and the ratio comes back `NaN` **from a
+/// locus that was scored** — the one state spec §6 trap 4 says must never leave the scorer,
+/// because downstream a `NaN` means *unscored* and folds into nothing.
+#[test]
+fn an_empty_carrier_set_is_neutral_on_both_sides() {
+    let mut rng = Splitmix64(0xe3d2_7a10);
+    for cohort_size in [1usize, 10] {
+        let drawn = draw_locus(&mut rng, cohort_size);
+        let (theirs, ours) = score_through_both(&HandedToBothScorers {
+            carrier_copy_numbers: Vec::new(),
+            ..HandedToBothScorers::agreeing(&drawn)
+        });
+        let case = format!("no carrier configurations, cohort size {cohort_size}");
+        assert_bit_identical(&case, &theirs, &ours);
+        assert_eq!(
+            ours.paralog_log_likelihood_ratio.to_bits(),
+            0.0f64.to_bits(),
+            "{case}: the refusal must be the neutral 0.0, never a NaN from a scored locus"
+        );
+        assert_eq!(ours.samples_used, 0, "{case}");
+    }
+}
+
+/// **A locus with nothing usable is neutral on both sides.**
+///
+/// It establishes nothing to flag, and both trees say so the same way. Note that the value
+/// is `0.0` and not `NaN`: spec §6 trap 4's `NaN` sentinel belongs to the run wiring and
+/// arrives with step B1, so nothing here tests it.
+#[test]
+fn a_locus_with_no_usable_sample_is_neutral_on_both_sides() {
+    for cohort_size in COHORT_SIZES {
+        let drawn: Vec<DrawnSample> = (0..cohort_size)
+            .map(|_| DrawnSample {
+                relative_copy_number: 1.0,
+                alt_reads: 0,
+                total_reads: 0,
+                inbreeding_coefficient: 0.0,
+                single_copy_depth_sd: 0.3,
+                absent: true,
+            })
+            .collect();
+        let (theirs, ours) = score_through_both(&HandedToBothScorers::agreeing(&drawn));
+        assert_bit_identical(
+            &format!("all absent, cohort size {cohort_size}"),
+            &theirs,
+            &ours,
+        );
+        assert_eq!(ours.samples_used, 0);
+        assert_eq!(ours.paralog_log_likelihood_ratio, 0.0);
+    }
+}
+
+/// The shape counts `the_drawn_stream_contains_every_shape_the_differential_claims` pins,
+/// over the 12,600 observations drawn at the largest cohort size, in the order that test
+/// counts them: absent, zero-read, alt-exceeds-total, degenerate σ₀, past the winsor cap,
+/// below zero. Drawn at 1 in 8, 1 in 6, 1 in 10, 1 in 7, 1 in 2 and 1 in 10 respectively.
+const SHAPES_THE_STREAM_DRAWS: [usize; 6] = [1598, 2210, 1256, 1841, 6259, 1277];
+
+/// **The stream the differential runs on contains what this file says it contains.**
+///
+/// Counted at the sweep's largest cohort size, from the same stream the sweep draws — the
+/// size and the seed both come from `COHORT_SIZES` and `stream_for`, not from a second copy
+/// of the literals.
+///
+/// **Pinned exactly, not as a floor.** `count > 0` passes through a 99-in-100 narrowing of
+/// any of these rates: cutting the malformed-record rate from 1 in 10 to 1 in 1,000 takes
+/// those draws from 1,256 to 17 in 12,600 and a floor never notices. An exact count makes a
+/// deliberate change to a rate something to look at, which is the whole reason this exists.
+#[test]
+fn the_drawn_stream_contains_every_shape_the_differential_claims() {
+    let largest_cohort_size = COHORT_SIZES[COHORT_SIZES.len() - 1];
+    let mut rng = stream_for(largest_cohort_size);
+    let (mut absent, mut zero_read, mut malformed, mut degenerate_sigma) = (0, 0, 0, 0usize);
+    let (mut past_the_cap, mut below_zero) = (0usize, 0usize);
+    let mut drawn_total = 0usize;
+    for _ in 0..LOCI_PER_COHORT_SIZE {
+        for sample in draw_locus(&mut rng, largest_cohort_size) {
+            drawn_total += 1;
+            absent += usize::from(sample.absent);
+            zero_read += usize::from(sample.total_reads == 0);
+            malformed += usize::from(sample.alt_reads > sample.total_reads);
+            degenerate_sigma += usize::from(
+                !(sample.single_copy_depth_sd.is_finite() && sample.single_copy_depth_sd > 0.0),
+            );
+            past_the_cap +=
+                usize::from(sample.relative_copy_number > ng::DEFAULT_MAX_RELATIVE_COPY_NUMBER);
+            below_zero += usize::from(sample.relative_copy_number < 0.0);
+        }
+    }
+    assert_eq!(drawn_total, largest_cohort_size * LOCI_PER_COHORT_SIZE);
+    assert_eq!(
+        [
+            absent,
+            zero_read,
+            malformed,
+            degenerate_sigma,
+            past_the_cap,
+            below_zero
+        ],
+        SHAPES_THE_STREAM_DRAWS,
+        "in {drawn_total} draws: absent, zero-read, alt-exceeds-total, degenerate σ₀, past \
+         the winsor cap, below zero. Pinned, so a change to a draw rate has to be looked at \
+         — a floor would pass through a 99-in-100 narrowing"
+    );
+}

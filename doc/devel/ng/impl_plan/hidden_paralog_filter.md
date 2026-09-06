@@ -76,7 +76,7 @@ range and the measurements the spec leaves open.
 `SingleCopyCoverageModel::fit` and `relative_copy_number`, `CoverageModelError`, with production's
 tests, reading ng's histogram type. Green as transcribed. *Depends:* —. *Source:* spec §3.1, §7.
 
-**A2. ☐ The score. Own commit, do not bundle.** `locus_score.rs`: `SampleObservation`,
+**A2. ✅ The score. Own commit, do not bundle.** `locus_score.rs`: `SampleObservation`,
 `LocusObservations`, `ParalogScorePrecompute`, `score_locus_for_paralogy`, with production's
 tests; plus a differential that feeds both implementations the same randomised inputs — cohort
 sizes 1, 2, 10, 63; zero-read samples included — and asserts the ratio, both log-likelihoods and
