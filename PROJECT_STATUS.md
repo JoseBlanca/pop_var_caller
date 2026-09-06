@@ -4372,6 +4372,20 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     timed hidden flushes. Both writers are now built with `new_with_block_layout` and a window
     no position can cross, and an assert names the premise if it breaks again.
 
+
+#### Step 11a — the hidden-duplication filter (ng's port)
+- **Status:** fixes-applied (Milestone A, step A1; branch `ng-paralog-filter`)
+- **Plan:** [hidden_paralog_filter.md](doc/devel/ng/impl_plan/hidden_paralog_filter.md); **Spec:** [hidden_paralog_filter.md](doc/devel/ng/spec/hidden_paralog_filter.md); the model it ports: [specs/hidden_paralog_filter.md](doc/devel/specs/hidden_paralog_filter.md) and [architecture/hidden_paralog_single_sample_scoring.md](doc/devel/architecture/hidden_paralog_single_sample_scoring.md). No architecture document — the spec's §3.7 type blocks are the code shape.
+- **Code:** [src/ng/paralog/coverage_model.rs](src/ng/paralog/coverage_model.rs) (production's per-sample coverage fit, verbatim), [src/ng/paralog/model_params.rs](src/ng/paralog/model_params.rs) (the model constants and grids, verbatim), [src/ng/paralog/mod.rs](src/ng/paralog/mod.rs) (ng's own declarations, re-exports and one added test), [src/ng/paralog/copy_fidelity.rs](src/ng/paralog/copy_fidelity.rs) (the textual guard on the copies).
+- **Impl reports:** [A1 (constants + coverage model)](doc/devel/reports/implementations/ng_paralog_filter_a1_2026-09-06.md)
+- **Latest review:** [A1](doc/devel/reports/reviews/ng_paralog_filter_a1_2026-09-06.md) (0 Blocker / 4 Major / 8 Minor, Approve-with-changes) — **fixes:** [applied](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_a1_2026-09-06.md) (10 applied, 2 deferred)
+- **Open:**
+  - **The plan's first precondition does not hold, one step earlier than the plan says.** A1 needs ng's `CoverageByGcHistogram` and B1 needs its `WindowCoverage`, both from [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md)'s *first* step, not its Checkpoint C. A1 fits from production's `CoverageByGcHistogram` meanwhile.
+  - **⛦ For Checkpoint A — which fields ng's `CoverageByGcHistogram` carries is unsettled, and the two documents disagree.** [window_coverage.md](doc/devel/ng/spec/window_coverage.md) §7 drops the fields the model fit does not read; production's transcribed test fixture (`coverage_model.rs:714-723`) builds all eight, so a verbatim port needs them all. Measured, not predicted: with §7 followed, the swap fails to compile (`E0560 … has no field named callable_positions`); with the fields kept, it is one `use` line. The decision belongs to that spec, on `ng-window-coverage`.
+  - **Nothing yet makes the temporary import temporary** (review Mi3). The fix — a step in this plan with window coverage's first step as its precondition — is a plan edit the plan-driven loop may not make.
+  - **Spec §3.2's one decision beyond production — every record scored, non-SNPs on coverage alone — is confirmed with the owner before step C1 is coded.**
+  - **`main` is red on four checks**, which costs this branch (and every branch) the `--all-targets` gate: `examples/ng_candidate_selection_probe.rs` does not compile against the current `ClosedLocus`; `ng_calling_loop_calls_genotypes::a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele` fails; `cargo fmt --check` is dirty on nine files; `cargo clippy -D warnings` fires three `needless_lifetimes`. None is this plan's to fix.
+
 ---
 
 ## Standing project-wide items

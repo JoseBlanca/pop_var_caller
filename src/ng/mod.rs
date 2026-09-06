@@ -16,7 +16,9 @@
 //! ([`calling`] — so far the vocabulary its four sub-modules will share, and two of the
 //! four: step 8's [`calling::genotype_prior`], as its folder and the four files the plan
 //! fills, and step 6's [`calling::allele_candidates`], so far the two constants its
-//! admission rule is made of).
+//! admission rule is made of); and step 11a's hidden-duplication filter
+//! ([`paralog`] — production's statistics copied in, so far the per-sample
+//! coverage model that says what one copy's depth looks like).
 //!
 //! **Production is frozen.** ng is a from-scratch caller: it does not edit
 //! `src/ssr/` or `src/regions.rs` — nor, since the generic locus generator's port,
@@ -60,6 +62,7 @@ mod scanner_parity;
 pub mod alignment;
 pub mod calling;
 pub mod locus_generation;
+pub mod paralog;
 pub mod parameter_estimation;
 pub mod psp;
 pub mod raw_chrom_reader;
