@@ -147,7 +147,7 @@ fn the_transcription_matches_production_on_streams_neither_test_was_written_for(
         // produces a histogram at all, and that every window emitted was folded into it.
         let (production_tail, _production_histogram) = production.finish();
         let (transcribed_tail, transcribed_histogram) = transcription.finish();
-        let transcribed_histogram = transcribed_histogram.expect(
+        let transcribed_histogram = transcribed_histogram.fitted().expect(
             "every window here clears a floor of 1 and the depths are positive, so a width is \
              fitted and a histogram comes back",
         );

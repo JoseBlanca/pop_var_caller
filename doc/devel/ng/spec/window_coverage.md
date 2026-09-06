@@ -209,11 +209,18 @@ speaking.
 
 ### 3.4 The histogram — production's shape, with the depth axis scaled to the sample
 
-**Every finalised window is folded into a per-sample count matrix indexed by GC bin and depth
-bin**, production's [`CoverageByGcHistogram`, `sample_summary/mod.rs:118`](../../../../src/sample_summary/mod.rs)
+**Every finalised window that clears §3.3's floor is folded into a per-sample count matrix
+indexed by GC bin and depth bin**, production's [`CoverageByGcHistogram`, `sample_summary/mod.rs:118`](../../../../src/sample_summary/mod.rs)
 — the input the filter's model fit reads and the one it was validated on. The accumulator already
 does this fold ([`coverage.rs:445`](../../../../src/sample_summary/coverage.rs), `finish` returns
 the histogram beside the tail).
+
+**A window under the floor is finalised and is deliberately *not* folded.** Both casts of `NaN`
+come back `0`, so folding one would pile every too-sparse window into a single cell — the lowest
+GC bin's lowest depth bin — in exactly the samples and regions where coverage is thinnest, and
+the yardstick would carry a spike of windows that had no depth to report. The histogram counts
+the silenced windows separately (§3.5) so that a yardstick fitted from a small share of a
+sample's positions is visible as such.
 
 **The bin scheme is where ng departs, because production's does not fit the budget or the
 range.** Production bins depth at 0.5× in 2,000 bins to 1,000×, 50 GC bins, four bytes a cell:
@@ -229,7 +236,10 @@ sample's own depth.** The accumulator buffers its first `depth_scale_windows` fi
 times that median (`width = median / 40`); it then folds the buffered windows and every later one.
 A sample whose whole run finalises fewer than 10,000 windows sets the width from what it has at
 `finish`; a sample with none has no histogram and is carried absent. **80.2 kB a sample** —
-50 × 401 × 4 bytes — plus a 120 kB transient while the first windows are buffered; 80 MB at a
+50 × 401 × 4 bytes — plus a **262 kB** transient while the first windows are held back — 10,000 pairs of `f64` is
+160 kB of live data, and the list grows by doubling, so its capacity reaches 16,384 (measured,
+2026-09-06; this paragraph previously said 120 kB, which left the budget below looking about
+145 kB roomier than it is); 80 MB at a
 thousand samples, 240 MB at three thousand. On tomato that fits today (108 kB + 80); on a human
 reference it fits once the run's readers share one contig list, the psp path plan's step D1
 (480 kB → 123). The plan measures the overflow fraction — the share of windows above the range,
@@ -276,14 +286,28 @@ from the record.
 **The histograms leave the cache when the merge does.** `into_sources` already hands the readers
 back so a mode can report per-sample facts
 ([`observation_cache.rs`](../../../../src/ng/run/cohort_merge/observation_cache.rs), `into_sources`);
-the histograms come out the same way, one per sample in the run's sample order, `None` for a
-sample that finalised no window.
+the histograms come out the same way, one per sample in the run's sample order, each either a
+fitted histogram or the reason there is none.
 
 ```rust
-/// A sample's finished histogram, or `None` where it finalised no window at all.
+/// A sample's finished histogram, or the reason it has none. The three silences are
+/// three different reports and this is the only place the difference exists: the pass
+/// reached nothing of this sample; every window it did finalise was under the floor,
+/// which is a reading on `min_window_positions` rather than a fault; or its windows
+/// reported no positive median depth, which is. A caller that does not act on the
+/// difference says `.fitted()` and gets an `Option` back.
+pub enum SampleHistogram {
+    Fitted(CoverageByGcHistogram),
+    NoWindowFinalised,
+    EveryWindowUnderTheFloor,
+    MedianDepthNotPositive,
+}
+
 /// Production's `CoverageByGcHistogram` shape, carrying what the model fit reads:
-/// the scheme (window width, GC bins, depth bin width and count), the counts,
-/// and the number of windows folded.
+/// the scheme (window width, GC bins, depth bin width and count), the counts, the
+/// number of windows folded, and the number the floor silenced — a yardstick fitted
+/// from a tenth of a sample's positions is one to trust less, and nothing else
+/// downstream can recover that, because an absent window leaves no trace in any cell.
 pub struct CoverageByGcHistogram { /* copied; §7 */ }
 ```
 
@@ -302,8 +326,8 @@ impl WindowCoverageAccumulator {
     pub fn observe(&mut self, contig: ContigId, position: Position, reference_base: u8, depth: u32);
     /// The next finalised centre, oldest first; `None` when none is complete yet.
     pub fn pop_ready(&mut self) -> Option<(GenomePosition, WindowCoverage)>;
-    /// Finalise the tail and hand back the histogram.
-    pub fn finish(self) -> (Vec<(GenomePosition, WindowCoverage)>, Option<CoverageByGcHistogram>);
+    /// Finalise the tail and hand back the histogram, or the reason there is none.
+    pub fn finish(self) -> (Vec<(GenomePosition, WindowCoverage)>, SampleHistogram);
 }
 ```
 
@@ -326,8 +350,9 @@ impl WindowCoverageAccumulator {
 
 ## 5. Cross-cutting concerns
 
-- **Memory** — §3.4's histogram, the ready deque (one 12-byte entry per held position per
-  sample), and the half-window of extra held summaries. Nothing grows with the genome.
+- **Memory** — §3.4's histogram, the ready deque (one **24-byte** entry per held position per
+  sample: §3.6's `pop_ready` hands back a `GenomePosition` beside the pair, and ng's `Position`
+  is a `u64`), and the half-window of extra held summaries. Nothing grows with the genome.
 - **Errors** — a reference fetch that fails is a `RunError` naming the region, as the padding
   fetch's failure already is (`RunError::PaddingBaseUnreadable`). Nothing else here can fail: an
   absent window is a value, not an error.
@@ -361,7 +386,7 @@ impl WindowCoverageAccumulator {
 | what | existing code | how it is reused |
 |---|---|---|
 | the sliding window and its histogram fold | [`SlidingWindowCoverageAccumulator`, `coverage.rs:331-540`](../../../../src/sample_summary/coverage.rs) and its tests `:780-1050` | transcribed into `src/ng/window_coverage/`, production untouched (the freeze rule); the floor and the per-sample width are the only additions |
-| the histogram type | [`CoverageByGcHistogram`, `sample_summary/mod.rs:118`](../../../../src/sample_summary/mod.rs) | copied; fields the model fit does not read (`callable_positions`, heterozygosity) dropped — a boy-scout choice for the coder |
+| the histogram type | [`CoverageByGcHistogram`, `sample_summary/mod.rs:118`](../../../../src/sample_summary/mod.rs) | copied; fields the model fit does not read dropped — `callable_positions` (production's own reader is `var_calling::diversity`) and `n_skipped_tiles`, which the sliding model can only ever write as zero; `windows_under_the_floor` added (§3.5) |
 | depth per position from a record | [`num_obs_along_locus`, `locus_generation/mod.rs:67`](../../../../src/ng/locus_generation/mod.rs) | called as-is on bodies spanning more than one base |
 | the head count | [`LocusSummary::reads_compared_with_reference`, `observation_cache.rs`](../../../../src/ng/run/cohort_merge/observation_cache.rs) | read as-is at single-base records |
 | the draw, hold, evict rhythm | [`draw_next`, `evict_before`, `cover`](../../../../src/ng/run/cohort_merge/observation_cache.rs) | the accumulator is observed at the draw, its values held and evicted with the summaries; `cover` gains the look-ahead |

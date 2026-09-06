@@ -4423,12 +4423,15 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   why A1's review gave the four behaviours it used to guard alone their own unit tests first.
 - **Open:** the floor's default (spec §3.3) and the histogram's three bin constants (spec §3.4)
   are soft until plan steps D1 and D2 measure them.
-- **⚠ Five items owed to the owner at Checkpoint A**, none of them the implementer's to change:
-  spec §3.4's "Every finalised window is folded" now contradicts the code (an absent window is
-  finalised and not folded); `finish` returning a reason rather than one bit, which spec §3.5 and
-  §3.6 fix as `Option`; a `windows_under_the_floor` counter on the histogram, recommended but a
-  change to the type the hidden-paralog filter plan reads; spec §5's 12-byte ready-deque entry,
-  which is 24 bytes; and spec §3.4's "120 kB transient", which is 262 kB.
+- **Checkpoint A ruled by the owner, 2026-09-06, and the spec updated with it:** `finish` hands
+  back **`SampleHistogram`** — the histogram, or which of the three silences it was (the pass
+  reached nothing; every window was under the floor, which is a reading on the floor and not a
+  fault; the windows reported no positive median depth, which is) — and
+  `CoverageByGcHistogram` carries **`windows_under_the_floor`**, so a yardstick fitted from a
+  small share of a sample's positions is visible as such. Spec §3.4, §3.5, §3.6, §5 and §7
+  amended in the same commit, including three figures that were wrong: an absent window is
+  finalised and deliberately not folded, the hold-back transient is 262 kB and not 120, and the
+  ready deque's entry is 24 bytes and not 12.
 
 ---
 

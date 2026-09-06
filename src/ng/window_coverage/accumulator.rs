@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 
-use super::{CoverageByGcHistogram, WindowCoverage, WindowCoverageConfig};
+use super::{CoverageByGcHistogram, SampleHistogram, WindowCoverage, WindowCoverageConfig};
 use crate::ng::types::{ContigId, GenomePosition, Position};
 
 /// A covered position retained in the sliding-window buffer.
@@ -146,6 +146,10 @@ pub struct WindowCoverageAccumulator {
     /// Windows folded into the histogram so far — one per covered position, minus the ones
     /// the floor silenced.
     windows_folded: u64,
+    /// Windows the floor silenced so far. Together with `windows_folded` this is every window
+    /// finalised, which is what lets `finish` tell "this sample reached nothing" from "this
+    /// sample reached ground its windows were all too thin to speak for".
+    windows_under_the_floor: u64,
     /// Contig currently being folded; `None` before the first position.
     contig: Option<ContigId>,
     /// Covered positions retained, in coordinate order (see the type's `# Invariants`).
@@ -185,6 +189,7 @@ impl WindowCoverageAccumulator {
             depth_bin_width: DepthBinWidth::AwaitingWindows(Vec::new()),
             config,
             windows_folded: 0,
+            windows_under_the_floor: 0,
             contig: None,
             positions: VecDeque::new(),
             centre_offset: 0,
@@ -266,20 +271,17 @@ impl WindowCoverageAccumulator {
     /// [`pop_ready`](Self::pop_ready), plus the tail just finalised — come back with it.
     /// Consuming `self` and returning the tail is what stops a caller forgetting to drain.
     ///
-    /// **There is no histogram for a sample the width could not be fitted from** — one that
-    /// finalised no window at all, or none that cleared the floor, or whose median window depth
-    /// was not a positive number. Such a sample is carried absent (spec §3.5).
+    /// **A sample the width could not be fitted from comes back with the reason instead** — it
+    /// finalised no window at all, or none that cleared the floor, or the windows it did have
+    /// reported no positive median depth. The three are three different reports, and this is the
+    /// only place the difference exists; a caller that does not act on it can say
+    /// [`fitted`](SampleHistogram::fitted) and get an `Option` back.
     ///
     /// A sample that finalised fewer windows than `depth_scale_windows` fits its width here,
     /// from what it has.
     #[must_use = "the tail windows and the histogram are the pass's whole output; dropping \
                   them discards every window the accumulator has not already handed over"]
-    pub fn finish(
-        mut self,
-    ) -> (
-        Vec<(GenomePosition, WindowCoverage)>,
-        Option<CoverageByGcHistogram>,
-    ) {
+    pub fn finish(mut self) -> (Vec<(GenomePosition, WindowCoverage)>, SampleHistogram) {
         self.finalise_all();
         self.fit_depth_bin_width_and_fold_held_back();
         let tail: Vec<(GenomePosition, WindowCoverage)> = self.ready.into_iter().collect();
@@ -298,15 +300,24 @@ impl WindowCoverageAccumulator {
             depth_range_in_medians: _,
         } = self.config;
         let histogram = match self.depth_bin_width {
-            DepthBinWidth::Fitted(depth_bin_width) => Some(CoverageByGcHistogram {
-                window_bp,
-                gc_bins,
-                depth_bin_width,
-                depth_bins,
-                windows_folded: self.windows_folded,
-                counts: self.counts,
-            }),
-            DepthBinWidth::AwaitingWindows(_) | DepthBinWidth::Unfittable => None,
+            DepthBinWidth::Fitted(depth_bin_width) => {
+                SampleHistogram::Fitted(CoverageByGcHistogram {
+                    window_bp,
+                    gc_bins,
+                    depth_bin_width,
+                    depth_bins,
+                    windows_folded: self.windows_folded,
+                    windows_under_the_floor: self.windows_under_the_floor,
+                    counts: self.counts,
+                })
+            }
+            // Nothing was ever held back. Either no window was finalised at all, or every one
+            // of them was refused by the floor — and those are the two the counter separates.
+            DepthBinWidth::AwaitingWindows(_) if self.windows_under_the_floor == 0 => {
+                SampleHistogram::NoWindowFinalised
+            }
+            DepthBinWidth::AwaitingWindows(_) => SampleHistogram::EveryWindowUnderTheFloor,
+            DepthBinWidth::Unfittable => SampleHistogram::MedianDepthNotPositive,
         };
         (tail, histogram)
     }
@@ -382,6 +393,7 @@ impl WindowCoverageAccumulator {
             // `NaN` divided by the bin width casts to 0, so folding an absent window would pile
             // every too-sparse window into the lowest-GC, lowest-depth cell — and the yardstick
             // the filter fits would carry a spike of windows that had no depth to report.
+            self.windows_under_the_floor += 1;
             WindowCoverage::absent()
         } else {
             let divisor = self.summed_positions as f64;
@@ -529,6 +541,16 @@ mod tests {
         Vec<(GenomePosition, WindowCoverage)>,
         Option<CoverageByGcHistogram>,
     ) {
+        let (windows, histogram) = run_sliding_with_the_reason(config, contig, stream);
+        (windows, histogram.fitted())
+    }
+
+    /// The whole answer, including which silence it was.
+    fn run_sliding_with_the_reason(
+        config: WindowCoverageConfig,
+        contig: u32,
+        stream: &[(u64, u8, u32)],
+    ) -> (Vec<(GenomePosition, WindowCoverage)>, SampleHistogram) {
         let mut accumulator = WindowCoverageAccumulator::new(config);
         let mut out = Vec::new();
         for &(position, base, depth) in stream {
@@ -553,6 +575,52 @@ mod tests {
             windows,
             histogram.expect("this fixture folds windows, so a depth width was fitted"),
         )
+    }
+
+    /// **The three silences are three different answers**, and this is where that is asserted:
+    /// a sample the pass never reached, one whose every window the floor refused, and one whose
+    /// windows reported no positive depth. Collapsing them would lose the middle one, which is a
+    /// reading on the floor rather than a fault and is the likely case at one low-coverage
+    /// sample.
+    #[test]
+    fn a_sample_without_a_histogram_says_which_silence_it_was() {
+        let (_, nothing_reached) = run_sliding_with_the_reason(sliding_config(), 0, &[]);
+        assert_eq!(nothing_reached, SampleHistogram::NoWindowFinalised);
+
+        // Two positions 100 apart at a window of 10: each window holds only its own centre, so
+        // both are one short of a floor of two.
+        let silenced = [(1u64, b'G', 7u32), (101, b'G', 7)];
+        let (_, all_refused) = run_sliding_with_the_reason(floored_config(2), 0, &silenced);
+        assert_eq!(all_refused, SampleHistogram::EveryWindowUnderTheFloor);
+
+        let zero_depth: Vec<(u64, u8, u32)> = (1..=5u64).map(|p| (p, b'G', 0u32)).collect();
+        let (_, no_median) = run_sliding_with_the_reason(sliding_config(), 0, &zero_depth);
+        assert_eq!(no_median, SampleHistogram::MedianDepthNotPositive);
+    }
+
+    /// The histogram says how many windows the floor silenced, so that a yardstick fitted from a
+    /// small share of a sample's positions can be told from one fitted from all of them.
+    ///
+    /// Positions 1..=6 at a floor of 3, in a ten-base window: the first two and the last two
+    /// hold fewer than three covered positions and are refused; the middle two hold all six.
+    #[test]
+    fn the_histogram_counts_the_windows_the_floor_silenced() {
+        let stream: Vec<(u64, u8, u32)> = [1u64, 2, 3, 100, 200, 300]
+            .into_iter()
+            .map(|p| (p, b'G', 9u32))
+            .collect();
+        let (windows, histogram) = run_sliding(floored_config(3), 0, &stream);
+        assert_eq!(windows.len(), 6);
+        assert_eq!(
+            histogram.windows_folded + histogram.windows_under_the_floor,
+            windows.len() as u64,
+            "every finalised window is either folded or counted as silenced",
+        );
+        assert_eq!(
+            histogram.windows_folded, 3,
+            "only the run of three clears a floor of 3"
+        );
+        assert_eq!(histogram.windows_under_the_floor, 3);
     }
 
     // -- production's sliding-window tests, transcribed --------------------------------
@@ -795,7 +863,10 @@ mod tests {
         let (windows, histogram) = accumulator.finish();
         assert_eq!(windows.len(), 5, "every window returned, none dropped");
         assert_eq!(
-            histogram.expect("five windows were folded").windows_folded,
+            histogram
+                .fitted()
+                .expect("five windows were folded")
+                .windows_folded,
             5,
         );
     }
@@ -1161,7 +1232,7 @@ mod tests {
             }
             let (tail, histogram) = accumulator.finish();
             out.extend(tail);
-            (out, histogram)
+            (out, histogram.fitted())
         }
 
         let (windows, histogram) = run(6);
@@ -1518,7 +1589,7 @@ mod tests {
             }
         }
         let (_, histogram) = accumulator.finish();
-        let histogram = histogram.expect("four windows were folded");
+        let histogram = histogram.fitted().expect("four windows were folded");
         assert_eq!(
             histogram.depth_bin_width, 2.5,
             "median 10 from the first contig × range 1 / 4 bins",

@@ -271,6 +271,45 @@ impl PartialEq for WindowCoverage {
     }
 }
 
+/// What a sample's pass produced: its histogram, or the reason there is none.
+///
+/// **Three silences, and they are three different reports.** A sample that reached no covered
+/// position at all says the pass covered nothing of it. A sample whose every window was refused
+/// says [`WindowCoverageConfig::min_window_positions`] is set above what this sample's coverage
+/// can reach — a reading on the floor rather than a fault, and the likely case at one
+/// low-coverage sample, which is the hardest input this caller commits to. A sample whose
+/// windows reported no positive median depth says the depths arriving from upstream are zero,
+/// which is a fault. Collapsing the three would throw away the only place the difference is
+/// visible.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SampleHistogram {
+    /// The sample's histogram, cut on a depth axis fitted from its own depth.
+    Fitted(CoverageByGcHistogram),
+    /// No window was finalised: the pass reached no covered position for this sample.
+    NoWindowFinalised,
+    /// Every window this sample finalised held fewer than
+    /// [`WindowCoverageConfig::min_window_positions`] covered positions, so all of them were
+    /// refused and none could train a yardstick.
+    EveryWindowUnderTheFloor,
+    /// The windows the depth axis would have been fitted from had no positive median depth, so
+    /// there is no width to cut bins at.
+    MedianDepthNotPositive,
+}
+
+impl SampleHistogram {
+    /// The histogram, or `None` for a sample that has none — for a caller that does not act on
+    /// which silence it was.
+    #[must_use]
+    pub fn fitted(self) -> Option<CoverageByGcHistogram> {
+        match self {
+            Self::Fitted(histogram) => Some(histogram),
+            Self::NoWindowFinalised
+            | Self::EveryWindowUnderTheFloor
+            | Self::MedianDepthNotPositive => None,
+        }
+    }
+}
+
 /// One sample's finished coverage-by-GC histogram: a row-major `[gc_bin][depth_bin]` count
 /// matrix over every window the sample finalised, plus the bin scheme needed to read a cell.
 ///
@@ -306,6 +345,14 @@ pub struct CoverageByGcHistogram {
     /// this counts the sample's covered positions **minus** the ones whose window was too
     /// sparse to speak.
     pub windows_folded: u64,
+    /// How many windows the floor silenced — the difference between this sample's covered
+    /// positions and [`windows_folded`](Self::windows_folded).
+    ///
+    /// **What it is for.** A histogram alone cannot tell a thinly covered sample from one whose
+    /// windows were mostly refused, and a yardstick fitted from a tenth of a sample's positions
+    /// is one to trust less. Nothing downstream can recover the number: an absent window leaves
+    /// no trace in any cell, by design.
+    pub windows_under_the_floor: u64,
     /// Row-major `[gc_bin][depth_bin]` counts. Length is exactly `gc_bins * (depth_bins + 1)`.
     ///
     /// **A cell saturates at `u32::MAX` rather than wrapping.** One window is folded per
