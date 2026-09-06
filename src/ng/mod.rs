@@ -73,6 +73,7 @@ pub mod segmentation_inputs;
 pub mod tandem_repeat;
 pub mod types;
 pub mod vcf;
+pub mod window_coverage;
 
 pub use ref_seq::{
     ContigTable, EvictableRefSeq, InMemoryRefSeq, RawRefSeq, RefSeq, RefSeqError, ResidentRefSeq,

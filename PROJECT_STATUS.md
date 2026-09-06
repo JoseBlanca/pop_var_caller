@@ -4372,6 +4372,37 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     timed hidden flushes. Both writers are now built with `new_with_block_layout` and a window
     no position can cross, and an assert names the premise if it breaks again.
 
+#### Window coverage — each sample's depth and GC around a locus, and the histogram behind it
+- **Status:** `implemented` — Milestone A step A1 only (branch `ng-window-coverage`). Nothing
+  calls the module yet; the cache learns to feed it at Milestone C.
+- **Plan:** [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md);
+  **Spec:** [window_coverage.md](doc/devel/ng/spec/window_coverage.md). No architecture
+  document — the spec's §3 type blocks are the code shape. Its consumer, built separately:
+  [hidden_paralog_filter.md](doc/devel/ng/spec/hidden_paralog_filter.md).
+- **Code:** [src/ng/window_coverage/](src/ng/window_coverage/) —
+  [mod.rs](src/ng/window_coverage/mod.rs) (`WindowCoverageConfig`, `WindowCoverage`,
+  `CoverageByGcHistogram`), [accumulator.rs](src/ng/window_coverage/accumulator.rs)
+  (`WindowCoverageAccumulator`), [production_parity.rs](src/ng/window_coverage/production_parity.rs).
+- **Impl report:** [A1](doc/devel/reports/implementations/ng_window_coverage_a1_2026-09-06.md);
+  **review:** [A1](doc/devel/reports/reviews/ng_window_coverage_a1_2026-09-06.md) (1 Blocker,
+  5 Major, 18 Minor — all applied or deferred with a home; the fixes are in the same commit).
+- **A1 done (the accumulator, copied):** production's `SlidingWindowCoverageAccumulator`
+  ([coverage.rs](src/sample_summary/coverage.rs)) transcribed with its eleven sliding-window
+  tests, under spec §3.6's names and ng's coordinate types; the fixed-tile accumulator and the
+  heterozygosity fields left behind, and two histogram fields dropped. **The copy is checked
+  against the original, not only against hand arithmetic:** 200 pseudo-random streams over
+  window widths 1 to 600 compare **447,581 window means and GC fractions bit for bit**, plus
+  every histogram cell. **Fourteen of the module's fifteen new unit tests exist because a
+  mutation survived the twelve the step started with** — nineteen mutations run, seven
+  survivors, every one now carried by a unit test rather than by the differential alone, which
+  matters because the differential's histogram half stops applying at step A3.
+- **The standing oracle for every step of this plan:** a run with the filter off writes byte for
+  byte what it writes today. Baseline taken 2026-09-06 on six tomato accessions over the first
+  two 100 kb intervals of `benchmarks/tomato1/regions.bed` — 2,311 records, direct mode and psp
+  mode identical apart from `##commandline` (sha256 `84ad19c2…`).
+- **Open:** the floor's default (spec §3.3) and the histogram's three bin constants (spec §3.4)
+  are soft until plan steps D1 and D2 measure them.
+
 ---
 
 ## Standing project-wide items
