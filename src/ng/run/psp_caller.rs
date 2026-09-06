@@ -447,6 +447,10 @@ impl PspVariantCaller {
         // **One accessor for the whole run, never shared** — it walks forward with the merge
         // and releases what it has passed, exactly as direct mode's does.
         let padding_reference = walk_reference.accessor();
+        // **A second accessor, for the merge's own reading** — the padding one is read at the
+        // record and this one at the cover, and one accessor serving both would have two
+        // callers sliding a single window in two directions (`spec/window_coverage.md` §3.2).
+        let reference_for_the_merge = walk_reference.accessor();
         // **Destructured rather than reached through accessors**, so that the readers can be
         // borrowed mutably while the table they are renumbered through is borrowed by the
         // same expression: they are separate fields, and only a destructuring says so.
@@ -487,7 +491,7 @@ impl PspVariantCaller {
         };
         let CohortCallingOutcome { calling, sources } =
             call_cohort_from_sources_handing_each_record_over(
-                ObservationCache::over(sources),
+                ObservationCache::over(sources, Box::new(reference_for_the_merge)),
                 inputs,
                 genotyper,
                 hand_over,

@@ -484,10 +484,11 @@ impl AlignedFilesVariantCaller {
     /// this is the merge's own oracle, not the path a run takes.
     /// [`call_cohort`](Self::call_cohort) is the run's, and it hands the tallies back.
     pub fn merge_cohort(self) -> Result<RegionOutcome, RunError> {
+        let reference_for_the_merge = self.walk_reference.accessor();
         let pieces = self.walkers()?;
         let merge = pieces.merge_parameters;
         let segmentation = Arc::clone(&pieces.segmentation);
-        let mut cache = ObservationCache::over(pieces.walkers);
+        let mut cache = ObservationCache::over(pieces.walkers, Box::new(reference_for_the_merge));
         merge_cohort_through_cache(
             segmentation.analysed_regions(),
             &mut cache,
@@ -545,6 +546,10 @@ impl AlignedFilesVariantCaller {
     {
         let run_sample_count = self.samples.len();
         let sample_names: Vec<String> = self.sample_names().map(str::to_owned).collect();
+        // **The merge's own accessor, minted beside the padding one** — one for the whole run,
+        // sliding forward with the merge and shared with nothing (`spec/window_coverage.md`
+        // §3.2). Taken before `walkers()` consumes the run.
+        let reference_for_the_merge = self.walk_reference.accessor();
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -579,7 +584,7 @@ impl AlignedFilesVariantCaller {
         // and what the report owes is how many, not where each one was.
         let mut tracts = TractOutcomes::default();
 
-        let mut cache = ObservationCache::over(walkers);
+        let mut cache = ObservationCache::over(walkers, Box::new(reference_for_the_merge));
         merge_cohort_handing_each_locus_over(
             segmentation.analysed_regions(),
             &mut cache,
@@ -668,6 +673,10 @@ impl AlignedFilesVariantCaller {
         // caller. One accessor for the whole run, never shared: it walks forward with the merge
         // and releases what it has passed.
         let padding_reference = self.walk_reference.accessor();
+        // **A second accessor, for the merge's own reading** — the padding one is read at the
+        // record and this one at the cover, and one accessor serving both would have two
+        // callers sliding a single window in two directions (`spec/window_coverage.md` §3.2).
+        let reference_for_the_merge = self.walk_reference.accessor();
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -689,7 +698,7 @@ impl AlignedFilesVariantCaller {
         };
         let CohortCallingOutcome { calling, sources } =
             call_cohort_from_sources_handing_each_record_over(
-                ObservationCache::over(walkers),
+                ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
                 inputs,
                 genotyper,
                 hand_over,
@@ -3869,7 +3878,10 @@ mod cohort_loci_from_reads_match_cohort_loci_from_records {
             "every sample must have walked something, or this compares two empty answers"
         );
 
-        let sources: Vec<std::vec::IntoIter<Result<SampleLocusObservations, Infallible>>> =
+        // `RunError` rather than `Infallible`, because the cache's cover can fail on its own
+        // account now — it reads the reference once a cover — and a source that cannot fail
+        // does not make the merge infallible.
+        let sources: Vec<std::vec::IntoIter<Result<SampleLocusObservations, RunError>>> =
             per_sample
                 .iter()
                 .map(|sample| {
@@ -3883,7 +3895,14 @@ mod cohort_loci_from_reads_match_cohort_loci_from_records {
                 .collect();
         let segmentation = segmentation_built_on([7; 16]);
         let merge = MergeParameters::DEFAULT;
-        let mut cache = ObservationCache::over(sources);
+        // **The run's own reference and not a fixture one**: this test compares a merge over
+        // records held in memory against a merge over the walkers that produced them, and the
+        // cache reads the reference over the ground it covers, so the two must read the same
+        // bases from the same file.
+        let mut cache = ObservationCache::over(
+            sources,
+            Box::new(open_over(&paths, &reference).walk_reference.accessor()),
+        );
         let from_memory = merge_cohort_through_cache(
             segmentation.analysed_regions(),
             &mut cache,
@@ -5374,6 +5393,10 @@ mod records_handed_over_as_the_run_finishes_them {
         // **Minted before `walkers` takes the run apart**, exactly as the run's own driver
         // does — `walkers` consumes the caller.
         let padding_reference = caller.walk_reference.accessor();
+        // Taken before the caller is consumed below, for the same reason the run's own two are
+        // minted side by side: the merge reads the reference at the cover and the record writer
+        // at the record, and one accessor cannot serve both.
+        let reference_for_the_merge = caller.walk_reference.accessor();
         let RunReadyToWalk {
             segmentation,
             mut merge_parameters,
@@ -5417,7 +5440,7 @@ mod records_handed_over_as_the_run_finishes_them {
         };
         let mut handed = 0;
         let outcome = call_cohort_from_sources_handing_each_record_over(
-            ObservationCache::over(vec![drawn.into_iter()]),
+            ObservationCache::over(vec![drawn.into_iter()], Box::new(reference_for_the_merge)),
             inputs,
             &the_shipped_genotyper(),
             &mut |_record| {

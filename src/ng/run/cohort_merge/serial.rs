@@ -23,7 +23,9 @@ use super::build::{
     CohortObservation, RegionOutcome, build_region, build_region_handing_over_windowed,
 };
 use crate::ng::locus_generation::SampleLocusObservations;
-use super::observation_cache::{ObservationCache, ObservationSource, building_regions_of};
+use super::observation_cache::{
+    ObservationCache, ObservationSource, ReferenceUnreadable, building_regions_of,
+};
 use super::timing;
 use super::{
     CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads,
@@ -154,6 +156,7 @@ pub fn merge_cohort_through_cache<S, E>(
 ) -> Result<RegionOutcome, E>
 where
     S: ObservationSource<Error = E>,
+    E: From<ReferenceUnreadable>,
 {
     let mut merged = RegionOutcome::default();
     // Two disjoint borrows of one outcome, so that collecting the loci is this driver's
@@ -203,6 +206,7 @@ pub fn merge_cohort_handing_each_locus_over<S, E>(
 ) -> Result<(), E>
 where
     S: ObservationSource<Error = E>,
+    E: From<ReferenceUnreadable>,
 {
     merge_handing_each_locus_over_with(
         analysed,
@@ -257,7 +261,7 @@ pub fn merge_cohort_handing_each_locus_over_covering_samples_in_parallel<S, E>(
 ) -> Result<(), E>
 where
     S: ObservationSource<Error = E> + Send,
-    E: Send,
+    E: Send + From<ReferenceUnreadable>,
 {
     if rayon::current_num_threads() > 1 {
         merge_handing_each_locus_over_with(
@@ -1017,8 +1021,9 @@ mod tests {
     ) -> RegionOutcome {
         let oracle =
             merge_cohort_serially(analysed, per_sample, max_cohort_locus_span, min_alt_reads);
-        let mut cache =
-            ObservationCache::over(per_sample.iter().map(|sample| source_of(sample)).collect());
+        let mut cache = ObservationCache::over_fixture(
+            per_sample.iter().map(|sample| source_of(sample)).collect(),
+        );
         let through_cache = merge_cohort_through_cache(
             analysed,
             &mut cache,
@@ -1099,8 +1104,9 @@ mod tests {
         oracle: &RegionOutcome,
     ) {
         for regions in [1, 4, 16] {
-            let mut cache =
-                ObservationCache::over(per_sample.iter().map(|sample| source_of(sample)).collect());
+            let mut cache = ObservationCache::over_fixture(
+                per_sample.iter().map(|sample| source_of(sample)).collect(),
+            );
             let in_parallel = merge_cohort_in_parallel(
                 analysed,
                 &mut cache,
@@ -1153,8 +1159,9 @@ mod tests {
         max_cohort_locus_span: MaxCohortLocusSpan,
         min_alt_reads: MinAltReads,
     ) {
-        let mut cache =
-            ObservationCache::over(per_sample.iter().map(|sample| source_of(sample)).collect());
+        let mut cache = ObservationCache::over_fixture(
+            per_sample.iter().map(|sample| source_of(sample)).collect(),
+        );
         let mut organiser = Organiser::new();
         let mut next_index = 0u64;
 
@@ -1382,7 +1389,8 @@ mod tests {
         let deleting = [member(region(305, 330), &[b'A'; 26], b"A")];
         let inside = [member(region(310, 310), b"A", b"T")];
 
-        let mut cache = ObservationCache::over(vec![source_of(&deleting), source_of(&inside)]);
+        let mut cache =
+            ObservationCache::over_fixture(vec![source_of(&deleting), source_of(&inside)]);
         let merged = merge_cohort_through_cache(
             &[region(1, 600)],
             &mut cache,
@@ -1592,7 +1600,7 @@ mod tests {
         ]
         .into_iter();
 
-        let mut cache = ObservationCache::over(vec![source_of(&sample), failing]);
+        let mut cache = ObservationCache::over_fixture(vec![source_of(&sample), failing]);
         let outcome = merge_cohort_through_cache(
             &[region(1, 600)],
             &mut cache,
@@ -1616,7 +1624,7 @@ mod tests {
     fn analysed_regions_that_overlap_are_refused_through_the_cache() {
         let sample = [member(region(45, 45), b"G", b"T")];
 
-        let mut cache = ObservationCache::over(vec![source_of(&sample)]);
+        let mut cache = ObservationCache::over_fixture(vec![source_of(&sample)]);
         let _ = merge_cohort_through_cache(
             &[region(1, 60), region(40, 100)],
             &mut cache,
@@ -1649,7 +1657,7 @@ mod tests {
                 member(region(at, at), b"A", b"T")
             })
             .collect();
-        let mut cache = ObservationCache::over(vec![source_of(&dotted)]);
+        let mut cache = ObservationCache::over_fixture(vec![source_of(&dotted)]);
 
         let merged = merge_cohort_through_cache(
             &[region(1, 600)],
@@ -1690,7 +1698,7 @@ mod tests {
             .collect();
 
         let held_at = |bases: u32| {
-            let mut cache = ObservationCache::over(vec![source_of(&dotted)]);
+            let mut cache = ObservationCache::over_fixture(vec![source_of(&dotted)]);
             merge_cohort_through_cache(
                 &[region(1, 600)],
                 &mut cache,
@@ -1727,7 +1735,7 @@ mod tests {
             })
             .collect();
         records.push(Err(SourceFailed("the block would not decode")));
-        let mut cache = ObservationCache::over(vec![records.into_iter()]);
+        let mut cache = ObservationCache::over_fixture(vec![records.into_iter()]);
 
         let outcome = merge_cohort_through_cache(
             &[region(1, 600)],
@@ -1759,7 +1767,7 @@ mod tests {
             start: Position(50),
             end: Position(1),
         };
-        let mut cache = ObservationCache::over(vec![source_of(&sample)]);
+        let mut cache = ObservationCache::over_fixture(vec![source_of(&sample)]);
 
         let _ = merge_cohort_through_cache(
             &[inverted],
@@ -1778,7 +1786,7 @@ mod tests {
     #[should_panic(expected = "not disjoint and ascending")]
     fn analysed_regions_sharing_one_base_are_refused() {
         let sample = [member(region(50, 50), b"G", b"T")];
-        let mut cache = ObservationCache::over(vec![source_of(&sample)]);
+        let mut cache = ObservationCache::over_fixture(vec![source_of(&sample)]);
 
         let _ = merge_cohort_through_cache(
             &[region(1, 50), region(50, 100)],
@@ -1794,7 +1802,7 @@ mod tests {
     #[test]
     fn merging_no_analysed_regions_through_the_cache_yields_nothing() {
         let sample = [member(region(12, 12), b"G", b"T")];
-        let mut cache = ObservationCache::over(vec![source_of(&sample)]);
+        let mut cache = ObservationCache::over_fixture(vec![source_of(&sample)]);
 
         let merged = merge_cohort_through_cache(
             &[],
@@ -1810,13 +1818,13 @@ mod tests {
     }
 
     /// A cohort of no samples merges to nothing rather than failing — the bottom of the range
-    /// this caller commits to (spec §7.2), and the shape `ObservationCache::over(Vec::new())`
+    /// this caller commits to (spec §7.2), and the shape `ObservationCache::over_fixture(Vec::new())`
     /// produces.
     #[test]
     fn merging_no_samples_through_the_cache_yields_nothing() {
         let mut cache: ObservationCache<
             std::vec::IntoIter<Result<SampleLocusObservations, SourceFailed>>,
-        > = ObservationCache::over(Vec::new());
+        > = ObservationCache::over_fixture(Vec::new());
 
         let merged = merge_cohort_through_cache(
             &[region(1, 100)],
@@ -1836,7 +1844,7 @@ mod tests {
     fn the_keep_threshold_reaches_the_builders_through_the_cache() {
         let sample = [member(region(12, 12), b"G", b"T")];
 
-        let mut built_cache = ObservationCache::over(vec![source_of(&sample)]);
+        let mut built_cache = ObservationCache::over_fixture(vec![source_of(&sample)]);
         let built = merge_cohort_through_cache(
             &[region(1, 50)],
             &mut built_cache,
@@ -1845,7 +1853,7 @@ mod tests {
             MinAltReads::DEFAULT,
         )
         .expect("the fixture source holds");
-        let mut quiet_cache = ObservationCache::over(vec![source_of(&sample)]);
+        let mut quiet_cache = ObservationCache::over_fixture(vec![source_of(&sample)]);
         let too_quiet = merge_cohort_through_cache(
             &[region(1, 50)],
             &mut quiet_cache,
@@ -1875,7 +1883,7 @@ mod tests {
             .build()
             .expect("a fixture pool");
         pool.install(|| {
-            let mut cache = ObservationCache::over(
+            let mut cache = ObservationCache::over_fixture(
                 layouts
                     .iter()
                     .map(|sample| source_of(sample))
@@ -1963,7 +1971,7 @@ mod tests {
             .expect("a fixture pool");
 
         let merged = pool.install(|| {
-            let mut cache = ObservationCache::over(vec![failing.into_iter()]);
+            let mut cache = ObservationCache::over_fixture(vec![failing.into_iter()]);
             let mut refused = Vec::new();
             merge_cohort_handing_each_locus_over_covering_samples_in_parallel(
                 &[region(1, 600)],

@@ -4373,11 +4373,12 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     no position can cross, and an assert names the premise if it breaks again.
 
 #### Window coverage — each sample's depth and GC around a locus, and the histogram behind it
-- **Status:** `fixes-applied` — **Milestones A and B complete** (branch `ng-window-coverage`):
-  the accumulator, the floor, the per-sample depth scale, the rule that turns one drawn record
-  into covered positions with a depth at each, and the measurement that says the rule's cheapest
-  branch is sound on real data. Nothing calls the module yet; the merge's observation cache learns
-  to feed it at Milestone C.
+- **Status:** `implemented` — **Milestones A and B complete, Milestone C step C1 written and not
+  yet reviewed** (branch `ng-window-coverage`): the accumulator, the floor, the per-sample depth
+  scale, the rule that turns one drawn record into covered positions with a depth at each, the
+  measurement that says the rule's cheapest branch is sound on real data, and the reference in the
+  merge's cache. The accumulator itself is still uncalled; it goes into the cache's per-sample
+  state at C2.
 - **Plan:** [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md);
   **Spec:** [window_coverage.md](doc/devel/ng/spec/window_coverage.md). No architecture
   document — the spec's §3 type blocks are the code shape. Its consumer, built separately:
@@ -4392,14 +4393,17 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   [A2](doc/devel/reports/implementations/ng_window_coverage_a2_2026-09-06.md),
   [A3](doc/devel/reports/implementations/ng_window_coverage_a3_2026-09-06.md),
   [B1](doc/devel/reports/implementations/ng_window_coverage_b1_2026-09-06.md),
-  [B2](doc/devel/reports/implementations/ng_window_coverage_b2_2026-09-06.md);
+  [B2](doc/devel/reports/implementations/ng_window_coverage_b2_2026-09-06.md),
+  [C1](doc/devel/reports/implementations/ng_window_coverage_c1_2026-09-06.md);
   **reviews:** [A1](doc/devel/reports/reviews/ng_window_coverage_a1_2026-09-06.md) (1 Blocker,
   5 Major, 18 Minor), [A2](doc/devel/reports/reviews/ng_window_coverage_a2_2026-09-06.md)
   (4 Major, 4 Minor), [A3](doc/devel/reports/reviews/ng_window_coverage_a3_2026-09-06.md)
   (1 Blocker, 3 Major, 8 Minor),
   [B1](doc/devel/reports/reviews/ng_window_coverage_b1_2026-09-06.md) (2 Blocker, 3 Major,
   9 Minor), [B2](doc/devel/reports/reviews/ng_window_coverage_b2_2026-09-06.md) (3 Major,
-  11 Minor) — all applied or deferred with a home; each step's fixes are in its own commit.
+  11 Minor), [C1](doc/devel/reports/reviews/ng_window_coverage_c1_2026-09-06.md) (1 Blocker,
+  6 Major, 8 Minor) — all applied or deferred with a home; each step's fixes are in its own
+  commit.
 - **A1 done (the accumulator, copied):** production's `SlidingWindowCoverageAccumulator`
   ([coverage.rs](src/sample_summary/coverage.rs)) transcribed with its eleven sliding-window
   tests, under spec §3.6's names and ng's coordinate types; the fixed-tile accumulator and the
@@ -4466,6 +4470,16 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   read — nor any over a whole genome — exists on this machine; the tomato CRAMs are cut to the
   benchmark's intervals, so the 80-interval store stands in for it, and the claim is measured over
   8 Mb of tomato at 10–14 reads a position rather than over a genome at 3×.
+- **C1 done (the reference into the cache):** the merge's observation cache holds a reference
+  accessor of its own — minted beside the padding one both callers already held — and reads the
+  ground each cover drew, **once per cover** into a buffer every sample will read by offset. **The
+  fetch happens after the cover's fixpoint, not before it**, because the ground a cover reaches is
+  not known until it has been drawn: an observation chaining past the region widens the reach, and
+  every position of it needs a base. A failed fetch is the cache's own failure, converted by the
+  caller into `RunError::WindowCoverageGroundUnreadable`, which names the ground; it ends the
+  cover rather than being absorbed, because one failure would cost every sample its coverage over
+  that stretch. Five tests; **the oracle is unmoved either side — 2,311 records, sha256
+  `84ad19c2…`, on both routes.**
 - **Open:** the floor's default (spec §3.3) and the histogram's three bin constants (spec §3.4)
   are soft until plan steps D1 and D2 measure them.
 - **Checkpoint A ruled by the owner, 2026-09-06, and the spec updated with it:** `finish` hands

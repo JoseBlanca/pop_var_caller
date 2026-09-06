@@ -375,6 +375,26 @@ pub enum RunError {
         source: crate::ng::ref_seq::RefSeqError,
     },
 
+    /// The reference bases over a stretch of ground the merge had just drawn could not be read.
+    ///
+    /// **The window-coverage measurement needs the reference base at every position it counts**,
+    /// because a window's GC is taken over the very positions that contributed its depth
+    /// (`doc/devel/ng/spec/window_coverage.md` §3.2). The merge's cache fetches a cover's ground
+    /// once and every sample reads it by offset, so one failed fetch costs every sample its
+    /// coverage over that stretch — which is why it ends the run rather than being absorbed.
+    ///
+    /// **The reachable cause is the same as the padding fetch's**: the FASTA becoming unreadable
+    /// part-way through a run, since the ground asked for is inside a contig the run has already
+    /// been drawing records from.
+    #[error("the reference bases over {region} could not be read")]
+    WindowCoverageGroundUnreadable {
+        /// The ground the cover had drawn and could not read.
+        region: GenomeRegion,
+        /// What the reference fetch hit.
+        #[source]
+        source: crate::ng::ref_seq::RefSeqError,
+    },
+
     /// Whatever the run was handing its records to would not take one.
     ///
     /// **The locus is named because a run writes hundreds of thousands of them** and the cause —
@@ -616,6 +636,23 @@ pub enum RunError {
         /// What is wrong with it, as a clause that reads inside the sentence.
         problem: String,
     },
+}
+
+/// **The merge's cache fails a run when it cannot read the reference**, and this is the
+/// conversion that says so.
+///
+/// The cache is generic over what its readers refuse, so a failure of its own — the fetch it
+/// makes once per cover — cannot be one of those. It hands back its own type and the caller
+/// converts; this is a run doing it, and it is what the bound on
+/// [`ObservationCache::cover`](crate::ng::run::cohort_merge::observation_cache::ObservationCache)
+/// asks for.
+impl From<crate::ng::run::cohort_merge::observation_cache::ReferenceUnreadable> for RunError {
+    fn from(failure: crate::ng::run::cohort_merge::observation_cache::ReferenceUnreadable) -> Self {
+        Self::WindowCoverageGroundUnreadable {
+            region: failure.region,
+            source: failure.source,
+        }
+    }
 }
 
 /// How far a sample's source had got when something went wrong.

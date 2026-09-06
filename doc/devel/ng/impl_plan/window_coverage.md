@@ -114,7 +114,7 @@ spec §3.1 to "build every body" before C begins.** *Depends:* B1. *Source:* spe
 
 ### Milestone C — into the cache, and out to the record
 
-**C1. ☐ The reference into the cache.** `ObservationCache::over` takes a reference accessor
+**C1. ✅ The reference into the cache.** `ObservationCache::over` takes a reference accessor
 minted beside the run's padding one (`walk_reference.accessor()`, both callers); `cover` fetches
 the cover's ground once into a scratch buffer with `fetch_into`; a fetch failure is a `RunError`
 naming the region. Direct mode's VCF byte-identical. *Depends:* —. *Source:* spec §3.2.

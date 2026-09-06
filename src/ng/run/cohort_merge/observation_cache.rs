@@ -43,7 +43,41 @@
 
 use super::CohortLocusBuilderRegionsLen;
 use crate::ng::locus_generation::SampleLocusObservations;
+use crate::ng::ref_seq::{EvictableRefSeq, RefSeq, RefSeqError};
 use crate::ng::types::{GenomePosition, GenomeRegion, Position};
+
+/// What the merge asks of a reference: bases, and the release of what it has walked past.
+///
+/// **Both halves, because a merge walks a whole contig forward.** A windowed reader extends its
+/// buffer while each request lands near the last — which is exactly the merge's pattern, one
+/// building region after the next — and shrinks it only when it is told to. A reader that is
+/// never told ends a contig holding every base the merge passed: about 250 MB on human
+/// chromosome 1, against a walk that otherwise peaks near 25 MB
+/// ([`ref_seq`](crate::ng::ref_seq)'s `a_forward_walk_holds_the_whole_span_unless_it_releases`).
+/// Asking for [`RefSeq`] alone would make releasing unavailable rather than merely unused.
+pub trait MergeReference: RefSeq + EvictableRefSeq {}
+
+impl<T: RefSeq + EvictableRefSeq + ?Sized> MergeReference for T {}
+
+/// The reference bases over ground a cover holds could not be read.
+///
+/// **A failure of the cache and not of a source**, which is why it is its own type rather than
+/// one of a source's errors: the cache is generic over what its readers refuse, and this is
+/// something the cache itself hit. A caller converts it into whatever it fails with — a run
+/// converts it into [`RunError::WindowCoverageGroundUnreadable`](crate::ng::run::RunError), and
+/// the bound that says so sits on [`cover`](ObservationCache::cover) rather than on the type,
+/// so a caller that never covers never has to name it.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+#[error("the reference bases over {region} could not be read")]
+pub struct ReferenceUnreadable {
+    /// The ground the fetch was over: every position of every record the cover holds on that
+    /// contig, widened to the region it was asked for.
+    pub region: GenomeRegion,
+    /// What the reference fetch hit.
+    #[source]
+    pub source: RefSeqError,
+}
 
 /// What the merge knows about one sample's observation **before** it decides to build
 /// anything.
@@ -286,6 +320,30 @@ where
 pub struct ObservationCache<S> {
     /// One per sample, in the run's sample order — the order every consumer indexes by.
     samples: Vec<SampleWindow<S>>,
+    /// **One reference accessor for the whole run** (`spec/window_coverage.md` §3.2). It slides
+    /// forward with the merge and releases what the merge has walked past — the release is
+    /// [`fetch_the_ground_this_cover_reached`](Self::fetch_the_ground_this_cover_reached)'s last
+    /// statement, and [`MergeReference`] is the bound that makes it available at all. It is
+    /// never shared with another thread; `Send + Sync` is what keeps the cache itself `Send`
+    /// where its sources are, and what lets the parallel cover borrow the cache shared.
+    ///
+    /// A trait object rather than a type parameter: the accessor is read **once per cover**
+    /// and not once per position, so the indirection costs nothing measurable, and every
+    /// signature that names this cache would otherwise gain a second parameter for it — while
+    /// the fixtures, which want a hand-built reference rather than a FASTA on disk, would gain
+    /// it too.
+    reference: Box<dyn MergeReference + Send + Sync>,
+    /// The reference bases over the ground the last [`cover`](Self::cover) reached, fetched
+    /// once and read by every sample at its own offset.
+    ///
+    /// **A buffer the cover refills rather than a per-position fetch**: the window-coverage
+    /// measurement needs a base at every position of every sample's records, and asking the
+    /// reference for each one would be one file read per position per sample.
+    reference_bases: Vec<u8>,
+    /// Which position [`reference_bases`](Self::reference_bases)`[0]` is, or `None` before the
+    /// first cover. Read through [`reference_base_at`](Self::reference_base_at), which is the
+    /// only thing that should do the arithmetic.
+    reference_bases_from: Option<GenomePosition>,
     /// **Whether any source has kept its evidence rather than building it**, latched on the
     /// first such draw and never cleared.
     ///
@@ -436,13 +494,23 @@ impl<'a> From<&'a [&'a [SampleLocusObservations]]> for WindowedCohort<'a> {
 }
 
 impl<S> ObservationCache<S> {
-    /// A cache over one source per sample, in the run's sample order.
+    /// A cache over one source per sample, in the run's sample order, and one reference
+    /// accessor for the whole merge.
     ///
     /// Zero samples is not an error here: refusing a zero-sample *run* happens where the run
     /// is configured (spec §7.2), and a cache over an empty cohort covers nothing and hands
     /// nothing out.
-    pub fn over(sources: Vec<S>) -> Self {
+    ///
+    /// **The accessor is the cache's own and is never shared.** Both callers mint one beside
+    /// the padding accessor the run already holds (`walk_reference.accessor()`), because an
+    /// accessor shared with another reader would have two callers sliding one window in two
+    /// directions — the cost `WindowedRefSeq`'s own documentation records at 14.6 GB of peak
+    /// resident memory when it was rebuilt per region instead.
+    pub fn over(sources: Vec<S>, reference: Box<dyn MergeReference + Send + Sync>) -> Self {
         Self {
+            reference,
+            reference_bases: Vec::new(),
+            reference_bases_from: None,
             samples: sources
                 .into_iter()
                 .map(|source| SampleWindow {
@@ -491,6 +559,58 @@ impl<S> ObservationCache<S> {
     #[must_use]
     pub fn sample_count(&self) -> usize {
         self.samples.len()
+    }
+
+    /// [`over`](Self::over) against the fixtures' hand-built reference — four contigs of
+    /// `ACGT` repeated, which every fixture in this module and its neighbours sits inside.
+    ///
+    /// **It exists so that a test says what it is about**: passing a reference at every one of
+    /// thirty construction sites would bury the two tests that are about the reference among
+    /// twenty-eight that are not, and the alternative — a cache that may hold no reference —
+    /// is the one shape that could measure no coverage without saying so.
+    #[cfg(test)]
+    pub(super) fn over_fixture(sources: Vec<S>) -> Self {
+        Self::over(sources, super::fixtures::a_reference())
+    }
+
+    /// The reference base at `at`, or `None` where the last cover's ground does not hold it.
+    ///
+    /// **Canonical `{A,C,G,T,N}`**, as every `RefSeq` fetch is, so a soft-masked FASTA and an
+    /// uppercase one give the same answer.
+    ///
+    /// **`None` means the last cover did not read that position, and there are two ways to meet
+    /// it**: a position on a contig the merge has left, and a position no cover has reached yet.
+    /// What it does *not* mean is a record without a base — the ground a cover reads covers
+    /// every record every sample holds on that contig
+    /// ([`fetch_the_ground_this_cover_reached`](Self::fetch_the_ground_this_cover_reached)), so
+    /// a consumer walking the held records finds a base at each of their positions.
+    ///
+    /// It is `pub(super)` and not `pub` because [`cover`](Self::cover) is: outside the merge
+    /// nothing can fill the buffer this reads, so a wider accessor could only ever answer
+    /// `None`.
+    #[must_use]
+    // **`not(test)`, because the tests below are its only callers today.** The merge's own
+    // reader arrives at plan step C2, which puts one window-coverage accumulator per sample
+    // into the cache and feeds it these bases; until then this would be dead code in a build
+    // without them, and the compiler asks for the attribute back the moment C2 lands.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read by plan step C2, which puts the window-coverage accumulator into \
+                      the cache; exercised by this module's tests until then"
+        )
+    )]
+    pub(super) fn reference_base_at(&self, at: GenomePosition) -> Option<u8> {
+        let from = self.reference_bases_from?;
+        if from.contig != at.contig || at.position < from.position {
+            return None;
+        }
+        // The guard above is what makes this subtraction total.
+        let offset = at.position.get() - from.position.get();
+        self.reference_bases
+            .get(usize::try_from(offset).ok()?)
+            .copied()
     }
 }
 
@@ -608,12 +728,18 @@ impl<S> ObservationCache<S> {
             // **Destructured so that the drain and the spare list are two borrows, not
             // one.** Both live on the same `SampleWindow`, and a method call inside the
             // drain would borrow the whole of it a second time.
+            // **Every field named, none absorbed by a `..`.** A field added to `SampleWindow`
+            // that an eviction has to drain — the window-coverage plan's next step adds two —
+            // would otherwise compile here and leak, in one of the two evictors or in both.
             let SampleWindow {
                 held_observations,
                 held_summaries,
                 held_bodies,
                 spare,
-                ..
+                source: _,
+                spent: _,
+                keeps_evidence: _,
+                last_drawn: _,
             } = sample;
             held_summaries.drain(..first_survivor);
             held_bodies.drain(..first_survivor.min(held_bodies.len()));
@@ -660,12 +786,16 @@ impl<S> ObservationCache<S> {
             .par_iter_mut()
             .map(|sample| {
                 let first_survivor = first_reaching_summary(&sample.held_summaries, position);
+                // Every field named, for the reason the serial evictor's destructure gives.
                 let SampleWindow {
                     held_observations,
                     held_summaries,
                     held_bodies,
                     spare,
-                    ..
+                    source: _,
+                    spent: _,
+                    keeps_evidence: _,
+                    last_drawn: _,
                 } = sample;
                 held_summaries.drain(..first_survivor);
             held_bodies.drain(..first_survivor.min(held_bodies.len()));
@@ -758,7 +888,10 @@ where
     /// a source that it may be polled after yielding `Err`**, something `Iterator` does not
     /// grant on its own. A source that cannot honour it must yield `None` after failing, which
     /// this reads as a spent sample rather than as a retry.
-    pub(super) fn cover(&mut self, region: GenomeRegion) -> Result<(), E> {
+    pub(super) fn cover(&mut self, region: GenomeRegion) -> Result<(), E>
+    where
+        E: From<ReferenceUnreadable>,
+    {
         // `max` for the same reason `SampleLocusObservations::reach` uses it: `GenomeRegion`
         // has public fields and no constructor enforcing `start <= end`, and an inverted
         // region must not put the chain's reach before the ground it is meant to cover.
@@ -770,12 +903,7 @@ where
         // The fixpoint: sweep until a whole sweep moves nothing.
         while self.sweep(&mut chain_reach)? {}
 
-        self.keeps_evidence |= self.samples.iter().any(|sample| sample.keeps_evidence);
-        self.covered_to = Some(
-            self.covered_to
-                .map_or(chain_reach, |reached| reached.max(chain_reach)),
-        );
-        Ok(())
+        self.close_the_cover(region, chain_reach)
     }
 
     /// [`cover`](Self::cover), with each sweep's samples swept concurrently.
@@ -792,7 +920,7 @@ where
     pub(super) fn cover_in_parallel(&mut self, region: GenomeRegion) -> Result<(), E>
     where
         S: Send,
-        E: Send,
+        E: Send + From<ReferenceUnreadable>,
     {
         use rayon::prelude::*;
 
@@ -805,7 +933,10 @@ where
             let widest = self
                 .samples
                 .par_iter_mut()
-                .map(|sample| {
+                // The return type is spelled out because `E` now carries a `From` bound, and
+                // without it inference reads the `?` below as converting into that bound's
+                // type rather than into the source's own error.
+                .map(|sample| -> Result<GenomePosition, E> {
                     let drawing = super::timing::Stopwatch::start();
                     let mut reach = snapshot;
                     sample.draw_to(&mut reach)?;
@@ -820,12 +951,145 @@ where
             chain_reach = widest;
         }
 
+        self.close_the_cover(region, chain_reach)
+    }
+
+    /// What both fixpoints do once the drawing has stopped: read the ground, then record how
+    /// far the cover got.
+    ///
+    /// **One copy, because the two covers must not drift.** They differ only in how they run
+    /// the fixpoint, and the standing oracle for this module is that they produce the same
+    /// answer; a step that added a statement to one tail and not the other would break that
+    /// without failing to compile.
+    ///
+    /// **The fetch happens before either fact is recorded**, so a cover that could not read its
+    /// ground is not counted as covered: `covered_to` is what
+    /// [`with_observations`](Self::with_observations) refuses ground against, and advancing it
+    /// over ground whose bases were never read would hand a builder a window this cache cannot
+    /// describe.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the reference fetch refuses, converted by the caller.
+    fn close_the_cover(
+        &mut self,
+        region: GenomeRegion,
+        chain_reach: GenomePosition,
+    ) -> Result<(), E>
+    where
+        E: From<ReferenceUnreadable>,
+    {
+        self.fetch_the_ground_this_cover_reached(region, chain_reach)?;
         self.keeps_evidence |= self.samples.iter().any(|sample| sample.keeps_evidence);
         self.covered_to = Some(
             self.covered_to
                 .map_or(chain_reach, |reached| reached.max(chain_reach)),
         );
         Ok(())
+    }
+
+    /// The reference bases over the ground this cover holds, into the buffer every sample
+    /// reads by offset.
+    ///
+    /// **The ground is what the cache holds, not what the region asked for**, and the two are
+    /// different at both ends. Past the region: an observation chaining beyond it widens the
+    /// reach, and every sample is drawn one observation *past* that reach — the only way to know
+    /// a record is beyond the reach is to draw it, and once drawn it is held rather than thrown
+    /// away. Before the region: a record drawn by an earlier cover and still held is handed to
+    /// the builders again, and this buffer is refilled rather than appended to, so the bases the
+    /// cover that drew it fetched are gone. So the ground runs from the earliest position any
+    /// sample still holds a record at to the furthest any of them reaches — widened to the
+    /// region either way, so a caller's offsets are against ground it asked for at the least.
+    ///
+    /// **After the fixpoint and not before it**, for the same reason: what the cache holds is
+    /// not known until the drawing has stopped.
+    ///
+    /// **One fetch a cover, whatever the cohort's size.** The bases are the same for every
+    /// sample; only which of them a sample's records fall on differs.
+    ///
+    /// **Records held on a contig this cover has left are not in it**, and cannot be: a buffer
+    /// is one contig's. Nothing asks — a cover on a new contig evicts every record of the old
+    /// one before it draws — and [`reference_base_at`](Self::reference_base_at) answers `None`
+    /// rather than reading across.
+    ///
+    /// # Errors
+    ///
+    /// A failed fetch, named by the ground it was over. It ends the cover rather than being
+    /// absorbed: one failure costs every sample its coverage over that stretch, and a run that
+    /// carried on would report a window whose denominator quietly excluded it. **A region whose
+    /// first base is 0 fails here too** — there is no position 0 on a contig, and the fetch
+    /// refuses rather than translating a caller's bug into a base.
+    fn fetch_the_ground_this_cover_reached(
+        &mut self,
+        region: GenomeRegion,
+        chain_reach: GenomePosition,
+    ) -> Result<(), E>
+    where
+        E: From<ReferenceUnreadable>,
+    {
+        let ground = self.ground_this_cover_holds(region, chain_reach);
+        // **The old ground stops being answerable the moment a new one is asked for.** A failed
+        // fetch leaves the buffer as it was (`RefSeq::fetch_into`'s contract), so without this
+        // a caller that retried a cover would read the previous cover's bases as this one's.
+        self.reference_bases_from = None;
+        self.reference
+            .fetch_into(
+                ground.contig,
+                ground.start.get(),
+                ground.len(),
+                &mut self.reference_bases,
+            )
+            .map_err(|source| {
+                E::from(ReferenceUnreadable {
+                    region: ground,
+                    source,
+                })
+            })?;
+        self.reference_bases_from = Some(GenomePosition {
+            contig: ground.contig,
+            position: ground.start,
+        });
+        // **Release what the merge has walked past**, exactly as the run's padding accessor
+        // does at the record (`run::records`). A windowed reader extends its buffer forward
+        // and only ever shrinks here, so a merge that never released would end a contig
+        // holding every base it had covered — about 250 MB on human chromosome 1, against a
+        // walk that otherwise peaks near 25 MB (`ref_seq.rs`'s
+        // `a_forward_walk_holds_the_whole_span_unless_it_releases`).
+        self.reference.evict_before(ground.start.get());
+        Ok(())
+    }
+
+    /// The stretch of one contig this cover's records lie on: the region it was asked for,
+    /// widened to every record any sample still holds on that contig.
+    ///
+    /// Held records on **another** contig are ignored rather than widening the ground: a fetch
+    /// is one contig's, and a cover on a new contig has evicted the old one's records before it
+    /// draws.
+    fn ground_this_cover_holds(
+        &self,
+        region: GenomeRegion,
+        chain_reach: GenomePosition,
+    ) -> GenomeRegion {
+        // `min`/`max` for the reason `SampleLocusObservations::reach` uses them: `GenomeRegion`
+        // has public fields and no constructor enforcing `start <= end`.
+        let mut first_base = region.start.min(region.end);
+        let mut last_base = chain_reach.position.max(first_base);
+        for sample in &self.samples {
+            let held_on_this_contig = |summary: &LocusSummary| {
+                (summary.region.contig == region.contig).then_some(*summary)
+            };
+            if let Some(first) = sample.held_summaries.first().and_then(held_on_this_contig) {
+                first_base = first_base.min(first.start_position().position);
+            }
+            if let Some(last) = sample.held_summaries.last().and_then(held_on_this_contig) {
+                last_base = last_base.max(last.reach());
+            }
+        }
+        GenomeRegion {
+            contig: region.contig,
+            start: first_base,
+            end: last_base,
+        }
     }
 
     /// One sweep of every sample against `chain_reach`. Answers whether any of them moved it.
@@ -1011,12 +1275,16 @@ fn first_reaching_summary(held: &[LocusSummary], position: GenomePosition) -> us
 #[cfg(test)]
 mod tests {
     use super::super::build::build_region_windowed;
-    use super::super::fixtures::{SourceFailed, position_on, region, region_on};
+    use super::super::fixtures::{
+        ReferenceCountingItsReleases, ReferenceFailureRecorded, SourceFailed, position_on, region,
+        region_on,
+    };
     use super::*;
     use crate::ng::locus_generation::{LocusKind, ReadWitness, SequenceObservation};
     use crate::ng::types::{ContigId, Position, ReadGroupId};
     use std::cell::Cell;
     use std::rc::Rc;
+    use std::sync::Arc;
 
     /// One sample's record over `region`. What it showed is irrelevant to the cache — which
     /// reads nothing but where an observation begins and how far it reaches — so every fixture
@@ -1071,6 +1339,273 @@ mod tests {
         )
     }
 
+    /// One sample's reader over records already in hand, with the failure type these tests
+    /// name spelled once rather than at every fixture.
+    fn a_source(
+        records: Vec<Result<SampleLocusObservations, SourceFailed>>,
+    ) -> std::vec::IntoIter<Result<SampleLocusObservations, SourceFailed>> {
+        records.into_iter()
+    }
+
+    /// The base the fixture reference holds at a 1-based position: it repeats `ACGT`, so
+    /// position 1 is `A`, position 5 is `A` again, and a test can say what it expects without
+    /// counting.
+    fn fixture_base_at(position: u64) -> u8 {
+        b"ACGT"[usize::try_from((position - 1) % 4).expect("a remainder of four fits")]
+    }
+
+    /// A cover reads the reference over the ground it drew, and every sample reads it from the
+    /// same buffer at its own offset. This is the first half: the bases are the reference's,
+    /// at the positions they belong to.
+    #[test]
+    fn a_cover_holds_the_reference_bases_over_the_ground_it_drew() {
+        let source = a_source(vec![Ok(observation_over(region(40, 40)))]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+        cache
+            .cover(region(40, 50))
+            .expect("the fixture source and reference hold");
+
+        for position in 40..=50 {
+            assert_eq!(
+                cache.reference_base_at(position_on(0, position)),
+                Some(fixture_base_at(position)),
+                "the base at {position} is not the reference's",
+            );
+        }
+    }
+
+    /// **The ground is the cover's reach and not the region's end**, which is the whole reason
+    /// the fetch happens after the fixpoint rather than before it: an observation chaining past
+    /// the region widens what was drawn, and every position of it needs a base.
+    #[test]
+    fn the_ground_read_reaches_as_far_as_the_cover_drew_and_no_further() {
+        // One observation opens inside the region and reaches ten bases past its end.
+        let source = a_source(vec![Ok(observation_over(region(48, 60)))]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+        cache
+            .cover(region(40, 50))
+            .expect("the fixture source and reference hold");
+
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 60)),
+            Some(fixture_base_at(60)),
+            "the last base the cover drew to has no reference base",
+        );
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 61)),
+            None,
+            "a base past the cover's reach was fetched, so the ground is not the one drawn",
+        );
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 39)),
+            None,
+            "a base before the region's own start was fetched",
+        );
+    }
+
+    /// A cover refills the buffer rather than adding to it, so the ground of the cover before
+    /// it is gone — including the whole of another contig. Reading a stale base would give a
+    /// sample the wrong contig's GC at every position of the region.
+    ///
+    /// **The two covers overlap in coordinate**, which is what makes this about the contig
+    /// rather than about the position: positions restart at 1 on every contig, so a fixture
+    /// whose second cover sat at higher coordinates would come back absent under either rule
+    /// and could not tell the two guards apart.
+    #[test]
+    fn a_position_on_the_contig_left_behind_is_not_read_from_the_new_ones_buffer() {
+        let first = a_source(vec![Ok(observation_over(region_on(0, 1, 1)))]);
+        let mut cache = ObservationCache::over_fixture(vec![first]);
+        cache
+            .cover(region_on(0, 1, 900))
+            .expect("the fixture source and reference hold");
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 500)),
+            Some(fixture_base_at(500)),
+        );
+
+        cache
+            .cover(region_on(1, 1, 900))
+            .expect("the fixture source and reference hold");
+        assert_eq!(
+            cache.reference_base_at(position_on(1, 500)),
+            Some(fixture_base_at(500)),
+            "the second cover did not read its own contig",
+        );
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 500)),
+            None,
+            "a position on the contig the merge has left was answered out of the new contig's \
+             buffer, which is a base read off the wrong chromosome",
+        );
+    }
+
+    /// **Before the first cover there is no ground**, and asking for a base is `None` rather
+    /// than an empty buffer's byte or a panic.
+    #[test]
+    fn a_cache_that_has_not_covered_yet_has_no_reference_base_anywhere() {
+        let source = a_source(vec![Ok(observation_over(region(40, 40)))]);
+        let cache = ObservationCache::over_fixture(vec![source]);
+        assert_eq!(cache.reference_base_at(position_on(0, 40)), None);
+    }
+
+    /// **Every record the cache holds has a base**, which is the property the whole step
+    /// exists to provide and the one the next step reads. Two shapes make it non-trivial, and
+    /// both occur on ordinary input: each sample is drawn **one record past** the reach — the
+    /// only way to know a record is beyond it is to draw it — and a record drawn by an earlier
+    /// cover is still held and handed out again, with its head before this region's start.
+    #[test]
+    fn every_position_of_every_held_record_has_a_reference_base() {
+        // 30..44 is drawn by an earlier cover and still reaches into this one; 60..60 is the
+        // record this cover draws past its own reach.
+        let source = a_source(vec![
+            Ok(observation_over(region(30, 44))),
+            Ok(observation_over(region(45, 45))),
+            Ok(observation_over(region(60, 60))),
+        ]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+        cache
+            .cover(region(20, 35))
+            .expect("the fixture source and reference hold");
+        cache
+            .cover(region(40, 50))
+            .expect("the fixture source and reference hold");
+
+        for position in [30, 40, 44, 45, 50, 60] {
+            assert_eq!(
+                cache.reference_base_at(position_on(0, position)),
+                Some(fixture_base_at(position)),
+                "the cache holds a record covering {position} and no base for it",
+            );
+        }
+    }
+
+    /// The parallel cover reads its ground too. **It is the production path on any multi-core
+    /// machine** — the driver picks it whenever the pool has more than one thread — so a fetch
+    /// that ran only in the serial cover would leave the whole measurement absent from a real
+    /// run and present in the oracle.
+    #[test]
+    fn the_parallel_cover_holds_the_reference_bases_over_the_ground_it_drew() {
+        let source = a_source(vec![Ok(observation_over(region(48, 60)))]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+        cache
+            .cover_in_parallel(region(40, 50))
+            .expect("the fixture source and reference hold");
+
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 45)),
+            Some(fixture_base_at(45)),
+        );
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 60)),
+            Some(fixture_base_at(60)),
+            "the parallel cover did not read as far as it drew",
+        );
+    }
+
+    /// **The merge lets go of what it has walked past.** A windowed reader extends its buffer
+    /// while each request lands near the last, which is exactly the merge's pattern, and shrinks
+    /// it only when told — so a merge that never told it would end a contig holding every base
+    /// it had covered. An in-memory reference has nothing to release, so what this pins is that
+    /// the release is asked for, and from where.
+    #[test]
+    fn a_cover_releases_the_reference_bases_the_merge_has_walked_past() {
+        let reference = ReferenceCountingItsReleases::new();
+        let source = a_source(vec![
+            Ok(observation_over(region(40, 40))),
+            Ok(observation_over(region(140, 140))),
+        ]);
+        let mut cache = ObservationCache::over(vec![source], Box::new(Arc::clone(&reference)));
+        cache
+            .cover(region(40, 50))
+            .expect("the fixture source and reference hold");
+        cache.evict_before(position_on(0, 130));
+        cache
+            .cover(region(130, 150))
+            .expect("the fixture source and reference hold");
+
+        let released = reference
+            .released_before
+            .lock()
+            .expect("no test holds this lock");
+        assert_eq!(
+            *released,
+            vec![40, 130],
+            "each cover releases the bases before the ground it went on to read",
+        );
+    }
+
+    /// A failed fetch names the ground the cover held, not the region it was asked for — the
+    /// ground is what tells an operator which stretch of FASTA went unreadable, and it is the
+    /// field the run's own error prints.
+    #[test]
+    fn a_failed_fetch_names_the_ground_the_cover_held() {
+        let records: Vec<Result<SampleLocusObservations, ReferenceFailureRecorded>> =
+            vec![Ok(observation_over(region_on(9, 48, 60)))];
+        let mut cache = ObservationCache::over_fixture(vec![records.into_iter()]);
+        let refused = cache
+            .cover(region_on(9, 40, 50))
+            .expect_err("contig 9 is past the fixture reference's four");
+        assert_eq!(
+            refused,
+            ReferenceFailureRecorded(Some(region_on(9, 40, 60))),
+            "the failure names other ground than the cover held",
+        );
+    }
+
+    /// **A cover that could not read its ground leaves none readable**, rather than answering
+    /// out of the cover before it. The type says a cover can be made again, so a caller that
+    /// catches a failure and retries must not be handed the previous cover's bases as this
+    /// one's.
+    #[test]
+    fn a_failed_fetch_leaves_no_ground_readable_and_a_retry_restores_it() {
+        let source = a_source(vec![
+            Ok(observation_over(region_on(0, 40, 40))),
+            Ok(observation_over(region_on(0, 60, 60))),
+        ]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+        cache
+            .cover(region_on(0, 40, 50))
+            .expect("the fixture source and reference hold");
+        assert!(cache.reference_base_at(position_on(0, 45)).is_some());
+
+        cache
+            .cover(region_on(9, 100, 110))
+            .expect_err("contig 9 is past the fixture reference's four");
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 45)),
+            None,
+            "after a failed fetch the previous cover's bases are still readable",
+        );
+
+        cache
+            .cover(region_on(0, 51, 70))
+            .expect("the fixture source and reference hold");
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 60)),
+            Some(fixture_base_at(60)),
+            "a cover made again after a failure did not restore the ground",
+        );
+    }
+
+    /// A reference that cannot serve the ground ends the cover, naming the ground rather than
+    /// the position inside it that failed. **It is not absorbed**: one failed fetch costs every
+    /// sample its coverage over that stretch, and a run carrying on would report windows whose
+    /// denominators quietly excluded it.
+    #[test]
+    fn a_reference_that_cannot_serve_the_cover_ground_ends_the_cover_naming_it() {
+        // Contig 9 is past the fixture reference's four, so the fetch cannot be served.
+        let source = a_source(Vec::new());
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+        let refused = cache
+            .cover(region_on(9, 40, 50))
+            .expect_err("a reference with no contig 9 cannot serve this cover");
+        assert_eq!(
+            refused,
+            SourceFailed("the fixture reference could not serve the cover's ground"),
+            "the cover did not fail through the reference conversion",
+        );
+    }
+
     /// A source over the given regions, with the counter the test reads afterwards.
     fn source_over(regions: &[GenomeRegion]) -> (CountingSource, Rc<Cell<usize>>) {
         let drawn = Rc::new(Cell::new(0));
@@ -1108,7 +1643,7 @@ mod tests {
     #[test]
     fn covering_a_region_draws_the_observations_over_it() {
         let (source, _drawn) = source_over(&[region(45, 45), region(48, 48)]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
 
         cache
             .cover(region(40, 50))
@@ -1127,7 +1662,7 @@ mod tests {
     #[test]
     fn an_observation_that_began_earlier_and_reaches_in_is_handed_out() {
         let (source, _drawn) = source_over(&[region(30, 44), region(45, 45)]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
 
         cache
             .cover(region(40, 50))
@@ -1150,7 +1685,7 @@ mod tests {
     #[test]
     fn an_observation_that_ends_before_the_span_is_drawn_but_not_handed_out() {
         let (source, drawn) = source_over(&[region(20, 39), region(41, 45), region(46, 46)]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
 
         cache
             .cover(region(40, 50))
@@ -1185,7 +1720,7 @@ mod tests {
     fn the_chain_reach_follows_a_widening_in_a_later_sample() {
         let (far, far_drawn) = source_over(&[region(60, 60), region(65, 65)]);
         let (widening, _widening_drawn) = source_over(&[region(48, 70)]);
-        let mut cache = ObservationCache::over(vec![far, widening]);
+        let mut cache = ObservationCache::over_fixture(vec![far, widening]);
 
         cache
             .cover(region(40, 55))
@@ -1214,7 +1749,7 @@ mod tests {
         let (middle, _middle_drawn) =
             source_over(&[region(60, 120), region(250, 250), region(260, 260)]);
         let (opening, _opening_drawn) = source_over(&[region(50, 70)]);
-        let mut cache = ObservationCache::over(vec![far, middle, opening]);
+        let mut cache = ObservationCache::over_fixture(vec![far, middle, opening]);
 
         cache
             .cover(region(40, 55))
@@ -1246,7 +1781,7 @@ mod tests {
         let (widened, widened_drawn) = source_over(&[region(70, 200), region(500, 500)]);
         let (widening, _widening_drawn) = source_over(&[region(48, 70)]);
         let (late, late_drawn) = source_over(&[region(150, 150), region(160, 160)]);
-        let mut cache = ObservationCache::over(vec![widened, widening, late]);
+        let mut cache = ObservationCache::over_fixture(vec![widened, widening, late]);
 
         cache
             .cover(region(40, 55))
@@ -1276,7 +1811,7 @@ mod tests {
     #[test]
     fn drawing_stops_one_observation_past_the_reach() {
         let (source, drawn) = source_over(&[region(45, 45), region(60, 60), region(80, 80)]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
 
         cache
             .cover(region(40, 50))
@@ -1298,7 +1833,7 @@ mod tests {
     #[test]
     fn a_second_cover_carries_on_without_re_reading() {
         let (source, drawn) = source_over(&[region(45, 45), region(60, 60), region(80, 80)]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
 
         cache
             .cover(region(40, 50))
@@ -1337,7 +1872,7 @@ mod tests {
             region(41, 44),
             region(45, 45),
         ]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
         cache
             .cover(region(40, 50))
             .expect("the fixture source holds");
@@ -1359,7 +1894,7 @@ mod tests {
     fn eviction_drops_from_every_sample_not_only_the_first() {
         let (first, _first_drawn) = source_over(&[region(20, 21), region(45, 45)]);
         let (second, _second_drawn) = source_over(&[region(22, 23), region(46, 46)]);
-        let mut cache = ObservationCache::over(vec![first, second]);
+        let mut cache = ObservationCache::over_fixture(vec![first, second]);
         cache
             .cover(region(40, 50))
             .expect("the fixture source holds");
@@ -1379,7 +1914,7 @@ mod tests {
     #[test]
     fn eviction_at_a_later_contig_drops_the_previous_contigs_window() {
         let (source, _drawn) = source_over(&[region_on(0, 900, 900), region_on(1, 45, 45)]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
         cache
             .cover(region_on(1, 40, 50))
             .expect("the fixture source holds");
@@ -1398,7 +1933,7 @@ mod tests {
     #[test]
     fn a_cover_after_an_eviction_draws_forward_and_keeps_the_survivor() {
         let (source, drawn) = source_over(&[region(20, 21), region(30, 44), region(60, 60)]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
         cache
             .cover(region(40, 50))
             .expect("the fixture source holds");
@@ -1428,7 +1963,7 @@ mod tests {
             region(90, 90),
             region(200, 200),
         ]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
         cache
             .cover(region(40, 50))
             .expect("the fixture source holds");
@@ -1461,7 +1996,7 @@ mod tests {
             region(160, 160),
             region(400, 400),
         ]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
         cache
             .cover(region(40, 50))
             .expect("the fixture source holds");
@@ -1487,7 +2022,7 @@ mod tests {
     #[test]
     fn a_region_given_end_first_still_covers_its_ground() {
         let (source, drawn) = source_over(&[region(45, 45), region(60, 60)]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
         let inverted = GenomeRegion {
             contig: ContigId(0),
             start: Position(50),
@@ -1502,6 +2037,11 @@ mod tests {
             vec![vec![region(45, 45), region(60, 60)]],
             "asked back over the same inverted region, the window is the ground it names",
         );
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 40)),
+            Some(fixture_base_at(40)),
+            "the ground read does not start at the inverted region's lower bound",
+        );
     }
 
     /// A contig boundary is beyond every reach on the contig before it, whatever the positions
@@ -1515,7 +2055,7 @@ mod tests {
             region_on(2, 10, 10),
             region_on(2, 20, 20),
         ]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
 
         cache
             .cover(region_on(1, 40, 50))
@@ -1545,7 +2085,7 @@ mod tests {
             .into_iter(),
             drawn: Rc::clone(&drawn),
         };
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
 
         let outcome = cache.cover(region(40, 50));
 
@@ -1560,7 +2100,7 @@ mod tests {
     #[should_panic(expected = "cover has only reached")]
     fn a_window_over_ground_no_cover_reached_is_refused() {
         let (source, _drawn) = source_over(&[region(45, 45), region(120, 120)]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
         cache
             .cover(region(40, 50))
             .expect("the fixture source holds");
@@ -1576,7 +2116,7 @@ mod tests {
     #[should_panic(expected = "cover has only reached")]
     fn a_window_reaching_past_the_covered_ground_is_refused() {
         let (source, _drawn) = source_over(&[region(45, 45), region(120, 120)]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
         cache
             .cover(region(40, 50))
             .expect("the fixture source holds");
@@ -1600,7 +2140,7 @@ mod tests {
             .into_iter(),
             drawn: Rc::new(Cell::new(0)),
         };
-        let mut cache = ObservationCache::over(vec![steady, recovering]);
+        let mut cache = ObservationCache::over_fixture(vec![steady, recovering]);
 
         let first = cache.cover(region(40, 50));
         assert_eq!(first, Err(SourceFailed("the block would not decode")));
@@ -1637,7 +2177,7 @@ mod tests {
         }
 
         let polls = Rc::new(Cell::new(0));
-        let mut cache = ObservationCache::over(vec![Resurrecting {
+        let mut cache = ObservationCache::over_fixture(vec![Resurrecting {
             polls: Rc::clone(&polls),
         }]);
 
@@ -1665,7 +2205,7 @@ mod tests {
     #[should_panic(expected = "not in coordinate order")]
     fn a_source_that_goes_backwards_is_refused() {
         let (source, _drawn) = source_over(&[region(45, 45), region(30, 30)]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
 
         let _ = cache.cover(region(40, 50));
     }
@@ -1678,7 +2218,7 @@ mod tests {
     #[should_panic(expected = "not in coordinate order")]
     fn a_source_that_goes_back_a_contig_is_refused() {
         let (source, _drawn) = source_over(&[region_on(1, 45, 45), region_on(0, 90, 90)]);
-        let mut cache = ObservationCache::over(vec![source]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
 
         let _ = cache.cover(region_on(1, 40, 50));
     }
@@ -1687,7 +2227,8 @@ mod tests {
     /// refusing a zero-sample run happens where the run is configured (spec §7.2).
     #[test]
     fn a_cache_over_no_samples_covers_nothing() {
-        let mut cache: ObservationCache<CountingSource> = ObservationCache::over(Vec::new());
+        let mut cache: ObservationCache<CountingSource> =
+            ObservationCache::over_fixture(Vec::new());
 
         cache.cover(region(40, 50)).expect("nothing can fail");
 
@@ -1700,7 +2241,7 @@ mod tests {
     fn a_sample_that_has_run_out_does_not_stop_the_cover() {
         let (spent, _spent_drawn) = source_over(&[region(10, 10)]);
         let (covering, _covering_drawn) = source_over(&[region(45, 45)]);
-        let mut cache = ObservationCache::over(vec![spent, covering]);
+        let mut cache = ObservationCache::over_fixture(vec![spent, covering]);
 
         cache
             .cover(region(40, 50))
@@ -1718,7 +2259,7 @@ mod tests {
     fn covering_a_region_with_an_empty_source_hands_out_nothing() {
         let (empty, empty_drawn) = source_over(&[]);
         let (covering, _covering_drawn) = source_over(&[region(45, 45)]);
-        let mut cache = ObservationCache::over(vec![empty, covering]);
+        let mut cache = ObservationCache::over_fixture(vec![empty, covering]);
 
         cache
             .cover(region(40, 50))
@@ -1743,7 +2284,7 @@ mod tests {
     fn the_held_count_sums_every_samples_window() {
         let (first, _first_drawn) = source_over(&[region(45, 45)]);
         let (second, _second_drawn) = source_over(&[region(46, 46)]);
-        let mut cache = ObservationCache::over(vec![first, second]);
+        let mut cache = ObservationCache::over_fixture(vec![first, second]);
 
         assert_eq!(
             cache.held_observations_len(),
@@ -1764,7 +2305,7 @@ mod tests {
     /// And a cache over no samples holds nothing rather than failing.
     #[test]
     fn the_held_count_is_zero_over_no_samples() {
-        let cache: ObservationCache<CountingSource> = ObservationCache::over(Vec::new());
+        let cache: ObservationCache<CountingSource> = ObservationCache::over_fixture(Vec::new());
 
         assert_eq!(cache.held_observations_len(), 0);
     }
@@ -1948,7 +2489,7 @@ mod tests {
                 .iter()
                 .map(|regions| source_over(regions).0)
                 .collect();
-            let mut cache = ObservationCache::over(sources);
+            let mut cache = ObservationCache::over_fixture(sources);
             let mut through_cache = Vec::new();
             for at in &builder_regions {
                 cache.evict_before(GenomePosition {

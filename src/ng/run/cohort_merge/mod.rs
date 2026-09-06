@@ -245,6 +245,93 @@ pub(super) mod fixtures {
     /// (`doc/devel/ng/arch/run_streaming.md` §2, §5).
     #[derive(Debug, PartialEq, Eq)]
     pub(super) struct SourceFailed(pub &'static str);
+
+    /// A fixture's source failure can also carry the cache's own — the reference fetch it makes
+    /// once per cover — because [`cover`](super::observation_cache::ObservationCache::cover)
+    /// asks every caller for the conversion.
+    ///
+    /// **A fixture reference is built in memory, so the only way to reach this is to ask it for
+    /// ground it does not hold** — a contig past its four, or a position past its 2,000 bases —
+    /// which the cache's own reference tests do deliberately and no other fixture does by
+    /// accident. What the ground *was* is thrown away here, so a test that cares which ground
+    /// failed uses [`ReferenceFailureRecorded`] instead.
+    impl From<super::observation_cache::ReferenceUnreadable> for SourceFailed {
+        fn from(_: super::observation_cache::ReferenceUnreadable) -> Self {
+            Self("the fixture reference could not serve the cover's ground")
+        }
+    }
+
+    /// A source failure that keeps the ground a failed fetch named, for the one test that is
+    /// about the naming.
+    ///
+    /// **[`SourceFailed`] cannot carry it** — it holds a `&'static str` — so a test asserting on
+    /// the region would be asserting on a constant, and any change to the ground a failure
+    /// names would pass unnoticed.
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) struct ReferenceFailureRecorded(pub Option<GenomeRegion>);
+
+    impl From<super::observation_cache::ReferenceUnreadable> for ReferenceFailureRecorded {
+        fn from(failure: super::observation_cache::ReferenceUnreadable) -> Self {
+            Self(Some(failure.region))
+        }
+    }
+
+    /// A reference the cache's fixtures cover against: four contigs of 2,000 bases, the widest
+    /// any fixture here reaches being 600.
+    ///
+    /// **The bases repeat `ACGT`**, so a window over any stretch of it has a GC fraction of a
+    /// half — a value a test can predict without counting, and one no arithmetic slip lands on
+    /// by accident the way `0` or `1` would.
+    pub(super) fn a_reference() -> Box<dyn super::observation_cache::MergeReference + Send + Sync> {
+        let bases: Vec<u8> = b"ACGT".iter().copied().cycle().take(2_000).collect();
+        Box::new(crate::ng::ref_seq::InMemoryRefSeq::from_contigs(vec![
+            bases;
+            4
+        ]))
+    }
+
+    /// A reference that answers like [`a_reference`] and counts what it was told to release —
+    /// the only way a test can see that the merge lets go of what it has walked past, since an
+    /// in-memory reference holds nothing to release.
+    pub(super) struct ReferenceCountingItsReleases {
+        bases: crate::ng::ref_seq::InMemoryRefSeq,
+        pub(super) released_before: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl crate::ng::ref_seq::RefSeq for ReferenceCountingItsReleases {
+        fn fetch_into(
+            &self,
+            contig: ContigId,
+            start_1based: u64,
+            length: u64,
+            dst: &mut Vec<u8>,
+        ) -> Result<(), crate::ng::ref_seq::RefSeqError> {
+            self.bases.fetch_into(contig, start_1based, length, dst)
+        }
+    }
+
+    impl crate::ng::ref_seq::EvictableRefSeq for ReferenceCountingItsReleases {
+        fn evict_before(&self, pos: u64) {
+            self.released_before
+                .lock()
+                .expect("a fixture reference is used by one test at a time")
+                .push(pos);
+        }
+
+        fn resident_bases(&self) -> usize {
+            0
+        }
+    }
+
+    impl ReferenceCountingItsReleases {
+        pub(super) fn new() -> std::sync::Arc<Self> {
+            let bases: Vec<u8> = b"ACGT".iter().copied().cycle().take(2_000).collect();
+            std::sync::Arc::new(Self {
+                bases: crate::ng::ref_seq::InMemoryRefSeq::from_contigs(vec![bases; 4]),
+                released_before: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
 }
 
 use std::num::{NonZeroU32, NonZeroUsize};

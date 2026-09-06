@@ -27,7 +27,9 @@
 use rayon::prelude::*;
 
 use super::build::{RegionOutcome, build_region_windowed};
-use super::observation_cache::{ObservationCache, ObservationSource, building_regions_of};
+use super::observation_cache::{
+    ObservationCache, ObservationSource, ReferenceUnreadable, building_regions_of,
+};
 use super::organise::{Organiser, RegionIndex};
 use super::timing;
 use super::{
@@ -103,7 +105,7 @@ pub fn merge_cohort_in_parallel<S, E>(
 ) -> Result<RegionOutcome, E>
 where
     S: ObservationSource<Error = E> + Sync + Send,
-    E: Send,
+    E: Send + From<ReferenceUnreadable>,
 {
     // Zero-sized and doing nothing without `--features merge-timing`, which is the only
     // build where any of the stopwatches below reads a clock (`super::timing`).
@@ -294,7 +296,7 @@ mod tests {
 
     /// A cache over one reader per sample of `layouts`.
     fn cache_over(layouts: &[Vec<SampleLocusObservations>]) -> ObservationCache<SourceOfFixture> {
-        ObservationCache::over(
+        ObservationCache::over_fixture(
             layouts
                 .iter()
                 .map(|sample| source_of(sample))
@@ -487,7 +489,7 @@ mod tests {
             Ok(member(region(5, 5), b"G", b"T")),
             Err(SourceFailed("the psp block would not decode")),
         ];
-        let mut cache = ObservationCache::over(vec![failing.into_iter()]);
+        let mut cache = ObservationCache::over_fixture(vec![failing.into_iter()]);
 
         let merged = merge_cohort_in_parallel(
             &[region(1, 600)],
