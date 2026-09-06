@@ -18,16 +18,41 @@
 //! `doc/devel/ng/impl_plan/hidden_paralog_filter.md`.
 //!
 //! **What exists so far:** [`spill`]'s entry and its codec — what pass one writes and passes
-//! two and three read back — and [`spill_file`]'s [`SpillFile`], which says where those bytes
-//! live and makes the file go away when the run ends, whatever way it ends. Nothing fills one
-//! yet: the sink that appends to it, the scoring context and the three passes are later steps
-//! of the plan above.
+//! two and three read back; [`spill_file`]'s [`SpillFile`], which says where those bytes live
+//! and makes the file go away when the run ends, whatever way it ends; and [`patch`]'s
+//! [`rewrite_filter_and_info`], which is how pass three puts the verdict on a line without
+//! disturbing the columns it does not touch. Nothing fills a spill yet: the sink that appends to
+//! it, the scoring context and the three passes are later steps of the plan above.
 
+use crate::ng::types::GenomePosition;
+use crate::ng::vcf::RecordPlace;
+
+pub mod patch;
 pub mod spill;
 pub mod spill_file;
 
+pub use patch::{LinePatchError, rewrite_filter_and_info};
 pub use spill::{SpillEntry, SpillError, SpillReader, SpillWriter, SpilledSample};
 pub use spill_file::{SpillFile, SpillFileError};
+
+/// **Where pass three gets the place it hands the writer.**
+///
+/// [`VcfWriter::write_line`](crate::ng::vcf::VcfWriter::write_line) checks the order against the
+/// place and never against the line's bytes, so a place typed out beside a line it does not
+/// describe writes a VCF whose `POS` column runs backwards, with the check passing. Deriving it
+/// from the entry the line came from is what makes that unbuildable: the three head fields are
+/// read, not retyped.
+impl From<&SpillEntry> for RecordPlace {
+    fn from(entry: &SpillEntry) -> Self {
+        Self {
+            at: GenomePosition {
+                contig: entry.contig,
+                position: entry.position,
+            },
+            is_repeat_tract: entry.is_repeat_tract,
+        }
+    }
+}
 
 /// One sample's coverage at one locus: the GC fraction of the window centred on it and that
 /// window's mean read depth. **Both fields `NaN` where the sample has no usable window

@@ -4,9 +4,9 @@
 use std::fs;
 
 use super::*;
-use crate::ng::types::{AlleleId, GenomeRegion, Genotype, Motif, Phred, Position};
+use crate::ng::types::{AlleleId, ContigId, GenomeRegion, Genotype, Motif, Phred, Position};
 use crate::ng::vcf::{
-    FilterVerdict, HeaderContig, MapqPool, SampleCall, SampleColumn, SampleReadCounts,
+    FilterVerdict, HeaderContig, MapqPool, PaddingBase, SampleCall, SampleColumn, SampleReadCounts,
     TractAnnotation, VcfHeaderMetadata,
 };
 
@@ -388,4 +388,199 @@ fn a_stream_that_reorders_its_records_is_refused_rather_than_written() {
         writer.write_stream(stream),
         Err(VcfWriteError::OutOfOrder { .. })
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Writing a line whose record is gone
+// ---------------------------------------------------------------------------
+
+/// Where a record sits, spelled out — what the hidden-duplication filter carries on its spill
+/// in place of the record itself.
+fn place(contig: u32, position: u64, is_repeat_tract: bool) -> RecordPlace {
+    RecordPlace {
+        at: crate::ng::types::GenomePosition {
+            contig: ContigId(contig),
+            position: Position(position),
+        },
+        is_repeat_tract,
+    }
+}
+
+#[test]
+fn a_line_written_without_its_record_reaches_the_file_exactly() {
+    let directory = scratch("a_line_written_without_its_record");
+    let output = directory.join("cohort.vcf");
+    let mut writer = VcfWriter::create(&output, metadata(), diploid()).expect("a writer");
+
+    writer
+        .write_line(
+            place(0, 100, false),
+            b"SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1",
+        )
+        .expect("the line");
+    writer.finish().expect("the file");
+
+    // The whole body, not a suffix: `ends_with` is also satisfied by a writer that emits the
+    // line twice, or that puts something extra in front of it.
+    let written = fs::read_to_string(&output).expect("the file");
+    let records: Vec<&str> = written
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect();
+    assert_eq!(
+        records,
+        vec!["SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1"],
+        "the line reached the file changed:\n{written}"
+    );
+}
+
+#[test]
+fn writing_a_record_and_writing_its_line_produce_the_same_bytes() {
+    // `write_record` is `write_line` with the line built first, so the two cannot drift — and
+    // this is what says so.
+    let directory = scratch("writing_a_record_and_writing_its_line");
+    let record = snp_at(0, 100);
+    let line = crate::ng::vcf::encode::record_line(&record, metadata().contigs(), diploid());
+
+    let through_the_record = directory.join("record.vcf");
+    let mut writer =
+        VcfWriter::create(&through_the_record, metadata(), diploid()).expect("a writer");
+    writer.write_record(&record).expect("the record");
+    writer.finish().expect("the file");
+
+    let through_the_line = directory.join("line.vcf");
+    let mut writer = VcfWriter::create(&through_the_line, metadata(), diploid()).expect("a writer");
+    writer
+        .write_line(place(0, 100, false), line.as_bytes())
+        .expect("the line");
+    writer.finish().expect("the file");
+
+    assert_eq!(
+        fs::read(&through_the_record).expect("the file"),
+        fs::read(&through_the_line).expect("the file"),
+    );
+}
+
+#[test]
+fn a_line_that_runs_backwards_is_refused_as_a_record_would_be() {
+    // Bypassing `write_record` must not bypass its check
+    // (`hidden_paralog_filter.md` §6 trap 6).
+    let directory = scratch("a_line_that_runs_backwards_is_refused");
+    let output = directory.join("cohort.vcf");
+    let mut writer = VcfWriter::create(&output, metadata(), diploid()).expect("a writer");
+
+    writer
+        .write_line(place(0, 200, false), b"x")
+        .expect("the first line");
+    let outcome = writer.write_line(place(0, 100, false), b"y");
+
+    assert!(matches!(
+        outcome,
+        Err(VcfWriteError::OutOfOrder {
+            previous_position: 200,
+            position: 100,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_line_may_take_the_one_legal_tie_and_no_other() {
+    let directory = scratch("a_line_may_take_the_one_legal_tie");
+    let output = directory.join("cohort.vcf");
+    let mut writer = VcfWriter::create(&output, metadata(), diploid()).expect("a writer");
+
+    writer
+        .write_line(place(0, 100, false), b"a generic locus")
+        .expect("the first");
+    writer
+        .write_line(place(0, 100, true), b"a tract padded onto it")
+        .expect("the tract may share the position");
+    let a_third = writer.write_line(place(0, 100, true), b"another tract");
+
+    assert!(matches!(a_third, Err(VcfWriteError::IllegalTie { .. })));
+}
+
+#[test]
+fn a_line_counts_towards_the_records_written() {
+    let directory = scratch("a_line_counts_towards_the_records_written");
+    let output = directory.join("cohort.vcf");
+    let mut writer = VcfWriter::create(&output, metadata(), diploid()).expect("a writer");
+
+    writer.write_record(&snp_at(0, 100)).expect("a record");
+    writer
+        .write_line(place(0, 200, false), b"a line")
+        .expect("a line");
+
+    assert_eq!(writer.records_written(), 2);
+}
+
+#[test]
+fn a_refused_line_leaves_the_writer_where_it_was() {
+    // A refusal must not move the writer: a line it rejected may not be counted, and may not
+    // become the place the next line is checked against. Neither was covered — advancing both
+    // before the check passes every other test in this file.
+    let directory = scratch("a_refused_line_leaves_the_writer_where_it_was");
+    let output = directory.join("cohort.vcf");
+    let mut writer = VcfWriter::create(&output, metadata(), diploid()).expect("a writer");
+
+    writer
+        .write_line(place(0, 200, false), b"the one that got in")
+        .expect("the first line");
+    let refused = writer.write_line(place(0, 100, false), b"backwards");
+
+    assert!(matches!(refused, Err(VcfWriteError::OutOfOrder { .. })));
+    assert_eq!(
+        writer.records_written(),
+        1,
+        "a line the writer refused was counted as written"
+    );
+    assert!(
+        matches!(
+            writer.write_line(place(0, 150, false), b"behind the last written line"),
+            Err(VcfWriteError::OutOfOrder { .. })
+        ),
+        "the refused line became the order the next one is checked against"
+    );
+}
+
+#[test]
+fn the_order_is_checked_against_the_place_and_not_the_line() {
+    // The boundary of the writer's guarantee, pinned so the next reader does not assume the
+    // bytes are checked: the places here ascend and the lines' POS columns descend, and the
+    // file goes out in the order the *lines* say — backwards.
+    //
+    // Nothing in the run can reach this, because pass three builds both the place and the line
+    // from one spill entry (`RecordPlace::from(&SpillEntry)`). This test exists so that stays a
+    // deliberate property rather than a lucky one.
+    let directory = scratch("the_order_is_checked_against_the_place");
+    let output = directory.join("cohort.vcf");
+    let mut writer = VcfWriter::create(&output, metadata(), diploid()).expect("a writer");
+
+    writer
+        .write_line(
+            place(0, 100, false),
+            b"SL4.0ch01\t900\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1",
+        )
+        .expect("the place ascends, so the writer is content");
+    writer
+        .write_line(
+            place(0, 200, false),
+            b"SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1",
+        )
+        .expect("the place ascends, so the writer is content");
+    writer.finish().expect("the file");
+
+    let written = fs::read_to_string(&output).expect("the file");
+    let positions: Vec<&str> = written
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| line.split('\t').nth(1).expect("a POS column"))
+        .collect();
+
+    assert_eq!(
+        positions,
+        vec!["900", "100"],
+        "the writer checks the place it is given, never the line's own POS"
+    );
 }

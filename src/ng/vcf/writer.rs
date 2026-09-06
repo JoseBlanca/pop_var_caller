@@ -7,6 +7,13 @@
 //! sink's: bytes go to `<output>.tmp` and are renamed into place only once they are on disk, so
 //! a crash leaves no half-written VCF for anyone to mistake for a finished run.
 //!
+//! **What "checked here" means for a caller holding a line rather than a record.** The check
+//! reads a [`RecordPlace`], not the bytes, so it is only as good as the place it is handed:
+//! [`VcfWriter::write_line`] will write a backwards file if given ascending places for
+//! descending lines. Both ways of building a place — [`place_of`] from a record, and
+//! `From<&SpillEntry>` from a spill entry — derive it from the same thing the line came from,
+//! which is what keeps the two in step.
+//!
 //! Encoding, by contrast, happens in [`encode`](super::encode) and cannot fail — everything
 //! that could make a record unwritable was refused when the record was built. So this module is
 //! where the `Result`s live, and all of them are about the file rather than about the data.
@@ -17,10 +24,10 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use super::VcfRecord;
 use super::encode::record_line;
 use super::header::{VcfHeaderMetadata, header_text};
-use super::{PaddingBase, VcfRecord};
-use crate::ng::types::{ContigId, Ploidy};
+use crate::ng::types::{GenomePosition, Ploidy, Position};
 
 /// The 28-byte empty-block marker every well-formed bgzf file ends with.
 ///
@@ -37,17 +44,27 @@ pub(crate) const BGZF_EOF: &[u8; 28] = &[
 /// kernel. The bgzf sink does its own block-level buffering.
 const WRITE_BUFFER_BYTES: usize = 64 * 1024;
 
-/// Where one record sits in the file's order: its contig, the position it is *written* at, and
-/// whether it is a repeat tract.
+/// Where one record sits in the file's order: the base it is *written* on, and whether it is a
+/// repeat tract.
 ///
 /// **The written position, not the record's own span start.** A left-padded deletion is written
 /// one base before its span (spec §5), and it is the written position a consumer sorts on — so
 /// it is the one the order has to be checked against.
+///
+/// **Public because a line can be written without its record.** The hidden-duplication filter
+/// parks finished lines on a spill and writes them back a pass later, by which time the record
+/// they came from is gone; this is what the ordering check reads, and carrying it is what lets
+/// [`VcfWriter::write_line`] run the same check (`hidden_paralog_filter.md` §6 trap 6).
+///
+/// **Do not build one field by field beside a line it is meant to describe.** The check cannot
+/// tell a place that disagrees with its line from one that agrees, so the two must come from one
+/// source: `From<&SpillEntry>` for a spilled line, [`place_of`] for a record.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct RecordPlace {
-    contig: ContigId,
-    position: u64,
-    is_repeat_tract: bool,
+pub struct RecordPlace {
+    /// Which base the record is written on, after the padding rule has moved it.
+    pub at: GenomePosition,
+    /// Whether it is a repeat tract, which is what admits the one legal tie.
+    pub is_repeat_tract: bool,
 }
 
 /// **The file's writer: a header, then records in genome order.**
@@ -112,14 +129,41 @@ impl VcfWriter {
     /// If the record runs backwards, if it forms a tie that is not the legal one, or if the
     /// write fails.
     pub fn write_record(&mut self, record: &VcfRecord) -> Result<(), VcfWriteError> {
-        let place = place_of(record);
+        let line = record_line(record, self.metadata.contigs(), self.ploidy);
+        self.write_line(place_of(record), line.as_bytes())
+    }
+
+    /// **Write a line that has already been encoded**, saying where it sits.
+    ///
+    /// The ordering check is the same one [`Self::write_record`] runs — that method is this one
+    /// with the line built first — so a line written this way cannot slip past a check the
+    /// record would have met. That is the point: the hidden-duplication filter parks finished
+    /// lines on a spill and writes them back a pass later, and by then the record is gone
+    /// (`hidden_paralog_filter.md` §3.5, §6 trap 6).
+    ///
+    /// **The line is written as given, with a newline after it** — no encoding, no validation of
+    /// its columns. Whoever hands it over owns its shape; the writer owns the order and the
+    /// bytes' destination.
+    ///
+    /// **What the writer cannot check, and it is not only the columns.** The order is checked
+    /// against the `place`, never against the line: **a place that disagrees with its line writes
+    /// a VCF whose `POS` column runs backwards, and the check passes** — as does a place that
+    /// lies about tract-ness, which admits a tie this method exists to refuse. Build the place
+    /// from the same thing the line came from — `RecordPlace::from(&entry)` for a spill entry,
+    /// [`place_of`] for a record — rather than typing the fields at the call site. Separately, a
+    /// line holding a `\n` becomes two record lines in the file and counts as one.
+    ///
+    /// # Errors
+    ///
+    /// If the `place` runs backwards, if it forms a tie that is not the legal one, or if the
+    /// write fails. Note that these are properties of the `place`, not of the line's bytes.
+    pub fn write_line(&mut self, place: RecordPlace, line: &[u8]) -> Result<(), VcfWriteError> {
         if let Some(last) = self.last {
             self.check_order(last, place)?;
         }
 
-        let line = record_line(record, self.metadata.contigs(), self.ploidy);
         self.sink
-            .write_all(line.as_bytes())
+            .write_all(line)
             .and_then(|()| self.sink.write_all(b"\n"))
             .map_err(|source| VcfWriteError::Write {
                 tmp_path: tmp_path_for(&self.final_path),
@@ -132,23 +176,36 @@ impl VcfWriter {
     }
 
     /// The ordering rule, in one place so the refusals cannot disagree with each other.
+    ///
+    /// **Both places are destructured exhaustively**, so a fourth component of the ordering key
+    /// cannot be added to [`RecordPlace`] without this function — the one whose correctness
+    /// depends on the whole field set — being made to think about it.
     fn check_order(&self, last: RecordPlace, next: RecordPlace) -> Result<(), VcfWriteError> {
-        let going_backwards = (next.contig.0, next.position) < (last.contig.0, last.position);
-        if going_backwards {
+        let RecordPlace {
+            at: last_at,
+            is_repeat_tract: last_is_tract,
+        } = last;
+        let RecordPlace {
+            at: next_at,
+            is_repeat_tract: next_is_tract,
+        } = next;
+
+        // `GenomePosition`'s derived `Ord` is genome order, so this is the whole backwards test.
+        if next_at < last_at {
             return Err(VcfWriteError::OutOfOrder {
-                previous_contig: last.contig.0,
-                previous_position: last.position,
-                contig: next.contig.0,
-                position: next.position,
+                previous_contig: last_at.contig.0,
+                previous_position: last_at.position.get(),
+                contig: next_at.contig.0,
+                position: next_at.position.get(),
             });
         }
-        let tied = next.contig == last.contig && next.position == last.position;
-        if tied && !(!last.is_repeat_tract && next.is_repeat_tract) {
+        let tied = next_at == last_at;
+        if tied && !(!last_is_tract && next_is_tract) {
             return Err(VcfWriteError::IllegalTie {
-                contig: next.contig.0,
-                position: next.position,
-                previous_was_repeat_tract: last.is_repeat_tract,
-                is_repeat_tract: next.is_repeat_tract,
+                contig: next_at.contig.0,
+                position: next_at.position.get(),
+                previous_was_repeat_tract: last_is_tract,
+                is_repeat_tract: next_is_tract,
             });
         }
         Ok(())
@@ -200,17 +257,17 @@ impl VcfWriter {
 }
 
 /// Where a record is written, after the padding rule has moved it.
+///
+/// **The position comes from the function that writes the `POS` column**
+/// ([`written_position`](super::encode::written_position)) rather than from a second copy of the
+/// padding rule. The two used to be spelled separately, so a record's ordering key and its own
+/// `POS` could drift apart under an edit to either.
 fn place_of(record: &VcfRecord) -> RecordPlace {
-    let start = record.region().start.get();
-    let position = match record.padding_base() {
-        // The record type refuses a left-hand padding base at position 1, so this cannot
-        // underflow.
-        Some(PaddingBase::Left(_)) => start - 1,
-        Some(PaddingBase::Right(_)) | None => start,
-    };
     RecordPlace {
-        contig: record.region().contig,
-        position,
+        at: GenomePosition {
+            contig: record.region().contig,
+            position: Position(super::encode::written_position(record)),
+        },
         is_repeat_tract: record.is_repeat_tract(),
     }
 }

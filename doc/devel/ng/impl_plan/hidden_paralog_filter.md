@@ -103,7 +103,7 @@ pairs, zero samples, a `FILTER` already set, and an `INFO` of `.`. *Depends:* �
 removed by a guard on every exit path — success, a `RunError`, a panic unwinding through the
 run — with a test for each. *Depends:* B1. *Source:* spec §3.4.
 
-**B3. ☐ The writer's line entry point and the patch. Own commit, do not bundle.**
+**B3. ✅ The writer's line entry point and the patch. Own commit, do not bundle.**
 `VcfWriter::write_line(place, &[u8])` running `check_order` from the entry's three head fields;
 a patch function that splits a line on its first eight tabs and rewrites `FILTER` (join with
 `;`, never replace a non-`PASS`) and `INFO` (append, or replace a `.`). Tests: a patched line
