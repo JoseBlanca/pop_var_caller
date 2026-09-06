@@ -21,6 +21,57 @@ struct CoveredPosition {
     is_gc: bool,
 }
 
+/// What one finalised window reports, before it is narrowed to the `f32` pair a locus carries.
+///
+/// A named pair rather than a `(f64, f64)`: the two are the same primitive and travel together
+/// through the fold, and transposing them is silent in every sense the module has — the emitted
+/// pair is built separately, so the per-locus half would stay right and the differential green,
+/// while every sample's depth bin width would be fitted from a median **GC fraction** and come
+/// out hundreds of times too small.
+#[derive(Debug, Clone, Copy)]
+struct WindowMeans {
+    gc_fraction: f64,
+    mean_depth: f64,
+}
+
+/// Where a sample stands with the depth bin width its histogram is cut on.
+///
+/// **Three states, not two, and the third is why this is an enum.** A sample whose held-back
+/// windows yield no positive median cannot be given a width — and must not be given a *later*
+/// one either: refitting from a later stretch of the genome would hand the filter a yardstick
+/// built from part of the sample, with the windows before it folded nowhere and the count
+/// agreeing with the cells. [`Unfittable`](Self::Unfittable) latches that, which also keeps the
+/// held-back list bounded.
+#[derive(Debug, Clone)]
+enum DepthBinWidth {
+    /// Still collecting windows to fit the width from. Absent windows never enter the list: a
+    /// window too thin to report a depth cannot help decide what a depth means either.
+    AwaitingWindows(Vec<WindowMeans>),
+    /// Fitted, and finite and greater than zero.
+    Fitted(f64),
+    /// The windows that arrived had no positive median. This sample has no histogram, and
+    /// nothing later can change that.
+    Unfittable,
+}
+
+/// The median of the held-back windows' mean depths, or `0.0` if there are none.
+///
+/// **The upper of the two middles on an even count**, rather than their average: either is a
+/// defensible median and this one needs no arithmetic on the values, so the width a sample gets
+/// is a depth the sample actually reported.
+///
+/// Reordering the slice is why it is taken by `&mut`; the caller is finished with the order.
+/// `total_cmp` rather than `partial_cmp`: it is total, so there is nothing to unwrap — and no
+/// `NaN` can be here anyway, since an absent window is never held back.
+fn median_depth(windows: &mut [WindowMeans]) -> f64 {
+    if windows.is_empty() {
+        return 0.0;
+    }
+    let middle = windows.len() / 2;
+    windows.select_nth_unstable_by(middle, |a, b| a.mean_depth.total_cmp(&b.mean_depth));
+    windows[middle].mean_depth
+}
+
 /// Accumulates, for every covered position, the mean depth and GC fraction of the **centred**
 /// window of width `window_bp` over the covered positions in it — and folds each finalised
 /// window into the per-sample histogram, so one pass serves both the per-locus pair and the
@@ -39,7 +90,18 @@ struct CoveredPosition {
 ///
 /// Memory is `O(window_bp)` **for a stream with one record per position**, which is what the
 /// walk produces; the order rule below is only non-decreasing, and a stream that repeated one
-/// position without advancing would buffer without bound.
+/// position without advancing would buffer without bound. On top of that sits the histogram,
+/// and — until the depth bin width is fitted — the `depth_scale_windows` windows held back to
+/// fit it from. Sixteen bytes each, but the list grows by doubling, so at the configured 10,000
+/// windows its capacity reaches 16,384 and the transient peaks at **262 kB**, not 160.
+///
+/// **The depth bin width is the sample's own, and nothing is folded until it is known.** The
+/// first `depth_scale_windows` windows that clear the floor are held back; their median mean
+/// depth sets the width so the regular bins span `depth_range_in_medians` times it; then those
+/// windows and every later one are folded. Production's fixed 0.5× bin serves one end of the
+/// depth axis at a time — at three reads a position it is a sixth of the single-copy peak's own
+/// scatter, and at 300 reads the range has to reach 1,200× for a four-copy carrier — which is
+/// what scaling per sample avoids.
 ///
 /// A window never spans contigs — a contig change finalises the previous contig's tail and
 /// resets the sliding state.
@@ -67,8 +129,20 @@ pub struct WindowCoverageAccumulator {
     /// Half-window in bases (`window_bp / 2`); the window centred on `p` spans the covered
     /// positions in `[p − half_window_bp, p + half_window_bp]`.
     half_window_bp: u64,
-    /// Row-major `[gc_bin][depth_bin]` counts, length `config.cell_count()`.
+    /// Row-major `[gc_bin][depth_bin]` counts, length `config.cell_count()`. Every cell is
+    /// zero until the depth bin width is fitted, because nothing can be folded before then.
     counts: Vec<u32>,
+    /// The depth bin width fitted from this sample's own depth, and the windows held back to
+    /// fit it from while it is not yet known.
+    ///
+    /// **Nothing is folded until it is known**, because a fold before the width is set has no
+    /// bins to fold into. The held-back windows are the exact pairs the fold will use, so that a
+    /// window folded after the fit lands in the cell it would have landed in before.
+    ///
+    /// **It is per sample and is never reset at a contig boundary.** A window never spans
+    /// contigs, but the axis a sample's whole histogram is cut on is one axis; refitting it at
+    /// each contig would give one matrix rows cut on several.
+    depth_bin_width: DepthBinWidth,
     /// Windows folded into the histogram so far — one per covered position, minus the ones
     /// the floor silenced.
     windows_folded: u64,
@@ -108,6 +182,7 @@ impl WindowCoverageAccumulator {
         Self {
             half_window_bp: u64::from(config.window_bp / 2),
             counts: vec![0; config.cell_count()],
+            depth_bin_width: DepthBinWidth::AwaitingWindows(Vec::new()),
             config,
             windows_folded: 0,
             contig: None,
@@ -191,32 +266,47 @@ impl WindowCoverageAccumulator {
     /// [`pop_ready`](Self::pop_ready), plus the tail just finalised — come back with it.
     /// Consuming `self` and returning the tail is what stops a caller forgetting to drain.
     ///
-    /// **The return shape changes at plan step A3**, where a depth bin width fitted to the
-    /// sample means a sample that finalised no window has no histogram at all (spec §3.6).
+    /// **There is no histogram for a sample the width could not be fitted from** — one that
+    /// finalised no window at all, or none that cleared the floor, or whose median window depth
+    /// was not a positive number. Such a sample is carried absent (spec §3.5).
+    ///
+    /// A sample that finalised fewer windows than `depth_scale_windows` fits its width here,
+    /// from what it has.
     #[must_use = "the tail windows and the histogram are the pass's whole output; dropping \
                   them discards every window the accumulator has not already handed over"]
-    pub fn finish(mut self) -> (Vec<(GenomePosition, WindowCoverage)>, CoverageByGcHistogram) {
+    pub fn finish(
+        mut self,
+    ) -> (
+        Vec<(GenomePosition, WindowCoverage)>,
+        Option<CoverageByGcHistogram>,
+    ) {
         self.finalise_all();
+        self.fit_depth_bin_width_and_fold_held_back();
         let tail: Vec<(GenomePosition, WindowCoverage)> = self.ready.into_iter().collect();
         // Exhaustive destructure: a field added to the configuration must be either carried
-        // into the histogram or explicitly ignored here, rather than silently omitted. A2 and
-        // A3 both add one.
+        // into the histogram or explicitly ignored here, rather than silently omitted.
         let WindowCoverageConfig {
             window_bp,
             gc_bins,
-            depth_bin_width,
             depth_bins,
-            // Not a bin scheme: the floor decides which windows are folded, and a consumer
-            // reading a cell does not need it.
+            // None of the three is a bin scheme. The floor decides which windows are folded,
+            // the scale sample decides when the width is fitted, and the range decides how wide
+            // it comes out; a consumer reading a cell needs none of them, and the width they
+            // between them produced is carried below.
             min_window_positions: _,
+            depth_scale_windows: _,
+            depth_range_in_medians: _,
         } = self.config;
-        let histogram = CoverageByGcHistogram {
-            window_bp,
-            gc_bins,
-            depth_bin_width,
-            depth_bins,
-            windows_folded: self.windows_folded,
-            counts: self.counts,
+        let histogram = match self.depth_bin_width {
+            DepthBinWidth::Fitted(depth_bin_width) => Some(CoverageByGcHistogram {
+                window_bp,
+                gc_bins,
+                depth_bin_width,
+                depth_bins,
+                windows_folded: self.windows_folded,
+                counts: self.counts,
+            }),
+            DepthBinWidth::AwaitingWindows(_) | DepthBinWidth::Unfittable => None,
         };
         (tail, histogram)
     }
@@ -297,13 +387,10 @@ impl WindowCoverageAccumulator {
             let divisor = self.summed_positions as f64;
             let gc_fraction = self.sum_gc as f64 / divisor;
             let mean_depth = self.sum_depth as f64 / divisor;
-            // Saturating rather than wrapping: a cell takes at most one count per covered
-            // position, so it can only reach `u32::MAX` on a reference above about 4.3 Gbp. A
-            // saturated cell under-reports; a wrapped one reports a near-empty cell where the
-            // single-copy peak is, and the filter's fit anchors on exactly that mode.
-            let cell = &mut self.counts[self.config.cell_index(gc_fraction, mean_depth)];
-            *cell = cell.saturating_add(1);
-            self.windows_folded += 1;
+            self.fold_or_hold_back(WindowMeans {
+                gc_fraction,
+                mean_depth,
+            });
             WindowCoverage {
                 gc_fraction: gc_fraction as f32,
                 // The stored `f32` holds a *mean* depth, bounded by the per-position depth and
@@ -316,6 +403,77 @@ impl WindowCoverageAccumulator {
         // so an exit that forgot it would hang the run rather than fail a test.
         self.ready.push_back((at, window));
         self.centre_offset += 1;
+    }
+
+    /// Fold one window into the histogram, or hold it back if the depth bin width is not yet
+    /// fitted — and fit it, and fold everything held back, once enough windows have arrived.
+    fn fold_or_hold_back(&mut self, window: WindowMeans) {
+        match &mut self.depth_bin_width {
+            DepthBinWidth::Fitted(width) => {
+                let width = *width;
+                self.fold(window, width);
+            }
+            DepthBinWidth::AwaitingWindows(held_back) => {
+                held_back.push(window);
+                if held_back.len() >= self.config.depth_scale_windows as usize {
+                    self.fit_depth_bin_width_and_fold_held_back();
+                }
+            }
+            // A sample already found unfittable folds nothing and holds nothing: it has no
+            // histogram, and a second scale sample from a later stretch of the genome would
+            // only produce a yardstick built from part of it.
+            DepthBinWidth::Unfittable => {}
+        }
+    }
+
+    /// Fit this sample's depth bin width from the windows held back, then fold them.
+    ///
+    /// **A sample whose held-back windows have no positive median gets no width and no
+    /// histogram, and stays that way.** A width of zero would put every window in the overflow
+    /// column and a negative or non-finite one is not a scale at all — so the sample is latched
+    /// unfittable and [`finish`](Self::finish) returns `None`, the same answer as for a sample
+    /// that finalised no window and for the same reason: nothing was measured that a yardstick
+    /// could be built from.
+    ///
+    /// **Having none held back is not the same as having a bad median**, so an empty list leaves
+    /// the state where it is: that is a sample which has not measured anything *yet*, and at
+    /// [`finish`](Self::finish) it is a sample that never did.
+    fn fit_depth_bin_width_and_fold_held_back(&mut self) {
+        let DepthBinWidth::AwaitingWindows(held_back) = &mut self.depth_bin_width else {
+            return;
+        };
+        if held_back.is_empty() {
+            return;
+        }
+        let mut held_back = std::mem::take(held_back);
+        let median = median_depth(&mut held_back);
+        let width = median * self.config.depth_range_in_medians / f64::from(self.config.depth_bins);
+        if !(width.is_finite() && width > 0.0) {
+            self.depth_bin_width = DepthBinWidth::Unfittable;
+            return;
+        }
+        self.depth_bin_width = DepthBinWidth::Fitted(width);
+        for window in held_back {
+            self.fold(window, width);
+        }
+    }
+
+    /// Add one window to its cell.
+    fn fold(&mut self, window: WindowMeans, depth_bin_width: f64) {
+        let WindowMeans {
+            gc_fraction,
+            mean_depth,
+        } = window;
+        // Saturating rather than wrapping: a cell takes at most one count per covered
+        // position, so it can only reach `u32::MAX` on a reference above about 4.3 Gbp. A
+        // saturated cell under-reports; a wrapped one reports a near-empty cell where the
+        // single-copy peak is, and the filter's fit anchors on exactly that mode.
+        let index = self
+            .config
+            .cell_index(gc_fraction, mean_depth, depth_bin_width);
+        let cell = &mut self.counts[index];
+        *cell = cell.saturating_add(1);
+        self.windows_folded += 1;
     }
 
     /// Finalise all remaining centres (truncated windows).
@@ -349,22 +507,28 @@ mod tests {
         WindowCoverageConfig {
             window_bp: 4,
             gc_bins: 2,
-            depth_bin_width: 1.0,
             depth_bins: 40,
             // The floor off, so these keep testing production's window: at 1 every window
             // clears it, because a window always holds at least its own centre.
             min_window_positions: 1,
+            // Larger than any fixture here, so the width is fitted once at `finish` from every
+            // window the stream produced rather than from its first few.
+            depth_scale_windows: 1_000,
+            depth_range_in_medians: 10.0,
         }
     }
 
     /// Feed a `(position, reference base, depth)` stream on one contig and collect every
     /// emitted window (drained after each `observe`, plus the tail `finish` returns), together
     /// with the finished histogram.
-    fn run_sliding(
+    fn run_sliding_allowing_no_histogram(
         config: WindowCoverageConfig,
         contig: u32,
         stream: &[(u64, u8, u32)],
-    ) -> (Vec<(GenomePosition, WindowCoverage)>, CoverageByGcHistogram) {
+    ) -> (
+        Vec<(GenomePosition, WindowCoverage)>,
+        Option<CoverageByGcHistogram>,
+    ) {
         let mut accumulator = WindowCoverageAccumulator::new(config);
         let mut out = Vec::new();
         for &(position, base, depth) in stream {
@@ -376,6 +540,19 @@ mod tests {
         let (tail, histogram) = accumulator.finish();
         out.extend(tail);
         (out, histogram)
+    }
+
+    /// The same, for the fixtures that do produce a histogram — most of them.
+    fn run_sliding(
+        config: WindowCoverageConfig,
+        contig: u32,
+        stream: &[(u64, u8, u32)],
+    ) -> (Vec<(GenomePosition, WindowCoverage)>, CoverageByGcHistogram) {
+        let (windows, histogram) = run_sliding_allowing_no_histogram(config, contig, stream);
+        (
+            windows,
+            histogram.expect("this fixture folds windows, so a depth width was fitted"),
+        )
     }
 
     // -- production's sliding-window tests, transcribed --------------------------------
@@ -414,7 +591,8 @@ mod tests {
     }
 
     /// A uniform stream: every window's mean equals the constant depth and GC, so every sample
-    /// lands in a single histogram cell.
+    /// lands in a single histogram cell — **and the cell is named**, because "one non-empty cell
+    /// holding twenty" is satisfied by any positive width and any in-range index formula.
     #[test]
     fn sliding_uniform_all_one_cell() {
         let stream: Vec<(u64, u8, u32)> = (1..=20u64).map(|p| (p, b'C', 12)).collect();
@@ -425,13 +603,11 @@ mod tests {
             assert!((window.gc_fraction - 1.0).abs() < 1e-6);
             assert_eq!(at.contig, ContigId(3));
         }
-        let nonzero: Vec<u32> = histogram
-            .counts
-            .iter()
-            .copied()
-            .filter(|&c| c > 0)
-            .collect();
-        assert_eq!(nonzero, vec![20], "all 20 windows in one cell");
+        // Median 12, range 10, 40 bins → width 3.0; depth 12 → column 4; GC 1.0 → the last of
+        // two GC bins, 1; each row holds 41 cells, so the cell is 1 × 41 + 4.
+        assert_eq!(histogram.depth_bin_width, 3.0);
+        assert_eq!(histogram.counts[1 * 41 + 4], 20);
+        assert_eq!(histogram.counts.iter().sum::<u32>(), 20);
     }
 
     /// An `N` reference base is not a centre and contributes to no window's sums. Positions
@@ -491,7 +667,7 @@ mod tests {
                 out.push(window);
             }
         }
-        let (tail, _) = accumulator.finish();
+        let (tail, _histogram) = accumulator.finish();
         out.extend(tail);
         // Six windows, three per contig; each carries only its own contig's depth, with no
         // averaging across the boundary.
@@ -543,13 +719,14 @@ mod tests {
         assert!((third.mean_depth - 3.0).abs() < 1e-6, "half=2 window");
     }
 
-    /// An empty stream yields no windows and an empty histogram.
+    /// An empty stream yields no windows and **no histogram at all**: with nothing measured
+    /// there is no median to scale a depth axis by, and an all-zero histogram carrying an
+    /// invented width would be a yardstick presented as if it had been fitted.
     #[test]
-    fn sliding_empty_stream_is_empty() {
-        let (windows, histogram) = run_sliding(sliding_config(), 0, &[]);
+    fn sliding_empty_stream_yields_no_window_and_no_histogram() {
+        let (windows, histogram) = run_sliding_allowing_no_histogram(sliding_config(), 0, &[]);
         assert!(windows.is_empty());
-        assert_eq!(histogram.windows_folded, 0);
-        assert!(histogram.counts.iter().all(|&c| c == 0));
+        assert!(histogram.is_none());
     }
 
     /// `window_bp = 1` → `half = 0`: the window is `[p, p]`, the centre alone — the degenerate
@@ -617,78 +794,99 @@ mod tests {
         }
         let (windows, histogram) = accumulator.finish();
         assert_eq!(windows.len(), 5, "every window returned, none dropped");
-        assert_eq!(histogram.windows_folded, 5);
+        assert_eq!(
+            histogram.expect("five windows were folded").windows_folded,
+            5,
+        );
     }
 
     // -- ng's own: the boundaries the transcribed eleven leave to the differential -----
     //
     // Each of these was written because a mutation to the code it covers left all eleven
-    // tests above green. The differential against production catches four of them too, but
-    // its histogram half stops applying once step A3 fits the depth bin width per sample,
+    // tests above green. The differential against production used to catch four of them too;
+    // its histogram half stopped applying once the depth bin width became a per-sample fit,
     // so these are what survive that.
 
-    /// The configuration reaches the histogram unaltered.
+    /// The bin scheme reaches the histogram unaltered — the configured part echoed, the depth
+    /// width fitted.
     ///
-    /// The four scheme fields are how a consumer turns a cell index back into a depth, and
-    /// nothing else in this module reads them — a cross-wired or constant echo produces a
-    /// histogram whose cells mean something other than what they say, with no panic.
+    /// Those four fields are how a consumer turns a cell index back into a depth, and nothing
+    /// else in this module reads them: a cross-wired or constant echo produces a histogram whose
+    /// cells mean something other than what they say, with no panic.
     #[test]
-    fn finish_echoes_the_configured_bin_scheme() {
-        // Every field a different value, and `depth_bin_width` deliberately not 1.0: a
-        // configuration whose fields coincide cannot tell a cross-wired echo from a right one.
+    fn finish_echoes_the_configured_bins_and_the_fitted_depth_width() {
+        // Every field a different value: a configuration whose fields coincide cannot tell a
+        // cross-wired echo from a right one.
         let config = WindowCoverageConfig {
             window_bp: 6,
             gc_bins: 3,
-            depth_bin_width: 0.7,
             depth_bins: 5,
             min_window_positions: 1,
+            depth_scale_windows: 1_000,
+            depth_range_in_medians: 7.0,
         };
         let (_, histogram) = run_sliding(config, 0, &[(1u64, b'G', 3u32)]);
         assert_eq!(histogram.window_bp, config.window_bp);
         assert_eq!(histogram.gc_bins, config.gc_bins);
-        assert_eq!(histogram.depth_bin_width, config.depth_bin_width);
         assert_eq!(histogram.depth_bins, config.depth_bins);
+        // One window at depth 3 → median 3; 3 × 7 / 5 = 4.2.
+        assert!(
+            (histogram.depth_bin_width - 4.2).abs() < 1e-12,
+            "the width is the median times the range over the bins, got {}",
+            histogram.depth_bin_width,
+        );
         assert_eq!(
             histogram.counts.len(),
             config.gc_bins as usize * (config.depth_bins as usize + 1),
         );
     }
 
+    /// A window of `window_bp` 1 is its own centre alone, so its mean depth is exactly the
+    /// depth fed in — which is what makes a cell index hand-computable.
+    fn one_position_per_window_config() -> WindowCoverageConfig {
+        WindowCoverageConfig {
+            window_bp: 1,
+            gc_bins: 2,
+            depth_bins: 4,
+            min_window_positions: 1,
+            depth_scale_windows: 1_000,
+            depth_range_in_medians: 1.0,
+        }
+    }
+
     /// A mean depth exactly on the top regular bin's edge belongs to the overflow column.
     ///
     /// The overflow column is the fit's own rejection guard — how many windows sat above the
     /// range — so merging it into the last regular bin would hide the thing it measures.
+    ///
+    /// **A uniform stream at a range of one median puts every window exactly on that edge**:
+    /// the median is the common depth, the regular bins span one median, so the top edge *is*
+    /// that depth. Nothing here has to be arranged to hit the boundary — the fit lands on it.
     #[test]
     fn mean_depth_on_the_top_bin_edge_lands_in_the_overflow_column() {
-        // window_bp 1 → each window is its centre alone, so the mean is that depth.
-        // depth_bins 4 at width 1.0 → the top regular edge is 4.0.
-        let config = WindowCoverageConfig {
-            window_bp: 1,
-            gc_bins: 2,
-            depth_bin_width: 1.0,
-            depth_bins: 4,
-            min_window_positions: 1,
-        };
-        let (_, histogram) = run_sliding(config, 0, &[(1u64, b'A', 4u32)]);
+        let stream: Vec<(u64, u8, u32)> = (1..=5u64).map(|p| (p, b'A', 4u32)).collect();
+        let (_, histogram) = run_sliding(one_position_per_window_config(), 0, &stream);
+        // Median 4, range 1, 4 bins → width 1.0, top regular edge 4 × 1.0 = 4.0.
+        assert_eq!(histogram.depth_bin_width, 1.0);
         // GC 0 → gc bin 0; depth 4.0 → overflow column 4; cell = 0 * 5 + 4.
-        assert_eq!(histogram.counts[4], 1);
-        assert_eq!(histogram.counts.iter().sum::<u32>(), 1);
+        assert_eq!(histogram.counts[4], 5);
+        assert_eq!(histogram.counts.iter().sum::<u32>(), 5);
     }
 
     /// A GC fraction of exactly 1.0 saturates into the last GC bin rather than off the end.
     #[test]
     fn gc_fraction_of_one_saturates_into_the_last_gc_bin() {
-        let config = WindowCoverageConfig {
-            window_bp: 1,
-            gc_bins: 2,
-            depth_bin_width: 1.0,
-            depth_bins: 4,
-            min_window_positions: 1,
-        };
-        let (_, histogram) = run_sliding(config, 0, &[(1u64, b'G', 1u32)]);
-        // GC 1.0 → floor(1.0 * 2) = 2, clamped to 1; depth 1.0 → bin 1; cell = 1 * 5 + 1.
+        // Depths 1 and 3 on `G` bases far enough apart to be their own windows: median 3
+        // (the upper of two), range 1, 4 bins → width 0.75.
+        let stream = [(1u64, b'G', 1u32), (100, b'G', 3u32)];
+        let (_, histogram) = run_sliding(one_position_per_window_config(), 0, &stream);
+        assert_eq!(histogram.depth_bin_width, 0.75);
+        // GC 1.0 → floor(1.0 × 2) = 2, clamped to the last GC bin, 1 — the saturation this
+        // test exists for. Depth 1 → bin 1 (1 / 0.75 = 1.33), depth 3 → the overflow column 4.
+        // Cells 1 × 5 + 1 = 6 and 1 × 5 + 4 = 9.
         assert_eq!(histogram.counts[6], 1);
-        assert_eq!(histogram.counts.iter().sum::<u32>(), 1);
+        assert_eq!(histogram.counts[9], 1);
+        assert_eq!(histogram.counts.iter().sum::<u32>(), 2);
     }
 
     /// A soft-masked reference reads exactly as an unmasked one.
@@ -789,11 +987,9 @@ mod tests {
     /// consecutive positions all share one window.
     fn floored_config(at_least: u32) -> WindowCoverageConfig {
         WindowCoverageConfig {
-            window_bp: 10,
-            gc_bins: 2,
-            depth_bin_width: 1.0,
-            depth_bins: 40,
             min_window_positions: at_least,
+            window_bp: 10,
+            ..sliding_config()
         }
     }
 
@@ -819,7 +1015,7 @@ mod tests {
             assert!((window.mean_depth - 10.0).abs() < 1e-6);
         }
 
-        let (one_short, _) = run_sliding(floored_config(6), 0, &stream);
+        let (one_short, _) = run_sliding_allowing_no_histogram(floored_config(6), 0, &stream);
         assert_eq!(one_short.len(), 5, "an absent window is still emitted");
         for (at, window) in &one_short {
             assert!(
@@ -837,7 +1033,8 @@ mod tests {
     /// hand it on, and compare two runs.
     #[test]
     fn an_absent_window_is_absent_in_both_fields_and_compares_by_bits() {
-        let (windows, _) = run_sliding(floored_config(6), 0, &[(1u64, b'G', 10u32)]);
+        let (windows, _) =
+            run_sliding_allowing_no_histogram(floored_config(6), 0, &[(1u64, b'G', 10u32)]);
         let (_, only) = &windows[0];
         assert!(only.gc_fraction.is_nan(), "GC fraction must be absent too");
         assert!(only.mean_depth.is_nan());
@@ -859,14 +1056,13 @@ mod tests {
         // Two positions 100 apart at a window of 10: each window holds only its own centre, so
         // both are one short of a floor of 2.
         let stream = [(1u64, b'G', 7u32), (101, b'G', 7)];
-        let (windows, histogram) = run_sliding(floored_config(2), 0, &stream);
+        let (windows, histogram) = run_sliding_allowing_no_histogram(floored_config(2), 0, &stream);
         assert_eq!(windows.len(), 2, "both centres are still emitted");
         assert!(windows.iter().all(|(_, w)| w.is_absent()));
-        assert_eq!(histogram.windows_folded, 0);
-        assert_eq!(
-            histogram.counts.iter().sum::<u32>(),
-            0,
-            "no cell may take an absent window",
+        assert!(
+            histogram.is_none(),
+            "no cell may take an absent window, and a sample whose every window was silenced \
+             has no depth to scale a histogram by either",
         );
 
         // The same stream with the floor off folds both, which is what makes the assertions
@@ -883,7 +1079,7 @@ mod tests {
     fn an_n_position_does_not_count_toward_the_floor() {
         // Three positions in one window of 10, the middle one `N`: two covered, floor of 3.
         let stream = [(1u64, b'G', 8u32), (2, b'N', 8), (3, b'G', 8)];
-        let (windows, _) = run_sliding(floored_config(3), 0, &stream);
+        let (windows, _) = run_sliding_allowing_no_histogram(floored_config(3), 0, &stream);
         assert_eq!(windows.len(), 2, "the N emits no window of its own");
         assert!(
             windows.iter().all(|(_, w)| w.is_absent()),
@@ -928,14 +1124,17 @@ mod tests {
     #[test]
     fn a_repeated_position_does_not_clear_the_floor_on_its_own() {
         let stream: Vec<(u64, u8, u32)> = (0..5).map(|_| (7u64, b'G', 10u32)).collect();
-        let (windows, histogram) = run_sliding(floored_config(5), 0, &stream);
+        let (windows, histogram) = run_sliding_allowing_no_histogram(floored_config(5), 0, &stream);
         assert_eq!(
             windows.len(),
             5,
             "one window per observation, as production emits"
         );
         assert!(windows.iter().all(|(_, w)| w.is_absent()));
-        assert_eq!(histogram.windows_folded, 0);
+        assert!(
+            histogram.is_none(),
+            "nothing was folded, so nothing was scaled"
+        );
     }
 
     /// **A window never spans contigs, and neither does the floor's count.** Five positions on
@@ -944,7 +1143,12 @@ mod tests {
     /// leaked across the boundary would clear the floor of 6.
     #[test]
     fn the_floor_counts_the_positions_of_its_own_contig() {
-        fn run(floor: u32) -> (Vec<(GenomePosition, WindowCoverage)>, CoverageByGcHistogram) {
+        fn run(
+            floor: u32,
+        ) -> (
+            Vec<(GenomePosition, WindowCoverage)>,
+            Option<CoverageByGcHistogram>,
+        ) {
             let mut accumulator = WindowCoverageAccumulator::new(floored_config(floor));
             let mut out = Vec::new();
             for contig in 0..2u32 {
@@ -966,14 +1170,17 @@ mod tests {
             windows.iter().all(|(_, w)| w.is_absent()),
             "five per contig is short of six",
         );
-        assert_eq!(histogram.windows_folded, 0);
+        assert!(histogram.is_none(), "nothing folded, so nothing scaled");
 
         let (windows, histogram) = run(5);
         assert!(
             windows.iter().all(|(_, w)| !w.is_absent()),
             "five per contig meets five",
         );
-        assert_eq!(histogram.windows_folded, 10);
+        assert_eq!(
+            histogram.expect("ten windows were folded").windows_folded,
+            10,
+        );
     }
 
     /// **A pair is absent if either number is.** The two are meant to go missing together and
@@ -1070,16 +1277,304 @@ mod tests {
         let _ = WindowCoverageAccumulator::new(config);
     }
 
-    /// A `NaN` width is the case worth its own test: without the guard, `mean / NaN` is `NaN`,
-    /// `as usize` yields 0, and every window silently lands in depth bin 0.
     #[test]
-    #[should_panic(expected = "depth_bin_width must be finite and > 0")]
-    fn new_panics_on_non_finite_depth_bin_width() {
+    #[should_panic(expected = "depth_scale_windows must be >= 1")]
+    fn new_panics_on_a_zero_depth_scale_sample() {
         let config = WindowCoverageConfig {
-            depth_bin_width: f64::NAN,
+            depth_scale_windows: 0,
             ..sliding_config()
         };
         let _ = WindowCoverageAccumulator::new(config);
+    }
+
+    #[test]
+    #[should_panic(expected = "depth_range_in_medians must be finite and > 0")]
+    fn new_panics_on_a_zero_depth_range() {
+        let config = WindowCoverageConfig {
+            depth_range_in_medians: 0.0,
+            ..sliding_config()
+        };
+        let _ = WindowCoverageAccumulator::new(config);
+    }
+
+    /// A `NaN` range makes the fitted width `NaN`, which is exactly the value the fit reads as
+    /// "this sample cannot be scaled" — so without this guard a misconfigured run would cost
+    /// every sample its histogram and say nothing.
+    #[test]
+    #[should_panic(expected = "depth_range_in_medians must be finite and > 0")]
+    fn new_panics_on_a_nan_depth_range() {
+        let config = WindowCoverageConfig {
+            depth_range_in_medians: f64::NAN,
+            ..sliding_config()
+        };
+        let _ = WindowCoverageAccumulator::new(config);
+    }
+
+    // -- the depth scale: a bin width fitted to the sample ------------------------------
+
+    /// The width is the median of the sample's own window depths, times the range, over the
+    /// bins — and the median is the upper of the two middles on an even count.
+    ///
+    /// Five windows at depths 1 to 5, far enough apart to be their own windows: the median is
+    /// 3, and with a range of 7 over 5 bins the width is 4.2. Fed in an order that is not
+    /// sorted, so a "take the last" or "take the first" would give 5 or 4 instead.
+    #[test]
+    fn the_depth_width_is_fitted_from_the_median_of_the_sample_own_window_depths() {
+        let config = WindowCoverageConfig {
+            depth_bins: 5,
+            depth_range_in_medians: 7.0,
+            ..one_position_per_window_config()
+        };
+        let stream = [
+            (1u64, b'G', 4u32),
+            (100, b'G', 1),
+            (200, b'G', 5),
+            (300, b'G', 3),
+            (400, b'G', 2),
+        ];
+        let (_, histogram) = run_sliding(config, 0, &stream);
+        assert!(
+            (histogram.depth_bin_width - 4.2).abs() < 1e-12,
+            "median 3 × range 7 / 5 bins = 4.2, got {}",
+            histogram.depth_bin_width,
+        );
+        assert_eq!(histogram.windows_folded, 5);
+    }
+
+    /// **A window held back for the fit lands in the cell it would have landed in had the width
+    /// already been known.** The same stream is run twice: once with the width fitted from the
+    /// first window, so every later window is folded as it is finalised, and once with a scale
+    /// sample larger than the stream, so every window is held back and folded at `finish`.
+    ///
+    /// The depth is uniform, so the median — and therefore the width — is the same either way;
+    /// the bases are not, so the histogram has more than one cell in it and a mis-binning of the
+    /// held-back windows would show. **What a uniform depth cannot see** is a held-back fold
+    /// that uses some other width, because that defect is present in both arms and cancels;
+    /// `a_held_back_window_lands_in_the_same_cell_as_one_folded_immediately` is what covers it.
+    #[test]
+    fn a_stream_gives_one_histogram_whether_its_windows_are_folded_early_or_late() {
+        let bases = [b'G', b'A', b'C', b'T', b'G', b'G', b'A', b'T'];
+        let stream: Vec<(u64, u8, u32)> = (1..=8u64)
+            .map(|p| (p, bases[(p - 1) as usize], 12u32))
+            .collect();
+
+        let folded_as_they_come = WindowCoverageConfig {
+            depth_scale_windows: 1,
+            ..sliding_config()
+        };
+        let all_held_back = WindowCoverageConfig {
+            depth_scale_windows: 1_000,
+            ..sliding_config()
+        };
+        let (early_windows, early) = run_sliding(folded_as_they_come, 0, &stream);
+        let (late_windows, late) = run_sliding(all_held_back, 0, &stream);
+
+        assert_eq!(
+            early_windows, late_windows,
+            "the emitted pairs never depended on the fit"
+        );
+        assert_eq!(
+            early, late,
+            "and neither does the histogram they are folded into"
+        );
+        assert!(
+            early.counts.iter().filter(|&&c| c > 0).count() > 1,
+            "the fixture must fill more than one cell, or this test cannot see a mis-binning",
+        );
+    }
+
+    /// A sample that finalises fewer windows than the scale sample asks for fits its width at
+    /// `finish`, from what it has — the common case for a run over a few regions, and for the
+    /// last sample of any cohort.
+    #[test]
+    fn a_stream_shorter_than_the_scale_sample_fits_its_width_at_the_end() {
+        let config = WindowCoverageConfig {
+            depth_bins: 5,
+            depth_range_in_medians: 7.0,
+            depth_scale_windows: 1_000_000,
+            ..one_position_per_window_config()
+        };
+        let stream = [(1u64, b'G', 3u32), (100, b'G', 3), (200, b'G', 3)];
+        let (windows, histogram) = run_sliding(config, 0, &stream);
+        assert_eq!(windows.len(), 3);
+        assert!(
+            (histogram.depth_bin_width - 4.2).abs() < 1e-12,
+            "median 3 × range 7 / 5 bins = 4.2 from three windows, got {}",
+            histogram.depth_bin_width,
+        );
+        assert_eq!(
+            histogram.windows_folded, 3,
+            "all three were folded at the end"
+        );
+    }
+
+    /// The median is the upper of the two middles on an even count, the middle on an odd one,
+    /// and `0.0` when there is nothing to take a median of — the value that makes the width
+    /// non-positive and so leaves the sample without a histogram.
+    #[test]
+    fn median_depth_returns_the_upper_middle_on_an_even_count() {
+        fn means(pairs: &[(f64, f64)]) -> Vec<WindowMeans> {
+            pairs
+                .iter()
+                .map(|&(gc_fraction, mean_depth)| WindowMeans {
+                    gc_fraction,
+                    mean_depth,
+                })
+                .collect()
+        }
+        assert_eq!(median_depth(&mut []), 0.0);
+        assert_eq!(median_depth(&mut means(&[(0.5, 7.0)])), 7.0);
+        // Even, and unsorted, so taking the first or the last would give a different answer.
+        assert_eq!(median_depth(&mut means(&[(0.1, 9.0), (0.2, 1.0)])), 9.0);
+        assert_eq!(
+            median_depth(&mut means(&[
+                (0.1, 4.0),
+                (0.2, 1.0),
+                (0.3, 8.0),
+                (0.4, 2.0)
+            ])),
+            4.0,
+        );
+        // Odd.
+        assert_eq!(
+            median_depth(&mut means(&[(0.1, 5.0), (0.2, 1.0), (0.3, 3.0)])),
+            3.0
+        );
+        // All equal: the answer cannot depend on which of the ties the selection lands on.
+        assert_eq!(
+            median_depth(&mut means(&[(0.1, 6.0), (0.9, 6.0), (0.3, 6.0)])),
+            6.0
+        );
+        // The GC fraction is never the key, even when it orders the pairs the other way.
+        assert_eq!(median_depth(&mut means(&[(9.0, 1.0), (1.0, 9.0)])), 9.0);
+    }
+
+    /// **A sample whose held-back windows have no positive median is carried absent, and stays
+    /// absent.** Three of the first four windows read depth zero, so the median is zero and no
+    /// width can be fitted — but the fourth reads 80 and the two after it read 30. Refitting
+    /// from the remainder would hand the filter a yardstick built from the last two windows of
+    /// six, with `windows_folded` reporting two and nothing to say the other four existed.
+    #[test]
+    fn a_failed_fit_does_not_start_a_second_scale_sample() {
+        let config = WindowCoverageConfig {
+            depth_scale_windows: 4,
+            ..one_position_per_window_config()
+        };
+        let stream = [
+            (1u64, b'G', 0u32),
+            (100, b'G', 0),
+            (200, b'G', 0),
+            (300, b'G', 80),
+            (400, b'G', 30),
+            (500, b'G', 30),
+        ];
+        let (windows, histogram) = run_sliding_allowing_no_histogram(config, 0, &stream);
+        assert_eq!(windows.len(), 6);
+        assert!(
+            windows.iter().all(|(_, w)| !w.is_absent()),
+            "every window clears a floor of one, so every one of them speaks",
+        );
+        assert!(
+            histogram.is_none(),
+            "the fit failed on a median of zero, so this sample has no yardstick — a histogram \
+             here would have been fitted from the tail of the sample and would count only it",
+        );
+    }
+
+    /// The width is fitted from exactly `depth_scale_windows` windows, not one more.
+    ///
+    /// Two windows at depths 10 and 2 — median 10, the upper of the two — then a third at 4. A
+    /// fit one window late would see `[10, 2, 4]` and take 4.
+    #[test]
+    fn the_scale_sample_is_exactly_as_many_windows_as_it_says() {
+        let config = WindowCoverageConfig {
+            depth_scale_windows: 2,
+            ..one_position_per_window_config()
+        };
+        let stream = [(1u64, b'G', 10u32), (100, b'G', 2), (200, b'G', 4)];
+        let (_, histogram) = run_sliding(config, 0, &stream);
+        assert_eq!(
+            histogram.depth_bin_width, 2.5,
+            "median 10 of the first two × range 1 / 4 bins; a fit one window late gives 1.0",
+        );
+        assert_eq!(histogram.windows_folded, 3);
+    }
+
+    /// **The depth axis is the sample's, not the contig's.** The width is fitted on the first
+    /// contig from windows at depth 10; the second contig is four times deeper. A width refitted
+    /// at the contig boundary would come out 10.0 instead of 2.5, and one histogram's rows would
+    /// be cut on two different axes.
+    #[test]
+    fn the_fitted_depth_width_survives_a_contig_change() {
+        let config = WindowCoverageConfig {
+            depth_scale_windows: 2,
+            ..one_position_per_window_config()
+        };
+        let mut accumulator = WindowCoverageAccumulator::new(config);
+        for (contig, depth) in [(0u32, 10u32), (1, 40)] {
+            for step in 0..2u64 {
+                accumulator.observe(ContigId(contig), Position(1 + step * 100), b'G', depth);
+                while accumulator.pop_ready().is_some() {}
+            }
+        }
+        let (_, histogram) = accumulator.finish();
+        let histogram = histogram.expect("four windows were folded");
+        assert_eq!(
+            histogram.depth_bin_width, 2.5,
+            "median 10 from the first contig × range 1 / 4 bins",
+        );
+        assert_eq!(
+            histogram.windows_folded, 4,
+            "both contigs' windows are folded"
+        );
+    }
+
+    /// **Held back and folded immediately are the same fold, at depths that differ.** With a
+    /// scale sample of two, the first two windows are held back and folded at the fit and the
+    /// two after are folded as they finalise. Their depths differ, so a held-back window folded
+    /// against any width but the fitted one lands in a different column — which the uniform-depth
+    /// fixture of `a_stream_gives_one_histogram_whether_its_windows_are_folded_early_or_late`
+    /// cannot see, because there a defect present in both of its arms cancels.
+    #[test]
+    fn a_held_back_window_lands_in_the_same_cell_as_one_folded_immediately() {
+        let config = WindowCoverageConfig {
+            depth_scale_windows: 2,
+            ..one_position_per_window_config()
+        };
+        // Held back: two windows at depth 10 → median 10 → width 10 × 1 / 4 = 2.5.
+        // Folded live: depth 3 → column 1 (3 / 2.5 = 1.2); depth 40 → the overflow column 4.
+        let stream = [
+            (1u64, b'G', 10u32),
+            (100, b'G', 10),
+            (200, b'G', 3),
+            (300, b'G', 40),
+        ];
+        let (_, histogram) = run_sliding(config, 0, &stream);
+        assert_eq!(histogram.depth_bin_width, 2.5);
+        // GC 1.0 → the last of two GC bins, 1; each row holds depth_bins + 1 = 5 cells. The two
+        // held back at depth 10 land at 10 / 2.5 = 4, the overflow column, and the live 40 with
+        // them.
+        assert_eq!(histogram.counts[1 * 5 + 4], 3);
+        assert_eq!(histogram.counts[1 * 5 + 1], 1, "the live window at depth 3");
+        assert_eq!(histogram.counts.iter().sum::<u32>(), 4);
+        assert_eq!(histogram.windows_folded, 4);
+    }
+
+    /// **A sample whose windows all report zero depth gets no histogram.** The median is zero,
+    /// so the width would be zero — every window in the overflow column and a yardstick with no
+    /// scale on it. The same answer as for a sample that finalised no window at all, and for the
+    /// same reason: nothing was measured that a yardstick could be built from.
+    #[test]
+    fn a_sample_whose_windows_all_report_zero_depth_gets_no_histogram() {
+        let stream: Vec<(u64, u8, u32)> = (1..=5u64).map(|p| (p, b'G', 0u32)).collect();
+        let (windows, histogram) = run_sliding_allowing_no_histogram(sliding_config(), 0, &stream);
+        assert_eq!(
+            windows.len(),
+            5,
+            "the windows are still emitted, and they are not absent"
+        );
+        assert!(windows.iter().all(|(_, w)| !w.is_absent()));
+        assert!(histogram.is_none());
     }
 
     #[cfg(debug_assertions)]
@@ -1101,9 +1596,8 @@ mod tests {
     }
 
     /// The absent pair equals itself, and equality is over bit patterns rather than IEEE
-    /// comparison. Nothing in this module produces the absent pair yet — plan step A2's floor
-    /// is what starts emitting it — so this is what keeps the convention from being an
-    /// undefended sentence in a doc comment until then.
+    /// comparison. The floor is what produces one, and three tests above assert on pairs it
+    /// produced; this is the statement of the convention itself, on a pair built by hand.
     #[test]
     fn an_absent_window_equals_itself_and_signed_zeroes_differ() {
         let absent = WindowCoverage {

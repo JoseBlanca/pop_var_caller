@@ -84,7 +84,7 @@ transcribed. *Depends:* —. *Source:* spec §3.3, §3.4, §7.
 positions emits `NaN` in both fields. Tests: a window at the floor emits a value, one below it
 emits `NaN`, and the `NaN` compares by bits. *Depends:* A1. *Source:* spec §3.3.
 
-**A3. ☐ The per-sample depth scale. Own commit, do not bundle.** The first
+**A3. ✅ The per-sample depth scale. Own commit, do not bundle.** The first
 `depth_scale_windows` finalised windows are buffered; at the 10,000th, the width is set from
 their median and every buffered window is folded; `finish` handles fewer than 10,000 and none.
 Its failure is silent — a width off by a factor is a histogram whose mode sits in the wrong bin,

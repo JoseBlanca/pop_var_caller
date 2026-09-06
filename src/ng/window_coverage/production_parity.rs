@@ -13,14 +13,15 @@
 //! in two other places (`ng/scanner_parity.rs`, `calling::genotype_table_parity`); nothing
 //! shipped depends on `src/sample_summary/`.
 //!
-//! **This narrows as ng's accumulator earns its two additions.** The floor (spec §3.3) has
-//! landed and is switched off here; the per-sample depth bin width (spec §3.4) is the other
-//! deliberate departure, and once it is fitted the histogram half of the comparison stops
-//! being meaningful. The
-//! window means and GC fractions stay production's and are what this exists to hold. Four
-//! behaviours that the transcribed unit tests leave entirely to this file — the overflow
-//! column's boundary, the GC clamp, lowercase bases, and the closing frontier — were given
-//! unit tests of their own for that reason.
+//! **This has narrowed to the windows, and will not narrow further.** ng's accumulator has
+//! both of its additions now: the floor (spec §3.3), which is switched off here so the two
+//! sides stay comparable, and a depth bin width fitted to each sample (spec §3.4), which
+//! production does not have and which ends the histogram half of the comparison — two
+//! histograms cut on different axes are not comparable, whatever the windows behind them.
+//! **What the windows themselves report is still production's, and is what this holds.** Four
+//! behaviours the transcribed unit tests used to leave entirely to this file — the overflow
+//! column's boundary, the GC clamp, lowercase bases, and the closing frontier — were given unit
+//! tests of their own before the narrowing, which is why the narrowing costs nothing.
 
 use super::{WindowCoverageAccumulator, WindowCoverageConfig};
 use crate::ng::types::{ContigId, Position};
@@ -89,19 +90,20 @@ fn the_transcription_matches_production_on_streams_neither_test_was_written_for(
         let config = WindowCoverageConfig {
             window_bp,
             gc_bins: 5,
-            depth_bin_width: 0.7,
             depth_bins: 17,
             // The floor at 1 is the floor switched off — every window holds at least its own
             // centre — which is what keeps this comparable with production, whose window has
             // no floor at all. The floor is ng's own and is unit-tested.
             min_window_positions: 1,
+            depth_scale_windows: 10_000,
+            depth_range_in_medians: 10.0,
         };
-        // Production's scheme is built from ng's configuration rather than typed a second
-        // time: the differential's premise is that both run the same numbers.
+        // Production's window width is ng's; its depth bin width has no counterpart on ng's
+        // side any more, and is set to a value this comparison never reads.
         let scheme = CoverageBinScheme {
             window_bp: config.window_bp,
             gc_bins: config.gc_bins,
-            depth_bin_width: config.depth_bin_width,
+            depth_bin_width: 0.7,
             depth_bins: config.depth_bins,
         };
         let mut production = SlidingWindowCoverageAccumulator::new(scheme);
@@ -139,8 +141,16 @@ fn the_transcription_matches_production_on_streams_neither_test_was_written_for(
             }
         }
 
-        let (production_tail, production_histogram) = production.finish();
+        // The two histograms' *cells* are not comparable — production cuts its depth axis at a
+        // fixed width and ng at one fitted to the sample — but two things about ng's still are,
+        // and neither has anything to do with the depth axis: that a stream of real windows
+        // produces a histogram at all, and that every window emitted was folded into it.
+        let (production_tail, _production_histogram) = production.finish();
         let (transcribed_tail, transcribed_histogram) = transcription.finish();
+        let transcribed_histogram = transcribed_histogram.expect(
+            "every window here clears a floor of 1 and the depths are positive, so a width is \
+             fitted and a histogram comes back",
+        );
         production_windows.extend(production_tail);
         transcribed_windows.extend(transcribed_tail);
 
@@ -188,12 +198,10 @@ fn the_transcription_matches_production_on_streams_neither_test_was_written_for(
              production, whose window has no floor — an absent window means it bound",
         );
         assert_eq!(
-            production_histogram.counts, transcribed_histogram.counts,
-            "seed {seed}: histogram cells differ",
-        );
-        assert_eq!(
-            production_histogram.n_positions, transcribed_histogram.windows_folded,
-            "seed {seed}: different number of windows folded",
+            transcribed_histogram.windows_folded as usize,
+            transcribed_windows.len(),
+            "seed {seed}: every window emitted must reach the histogram, whatever axis it is \
+             cut on",
         );
     }
 

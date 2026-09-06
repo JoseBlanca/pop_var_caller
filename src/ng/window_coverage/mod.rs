@@ -18,11 +18,12 @@
 //! ([`SlidingWindowCoverageAccumulator`](crate::sample_summary::coverage::SlidingWindowCoverageAccumulator),
 //! transcribed with its tests under the freeze rule that `src/sample_summary/` is not edited).
 //! The copy is deliberate and is held to its original by a differential test
-//! (`production_parity.rs`) — a later reader who is tempted to delete it and call
-//! production instead should know that ng's version has already diverged: a window built from
-//! fewer than [`WindowCoverageConfig::min_window_positions`] covered positions reports nothing,
-//! where production's would report a number. One further departure is still to come, a depth
-//! bin width fitted to the sample.
+//! (`production_parity.rs`) — a later reader who is tempted to delete it and call production
+//! instead should know that ng's version has already diverged twice. A window built from fewer
+//! than [`WindowCoverageConfig::min_window_positions`] covered positions reports nothing, where
+//! production's would report a number; and the depth bin width is fitted to each sample rather
+//! than configured, so the two sides' histograms are cut on different axes and only the windows
+//! are still comparable.
 
 mod accumulator;
 
@@ -42,10 +43,36 @@ pub use accumulator::WindowCoverageAccumulator;
 pub const WINDOW_BP: u32 = 500;
 
 /// GC bins, uniform over the closed unit interval `[0, 1]` (spec §3.4).
-///
-/// The depth axis has no constant here on purpose: its bin count and its width are marked soft
-/// in the spec and are settled by measurement, in plan steps D1 and D2.
 pub const GC_BINS: u32 = 50;
+
+/// Depth bins, before the overflow bin that follows them — **soft, and confirmed or moved by
+/// measurement at plan step D2** (spec §3.4).
+///
+/// Production bins depth at a fixed 0.5× in 2,000 bins to 1,000×, which is 400 kB a sample
+/// against a 500 kB per-open-sample budget, and which serves one end of the depth axis at a
+/// time: at three reads a position a 0.5× bin is a sixth of the single-copy peak's own scatter,
+/// and at 300 reads the range has to reach 1,200× for a four-copy carrier. ng bins fewer and
+/// scales the width to the sample instead — 50 × 401 × 4 bytes, **80.2 kB a sample**.
+pub const DEPTH_BINS: u32 = 400;
+
+/// How many windows a sample buffers before it sets its depth bin width — **soft, and confirmed
+/// or moved by measurement at plan step D2** (spec §3.4). Until then, 10,000.
+///
+/// The width is the sample's own: the accumulator holds its first windows back, takes the median
+/// of their mean depths, and sets the width so the bins span ten times that median. A sample
+/// that finalises fewer than this many sets the width from what it has when the pass ends.
+pub const DEPTH_SCALE_WINDOWS: u32 = 10_000;
+
+/// How many times the sample's median window depth the regular bins are to span — **soft, and
+/// confirmed or moved by measurement at plan step D2** (spec §3.4).
+///
+/// Ten leaves room above the single-copy peak for a four-copy carrier and below it for a sample
+/// whose median sits above its own mode. What share of windows still overflow is D2's
+/// measurement, on both benchmarks, against the fit's own rejection guard at a fifth.
+///
+/// **A multiple, not a count**, so that D2 can land between two whole numbers: the width the
+/// bins are cut at is this times the sample's median, over [`DEPTH_BINS`].
+pub const DEPTH_RANGE_IN_MEDIANS: f64 = 10.0;
 
 /// How many covered positions a window must hold before it is allowed to speak — **soft, and
 /// set by measurement at plan step D1** (spec §3.3's open question). Until then, 50 of 500.
@@ -56,21 +83,28 @@ pub const GC_BINS: u32 = 50;
 /// absent instead.
 pub const MIN_WINDOW_POSITIONS: u32 = 50;
 
-/// How wide the window is and how the histogram's cells are cut.
+/// How wide the window is, how many cells the histogram has, and how its depth axis is scaled.
 ///
-/// Production's `CoverageBinScheme` transcribed, under the name spec §3.6 gives it. Every
-/// field must be positive (`depth_bin_width` finite and `> 0`); [`assert_valid`] asserts that
-/// in both debug and release rather than silently using a scheme the caller never chose.
+/// Production's `CoverageBinScheme`, under the name spec §3.6 gives it, with three of ng's own
+/// additions in place of production's fixed depth bin width: a floor under how thin a window may
+/// be, the size of the sample the depth width is fitted from, and how far past that sample's
+/// median the regular bins are to reach. Every field must be positive; [`assert_valid`] asserts
+/// that in both debug and release rather than silently using a scheme the caller never chose.
+///
+/// **The width of a depth bin is not here, because it is not configuration.** It is fitted from
+/// each sample's own depth as the pass runs (spec §3.4), so it arrives on the finished histogram
+/// and nowhere else.
 ///
 /// **There is no `Default`**, and the values live in the constants above instead: every field
 /// here changes what the run measures, so the configuration is spelled at the site that builds
 /// the accumulator — plan step C2, inside the merge's observation cache — and a misconfigured
 /// run fails there rather than quietly measuring something else.
 ///
-/// **The three constants are not of the same kind.** [`WINDOW_BP`] and [`GC_BINS`] are
-/// production's, inherited and not re-argued here. [`MIN_WINDOW_POSITIONS`] is ng's own and is
-/// provisional: a reader who finds a run's behaviour turning on it is looking at a value nobody
-/// has yet defended with data, and plan step D1 is where that happens.
+/// **The constants are not all of the same kind.** [`WINDOW_BP`] and [`GC_BINS`] are
+/// production's, inherited and not re-argued here. [`MIN_WINDOW_POSITIONS`], [`DEPTH_BINS`],
+/// [`DEPTH_SCALE_WINDOWS`] and [`DEPTH_RANGE_IN_MEDIANS`] are ng's own and are provisional: a
+/// reader who finds a run's behaviour turning on one of them is looking at a value nobody has
+/// yet defended with data, and plan steps D1 and D2 are where that happens.
 ///
 /// [`assert_valid`]: WindowCoverageConfig::assert_valid
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -81,10 +115,15 @@ pub struct WindowCoverageConfig {
     /// Number of GC bins, uniform over the closed unit interval `[0, 1]`. Settled at
     /// [`GC_BINS`].
     pub gc_bins: u32,
-    /// Width of one depth bin, in mean-depth units.
-    pub depth_bin_width: f64,
-    /// Number of regular depth bins; one overflow bin follows them.
+    /// Number of regular depth bins; one overflow bin follows them. Provisionally
+    /// [`DEPTH_BINS`].
     pub depth_bins: u32,
+    /// How many windows to buffer before fitting this sample's depth bin width from their
+    /// median. Provisionally [`DEPTH_SCALE_WINDOWS`].
+    pub depth_scale_windows: u32,
+    /// How many times the sample's fitted median the regular bins span. Provisionally
+    /// [`DEPTH_RANGE_IN_MEDIANS`].
+    pub depth_range_in_medians: f64,
     /// Fewest covered positions a window may be built from and still report a number; below
     /// this it comes back absent. Provisionally [`MIN_WINDOW_POSITIONS`] — see spec §3.3.
     ///
@@ -104,17 +143,31 @@ impl WindowCoverageConfig {
         self.gc_bins as usize * self.depth_columns()
     }
 
-    /// Panic (in both debug and release) if any field is non-positive, or `depth_bin_width`
-    /// is not finite. The configuration is chosen by the run, not by the data, so a bad one
-    /// is a programmer error and fails loudly rather than quietly substituting another — the
-    /// `NaN` width is the case worth naming, because it would send every window into depth
-    /// bin 0 and produce a plausible-looking histogram from a configuration nobody chose.
+    /// Panic (in both debug and release) if any field is non-positive, or
+    /// `depth_range_in_medians` is not finite. The configuration is chosen by the run, not by
+    /// the data, so a bad one is a programmer error and fails loudly rather than quietly
+    /// substituting another.
+    ///
+    /// **The `NaN` case is the one worth naming.** `depth_range_in_medians` is the only float
+    /// here, and a `NaN` one makes the fitted depth bin width `NaN` — which is exactly the value
+    /// the fit reads as "this sample cannot be scaled", so a misconfigured run would cost every
+    /// sample its histogram and say nothing.
+    ///
     /// The boundary that supplies the configuration is plan step C2, where the merge's
     /// observation cache builds one accumulator per sample.
     pub(crate) fn assert_valid(&self) {
         assert!(self.window_bp >= 1, "window_bp must be >= 1");
         assert!(self.gc_bins >= 1, "gc_bins must be >= 1");
         assert!(self.depth_bins >= 1, "depth_bins must be >= 1");
+        assert!(
+            self.depth_scale_windows >= 1,
+            "depth_scale_windows must be >= 1",
+        );
+        assert!(
+            self.depth_range_in_medians.is_finite() && self.depth_range_in_medians > 0.0,
+            "depth_range_in_medians must be finite and > 0, got {}",
+            self.depth_range_in_medians,
+        );
         assert!(
             self.min_window_positions >= 1,
             "min_window_positions must be >= 1",
@@ -132,23 +185,20 @@ impl WindowCoverageConfig {
             self.window_bp,
             widest_window_in_bases,
         );
-        assert!(
-            self.depth_bin_width.is_finite() && self.depth_bin_width > 0.0,
-            "depth_bin_width must be finite and > 0, got {}",
-            self.depth_bin_width,
-        );
     }
 
-    /// Map a window's `(GC fraction in [0, 1], mean depth >= 0)` to a row-major cell index.
-    /// GC saturates into the last GC bin at 1.0; a depth at or above
-    /// `depth_bins * depth_bin_width` lands in the overflow column. `mean_depth` is always
-    /// `>= 0` (a sum of non-negative counts over a positive divisor), so `0` maps to depth
-    /// bin `0`; the `as usize` cast also saturates a hypothetical negative to `0`.
-    fn cell_index(&self, gc_fraction: f64, mean_depth: f64) -> usize {
+    /// Map a window's `(GC fraction in [0, 1], mean depth >= 0)` to a row-major cell index,
+    /// against a depth bin width fitted to this sample.
+    ///
+    /// GC saturates into the last GC bin at 1.0; a depth at or above `depth_bins * width` lands
+    /// in the overflow column. `mean_depth` is always `>= 0` (a sum of non-negative counts over
+    /// a positive divisor), so `0` maps to depth bin `0`; the `as usize` cast also saturates a
+    /// hypothetical negative to `0`.
+    fn cell_index(&self, gc_fraction: f64, mean_depth: f64, depth_bin_width: f64) -> usize {
         let gc_bins = self.gc_bins as usize;
         let gc_bin = ((gc_fraction * gc_bins as f64) as usize).min(gc_bins - 1);
         let depth_bins = self.depth_bins as usize;
-        let depth_bin = ((mean_depth / self.depth_bin_width) as usize).min(depth_bins);
+        let depth_bin = ((mean_depth / depth_bin_width) as usize).min(depth_bins);
         gc_bin * self.depth_columns() + depth_bin
     }
 }
@@ -242,7 +292,10 @@ pub struct CoverageByGcHistogram {
     /// Number of GC bins, uniform over `[0, 1]`: a window of GC fraction `g` lands in bin
     /// `min(floor(g * gc_bins), gc_bins - 1)`.
     pub gc_bins: u32,
-    /// Width of one depth bin, in mean-depth units.
+    /// Width of one depth bin, in mean-depth units — **fitted to this sample, not configured**.
+    /// It is the sample's median window depth times `depth_range_in_medians`, over `depth_bins`,
+    /// so the regular bins span ten times the median. Always finite and greater than zero: a
+    /// sample whose median came out zero or worse has no histogram at all.
     pub depth_bin_width: f64,
     /// Number of regular depth bins. One overflow bin — for a mean depth at or above
     /// `depth_bins * depth_bin_width` — follows them, so each GC row holds `depth_bins + 1`

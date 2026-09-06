@@ -4373,8 +4373,9 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     no position can cross, and an assert names the premise if it breaks again.
 
 #### Window coverage — each sample's depth and GC around a locus, and the histogram behind it
-- **Status:** `implemented` — Milestone A step A1 only (branch `ng-window-coverage`). Nothing
-  calls the module yet; the cache learns to feed it at Milestone C.
+- **Status:** `fixes-applied` — **Milestone A complete** (branch `ng-window-coverage`): the
+  accumulator, the floor, and the per-sample depth scale. Nothing calls the module yet; the
+  merge's observation cache learns to feed it at Milestone C.
 - **Plan:** [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md);
   **Spec:** [window_coverage.md](doc/devel/ng/spec/window_coverage.md). No architecture
   document — the spec's §3 type blocks are the code shape. Its consumer, built separately:
@@ -4384,11 +4385,13 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   `CoverageByGcHistogram`), [accumulator.rs](src/ng/window_coverage/accumulator.rs)
   (`WindowCoverageAccumulator`), [production_parity.rs](src/ng/window_coverage/production_parity.rs).
 - **Impl reports:** [A1](doc/devel/reports/implementations/ng_window_coverage_a1_2026-09-06.md),
-  [A2](doc/devel/reports/implementations/ng_window_coverage_a2_2026-09-06.md);
+  [A2](doc/devel/reports/implementations/ng_window_coverage_a2_2026-09-06.md),
+  [A3](doc/devel/reports/implementations/ng_window_coverage_a3_2026-09-06.md);
   **reviews:** [A1](doc/devel/reports/reviews/ng_window_coverage_a1_2026-09-06.md) (1 Blocker,
   5 Major, 18 Minor), [A2](doc/devel/reports/reviews/ng_window_coverage_a2_2026-09-06.md)
-  (4 Major, 4 Minor) — all applied or deferred with a home; each step's fixes are in its own
-  commit.
+  (4 Major, 4 Minor), [A3](doc/devel/reports/reviews/ng_window_coverage_a3_2026-09-06.md)
+  (1 Blocker, 3 Major, 8 Minor) — all applied or deferred with a home; each step's fixes are in
+  its own commit.
 - **A1 done (the accumulator, copied):** production's `SlidingWindowCoverageAccumulator`
   ([coverage.rs](src/sample_summary/coverage.rs)) transcribed with its eleven sliding-window
   tests, under spec §3.6's names and ng's coordinate types; the fixed-tile accumulator and the
@@ -4409,13 +4412,23 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   which plan step D1 measures. **The review caught a real defect, not only missing tests:** the
   floor first counted records rather than distinct coordinates, so one base observed five times
   cleared a floor of five and was folded. Seven mutations run on the fixed tree, each caught.
+- **A3 done (the depth axis, fitted per sample):** the accumulator holds its first
+  `depth_scale_windows` windows back, takes the median of their mean depths, and cuts the depth
+  axis so the 400 regular bins span ten times it — **50 × 401 × 4 bytes, 80.2 kB a sample**,
+  against production's fixed 0.5× bin at 400 kB. A sample nothing can be fitted from has no
+  histogram. **The review found the failure this step was warned about:** a fit that failed
+  part-way through a sample silently retried and dropped the windows it failed on — measured, six
+  windows emitted and two folded — so the width is now three-state and latches unfittable. The
+  differential against production keeps the windows and gives up the histogram cells, which is
+  why A1's review gave the four behaviours it used to guard alone their own unit tests first.
 - **Open:** the floor's default (spec §3.3) and the histogram's three bin constants (spec §3.4)
   are soft until plan steps D1 and D2 measure them.
-- **⚠ Three items owed to the owner at Checkpoint A**, none of them the implementer's to change:
+- **⚠ Five items owed to the owner at Checkpoint A**, none of them the implementer's to change:
   spec §3.4's "Every finalised window is folded" now contradicts the code (an absent window is
-  finalised and not folded); a `windows_under_the_floor` counter on the histogram is recommended
-  but changes the type the hidden-paralog filter plan reads; and spec §5 budgets a 12-byte entry
-  for the ready deque where the entry spec §3.6 specifies is 24 bytes.
+  finalised and not folded); `finish` returning a reason rather than one bit, which spec §3.5 and
+  §3.6 fix as `Option`; a `windows_under_the_floor` counter on the histogram, recommended but a
+  change to the type the hidden-paralog filter plan reads; spec §5's 12-byte ready-deque entry,
+  which is 24 bytes; and spec §3.4's "120 kB transient", which is 262 kB.
 
 ---
 
