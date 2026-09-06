@@ -4373,10 +4373,11 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     no position can cross, and an assert names the premise if it breaks again.
 
 #### Window coverage — each sample's depth and GC around a locus, and the histogram behind it
-- **Status:** `fixes-applied` — **Milestone A complete, Milestone B step B1 complete** (branch
-  `ng-window-coverage`): the accumulator, the floor, the per-sample depth scale, and the rule that
-  turns one drawn record into covered positions with a depth at each. Nothing calls the module
-  yet; the merge's observation cache learns to feed it at Milestone C.
+- **Status:** `fixes-applied` — **Milestones A and B complete** (branch `ng-window-coverage`):
+  the accumulator, the floor, the per-sample depth scale, the rule that turns one drawn record
+  into covered positions with a depth at each, and the measurement that says the rule's cheapest
+  branch is sound on real data. Nothing calls the module yet; the merge's observation cache learns
+  to feed it at Milestone C.
 - **Plan:** [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md);
   **Spec:** [window_coverage.md](doc/devel/ng/spec/window_coverage.md). No architecture
   document — the spec's §3 type blocks are the code shape. Its consumer, built separately:
@@ -4390,13 +4391,15 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Impl reports:** [A1](doc/devel/reports/implementations/ng_window_coverage_a1_2026-09-06.md),
   [A2](doc/devel/reports/implementations/ng_window_coverage_a2_2026-09-06.md),
   [A3](doc/devel/reports/implementations/ng_window_coverage_a3_2026-09-06.md),
-  [B1](doc/devel/reports/implementations/ng_window_coverage_b1_2026-09-06.md);
+  [B1](doc/devel/reports/implementations/ng_window_coverage_b1_2026-09-06.md),
+  [B2](doc/devel/reports/implementations/ng_window_coverage_b2_2026-09-06.md);
   **reviews:** [A1](doc/devel/reports/reviews/ng_window_coverage_a1_2026-09-06.md) (1 Blocker,
   5 Major, 18 Minor), [A2](doc/devel/reports/reviews/ng_window_coverage_a2_2026-09-06.md)
   (4 Major, 4 Minor), [A3](doc/devel/reports/reviews/ng_window_coverage_a3_2026-09-06.md)
   (1 Blocker, 3 Major, 8 Minor),
   [B1](doc/devel/reports/reviews/ng_window_coverage_b1_2026-09-06.md) (2 Blocker, 3 Major,
-  9 Minor) — all applied or deferred with a home; each step's fixes are in its own commit.
+  9 Minor), [B2](doc/devel/reports/reviews/ng_window_coverage_b2_2026-09-06.md) (3 Major,
+  11 Minor) — all applied or deferred with a home; each step's fixes are in its own commit.
 - **A1 done (the accumulator, copied):** production's `SlidingWindowCoverageAccumulator`
   ([coverage.rs](src/sample_summary/coverage.rs)) transcribed with its eleven sliding-window
   tests, under spec §3.6's names and ng's coordinate types; the fixed-tile accumulator and the
@@ -4441,6 +4444,28 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   release assert rather than a debug-only one, because this repo ships with debug assertions off.
   Eighteen tests including a property test over the whole small domain; thirteen mutations run,
   each caught, five by exactly one test.
+- **B2 done (the head-equals-evidence claim, measured):** the rule takes a one-base record's
+  depth from the count its head already carries rather than decoding the evidence, and that is
+  only right if the two agree. **They agree at every one of 8,784,182 one-base records** across
+  two tomato stores — six accessions over 200 kb of one chromosome at a mean 14.4 reads compared
+  with the reference, and the sample of `SRR7279481.p1` over all 80 benchmark intervals, 8 Mb on
+  all 12 chromosomes at 10.3 — and the mechanism that could break it, a read whose evidence stops
+  inside a one-base locus, occurs **nowhere in either store**. Spec §3.1 stands; the rule does not
+  become "build every body". **The cheap branch decides 992 positions in every 1,000 on the slice
+  and 994 on the wider store**; in records, 1 in 871 and 1 in 1,221 span more than one base. **No
+  one-base record was a tract**, which is spec §3.1's "generic by construction" measured rather
+  than assumed. **The review turned a reading into a check:** as first written the probe could
+  report the rule confirmed having checked nothing — a store with no records printed zeros and
+  exited 0 — and the evidence offered that its comparison could fail did not exercise the
+  mechanism the claim is about; two mutations that both tomato stores cannot distinguish from
+  correct code are now killed by a shipped fixture. Two figures in the first draft were wrong,
+  both flattering the rule. The probe
+  ([examples/ng_window_coverage_probe.rs](examples/ng_window_coverage_probe.rs)) is what plan step
+  C3 extends into the whole-store window recomputation, through the measurement seam the review
+  added. **Deviation:** the plan asks for a whole-genome store, and no ng store this build can
+  read — nor any over a whole genome — exists on this machine; the tomato CRAMs are cut to the
+  benchmark's intervals, so the 80-interval store stands in for it, and the claim is measured over
+  8 Mb of tomato at 10–14 reads a position rather than over a genome at 3×.
 - **Open:** the floor's default (spec §3.3) and the histogram's three bin constants (spec §3.4)
   are soft until plan steps D1 and D2 measure them.
 - **Checkpoint A ruled by the owner, 2026-09-06, and the spec updated with it:** `finish` hands

@@ -103,7 +103,7 @@ for and the depth at each — the head count at a single-base record; the body's
 `num_obs_along_locus()` at the anchor only for a generic record, at every position for a tract.
 Tests on fixtures of each shape, both `Built` and `Kept`. *Depends:* —. *Source:* spec §3.1.
 
-**B2. ☐ The single-base equality, measured. Own commit.** A probe (`examples/ng_window_coverage_probe.rs`)
+**B2. ✅ The single-base equality, measured. Own commit.** A probe (`examples/ng_window_coverage_probe.rs`)
 walks a real store building every body and asserts, at every record spanning one base, that the
 head count equals the body's `num_obs` sum; reports the count checked and any counter-example,
 on the six-accession slice and the whole-genome `SRR7279481` store. **A counter-example changes

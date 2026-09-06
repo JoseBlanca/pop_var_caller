@@ -18,8 +18,14 @@
 //!   the record the walker just minted. At a one-base locus no read's witness can stop inside
 //!   the locus, so every observation is whole and that count is the sum of `num_obs` — which is
 //!   why psp mode need not decode the evidence here at all. **That equality is a claim about
-//!   real data, not a theorem**, and plan step B2 measures it over a whole store; a
-//!   counter-example moves this rule to "build every body".
+//!   real data, not a theorem** (spec §6 trap 7); a counter-example — a read whose evidence
+//!   stops inside a one-base locus — moves this rule to "build every body". Plan step B2
+//!   checked **8,784,182 one-base records and found no disagreement and no such read**, on two
+//!   tomato stores: six accessions over 200 kb of one chromosome at a mean 14.4 reads compared
+//!   with the reference, and one accession over 8 Mb of all twelve at 10.3. **This rule decides
+//!   992 positions in every 1,000 there, and the build rule the other 8** — a share that moves
+//!   with indel density and with how much of the ground is repeat tract, so it is a fact about
+//!   those files rather than about the caller.
 //! - **A generic record spanning more than one base reports at its first base only.** The
 //!   generic walk emits one record per covered position, and a record widened by a deletion is
 //!   anchored at its first base while the interior positions have records of their own — so
@@ -52,7 +58,8 @@ use crate::ng::types::{GenomePosition, Position};
 ///
 /// `build` is how the evidence is obtained for a record that arrived without it, and it is
 /// **called at most once, and only for a record spanning more than one base**: a one-base
-/// record is answered from its summary, so psp mode never decodes the bytes it kept for one.
+/// record is answered from its summary, so psp mode never decodes the bytes it kept for one —
+/// on the stores B2 measured, all but about one record in a thousand (the module doc above).
 ///
 /// A position with a record but no reads is reported at depth `0`. That is a covered position
 /// — the sample has a record there — and dropping it would leave the window's denominator
