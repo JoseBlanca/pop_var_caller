@@ -21,8 +21,11 @@
 //! two and three read back; [`spill_file`]'s [`SpillFile`], which says where those bytes live
 //! and makes the file go away when the run ends, whatever way it ends; and [`patch`]'s
 //! [`rewrite_filter_and_info`], which is how pass three puts the verdict on a line without
-//! disturbing the columns it does not touch. Nothing fills a spill yet: the sink that appends to
-//! it, the scoring context and the three passes are later steps of the plan above.
+//! disturbing the columns it does not touch; and [`scoring_context`]'s
+//! [`ParalogScoringContext`], which is what pass two reads — one fitted coverage model per
+//! sample, and the rule turning a spilled row into the four numbers the scorer takes. **Nothing
+//! fills a spill yet**: the sink that appends to it and the three passes themselves are later
+//! steps of the plan above.
 
 use crate::ng::types::GenomePosition;
 use crate::ng::vcf::RecordPlace;
@@ -33,7 +36,9 @@ pub mod spill;
 pub mod spill_file;
 
 pub use patch::{LinePatchError, rewrite_filter_and_info};
-pub use scoring_context::{ParalogScoringContext, WhyNoCoverageModel};
+pub use scoring_context::{
+    CohortSizeMismatch, CoverageFitConfigRefused, ParalogScoringContext, WhyNoCoverageModel,
+};
 pub use spill::{
     GenericLocusSample, RepeatTractSample, SpillEntry, SpillError, SpillReader, SpillWriter,
     SpilledSamples,

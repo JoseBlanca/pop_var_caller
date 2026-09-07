@@ -19,7 +19,7 @@
 //! (`doc/devel/specs/hidden_paralog_filter.md`, reformulated for one sample by
 //! `doc/devel/architecture/hidden_paralog_single_sample_scoring.md`). Three of the five
 //! files beside this one are production's source, line for line and byte for byte:
-//! [`coverage_model`], 1,158 lines past its module header; [`locus_score`], 797; and
+//! [`coverage_model`], 1,157 lines past its module header; [`locus_score`], 797; and
 //! [`model_params`], 236. The other two are ng's own and are what assert the copies —
 //! `copy_fidelity` textually, so an edit to *either* tree fails the build instead of
 //! drifting quietly, and `production_parity` numerically, by scoring randomised loci

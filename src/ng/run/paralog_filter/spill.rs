@@ -398,7 +398,14 @@ impl<W: Write> SpillWriter<W> {
     /// stores, so a mismatch would be written as the flag and read back as the other shape; or
     /// if the sink refuses the bytes. An entry the sink refused is not counted.
     pub fn append(&mut self, entry: &SpillEntry) -> Result<(), SpillError> {
-        if entry.is_repeat_tract != matches!(entry.samples, SpilledSamples::RepeatTract(_)) {
+        // **Matched, not `matches!`**, so a third row shape cannot slip through as "not a
+        // tract". The spec already defers a tract-aware allele term that would want one, and a
+        // boolean test would have compiled unchanged and quietly written the wrong shape.
+        let carries_tract_rows = match entry.samples {
+            SpilledSamples::RepeatTract(_) => true,
+            SpilledSamples::GenericLocus(_) => false,
+        };
+        if entry.is_repeat_tract != carries_tract_rows {
             return Err(SpillError::SampleShapeDisagreesWithTheTractFlag {
                 contig: entry.contig.get(),
                 position: entry.position.get(),
@@ -604,6 +611,13 @@ fn decode_entry<R: BufRead>(source: &mut R) -> Result<SpillEntry, SpillError> {
     // **The tract flag chooses the row shape** (spec §3.2, §3.4). Reading it rather than a
     // second flag is what makes a mismatch unrepresentable in the file: there is only one thing
     // to be wrong.
+    //
+    // **⚑ A third row shape needs a wider discriminant in the file, and the compiler will not
+    // say so.** One bit distinguishes two shapes and no more, so a third `SpilledSamples`
+    // variant — spec §8's deferred tract-aware allele term is the candidate — would be written
+    // by an encoder that must then also widen this, while `if is_repeat_tract` goes on
+    // compiling and silently decodes it as a generic locus. The writer's own check is a `match`
+    // for that reason; this one cannot be, so it is a comment instead.
     let samples = if is_repeat_tract {
         let mut samples = Vec::with_capacity(reserve);
         for index in 0..sample_count {

@@ -9,10 +9,12 @@
 //! **A sample can fail to get a model, and which way it failed is kept.** Four ways, and they
 //! are not the same news: the pass reached no covered position for that sample at all; every
 //! window it did reach was too sparse to trust; the windows had no positive median depth to cut
-//! bins at; or the histogram existed and the fit refused it — an unresolvable single-copy peak,
-//! a mode on the wrong copy-number peak, too much of the sample in the overflow bin. The first
+//! bins at; or the histogram existed and the fit refused it, for any of the six reasons
+//! [`CoverageModelError`] names — no usable tiles at all, a single-copy peak in the bottom bin,
+//! a mode on the wrong copy-number peak, too much of the sample in the overflow bin, no GC bin
+//! dense enough to anchor the curve, or a configuration that is not a configuration. The first
 //! three come from [`SampleHistogram`](crate::ng::window_coverage::SampleHistogram) and the
-//! fourth from the fit. The run report says how many samples fell to each, because "the
+//! fourth carries the fit's own reason, whichever of the six it was. The run report says how many samples fell to each, because "the
 //! coverage model rested on 61 of 63 samples" is a different statement from "on 61 of 63, and
 //! the two that dropped out were nearly uncovered".
 //!
@@ -22,13 +24,48 @@
 //!
 //! Spec: `doc/devel/ng/spec/hidden_paralog_filter.md` §3.1, §3.2.
 
+use thiserror::Error;
+
 use crate::ng::paralog::{
     CoverageFitConfig, CoverageModelError, ParalogModelParams, ParalogScorePrecompute,
     SampleObservation, SingleCopyCoverageModel,
 };
+use crate::ng::types::InbreedingF;
 use crate::ng::window_coverage::SampleHistogram;
 
-use super::{SpillEntry, SpilledSamples};
+use super::{GenericLocusSample, RepeatTractSample, SpillEntry, SpilledSamples};
+
+/// **A record's sample count disagrees with the run's.**
+///
+/// Not a property of the data: the sink that filled the spill and this context both claim the
+/// run's sample count, so a disagreement is a wiring error between them. It names the record
+/// because pass two walks millions of them and a count alone would say nothing about which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error(
+    "the record at contig {contig} position {position} carries {record} sample(s) and the run \
+     has {cohort}; scoring it would silently use a prefix of the cohort"
+)]
+pub struct CohortSizeMismatch {
+    /// The record's contig.
+    pub contig: u32,
+    /// The record's written position.
+    pub position: u64,
+    /// How many samples the record carried.
+    pub record: usize,
+    /// How many the run has.
+    pub cohort: usize,
+}
+
+/// **The fit configuration is not a usable one**, so no sample could get a model.
+///
+/// Separate from [`WhyNoCoverageModel`] on purpose: that enum says what a *sample's* data came to,
+/// and this says the run was asked to fit with knobs that do not describe a fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("the paralog coverage fit was configured with {reason}, so no sample could be fitted")]
+pub struct CoverageFitConfigRefused {
+    /// What the fit said was wrong with it.
+    pub reason: &'static str,
+}
 
 /// Why a sample has no fitted coverage model, and therefore enters no record's score.
 ///
@@ -37,22 +74,28 @@ use super::{SpillEntry, SpilledSamples};
 /// operator about.
 /// **Not `Clone`**, because the fit's own error is not: it is a byte-for-byte copy of
 /// production's type and gaining a derive would be an edit to it.
-#[derive(Debug, PartialEq)]
+/// **`Display` is what spec §3.5's run-report line prints** — "samples whose coverage model was
+/// rejected, each with its reason" wants words, and `{:?}` would give an operator a variant name.
+#[derive(Debug, PartialEq, Error)]
 #[non_exhaustive]
 pub enum WhyNoCoverageModel {
     /// The calling pass reached no covered position for this sample, so no window was ever
     /// finalised. Ordinarily this is a sample with no reads in the run's intervals.
+    #[error("no window was finalised — the run reached no covered position for this sample")]
     NoWindowFinalised,
     /// Every window this sample finalised held too few covered positions to be trusted, so all
     /// of them were refused and none could train a yardstick.
+    #[error("every window this sample finalised held too few covered positions to be trusted")]
     EveryWindowUnderTheFloor,
     /// The windows the depth axis would have been fitted from had no positive median depth, so
     /// there was no bin width to cut the histogram at.
+    #[error("the sample's windows had no positive median depth to cut depth bins at")]
     MedianDepthNotPositive,
     /// The histogram existed and the fit refused it. **Carries the fit's own reason**, which
     /// distinguishes an essentially uncovered sample from one whose depth ran off the top of
     /// the histogram — opposite problems that a bare count would merge.
-    TheFitRefusedTheHistogram(CoverageModelError),
+    #[error("the coverage fit refused this sample's histogram: {0}")]
+    TheFitRefusedTheHistogram(#[source] CoverageModelError),
 }
 
 /// **Everything the scorer reads that does not change from record to record.**
@@ -83,24 +126,42 @@ impl ParalogScoringContext {
     /// `histograms` and `inbreeding` are both in the run's sample order and must be the same
     /// length; that length is the cohort size every scored record must also have.
     ///
+    /// **The histograms are taken by value on purpose.** Each sample's bins are freed as its fit
+    /// finishes rather than at the end of the run, which is the difference between holding one
+    /// histogram and holding three thousand. `fit` itself only borrows, so this looks like
+    /// unnecessary ownership until you count what a cohort's worth of them costs.
+    ///
     /// # Panics
     ///
     /// If the two slices disagree in length. They come from the same run, indexed by the same
     /// sample order, so a mismatch is a wiring error rather than an input the caller can meet —
     /// and the alternative is a scorer that silently drops the tail of the cohort.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// If the fit configuration is not a usable one. **That is an operator's mistake and not a
+    /// verdict about the cohort**, and it has to be told apart from one: the copied fit
+    /// re-validates its configuration on every call, so folding the refusal into the per-sample
+    /// outcome would make one wrong knob report that the coverage model rested on 0 of 63
+    /// samples, with 63 identical reasons — a configuration error dressed as a statement about
+    /// every sample's coverage.
     pub fn new(
         histograms: Vec<SampleHistogram>,
-        inbreeding: &[f64],
+        inbreeding: &[InbreedingF],
         params: &ParalogModelParams,
         fit: &CoverageFitConfig,
-    ) -> Self {
+    ) -> Result<Self, CoverageFitConfigRefused> {
         assert_eq!(
             histograms.len(),
             inbreeding.len(),
             "the run has one histogram and one inbreeding coefficient per sample, and these \
              disagree; a scorer built from them would drop the tail of the cohort"
         );
+
+        // **Unwrapped once, here.** The parameters file carries these validated to `[0, 1)`; the
+        // copied scorer takes plain `f64`s, because it is production's code unchanged. This is
+        // the one boundary between the two, so it is the one place the newtype comes off.
+        let inbreeding: Vec<f64> = inbreeding.iter().map(|f| f.get()).collect();
 
         let mut coverage_models = Vec::with_capacity(histograms.len());
         let mut why_no_model = Vec::with_capacity(histograms.len());
@@ -119,6 +180,15 @@ impl ParalogScoringContext {
                 }
             };
 
+            // A refused configuration is the same refusal for every sample, so it is reported
+            // once and construction fails, rather than being counted 63 times as data.
+            if let Err(WhyNoCoverageModel::TheFitRefusedTheHistogram(
+                CoverageModelError::InvalidConfig { reason },
+            )) = outcome
+            {
+                return Err(CoverageFitConfigRefused { reason });
+            }
+
             match outcome {
                 Ok(model) => {
                     // **The three slices are filled in one step each**, so they cannot come out
@@ -135,13 +205,13 @@ impl ParalogScoringContext {
             }
         }
 
-        Self {
+        Ok(Self {
+            precompute: ParalogScorePrecompute::new(params, &inbreeding),
             coverage_models,
             why_no_model,
-            inbreeding: inbreeding.to_vec(),
+            inbreeding,
             single_copy_depth_sd,
-            precompute: ParalogScorePrecompute::new(params, inbreeding),
-        }
+        })
     }
 
     /// **What one sample showed at one record, as the scorer reads it** — or `None` where the
@@ -160,32 +230,50 @@ impl ParalogScoringContext {
     #[must_use]
     pub fn observation_of(&self, entry: &SpillEntry, sample: usize) -> Option<SampleObservation> {
         let model = self.coverage_models.get(sample)?.as_ref()?;
-        let window = entry.samples.window(sample)?;
 
-        // The `NaN` pair is *this sample has no usable window here*, and it is compared as a
-        // number rather than by bits on purpose: any non-finite value is unusable, however it
-        // arrived.
-        if !window.gc_fraction.is_finite() || !window.mean_depth.is_finite() {
-            return None;
-        }
-        let relative_copy_number =
-            model.relative_copy_number(f64::from(window.gc_fraction), f64::from(window.mean_depth));
-
-        let (alt_reads, total_reads) = match &entry.samples {
+        // **One match yields the window and the counts together**, and both row types are
+        // destructured exhaustively — the sibling codec does the same, for the same reason: a
+        // field added to either row is a field this, the only reader of them, would otherwise
+        // drop in silence. Spec §8's deferred tract-aware allele term is exactly such a field.
+        let (window, alt_reads, total_reads) = match &entry.samples {
             SpilledSamples::GenericLocus(samples) => {
-                let sample = samples.get(sample)?;
-                let total = sample.ref_reads.checked_add(sample.alt_reads)?;
+                let GenericLocusSample {
+                    window,
+                    ref_reads,
+                    alt_reads,
+                } = samples.get(sample)?;
+                // A pair that cannot be summed is a corrupt spill row; it is treated as an
+                // absence here and counted by the caller, which is the only place that can tell
+                // one corrupt row from a sparse cohort.
+                let total = ref_reads.checked_add(*alt_reads)?;
                 if total == 0 {
                     return None;
                 }
-                (sample.alt_reads, total)
+                (*window, *alt_reads, total)
             }
             // No read counts to read, and no skip. The allele term is
             // `alt·ln(vaf) + (total − alt)·ln(1 − vaf)`, which is zero at zero reads under every
             // genotype and every carrier count, so it cancels and the ratio rests on coverage
             // alone (spec §3.2).
-            SpilledSamples::RepeatTract(_) => (0, 0),
+            SpilledSamples::RepeatTract(samples) => {
+                let RepeatTractSample { window } = samples.get(sample)?;
+                (*window, 0, 0)
+            }
         };
+
+        // **Stricter than [`WindowCoverage::is_absent`], deliberately.** That predicate asks
+        // whether either field is `NaN`; this rejects any non-finite value, and the difference is
+        // `±∞`. An infinite depth would divide to `+∞`, be winsorised by the scorer to
+        // `max_relative_copy_number` and read as a *confident four-copy paralog* — the filter's
+        // strongest possible coverage signal, from a measurement that never happened. The `NaN`
+        // half is load-bearing too, and against a panic rather than a wrong answer: a `NaN` GC
+        // fraction reaches `gc_multiplier`, where both its range comparisons are false, the
+        // floor saturates to zero, and the interpolation indexes one past the end of the curve.
+        if !window.gc_fraction.is_finite() || !window.mean_depth.is_finite() {
+            return None;
+        }
+        let relative_copy_number =
+            model.relative_copy_number(f64::from(window.gc_fraction), f64::from(window.mean_depth));
 
         Some(SampleObservation {
             relative_copy_number,
@@ -193,6 +281,43 @@ impl ParalogScoringContext {
             total_reads,
             inbreeding_coefficient: *self.inbreeding.get(sample)?,
         })
+    }
+
+    /// **Every sample's observation for one record**, into a buffer the caller keeps.
+    ///
+    /// This is what pass two calls; [`Self::observation_of`] is one sample of it. The buffer is
+    /// cleared and refilled, so one allocation serves the whole run — the project's
+    /// load / use / clear / reload shape.
+    ///
+    /// **The record's width is checked once here, and that is the point of the method.** Per
+    /// sample there is nothing to check against: an index past the record's own rows is
+    /// indistinguishable from a sample that was simply not covered, so a record narrower than
+    /// the cohort would score on a prefix and a wider one would be truncated —
+    /// [`score_locus_for_paralogy`](crate::ng::paralog::score_locus_for_paralogy) answers a
+    /// length mismatch with a *neutral score* rather than an error, so neither would fail
+    /// loudly. Both are wiring errors between the sink that filled the spill and this context,
+    /// and both produce a plausible, quietly weaker score on some records — the defect shape
+    /// that survives a whole run because nothing about the output looks wrong.
+    ///
+    /// # Errors
+    ///
+    /// If the record carries a different number of samples than the run has.
+    pub fn observations_of(
+        &self,
+        entry: &SpillEntry,
+        out: &mut Vec<Option<SampleObservation>>,
+    ) -> Result<(), CohortSizeMismatch> {
+        if entry.samples.len() != self.sample_count() {
+            return Err(CohortSizeMismatch {
+                contig: entry.contig.get(),
+                position: entry.position.get(),
+                record: entry.samples.len(),
+                cohort: self.sample_count(),
+            });
+        }
+        out.clear();
+        out.extend((0..self.sample_count()).map(|sample| self.observation_of(entry, sample)));
+        Ok(())
     }
 
     /// How many samples the run has — the cohort size every scored record must match.
@@ -203,7 +328,7 @@ impl ParalogScoringContext {
 
     /// How many samples have a fitted coverage model.
     #[must_use]
-    pub fn samples_with_a_coverage_model(&self) -> usize {
+    pub fn how_many_samples_have_a_coverage_model(&self) -> usize {
         self.coverage_models.iter().flatten().count()
     }
 
@@ -220,9 +345,10 @@ impl ParalogScoringContext {
         &self.single_copy_depth_sd
     }
 
-    /// The per-pass tables the scorer reuses across every record.
+    /// The per-pass tables the scorer reuses across every record. **Built once in
+    /// [`Self::new`]; this only hands them out.**
     #[must_use]
-    pub fn precompute(&self) -> &ParalogScorePrecompute {
+    pub fn score_tables(&self) -> &ParalogScorePrecompute {
         &self.precompute
     }
 }

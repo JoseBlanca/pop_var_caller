@@ -50,7 +50,7 @@
 //! **The transcribed tests below are outside the guard, and only they are.** Production's
 //! fixture builds the histogram naming all eight of its fields; ng's names the six it has, and
 //! three lines becoming two is not a substitution any line-for-line repoint can express. So the
-//! guard's span stops at `#[cfg(test)]` and the 694 lines above it — the whole of the fit —
+//! guard's span stops at `#[cfg(test)]` and the 644 lines above it — the whole of the fit —
 //! stay compared byte for byte.
 
 use thiserror::Error;

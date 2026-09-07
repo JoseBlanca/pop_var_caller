@@ -13,7 +13,7 @@ use crate::ng::paralog::{CoverageFitConfig, CoverageModelError, ParalogModelPara
 use crate::ng::run::paralog_filter::{
     GenericLocusSample, RepeatTractSample, SpillEntry, SpilledSamples,
 };
-use crate::ng::types::{ContigId, Position};
+use crate::ng::types::{ContigId, InbreedingF, Position};
 use crate::ng::window_coverage::{CoverageByGcHistogram, SampleHistogram, WindowCoverage};
 
 /// A histogram a sample's depth model can actually be fitted from: one GC bin, a single-copy
@@ -49,11 +49,27 @@ fn fit_config() -> CoverageFitConfig {
     CoverageFitConfig::default()
 }
 
+/// `n` outbred coefficients, which is what every fixture here wants.
+fn outbred(n: usize) -> Vec<InbreedingF> {
+    vec![InbreedingF::try_new(0.0).expect("zero is a coefficient"); n]
+}
+
+/// Build a context, expecting the fit configuration to be a usable one.
+fn a_context_from(
+    histograms: Vec<SampleHistogram>,
+    fit: &CoverageFitConfig,
+) -> ParalogScoringContext {
+    let n = histograms.len();
+    ParalogScoringContext::new(histograms, &outbred(n), &params(), fit)
+        .expect("the default fit configuration is a usable one")
+}
+
 /// A context over `n` samples, every one of which fits.
 fn a_context_over(n: usize) -> ParalogScoringContext {
-    let histograms: Vec<SampleHistogram> = (0..n).map(|_| a_fittable_histogram()).collect();
-    let inbreeding = vec![0.0; n];
-    ParalogScoringContext::new(histograms, &inbreeding, &params(), &fit_config())
+    a_context_from(
+        (0..n).map(|_| a_fittable_histogram()).collect(),
+        &fit_config(),
+    )
 }
 
 fn a_window(mean_depth: f32) -> WindowCoverage {
@@ -189,7 +205,7 @@ fn a_sample_whose_coverage_model_was_refused_is_absent_from_every_record() {
         SampleHistogram::NoWindowFinalised,
         a_fittable_histogram(),
     ];
-    let context = ParalogScoringContext::new(histograms, &[0.0; 3], &params(), &fit_config());
+    let context = a_context_from(histograms, &fit_config());
     let entry = a_generic_locus(vec![
         (a_window(ONE_COPY_DEPTH), 5, 5),
         (a_window(ONE_COPY_DEPTH), 5, 5),
@@ -236,10 +252,10 @@ fn each_way_a_sample_can_lose_its_model_is_kept_apart_from_the_others() {
             counts: vec![0; 41],
         }),
     ];
-    let context = ParalogScoringContext::new(histograms, &[0.0; 5], &params(), &fit_config());
+    let context = a_context_from(histograms, &fit_config());
 
     assert_eq!(context.sample_count(), 5);
-    assert_eq!(context.samples_with_a_coverage_model(), 1);
+    assert_eq!(context.how_many_samples_have_a_coverage_model(), 1);
 
     let why = context.why_no_model();
     assert!(why[0].is_none(), "the fitted sample has no reason");
@@ -267,7 +283,7 @@ fn the_sigma_slice_is_the_cohorts_length_with_nan_where_a_sample_has_no_model() 
         SampleHistogram::NoWindowFinalised,
         a_fittable_histogram(),
     ];
-    let context = ParalogScoringContext::new(histograms, &[0.0; 3], &params(), &fit_config());
+    let context = a_context_from(histograms, &fit_config());
 
     let sigma = context.single_copy_depth_sd();
 
@@ -318,8 +334,250 @@ fn the_relative_copy_number_doubles_when_the_window_depth_does() {
 fn a_cohort_whose_two_slices_disagree_is_refused_rather_than_truncated() {
     let _ = ParalogScoringContext::new(
         vec![a_fittable_histogram(), a_fittable_histogram()],
-        &[0.0],
+        &outbred(1),
         &params(),
         &fit_config(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The GC half of the copy number, and the two halves of the finiteness guard
+// ---------------------------------------------------------------------------
+
+/// Four GC bins whose one-copy depth rises with GC: bin 0 reads at 9.5, bins 1–2 at 10.5, bin 3
+/// at 11.5.
+///
+/// **The single-bin fixture above cannot test GC at all** — the copied model returns
+/// `gc_bias_curve[0]` for every GC value on a one-bin curve, so the GC argument is unobservable
+/// there and a wrong one passes every assertion. This one is the fixture for the tests that are
+/// about GC; the other stays right for the tests that are not.
+fn a_gc_varying_histogram() -> SampleHistogram {
+    let gc_bins = 4usize;
+    let depth_bins = 30usize;
+    let row = depth_bins + 1;
+    let mut counts = vec![0u32; gc_bins * row];
+    for (gc_bin, depth_bin) in [(0usize, 9usize), (1, 10), (2, 10), (3, 11)] {
+        counts[gc_bin * row + depth_bin] = 150;
+    }
+    SampleHistogram::Fitted(CoverageByGcHistogram {
+        window_bp: 500,
+        gc_bins: gc_bins as u32,
+        depth_bin_width: 1.0,
+        depth_bins: depth_bins as u32,
+        windows_folded: 600,
+        windows_under_the_floor: 0,
+        counts,
+    })
+}
+
+/// A fit whose smoother is the identity, so the fitted curve is the four bins' own medians and
+/// the expected values below can be written down rather than solved for.
+fn unsmoothed_fit_config() -> CoverageFitConfig {
+    CoverageFitConfig {
+        smooth_window: 1,
+        ..CoverageFitConfig::default()
+    }
+}
+
+fn a_window_at(gc_fraction: f32, mean_depth: f32) -> WindowCoverage {
+    WindowCoverage {
+        gc_fraction,
+        mean_depth,
+    }
+}
+
+#[test]
+fn the_relative_copy_number_uses_the_windows_own_gc_and_not_a_constant() {
+    // Two samples at the *same* depth and different GC must read as different copy numbers,
+    // because the depth a single copy produces depends on GC. Without this, passing a constant —
+    // or a stale window, or the wrong sample's — is invisible: every other test in this file uses
+    // a one-GC-bin histogram, where the curve is flat and the argument cannot be observed.
+    let context = a_context_from(
+        vec![a_gc_varying_histogram(), a_gc_varying_histogram()],
+        &unsmoothed_fit_config(),
+    );
+    let entry = a_generic_locus(vec![
+        (a_window_at(0.125, 9.5), 5, 5),
+        (a_window_at(0.875, 9.5), 5, 5),
+    ]);
+
+    let low = context
+        .observation_of(&entry, 0)
+        .expect("a covered sample")
+        .relative_copy_number;
+    let high = context
+        .observation_of(&entry, 1)
+        .expect("a covered sample")
+        .relative_copy_number;
+
+    assert!(
+        (low - 1.0).abs() < 1e-9,
+        "the low-GC window sits exactly at its bin's one-copy depth, so it must read as one \
+         copy: {low}"
+    );
+    assert!(
+        (high - 9.5 / 11.5).abs() < 1e-9,
+        "the high-GC window is below its bin's one-copy depth, so it must read below one: {high}"
+    );
+}
+
+#[test]
+fn a_window_with_only_one_field_absent_is_absent() {
+    // Both halves of the guard, separately. Every other fixture sets both fields to `NaN`, so
+    // either half alone catches them and one half could be deleted without a red test.
+    //
+    // The GC half is load-bearing against a *panic*, not a wrong answer: a `NaN` GC fraction
+    // reaches `gc_multiplier`, where both range comparisons are false, the floor saturates to
+    // zero, and the interpolation indexes one past the end of a one-bin curve — inside a file
+    // the copy guard forbids editing.
+    let context = a_context_over(2);
+    let entry = a_generic_locus(vec![
+        (a_window_at(f32::NAN, ONE_COPY_DEPTH), 5, 5),
+        (a_window_at(0.4, f32::NAN), 5, 5),
+    ]);
+
+    assert!(
+        context.observation_of(&entry, 0).is_none(),
+        "a window with no GC fraction but a depth was scored"
+    );
+    assert!(
+        context.observation_of(&entry, 1).is_none(),
+        "a window with a GC fraction but no depth was scored"
+    );
+}
+
+#[test]
+fn an_infinite_window_depth_is_absent_rather_than_a_winsorised_paralog() {
+    // This is where the guard is deliberately stricter than `WindowCoverage::is_absent`, which
+    // asks only whether either field is `NaN`. An infinite depth divides to `+∞`, which the
+    // scorer winsorises to its maximum relative copy number — so accepting it would turn a
+    // measurement that never happened into the filter's strongest possible paralog signal.
+    let context = a_context_over(2);
+    let entry = a_generic_locus(vec![
+        (a_window_at(0.4, f32::INFINITY), 5, 5),
+        (a_window_at(f32::NEG_INFINITY, ONE_COPY_DEPTH), 5, 5),
+    ]);
+
+    assert!(context.observation_of(&entry, 0).is_none());
+    assert!(context.observation_of(&entry, 1).is_none());
+}
+
+#[test]
+fn a_sample_at_zero_window_depth_reads_as_zero_copies_rather_than_absent() {
+    // Zero depth is a measurement — the sample was looked at and nothing was there — and it is
+    // the opposite of the paralog signal. Treating it as an absence would drop exactly the
+    // samples that argue hardest against a duplication.
+    let context = a_context_over(1);
+    let entry = a_generic_locus(vec![(a_window_at(0.4, 0.0), 5, 5)]);
+
+    let observation = context
+        .observation_of(&entry, 0)
+        .expect("zero depth is a measurement, not an absence");
+
+    assert_eq!(observation.relative_copy_number, 0.0);
+}
+
+#[test]
+fn a_sample_far_above_its_one_copy_depth_is_handed_over_unwinsorised() {
+    // The winsor cap belongs to the scorer, which applies it inside its own arithmetic. Capping
+    // here as well would be a second cap that nothing states, and it would silently change the
+    // input production's copy was validated on.
+    let context = a_context_over(1);
+    let entry = a_generic_locus(vec![(a_window_at(0.4, ONE_COPY_DEPTH * 20.0), 5, 5)]);
+
+    let observation = context.observation_of(&entry, 0).expect("a covered sample");
+
+    assert!(
+        (observation.relative_copy_number - 20.0).abs() < 1e-9,
+        "handed over as {} copies, so something capped it on the way",
+        observation.relative_copy_number
+    );
+}
+
+#[test]
+fn a_record_mixing_covered_and_absent_samples_hands_over_only_the_covered_ones() {
+    // The ordinary cohort shape, which no other test here has: some samples covered, some not.
+    let context = a_context_over(4);
+    let entry = a_generic_locus(vec![
+        (a_window(ONE_COPY_DEPTH), 5, 5),
+        (no_window(), 5, 5),
+        (a_window(ONE_COPY_DEPTH * 2.0), 6, 6),
+        (no_window(), 0, 0),
+    ]);
+
+    let scored: Vec<bool> = (0..4)
+        .map(|sample| context.observation_of(&entry, sample).is_some())
+        .collect();
+
+    assert_eq!(scored, vec![true, false, true, false]);
+}
+
+#[test]
+fn a_record_whose_width_disagrees_with_the_cohort_is_refused_rather_than_scored_on_a_prefix() {
+    // Per sample there is nothing to check against — an index past the record's rows looks
+    // exactly like an uncovered sample — so a narrow record would score on a prefix and a wide
+    // one would be truncated, and the scorer answers a length mismatch with a *neutral score*
+    // rather than an error. Both are wiring errors between the sink and this context.
+    let context = a_context_over(3);
+    let mut out = Vec::new();
+
+    let two_rows = a_generic_locus(vec![
+        (a_window(ONE_COPY_DEPTH), 5, 5),
+        (a_window(ONE_COPY_DEPTH), 5, 5),
+    ]);
+    let refused = context
+        .observations_of(&two_rows, &mut out)
+        .expect_err("a record narrower than the cohort must be refused");
+    assert_eq!(refused.record, 2);
+    assert_eq!(refused.cohort, 3);
+
+    let four_rows = a_generic_locus(vec![
+        (a_window(ONE_COPY_DEPTH), 5, 5),
+        (a_window(ONE_COPY_DEPTH), 5, 5),
+        (a_window(ONE_COPY_DEPTH), 5, 5),
+        (a_window(ONE_COPY_DEPTH), 5, 5),
+    ]);
+    assert!(context.observations_of(&four_rows, &mut out).is_err());
+}
+
+#[test]
+fn a_records_observations_are_the_cohorts_length_and_refill_one_buffer() {
+    let context = a_context_over(3);
+    let entry = a_generic_locus(vec![
+        (a_window(ONE_COPY_DEPTH), 5, 5),
+        (no_window(), 5, 5),
+        (a_window(ONE_COPY_DEPTH), 0, 0),
+    ]);
+    let mut out = vec![None; 99];
+
+    context
+        .observations_of(&entry, &mut out)
+        .expect("the record is the cohort's width");
+
+    assert_eq!(out.len(), 3, "the buffer is refilled, not appended to");
+    assert!(out[0].is_some());
+    assert!(out[1].is_none(), "no window");
+    assert!(out[2].is_none(), "no reads at a generic locus");
+}
+
+#[test]
+fn a_fit_configuration_that_is_not_one_fails_construction_rather_than_every_sample() {
+    // One wrong knob is an operator's mistake, and the copied fit re-validates on every call —
+    // so folding it into the per-sample outcome would report that the coverage model rested on
+    // 0 of 3 samples, with three identical reasons, which reads as a statement about the cohort.
+    let refused = ParalogScoringContext::new(
+        vec![a_fittable_histogram(); 3],
+        &outbred(3),
+        &params(),
+        &CoverageFitConfig {
+            single_copy_lo: f64::NAN,
+            ..CoverageFitConfig::default()
+        },
+    )
+    .expect_err("a NaN band edge is not a configuration");
+
+    assert!(
+        !refused.reason.is_empty(),
+        "the refusal must say what was wrong with it"
     );
 }

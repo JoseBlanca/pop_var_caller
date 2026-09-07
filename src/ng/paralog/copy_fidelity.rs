@@ -4,7 +4,7 @@
 //!
 //! | ng's copy | lines | production's original |
 //! |---|---|---|
-//! | `coverage_model.rs` | 1,158 past its module header | `src/paralog/coverage_model.rs` |
+//! | `coverage_model.rs` | 1,157 past its module header | `src/paralog/coverage_model.rs` |
 //! | `locus_score.rs` | 797 | `src/paralog/locus_score.rs` |
 //! | `prior.rs` | 524 | `src/paralog/prior.rs` |
 //! | `model_params.rs` | 236 | the items of `src/paralog/mod.rs` |
@@ -96,7 +96,7 @@
 //! **Narrow before you release.** A copy that gains content of its own — ng's
 //! `coverage_model.rs` has a test module whose fixture names ng's histogram fields, three lines
 //! where production has four — declares `ng_ends_before` and keeps the whole of its *logic*
-//! compared. Releasing that file instead would have thrown away a byte-for-byte check on 694
+//! compared. Releasing that file instead would have thrown away a byte-for-byte check on 644
 //! lines to accommodate a three-line fixture, and the numeric differential next door
 //! ([`production_parity`](super::production_parity)) covers the *scorer*, not the fit, so
 //! nothing else would have been watching it.
@@ -238,7 +238,7 @@ fn guarded_copies() -> Vec<GuardedCopy> {
         // **The guard stops before the transcribed tests, and only there.** ng's histogram
         // renames two of production's fields and drops a third, none of which the *fit* reads —
         // but production's test fixture builds all eight by name, and three lines becoming two
-        // is not a substitution any repoint can express. So the 694 lines that do the work stay
+        // is not a substitution any repoint can express. So the 644 lines that do the work stay
         // compared byte for byte, and the fixture below them is free to name ng's fields.
         GuardedCopy {
             file_name: "coverage_model.rs",
