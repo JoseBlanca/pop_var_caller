@@ -43,6 +43,7 @@ use std::time::{Duration, Instant};
 
 use md5::{Digest, Md5};
 use noodles_cram as cram;
+use noodles_cram::io::reader::ReferenceExtent;
 use noodles_fasta as fasta;
 use noodles_sam as sam;
 
@@ -521,9 +522,22 @@ fn time_pass_checked(
                 // the same repository for want of a second reference reader in this harness —
                 // the point being measured is what the decode needs resident, not how the
                 // window is read.
-                let (contig, start, end) = slice
-                    .reference_span()
-                    .expect("a mapped slice names one reference sequence");
+                let ReferenceExtent::OneSequence {
+                    reference_sequence_id: contig,
+                    start,
+                    end,
+                } = slice.reference_extent()
+                else {
+                    // This harness measures the whole-contig decode against the windowed one on
+                    // a coordinate-sorted whole-genome CRAM, every block of which sits on one
+                    // reference sequence. A block spanning several needs two passes and one
+                    // window each (`FORK.md` change 6) — a different measurement, and not one
+                    // the file under measurement can supply.
+                    panic!(
+                        "this block does not sit on one reference sequence; the layer \
+                         comparison is not defined for it"
+                    );
+                };
                 let name = header
                     .reference_sequences()
                     .get_index(contig)

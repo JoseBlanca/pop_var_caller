@@ -56,8 +56,11 @@ descriptors where a BAM needs two.
   the authoring skill says to isolate.
 - **Verify against ground truth, twice.** A CRAM and a BAM written from the same records must
   yield the same reads (`t8_a_cram_yields_the_same_ordered_reads_as_the_same_bam`), and on the
-  real file the harness's digest over every field of 600,000 decoded reads must stay at
-  `a127ecf5083f535a002a5f461f150ede`. Self-consistency proves nothing here.
+  real file the harness's digest over every field of 600,000 decoded reads must not move.
+  **The constant this line first gave, `a127ecf5083f535a002a5f461f150ede`, was wrong** — copied
+  from the research note, which had it wrong too. Measured on three builds including the note's
+  own commit, the value is `c0bdbb0e464a920b966ad487fc3ca678` (B1's report). Self-consistency
+  proves nothing here.
 - **Delete only after the replacement is proven.** The repository goes in A3, once A2's oracles
   are green with the repository already unreachable (an empty one is passed from A2 on).
 - **Measure at the end, on the real file, not the fixture.** The research note's §2 showed the
@@ -259,12 +262,12 @@ chromosome's window is withheld must be refused, not decoded short.
 
 ### Milestone B — measured on the real file, and the note closed
 
-**B1. The measurement, and the report.** ☐
+**B1. The measurement, and the report.** ✅
 Two runs, both against the main worktree's whole-genome tomato CRAM:
 
 1. The harness, `--only window` against `--only contig`, 60 containers from `SL4.0ch01`, seven
    repeats, under `/usr/bin/time -l` on the host build — per-layer seconds, peak resident, and
-   the digest, which must read `a127ecf5083f535a002a5f461f150ede` in both passes.
+   the digest, which must read `c0bdbb0e464a920b966ad487fc3ca678` in both passes.
 2. `pop_var_caller_exp call-from-alignments --reference … --alignment DRR000741.p1.cram
    --regions <a BED of SL4.0ch01:1-10,000,000> --defaults --threads 1 --output …`, on `main` at
    the merge base and on this branch, three repeats alternated: wall time, peak resident, and the
@@ -287,7 +290,7 @@ half is built. Numbers are quoted with the file and the range they were measured
 
 | milestone | proven by |
 |---|---|
-| A | **Ground truth, and two oracles that can see a wrong offset.** (1) `t8_a_cram_yields_the_same_ordered_reads_as_the_same_bam` in `open_bam.rs`: a CRAM and a BAM written from the same records yield the same reads in the same order — green before A2, green after; **blind to a window offset error**, because its reference is all-`A`. (2) A2's new non-periodic-reference test in `container.rs`: the CRAM decoded through a `WindowedRefSeq` over a pseudo-random FASTA equals its BAM twin field for field — a one-base offset fails it. (3) `ng_cram_decode_layers --only window` on the whole-genome tomato CRAM: every field of 600,000 decoded reads hashes to `a127ecf5083f535a002a5f461f150ede`, the value the contig-resident decode produces. Plus A2's short-window refusal test and A3's unchanged open-time refusal tests. |
+| A | **Ground truth, and two oracles that can see a wrong offset.** (1) `t8_a_cram_yields_the_same_ordered_reads_as_the_same_bam` in `open_bam.rs`: a CRAM and a BAM written from the same records yield the same reads in the same order — green before A2, green after; **blind to a window offset error**, because its reference is all-`A`. (2) A2's new non-periodic-reference test in `container.rs`: the CRAM decoded through a `WindowedRefSeq` over a pseudo-random FASTA equals its BAM twin field for field — a one-base offset fails it. (3) `ng_cram_decode_layers --only window` on the whole-genome tomato CRAM: every field of 600,000 decoded reads hashes to `c0bdbb0e464a920b966ad487fc3ca678`, the value the contig-resident decode produces. Plus A2's short-window refusal test and A3's unchanged open-time refusal tests. |
 | B | The report: peak resident and wall time on the real file, VCF byte-identical over 10 Mb of `SL4.0ch01`, one sample, one thread. |
 
 ## Out of scope (next plans)
