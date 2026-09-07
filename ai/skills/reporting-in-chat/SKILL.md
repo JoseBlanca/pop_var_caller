@@ -703,6 +703,46 @@ Three failures, all in one sentence:
    is meaningless until the reader knows what was fed differently between the 2.2× and the
    3.75×. The repair states both arms, what differs, and only then the two numbers.
 
+### 2026-09-07 — a spec gap put to the owner as a file-format question, in four undefined nouns
+
+Reporting a review finding, I asked the owner to rule on how the spill file should record that a
+record has no alternative allele:
+
+> ❌ "**Spec §3.2 says a record with no alternative allele is not scored — and neither pass does
+> that.** A repeat tract the caller refused, written with `ALT .` and every sample no-called, is
+> parked like any other record and scored on its coverage, so it gets a real ratio, enters the fit,
+> and can be removed from the file." … "**My recommendation: widen the existing tract byte into a
+> two-value discriminant rather than adding a field**"
+>
+> Owner: *"This writting is so aweful that I can't understand a thing. But, a record with no alt
+> allele is not variable and we don't mind about it because we remove them from the analysis."*
+
+> ✅ "Some positions get written out with no variant at them — a repeat tract the caller looked at
+> and declined to call. Should the duplication filter be allowed to remove those lines?"
+
+The owner answered in one sentence the moment the question was legible, and the answer made the
+whole recommendation moot. Four failures, and the first two are new in combination:
+
+1. **The reply opened with a specification citation instead of with the thing.** "Spec §3.2 says X
+   — and neither pass does that" makes the reader reconstruct X, then reconstruct which two passes,
+   before any fact arrives. **New rule: never open a paragraph with a document reference. Say what
+   is true, then cite.** A citation is evidence for a claim, not a substitute for making one.
+2. **Three modifiers stacked before the object was named**: *a repeat tract the caller refused,
+   written with `ALT .` and every sample no-called*. By the time the noun arrives the reader is
+   holding three unresolved qualifiers. One clause, one fact.
+3. **Every consequence was stated as internal mechanism** — *parked*, *scored on its coverage*,
+   *gets a real ratio*, *enters the fit*. Four project verbs in one sentence, none of them said in
+   plain terms, and not one of them named the thing the owner actually cares about: **a line
+   disappearing from their VCF**.
+4. **The `is this mine` test was run on the wrong question, which is why it passed.** The choice I
+   put up — a bit in the spill's layout — really was the owner's, because it edits a spec. But it
+   was *downstream* of a question that was theirs and far simpler: do these records matter at all?
+   Asking the downstream one first spent the owner's attention on machinery that a "no" deletes
+   entirely. **New rule: when a finding leads to a design choice, ask whether the thing the choice
+   is about matters, before asking how to build it.** The 2026-09-07 entry below says to run the
+   *is this mine* test before drafting; this adds that the test has to be run on the **outermost**
+   question, not the one the working reached last.
+
 ### 2026-09-07 — a decision put to the owner in the vocabulary of my own tooling
 
 Asked to code a step, I hit a choice about how a copied file reaches a type, and put it to the

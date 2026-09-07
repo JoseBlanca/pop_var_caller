@@ -30,21 +30,29 @@
 //!   it is on.
 //! - [`pass_two`] — [`score_the_parked_records_and_resolve_the_cut`]: read the spill, score every
 //!   record, fit how common duplications are in this run, resolve the target to a cut.
-//!
-//! **Pass three is not built.** Until it is, a run asking for the filter is refused rather than
-//! left holding a spill and no calls.
+//! - [`pass_three`] — [`write_the_records_the_filter_kept`]: read the spill again in step with
+//!   those ratios and write the VCF, dropping or tagging what the cut removes.
 
 use crate::ng::types::GenomePosition;
 use crate::ng::vcf::RecordPlace;
 
+pub mod finish;
 pub mod pass_one;
+pub mod pass_three;
 pub mod pass_two;
 pub mod patch;
 pub mod scoring_context;
 pub mod spill;
 pub mod spill_file;
 
+pub use finish::{
+    FilteredRun, ParalogFilterError, WhatTheOperatorAskedFor, fit_score_and_write_the_calls,
+    what_to_tell_the_operator,
+};
 pub use pass_one::{CalledRecordSink, PassOneError, SpillingSink, entry_for};
+pub use pass_three::{
+    HIDDEN_PARALOG_FILTER_ID, PassThreeError, WhatTheFilterDid, write_the_records_the_filter_kept,
+};
 pub use pass_two::{
     LrHistogramShape, NotATargetFdr, ParalogVerdicts, PassTwoError, TargetFdr,
     score_the_parked_records_and_resolve_the_cut,

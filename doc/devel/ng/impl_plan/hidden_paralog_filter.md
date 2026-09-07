@@ -154,7 +154,7 @@ is a `NaN` becoming a zero somewhere between the scorer and the histogram; the t
 mixed stream and asserts the histogram's total equals the finite count. *Depends:* A3, C1, C2.
 *Source:* spec §3.3, §6 trap 4.
 
-**C4. ☐ Pass three.** Read the spill again in step with the ratios; drop or tag per spec §3.5;
+**C4. ✅ Pass three.** Read the spill again in step with the ratios; drop or tag per spec §3.5;
 append the two INFO fields on every finite ratio; write through `write_line`; delete the spill;
 count. The header gains the `##paralogFilter=` line and the three declarations; the run report
 gains its lines. *Depends:* B3, C3. *Source:* spec §3.5, §3.6.

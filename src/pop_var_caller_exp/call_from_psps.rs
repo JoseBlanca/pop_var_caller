@@ -48,10 +48,10 @@ use crate::ng::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
 use crate::ng::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
-use crate::ng::run::paralog_filter::CalledRecordSink;
+use crate::ng::run::paralog_filter::{self, CalledRecordSink, SpillingSink, TargetFdr};
 use crate::ng::run::report::BoundsTheRunCalledUnder;
 use crate::ng::run::{OpenPspCohort, PspVariantCaller, RunError, RunReport, StoredCohortInputs};
-use crate::ng::types::MAX_MOTIF_LEN;
+use crate::ng::types::{InbreedingF, MAX_MOTIF_LEN};
 use crate::ng::vcf::writer::{VcfWriteError, VcfWriter};
 use crate::pop_var_caller_exp::calling_run::{self, CallingRunError};
 use crate::pop_var_caller_exp::generate_psps::PSP_FILE_EXTENSION;
@@ -63,14 +63,13 @@ mod tests;
 /// What this subcommand is called on the command line.
 pub const SUBCOMMAND: &str = "call-from-psps";
 
-/// Default target false-discovery rate for the hidden-duplication filter.
+/// Default target false-discovery rate for the hidden-duplication filter — spec §3.6's.
 ///
-/// **Zero, where spec §3.6 gives `0.01`, and only until the filter is finished.** The spec's
-/// default turns the filter on; its scoring and writing passes are steps C3 and C4 of
-/// `doc/devel/ng/impl_plan/hidden_paralog_filter.md`, so a run taking that default today would
-/// park every record and produce no VCF. This becomes `0.01` in the step that makes the whole
-/// path exist.
-const DEFAULT_PARALOG_FDR: f64 = 0.0;
+/// **About one record in a hundred of those the filter removes was really a variant.** It was
+/// `0` while the filter's scoring and writing passes did not exist, because that default would
+/// have parked every record and produced no VCF; both passes are built now, so the spec's value
+/// stands and the filter is on unless an operator turns it off with `--paralog-fdr 0`.
+const DEFAULT_PARALOG_FDR: f64 = 0.01;
 
 /// Call a cohort of stored psps and write a VCF.
 ///
@@ -147,11 +146,11 @@ pub struct CallFromPspsArgs {
     #[arg(long, default_value_t = DEFAULT_PARALOG_FDR, help_heading = "Advanced")]
     pub paralog_fdr: f64,
 
-    /// Keep the records the hidden-duplication filter flags, on the `hiddenParalog` filter,
+    /// Keep the records the hidden-duplication filter removes, on the `hiddenParalog` filter,
     /// instead of dropping them.
     ///
-    /// **Read by nothing yet.** The pass that applies a verdict is not built, and every non-zero
-    /// `--paralog-fdr` is refused meanwhile, so this changes no run today.
+    /// **What it is for**: a run that drops can be audited against one that tags, since the two
+    /// files differ by exactly the tagged lines.
     #[arg(long, help_heading = "Advanced")]
     pub paralog_filter_tag: bool,
 
@@ -223,13 +222,19 @@ pub struct CallFromPspsArgs {
 #[non_exhaustive]
 pub enum CallFromPspsCliError {
     /// The hidden-duplication filter's target is not a false-discovery rate.
-    #[error(
-        "--paralog-fdr {asked} is not a false-discovery rate; it must be a fraction in [0, 1), \
-         and 0 turns the filter off"
-    )]
+    #[error("--paralog-fdr is not a false-discovery rate")]
     ParalogTargetIsNotAFraction {
-        /// What was asked for.
-        asked: f64,
+        /// What the type said was wrong with it.
+        #[source]
+        source: crate::ng::run::paralog_filter::NotATargetFdr,
+    },
+
+    /// The hidden-duplication filter could not finish the run.
+    #[error("the hidden-duplication filter could not finish this run")]
+    ParalogFilter {
+        /// What the filter said.
+        #[source]
+        source: crate::ng::run::paralog_filter::ParalogFilterError,
     },
 
     /// The calls could not be written, or the records could not be parked for the filter.
@@ -240,21 +245,6 @@ pub enum CallFromPspsCliError {
         /// What pass one said.
         #[source]
         source: crate::ng::run::paralog_filter::PassOneError,
-    },
-    /// The hidden-duplication filter was asked for before the passes that finish it exist.
-    ///
-    /// **Refused rather than run half-way.** Pass one — parking every record beside the output —
-    /// is built; the scoring pass that turns those records into a cut and the writing pass that
-    /// applies it are steps C3 and C4 of the filter's plan. A run that parked its records and
-    /// stopped would leave no VCF at all, so the flag is accepted and its non-zero values are
-    /// not, until those steps land.
-    #[error(
-        "--paralog-fdr {asked} was given, but the hidden-duplication filter's scoring and \
-         writing passes are not built yet; use 0 to run without it"
-    )]
-    ParalogFilterNotFinished {
-        /// The target the run asked for.
-        asked: f64,
     },
     /// The reference could not be read.
     #[error("reading the reference {}", path.display())]
@@ -439,22 +429,10 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     }
 
     // **A target that is not a fraction is refused before anything else looks at it.** `clap`
-    // parses any `f64`, so `7`, `inf` and `nan` all arrive here; a false-discovery rate is a
-    // probability, and `-0.0` is not "off" however it compares.
-    if !(args.paralog_fdr.is_finite()
-        && args.paralog_fdr >= 0.0
-        && args.paralog_fdr < 1.0
-        && args.paralog_fdr.is_sign_positive())
-    {
-        return Err(CallFromPspsCliError::ParalogTargetIsNotAFraction {
-            asked: args.paralog_fdr,
-        });
-    }
-    if args.paralog_fdr != 0.0 {
-        return Err(CallFromPspsCliError::ParalogFilterNotFinished {
-            asked: args.paralog_fdr,
-        });
-    }
+    // parses any `f64`, so `7`, `inf` and `nan` all arrive here, and the type is what says which
+    // of those is a false-discovery rate.
+    let target_fdr = TargetFdr::try_new(args.paralog_fdr)
+        .map_err(|source| CallFromPspsCliError::ParalogTargetIsNotAFraction { source })?;
 
     let asked_ploidy = calling_run::ploidy_asked_for(args.ploidy)?;
     let candidate_selection = calling_run::candidate_selection_for(args.max_candidate_alleles)?;
@@ -518,6 +496,12 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         &segmentation.inputs().repeat_tract_criteria,
     )?;
     let ploidy = numbers.parameters.ploidy();
+    // **Captured before the parameters move into the caller.** The filter reads one coefficient
+    // a sample, in the run's sample order, and the caller consumes the parameters it lives on.
+    let inbreeding_by_sample: Vec<InbreedingF> = numbers
+        .parameters
+        .inbreeding_coefficient_by_sample()
+        .to_vec();
 
     let digest = ReferenceDigest::of(&with_checksums)
         .map_err(|source| CallingRunError::ReferenceNotDigested { source })?;
@@ -553,27 +537,30 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         &with_checksums,
         caller.sample_names().map(str::to_owned).collect(),
     )?;
-    // **The filter is accepted and refused in one place, before anything is opened.** Pass one
-    // is built (`paralog_filter::CalledRecordSink`); the scoring and writing passes are not, so a
-    // run that parked its records would finish with no VCF. Refusing here means the flag's
-    // plumbing is real and no run can reach that state — the byte-identity oracle for
-    // `--paralog-fdr 0` is what this step actually delivers.
-    // **The sink is where the filter's flag lands** — with it off, this variant hands each record
-    // straight to the writer, which is the call the run made before the filter existed. The
-    // window coverage travels beside the record because the filter's on-path needs it; a VCF has
-    // no field for it.
-    // **The VCF is created here or not at all.** With the filter on, no record's verdict is
-    // known until every record has been scored, so opening the output during pass one would
-    // leave a file beside a run that has decided nothing — which is why the writer is built
-    // inside the choice rather than before it.
-    let mut sink = CalledRecordSink::StraightToTheVcf(
-        VcfWriter::create(&args.output, metadata, ploidy).map_err(|source| {
-            CallFromPspsCliError::Output {
-                path: args.output.clone(),
-                source,
-            }
-        })?,
-    );
+    // **The sink is where the filter's flag lands.** With the filter off, this hands each record
+    // straight to the writer — the call the run made before the filter existed, which is what
+    // makes `--paralog-fdr 0` byte-identical by construction rather than by hope. With it on, the
+    // records are parked and **the VCF is not opened at all**: no record's fate is known until
+    // every record has been scored, so a file opened now would stand beside a run that has
+    // decided nothing.
+    let mut sink = if target_fdr.get() > 0.0 {
+        // The spill's lines are encoded against the same contigs the header names, taken from
+        // the metadata itself rather than re-derived.
+        CalledRecordSink::ParkedOnTheSpill(SpillingSink::beside(
+            &args.output,
+            metadata.contigs().to_vec(),
+            ploidy,
+        ))
+    } else {
+        CalledRecordSink::StraightToTheVcf(
+            VcfWriter::create(&args.output, metadata.clone(), ploidy).map_err(|source| {
+                CallFromPspsCliError::Output {
+                    path: args.output.clone(),
+                    source,
+                }
+            })?,
+        )
+    };
 
     let (calling, stored) = caller
         .call_cohort_handing_each_record_over(
@@ -582,11 +569,49 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         )
         .map_err(|source| CallFromPspsCliError::Run { source })?;
 
-    sink.finish()
-        .map_err(|source| CallFromPspsCliError::CallsNotWritten {
-            path: args.output.clone(),
-            source,
-        })?;
+    // **The spill has to stay alive until pass three has read it**, so the sink is taken apart
+    // rather than consumed: `finish` would drop the file the next two passes need.
+    let parked = match sink {
+        CalledRecordSink::StraightToTheVcf(writer) => {
+            writer
+                .finish()
+                .map_err(|source| CallFromPspsCliError::CallsNotWritten {
+                    path: args.output.clone(),
+                    source: crate::ng::run::paralog_filter::PassOneError::Vcf(source),
+                })?;
+            None
+        }
+        CalledRecordSink::ParkedOnTheSpill(mut spilling) => {
+            spilling
+                .finish_parking()
+                .map_err(|source| CallFromPspsCliError::CallsNotWritten {
+                    path: args.output.clone(),
+                    source: crate::ng::run::paralog_filter::PassOneError::Spill(source),
+                })?;
+            Some(spilling)
+        }
+    };
+
+    // **Passes two and three, through the one function both subcommands call**, so direct mode
+    // and psp mode cannot drift into filtering differently (spec §1.1 goal 2).
+    let filtered = match &parked {
+        Some(spilling) => Some(
+            paralog_filter::fit_score_and_write_the_calls(
+                spilling.spill(),
+                stored.window_coverage_histograms.clone(),
+                &inbreeding_by_sample,
+                paralog_filter::WhatTheOperatorAskedFor {
+                    target_fdr,
+                    tag_instead_of_dropping: args.paralog_filter_tag,
+                },
+                &args.output,
+                metadata,
+                ploidy,
+            )
+            .map_err(|source| CallFromPspsCliError::ParalogFilter { source })?,
+        ),
+        None => None,
+    };
 
     // **After the VCF is on disk, not before** — direct mode's rule and its reasons: a
     // parameters file standing beside a VCF that does not exist answers none of spec §7's three
@@ -606,7 +631,13 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
             source,
         })?;
 
-    calling_run::print_report(
+    // **What the filter did goes at the end of the report**, and is empty on a run with the
+    // filter off — so an off run prints what it printed before the filter existed.
+    let filter_lines = filtered
+        .as_ref()
+        .map(paralog_filter::what_to_tell_the_operator)
+        .unwrap_or_default();
+    calling_run::print_report_with_the_filter_s_lines(
         &args.output,
         &parameters_at,
         &RunReport::of_a_stored_cohort(
@@ -621,6 +652,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
                 max_candidate_alleles: candidate_selection.max_candidate_alleles.get(),
             },
         ),
+        &filter_lines,
     );
     Ok(())
 }

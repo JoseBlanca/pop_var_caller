@@ -751,9 +751,26 @@ pub fn header_for(
 /// a test can hold. It was the one part of `call-from-alignments` a mutation could change with
 /// the whole suite still green.
 pub fn print_report(calls: &Path, parameters_at: &Path, report: &RunReport<'_>) {
+    print_report_with_the_filter_s_lines(calls, parameters_at, report, &[]);
+}
+
+/// **The run report, with what the hidden-duplication filter did appended.**
+///
+/// `filter_lines` is empty on a run with the filter off, which is why the two are one function
+/// rather than two: an off run's report is the report it printed before the filter existed, and
+/// the empty slice is what says so.
+pub fn print_report_with_the_filter_s_lines(
+    calls: &Path,
+    parameters_at: &Path,
+    report: &RunReport<'_>,
+    filter_lines: &[String],
+) {
     println!("calls: {}", calls.display());
     println!("parameters: {}", parameters_at.display());
     for line in report.lines() {
+        println!("{line}");
+    }
+    for line in filter_lines {
         println!("{line}");
     }
 }

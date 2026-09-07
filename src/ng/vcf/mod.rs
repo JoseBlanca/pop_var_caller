@@ -48,8 +48,8 @@ pub use encode::{
     mapping_quality_text, penalty_text, quality_text, record_line, sample_columns,
 };
 pub use header::{
-    FILE_FORMAT, HeaderContig, HeaderMetadataError, MAX_CONTIG_LENGTH, VcfHeaderMetadata,
-    header_text,
+    FILE_FORMAT, HeaderContig, HeaderMetadataError, HiddenParalogProvenance, MAX_CONTIG_LENGTH,
+    VcfHeaderMetadata, header_text,
 };
 pub use writer::{RecordPlace, VcfWriteError, VcfWriter};
 

@@ -432,28 +432,55 @@ fn parameters_that_name_another_cohorts_samples_are_refused() {
 /// not. A run that parked its records and stopped would leave the operator no VCF at all, so the
 /// flag is accepted and its non-zero values are refused until those steps land.
 ///
-/// **The refusal comes before anything is opened**, which is what this asserts by checking no
-/// output file appeared: an error raised after the writer was created would leave a `.tmp` beside
-/// a run that failed.
+/// **A run asking for the filter now runs it**, where it used to be refused.
+///
+/// The step that built the scoring and writing passes is the step that deletes the refusal, and
+/// this is what says the deletion was not merely a deletion: the run finishes, writes its VCF, and
+/// the header states what the filter was calibrated to — which is the one trace a dropped record
+/// leaves.
 #[test]
-fn a_paralog_target_above_zero_is_refused_while_the_filter_is_unfinished() {
+fn a_run_asking_for_the_filter_writes_a_calibrated_file() {
     let (cohort, mut args) = a_cohort_of_psps();
     args.paralog_fdr = 0.01;
 
-    let refused = run_call_from_psps(&args).expect_err("the filter cannot finish a run yet");
+    run_call_from_psps(&args).expect("the filter finishes a run now");
 
+    let written = std::fs::read_to_string(&args.output).expect("the calls are on disk");
     assert!(
-        matches!(
-            refused,
-            CallFromPspsCliError::ParalogFilterNotFinished { asked } if asked == 0.01
-        ),
-        "expected the unfinished filter to be named, got {refused:?}"
+        written.contains("##paralogFilter=target_fdr=0.0100;"),
+        "the header must say what the filter was calibrated to: {}",
+        written.lines().take(12).collect::<Vec<_>>().join("\n")
     );
     assert!(
-        !args.output.exists(),
-        "the run was refused after opening the output"
+        written.contains("##FILTER=<ID=hiddenParalog,"),
+        "and it must declare the filter it may have applied"
+    );
+    assert!(
+        !std::path::Path::new(&format!("{}.paralog-spill.tmp", args.output.display())).exists(),
+        "the spill must not outlive the run"
     );
     drop(cohort);
+}
+
+/// **A run that says nothing about the filter runs it, at spec §3.6's target.**
+///
+/// The default was `0` while the filter's scoring and writing passes did not exist. Every fixture
+/// in this file sets the target explicitly, so nothing here would have noticed the constant going
+/// back to `0.01` — or failing to. This reads it off the parsed command line, which is where an
+/// operator's run gets it.
+#[test]
+fn a_run_that_says_nothing_about_the_filter_takes_the_specs_target() {
+    let args = args_of(&a_defaults_run());
+
+    assert!(
+        (args.paralog_fdr - 0.01).abs() < 1e-12,
+        "the filter is on by default, at about one wrongly removed record in a hundred; got {}",
+        args.paralog_fdr
+    );
+    assert!(
+        !args.paralog_filter_tag,
+        "and it removes them rather than tagging them"
+    );
 }
 
 /// **A target that is not a false-discovery rate is refused, whatever shape it takes.**

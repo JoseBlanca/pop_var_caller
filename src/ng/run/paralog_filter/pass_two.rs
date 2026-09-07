@@ -57,11 +57,16 @@ impl TargetFdr {
     /// The only constructor. A target that is not a fraction in `[0, 1)` is refused rather than
     /// coerced.
     ///
+    /// **`-0.0` is refused too, and it is the one that needs saying.** It compares equal to zero,
+    /// so a range check alone admits it and the filter would read it as *off* — but a run asking
+    /// for a negative target has asked for something, and answering "the filter did not run" is
+    /// the wrong reply to a mistake.
+    ///
     /// # Errors
     ///
-    /// If the value is not finite, is negative, or is `1` or more.
+    /// If the value is not finite, is negative — negative zero included — or is `1` or more.
     pub fn try_new(target: f64) -> Result<Self, NotATargetFdr> {
-        if target.is_finite() && (0.0..1.0).contains(&target) {
+        if target.is_finite() && target.is_sign_positive() && (0.0..1.0).contains(&target) {
             Ok(Self(target))
         } else {
             Err(NotATargetFdr { given: target })
