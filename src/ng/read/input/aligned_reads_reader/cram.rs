@@ -75,17 +75,24 @@ pub(crate) struct CramAlignedReadsReader {
     /// The reference bases decoding consults, for this cursor's chromosome. Cheap to clone —
     /// it is internally shared — and cloned per decode, as noodles requires.
     repository: fasta::Repository,
-    /// **This decode's own windowed reference reader**, minted by the cursor factory and owned
-    /// for this reader's life (`alignment_cursor.md` §10 point 1).
+    /// **The reference bases this decode reads through**, minted by the cursor factory and
+    /// owned for this reader's life (`alignment_cursor.md` §10 point 1). **Read from A2
+    /// onwards**, one slice's span at a time; A1 established the ownership.
     ///
-    /// Its own, and not the cursor's: a reference reader is an open file position and a
+    /// Its own reader, not the cursor's: a reference reader is an open file position and a
     /// resident window, and this project gives one to every consumer of bases rather than
-    /// sharing. So the walk evicting behind itself can never make a decode re-read, and the two
-    /// never contend for one lock. `Box<dyn …>` because this reader is not generic — making it
-    /// so would put a type parameter through `AlignedReadsReader` and every one of its callers
-    /// for a field only this arm has. `+ Send` keeps the cursor `Send`
-    /// (`a_sample_cursor_is_send_in_both_arms`).
-    decode_reference: Box<dyn RawRefSeq + Send>,
+    /// sharing. Sharing the cursor's would mean the walk's `evict_before` could drop bases a
+    /// decode is about to want — costing a re-read — and would make a same-thread re-entry
+    /// possible, which `WindowedRefSeq`'s lock answers with a hang rather than a panic.
+    ///
+    /// **`Box<dyn …>` beside an enum whose own doc refuses dynamic dispatch, and the numbers
+    /// are why.** That enum is on the per-record path — about a million virtual calls a run,
+    /// which is what it declines. This reader is reached **once per slice**, and a slice holds
+    /// on the order of ten thousand records, so the same run makes on the order of a hundred
+    /// such calls. Making it generic instead would put a type parameter through
+    /// `AlignedReadsReader` and all 72 sites that name it, for a field only this arm has.
+    /// `+ Send` keeps the cursor `Send` (`a_sample_cursor_is_send_in_both_arms`).
+    reference_reader: Box<dyn RawRefSeq + Send>,
     /// **This contig's** `.crai` entries, in file order, grouped once at open.
     entries: Arc<[cram::crai::Record]>,
     /// A copy of the file's, settled at open. Owned, so this reader carries no lifetime.
@@ -131,7 +138,7 @@ impl CramAlignedReadsReader {
         reader: cram::io::Reader<File>,
         header: Arc<sam::Header>,
         repository: fasta::Repository,
-        decode_reference: Box<dyn RawRefSeq + Send>,
+        reference_reader: Box<dyn RawRefSeq + Send>,
         entries: Arc<[cram::crai::Record]>,
         resolution: ReadGroupResolution,
         path: Arc<Path>,
@@ -140,7 +147,7 @@ impl CramAlignedReadsReader {
             reader,
             header,
             repository,
-            decode_reference,
+            reference_reader,
             entries,
             resolution,
             path,
@@ -255,7 +262,6 @@ impl CramAlignedReadsReader {
                 &self.repository,
                 &self.resolution,
                 offset,
-                &*self.decode_reference,
             )?
             else {
                 // End of stream reached through the index — nothing further.

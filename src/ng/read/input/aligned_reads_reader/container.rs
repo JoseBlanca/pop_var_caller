@@ -37,7 +37,6 @@ use noodles_sam::alignment::record::{Flags, MappingQuality};
 
 use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
 use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
-use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::types::ReadGroupId;
 
 /// One CRAM container, decoded and held in two flat buffers.
@@ -340,12 +339,6 @@ pub(crate) fn decode_container_at(
     repository: &fasta::Repository,
     resolution: &ReadGroupResolution,
     offset: u64,
-    // **Threaded here at A1 and read at A2** (`impl_plan/cram_reference_window.md`). The decode
-    // is about to take its bases from this reader, one slice's span at a time, instead of from
-    // a repository holding the whole chromosome; this step puts the reader in reach without
-    // changing a byte of what is decoded, so the step that *does* change the bases is a diff of
-    // its own.
-    _reference: &dyn RawRefSeq,
 ) -> io::Result<Option<DecodedContainer>> {
     reader.seek(SeekFrom::Start(offset))?;
 

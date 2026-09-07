@@ -856,8 +856,9 @@ fn refuse_a_table_that_cannot_be_renumbered(header: &Header) -> Result<(), RunEr
 ///
 /// **The arithmetic is written out because the message asks an operator to act on it**: an open
 /// psp costs one descriptor, held for the whole run (`PspReader` keeps one `File` and opens
-/// nothing else), against an alignment file's two — its own reader, and the reference accessor
-/// its cursor mints.
+/// nothing else), against a BAM's two — its own reader, and the reference reader its cursor
+/// mints for the mismatch filter — or a CRAM's three, whose decode reads the reference through a
+/// reader of its own.
 ///
 /// `None` means the platform reports no limit at all, and then there is nothing to refuse
 /// against.

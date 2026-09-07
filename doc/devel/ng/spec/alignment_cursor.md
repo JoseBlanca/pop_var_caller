@@ -679,9 +679,21 @@ repository and nothing chromosome-sized.
 
 5. **What the second reader costs, stated plainly.** One `open(2)` and one window per open CRAM —
    about 9 kb on a real file (point 3), and about 18 µs to build (point 1). A run over BAM mints
-   nothing extra. The file-descriptor count is what grows, and it is already the thing
-   `run_streaming.md` §7.1a checks against `RLIMIT_NOFILE` at construction, so a cohort large
-   enough to run out is refused by name rather than dying at `EMFILE` part-way through.
+   nothing extra.
+
+   **The descriptor budget had to be told, and this is the part that could have gone wrong
+   quietly.** `run_streaming.md` §7.1a refuses at construction a cohort this process may not hold
+   open, and it sized a cursor at two descriptors a file — the file's reader and the mismatch
+   filter's reference reader. A CRAM's is now three, because the servability check fetches
+   through the decode's reader and a fetch is what opens the FASTA. A guard left at two would
+   have passed a CRAM cohort that then met `EMFILE` mid-genome, which is the exact failure it
+   exists to prevent and which its own doc records happening once before. So the constant is
+   **split by format** rather than raised: `DESCRIPTORS_A_BAM_NEEDS` stays 2 and
+   `DESCRIPTORS_A_CRAM_NEEDS` is 3, and the refusal counts the two kinds apart. Rounding a BAM up
+   to three instead would demand a thousand descriptors nothing opens at a thousand samples,
+   turning a safety check into a limit of its own. The BAM figure is measured; **the CRAM figure
+   is arithmetic** — no CRAM cohort's descriptors have been counted, and
+   `examples/ng_open_cohort_descriptors.rs` on one is what would replace it.
 
    **The alternative was sharing the cursor's own reader**, reached either as an argument threaded
    down `read_next` or as an `Arc` handle cloned into the CRAM reader. Both save the descriptor and

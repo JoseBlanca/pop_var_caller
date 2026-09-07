@@ -9,18 +9,17 @@
 ## Verdict
 
 **Plumbing only, and it decodes exactly what it decoded before.** The CRAM decode now owns a
-windowed reference reader and does not read it: `decode_container_at` takes it as `_reference`
-and step A2 is where it starts fetching bases. 6,275 library tests pass and every integration
-binary passes except the one that was already failing on `main`.
+windowed reference reader and does not read it; step A2 is where it starts fetching bases and
+where `decode_container_at` gains the parameter. **6,276 library tests pass** and every
+integration binary passes except the one that was already failing on `main`.
 
 ## What landed
 
 | file | change |
 |---|---|
-| `read/input/open_bam.rs` | `AlignmentFile::cursor` takes `impl FnMut() -> R` in place of `reference: R`, and bounds `R: RawRefSeq + ContigTable + Send + 'static`. It mints the cursor's reader as before; on the CRAM arm it mints a second for the decode. **Both go through one `checked_reference` closure** that applies the contig-table comparison and the servability probe — the two checks that are about an accessor rather than about the argument — so minting a reader and checking it are one operation. |
+| `read/input/open_bam.rs` | `AlignmentFile::cursor` takes `impl FnMut() -> R` in place of `reference: R`, and bounds `R: RawRefSeq + ContigTable + Send + 'static`. It mints the cursor's reader as before; on the CRAM arm it mints a second for the decode. **Both go through one `check_reference_reader` closure** that applies the contig-table comparison and the servability probe — the two checks that are about an accessor rather than about the argument — so minting a reader and checking it are one operation. |
 | `read/input/mod.rs` | `SampleReads::cursor` forwards its factory to each file instead of calling it — how many readers a file needs is the format's question, and only `AlignmentFile::cursor` knows the format. |
-| `aligned_reads_reader/cram.rs` | `CramAlignedReadsReader` gains `decode_reference: Box<dyn RawRefSeq + Send>`, owned for the reader's life and passed to every `decode_container_at`. |
-| `aligned_reads_reader/container.rs` | `decode_container_at` gains the parameter, named `_reference` because A2 is what reads it. |
+| `aligned_reads_reader/cram.rs` | `CramAlignedReadsReader` gains `reference_reader: Box<dyn RawRefSeq + Send>`, owned for its life. Unread until A2, which is when `decode_container_at` gains the parameter — threading it a commit early would have meant an `_`-prefixed parameter that compiles just as well if A2 forgets to rename it, and nothing here warns on dead code. |
 | `locus_generation/pileup/generator.rs`, `locus_generation/ssr.rs` | `Send + 'static` propagated onto `PileupGenerator` and `SsrGenerator`, which are generic over the accessor and call `SampleReads::cursor`. |
 
 **Why the decode gets its own reader rather than sharing the cursor's** is the ruling recorded
@@ -52,7 +51,7 @@ bound sites in two files. Every accessor actually handed to a cursor satisfies i
 to a cursor — it serves the production walk's `MultiChromRefFetcher`.
 
 **One defect was found in this step's own first draft, before it was committed, and it is the
-reason `checked_reference` exists.** That draft checked the *contig table* of the cursor's reader
+reason `check_reference_reader` exists.** That draft checked the *contig table* of the cursor's reader
 only, and gave the decode's reader nothing but the zero-length probe. The probe cannot catch the
 case that matters: a **permuted** contig table carries every name and every length the file
 declares, so a fetch at position 1 succeeds — those bases are readable, they are simply another
@@ -63,7 +62,7 @@ from the reference. Both readers are now minted and checked in one place.
 
 `a_cram_cursor_checks_the_second_reference_reader_it_mints` pins it with a factory that is right
 the first time and permuted the second. **Mutation-verified rather than argued:** replacing the
-CRAM arm's `checked_reference(make_reference(), …)` with a bare `make_reference()` leaves
+CRAM arm's `check_reference_reader(make_reference(), …)` with a bare `make_reference()` leaves
 `cargo test --lib ng::read` at **300 passed, 1 failed** — only this test — and the mutation was
 reverted and the revert confirmed by grep before anything else ran.
 
@@ -76,29 +75,60 @@ deriving `Clone` on `InMemoryRefSeq` for the sake of three tests.
 
 Run in the container on this tree.
 
-- `cargo fmt --all -- --check` — clean.
-- `cargo test --lib --tests` — **6,276 library tests pass**, 0 failed, 15 ignored, in 57.12 s.
+- `cargo fmt --all -- --check` — the only drift is 29 hunks in files this step does not touch,
+  identical to `main`'s.
+- `cargo test --lib --tests` — **6,276 library tests pass**, 0 failed, 15 ignored, in 60.61 s.
   Every integration binary passes except `ng_calling_loop_calls_genotypes`, where
   `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele` fails at line 1235.
 - `cargo clippy --lib --tests --all-features -- -D warnings` — three errors remain, all
   `explicit lifetimes could be elided` in `run/cohort_merge/build.rs:820`, `:893` and
   `run/cohort_merge/serial.rs:67`.
 
-**Both of those failures are `main`'s, not this step's, and both were checked rather than
-assumed**: the test fails identically at the pre-merge commit, and the same three clippy errors
-come back from `cargo clippy --lib --all-features -- -D warnings` run in the `main` worktree at
-`52b7b787`. Nothing in the changed files is flagged.
+**All three of those are `main`'s, not this step's, and each was checked rather than assumed**:
+the test fails identically at the pre-merge commit, and the same three clippy errors and the same
+29 formatting hunks come back from the `main` worktree at `52b7b787`. Nothing in the changed
+files is flagged. **The formatting drift is a trap for this step in particular**: `cargo fmt
+--all` reformats all 29, so they have to be reverted out of every commit here.
 
-## Open, for the review to rule on
+## What the review changed, after the first commit
 
-**Should the two accessor errors say *which* reader failed?** `CursorAccessorContigTable` and
-`Reference` are both keyed on the alignment file's path, which is the same for both readers, so
-an operator cannot tell the read filter's reader from the decode's. The file already carries the
-precedent for splitting — `CursorAccessorContigTable`'s own doc argues it for a different pair.
-Not done here, on the reasoning that both readers now come from one factory and are checked
-within microseconds of each other, so the realistic fault fails the *first* one; a second-only
-failure means the factory is not deterministic, which is a different thing to name. A `role`
-field on both variants would cost 11 call sites across two files.
+Reviewed at `385d7c91`; the findings below are applied in the commit that follows it.
+
+**Major — the file-descriptor guard was left sized below what the code opens.** `run_streaming.md`
+§7.1a refuses at construction a cohort this process may not hold open, and it priced a cursor at
+two descriptors a file: the file's reader, and the mismatch filter's reference reader. A CRAM's is
+now three, because the servability check fetches through the decode's reader and a fetch is what
+opens the FASTA (`WindowedRefSeq::fetch_transformed` builds its `RawChromReader` before it
+narrows, so a zero-length probe opens the file). A guard left at two would pass a CRAM cohort that
+then met `EMFILE` mid-genome — the exact failure it exists to prevent, and one its own doc records
+happening before. **Split by format** rather than raised: `DESCRIPTORS_A_BAM_NEEDS` stays 2,
+`DESCRIPTORS_A_CRAM_NEEDS` is 3, the refusal counts the two kinds apart and its message shows
+both terms so an operator can reproduce the total. Rounding a BAM up to three instead would demand
+a thousand descriptors nothing opens at a thousand samples. **The BAM figure is measured and the
+CRAM figure is arithmetic** — no CRAM cohort's descriptors have been counted, and the constant
+says so.
+
+**The two accessor errors now name which reader failed** — `"read filter's"` or `"CRAM decode's"`,
+a `&'static str` on both variants. The first draft of this report argued against it, on the ground
+that a second-only failure implies a factory that does not return the same thing twice; the review
+pointed out that this step's own new test *is* such a factory, so the shape is representable and
+now exercised.
+
+**`decode_container_at` keeps its old signature.** Threading the reader a commit early meant an
+`_`-prefixed parameter, and nothing would have caught the underscore surviving A2:
+`clippy::used_underscore_binding` is not enabled here, and `aligned_reads_reader/mod.rs` allows
+dead code module-wide, so the field alone would not have warned either. A2 adds the parameter in
+the commit whose body reads it, and its diff is smaller for it.
+
+**Renames and stale prose.** `checked_reference` → `check_reference_reader` (a closure that
+checks is a verb); `decode_reference` → `reference_reader`. The vocabulary is settled on
+**reference reader**, the term spec §10 chose, where this commit had used *accessor*, *reader*
+and *read reference* interchangeably. Corrected: `read_filtering_stages.md`'s "As built" block,
+which showed the signature this step replaced in the spec whose §5 the design turns on;
+`open_bam.rs`'s "CRAM is not served yet", written before Milestone E served it and sitting forty
+lines above new text about what a CRAM cursor mints; `mod.rs`'s "minted here once" nine lines
+above "the factory is forwarded, not called here"; and two rationales written twice, doc comment
+then inline copy.
 
 ## What this step deliberately does not do
 

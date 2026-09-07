@@ -205,10 +205,16 @@ pub enum AlignmentFileError {
     /// `detail` comes from `ContigList::first_disagreement` and names the first differing field
     /// and index, **file value first**, as at the gate.
     #[error(
-        "the reference accessor for alignment file '{path}' is over a different contig table: \
-         {detail}"
+        "the {reader} reference reader for alignment file '{path}' is over a different contig \
+         table: {detail}"
     )]
-    CursorAccessorContigTable { path: PathBuf, detail: String },
+    CursorAccessorContigTable {
+        path: PathBuf,
+        /// Which of the cursor's reference readers this was — see
+        /// [`Reference::reader`](Self::Reference::reader).
+        reader: &'static str,
+        detail: String,
+    },
 
     /// The reference could not **serve bases** for the contig a cursor was made for, at the
     /// point it was made.
@@ -224,9 +230,16 @@ pub enum AlignmentFileError {
     /// happened to ask for first. **Scoped to this cursor's own contig** since B1 — the check
     /// that used to ask it of every contig in the header cost ~2,580 opens per cursor for a
     /// property that matters only for the one about to be read.
-    #[error("the reference cannot serve alignment file '{path}'")]
+    #[error("the {reader} reference reader cannot serve alignment file '{path}'")]
     Reference {
         path: PathBuf,
+        /// **Which of the cursor's reference readers failed**, in the words an operator can
+        /// act on: `"read filter's"` or `"CRAM decode's"`. A CRAM cursor mints two from one
+        /// caller-supplied factory (`alignment_cursor.md` §10 point 1), and without this the
+        /// two faults render identically — both are keyed on the alignment file's path, which
+        /// is the same for both. A failure of the *second* alone means the factory did not
+        /// return the same thing twice, which is a different thing to go and look at.
+        reader: &'static str,
         #[source]
         source: crate::ng::ref_seq::RefSeqError,
     },
@@ -588,7 +601,7 @@ impl SampleReads {
     /// reopened the question every time — index query, seek, decode, filter — for regions
     /// that usually sat in the block the reader was already in.
     ///
-    /// **A reference accessor per consumer, minted here once** for the cursor's whole life
+    /// **A reference reader per consumer, built once** for the cursor's whole life
     /// rather than rebuilt per region (perf review L2). `RawRefSeq` impls are stateful
     /// readers, so the k files cannot share one: `WindowedRefSeq` holds an open per-contig
     /// reader, and each consumer is meant to own one — k cursors on one accessor would be one
@@ -624,9 +637,6 @@ impl SampleReads {
     {
         let mut cursors = Vec::with_capacity(self.files.len());
         for (source_file_index, file) in self.files.iter().enumerate() {
-            // **The factory, not one accessor.** How many readers a file needs is the file's
-            // question, not this layer's: a BAM takes one, a CRAM two — the second for its
-            // decode (`alignment_cursor.md` §10 point 1).
             cursors.push(file.cursor(contig, &mut make_reference).map_err(|source| {
                 IngestError::File {
                     source_file_index,

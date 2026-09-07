@@ -55,8 +55,9 @@ pub struct AlignmentFile {
     resolution: ReadGroupResolution,
     /// CRAM only: the reference's description, and the proof made at open that
     /// it carries a FASTA whose `.fai` opens. **No bases** — since 2026-09-07 the
-    /// decode fetches each slice's span through the cursor's own accessor
-    /// (spec §10), so nothing chromosome-sized lives here or anywhere.
+    /// decode fetches each slice's span through a reference reader of its own,
+    /// minted by the cursor factory (spec §10), so nothing chromosome-sized
+    /// lives here or anywhere.
     reference: Option<OpenReference>,
 }
 ```

@@ -2,7 +2,7 @@
 
 **Status:** draft, 2026-09-07. Branch `ng-cram-window`. This turns the settled design —
 [`alignment_cursor.md`](../spec/alignment_cursor.md) §10 *"The CRAM reference bases — a window
-per slice, from the cursor's own accessor"* (amended 2026-09-07), with the arch in
+per slice, from a reader of the decode's own"* (amended 2026-09-07), with the arch in
 [`arch/alignment_cursor.md`](../arch/alignment_cursor.md) §1.1–§1.3 and §4 — into build order.
 It is **not** a place for new design. It follows the `ng-cram-perf` branch, merged into `main`
 at `52b7b787`, whose research note
@@ -12,8 +12,10 @@ the noodles half (§7) and left the ng half unbuilt (§9, item 2).
 **What this buys, in one line.** The CRAM decode stops holding a whole chromosome of the
 reference — 198 MB for tomato chromosome 1, 493 MB for human chromosome 1, measured — and holds
 instead one buffer per open file the size of the largest slice span that file has met, about
-9 kb on a real coordinate-sorted CRAM. The bases come from the reference accessor every cursor
-already owns; no new reader, no new window, no new file descriptor.
+9 kb on a real coordinate-sorted CRAM. **What it costs**, priced while building A1 rather than assumed: one more reference reader per
+open CRAM — one `open(2)`, one window of about 9 kb, about 18 µs to build — and the run's
+`RLIMIT_NOFILE` refusal split by format to match, because a CRAM cursor now needs three
+descriptors where a BAM needs two.
 
 ---
 
@@ -96,23 +98,29 @@ already owns; no new reader, no new window, no new file descriptor.
   (mounted read-only by `dev.sh`); contig `SL4.0ch01`.
 - **The test bar before step 1** is `cargo test --lib --tests` green except the one
   pre-existing failure named under *Out* — 6,275 library tests and every integration binary but
-  `ng_calling_loop_calls_genotypes`.
+  `ng_calling_loop_calls_genotypes`. `cargo fmt --check` and
+  `cargo clippy --all-features -- -D warnings` are **also red on `main`**, at 29 formatting hunks
+  and 3 lifetime-elision errors in `run/cohort_merge/`, none in files this plan touches; do not
+  read either as this plan's doing.
 
 ---
 
 ## The steps
 
-### Milestone A — the decode takes its bases from the cursor's accessor
+### Milestone A — the decode reads its bases through a reader of its own
 
-**A1. The decode is handed a reference reader of its own, and nothing decodes differently yet.** ☐
+**A1. The decode is handed a reference reader of its own, and nothing decodes differently yet.** ✅
 `AlignmentFile::cursor<R: RawRefSeq + ContigTable + Send + 'static>(contig, make_reference: impl
 FnMut() -> R)` takes the factory in place of one accessor; `SampleReads::cursor` forwards its own
 factory rather than calling it. The BAM arm mints one reader, for the cursor, exactly as today.
-The CRAM arm mints a second, probes it with the same zero-length fetch the first gets, and hands
-it to `CramAlignedReadsReader`, which owns it as `Box<dyn RawRefSeq + Send>` and passes it to
-`decode_container_at`. That function gains the parameter but still decodes with
-`records_discarding_tags` and the repository — this step is plumbing only, so the step that
-*changes decoded bases* is a diff of its own.
+The CRAM arm mints a second and hands it to `CramAlignedReadsReader`, which owns it as
+`Box<dyn RawRefSeq + Send>`. **Both go through one `check_reference_reader` closure** — the
+contig-table comparison and the servability probe, the two checks that are about a reader rather
+than about the argument — so minting a reader and checking it are one operation. `decode_container_at` keeps its
+signature: it still decodes with `records_discarding_tags` and the repository, and gains the
+reader as a parameter in **A2**, where the body reads it — a parameter threaded a commit early
+and named `_reference` would compile just as well after A2 forgot to rename it, and nothing in
+this tree would warn (`aligned_reads_reader/mod.rs` allows dead code module-wide).
 
 **Nothing below `AlignmentFile::cursor` is touched**: `AlignedReadsReader` and
 `RegionRawAlignedReads` keep their signatures and their freedom from a reference bound, so
@@ -125,9 +133,10 @@ module construct a reference, which is the one thing its docs say it must not do
 
 **A2. The decode fetches each slice's span and decodes over it.** ☐ **Own commit — do not
 bundle.** Guarded by the two oracles named under *Verification*, green before and after.
-In `decode_container_at`, per slice: `slice.reference_span()`; when `Some((contig, start,
-end))`, `reference.fetch_raw_into(ContigId(contig), start, end − start + 1, &mut
-scratch.window)` — `reference` being the reader A1 gave the CRAM arm — and
+`decode_container_at` gains a `reference: &dyn RawRefSeq` parameter, passed
+`&*self.reference_reader` from `decode_next_container`. Per slice: `slice.reference_span()`;
+when `Some((contig, start, end))`, `reference.fetch_raw_into(ContigId(contig), start,
+end − start + 1, &mut scratch.window)` and
 `slice.records_over_window(&scratch.window, start, …)`; when `None`, the existing
 `records_discarding_tags`. `RecordScratch` gains `window: Vec<u8>`, cleared and refilled
 per slice like its other buffers. The repository argument becomes `fasta::Repository::default()`

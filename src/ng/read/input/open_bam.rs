@@ -338,9 +338,11 @@ impl AlignmentFile {
     /// Fallible only here. Opening the descriptor is the one thing that can fail at
     /// construction; after this returns, a cursor cannot fail to exist.
     ///
-    /// **CRAM is not served yet** (Milestone E). It is refused rather than silently mis-read,
-    /// because a CRAM opened as a BAM would fail deep inside a decode with an error naming
-    /// neither the format nor this decision.
+    /// **A format this function does not know is refused** rather than silently mis-read
+    /// ([`CursorFormatUnsupported`](AlignmentFileError::CursorFormatUnsupported)), because a
+    /// file opened as the wrong format would fail deep inside a decode with an error naming
+    /// neither the format nor this decision. *(This said "CRAM is not served yet" until
+    /// Milestone E served it.)*
     ///
     /// # Three checks, in order: the argument, the accessor's description, its ability
     ///
@@ -393,11 +395,6 @@ impl AlignmentFile {
         contig: ContigId,
         mut make_reference: impl FnMut() -> R,
     ) -> Result<AlignmentCursor<R>, AlignmentFileError> {
-        // **The factory reaches this far down, and only here can it be called the right number
-        // of times.** A BAM cursor needs one reference reader — the mismatch filter's. A CRAM
-        // cursor needs two, because the decode reads bases as well and a reference reader is a
-        // file position and a resident window, which no two consumers share (spec §10 point 1).
-        // Above this, `SampleReads::cursor` cannot know which it is handing a factory to.
         let open_error = |source: std::io::Error| AlignmentFileError::Open {
             path: self.path.to_path_buf(),
             source,
@@ -434,50 +431,54 @@ impl AlignmentFile {
         // corrupts the read sequences themselves, silently, because a CRAM stores a read as
         // its *differences from the reference*. Minting and checking in one place is what
         // makes forgetting the second one unrepresentable.
-        let checked_reference =
-            |reference: R, probe: &mut Vec<u8>| -> Result<R, AlignmentFileError> {
-                // **Is the accessor over this file's contigs at all?** One comparison of two
-                // tables — names, lengths, and digests where both sides carry one.
-                self.contigs
-                    .first_disagreement(reference.contigs())
-                    .map_err(|detail| AlignmentFileError::CursorAccessorContigTable {
-                        path: self.path.to_path_buf(),
-                        detail,
-                    })?;
+        let check_reference_reader = |reference: R,
+                                      probe: &mut Vec<u8>,
+                                      reader: &'static str|
+         -> Result<R, AlignmentFileError> {
+            // **Is the accessor over this file's contigs at all?** One comparison of two
+            // tables — names, lengths, and digests where both sides carry one.
+            self.contigs
+                .first_disagreement(reference.contigs())
+                .map_err(|detail| AlignmentFileError::CursorAccessorContigTable {
+                    path: self.path.to_path_buf(),
+                    reader,
+                    detail,
+                })?;
 
-                // **Can it actually serve this cursor's contig?**
-                //
-                // The comparison above proves the accessor carries the right *description*.
-                // For one accessor that is the whole story — `InMemoryRefSeq` derives its
-                // table from the bytes it holds. But `ResidentRefSeq::new` and
-                // `WindowedRefSeq::new` take the `ContigList` as a **separate constructor
-                // argument**, so nothing ties it to the bytes on disk: a `WindowedRefSeq` over
-                // a FASTA missing a contig, behind a table that names it, matches this file
-                // perfectly and cannot serve a single base of it.
-                //
-                // A zero-length fetch settles that, and it is what the deleted per-contig loop
-                // was really for. The loop asked it of **every** contig in the header — ~2,580
-                // on GRCh38, once per cursor — for a property that only matters for the one
-                // contig this cursor will read. Asking it once keeps the fail-fast and costs
-                // one `open(2)` instead of 2,580.
-                //
-                // Without it the fault surfaces mid-stream, per chromosome, after arbitrary
-                // work, under a top-level message naming the *BAM* — and on a `--regions` run
-                // whose reads are all dropped before filter #8, never at all.
-                reference
-                    .fetch_raw_into(contig, 1, 0, probe)
-                    .map_err(|source| AlignmentFileError::Reference {
-                        path: self.path.to_path_buf(),
-                        source,
-                    })?;
+            // **Can it actually serve this cursor's contig?**
+            //
+            // The comparison above proves the accessor carries the right *description*.
+            // For one accessor that is the whole story — `InMemoryRefSeq` derives its
+            // table from the bytes it holds. But `ResidentRefSeq::new` and
+            // `WindowedRefSeq::new` take the `ContigList` as a **separate constructor
+            // argument**, so nothing ties it to the bytes on disk: a `WindowedRefSeq` over
+            // a FASTA missing a contig, behind a table that names it, matches this file
+            // perfectly and cannot serve a single base of it.
+            //
+            // A zero-length fetch settles that, and it is what the deleted per-contig loop
+            // was really for. The loop asked it of **every** contig in the header — ~2,580
+            // on GRCh38, once per cursor — for a property that only matters for the one
+            // contig this cursor will read. Asking it once keeps the fail-fast and costs
+            // one `open(2)` instead of 2,580.
+            //
+            // Without it the fault surfaces mid-stream, per chromosome, after arbitrary
+            // work, under a top-level message naming the *BAM* — and on a `--regions` run
+            // whose reads are all dropped before filter #8, never at all.
+            reference
+                .fetch_raw_into(contig, 1, 0, probe)
+                .map_err(|source| AlignmentFileError::Reference {
+                    path: self.path.to_path_buf(),
+                    reader,
+                    source,
+                })?;
 
-                Ok(reference)
-            };
+            Ok(reference)
+        };
 
         // One buffer for every probe, since a zero-length fetch writes nothing into it and the
         // readers are checked one after the other.
         let mut probe = Vec::new();
-        let reference = checked_reference(make_reference(), &mut probe)?;
+        let reference = check_reference_reader(make_reference(), &mut probe, "read filter's")?;
 
         let aligned_reads_reader = match AlignmentFileKind::from_path(&self.path) {
             Some(AlignmentFileKind::Bam) => {
@@ -524,7 +525,8 @@ impl AlignmentFile {
                 // **The decode's own reader, not the cursor's** — and it goes through exactly
                 // the checks the first one did, because a factory that hands out one good
                 // reader and one bad one is not a case worth leaving to luck.
-                let decode_reference = checked_reference(make_reference(), &mut probe)?;
+                let decode_reference =
+                    check_reference_reader(make_reference(), &mut probe, "CRAM decode's")?;
                 let entries = self
                     .crai_by_contig
                     .get(usize::try_from(contig.get()).unwrap_or(usize::MAX))

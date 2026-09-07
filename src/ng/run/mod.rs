@@ -288,7 +288,8 @@ pub enum RunError {
     /// besides them, and the command that raises it (spec §7.1a).
     #[error(
         "this run needs {needed} open files and this process may open {limit}: \
-         {alignment_files} alignment files at {per_file} each, {samples} samples at \
+         {bam_files} BAMs at {per_bam} each and {cram_files} CRAMs at {per_cram} each, \
+         {samples} samples at \
          {per_sample} more each for the reference bases their walks read, and {allowance} for \
          the reference, the repeat catalog and the output. \
          Raise the limit with: ulimit -n {needed}, or call fewer samples at once"
@@ -296,12 +297,18 @@ pub enum RunError {
     NotEnoughFileDescriptors {
         /// How many samples the run holds — what an operator counts their cohort in.
         samples: usize,
-        /// How many alignment files those samples are spread over. **This is what the
-        /// arithmetic is over**: a sample sequenced across four lanes is four files.
-        alignment_files: usize,
-        /// Descriptors one alignment file needs: its reader, and the reference accessor the
-        /// cursor over it holds.
-        per_file: u64,
+        /// How many BAMs those samples are spread over. **Files are what the arithmetic is
+        /// over**, not samples: a sample sequenced across four lanes is four files.
+        bam_files: usize,
+        /// How many CRAMs, counted apart because they cost more (see [`per_cram`](Self::NotEnoughFileDescriptors::per_cram)).
+        cram_files: usize,
+        /// Descriptors one BAM needs: its reader, and the reference reader the cursor over it
+        /// holds for the mismatch filter.
+        per_bam: u64,
+        /// Descriptors one CRAM needs — one more than a BAM, because a CRAM stores its reads
+        /// as differences from the reference and its decode reads the bases through a
+        /// reference reader of its own.
+        per_cram: u64,
         /// Descriptors one **sample** needs on top of its files: the two reference accessors
         /// its locus generator holds for the run.
         per_sample: u64,
