@@ -259,9 +259,15 @@ impl CramAlignedReadsReader {
             let Some(container) = decode_container_at(
                 &mut self.reader,
                 &self.header,
-                &self.repository,
+                // **An empty repository, from A2 on.** Every mapped slice is decoded against
+                // the window fetched from `reference_reader`, and an unmapped or multi-contig
+                // slice needs no external bases at all — so nothing reads this, and passing a
+                // *populated* one would hide a slice that had quietly fallen back to it. The
+                // field goes at A3 along with `OpenReference`'s cache.
+                &fasta::Repository::default(),
                 &self.resolution,
                 offset,
+                &*self.reference_reader,
             )?
             else {
                 // End of stream reached through the index — nothing further.

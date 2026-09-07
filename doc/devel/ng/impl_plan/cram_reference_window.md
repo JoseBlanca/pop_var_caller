@@ -131,7 +131,7 @@ module construct a reference, which is the one thing its docs say it must not do
 *Depends:* —. *Source:* spec §10 points 1, 5 and 6; arch §1.2, §1.3, §4;
 `read_filtering_stages.md` §5.
 
-**A2. The decode fetches each slice's span and decodes over it.** ☐ **Own commit — do not
+**A2. The decode fetches each slice's span and decodes over it.** ✅ **Own commit — do not
 bundle.** Guarded by the two oracles named under *Verification*, green before and after.
 `decode_container_at` gains a `reference: &dyn RawRefSeq` parameter, passed
 `&*self.reference_reader` from `decode_next_container`. Per slice: `slice.reference_span()`;

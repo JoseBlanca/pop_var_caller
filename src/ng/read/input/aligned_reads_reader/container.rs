@@ -37,7 +37,8 @@ use noodles_sam::alignment::record::{Flags, MappingQuality};
 
 use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
 use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
-use crate::ng::types::ReadGroupId;
+use crate::ng::ref_seq::RawRefSeq;
+use crate::ng::types::{ContigId, ReadGroupId};
 
 /// One CRAM container, decoded and held in two flat buffers.
 ///
@@ -339,6 +340,8 @@ pub(crate) fn decode_container_at(
     repository: &fasta::Repository,
     resolution: &ReadGroupResolution,
     offset: u64,
+    // The reference bases each slice is decoded against, one span at a time.
+    reference: &dyn RawRefSeq,
 ) -> io::Result<Option<DecodedContainer>> {
     reader.seek(SeekFrom::Start(offset))?;
 
@@ -376,25 +379,75 @@ pub(crate) fn decode_container_at(
     // container's flat buffers; reused, they grow to the longest read of the container and no
     // further.
     let mut scratch = RecordScratch::default();
+    // **The window is its own buffer, not one of `scratch`'s, and the borrow checker is why.**
+    // The decoded records borrow it for as long as they live, while `scratch` is borrowed
+    // *mutably* to build each of them — so the two cannot be fields of one struct. Reused
+    // across the container's slices, it grows to the widest span this file has met and no
+    // further.
+    let mut window: Vec<u8> = Vec::new();
     for slice in container.slices() {
         let slice = slice?;
         // The decoded block data and the borrowed records live only within this block;
         // copying each record's bytes into the container's own buffers here keeps the result
         // independent of those borrows.
         let (core_data_src, external_data_srcs) = slice.decode_blocks()?;
+
+        // **A slice says which bases it needs before any of them are read.** Its header names
+        // the contig and the first and last position its records touch, and it is parsed
+        // before a block is decoded — so the decode fetches exactly that span rather than
+        // holding a chromosome. `None` is an unmapped slice or one spanning several contigs;
+        // neither needs external bases, and noodles resolves both record by record without
+        // consulting a reference at all (`alignment_cursor.md` §10 point 2).
+        let span = slice.reference_span();
+        if let Some((reference_sequence_id, start, end)) = span {
+            let contig = ContigId(u32::try_from(reference_sequence_id).map_err(|_| {
+                io::Error::other(format!(
+                    "slice names reference sequence {reference_sequence_id}, which is not a \
+                     contig index this reference can hold"
+                ))
+            })?);
+            let length = (usize::from(end) - usize::from(start) + 1) as u64;
+            reference
+                .fetch_raw_into(contig, usize::from(start) as u64, length, &mut window)
+                .map_err(|source| {
+                    io::Error::other(format!(
+                        "the reference could not serve the {length} bases from {} that a CRAM \
+                         slice is stored against: {source}",
+                        usize::from(start)
+                    ))
+                })?;
+        }
+
         // **The auxiliary tags are not read at all**, where the file's own encoding lets them
         // be skipped safely — noodles decides that from the compression header and falls back
         // to reading them when it cannot. ng reads exactly one thing out of a record's tags,
         // the read group, and a CRAM does not store that as a tag: it stores a *number*, an
         // index into the header's `@RG` list, which `resolve_read_group` below gets from that
         // number rather than from any tag. So nothing here loses an answer.
-        for record in slice.records_discarding_tags(
-            repository.clone(),
-            header,
-            &compression_header,
-            &core_data_src,
-            &external_data_srcs,
-        )? {
+        //
+        // **Both arms skip the tags; they differ only in where the bases come from.** The
+        // windowed one hands over the span fetched above; noodles checks it covers what the
+        // slice declares and refuses, naming both spans, rather than decoding against bases
+        // that fall short.
+        let records = match span {
+            Some((_, start, _)) => slice.records_over_window(
+                &window,
+                start,
+                repository.clone(),
+                header,
+                &compression_header,
+                &core_data_src,
+                &external_data_srcs,
+            )?,
+            None => slice.records_discarding_tags(
+                repository.clone(),
+                header,
+                &compression_header,
+                &core_data_src,
+                &external_data_srcs,
+            )?,
+        };
+        for record in records {
             // **Who owns this record is decided before anything is built.** A CRAM stores
             // the read group as a number, so asking costs an index lookup into the header
             // and no allocation — where building the `RecordBuf` below copies the name,

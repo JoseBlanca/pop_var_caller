@@ -2315,6 +2315,249 @@ mod tests {
         );
     }
 
+    /// **The windowed decode reconstructs the same reads, against a reference where a wrong
+    /// window would not.**
+    ///
+    /// This is A2's oracle, and the fixture is the whole point of it. `t8` below compares a CRAM
+    /// against its BAM twin too, but over the all-`A` reference every other CRAM fixture uses —
+    /// and a CRAM stores each read as its *differences from the reference*, so decoding against
+    /// the wrong offset of an all-`A` chromosome rebuilds exactly the same read, and the slice's
+    /// stored MD5 matches as well, every window of that reference having the same digest. So
+    /// `t8` cannot fail for a window that is off by one, and neither can any other test here.
+    ///
+    /// Against a reference whose bases vary, a one-base shift changes the reconstructed
+    /// sequence. The BAM twin is the oracle because a BAM stores its bases literally and reads
+    /// them back without consulting a reference at all.
+    ///
+    /// **Filter #8 is off on purpose.** The fixture's reads are all-`A` against a pseudo-random
+    /// reference, so the mismatch filter would drop every one of them and the comparison would
+    /// be two empty lists agreeing.
+    ///
+    /// **What actually catches a shifted window here, measured**: fetching the span one base
+    /// late fails this test, and the message is *"reference sequence checksum mismatch"* — the
+    /// MD5 the slice header stores over its own span, which noodles validates against whatever
+    /// bases it is handed. So on a file carrying that digest the window is guarded twice, and
+    /// the digest fires first. **The comparison below is what remains when it does not**: CRAM
+    /// v3 §8.5 says an all-zero checksum is not to be validated, and a writer may store one, in
+    /// which case wrong bases reach the caller with nothing else objecting. That is the case
+    /// this test is really for, and it is why the assertion is on the sequences rather than on
+    /// the decode merely succeeding.
+    #[test]
+    fn a_cram_decoded_against_per_slice_windows_rebuilds_the_reads_its_bam_twin_holds() {
+        use crate::ng::read::input::test_fixtures::indexed_cram_over_a_varied_reference;
+        use crate::ng::ref_seq::WindowedRefSeq;
+
+        let records = parity_records();
+        let no_mismatch_filter = ReadFilterConfig {
+            max_read_mismatch_fraction: None,
+            ..ReadFilterConfig::default()
+        };
+
+        let (_cram_dir, cram_path, _fasta_dir, fasta) =
+            indexed_cram_over_a_varied_reference(&records);
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read the varied reference"),
+        );
+        let cram = AlignmentFile::open(
+            &cram_path,
+            &reference,
+            no_mismatch_filter,
+            false,
+            fixture_read_group(),
+        )
+        .expect("the CRAM opens");
+
+        let (_bam_dir, bam_path) = indexed_bam(&bam_header(&matching_contigs()), &records);
+        let bam = AlignmentFile::open(
+            &bam_path,
+            &reference,
+            no_mismatch_filter,
+            false,
+            fixture_read_group(),
+        )
+        .expect("the BAM opens");
+
+        /// One decoded read, reduced to the fields a wrong reference window would move.
+        struct Compared {
+            qname: Vec<u8>,
+            pos: u64,
+            seq: Vec<u8>,
+            qual: Vec<u8>,
+        }
+
+        let table = reference.info().contig_list();
+        let whole_contig = GenomeRegion {
+            contig: ContigId(0),
+            start: crate::ng::types::Position(1),
+            end: crate::ng::types::Position(FIXTURE_CONTIGS[0].1 as u64),
+        };
+        let reads_of = |file: &Arc<AlignmentFile>| -> Vec<Compared> {
+            let mut cursor = file
+                .cursor(ContigId(0), || {
+                    WindowedRefSeq::new(fasta.clone(), table.clone())
+                })
+                .expect("a cursor over the varied reference");
+            cursor
+                .move_to_region(whole_contig)
+                .expect("the region is this cursor's chromosome");
+            let mut out = Vec::new();
+            while let Some(read) = cursor.next_read() {
+                let read = read.expect("no fatal read error");
+                out.push(Compared {
+                    qname: read.qname.clone(),
+                    pos: read.pos,
+                    seq: read.seq.clone(),
+                    qual: read.qual.clone(),
+                });
+            }
+            out
+        };
+
+        let from_cram = reads_of(&cram);
+        let from_bam = reads_of(&bam);
+
+        assert!(
+            !from_bam.is_empty(),
+            "the fixture must yield reads, or this compares two empty lists"
+        );
+        assert_eq!(
+            from_cram.len(),
+            from_bam.len(),
+            "the two files hold the same reads"
+        );
+        // Compared field by field rather than as a whole, so a failure names *which* field
+        // moved: a wrong window shows up in `seq` alone, with the name and position intact.
+        for (cram_read, bam_read) in from_cram.iter().zip(&from_bam) {
+            assert_eq!(cram_read.qname, bam_read.qname, "read names, in order");
+            assert_eq!(cram_read.pos, bam_read.pos, "alignment start");
+            assert_eq!(
+                cram_read.seq,
+                bam_read.seq,
+                "**the bases, which is what a wrong reference window changes** — read {}",
+                String::from_utf8_lossy(&cram_read.qname)
+            );
+            assert_eq!(cram_read.qual, bam_read.qual, "quality scores");
+        }
+    }
+
+    /// **A window that does not cover the slice is refused, not decoded short.**
+    ///
+    /// The failure this prevents is the silent one: bases that fall short of the span leave
+    /// every read past the end reconstructed against whatever the decoder finds, or against
+    /// nothing. noodles refuses and names both spans, and this checks that the refusal is
+    /// reachable from ng rather than only from noodles' own tests.
+    ///
+    /// **It needs an accessor that lies**, because nothing in the honest path can produce a
+    /// short window: `decode_container_at` asks for exactly the span the slice header declares,
+    /// and a real reference either serves it or errors. So the double below serves one base
+    /// fewer than it was asked for, which is the smallest lie that can be told.
+    #[test]
+    fn a_reference_window_that_falls_short_of_its_slice_is_refused() {
+        use crate::fasta::ContigList;
+        use crate::ng::read::input::test_fixtures::indexed_cram_over_a_varied_reference;
+        use crate::ng::ref_seq::{ContigTable, RefSeq, RefSeqError, WindowedRefSeq};
+
+        /// A reference that hands back one base fewer than it was asked for — and only when
+        /// asked for more than one, so the cursor's own zero-length probe still passes and the
+        /// refusal comes from the decode rather than from the open.
+        struct OneBaseShort(WindowedRefSeq);
+
+        impl RefSeq for OneBaseShort {
+            fn fetch_into(
+                &self,
+                contig: ContigId,
+                start_1based: u64,
+                length: u64,
+                dst: &mut Vec<u8>,
+            ) -> Result<(), RefSeqError> {
+                self.0.fetch_into(contig, start_1based, length, dst)?;
+                if dst.len() > 1 {
+                    dst.pop();
+                }
+                Ok(())
+            }
+        }
+        impl RawRefSeq for OneBaseShort {
+            fn fetch_raw_into(
+                &self,
+                contig: ContigId,
+                start_1based: u64,
+                length: u64,
+                dst: &mut Vec<u8>,
+            ) -> Result<(), RefSeqError> {
+                self.0.fetch_raw_into(contig, start_1based, length, dst)?;
+                if dst.len() > 1 {
+                    dst.pop();
+                }
+                Ok(())
+            }
+        }
+        impl ContigTable for OneBaseShort {
+            fn contigs(&self) -> &ContigList {
+                self.0.contigs()
+            }
+        }
+
+        let records = parity_records();
+        let (_cram_dir, cram_path, _fasta_dir, fasta) =
+            indexed_cram_over_a_varied_reference(&records);
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read the varied reference"),
+        );
+        let cram = AlignmentFile::open(
+            &cram_path,
+            &reference,
+            ReadFilterConfig {
+                max_read_mismatch_fraction: None,
+                ..ReadFilterConfig::default()
+            },
+            false,
+            fixture_read_group(),
+        )
+        .expect("the CRAM opens");
+
+        let table = reference.info().contig_list();
+        let mut cursor = cram
+            .cursor(ContigId(0), || {
+                OneBaseShort(WindowedRefSeq::new(fasta.clone(), table.clone()))
+            })
+            .expect("the zero-length probe is untouched, so the cursor opens");
+        cursor
+            .move_to_region(GenomeRegion {
+                contig: ContigId(0),
+                start: crate::ng::types::Position(1),
+                end: crate::ng::types::Position(FIXTURE_CONTIGS[0].1 as u64),
+            })
+            .expect("the region is this cursor's chromosome");
+
+        let Err(error) = cursor
+            .next_read()
+            .expect("the decode is attempted rather than yielding an empty region")
+        else {
+            panic!("a window one base short of the slice must be refused, not decoded against");
+        };
+        // **The window check, specifically, and not the digest.** A slice carrying a reference
+        // MD5 would also fail that — but the bounds check runs first, so this is the refusal a
+        // caller sees, and it is the one that still fires on a file whose stored checksum is
+        // all-zero (CRAM v3 §8.5 says such a checksum is not validated). Asserted narrowly for
+        // that reason: accepting either would let the only guard silently become the one that
+        // some real files switch off.
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("window"),
+            "the refusal must name the window that fell short, not something downstream: \
+             {rendered}"
+        );
+    }
+
     /// **T8 — the same reads written as BAM and as CRAM produce the same
     /// ordered stream.**
     ///
