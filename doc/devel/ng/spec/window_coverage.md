@@ -256,14 +256,34 @@ A sample whose whole run finalises fewer than 10,000 windows sets the width from
 145 kB roomier than it is); 80 MB at a
 thousand samples, 240 MB at three thousand. On tomato that fits today (108 kB + 80); on a human
 reference it fits once the run's readers share one contig list, the psp path plan's step D1
-(480 kB → 123). The plan measures the overflow fraction — the share of windows above the range,
-which is the fit's own rejection guard — on both benchmarks (step D2).
+(480 kB → 123).
 
-**Soft, and marked so.** The 10,000-window scale sample, the factor of ten, and 400 bins are
-starting values chosen to fit the budget and cover both ends of the depth axis; none has been
-measured against the fit's accuracy. The alternative that lost: a depth axis on a log scale, which
-would give the same resolution at every depth in fewer bins, and lost because the fit's three
-functions assume uniform bins and would have to be rewritten rather than copied.
+**All three examined against measurement 2026-09-07, and all three stand** (plan step D2; the full
+tables are in
+[the measurement's report](../../reports/implementations/ng_window_coverage_d2_2026-09-07.md) and,
+shortened, beside each constant). Over ten sample-stores of two species:
+
+- **the factor of ten.** The fit refuses a sample once more than a fifth of its windows are past
+  the top of the range. At ten, nine of the ten sample-stores overflow nothing at all and the tenth
+  overflows 1,972 windows of 7,666,421 — **2.6 in 10,000, some 780 times under the guard**. At a
+  range of 5 the worst is 35 in 10,000; at 2.5 it is 1,103 in 10,000, within a factor of 1.8 of the
+  guard. No setting tried made the fit reject a sample; ten was kept for the size of its margin,
+  and 40 is where the settings tried stop rather than where a cost appears.
+- **the 10,000-window scale sample.** Kept, but **not because a prefix of 10,000 windows is
+  representative** — the median fitted from it came out below the median over every window of the
+  same store in eight of the ten, by 13% on average and 34% at worst, and a longer prefix does not
+  fix it (on the worst store the fitted median barely moves from 100 windows to 100,000). What
+  makes the bias harmless is the range's margin under the guard, so **the two constants are not
+  independent**: a step that narrows the range has to re-check the prefix first.
+- **400 bins.** Nothing measured forces the count; what it decides is the 80.2 kB above. What the
+  *scaling* is for is measured: the fitted medians span 3.97 to 246.21 reads a position, 62-fold,
+  where production's fixed 0.5× bin would give the shallowest seven bins below its own single-copy
+  peak and waste three quarters of the axis on the deepest.
+
+**None of this is measured against the fit's accuracy**, which is the filter's own branch; what is
+measured is the one failure the fit can see for itself. The alternative that lost: a depth axis on
+a log scale, which would give the same resolution at every depth in fewer bins, and lost because
+the fit's three functions assume uniform bins and would have to be rewritten rather than copied.
 
 **Determinism holds at any thread count.** Each sample's records arrive in one fixed coordinate
 order whatever the cover's schedule (the parallel cover reaches the same fixpoint by any
@@ -333,8 +353,9 @@ pub struct CoverageByGcHistogram { /* copied; §7 */ }
 pub struct WindowCoverageAccumulator { /* private */ }
 
 impl WindowCoverageAccumulator {
-    /// `window_bp` 500, `gc_bins` 50, `depth_bins` 400, `min_window_positions` (soft, §3.3),
-    /// `depth_scale_windows` 10,000 (soft, §3.4).
+    /// `window_bp` 500, `gc_bins` 50, `depth_bins` 400, `min_window_positions` 50 (§3.3),
+    /// `depth_scale_windows` 10,000 (§3.4). The last two were the soft ones; both were
+    /// measured 2026-09-07 and kept.
     pub fn new(config: WindowCoverageConfig) -> Self;
     /// One covered position, in non-decreasing `(contig, position)` order.
     pub fn observe(&mut self, contig: ContigId, position: Position, reference_base: u8, depth: u32);
@@ -449,8 +470,14 @@ exactly the records §3.1 builds bodies for.
   over 122 positions is wrong, and that question belongs to the filter's own validation. Against
   lowering it: the one-accession tomato store has 261 windows holding fewer than 10 positions,
   which a floor of 10 would let speak.
-- **OPEN — the bin scheme's three constants.** Leaning as §3.4; **settled by plan step D2's
-  overflow fraction on both benchmarks**.
+- **The bin scheme's three constants — resolved 2026-09-07: all three stand** (§3.4). 400 bins
+  spanning ten times the sample's median, fitted from its first 10,000 windows. Measured over ten
+  sample-stores: at the shipped range, nine overflow nothing and the tenth overflows 2.6 windows in
+  10,000, against a fit that rejects a sample at 2,000 in 10,000. The one finding that constrains a
+  later change is that the scale sample is a **prefix** of the run's ground and fits a median about
+  13% shallow on average and 34% shallow at worst — which shortens the axis by as much, and is
+  harmless only because the range leaves that much margin under the guard. The two cannot be moved
+  independently.
 
 ## 10. How we know it works
 

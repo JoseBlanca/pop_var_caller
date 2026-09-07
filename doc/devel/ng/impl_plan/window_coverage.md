@@ -157,10 +157,12 @@ into the config with the distribution beside it in the report, and spec §3.3's 
 *Depends:* C3. *Source:* spec §3.3, §9. **Five stores rather than two, because the slice silences
 nothing and "HG002" names two benchmarks here whose intervals are 42-fold apart; 50 stands.**
 
-**D2. ☐ The bin scheme.** From the probe: each sample's fitted width, and the overflow fraction
+**D2. ✅ The bin scheme.** From the probe: each sample's fitted width, and the overflow fraction
 — windows past the range — on both benchmarks, against the fit's rejection guard at a fifth; the
 scale sample and the factor of ten confirmed or moved, spec §3.4's OPEN closed. *Depends:* C5.
-*Source:* spec §3.4, §9.
+*Source:* spec §3.4, §9. **All three constants kept; the finding that constrains a later change is
+that the scale sample is a prefix and reads about 13% shallow, so it and the range cannot be moved
+independently.**
 
 **D3. ☐ The memory, per sample.** Peak resident of a psp-mode run at 1, 6 and 63 samples on the
 tomato slice, before and after this plan, with the per-sample slope reported against

@@ -1,8 +1,10 @@
-//! **Three questions about the window-coverage measurement, asked of a real store.** Does a
+//! **Four questions about the window-coverage measurement, asked of a real store.** Does a
 //! one-base record's head really say what its evidence says (plan step B2, spec
 //! `window_coverage.md` §3.1)? Does a calling run's per-locus window equal the one a straight
 //! walk of the same store computes (plan step C3, spec §10)? And how many covered positions is
-//! each window built from, which is what spec §3.3's floor is a threshold on (plan step D1)?
+//! each window built from, which is what spec §3.3's floor is a threshold on (plan step D1)? And
+//! where does the histogram's depth axis get cut, and how much of a sample falls off the end of
+//! it, which is what spec §3.4's three bin constants decide (plan step D2)?
 //!
 //! ```text
 //! # the first question alone — plan step B2's command, unchanged
@@ -14,9 +16,10 @@
 //!     --reference <reference.fa> --windows-from-the-run windows.tsv \
 //!     <a store.psp> [more stores...]
 //!
-//! # the third — no run needed, only the stores and the reference their GC comes from
+//! # the third and fourth — no run needed, only the stores and the reference their GC comes from
 //! cargo run --release --example ng_window_coverage_probe -- \
-//!     --reference <reference.fa> --covered-positions-per-window <a store.psp> [more stores...]
+//!     --reference <reference.fa> --covered-positions-per-window --bin-scheme \
+//!     <a store.psp> [more stores...]
 //! ```
 //!
 //! Without `--reference` only the first question is asked, which is what plan step B2 ran. With
@@ -86,6 +89,22 @@
 //! The arm at the floor the run actually ships must agree with the walk's own count of absent
 //! windows, which is what ties the sweep to the measurement it is about.
 //!
+//! # The fourth question
+//!
+//! Every window that clears the floor is folded into a per-sample histogram, binned by GC and by
+//! depth. The depth axis is not configured but **fitted to the sample**: the accumulator holds its
+//! first `DEPTH_SCALE_WINDOWS` windows back, takes the median of their mean depths, and cuts
+//! `DEPTH_BINS` bins spanning `DEPTH_RANGE_IN_MEDIANS` times that median. Everything above lands
+//! in one overflow column, and the model fit that reads the histogram rejects the sample outright
+//! once more than a fifth of its windows are there. Those three constants were starting values
+//! until this measurement was run; it kept all three, and re-running it is how a later change to
+//! any of them is checked.
+//!
+//! **The same device answers this**: one shipped accumulator per candidate setting, differing from
+//! the run's in one field, fed the identical positions. Each reports the axis it fitted and how
+//! much of the sample fell off the end of it, and the arm configured exactly as the run is
+//! checked against the walk's own histogram.
+//!
 //! # What it prints
 //!
 //! One tab-separated block per store, then one for the total. Besides the equality itself, the
@@ -108,13 +127,15 @@
 //! and [`WindowRecomputation`] the second's; neither knows about the other, and a measurement that
 //! needs only the record is a third implementor and one more entry in `main`'s slice.
 //!
-//! **The third question is not one of those, and rides inside [`WindowRecomputation`] instead.**
-//! What it counts is not a record but a covered position with its reference base and its depth,
-//! which exists only after the recomputation has looked the bases up and decoded the record's
-//! reported depths. A separate implementor would need its own copy of that — a second reference
-//! accessor, a second contig check, a second call of the depth rule — and its answer would then be
-//! checkable only against itself. Riding along, it is fed the identical four values and its arm at
-//! the shipped floor is checked against the recomputation's own count of absent windows.
+//! **The third and fourth questions are not those, and ride inside [`WindowRecomputation`]
+//! instead.** What they count is not a record but a covered position with its reference base and
+//! its depth, which exists only after the recomputation has looked the bases up and decoded the
+//! record's reported depths. A separate implementor would need its own copy of that — a second
+//! reference accessor, a second contig check, a second call of the depth rule — and its answer
+//! would then be checkable only against itself. Riding along, each is fed the identical four
+//! values and each has one arm the recomputation can check: [`FloorSweep`]'s arm at the shipped
+//! floor against the walk's own count of absent windows, and [`BinSchemeSweep`]'s arm at the
+//! run's own configuration against the walk's own histogram.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -133,8 +154,10 @@ use pop_var_caller::ng::run::cohort_merge::recorded_windows::{
 use pop_var_caller::ng::types::{ContigId, GenomePosition, GenomeRegion, Position};
 use pop_var_caller::ng::window_coverage::depth::{EvidenceForOneRecord, for_each_reported_depth};
 use pop_var_caller::ng::window_coverage::{
-    self, SampleHistogram, WindowCoverage, WindowCoverageAccumulator, WindowCoverageConfig,
+    self, CoverageByGcHistogram, SampleHistogram, WindowCoverage, WindowCoverageAccumulator,
+    WindowCoverageConfig,
 };
+use pop_var_caller::paralog::coverage_model::DEFAULT_MAX_OVERFLOW_FRACTION;
 
 #[cfg(test)]
 use pop_var_caller::ng::locus_generation::{LocusLen, SequenceObservation, SsrDetail};
@@ -405,6 +428,17 @@ struct WindowRecomputation {
     /// What that measurement said, set by [`close`](Self::close) and `None` where the sweep was
     /// not asked for.
     windows_under_each_floor: Option<WindowsUnderEachFloor>,
+    /// The accumulators that measure where the depth axis is cut, one per candidate setting, fed
+    /// the same positions as the one above. `None` unless `--bin-scheme` was given, and `None`
+    /// again once [`close`](Self::close) has finished the pass.
+    bin_schemes: Option<BinSchemeSweep>,
+    /// What that measurement said, set by [`close`](Self::close). One entry an arm, in the order
+    /// [`the_bin_schemes_asked_about`] gives them.
+    ///
+    /// **Printed per store and never summed**, unlike [`Self::windows_under_each_floor`]: an axis
+    /// is fitted from one sample's own depth, so two samples' axes have no total — the row a
+    /// reader wants across stores is the worst overflow, and that is read off the rows.
+    each_bin_scheme: Option<Vec<OneBinSchemeAnswer>>,
     /// Every window this walk finalised, in ascending centre order — the whole store's, since
     /// nothing here evicts.
     windows: Vec<(GenomePosition, WindowCoverage)>,
@@ -774,6 +808,387 @@ impl WindowsUnderEachFloor {
     }
 }
 
+/// **Where the histogram's depth axis is cut, and how much of the sample falls off the end of
+/// it** — the three constants spec `window_coverage.md` §3.4 left to measurement, and that this
+/// sweep is what settled.
+///
+/// The axis is not configured but fitted: the accumulator holds its first `depth_scale_windows`
+/// windows back, takes the median of their mean depths, and cuts `depth_bins` bins so they span
+/// `depth_range_in_medians` times that median. Everything above lands in one overflow column, and
+/// the model fit that reads this histogram **rejects a sample outright** once more than a fifth of
+/// its windows are in that column ([`THE_OVERFLOW_SHARE_THE_FIT_ALLOWS`]), because at that point
+/// the sample's own single-copy peak has left the range and the regular bins hold noise.
+///
+/// **So the same device the floor sweep above uses answers all three**: one shipped accumulator
+/// per setting, fed exactly the positions [`WindowRecomputation`] is fed and differing from it in
+/// one field. Varying `depth_scale_windows` says how far the fitted median moves when the width is
+/// fitted from more of the store, up to every window of it. Varying `depth_range_in_medians` says
+/// what the factor of ten buys and costs: a wider range overflows less and resolves more coarsely,
+/// and the two move in opposite directions over the same bins.
+///
+/// **The two answers are read together, not one at a time.** A scale sample that fits a median
+/// below the whole store's costs a proportional slice off the top of the axis, so what a short
+/// scale sample costs is paid in overflow — which is the range's quantity.
+struct BinSchemeSweep {
+    /// One arm per setting, in the order [`the_bin_schemes_asked_about`] gives them.
+    arms: Vec<OneBinScheme>,
+}
+
+/// One arm of a [`BinSchemeSweep`] while the pass is running: the shipped accumulator at one
+/// candidate setting.
+struct OneBinScheme {
+    setting: BinSchemeSetting,
+    accumulator: WindowCoverageAccumulator,
+}
+
+/// Which of the two settings an arm varies, and to what — the whole of what makes one arm differ
+/// from another, and what a row is labelled by, so that a reader does not have to know the arm's
+/// position in a list to know what it changed.
+///
+/// No `Eq`, because one variant carries an `f64`. The only comparison this file makes is against
+/// [`AsTheRunFitsIt`](Self::AsTheRunFitsIt), which carries nothing.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum BinSchemeSetting {
+    /// The run's own configuration, unchanged. Exactly one arm is this, and
+    /// [`BinSchemeSweep::close`] checks its answer against the walk's own histogram.
+    AsTheRunFitsIt,
+    /// `depth_scale_windows` moved to this many windows, everything else the run's.
+    ScaleSampleOf(u32),
+    /// `depth_range_in_medians` moved to this multiple, everything else the run's.
+    RangeOf(f64),
+}
+
+/// What one arm's histogram came out as.
+struct OneBinSchemeAnswer {
+    setting: BinSchemeSetting,
+    fitted: WhatOneArmFitted,
+}
+
+/// An arm either cut an axis or it has no histogram to cut one from, and **which silence it was is
+/// itself a reading** — the three are three different reports about the sample, not one hole.
+enum WhatOneArmFitted {
+    /// The axis the arm cut, and what fell off the end of it.
+    Axis(FittedAxis),
+    /// No histogram, and which of [`SampleHistogram`]'s three silences it was.
+    NoHistogram(&'static str),
+}
+
+/// A fitted depth axis and what fell off the end of it.
+#[derive(Clone, Copy)]
+struct FittedAxis {
+    /// The width of one regular depth bin, in mean-depth units.
+    depth_bin_width: f64,
+    /// The median window depth the width was fitted from — `width * depth_bins /
+    /// depth_range_in_medians`, recovered rather than re-derived, since the accumulator keeps it
+    /// nowhere.
+    median_depth: f64,
+    /// The depth at which the regular bins stop and the overflow column begins.
+    top_of_the_range: f64,
+    /// Windows that landed in a regular depth bin — the counts of every cell except each GC
+    /// row's last, which is `coverage_model.rs`'s `regular_total`.
+    ///
+    /// **Read off the cells, not off the accumulator's `windows_folded` counter.** The two agree
+    /// — a folded window always reaches a cell — and [`OneArmsAnswer::of`] asserts they do; but
+    /// the fraction the fit judges a sample by is a ratio of cell counts, and reading it from
+    /// anywhere else would make this probe's number a near relative of the fit's rather than the
+    /// fit's.
+    in_a_regular_bin: u64,
+    /// Windows that landed in the overflow column: their mean depth was at or above
+    /// `top_of_the_range`. `coverage_model.rs`'s `overflow_total`.
+    overflowed: u64,
+}
+
+impl FittedAxis {
+    /// Windows folded into the histogram at all — every window that reached a cell.
+    fn folded(&self) -> u64 {
+        self.in_a_regular_bin + self.overflowed
+    }
+
+    /// The share the model fit's own guard is a threshold on: overflowed windows over every
+    /// window that reached a cell.
+    ///
+    /// **Computed the way `coverage_model.rs` computes it** — the overflow column over the
+    /// regular bins plus the overflow column, both summed out of the cells — so the number here
+    /// is the one that would be compared against the guard, not a near relative of it.
+    ///
+    /// A sample with no window in any cell has no histogram at all, so this never divides by
+    /// zero in a run; the guard is written anyway, and answers `0.0`, because the fit's own guard
+    /// also declines to reject a sample it has counted nothing for.
+    fn overflow_fraction(&self) -> f64 {
+        if self.folded() == 0 {
+            0.0
+        } else {
+            self.overflowed as f64 / self.folded() as f64
+        }
+    }
+}
+
+/// The largest share of a sample's windows the coverage model fit tolerates in the overflow
+/// column before it rejects the sample outright — 0.20, a fifth.
+///
+/// **Bound to production's own constant rather than copied**, so that this measurement is read
+/// against the number that would actually judge the sample and cannot drift from it in silence.
+/// Reading it is not a change to production: it is a `pub const` of a `pub` module, and the local
+/// name is here only to say in this file's own words what the number is.
+const THE_OVERFLOW_SHARE_THE_FIT_ALLOWS: f64 = DEFAULT_MAX_OVERFLOW_FRACTION;
+
+/// The settings the bin-scheme sweep asks about.
+///
+/// **The first is the run's own**, which is what ties the sweep to the walk beside it. The scale
+/// samples bracket the shipped 10,000 by two orders each way and end with one no store here
+/// reaches, which fits the width from every window the sample has. The ranges bracket the shipped
+/// factor of ten from a quarter of it to four times.
+fn the_bin_schemes_asked_about() -> Vec<BinSchemeSetting> {
+    let mut settings = vec![BinSchemeSetting::AsTheRunFitsIt];
+    settings.extend(
+        [100, 1_000, 100_000, 1_000_000, u32::MAX]
+            .into_iter()
+            .map(BinSchemeSetting::ScaleSampleOf),
+    );
+    settings.extend(
+        [2.5, 5.0, 20.0, 40.0]
+            .into_iter()
+            .map(BinSchemeSetting::RangeOf),
+    );
+    settings
+}
+
+impl BinSchemeSetting {
+    /// The configuration this arm runs — the run's, with at most one field moved.
+    fn configuration(self) -> WindowCoverageConfig {
+        let run = the_configuration_a_run_uses();
+        match self {
+            BinSchemeSetting::AsTheRunFitsIt => run,
+            BinSchemeSetting::ScaleSampleOf(windows) => WindowCoverageConfig {
+                depth_scale_windows: windows,
+                ..run
+            },
+            BinSchemeSetting::RangeOf(medians) => WindowCoverageConfig {
+                depth_range_in_medians: medians,
+                ..run
+            },
+        }
+    }
+
+    /// How a row labels itself: what was moved and to what.
+    fn as_text(self) -> String {
+        match self {
+            BinSchemeSetting::AsTheRunFitsIt => "as-the-run-fits-it".to_owned(),
+            BinSchemeSetting::ScaleSampleOf(u32::MAX) => "scale-sample=every-window".to_owned(),
+            BinSchemeSetting::ScaleSampleOf(windows) => format!("scale-sample={windows}"),
+            BinSchemeSetting::RangeOf(medians) => format!("range-in-medians={medians}"),
+        }
+    }
+}
+
+impl BinSchemeSweep {
+    /// One arm per setting in [`the_bin_schemes_asked_about`], each a fresh accumulator configured
+    /// as a run's but for the one field that setting moves — see
+    /// [`BinSchemeSetting::configuration`], which is where the `..` over the run's own
+    /// configuration is written.
+    fn new() -> Self {
+        Self {
+            arms: the_bin_schemes_asked_about()
+                .into_iter()
+                .map(|setting| OneBinScheme {
+                    setting,
+                    accumulator: WindowCoverageAccumulator::new(setting.configuration()),
+                })
+                .collect(),
+        }
+    }
+
+    /// One covered position, into every arm.
+    ///
+    /// **The windows are dropped as they are popped.** This measurement is about the histogram
+    /// each arm ends with, and the windows themselves are the recomputation's, beside it.
+    fn observe(&mut self, contig: ContigId, position: Position, reference_base: u8, depth: u32) {
+        for arm in &mut self.arms {
+            arm.accumulator
+                .observe(contig, position, reference_base, depth);
+            while arm.accumulator.pop_ready().is_some() {}
+        }
+    }
+
+    /// Finish every arm and read its axis off its histogram, having checked the three things that
+    /// would make the answers a fiction.
+    ///
+    /// `the_walks_histogram` is the recomputation's own, fitted with the run's configuration, and
+    /// the arm that runs that same configuration must reproduce it exactly — the one place this
+    /// sweep and the walk answer the same question, and the only check here that compares against
+    /// something computed outside it. **What is compared is the printed row**, so the tolerance is
+    /// the precision the row is printed at, and a field of [`FittedAxis`] enters the comparison as
+    /// soon as it enters the row.
+    fn close(self, the_walks_histogram: &SampleHistogram) -> Vec<OneBinSchemeAnswer> {
+        let answers: Vec<OneBinSchemeAnswer> = self
+            .arms
+            .into_iter()
+            .map(|arm| {
+                let OneBinScheme {
+                    setting,
+                    accumulator,
+                } = arm;
+                let (_, histogram) = accumulator.finish();
+                OneBinSchemeAnswer::of(setting, &histogram)
+            })
+            .collect();
+        // Found rather than filtered for, so that a sweep that has lost the arm the check is
+        // written against fails here instead of running no check at all.
+        let as_the_run_ran_it = answers
+            .iter()
+            .find(|answer| answer.setting == BinSchemeSetting::AsTheRunFitsIt)
+            .expect(
+                "no arm runs the configuration the run uses, so the check against the walk \
+                 never ran",
+            );
+        let the_walk =
+            OneBinSchemeAnswer::of(BinSchemeSetting::AsTheRunFitsIt, the_walks_histogram);
+        assert_eq!(
+            as_the_run_ran_it.as_a_row(),
+            the_walk.as_a_row(),
+            "the arm configured as the run is fitted came out differently from the walk beside \
+             it, over the same positions",
+        );
+        assert!(
+            answers
+                .iter()
+                .any(|answer| answer.axis().is_some_and(|axis| axis.folded() > 0)),
+            "no arm folded a window, so this sweep says nothing about where the depth axis \
+             should be cut",
+        );
+        answers
+    }
+}
+
+impl OneBinSchemeAnswer {
+    /// Read one arm's axis off the histogram it finished with.
+    ///
+    /// **The three silences are named here rather than rendered with `Debug`**, so that a variant
+    /// added to [`SampleHistogram`] is a compile error rather than a fourth silence reported under
+    /// whatever name its declaration happens to carry.
+    fn of(setting: BinSchemeSetting, histogram: &SampleHistogram) -> Self {
+        let fitted = match histogram {
+            SampleHistogram::NoWindowFinalised => {
+                WhatOneArmFitted::NoHistogram("no-window-finalised")
+            }
+            SampleHistogram::EveryWindowUnderTheFloor => {
+                WhatOneArmFitted::NoHistogram("every-window-under-the-floor")
+            }
+            SampleHistogram::MedianDepthNotPositive => {
+                WhatOneArmFitted::NoHistogram("median-depth-not-positive")
+            }
+            SampleHistogram::Fitted(fitted) => {
+                let CoverageByGcHistogram {
+                    depth_bin_width,
+                    depth_bins,
+                    gc_bins,
+                    windows_folded,
+                    counts,
+                    // Not part of the axis: how wide a window is, and how many the floor
+                    // silenced, belong to the floor sweep above and the walk prints both already.
+                    window_bp: _,
+                    windows_under_the_floor: _,
+                } = fitted;
+                // Row-major `[gc_bin][depth_bin]` with one overflow column after each row's
+                // regular bins, which is how `coverage_model.rs`'s own layout reads it. Both
+                // totals are summed out of the cells, because the fraction the fit judges a
+                // sample by is a ratio of exactly these two.
+                let columns = *depth_bins as usize + 1;
+                let overflowed: u64 = (0..*gc_bins as usize)
+                    .map(|gc_bin| u64::from(counts[gc_bin * columns + *depth_bins as usize]))
+                    .sum();
+                let in_a_regular_bin: u64 = (0..*gc_bins as usize)
+                    .flat_map(|gc_bin| {
+                        (0..*depth_bins as usize).map(move |depth_bin| gc_bin * columns + depth_bin)
+                    })
+                    .map(|cell| u64::from(counts[cell]))
+                    .sum();
+                // The accumulator counts one folded window per cell it wrote, so the cells and
+                // the counter are two readings of one number. They can part only if a cell
+                // saturated at `u32::MAX`, which needs one GC-and-depth cell to hold 4.3 billion
+                // windows — a reference above about 4.3 Gbp, larger than either benchmark. If it
+                // ever happens the overflow fraction reads low, which is the direction that makes
+                // a sample look acceptable, so it fails here rather than being reported.
+                assert_eq!(
+                    in_a_regular_bin + overflowed,
+                    *windows_folded,
+                    "the histogram's cells hold {} windows and the accumulator counted {} folded, \
+                     so a cell has saturated and the overflow fraction would read low",
+                    in_a_regular_bin + overflowed,
+                    windows_folded,
+                );
+                let top_of_the_range = depth_bin_width * f64::from(*depth_bins);
+                WhatOneArmFitted::Axis(FittedAxis {
+                    depth_bin_width: *depth_bin_width,
+                    // The width is `median * range / bins`, so the median it was fitted from
+                    // is the width times bins over range — recovered, because nothing keeps
+                    // it. The range is the arm's own, not the run's.
+                    median_depth: depth_bin_width * f64::from(*depth_bins)
+                        / setting.configuration().depth_range_in_medians,
+                    top_of_the_range,
+                    in_a_regular_bin,
+                    overflowed,
+                })
+            }
+        };
+        Self { setting, fitted }
+    }
+
+    /// The axis this arm cut, or `None` where the sample got no histogram to cut one from.
+    fn axis(&self) -> Option<FittedAxis> {
+        match self.fitted {
+            WhatOneArmFitted::Axis(axis) => Some(axis),
+            WhatOneArmFitted::NoHistogram(_) => None,
+        }
+    }
+
+    /// One arm's answer as the text a row carries — also what the check against the walk
+    /// compares, so that a field added to [`FittedAxis`] is compared as soon as it is printed.
+    ///
+    /// **The axis is destructured with every field named**, so adding one is a compile error here
+    /// rather than a field that quietly stays out of both the row and the check.
+    fn as_a_row(&self) -> String {
+        match self.fitted {
+            WhatOneArmFitted::Axis(axis) => {
+                let FittedAxis {
+                    depth_bin_width,
+                    median_depth,
+                    top_of_the_range,
+                    in_a_regular_bin,
+                    overflowed,
+                } = axis;
+                format!(
+                    "median-depth={median_depth:.4}\tdepth-bin-width={depth_bin_width:.6}\t\
+                     top-of-the-range={top_of_the_range:.2}\tin-a-regular-bin={in_a_regular_bin}\t\
+                     overflowed={overflowed}\tfolded={}\toverflow-fraction={:.5}",
+                    axis.folded(),
+                    axis.overflow_fraction(),
+                )
+            }
+            WhatOneArmFitted::NoHistogram(silence) => format!("no-histogram={silence}"),
+        }
+    }
+
+    /// Whether the model fit would reject this sample for having left the depth range.
+    fn the_fit_would_reject_it(&self) -> bool {
+        self.axis()
+            .is_some_and(|axis| axis.overflow_fraction() > THE_OVERFLOW_SHARE_THE_FIT_ALLOWS)
+    }
+
+    fn print(&self, label: &str) {
+        println!(
+            "{label}\tbin-scheme\t{}\t{}\t{}",
+            self.setting.as_text(),
+            self.as_a_row(),
+            if self.the_fit_would_reject_it() {
+                "the-fit-would-reject-this-sample"
+            } else {
+                "the-fit-would-take-it"
+            },
+        );
+    }
+}
+
 impl WindowRecomputation {
     fn over(
         reference: &ReferenceFasta,
@@ -781,6 +1196,7 @@ impl WindowRecomputation {
         run_histogram: Option<String>,
         sample: usize,
         covered_positions_per_window: bool,
+        bin_scheme: bool,
     ) -> Self {
         Self {
             accumulator: Some(WindowCoverageAccumulator::new(
@@ -788,6 +1204,8 @@ impl WindowRecomputation {
             )),
             sweep: covered_positions_per_window.then(FloorSweep::new),
             windows_under_each_floor: None,
+            bin_schemes: bin_scheme.then(BinSchemeSweep::new),
+            each_bin_scheme: None,
             windows: Vec::new(),
             reference: reference.accessor(),
             reference_contigs: reference.contigs.clone(),
@@ -831,6 +1249,15 @@ impl WindowRecomputation {
                 .filter(|(_, window)| window.is_absent())
                 .count() as u64;
             self.windows_under_each_floor = Some(sweep.close(self.windows.len() as u64, absent));
+        }
+        if let Some(bin_schemes) = self.bin_schemes.take() {
+            // **Closed after `self.histogram` is set**, because the arm configured as the run is
+            // checked against exactly that histogram.
+            let the_walks = self
+                .histogram
+                .as_ref()
+                .expect("the walk's own histogram is taken before the bin schemes are closed");
+            self.each_bin_scheme = Some(bin_schemes.close(the_walks));
         }
         self.compare_against_the_run();
     }
@@ -1144,6 +1571,7 @@ impl RecordMeasurement for WindowRecomputation {
         let Self {
             accumulator,
             sweep,
+            bin_schemes,
             bases,
             positions_observed,
             windows,
@@ -1156,8 +1584,9 @@ impl RecordMeasurement for WindowRecomputation {
             sample: _,
             histogram: _,
             histogram_the_run_wrote: _,
-            // Filled by `close` out of `sweep`, and never fed a record.
+            // Both filled by `close` out of the two sweeps above, and neither fed a record.
             windows_under_each_floor: _,
+            each_bin_scheme: _,
         } = self;
         let accumulator = accumulator
             .as_mut()
@@ -1172,6 +1601,9 @@ impl RecordMeasurement for WindowRecomputation {
             // its arms answer about this walk's windows and not about some other stream.
             if let Some(sweep) = sweep.as_mut() {
                 sweep.observe(at.contig, at.position, base, depth);
+            }
+            if let Some(bin_schemes) = bin_schemes.as_mut() {
+                bin_schemes.observe(at.contig, at.position, base, depth);
             }
             *positions_observed += 1;
         }
@@ -1196,6 +1628,9 @@ impl RecordMeasurement for WindowRecomputation {
         println!("{label}\twindows-under-the-floor\t{absent}");
         if let Some(under_each_floor) = &self.windows_under_each_floor {
             under_each_floor.print(label);
+        }
+        for answer in self.each_bin_scheme.iter().flatten() {
+            answer.print(label);
         }
         self.report_the_histogram(label);
         let Some(comparison) = &self.comparison else {
@@ -1260,11 +1695,15 @@ struct Arguments {
     /// Also report how many covered positions each window was built from, as the share of windows
     /// a floor of each candidate size would silence.
     covered_positions_per_window: bool,
+    /// Also report, per sample, where the histogram's depth axis is cut and how much of the
+    /// sample falls off the end of it, at the run's setting and at each candidate.
+    bin_scheme: bool,
 }
 
 const USAGE: &str = "usage: ng_window_coverage_probe [--reference <reference.fa>] \
                      [--windows-from-the-run <windows.tsv>] \
-                     [--covered-positions-per-window] <a store.psp> [more stores...]";
+                     [--covered-positions-per-window] [--bin-scheme] \
+                     <a store.psp> [more stores...]";
 
 impl Arguments {
     fn from_command_line() -> Self {
@@ -1272,10 +1711,12 @@ impl Arguments {
         let mut reference = None;
         let mut windows_from_the_run = None;
         let mut covered_positions_per_window = false;
+        let mut bin_scheme = false;
         let mut argv = std::env::args().skip(1);
         while let Some(argument) = argv.next() {
             match argument.as_str() {
                 "--covered-positions-per-window" => covered_positions_per_window = true,
+                "--bin-scheme" => bin_scheme = true,
                 "--reference" => {
                     reference = Some(PathBuf::from(
                         argv.next().expect("--reference takes a path"),
@@ -1302,11 +1743,17 @@ impl Arguments {
             "--covered-positions-per-window counts the positions in each window, which are the \
              recomputation's, and that needs --reference",
         );
+        assert!(
+            !bin_scheme || reference.is_some(),
+            "--bin-scheme fits a depth axis from the windows the recomputation builds, and that \
+             needs --reference",
+        );
         Self {
             stores,
             reference,
             windows_from_the_run,
             covered_positions_per_window,
+            bin_scheme,
         }
     }
 }
@@ -1421,6 +1868,7 @@ fn main() {
                     .map(|per_sample| per_sample[sample].clone()),
                 sample,
                 arguments.covered_positions_per_window,
+                arguments.bin_scheme,
             )
         });
         match &mut windows {
@@ -2060,5 +2508,232 @@ mod tests {
     #[should_panic(expected = "no arm at a floor of 1")]
     fn a_sweep_that_lost_the_floor_a_check_is_written_against_is_refused() {
         a_sweep_saying(&[(window_coverage::MIN_WINDOW_POSITIONS, 5, 0)]).close(5, 0);
+    }
+
+    /// Feed a bin-scheme sweep, and a plain accumulator configured as a run's, one contig per
+    /// `(depth, positions)` segment — consecutive positions from base 1, every one at that
+    /// segment's depth — and close the sweep against the histogram the plain one finished with.
+    ///
+    /// **A contig apiece, so a window never straddles two depths**: the accumulator never spans
+    /// contigs, so every window of segment *i* has mean depth exactly *i*'s, and a test can say
+    /// how many windows sit where without allowing for a boundary.
+    fn bin_schemes_over(segments: &[(u32, u64)]) -> Vec<OneBinSchemeAnswer> {
+        let mut sweep = BinSchemeSweep::new();
+        let mut beside_it = WindowCoverageAccumulator::new(the_configuration_a_run_uses());
+        for (contig, &(depth, positions)) in segments.iter().enumerate() {
+            let contig = ContigId(contig as u32);
+            for position in 1..=positions {
+                sweep.observe(contig, Position(position), b'A', depth);
+                beside_it.observe(contig, Position(position), b'A', depth);
+                while beside_it.pop_ready().is_some() {}
+            }
+        }
+        let (_, histogram) = beside_it.finish();
+        sweep.close(&histogram)
+    }
+
+    fn the_arm(answers: &[OneBinSchemeAnswer], setting: BinSchemeSetting) -> &OneBinSchemeAnswer {
+        answers
+            .iter()
+            .find(|answer| answer.setting == setting)
+            .unwrap_or_else(|| panic!("the sweep has no arm for {setting:?}"))
+    }
+
+    fn the_axis(answers: &[OneBinSchemeAnswer], setting: BinSchemeSetting) -> FittedAxis {
+        the_arm(answers, setting)
+            .axis()
+            .unwrap_or_else(|| panic!("the arm at {setting:?} fitted no axis"))
+    }
+
+    /// Six hundred covered positions all at 8 reads: every window's mean depth is 8, so the
+    /// fitted median is 8, the bin width is `8 × 10 / 400 = 0.2`, the regular bins stop at 80,
+    /// and nothing overflows.
+    ///
+    /// **The arithmetic is the whole of what this pins** — the width the accumulator fits and the
+    /// depth this file recovers it from are two directions of one formula, and a reader can check
+    /// both against a stream whose depth never varies.
+    #[test]
+    fn a_stream_of_one_depth_fits_an_axis_this_file_can_recover_that_depth_from() {
+        let answers = bin_schemes_over(&[(8, 600)]);
+        let axis = the_axis(&answers, BinSchemeSetting::AsTheRunFitsIt);
+        assert!(
+            (axis.median_depth - 8.0).abs() < 1e-9,
+            "{}",
+            axis.median_depth
+        );
+        assert!(
+            (axis.depth_bin_width - 0.2).abs() < 1e-9,
+            "{}",
+            axis.depth_bin_width
+        );
+        assert!(
+            (axis.top_of_the_range - 80.0).abs() < 1e-9,
+            "{}",
+            axis.top_of_the_range
+        );
+        assert_eq!(axis.folded(), 600);
+        assert_eq!(
+            axis.overflowed, 0,
+            "every window sits at 8, a tenth of the way up a range that reaches 80",
+        );
+    }
+
+    /// **The range decides whether the model fit takes the sample at all**, on a stream where the
+    /// windows are not all at one depth.
+    ///
+    /// 700 windows at 1 read a position and 300 at 20, on two contigs so neither mixes. The
+    /// median is 1, so the range's multiple *is* the top of the axis: at the shipped ten it
+    /// stops at 10 and the 300 deep windows overflow — 3 windows in 10, past the fit's guard of
+    /// 1 in 5, so the sample is rejected and its coverage goes unused. At forty it stops at 40,
+    /// nothing overflows, and the fit takes the sample; at 2.5 it stops at 2.5 and the same 300
+    /// overflow.
+    #[test]
+    fn the_range_decides_whether_the_deep_windows_overflow_and_the_fit_refuses_the_sample() {
+        let answers = bin_schemes_over(&[(1, 700), (20, 300)]);
+        for (setting, overflowed, rejected) in [
+            (BinSchemeSetting::RangeOf(2.5), 300, true),
+            (BinSchemeSetting::AsTheRunFitsIt, 300, true),
+            (BinSchemeSetting::RangeOf(40.0), 0, false),
+        ] {
+            let axis = the_axis(&answers, setting);
+            assert!(
+                (axis.median_depth - 1.0).abs() < 1e-9,
+                "700 of the 1,000 windows sit at 1, so the median is 1 whatever the range: {}",
+                axis.median_depth,
+            );
+            assert_eq!(axis.folded(), 1_000);
+            assert_eq!(
+                axis.overflowed, overflowed,
+                "at {setting:?} the axis stops at {} and 300 windows sit at 20",
+                axis.top_of_the_range,
+            );
+            assert_eq!(
+                the_arm(&answers, setting).the_fit_would_reject_it(),
+                rejected,
+                "at {setting:?} the overflow fraction is {:.2} against a guard of \
+                 {THE_OVERFLOW_SHARE_THE_FIT_ALLOWS}",
+                axis.overflow_fraction(),
+            );
+        }
+    }
+
+    /// The arm configured exactly as the run must reproduce the walk's own histogram — the one
+    /// place this sweep and the recomputation answer the same question, and the only check here
+    /// that compares against something computed outside the sweep.
+    #[test]
+    #[should_panic(expected = "the arm configured as the run is fitted came out")]
+    fn a_bin_scheme_sweep_disagreeing_with_the_walk_is_refused() {
+        let mut sweep = BinSchemeSweep::new();
+        for position in 1..=600u64 {
+            sweep.observe(ContigId(0), Position(position), b'A', 8);
+        }
+        // The walk it is closed against saw twice that depth, so no arm can match it.
+        // A walk that saw twice the depth: its median is 16 and its bins twice as wide, so the
+        // arm running the run's own configuration cannot match it.
+        let mut a_different_walk = WindowCoverageAccumulator::new(the_configuration_a_run_uses());
+        for position in 1..=600u64 {
+            a_different_walk.observe(ContigId(0), Position(position), b'A', 16);
+            while a_different_walk.pop_ready().is_some() {}
+        }
+        let (_, histogram) = a_different_walk.finish();
+        sweep.close(&histogram);
+    }
+
+    /// A sweep over a store that folded nothing says nothing about where the axis should be cut,
+    /// and is refused rather than printing an arm's worth of zeroes at every setting.
+    #[test]
+    #[should_panic(expected = "no arm folded a window")]
+    fn a_bin_scheme_sweep_over_an_empty_store_is_refused() {
+        let sweep = BinSchemeSweep::new();
+        let (_, histogram) =
+            WindowCoverageAccumulator::new(the_configuration_a_run_uses()).finish();
+        sweep.close(&histogram);
+    }
+
+    /// **The fraction's denominator is the windows in the cells, and the guard is a strict `>`**
+    /// — the two places this file could disagree with the fit it measures against while every
+    /// other test here stayed green.
+    ///
+    /// 800 windows at 1 read a position, 200 at 20, and 30 more at 1 on a contig too short to
+    /// build a window the floor will take. The median is 1, so the shipped range stops the axis
+    /// at 10 and the 200 deep windows overflow: **200 of the 1,000 windows in the cells, exactly
+    /// the fit's guard of 1 in 5** — and the fit rejects a sample only when the share is *past*
+    /// its guard, so this sample is taken.
+    ///
+    /// **The 30 silenced windows are what pins the denominator.** They are finalised and counted
+    /// under the floor, but they reach no cell, so the fit never sees them: counting them here
+    /// would put the share at 194 in 1,000 and would have taken this sample for the wrong reason.
+    #[test]
+    fn the_overflow_share_is_over_the_windows_in_the_cells_and_the_guard_is_not_reached_at_it() {
+        let answers = bin_schemes_over(&[(1, 800), (20, 200), (1, 30)]);
+        let arm = the_arm(&answers, BinSchemeSetting::AsTheRunFitsIt);
+        let axis = arm.axis().expect("the axis is fitted");
+        assert_eq!(
+            axis.folded(),
+            1_000,
+            "1,000 windows reached a cell; the 30 on the short contig were silenced by the floor \
+             and reached none",
+        );
+        assert_eq!(axis.in_a_regular_bin, 800);
+        assert_eq!(axis.overflowed, 200);
+        assert!(
+            (axis.overflow_fraction() - THE_OVERFLOW_SHARE_THE_FIT_ALLOWS).abs() < f64::EPSILON,
+            "200 of 1,000 is the guard exactly: {}",
+            axis.overflow_fraction(),
+        );
+        assert!(
+            !arm.the_fit_would_reject_it(),
+            "the fit rejects a sample past its guard, not at it",
+        );
+    }
+
+    /// **What the scale sample buys, on a stream whose depth changes after it has closed.**
+    ///
+    /// 10,300 windows at 1 read a position, then 19,700 at 100, on two contigs. The run's setting
+    /// fits from the first 10,000 windows, every one of which sits at 1, so its axis stops at 10
+    /// and the 19,700 deep windows all overflow — 66 windows in 100, and the model fit refuses
+    /// the sample. The arm that holds every window back until the pass ends sees a median of 100,
+    /// cuts an axis reaching 1,000, and overflows nothing.
+    ///
+    /// This is the failure the constant exists to trade against: a scale sample too small to
+    /// reach the sample's own depth costs the whole sample, not a little resolution.
+    #[test]
+    fn a_scale_sample_that_closes_before_the_depth_changes_costs_the_sample() {
+        let answers = bin_schemes_over(&[(1, 10_300), (100, 19_700)]);
+        let as_the_run = the_axis(&answers, BinSchemeSetting::AsTheRunFitsIt);
+        assert!(
+            (as_the_run.median_depth - 1.0).abs() < 1e-9,
+            "the first 10,000 windows all sit at 1: {}",
+            as_the_run.median_depth,
+        );
+        assert_eq!(as_the_run.overflowed, 19_700);
+        assert!(the_arm(&answers, BinSchemeSetting::AsTheRunFitsIt).the_fit_would_reject_it());
+
+        let every_window = the_axis(&answers, BinSchemeSetting::ScaleSampleOf(u32::MAX));
+        assert!(
+            (every_window.median_depth - 100.0).abs() < 1e-9,
+            "19,700 of the 30,000 windows sit at 100: {}",
+            every_window.median_depth,
+        );
+        assert_eq!(every_window.overflowed, 0);
+        assert!(
+            !the_arm(&answers, BinSchemeSetting::ScaleSampleOf(u32::MAX)).the_fit_would_reject_it()
+        );
+    }
+
+    /// On a stream shorter than the shipped scale sample, the arm that holds every window back
+    /// answers exactly as the run does — both fit at `finish` from every window they have.
+    ///
+    /// It is the control for the test above: without it, that one's difference could as easily be
+    /// a mis-wired arm as the scale sample doing its job.
+    #[test]
+    fn an_arm_that_holds_every_window_back_answers_as_the_run_does_on_a_short_stream() {
+        let answers = bin_schemes_over(&[(8, 600)]);
+        assert_eq!(
+            the_arm(&answers, BinSchemeSetting::ScaleSampleOf(u32::MAX)).as_a_row(),
+            the_arm(&answers, BinSchemeSetting::AsTheRunFitsIt).as_a_row(),
+            "600 windows is under the shipped scale sample of 10,000, so both fit at `finish` \
+             from every window they have",
+        );
     }
 }

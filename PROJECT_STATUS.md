@@ -4381,8 +4381,8 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   the run writes, and each sample's histogram out of the cache. **The measurement runs on real data
   in both modes, no VCF byte has moved, the two modes' windows and histograms are identical bit for
   bit, and both equal a whole-store recomputation.** **Checkpoint C reached** — the filter plan may
-  start. **Milestone D under way: D1 has measured the floor and 50 of 500 stands.** Next: D2, the
-  bin scheme, and D3, the memory.
+  start. **Milestone D under way: D1 and D2 have measured the floor and the bin scheme, and all
+  four constants stand.** Next: D3, the memory.
 - **Plan:** [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md);
   **Spec:** [window_coverage.md](doc/devel/ng/spec/window_coverage.md). No architecture
   document — the spec's §3 type blocks are the code shape. Its consumer, built separately:
@@ -4403,7 +4403,8 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   [C3](doc/devel/reports/implementations/ng_window_coverage_c3_2026-09-06.md),
   [C4](doc/devel/reports/implementations/ng_window_coverage_c4_2026-09-07.md),
   [C5](doc/devel/reports/implementations/ng_window_coverage_c5_2026-09-07.md),
-  [D1](doc/devel/reports/implementations/ng_window_coverage_d1_2026-09-07.md);
+  [D1](doc/devel/reports/implementations/ng_window_coverage_d1_2026-09-07.md),
+  [D2](doc/devel/reports/implementations/ng_window_coverage_d2_2026-09-07.md);
   **reviews:** [A1](doc/devel/reports/reviews/ng_window_coverage_a1_2026-09-06.md) (1 Blocker,
   5 Major, 18 Minor), [A2](doc/devel/reports/reviews/ng_window_coverage_a2_2026-09-06.md)
   (4 Major, 4 Minor), [A3](doc/devel/reports/reviews/ng_window_coverage_a3_2026-09-06.md)
@@ -4418,7 +4419,10 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   8 Minor), and D1's two —
   [correctness](doc/devel/reports/reviews/ng_window_coverage_d1_correctness_2026-09-07.md) and
   [naming and structure](doc/devel/reports/reviews/ng_window_coverage_d1_design_2026-09-07.md),
-  6 Major and 14 Minor between them
+  6 Major and 14 Minor between them, and D2's two —
+  [correctness](doc/devel/reports/reviews/ng_window_coverage_d2_correctness_2026-09-07.md) and
+  [naming and structure](doc/devel/reports/reviews/ng_window_coverage_d2_design_2026-09-07.md),
+  9 Major and 13 Minor between them
   — all applied or raised with a home; each step's fixes are in its own commit. **C2's correctness
   review ran a session late**, its design half having landed inside C2's own commit; its findings
   are fixed forward in their own commit after C3.
@@ -4610,8 +4614,27 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   configuration, which only the unit tests pin. The same five walks re-answer B2's question:
   **the head count equals the evidence's sum at every one of 24,793,279 one-base records**, now on
   human data at 5.1, 30.3 and 301.4 reads a position as well as tomato.
-- **Open:** the histogram's three bin constants (spec §3.4) are soft until plan step D2 measures
-  them.
+- **D2 done (the bin scheme, measured — all three constants kept):** 400 depth bins spanning ten
+  times the sample's median, fitted from its first 10,000 windows. The coverage-model fit that
+  reads these histograms rejects a sample once more than **a fifth** of its windows sit above the
+  top of the axis; over the same ten sample-stores, **nine overflow nothing at all and the tenth
+  overflows 1,972 windows of 7,666,421 — 2.6 in every 10,000** against a guard that fires at
+  2,000. **No setting tried made the fit reject a sample**, 2.5 medians included, so what the
+  measurement ranks is margin: quartering the range takes the worst store from 2.6 to 1,103 in
+  10,000, halving it to 35. **The finding that constrains any later change is about the scale
+  sample**: the median fitted from a sample's first 10,000 windows comes out *below* the median
+  over all its windows on eight of the ten sample-stores, 13% low on average and 34% at worst, and
+  a longer prefix is not the fix — on the worst store the fitted median barely moves from 100
+  windows to 100,000, and only a million (16.8 MB a sample, against 262 kB at 10,000) reaches the
+  whole-store value. What makes the bias harmless is the range's margin, so **the two constants
+  cannot be moved independently**; that is now written into both their docs and into spec §3.4.
+  Like D1 this measures each setting's cost and not its benefit, which belongs to the filter's
+  branch. **The reviews found two claims wrong**: "nine of the ten" stores fitted a shallow median
+  is eight — both agents found it independently, and the report's own table printed the two
+  exceptions — and the overflow fraction was divided by the accumulator's counter where the prose
+  claimed production's cell totals; the two agree on every store measured, but nothing was
+  checking, and two wrong denominators survived all 21 tests.
+- **Open:** nothing in this plan. Milestone D's last step, D3, prices the memory.
 - **Checkpoint A ruled by the owner, 2026-09-06, and the spec updated with it:** `finish` hands
   back **`SampleHistogram`** — the histogram, or which of the three silences it was (the pass
   reached nothing; every window was under the floor, which is a reading on the floor and not a

@@ -57,33 +57,84 @@ pub const WINDOW_BP: u32 = 500;
 /// GC bins, uniform over the closed unit interval `[0, 1]` (spec §3.4).
 pub const GC_BINS: u32 = 50;
 
-/// Depth bins, before the overflow bin that follows them — **soft, and confirmed or moved by
-/// measurement at plan step D2** (spec §3.4).
+/// Depth bins, before the overflow bin that follows them — **kept at 400, and no longer soft; but
+/// what the measurement of 2026-09-07 settled is the scaling, not the count** (spec §3.4, plan
+/// step D2).
 ///
 /// Production bins depth at a fixed 0.5× in 2,000 bins to 1,000×, which is 400 kB a sample
 /// against a 500 kB per-open-sample budget, and which serves one end of the depth axis at a
-/// time: at three reads a position a 0.5× bin is a sixth of the single-copy peak's own scatter,
-/// and at 300 reads the range has to reach 1,200× for a four-copy carrier. ng bins fewer and
-/// scales the width to the sample instead — 50 × 401 × 4 bytes, **80.2 kB a sample**.
+/// time. ng bins fewer and scales the width to the sample instead — 50 × 401 × 4 bytes,
+/// **80.2 kB a sample**.
+///
+/// **What the scaling is for, measured**: across ten sample-stores of two species the fitted
+/// median window depth spans **3.97 to 246.21 reads a position, 62-fold**. Production's fixed
+/// 0.5× bin would put the shallowest of those at its bin 7 and the deepest at bin 492 of 2,000 —
+/// seven bins to resolve everything below one sample's single-copy peak, and three quarters of the
+/// axis wasted above the other's. Fitting the width puts every median at bin
+/// `DEPTH_BINS / DEPTH_RANGE_IN_MEDIANS` — bin 40 of 400 — by construction.
+///
+/// Nothing measured forces this count either way; what it decides is the 80.2 kB.
 pub const DEPTH_BINS: u32 = 400;
 
-/// How many windows a sample buffers before it sets its depth bin width — **soft, and confirmed
-/// or moved by measurement at plan step D2** (spec §3.4). Until then, 10,000.
+/// How many windows a sample buffers before it sets its depth bin width — **kept at 10,000 by
+/// measurement 2026-09-07** (spec §3.4, plan step D2).
 ///
 /// The width is the sample's own: the accumulator holds its first windows back, takes the median
-/// of their mean depths, and sets the width so the bins span ten times that median. A sample
-/// that finalises fewer than this many sets the width from what it has when the pass ends.
+/// of their mean depths, and sets the width so the bins span [`DEPTH_RANGE_IN_MEDIANS`] times that
+/// median. A sample that finalises fewer than this many sets the width from what it has when the
+/// pass ends.
+///
+/// **These windows are a prefix of the run's ground, and a prefix is not the ground.** Measured
+/// over ten sample-stores, the median fitted from the first 10,000 windows came out **below** the
+/// median over every window of the same store in eight of the ten — by 13% on average and 34% at
+/// worst (6.41 against 9.77, on one tomato accession over 80 intervals of 100 kb). The two that
+/// came out above did so by 2% and 8%.
+///
+/// **A longer prefix is not the fix.** On that store the fitted median barely moves from 100
+/// windows to 100,000 — 5.25, 6.50, 6.41, 6.25 — and only reaches 9.43 at a million, which is ten
+/// whole intervals. What would fix it is sampling across the run's ground rather than taking the
+/// first windows of it, and nothing needs that yet. A million windows held back is **16.8 MB** a
+/// sample against 262 kB at 10,000 — both as the capacity a doubling `Vec` of `f64` pairs
+/// reaches, which is the basis spec §3.4's 262 kB is stated on — so the affordable prefixes are
+/// all biased and the one that is not is unaffordable.
+///
+/// **What makes the bias harmless is [`DEPTH_RANGE_IN_MEDIANS`]'s headroom**, and the two are
+/// therefore not independent: a prefix a third shallow makes the axis a third short, and a third
+/// short is what the range absorbs. On the store where the prefix is worst, the axis it shortens
+/// puts 2.6 windows in every 10,000 over the top, against a fit that rejects a sample at 2,000 in
+/// 10,000. That margin is not the range's to spend twice: at a range of 5 the same prefix puts 35
+/// in 10,000 over. A step that narrows the range has to re-check this first.
 pub const DEPTH_SCALE_WINDOWS: u32 = 10_000;
 
-/// How many times the sample's median window depth the regular bins are to span — **soft, and
-/// confirmed or moved by measurement at plan step D2** (spec §3.4).
+/// How many times the sample's median window depth the regular bins are to span — **kept at ten
+/// by measurement 2026-09-07** (spec §3.4, plan step D2).
 ///
 /// Ten leaves room above the single-copy peak for a four-copy carrier and below it for a sample
-/// whose median sits above its own mode. What share of windows still overflow is D2's
-/// measurement, on both benchmarks, against the fit's own rejection guard at a fifth.
+/// whose median sits above its own mode. **A multiple, not a count**: the width the bins are cut
+/// at is this times the sample's median, over [`DEPTH_BINS`].
 ///
-/// **A multiple, not a count**, so that D2 can land between two whole numbers: the width the
-/// bins are cut at is this times the sample's median, over [`DEPTH_BINS`].
+/// **What it is measured against** is the coverage model fit's own rejection guard: the fit
+/// refuses a sample outright once more than a fifth of its windows are past the top of the range
+/// ([`DEFAULT_MAX_OVERFLOW_FRACTION`](crate::paralog::coverage_model::DEFAULT_MAX_OVERFLOW_FRACTION)),
+/// because at that point the sample's single-copy peak has itself overflowed and the regular bins
+/// hold noise. Worst overflow across ten sample-stores of two species, at each setting tried:
+///
+/// | range, in medians | worst overflow anywhere | against the fit's guard |
+/// |---|---|---|
+/// | 2.5 | 1,103 in 10,000 | within a factor of 1.8 |
+/// | 5 | 35 in 10,000 | 57 times under |
+/// | **10** | **2.6 in 10,000** | **780 times under** |
+/// | 20 | none | — |
+/// | 40 | none | — |
+///
+/// At ten, nine of the ten sample-stores overflow nothing at all and the tenth overflows 1,972
+/// windows of 7,666,421. **No setting tried made the fit reject a sample**, 2.5 included; ten was
+/// kept for the size of its margin, not because a neighbour failed, and 40 is where the settings
+/// tried stop rather than where a cost appears. Halving to 5 would double the resolution and cut
+/// the margin under the guard thirteenfold, from 780 times under to 57; nothing measured asks for
+/// that resolution, and that margin is what absorbs [`DEPTH_SCALE_WINDOWS`]'s prefix bias — the
+/// whole of the worst store's overflow comes from the prefix, and vanishes when the width is
+/// fitted from every window.
 pub const DEPTH_RANGE_IN_MEDIANS: f64 = 10.0;
 
 /// How many covered positions a window must hold before it is allowed to speak. Below this many,
@@ -147,9 +198,9 @@ pub const MIN_WINDOW_POSITIONS: u32 = 50;
 ///
 /// **The constants are not all of the same kind.** [`WINDOW_BP`] and [`GC_BINS`] are
 /// production's, inherited and not re-argued here. [`MIN_WINDOW_POSITIONS`], [`DEPTH_BINS`],
-/// [`DEPTH_SCALE_WINDOWS`] and [`DEPTH_RANGE_IN_MEDIANS`] are ng's own and are provisional: a
-/// reader who finds a run's behaviour turning on one of them is looking at a value nobody has
-/// yet defended with data, and plan steps D1 and D2 are where that happens.
+/// [`DEPTH_SCALE_WINDOWS`] and [`DEPTH_RANGE_IN_MEDIANS`] are ng's own, and each was measured on
+/// real stores in September 2026 and kept: a reader who finds a run's behaviour turning on one of
+/// them will find, beside that constant, what the alternatives were measured to cost.
 ///
 /// [`assert_valid`]: WindowCoverageConfig::assert_valid
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -160,14 +211,16 @@ pub struct WindowCoverageConfig {
     /// Number of GC bins, uniform over the closed unit interval `[0, 1]`. Settled at
     /// [`GC_BINS`].
     pub gc_bins: u32,
-    /// Number of regular depth bins; one overflow bin follows them. Provisionally
-    /// [`DEPTH_BINS`].
+    /// Number of regular depth bins; one overflow bin follows them. [`DEPTH_BINS`] in a run —
+    /// measured, and its doc comment carries what the count decides.
     pub depth_bins: u32,
     /// How many windows to buffer before fitting this sample's depth bin width from their
-    /// median. Provisionally [`DEPTH_SCALE_WINDOWS`].
+    /// median. [`DEPTH_SCALE_WINDOWS`] in a run — measured, and its doc comment carries the bias
+    /// a prefix of that length reads with.
     pub depth_scale_windows: u32,
-    /// How many times the sample's fitted median the regular bins span. Provisionally
-    /// [`DEPTH_RANGE_IN_MEDIANS`].
+    /// How many times the sample's fitted median the regular bins span.
+    /// [`DEPTH_RANGE_IN_MEDIANS`] in a run — measured, and its doc comment carries what each
+    /// setting overflows.
     pub depth_range_in_medians: f64,
     /// Fewest covered positions a window may be built from and still report a number; below
     /// this it comes back absent. [`MIN_WINDOW_POSITIONS`] in a run — measured, and its doc
