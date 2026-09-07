@@ -7,7 +7,7 @@
 //! to — and the cut is a property of the whole run, computed from the distribution of every
 //! record's score. So no record's verdict is known until the last one has been called. Pass
 //! one therefore writes each finished record's **line** — the bytes the encoder produced — to a
-//! file beside the output, together with the four numbers per sample the scorer reads. Pass
+//! file beside the output, together with what the scorer reads for each sample. Pass
 //! two reads that file and scores it; pass three reads it again and writes the VCF, rewriting
 //! only `FILTER` and `INFO`, and only on the records the verdict touches.
 //!
@@ -22,19 +22,32 @@
 //!
 //! ```text
 //! entry :=
-//!   contig           varint    -- the three fields the writer's ordering check reads
-//!   position         varint
-//!   is_repeat_tract  u8
-//!   is_biallelic_snp u8        -- settled once by whoever fills the entry
-//!   line_length      varint
-//!   line             bytes     -- the record's line, no newline
-//!   sample_count     varint    -- the run's sample count, dense
-//!   per sample:
-//!     gc_fraction    4 bytes   -- an f32's bits, little-endian; NaN = absent
-//!     mean_depth     4 bytes   -- an f32's bits, little-endian
-//!     ref_reads      varint    -- AD[0]
-//!     alt_reads      varint    -- AD[1] on a biallelic SNP, else 0
+//!   contig             varint  -- the three fields the writer's ordering check reads
+//!   position           varint
+//!   is_repeat_tract    u8
+//!   spans_one_position u8      -- settled once by whoever fills the entry, from
+//!                              -- `region().len() == 1`; it selects the row shape below
+//!   line_length        varint
+//!   line               bytes   -- the record's line, no newline
+//!   sample_count       varint  -- the run's sample count, dense
+//!   per sample, when spans_one_position:
+//!     gc_fraction      4 bytes -- an f32's bits, little-endian; NaN = absent
+//!     mean_depth       4 bytes -- an f32's bits, little-endian
+//!     ref_reads        varint  -- AD[0]
+//!     alt_reads        varint  -- every alternative's reads, summed
+//!   per sample, otherwise:
+//!     gc_fraction      4 bytes
+//!     mean_depth       4 bytes
 //! ```
+//!
+//! **Why the row has two shapes** (spec §3.2, §3.7). The filter reads a reference/non-reference
+//! split only where the locus occupies one base; at a deletion or a repeat tract it declines to,
+//! and rests the verdict on coverage. Writing that abstention as `0, 0` would put it in the same
+//! two fields a real measurement lives in — and production's scorer drops a sample at zero total
+//! reads, which would then silently empty every wide locus's score and leave every tract
+//! unfiltered while the file looked correct (spec §6 trap 1). A wide locus's row carries no read
+//! counts at all, so there is no zero to misread. It is also eight bytes a sample instead of ten
+//! or more.
 //!
 //! Every field is either fixed-width, length-prefixed, or self-delimiting — a varint ends at
 //! the first byte whose top bit is clear — so an entry ends where the next begins and there is
@@ -48,8 +61,9 @@
 //! never compared with `==`, so an absent pair arrives absent rather than as a zero that would
 //! make a sample with no evidence look like one with average coverage.
 //!
-//! **The encoder destructures its input exhaustively**, which is the codebase's way of making
-//! a struct that gains a field fail to compile rather than lose it quietly
+//! **The encoder destructures its input exhaustively, and matches both row shapes**, which is
+//! the codebase's way of making a struct that gains a field fail to compile rather than lose it
+//! quietly
 //! ([`cohort_merge`](crate::ng::run::cohort_merge)'s `render`,
 //! [`var_calling::types`](crate::var_calling::types)).
 
@@ -72,7 +86,7 @@ mod field {
     pub const CONTIG: &str = "contig";
     pub const POSITION: &str = "position";
     pub const IS_REPEAT_TRACT: &str = "is_repeat_tract";
-    pub const IS_BIALLELIC_SNP: &str = "is_biallelic_snp";
+    pub const SPANS_ONE_POSITION: &str = "spans_one_position";
     pub const LINE_LENGTH: &str = "line_length";
     pub const LINE: &str = "line";
     pub const SAMPLE_COUNT: &str = "sample_count";
@@ -124,16 +138,14 @@ const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 ///
 /// `contig`, `position` and `is_repeat_tract` are the fields the writer's ordering check reads,
 /// carried so that pass three can run that same check without rebuilding the record
-/// ([`place_of`](crate::ng::vcf::writer), spec §6 trap 6). `is_biallelic_snp` is settled once by
-/// whoever fills the entry, from the record's own alleles *before* the padding base is added —
-/// testing the written `REF`/`ALT` would call a one-base deletion a two-base SNP (spec §6 trap
-/// 2). Nothing in this module makes that decision; the sink that fills the entry does, and it
-/// arrives with the run wiring.
+/// ([`place_of`](crate::ng::vcf::writer), spec §6 trap 6). Which shape [`SpilledSamples`] takes
+/// is settled once by whoever fills the entry, from the record's span — `region().len() == 1`
+/// and nothing about its alleles (spec §3.2). Nothing in this module makes that decision; the
+/// sink that fills the entry does, and it arrives with the run wiring.
 ///
-/// **A repeat tract is never a biallelic SNP.** Spec §3.2 scores biallelic SNP records on
-/// coverage and allele balance and every other record — repeat tracts among them — on coverage
-/// alone, so the two flags have three meaningful combinations and not four. The writer and the
-/// reader both refuse the fourth.
+/// **A repeat tract never occupies one position.** A tract spans at least two bases by
+/// definition, so an entry marked as a tract whose samples are [`SpilledSamples::OnePosition`]
+/// is a caller's bug rather than a record. The writer and the reader both refuse it.
 #[derive(Clone, Debug)]
 pub struct SpillEntry {
     /// Which contig the record is written on.
@@ -143,27 +155,91 @@ pub struct SpillEntry {
     /// Whether the record is a repeat tract. Part of the ordering rule: a tract may share a
     /// position with the generic locus that owns its anchor base, and nothing else may.
     pub is_repeat_tract: bool,
-    /// Whether the record is a biallelic SNP, which decides whether the scorer sees each
-    /// sample's allele counts or only its coverage (spec §3.2).
-    pub is_biallelic_snp: bool,
     /// The record's VCF line as the encoder produced it, with no trailing newline.
     pub line: Vec<u8>,
-    /// One entry per sample of the run, in the run's sample order — dense, so a sample that
-    /// covered nothing still has its place.
-    pub per_sample: Vec<SpilledSample>,
+    /// What each sample showed, in the shape the record's span allows.
+    pub samples: SpilledSamples,
 }
 
-/// What one sample showed at one record, as the scorer reads it: its window, and the reads
-/// behind the two alleles.
+/// **What the samples of one record carry, and it depends on how many bases the record covers.**
+///
+/// Spec §3.2 draws its line at the locus's span rather than at its alleles: a record occupying
+/// **one** genomic position has a reference/non-reference split at that base, whatever its
+/// alleles are, and a record occupying **more** does not have one place to take that split at.
+///
+/// **The wide variant carries no read counts, and that is the whole point of the type.** The
+/// filter declining to read a tract's alleles is an *abstention*; a sample that observed nothing
+/// is a *measurement*. Written as `0, 0` in the fields a measurement lives in, the two are
+/// indistinguishable — and production's scorer drops a sample at zero total reads
+/// ([`calibrate.rs:173`](../../../../src/var_calling/paralog_filter/calibrate.rs)), which would
+/// then silently empty every wide locus's score and leave every repeat tract unfiltered while
+/// the file looked correct (spec §6 trap 1). With two shapes there is no zero to misread.
+#[derive(Clone, Debug)]
+pub enum SpilledSamples {
+    /// A locus at one genomic position — a SNP of any allele count, or an insertion. Both
+    /// signals reach the scorer, and a sample at zero total reads is absent from the score.
+    OnePosition(Vec<OnePositionSample>),
+    /// A locus spanning more than one — a deletion or a repeat tract. Coverage alone, and **no
+    /// sample is skipped**, because there is no read count that could be zero.
+    Wide(Vec<WideSample>),
+}
+
+impl SpilledSamples {
+    /// How many samples the record carries, whichever shape it took.
+    ///
+    /// **The run's sample count, always** — both variants are dense, so a sample that covered
+    /// nothing still has its place.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::OnePosition(samples) => samples.len(),
+            Self::Wide(samples) => samples.len(),
+        }
+    }
+
+    /// Whether the record carries no samples at all, which is a run with no samples.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The window pair for one sample, whichever shape the record took.
+    ///
+    /// This is the one thing every record has for every sample, so the coverage half of the
+    /// score reads it without asking which variant it is looking at.
+    #[must_use]
+    pub fn window(&self, index: usize) -> Option<WindowCoverage> {
+        match self {
+            Self::OnePosition(samples) => samples.get(index).map(|sample| sample.window),
+            Self::Wide(samples) => samples.get(index).map(|sample| sample.window),
+        }
+    }
+}
+
+/// What one sample showed at a record covering a single base: its window, and the split between
+/// reads carrying the reference base and reads carrying anything else.
 #[derive(Clone, Copy, Debug)]
-pub struct SpilledSample {
+pub struct OnePositionSample {
     /// The sample's window at this locus, or the `NaN` pair where it has none.
     pub window: WindowCoverage,
     /// Reads supporting the reference allele — `AD[0]`.
     pub ref_reads: u32,
-    /// Reads supporting the alternative — `AD[1]` where the *entry* is a biallelic SNP, `0` on
-    /// every other record, because there is no single alternative for the score to read.
+    /// **Every alternative's reads, summed.** Pooling is what lets a multiallelic site use this
+    /// path: the collapsed-duplication story asks whether the non-reference share sits at some
+    /// whole number of copies over the total, and two copies of three carrying two *different*
+    /// non-reference bases give the same two-thirds as two copies carrying one (spec §3.2).
     pub alt_reads: u32,
+}
+
+/// What one sample showed at a record covering more than one base: its window, and nothing else.
+///
+/// The sample has reads and its call rests on them; what it has no single base to give is a
+/// reference/non-reference split. See [`SpilledSamples`] for why that is a missing field rather
+/// than a zero.
+#[derive(Clone, Copy, Debug)]
+pub struct WideSample {
+    /// The sample's window at this locus, or the `NaN` pair where it has none.
+    pub window: WindowCoverage,
 }
 
 /// What can go wrong reading or writing the spill.
@@ -250,12 +326,16 @@ pub enum SpillError {
         read: u64,
     },
 
-    /// A record is marked as both a repeat tract and a biallelic SNP, which spec §3.2 excludes.
+    /// A record is marked as a repeat tract but carries one-position samples.
+    ///
+    /// **A tract spans at least two bases**, so it can never be the one-position kind spec §3.2
+    /// scores on both signals. Reaching this means whoever filled the entry derived the two from
+    /// different things.
     #[error(
-        "the record at contig {contig} position {position} is marked as both a repeat tract \
-         and a biallelic SNP, and a tract is scored on coverage alone"
+        "the record at contig {contig} position {position} is marked as a repeat tract but \
+         carries one-position samples, and a tract spans at least two bases"
     )]
-    TractMarkedAsABiallelicSnp {
+    TractMarkedAsOnePosition {
         /// The record's contig.
         contig: u32,
         /// The record's written position.
@@ -307,11 +387,12 @@ impl<W: Write> SpillWriter<W> {
     ///
     /// # Errors
     ///
-    /// If the entry is marked as both a repeat tract and a biallelic SNP, which spec §3.2
-    /// excludes; or if the sink refuses the bytes. An entry the sink refused is not counted.
+    /// If the entry is marked as a repeat tract but carries one-position samples — a tract
+    /// spans at least two bases, so the two cannot both be true; or if the sink refuses the
+    /// bytes. An entry the sink refused is not counted.
     pub fn append(&mut self, entry: &SpillEntry) -> Result<(), SpillError> {
-        if entry.is_repeat_tract && entry.is_biallelic_snp {
-            return Err(SpillError::TractMarkedAsABiallelicSnp {
+        if entry.is_repeat_tract && matches!(entry.samples, SpilledSamples::OnePosition(_)) {
+            return Err(SpillError::TractMarkedAsOnePosition {
                 contig: entry.contig.get(),
                 position: entry.position.get(),
             });
@@ -450,35 +531,51 @@ fn encode_entry(entry: &SpillEntry, out: &mut Vec<u8>) {
         contig,
         position,
         is_repeat_tract,
-        is_biallelic_snp,
         line,
-        per_sample,
+        samples,
     } = entry;
 
     encode_u64_leb128(u64::from(contig.get()), out);
     encode_u64_leb128(position.get(), out);
     out.push(u8::from(*is_repeat_tract));
-    out.push(u8::from(*is_biallelic_snp));
+    out.push(u8::from(matches!(samples, SpilledSamples::OnePosition(_))));
     encode_u64_leb128(line.len() as u64, out);
     out.extend_from_slice(line);
-    encode_u64_leb128(per_sample.len() as u64, out);
+    encode_u64_leb128(samples.len() as u64, out);
 
-    for sample in per_sample {
-        let SpilledSample {
-            window,
-            ref_reads,
-            alt_reads,
-        } = sample;
-        let WindowCoverage {
-            gc_fraction,
-            mean_depth,
-        } = window;
+    match samples {
+        SpilledSamples::OnePosition(samples) => {
+            for sample in samples {
+                let OnePositionSample {
+                    window,
+                    ref_reads,
+                    alt_reads,
+                } = sample;
 
-        out.extend_from_slice(&gc_fraction.to_bits().to_le_bytes());
-        out.extend_from_slice(&mean_depth.to_bits().to_le_bytes());
-        encode_u64_leb128(u64::from(*ref_reads), out);
-        encode_u64_leb128(u64::from(*alt_reads), out);
+                encode_window(window, out);
+                encode_u64_leb128(u64::from(*ref_reads), out);
+                encode_u64_leb128(u64::from(*alt_reads), out);
+            }
+        }
+        SpilledSamples::Wide(samples) => {
+            for sample in samples {
+                let WideSample { window } = sample;
+
+                encode_window(window, out);
+            }
+        }
     }
+}
+
+/// The window pair, by bit pattern, so an absent one survives the round trip.
+fn encode_window(window: &WindowCoverage, out: &mut Vec<u8>) {
+    let WindowCoverage {
+        gc_fraction,
+        mean_depth,
+    } = window;
+
+    out.extend_from_slice(&gc_fraction.to_bits().to_le_bytes());
+    out.extend_from_slice(&mean_depth.to_bits().to_le_bytes());
 }
 
 /// Read one entry from `source`, which is positioned at its first byte.
@@ -486,9 +583,9 @@ fn decode_entry<R: BufRead>(source: &mut R) -> Result<SpillEntry, SpillError> {
     let contig = read_u32(source, field::CONTIG)?;
     let position = read_varint(source, field::POSITION)?;
     let is_repeat_tract = read_bool(source, field::IS_REPEAT_TRACT)?;
-    let is_biallelic_snp = read_bool(source, field::IS_BIALLELIC_SNP)?;
-    if is_repeat_tract && is_biallelic_snp {
-        return Err(SpillError::TractMarkedAsABiallelicSnp { contig, position });
+    let spans_one_position = read_bool(source, field::SPANS_ONE_POSITION)?;
+    if is_repeat_tract && spans_one_position {
+        return Err(SpillError::TractMarkedAsOnePosition { contig, position });
     }
 
     let line = read_line(source)?;
@@ -500,22 +597,36 @@ fn decode_entry<R: BufRead>(source: &mut R) -> Result<SpillEntry, SpillError> {
             value: sample_count as u64,
         });
     }
-    let mut per_sample = Vec::with_capacity(sample_count.min(MAX_SAMPLES_RESERVED_UP_FRONT));
-    for index in 0..sample_count {
-        let sample = decode_sample(source).map_err(|source| SpillError::InSample {
-            index,
-            source: Box::new(source),
-        })?;
-        per_sample.push(sample);
-    }
+    let reserve = sample_count.min(MAX_SAMPLES_RESERVED_UP_FRONT);
+    let samples = if spans_one_position {
+        let mut samples = Vec::with_capacity(reserve);
+        for index in 0..sample_count {
+            let sample =
+                decode_one_position_sample(source).map_err(|source| SpillError::InSample {
+                    index,
+                    source: Box::new(source),
+                })?;
+            samples.push(sample);
+        }
+        SpilledSamples::OnePosition(samples)
+    } else {
+        let mut samples = Vec::with_capacity(reserve);
+        for index in 0..sample_count {
+            let sample = decode_wide_sample(source).map_err(|source| SpillError::InSample {
+                index,
+                source: Box::new(source),
+            })?;
+            samples.push(sample);
+        }
+        SpilledSamples::Wide(samples)
+    };
 
     Ok(SpillEntry {
         contig: ContigId(contig),
         position: Position(position),
         is_repeat_tract,
-        is_biallelic_snp,
         line,
-        per_sample,
+        samples,
     })
 }
 
@@ -546,19 +657,32 @@ fn read_line<R: BufRead>(source: &mut R) -> Result<Vec<u8>, SpillError> {
     Ok(line)
 }
 
-/// Read one sample's four numbers.
-fn decode_sample<R: BufRead>(source: &mut R) -> Result<SpilledSample, SpillError> {
-    let gc_fraction = f32::from_bits(read_f32_bits(source, field::GC_FRACTION)?);
-    let mean_depth = f32::from_bits(read_f32_bits(source, field::MEAN_DEPTH)?);
+/// Read one sample's four numbers, at a record covering a single base.
+fn decode_one_position_sample<R: BufRead>(source: &mut R) -> Result<OnePositionSample, SpillError> {
+    let window = decode_window(source)?;
     let ref_reads = read_u32(source, field::REF_READS)?;
     let alt_reads = read_u32(source, field::ALT_READS)?;
-    Ok(SpilledSample {
-        window: WindowCoverage {
-            gc_fraction,
-            mean_depth,
-        },
+    Ok(OnePositionSample {
+        window,
         ref_reads,
         alt_reads,
+    })
+}
+
+/// Read one sample's window, at a record covering more than one base — there is nothing else.
+fn decode_wide_sample<R: BufRead>(source: &mut R) -> Result<WideSample, SpillError> {
+    Ok(WideSample {
+        window: decode_window(source)?,
+    })
+}
+
+/// Read the window pair back from its bit patterns.
+fn decode_window<R: BufRead>(source: &mut R) -> Result<WindowCoverage, SpillError> {
+    let gc_fraction = f32::from_bits(read_f32_bits(source, field::GC_FRACTION)?);
+    let mean_depth = f32::from_bits(read_f32_bits(source, field::MEAN_DEPTH)?);
+    Ok(WindowCoverage {
+        gc_fraction,
+        mean_depth,
     })
 }
 

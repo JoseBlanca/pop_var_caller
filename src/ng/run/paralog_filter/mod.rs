@@ -32,7 +32,9 @@ pub mod spill;
 pub mod spill_file;
 
 pub use patch::{LinePatchError, rewrite_filter_and_info};
-pub use spill::{SpillEntry, SpillError, SpillReader, SpillWriter, SpilledSample};
+pub use spill::{
+    OnePositionSample, SpillEntry, SpillError, SpillReader, SpillWriter, SpilledSamples, WideSample,
+};
 pub use spill_file::{SpillFile, SpillFileError};
 
 /// **Where pass three gets the place it hands the writer.**

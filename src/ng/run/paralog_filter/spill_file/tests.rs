@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use super::{SpillFile, SpillFileError};
 use crate::ng::run::RunError;
 use crate::ng::run::paralog_filter::{
-    SpillEntry, SpillError, SpillWriter, SpilledSample, WindowCoverage,
+    OnePositionSample, SpillEntry, SpillError, SpillWriter, SpilledSamples, WindowCoverage,
 };
 use crate::ng::types::{ContigId, GenomeRegion, Position};
 
@@ -45,11 +45,10 @@ fn a_record_at(position: u64) -> SpillEntry {
         contig: ContigId(2),
         position: Position(position),
         is_repeat_tract: false,
-        is_biallelic_snp: true,
         line: format!("SL4.0ch03\t{position}\t.\tA\tG\t42.5\tPASS\tAF=0.5\tGT:AD\t0/1:5,5")
             .into_bytes(),
-        per_sample: vec![
-            SpilledSample {
+        samples: SpilledSamples::OnePosition(vec![
+            OnePositionSample {
                 window: WindowCoverage {
                     gc_fraction: 0.41,
                     mean_depth: 6.25,
@@ -57,7 +56,7 @@ fn a_record_at(position: u64) -> SpillEntry {
                 ref_reads: 5,
                 alt_reads: 5,
             },
-            SpilledSample {
+            OnePositionSample {
                 window: WindowCoverage {
                     gc_fraction: f32::NAN,
                     mean_depth: f32::NAN,
@@ -65,7 +64,7 @@ fn a_record_at(position: u64) -> SpillEntry {
                 ref_reads: 0,
                 alt_reads: 0,
             },
-        ],
+        ]),
     }
 }
 
@@ -369,7 +368,12 @@ fn the_records_come_back_from_the_file_bit_for_bit() {
         assert_eq!(wrote.position, came_back.position);
         assert_eq!(wrote.line, came_back.line);
         assert!(
-            came_back.per_sample[1].window.gc_fraction.is_nan(),
+            came_back
+                .samples
+                .window(1)
+                .expect("two samples went in")
+                .gc_fraction
+                .is_nan(),
             "the absent sample came back as a number after a round trip through the filesystem"
         );
     }
