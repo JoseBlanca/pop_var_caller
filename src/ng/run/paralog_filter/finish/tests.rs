@@ -532,3 +532,152 @@ fn a_fit_that_is_not_configured_fails_the_run_rather_than_the_cohort() {
     );
     drop((spill, output));
 }
+
+/// A histogram whose one-copy depth peak sits at `peak_bin`, so a cohort built from several of
+/// them has a **different** fitted depth per sample.
+///
+/// **The shape is symmetric about the peak on purpose**: the fit refuses a sample whose mode and
+/// median disagree by more than half (spec §3.1's guard), and a symmetric histogram puts the two
+/// together whichever bin the peak is moved to.
+fn a_fittable_histogram_peaking_at(peak_bin: usize) -> SampleHistogram {
+    let depth_bins = 40u32;
+    let mut counts = vec![0u32; depth_bins as usize + 1];
+    for (offset, count) in [(-2i64, 200u32), (-1, 900), (0, 2000), (1, 900), (2, 200)] {
+        let bin = usize::try_from(i64::try_from(peak_bin).expect("a small bin") + offset)
+            .expect("the peak is at least two bins from the bottom");
+        counts[bin] = count;
+    }
+    SampleHistogram::Fitted(CoverageByGcHistogram {
+        window_bp: 500,
+        gc_bins: 1,
+        depth_bin_width: 0.5,
+        depth_bins,
+        windows_folded: 4200,
+        windows_under_the_floor: 0,
+        counts,
+    })
+}
+
+/// **The report says what each sample's coverage fit came to** — plan step D1 asks for "the fit's
+/// outcome", and before this the report said only how many fits were accepted.
+///
+/// Without it the only route to the depth a record was compared against is inverting the run's own
+/// ratios, and the obvious substitute — the median depth of the records the run wrote — is a
+/// variant-site subset that runs well above one copy.
+#[test]
+fn the_report_says_what_each_sample_s_coverage_fit_came_to() {
+    let (spill, output) = a_spill_and_an_output(
+        "the_report_says_what_each_sample_s_coverage_fit_came_to",
+        vec![a_record(100, 3, ONE_COPY_DEPTH)],
+    );
+
+    // **Two samples fitted at different depths, and one refused.** Different depths, because a
+    // cohort whose fits were all equal could not tell a line that prints each sample's own number
+    // from one that prints the first sample's number three times.
+    let run = fit_score_and_write_the_calls(
+        &spill,
+        vec![
+            a_fittable_histogram_peaking_at(10),
+            a_fittable_histogram_peaking_at(16),
+            SampleHistogram::NoWindowFinalised,
+        ],
+        &outbred(3),
+        an_ordinary_request(),
+        &output,
+        metadata_over(3),
+        diploid(),
+    )
+    .expect("the run finishes");
+
+    let fits = run.scoring.what_each_fit_came_to();
+    let first = fits[0].expect("the first sample was fitted");
+    let second = fits[1].expect("the second sample was fitted");
+    assert!(fits[2].is_none(), "the third sample's fit was refused");
+    assert!(
+        second.one_copy_depth > first.one_copy_depth + 2.0,
+        "the fixture must give the two samples different depths, or this test cannot tell a \
+         per-sample line from a repeated one: {} against {}",
+        first.one_copy_depth,
+        second.one_copy_depth
+    );
+
+    let lines = what_to_tell_the_operator(&run).join("\n");
+    assert!(
+        lines.contains(&format!(
+            "sample SRR7279400 fitted one copy at {:.2} reads a window, scatter {:.3}",
+            first.one_copy_depth, first.single_copy_depth_sd
+        )),
+        "the first sample's own fitted numbers must be in the report: {lines}"
+    );
+    assert!(
+        lines.contains(&format!(
+            "sample SRR7279401 fitted one copy at {:.2} reads a window, scatter {:.3}",
+            second.one_copy_depth, second.single_copy_depth_sd
+        )),
+        "and the second sample's, which are different numbers: {lines}"
+    );
+    // A sample with no model has no fit to report, and says why instead.
+    assert!(
+        !lines.contains("SRR7279402 fitted one copy"),
+        "a refused sample has no fitted numbers to print: {lines}"
+    );
+    assert!(
+        lines.contains("sample SRR7279402 has no coverage model:"),
+        "and it still says why it has none: {lines}"
+    );
+}
+
+/// **A cohort too large to name sample by sample is summarised, not truncated silently.**
+///
+/// A run is up to several thousand samples (spec §4) and a report is read by a person, so past a
+/// cap the line gives the spread instead. What it must not do is print the first ten and leave a
+/// reader believing that is the cohort.
+#[test]
+fn a_cohort_larger_than_the_cap_is_reported_as_a_spread() {
+    const SAMPLES: usize = 12;
+    let (spill, output) = a_spill_and_an_output(
+        "a_cohort_larger_than_the_cap_is_reported_as_a_spread",
+        vec![a_record(100, SAMPLES, ONE_COPY_DEPTH)],
+    );
+
+    // Twelve samples, each fitted at its own depth, so the lowest, the median and the highest are
+    // three different numbers and a line that confused them would fail.
+    let run = fit_score_and_write_the_calls(
+        &spill,
+        (0..SAMPLES)
+            .map(|sample| a_fittable_histogram_peaking_at(6 + sample))
+            .collect(),
+        &outbred(SAMPLES),
+        an_ordinary_request(),
+        &output,
+        metadata_over(SAMPLES),
+        diploid(),
+    )
+    .expect("the run finishes");
+
+    let fits = run.scoring.what_each_fit_came_to();
+    let mut depths: Vec<f64> = fits
+        .iter()
+        .map(|fit| fit.expect("every sample was fitted").one_copy_depth)
+        .collect();
+    assert_eq!(depths.len(), SAMPLES);
+    depths.sort_by(f64::total_cmp);
+    let (lowest, median, highest) = (depths[0], depths[(SAMPLES - 1) / 2], depths[SAMPLES - 1]);
+    assert!(
+        lowest < median && median < highest,
+        "the fixture must spread the depths, or the spread line cannot be checked: {depths:?}"
+    );
+
+    let lines = what_to_tell_the_operator(&run).join("\n");
+    assert!(
+        lines.contains(&format!(
+            "across the {SAMPLES} fitted sample(s): one copy is {median:.2} reads a window at \
+             the median ({lowest:.2} to {highest:.2})"
+        )),
+        "past the cap the report gives the spread, with the median between the ends: {lines}"
+    );
+    assert!(
+        !lines.contains("fitted one copy at"),
+        "and names no sample individually, so a reader cannot mistake ten for the cohort: {lines}"
+    );
+}

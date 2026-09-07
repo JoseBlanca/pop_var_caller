@@ -60,7 +60,8 @@ pub use pass_two::{
 };
 pub use patch::{LinePatchError, rewrite_filter_and_info};
 pub use scoring_context::{
-    CohortSizeMismatch, CoverageFitConfigRefused, ParalogScoringContext, WhyNoCoverageModel,
+    CohortSizeMismatch, CoverageFitConfigRefused, ParalogScoringContext, WhatTheFitCameTo,
+    WhyNoCoverageModel,
 };
 pub use spill::{
     GenericLocusSample, RepeatTractSample, SpillEntry, SpillError, SpillReader, SpillWriter,

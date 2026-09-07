@@ -23,7 +23,7 @@ use crate::ng::window_coverage::SampleHistogram;
 
 use super::{
     CoverageFitConfigRefused, NotATargetFdr, ParalogScoringContext, ParalogVerdicts,
-    PassThreeError, PassTwoError, SpillFile, TargetFdr, WhatTheFilterDid,
+    PassThreeError, PassTwoError, SpillFile, TargetFdr, WhatTheFilterDid, WhatTheFitCameTo,
     score_the_parked_records_and_resolve_the_cut, write_the_records_the_filter_kept,
 };
 
@@ -223,6 +223,49 @@ pub fn fit_score_and_write_the_calls(
     })
 }
 
+/// A sample's name, or its index where the run kept no name for it.
+///
+/// **The index is a fallback and not an equal option**: it is a fact about the order the
+/// operator's own command line put the samples in, so a reader has to count their arguments to
+/// use it.
+fn name_of(sample_names: &[String], sample: usize) -> String {
+    sample_names.get(sample).map_or_else(
+        || format!("sample {sample}"),
+        |name| format!("sample {name}"),
+    )
+}
+
+/// The lowest, median and highest of a run of values — how a cohort's fits are summarised when
+/// there are too many to name.
+struct Spread {
+    lowest: f64,
+    median: f64,
+    highest: f64,
+}
+
+/// **The spread of a non-empty run of finite values.** Sorting rather than a running min/max
+/// because the median is wanted too, and a cohort's worth of fits is thousands of values at
+/// most, once per run.
+///
+/// # Panics
+///
+/// If handed no values — every caller has already checked there is more than one fit.
+fn spread_of(values: impl Iterator<Item = f64>) -> Spread {
+    let mut values: Vec<f64> = values.collect();
+    values.sort_by(f64::total_cmp);
+    assert!(
+        !values.is_empty(),
+        "the spread of no values is not a number; the caller checks there is at least one fit"
+    );
+    Spread {
+        lowest: values[0],
+        // The lower of the two middle values on an even count rather than their mean: it is a
+        // value some sample really has, which is what a reader chasing an outlier wants.
+        median: values[(values.len() - 1) / 2],
+        highest: values[values.len() - 1],
+    }
+}
+
 /// **The lines spec §3.5 asks a run report for**, when the filter ran.
 ///
 /// Words rather than fields, because this is what an operator reads: how many records went, how
@@ -272,12 +315,51 @@ pub fn what_to_tell_the_operator(run: &FilteredRun) -> Vec<String> {
     // them count their own command line to find out which sample it was.
     for (sample, why) in scoring.why_no_model().iter().enumerate() {
         if let Some(why) = why {
-            let name = sample_names.get(sample).map_or_else(
-                || format!("sample {sample}"),
-                |name| format!("sample {name}"),
-            );
-            lines.push(format!("  {name} has no coverage model: {why}"));
+            lines.push(format!(
+                "  {} has no coverage model: {why}",
+                name_of(sample_names, sample)
+            ));
         }
+    }
+
+    // **What the fit came to, per sample** — spec §3.1's outcome, which nothing printed before.
+    // Without it the only way to learn what depth a record was compared against is to invert the
+    // run's own ratios, and the obvious substitute — the median depth of the records the run
+    // wrote — is a variant-site subset and can be half again the fitted one-copy level.
+    //
+    // **Capped, because a cohort is up to several thousand samples** and a run report is read by
+    // a person. The whole cohort's fits are on `ParalogScoringContext` for anything that wants
+    // them; what an operator needs from the report is the scale and whether the samples agree.
+    const FITS_NAMED_IN_FULL: usize = 10;
+    let fits = scoring.what_each_fit_came_to();
+    let fitted: Vec<(usize, WhatTheFitCameTo)> = fits
+        .iter()
+        .enumerate()
+        .filter_map(|(sample, fit)| fit.map(|fit| (sample, fit)))
+        .collect();
+    if fitted.len() <= FITS_NAMED_IN_FULL {
+        for (sample, fit) in &fitted {
+            lines.push(format!(
+                "  {} fitted one copy at {:.2} reads a window, scatter {:.3}",
+                name_of(sample_names, *sample),
+                fit.one_copy_depth,
+                fit.single_copy_depth_sd,
+            ));
+        }
+    } else {
+        let depths = spread_of(fitted.iter().map(|(_, fit)| fit.one_copy_depth));
+        let scatters = spread_of(fitted.iter().map(|(_, fit)| fit.single_copy_depth_sd));
+        lines.push(format!(
+            "  across the {} fitted sample(s): one copy is {:.2} reads a window at the median \
+             ({:.2} to {:.2}), scatter {:.3} ({:.3} to {:.3})",
+            fitted.len(),
+            depths.median,
+            depths.lowest,
+            depths.highest,
+            scatters.median,
+            scatters.lowest,
+            scatters.highest,
+        ));
     }
 
     if verdicts.ratios_outside_the_histogram > 0 {

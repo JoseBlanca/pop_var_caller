@@ -383,6 +383,50 @@ impl ParalogScoringContext {
     pub fn why_no_model(&self) -> &[Option<WhyNoCoverageModel>] {
         &self.why_no_model
     }
+
+    /// **What each sample's coverage fit came to**, in the run's sample order — `None` where the
+    /// fit was refused.
+    ///
+    /// **Why this is here rather than being inferred later.** The two numbers below are what the
+    /// score divides by and measures against, and a run that prints neither can only be explained
+    /// by inverting its own output — which is how D1's first report explained it, and the
+    /// explanation was wrong twice over: the depth a record was compared against was taken to be
+    /// the median depth of the records the run *wrote*, which is a variant-site subset and not
+    /// one copy of anything. Plan step D1 asks for "the fit's outcome"; this is it.
+    ///
+    /// It is deliberately a small owned summary rather than the models themselves. A caller
+    /// holding a [`SingleCopyCoverageModel`] could ask it for a copy number at a GC of its
+    /// choosing and index the answer against the wrong sample, which is the shape of spec §6's
+    /// trap 3; a caller holding two numbers per sample cannot.
+    #[must_use]
+    pub fn what_each_fit_came_to(&self) -> Vec<Option<WhatTheFitCameTo>> {
+        self.coverage_models
+            .iter()
+            .map(|model| {
+                model.as_ref().map(|model| WhatTheFitCameTo {
+                    one_copy_depth: model.single_copy_scale(),
+                    single_copy_depth_sd: model.single_copy_depth_sd(),
+                })
+            })
+            .collect()
+    }
+}
+
+/// **One sample's fitted coverage model, in the two numbers a reader needs** — spec §3.1's fit,
+/// as the run report says it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WhatTheFitCameTo {
+    /// **Reads a one-copy window carries in this sample**, before the GC multiplier — the
+    /// depth-distribution mode the fit anchors on
+    /// ([`single_copy_scale`](SingleCopyCoverageModel::single_copy_scale)). This is what a
+    /// record's window depth is divided by to give its copy number, so it is the number a
+    /// reader needs to turn "19 reads" into "three copies", and it is **not** the median depth
+    /// of the records the run wrote.
+    pub one_copy_depth: f64,
+    /// **σ₀ — how much a one-copy window's relative depth scatters in this sample.** The score's
+    /// coverage half measures a record's departure from one copy in these units, so it is what
+    /// says whether a window at twice one copy's depth is remarkable or ordinary.
+    pub single_copy_depth_sd: f64,
 }
 
 #[cfg(test)]

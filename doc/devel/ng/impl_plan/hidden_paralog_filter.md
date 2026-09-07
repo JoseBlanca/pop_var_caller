@@ -159,7 +159,7 @@ append the two INFO fields on every finite ratio; write through `write_line`; de
 count. The header gains the `##paralogFilter=` line and the three declarations; the run report
 gains its lines. *Depends:* B3, C3. *Source:* spec §3.5, §3.6.
 
-**C5. ◑ The oracles — three of four.** *(i) needs the tomato slice's CRAMs, which are not on this machine; (ii), (iii) and (iv) hold on the mode-equivalence cohort. §10's (ii) amended by the owner 2026-09-07 to strip the filter's four header lines too.*
+**C5. ✅ The oracles — all four.** *(ii), (iii) and (iv) hold on the mode-equivalence cohort, where nothing is ever flagged. **(i) holds too, run at D1**: six accessions at `--paralog-fdr 0` give 2,311 records and sha256 `84ad19c2…0590d`, the standing pre-filter baseline. It was recorded as un-runnable because `benchmarks/tomato1/crams/` is empty **in the worktree** — the path is gitignored and a worktree carries no ignored files; the reads have been in the main checkout since June. §10's (ii) amended by the owner 2026-09-07 to strip the filter's four header lines too.*
 
 **C5 (original text).** (i) off is byte-identical (C2's, rerun); (ii) on at an
 unreachable target, the two INFO keys stripped, equals off; (iii) the drop-mode file equals the
@@ -172,7 +172,7 @@ modes' files identical. All on the six-accession slice; (i) and (iv) also on the
 
 ### Milestone D — the range, and what the spec left to measurement
 
-**D1. ☐ One sample.** A single tomato accession over the slice, filter on: the fit's outcome,
+**D1. ✅ One sample.** A single tomato accession over the slice, filter on: the fit's outcome,
 π and whether the EM converged, records dropped. The check is that it runs, that the precompute
 at `N = 1` produces finite ratios, and that the header says what happened. Spec §9's second OPEN
 closed. *Depends:* C5. *Source:* spec §4, §9.
