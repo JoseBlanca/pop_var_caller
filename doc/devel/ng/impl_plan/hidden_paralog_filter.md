@@ -186,7 +186,7 @@ parallel scoring gets a plan (spec §8). *Depends:* C5. *Source:* spec §4, §5.
 or the report says why not; the records dropped, with the ten highest ratios listed for a human
 eye. *Depends:* C5. *Source:* spec §4.
 
-**D4. ☐ The coverage-only score, counted.** On D2's and D3's runs: how many records of each
+**D4. ✅ The coverage-only score, counted.** On D2's and D3's runs: how many records of each
 kind were scored, how many of each were flagged, and the distribution of ratios by kind — the
 kinds being **biallelic SNP, multiallelic SNP, insertion, deletion** (all carrying both signals)
 and **repeat tract** (coverage alone). **Deletions are counted apart from tracts** even though
