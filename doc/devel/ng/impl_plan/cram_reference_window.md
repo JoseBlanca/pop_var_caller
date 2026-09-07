@@ -175,6 +175,81 @@ not be opened — with the `.fai` read as its source.
 
 > **Checkpoint A:** the decode holds no chromosome, every oracle under *Verification* is green,
 > and `cargo test --lib --tests` matches the pre-existing bar. Pause for review.
+>
+> **Reached 2026-09-07, and it found one thing** — the milestone below, added at the pause by
+> the owner's ruling. Milestone B does not start until it is done.
+
+### Milestone A′ — a block that holds two chromosomes (added 2026-09-07)
+
+**Why this exists.** A2 and A3 fetch the stretch of reference a block's header declares. A block
+whose reads sit on **several** chromosomes declares no stretch, and noodles then resolves each
+mapped read's *whole* chromosome from the repository — which A3 emptied, so the process aborts
+where before this branch it decoded. Spec §10 point 2 says such a block "needs no external bases",
+and that is true of an unmapped block and false of this one.
+
+**How common, measured, and the first measurement was wrong.** A multi-chromosome block is written
+to the `.crai` as **one line per chromosome, all sharing the container offset and the slice
+landmark** (`htslib/cram/cram_index.c:715`, `cram_index_build_multiref`); the reference id `-2`
+that the slice header carries never reaches the index. A first survey looked for `-2` and so could
+not have found one. Re-measured by grouping index lines on (offset, landmark) and counting distinct
+chromosomes: **0 such blocks in 179 CRAMs and 134,860 blocks under `benchmarks/`**, the
+whole-genome tomato file's 112,140 included. But `samtools` 1.16.1 writes one **by default** for a
+two-chromosome file with five reads each — it merges under-full blocks across chromosomes
+(`cram_encode.c:3964`) — so **any reference with many short contigs produces them routinely**, and
+a coordinate-sorted file is not protection. That is what makes this a correctness gap rather than
+a curiosity.
+
+**The design, ruled by the owner 2026-09-07:** *"we might find crams in which a block has reads
+from two chromosomes, that span the boundary. We should be prepared for that. We could decompress
+those twice, no problem because they would be few of them."* So: **support them, by decoding such
+a block twice** — and the block's bytes are decompressed only once, since `decode_blocks` already
+runs before any record is read and both passes read its output.
+
+**Not taken, and why it is worth writing down:** the `.crai` already carries each chromosome's
+span for these blocks (the two lines above are `chrom=0 start=201 span=24` and
+`chrom=1 start=11 span=24`), so the windows could be fetched with no extra decode at all. Rejected
+because it makes the *bases a read is rebuilt from* depend on the index being right, where today
+the index is trusted only for where to seek. At one extra record-decode per rare block, the safety
+is free.
+
+**A4. The fork learns to decode a block against one window per chromosome.** ☐
+`vendor/noodles-cram`, and `FORK.md` gains change 6. Three additions to
+`io/reader/container/slice.rs`:
+- `Slice::reference_extent()` replacing `reference_span()` — a three-state answer
+  (`OneChromosome { id, start, end }` / `SeveralChromosomes` / `Unmapped`) in place of an
+  `Option` that folds the last two together, which is the fold that hid this. A2's call site is
+  the only user.
+- `Slice::record_extents(...)` — the first pass. Decodes the records and returns
+  `Vec<(reference_sequence_id, first position, last position)>`, one per chromosome present,
+  **without resolving any reference**: a read's chromosome, start and CIGAR are decoded from the
+  file, and only its *bases* need the reference (`read_records` attaches the reference after
+  `read_record` returns, and `record.rs:151` is where it is first read). Returns the extents
+  rather than the half-built records, so a caller cannot ask one for bases it cannot serve.
+- `Slice::records_over_windows(windows, …)` — the second pass. `windows` is one
+  `(reference_sequence_id, bases, first position)` per chromosome; each mapped record resolves to
+  `ReferenceSequence::Window` from its own chromosome's entry. A record whose chromosome is absent
+  from `windows`, or whose span the window does not cover, is **refused with both spans named**,
+  exactly as the single-chromosome path already refuses a short window — never decoded against
+  what happens to be there.
+*Depends:* A3. *Source:* this milestone's preamble; `FORK.md` §5 for the shape to follow.
+
+**A5. ng decodes such a block, and a fixture proves it.** ☐
+`decode_container_at` takes the `SeveralChromosomes` arm: `record_extents`, then one
+`fetch_raw_into` per chromosome into a reused buffer set, then `records_over_windows`. The buffers
+are per call and sized by the extents, so what is resident stays bounded by the block's reads and
+never by a chromosome — which is the property the whole plan is for, and a cohort crossing a
+boundary on 63 samples at once is where it would otherwise bite.
+
+**The fixture is a real samtools file, built in the container**, because the writer this project
+vendors cannot produce one: `samtools view -C -T <fasta>` over a coordinate-sorted SAM with reads
+on two short chromosomes yields a single block covering both, with no options set. Written against
+a **non-periodic** reference for the reason A2's fixture is (an all-`A` reference cannot fail for a
+wrong window), and checked against its BAM twin field for field. Plus: a block whose second
+chromosome's window is withheld must be refused, not decoded short.
+*Depends:* A4.
+
+> **Checkpoint A′:** a CRAM whose block spans two chromosomes decodes to the same reads its BAM
+> twin holds, and nothing holds a chromosome. Pause for review.
 
 ### Milestone B — measured on the real file, and the note closed
 

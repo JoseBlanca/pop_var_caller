@@ -389,17 +389,20 @@ pub(crate) fn decode_container_at(
     // record is rebuilt from can only be the window fetched above (`alignment_cursor.md` §10
     // point 2). The clones are pointer bumps — a `Repository` is an `Arc` inside.
     //
-    // **⚠ One slice shape does read it, and it is the one shape ng cannot serve a window for.**
-    // A slice whose records span *several* contigs has no single span to fetch, so it takes the
-    // no-window call below — and noodles then resolves each mapped record's contig through the
-    // repository, whole, and `expect`s a hit (`get_record_reference_sequence`). Against an empty
-    // one that is a **panic**, where before 2026-09-07 the run's shared repository answered it.
-    // No file in this project has such a slice: the `.crai` of all 179 CRAMs under `benchmarks/`
-    // — the whole-genome tomato CRAM's 112,140 slices included — carries reference id `-1`
-    // (unmapped) 1,876 times and `-2` (multi-reference) not once. Unmapped slices are safe: their
-    // records are unmapped, so noodles asks for no bases at all. Raised at Milestone A's
-    // checkpoint; whether ng refuses such a file at open or grows a per-record window for it is
-    // not this step's to decide.
+    // **⚠ One slice shape does read it, and A′ is the milestone that fixes it.** A slice whose
+    // records span *several* contigs has no single span to fetch, so it takes the no-window call
+    // below — and noodles then resolves each mapped record's contig through the repository,
+    // whole, and `expect`s a hit (`get_record_reference_sequence`). Against an empty one that is
+    // a **panic**, where before 2026-09-07 the run's shared repository answered it. Unmapped
+    // slices are safe by contrast: their records are unmapped, so noodles asks for no bases.
+    //
+    // **How rare, and the first count of it was measured wrongly.** htslib writes such a slice to
+    // the `.crai` as one line per contig, all sharing the container offset and the landmark
+    // (`cram_index_build_multiref`); the `-2` the slice header carries never reaches the index,
+    // so a survey looking for `-2` — which the first one was — could not have found any. Counted
+    // properly, by grouping index lines on (offset, landmark): **0 such slices in 179 CRAMs and
+    // 134,860 slices under `benchmarks/`**. But samtools writes one by *default* for two short
+    // contigs with a handful of reads each, so a fragmented reference produces them routinely.
     let no_repository = fasta::Repository::default();
     for slice in container.slices() {
         let slice = slice?;

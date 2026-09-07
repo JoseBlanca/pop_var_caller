@@ -111,71 +111,46 @@ Run in the container on this tree.
   `ng/psp/block.rs`, five under `ng/run/cohort_merge/`, and `ng/run/psp_source.rs`.
   `open_bam.rs` was formatted here and is clean.
 
-## One thing found while doing this, and it is the owner's to rule on
+## One thing found while doing this, and what the owner ruled
 
 **A CRAM slice whose records span several contigs would now panic, where before this branch it
-decoded.** It is not in A3's diff — A2 introduced it — and no file this project has ever met
-contains such a slice, but the deletion here makes it permanent, so it is recorded before the
-checkpoint rather than after.
+decoded.** It is not in A3's diff — A2 introduced it — but the deletion here makes it permanent,
+so it was raised at the checkpoint. The owner's ruling: support such slices rather than refuse
+them, by decoding one twice. That is Milestone A′ in the plan, and it runs before Milestone B.
 
 Spec §10 point 2 says a slice with no single reference "needs no external bases; it takes the
 existing no-window call, whose repository argument is then an empty `fasta::Repository::default()`
 and is never consulted". **The second half is false for the multi-contig case.** In
 `vendor/noodles-cram/src/io/reader/container/slice.rs:291`, a slice whose reference context
 `is_many()` resolves *each mapped record's own* contig through the repository —
-`get_record_reference_sequence`, which ends in
-`.expect("invalid reference sequence name")`. Against an empty repository that expectation fails,
-so the process aborts. Until 2026-09-07 the run's shared repository answered it and the file read
-correctly, at the cost of holding whole contigs. Unmapped slices are unaffected: their records are
-unmapped, so noodles asks for no bases at all.
+`get_record_reference_sequence`, which ends in `.expect("invalid reference sequence name")`.
+Against an empty repository that expectation fails, so the process aborts. Until 2026-09-07 the
+run's shared repository answered it and the file read correctly, at the cost of holding whole
+contigs. Unmapped slices are unaffected: their records are unmapped, so noodles asks for no bases.
 
-**Nothing in reach is affected, measured.** Every `.crai` under `benchmarks/` — 179 CRAMs, and the whole-genome tomato file among them at 112,140 slices — was read for its reference ids: 1,876
-slices with `-1` (unmapped) in that file and **not one `-2` (multi-reference) anywhere**. Those
-files are untracked, in the main checkout at `/Users/jose/devel/pop_var_caller/benchmarks/`, so the
-count cannot be reproduced from a clone; the command was
-`gzip -dc <file>.crai | awk -F'\t' '{c[$1]++} END {...}'` over `find benchmarks -name '*.crai'`.
-`samtools`
-writes them when a file is name-sorted or unsorted, and for runs of small contigs; a fragmented
-assembly is where one would first appear, which is the same case `open`'s comment on index-building
-already warns about.
+### The first count of how rare this is was measured wrongly
 
-**Recommendation: refuse such a file at the decode, naming it, rather than either panicking or
-building a window path for it.** One `if` where `reference_span()` returns `None` and the slice's
-records are not all unmapped, returning an `io::Error` that says ng cannot decode a slice spanning
-several contigs. It costs a few lines, it converts an abort into a message, and it does not commit
-the project to a per-record window design for a file shape nobody has. The alternative — teaching
-the fork to resolve a multi-contig slice record by record through the `RawRefSeq` — is real work in
-the vendored crate and should wait for a file that needs it. Either way this is a change to spec
-§10 point 2, so it is not the implementer's to make.
+**Corrected here rather than quietly.** The first survey searched each `.crai` for the reference
+id `-2`, the value a multi-contig slice's *header* carries, and reported none. That check could not
+have found one however many there were: htslib writes such a slice to the index as **one line per
+contig, all sharing the container offset and the slice landmark**
+(`htslib/cram/cram_index.c:715`, `cram_index_build_multiref`), and `-2` never reaches the index at
+all.
 
-## What the review changed (commit 2)
+Re-measured by grouping index lines on (offset, landmark) and counting distinct contigs per group,
+the conclusion survives — **0 multi-contig slices in 179 CRAMs and 134,860 slices under
+`benchmarks/`**, the whole-genome tomato file's 112,140 included — but the evidence for it is
+different, and the wrong method is what let the next sentence be wrong too.
 
-The step's review found three things worth fixing and four nits; all seven were applied in a
-follow-up commit rather than by amending, so the record shows what was found.
+**These slices are not rare in general, which the first report implied they were.** `samtools`
+1.16.1 writes one **by default**, with no options set, for a coordinate-sorted file with two short
+contigs and five reads each: it merges under-full slices across contigs
+(`htslib/cram/cram_encode.c:3964`). So a reference with many short contigs — a draft assembly, a
+scaffold-level reference — produces them routinely, and coordinate-sorted input is no protection.
+That is what turned the owner's ruling from "prepare for an edge case" into a correctness gap.
 
-- **The missing-`.fai` message had got worse, and the test could not see it.** Reporting the
-  fault as `AlignmentFileError::Open` kept only the inner `io::Error` — and `fai::fs::read` is a
-  bare `File::open`, whose failure says `No such file or directory` with no path in it. The top
-  line therefore read *"opening alignment file '<reference>.fa' failed"*: the wrong kind of file,
-  a FASTA that is present and readable, and no mention of the index. It now has its own variant,
-  `AlignmentFileError::CramReferenceIndexUnreadable`, naming the CRAM, the FASTA and the `.fai`
-  and saying to run `samtools faidx`. Both tests now assert the message, not only the variant.
-- **The check that moved out of `open` had no test where it landed.** A FASTA deleted with its
-  `.fai` left behind is now caught by `cursor`'s zero-length probe, and nothing held that:
-  the neighbouring `a_cram_cursor_checks_that_its_second_reader_can_serve_the_contig` fails at
-  the index lookup, before any file is opened. `a_cursor_over_a_fasta_that_has_been_deleted_is_refused`
-  holds it, and leaving the FASTA in place fails it — 305 passed / 1 failed, the one being this
-  test on its own assertion.
-- **Two comments in `container.rs` said opposite things about multi-contig slices.** The older
-  one repeated spec §10's claim that such a slice consults no reference. Corrected, along with
-  the same sentence in the fork's own `Slice::reference_span` doc, which is where the wrong
-  belief came from.
-- **`ReferenceBasesError::Build` was renamed `IndexUnreadable`.** Nothing is built any more. This
-  contradicts the plan's "keeps its name and its meaning", and the plan is right that the
-  *meaning* is unchanged — but the name described the deleted operation.
-- The `open` comment numbered "5." sat sixteen lines above the code it described, with the
-  `.crai` grouping comment butted against it; moved down to the check. The tombstone comment
-  where the deleted `reference` field was is now one line pointing at that check.
+The benchmark files are untracked, in the main checkout at
+`/Users/jose/devel/pop_var_caller/benchmarks/`, so the count cannot be reproduced from a clone.
 
 ## What is not proven here
 

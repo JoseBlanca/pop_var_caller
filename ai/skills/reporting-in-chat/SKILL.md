@@ -866,3 +866,55 @@ that work were caught by re-reading the report's own sentences against the code 
 reviews reported — the caller count, the doc-link provenance, two footprint ratios on different
 bases. That pass costs minutes. The reviews then found seven more, and corrected one of the four
 again.
+
+---
+
+### 2026-09-07 — a decision handed over with none of what it needed
+
+Reporting the end of a plan milestone, a decision paragraph was written as:
+
+> ❌ "A CRAM slice whose records span several contigs would now panic… In
+> `vendor/noodles-cram/src/io/reader/container/slice.rs:291`, a slice whose
+> reference context `is_many()` resolves each mapped record's own contig through
+> the repository — `get_record_reference_sequence`, which ends in
+> `.expect("invalid reference sequence name")`."
+>
+> Owner: *"I don't understand what you're saying, you're writting is bad and it
+> is lacking context."*
+
+Every noun in it — *slice*, *reference context*, *repository*, the function name,
+the file and line — came out of a code reading the owner never saw. The reply
+then asked them to choose between refusing such a file and building a new decode
+path for it, which is a choice about **what the caller can read**, presented in
+the vocabulary of the library's internals.
+
+What was missing was not shorter words. It was the four facts that make the
+question a question at all, none of which appeared:
+
+1. a CRAM stores a read as its *differences from the reference*, so rebuilding
+   one needs the reference bases under it;
+2. reads are stored in blocks, and a block's header normally names the one
+   stretch of one chromosome its reads cover — which is the whole of what this
+   branch changed;
+3. a block holding reads from **two** chromosomes has no such stretch to name;
+4. so that block, and only that block, has nothing to fetch.
+
+With those, the owner answered in one sentence and was right — *"we might find
+crams in which a block has reads from two chromosomes, that span the boundary…
+we could decompress those twice"* — and their answer was better than either
+option offered. **The options were bad because the context was missing**, not
+merely hard to read: a reader given (1)–(4) can see the third way, and a reader
+given a stack trace cannot.
+
+> ✅ "A CRAM does not store a read's bases; it stores how that read differs from
+> the reference… Reads are stored in blocks of about ten thousand, and a block's
+> header says which chromosome and which stretch, about 9 kb, so we fetch that
+> and nothing else. **Your case is exactly the one that has no such header**: a
+> block holding reads from two chromosomes cannot name one stretch, so it names
+> none, and the decoder falls back to asking for whole chromosomes."
+
+**The check this adds to the pass before sending.** For a **D** paragraph, the
+noun test is not enough — every noun can be plain English and the question still
+be unanswerable. Ask instead: *what would the reader have to already know to
+invent a third option?* Write that down first. If it is not in the reply, the
+options are decoration and the decision is really still yours.
