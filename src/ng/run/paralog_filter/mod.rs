@@ -25,22 +25,26 @@
 //! [`ParalogScoringContext`], which is what pass two reads — one fitted coverage model per
 //! sample, and the rule turning a spilled row into the four numbers the scorer takes; and
 //! [`pass_one`]'s [`CalledRecordSink`], which is the choice itself — the VCF writer while the
-//! filter is off, the spill while it is on.
+//! filter is off, the spill while it is on; and [`pass_two`]'s
+//! [`score_the_parked_records_and_resolve_the_cut`], which reads the spill back, scores every
+//! record, fits how common duplications are in this run, and turns the operator's target
+//! false-discovery rate into a likelihood ratio to cut at.
 //!
-//! **What is not built yet are passes two and three**: the scoring that turns parked records into
-//! a cut, and the writing that applies it. Until they are, a run asking for the filter is refused
-//! rather than left holding a spill and no calls.
+//! **What is not built yet is pass three**: the writing that applies the verdict. Until it is,
+//! a run asking for the filter is refused rather than left holding a spill and no calls.
 
 use crate::ng::types::GenomePosition;
 use crate::ng::vcf::RecordPlace;
 
 pub mod pass_one;
+pub mod pass_two;
 pub mod patch;
 pub mod scoring_context;
 pub mod spill;
 pub mod spill_file;
 
 pub use pass_one::{CalledRecordSink, PassOneError, SpillingSink, entry_for};
+pub use pass_two::{ParalogVerdicts, PassTwoError, score_the_parked_records_and_resolve_the_cut};
 pub use patch::{LinePatchError, rewrite_filter_and_info};
 pub use scoring_context::{
     CohortSizeMismatch, CoverageFitConfigRefused, ParalogScoringContext, WhyNoCoverageModel,

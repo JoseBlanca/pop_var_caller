@@ -27,8 +27,8 @@
 use thiserror::Error;
 
 use crate::ng::paralog::{
-    CoverageFitConfig, CoverageModelError, ParalogModelParams, ParalogScorePrecompute,
-    SampleObservation, SingleCopyCoverageModel,
+    CoverageFitConfig, CoverageModelError, LocusObservations, ParalogModelParams,
+    ParalogScorePrecompute, SampleObservation, SingleCopyCoverageModel, score_locus_for_paralogy,
 };
 use crate::ng::types::InbreedingF;
 use crate::ng::window_coverage::SampleHistogram;
@@ -228,7 +228,7 @@ impl ParalogScoringContext {
     /// not an observation of zero — so there is no total for the skip to test, and the type is
     /// what says so rather than a condition someone has to remember.
     #[must_use]
-    pub fn observation_of(&self, entry: &SpillEntry, sample: usize) -> Option<SampleObservation> {
+    fn observation_of(&self, entry: &SpillEntry, sample: usize) -> Option<SampleObservation> {
         let model = self.coverage_models.get(sample)?.as_ref()?;
 
         // **One match yields the window and the counts together**, and both row types are
@@ -302,7 +302,7 @@ impl ParalogScoringContext {
     /// # Errors
     ///
     /// If the record carries a different number of samples than the run has.
-    pub fn observations_of(
+    fn observations_of(
         &self,
         entry: &SpillEntry,
         out: &mut Vec<Option<SampleObservation>>,
@@ -318,6 +318,49 @@ impl ParalogScoringContext {
         out.clear();
         out.extend((0..self.sample_count()).map(|sample| self.observation_of(entry, sample)));
         Ok(())
+    }
+
+    /// **One parked record's likelihood ratio — or `NaN`, which means it was not scored.**
+    ///
+    /// This is the only way in: the σ₀ slice and the precomputed tables are the scorer's other
+    /// two arguments, and handing them out separately would let a caller pair them with
+    /// observations they were not built for. The scorer answers that with a *neutral score*
+    /// rather than an error (spec §6 trap 3), so the mistake would show up as a run that
+    /// quietly flags nothing. Here the three arguments come from one place and cannot be
+    /// mismatched.
+    ///
+    /// **`NaN` where no sample was usable, and never `0.0`.** The scorer's neutral verdict is a
+    /// ratio of `0.0` — the value it returns when the two stories are exactly balanced, and also
+    /// the value it returns when it had nothing to weigh at all. Those are opposite states and
+    /// they must not share a number: a `0.0` folded into the run's histogram is one more record
+    /// saying "not a duplication", and a whole run of unscorable records would fit a paralog rate
+    /// from evidence that does not exist (spec §6 trap 4). `samples_used` is the scorer's own
+    /// count of what it weighed, so this reads it rather than re-deriving the condition.
+    ///
+    /// `observations` is a scratch buffer the caller keeps across records — cleared and refilled
+    /// here, so one allocation serves the run.
+    ///
+    /// # Errors
+    ///
+    /// If the record carries a different number of samples than the run has.
+    pub fn score(
+        &self,
+        entry: &SpillEntry,
+        observations: &mut Vec<Option<SampleObservation>>,
+    ) -> Result<f64, CohortSizeMismatch> {
+        self.observations_of(entry, observations)?;
+        let score = score_locus_for_paralogy(
+            &LocusObservations {
+                samples: observations,
+            },
+            self.single_copy_depth_sd(),
+            self.score_tables(),
+        );
+        Ok(if score.samples_used == 0 {
+            f64::NAN
+        } else {
+            score.paralog_log_likelihood_ratio
+        })
     }
 
     /// How many samples the run has — the cohort size every scored record must match.
@@ -341,14 +384,14 @@ impl ParalogScoringContext {
 
     /// σ₀ per sample, the slice the scorer takes beside the observations.
     #[must_use]
-    pub fn single_copy_depth_sd(&self) -> &[f64] {
+    fn single_copy_depth_sd(&self) -> &[f64] {
         &self.single_copy_depth_sd
     }
 
     /// The per-pass tables the scorer reuses across every record. **Built once in
     /// [`Self::new`]; this only hands them out.**
     #[must_use]
-    pub fn score_tables(&self) -> &ParalogScorePrecompute {
+    fn score_tables(&self) -> &ParalogScorePrecompute {
         &self.precompute
     }
 }
