@@ -252,6 +252,13 @@ pub struct PspSummarySource<'a> {
     read_groups: Vec<ReadGroupId>,
     /// The heads handed over so far, so a body can be located and described when it is built.
     heads: Vec<KeptRecord>,
+    /// The live sets of the records still held, back to back in draw order.
+    ///
+    /// **A span addresses the whole file, not this buffer** — the same rule `kept` follows, and
+    /// for the same reason: the merge holds spans across draws.
+    live_ids: Vec<crate::pileup_record::ChainId>,
+    /// How many entries have been dropped from the front of `live_ids`.
+    live_released: u64,
     /// What this sample contributed, for the run report.
     read: StoredSampleTallies,
 }
@@ -282,7 +289,17 @@ pub struct KeptRecord {
     /// per record is bounded by the merge's window only because the heads are released with the
     /// bodies they describe; before that they were not, and this set — the largest field of the
     /// three, and the one that grows with depth — was held for every record the file had.
-    pub live: LiveSet,
+    pub live: LiveSpan,
+}
+
+/// Where a record's live set sits in the source's chain-id arena, measured from the file the
+/// way a body's range is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LiveSpan {
+    /// First entry of this record's live set, counted from the file's first record.
+    pub start: u64,
+    /// How many entries it has.
+    pub len: u32,
 }
 
 impl<'a> PspSummarySource<'a> {
@@ -308,6 +325,8 @@ impl<'a> PspSummarySource<'a> {
             layout,
             read_groups,
             heads: Vec::new(),
+            live_ids: Vec::new(),
+            live_released: 0,
             read: StoredSampleTallies::default(),
         })
     }
@@ -344,6 +363,13 @@ impl<'a> PspSummarySource<'a> {
         self.heads.len()
     }
 
+    /// How many read identifiers this source is holding — the third arena, and the one whose
+    /// cut cannot be derived from either of the others.
+    #[must_use]
+    pub fn held_live_ids(&self) -> usize {
+        self.live_ids.len()
+    }
+
     /// The bytes of the body at `body`, which must be one this source still holds.
     ///
     /// # Panics
@@ -373,6 +399,14 @@ impl<'a> PspSummarySource<'a> {
                 // **Shifted from the buffer's terms into the file's**, which is what makes a
                 // range outlive the release that moves the bytes it names.
                 let body = body.start + self.released..body.end + self.released;
+                // The ids go into the source's own arena and the record carries a span into
+                // it, so a record costs no allocation and no `Vec` header.
+                let ids = self.walk.live_reads().ids();
+                let live = LiveSpan {
+                    start: self.live_released + self.live_ids.len() as u64,
+                    len: ids.len() as u32,
+                };
+                self.live_ids.extend_from_slice(ids);
                 Some(Ok(KeptRecord {
                     summary: LocusSummary::from(&streamed.head),
                     body,
@@ -380,7 +414,7 @@ impl<'a> PspSummarySource<'a> {
                     // The walk parses a head's live-set changes and applies them before
                     // handing the record over, so this is the set as of this record and not
                     // as of the one before it.
-                    live: self.walk.live_reads().clone(),
+                    live,
                 }))
             }
             Some(Err(failed)) => Some(Err(failed)),
@@ -642,15 +676,22 @@ impl ObservationSource for PspSummarySource<'_> {
 
     /// Build the body kept at `body`.
     ///
-    /// **⚠ Decoded against an empty live set, which is right today and will not always be.**
-    /// A body needs the set of reads live at its own record only to derive the one observation
-    /// whose read list is stored as a residual; the encoder does not yet write chain ids at all
-    /// (`psp/record.rs`, `encode_record_body`), so every file this caller produces has an empty
-    /// set everywhere and the residual is trivial. When the encoding's Milestone E writes them,
-    /// the set as of *this* record has to reach here — and since the head walk is what carries
-    /// it, that means keeping it beside the bytes or replaying the heads to reach it. Building
-    /// against the wrong set is the failure that does not announce itself: a body decoded
-    /// against a plausible-but-wrong set is a plausible body.
+    /// **Decoded against the set of reads live at this record's own position**, which the head
+    /// walk carried and the source kept beside the bytes. A body needs it to derive the one
+    /// observation whose read list is stored as a residual rather than written out.
+    ///
+    /// **⚠ An earlier version of this comment said the sets were empty, and it was wrong.** It
+    /// reasoned from `encode_record_body`, which does drop chain ids from a record's *body* —
+    /// but the *head* still writes the live-set changes, so a walk that reads heads in order
+    /// carries a populated set. Counted over the tomato benchmark's stored files:
+    /// **96,728,802 identifiers over 15,074,770 records, 6.42 a record, with only 6 records in
+    /// 10,000 holding none.** Two facts in two files, and the comment checked one.
+    ///
+    /// Which is why the set is kept: building against the wrong one is the failure that does
+    /// not announce itself, because a body decoded against a plausible-but-wrong set is a
+    /// plausible body. The set lives in the source's own arena and the record carries a span
+    /// into it, released with the head that names it
+    /// ([`release_before`](ObservationSource::release_before)).
     fn build(&self, body: core::ops::Range<usize>) -> Result<SampleLocusObservations, RunError> {
         let kept = self
             .heads
@@ -668,7 +709,9 @@ impl ObservationSource for PspSummarySource<'_> {
             body: self.body_bytes(&body),
             record_bytes: body.len(),
         };
-        let mut record = decode_the_body_of(&found, &kept.live, &self.layout)
+        let at = (kept.live.start - self.live_released) as usize;
+        let live = LiveSet::from_sorted_slice(&self.live_ids[at..at + kept.live.len as usize]);
+        let mut record = decode_the_body_of(&found, &live, &self.layout)
             .map_err(|source| self.refuse(source))?
             .record;
         // **The same renumbering the building source makes, for the same reason**: every
@@ -710,6 +753,18 @@ impl ObservationSource for PspSummarySource<'_> {
         let past = self
             .heads
             .partition_point(|kept| kept.body.end <= body_start);
+        // **The live arena is drained with the heads that address it, and it needs its own
+        // cut.** A record contributes as many bytes as its body has and as many identifiers as
+        // it has reads, so the two arenas fill at different rates and one cut cannot serve
+        // both: this one is read off the first surviving head's span.
+        let drawn_ids = self.live_released + self.live_ids.len() as u64;
+        let live_from = self
+            .heads
+            .get(past)
+            .map_or(drawn_ids, |surviving| surviving.live.start);
+        self.live_ids
+            .drain(..(live_from - self.live_released) as usize);
+        self.live_released = live_from;
         self.heads.drain(..past);
     }
 }
@@ -1640,7 +1695,20 @@ mod tests {
     /// wrong base would read another record's bytes and build a plausible wrong record.
     #[test]
     fn releasing_what_the_merge_has_passed_leaves_the_rest_building_the_same() {
-        let records = a_sample();
+        // **The shared fixture's reads carry no chain identifiers, and this test needs them
+        // to.** A record's read set is held in an arena of its own, released on its own cut —
+        // and a release that took the bodies' cut instead would hand a surviving record another
+        // record's reads, which decodes into a plausible record rather than a refusal. With the
+        // sets empty there is nothing for that mistake to get wrong. Three identifiers a
+        // record, distinct across records, so every record's set differs from its neighbours'.
+        let mut records = a_sample();
+        for (at, record) in records.iter_mut().enumerate() {
+            let first = (at as u64 + 1) * 10;
+            for observation in &mut record.observations {
+                observation.chain_ids = vec![first, first + 1, first + 2];
+                observation.num_obs = 3;
+            }
+        }
         let (_dir, path) = a_psp_of(&records);
         let groups = as_walked();
 
@@ -1669,8 +1737,19 @@ mod tests {
         );
         let whole_arena = source.held_bytes();
         assert_eq!(source.held_records(), bodies.len(), "one head a record drawn");
+        // **The third arena is checked by its own count, not by the bytes'.** A record puts as
+        // many bytes in one as its body has and as many identifiers in the other as it has
+        // reads, so a release that used the bodies' cut on the identifiers would take the
+        // wrong prefix — and the records that still built would build against another record's
+        // read set, which is a plausible record rather than a refusal.
+        let whole_live_arena = source.held_live_ids();
+        assert!(
+            whole_live_arena > 0,
+            "the fixture's records carry live reads, or this arena's release is untested"
+        );
 
         for cut in [bodies.len() / 4, bodies.len() / 2] {
+            let live_behind: usize = source.held_live_ids();
             source.release_before(bodies[cut].start);
             assert_eq!(
                 source.held_records(),
@@ -1682,6 +1761,10 @@ mod tests {
                 whole_arena - bodies[cut].start,
                 "the arena holds exactly the bodies from record {cut} on"
             );
+            assert!(
+                source.held_live_ids() < live_behind,
+                "record {cut} was released, so its read identifiers went with it"
+            );
             for (at, body) in bodies.iter().enumerate().skip(cut).rev() {
                 let rebuilt = source.build(body.clone()).expect("a surviving body builds");
                 assert_eq!(
@@ -1690,5 +1773,13 @@ mod tests {
                 );
             }
         }
+
+        // Released past the last record: all three arenas empty, and none of them holding a
+        // remainder that a later release would have to reconcile.
+        let end_of_the_file = bodies.last().expect("the fixture has records").end;
+        source.release_before(end_of_the_file);
+        assert_eq!(source.held_records(), 0, "no head survives the whole file");
+        assert_eq!(source.held_bytes(), 0, "no body does either");
+        assert_eq!(source.held_live_ids(), 0, "and no read identifier does");
     }
 }
