@@ -177,7 +177,7 @@ modes' files identical. All on the six-accession slice; (i) and (iv) also on the
 at `N = 1` produces finite ratios, and that the header says what happened. Spec §9's second OPEN
 closed. *Depends:* C5. *Source:* spec §4, §9.
 
-**D2. ☐ Six samples, with the pass shares.** The slice at six, filter on: records dropped and
+**D2. ✅ Six samples, with the pass shares.** The slice at six, filter on: records dropped and
 tagged, samples rejected by reason, π, the cut; wall per pass — calling, fit, scoring, writing —
 and peak resident, against the filter-off run. The scoring share is what decides whether
 parallel scoring gets a plan (spec §8). *Depends:* C5. *Source:* spec §4, §5.

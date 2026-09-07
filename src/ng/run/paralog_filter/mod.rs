@@ -49,8 +49,8 @@ pub mod spill;
 pub mod spill_file;
 
 pub use finish::{
-    FilteredRun, ParalogFilterError, WhatTheOperatorAskedFor, fit_score_and_write_the_calls,
-    what_to_tell_the_operator,
+    FilteredRun, ParalogFilterError, WhatTheOperatorAskedFor, WhereTheTimeWent,
+    fit_score_and_write_the_calls, what_to_tell_the_operator,
 };
 pub use pass_one::{CalledRecordSink, PassOneError, SpillingSink, entry_for};
 pub use pass_three::{PassThreeError, WhatTheFilterDid, write_the_records_the_filter_kept};

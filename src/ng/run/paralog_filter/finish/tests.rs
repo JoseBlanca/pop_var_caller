@@ -99,8 +99,18 @@ fn a_spill_and_an_output(test_name: &str, entries: Vec<SpillEntry>) -> (SpillFil
         spill.append(entry).expect("the entry is appended");
     }
     spill.finish_writing().expect("the spill is flushed");
+    // **The calling pass is given something to measure.** `calling` is the interval from the
+    // spill being named to the fit, and in a fixture that interval is microseconds — small
+    // enough that a clock started and read on one line looks the same as the real one. It did:
+    // replacing the span with `Instant::now().elapsed()` gave 83 ns and passed every test.
+    // `Instant` is monotonic, so a sleep here is a hard lower bound the mutation cannot reach.
+    std::thread::sleep(THE_CALLING_PASS_IS_AT_LEAST);
     (spill, output)
 }
+
+/// How long [`a_spill_and_an_output`] holds the spill open before handing it over, so that the
+/// calling pass has a duration a test can assert a floor on.
+const THE_CALLING_PASS_IS_AT_LEAST: std::time::Duration = std::time::Duration::from_millis(20);
 
 fn metadata_over(samples: usize) -> VcfHeaderMetadata {
     VcfHeaderMetadata::try_new(
@@ -679,5 +689,229 @@ fn a_cohort_larger_than_the_cap_is_reported_as_a_spread() {
     assert!(
         !lines.contains("fitted one copy at"),
         "and names no sample individually, so a reader cannot mistake ten for the cohort: {lines}"
+    );
+}
+
+/// Pull the duration and the share the report printed for one named pass, so a test can check
+/// that a pass's name sits beside **its own** number.
+///
+/// **Why this exists.** An earlier version checked only that the four pass names appeared and that
+/// the four shares summed to about a hundred. Both survive swapping two passes' figures, which is
+/// the likeliest way this line goes wrong.
+fn what_the_line_says_about(lines: &str, pass: &str) -> (String, f64) {
+    // **Anchored on the separator before the pass name**, because the line opens with "time from
+    // the start of the calling pass" — a bare search for "calling " finds that instead, and the
+    // test then compares the total against the calling pass and fails for the wrong reason.
+    let after = lines
+        .split_once(pass)
+        .unwrap_or_else(|| panic!("the time line names no pass {pass:?}: {lines}"))
+        .1;
+    let (duration, rest) = after
+        .split_once(" (")
+        .unwrap_or_else(|| panic!("no duration after {pass:?}: {lines}"));
+    let share = rest
+        .split_once("%)")
+        .unwrap_or_else(|| panic!("no share after {pass:?}: {lines}"))
+        .0;
+    (
+        duration.to_string(),
+        share
+            .parse()
+            .unwrap_or_else(|_| panic!("share {share:?} is not a number: {lines}")),
+    )
+}
+
+/// **The report says where the run's time went, and each pass's figure sits beside its own name** —
+/// plan step D2 asks for the wall per pass, and spec §8 defers parallel scoring until a run says
+/// whether it is worth threads.
+#[test]
+fn the_report_says_where_the_time_went_and_what_share_each_pass_took() {
+    let (spill, output) = a_spill_and_an_output(
+        "the_report_says_where_the_time_went_and_what_share_each_pass_took",
+        vec![
+            a_record(100, 1, ONE_COPY_DEPTH),
+            a_record(200, 1, ONE_COPY_DEPTH),
+        ],
+    );
+
+    let run = fit_score_and_write_the_calls(
+        &spill,
+        vec![a_fittable_histogram()],
+        &outbred(1),
+        an_ordinary_request(),
+        &output,
+        metadata_over(1),
+        diploid(),
+    )
+    .expect("the run finishes");
+
+    // **The calling pass really was clocked from the spill's birth.** The fixture holds the spill
+    // open for a known interval first, so a clock started inside `fit_score_and_write_the_calls`
+    // — which is what the span looked like to every earlier test — cannot reach this floor.
+    let spent = run.spent;
+    assert!(
+        spent.calling >= THE_CALLING_PASS_IS_AT_LEAST,
+        "the calling pass is timed from the spill being named, so it covers the {:?} the fixture \
+         held it open; got {:?}",
+        THE_CALLING_PASS_IS_AT_LEAST,
+        spent.calling
+    );
+    // **Nothing here asserts an order between the four passes**, though the sleep above usually
+    // makes the calling pass the largest. Under the full suite the writing pass contends for the
+    // same filesystem as six thousand other tests and has been seen at 77 ms against calling's
+    // 23 ms, so an assertion on their order fails on a loaded machine and passes on an idle one.
+    // The per-pass checks below compare each printed figure against *that pass's own* measured
+    // duration, which tells the four apart without needing an order between them.
+
+    let lines = what_to_tell_the_operator(&run).join("\n");
+    assert!(
+        lines.contains("time from the start of the calling pass"),
+        "the line must say where its clock starts: {lines}"
+    );
+    assert!(
+        lines.contains("startup before the calling pass"),
+        "and what it leaves out: {lines}"
+    );
+
+    // **Each pass's number, checked against that pass's own duration.** Swapping two passes'
+    // figures leaves the shares summing to a hundred and every name present, so a check on the
+    // sum alone cannot see it.
+    let mut shares = Vec::new();
+    for (pass, measured) in [
+        (": calling ", spent.calling),
+        (", fitting the coverage models ", spent.fitting),
+        (", scoring ", spent.scoring),
+        (", writing ", spent.writing),
+    ] {
+        let (printed, share) = what_the_line_says_about(&lines, pass);
+        assert_eq!(
+            printed,
+            super::how_long(measured),
+            "the duration printed for {pass} is not {pass}'s own: {lines}"
+        );
+        let expected = 100.0 * measured.as_secs_f64()
+            / (spent.calling + spent.fitting + spent.scoring + spent.writing).as_secs_f64();
+        assert!(
+            (share - expected).abs() <= 1.0,
+            "the share printed for {pass} is {share} and its own share is {expected:.1}: {lines}"
+        );
+        shares.push(share);
+    }
+    // The four are shares of one total: a line dividing by anything else would not sum to a
+    // hundred, whichever pass it divided by.
+    let summed: f64 = shares.iter().sum();
+    assert!(
+        (summed - 100.0).abs() <= 2.0,
+        "the four shares must sum to about 100, got {summed}: {lines}"
+    );
+}
+
+/// **The report says how much disk the parked records took**, which nothing else in the run does —
+/// the spill holds every record's line uncompressed plus about ten bytes a sample, so an operator
+/// cannot read it off the compressed output (B2 review M6).
+#[test]
+fn the_report_says_how_much_disk_the_parked_records_took() {
+    // **Enough records that the printed figure has a digit that can be wrong.** Two records give
+    // a few hundred bytes, and at that size every plausible unit and divisor renders the same
+    // thing — so a test on two records pins the words and not the number.
+    let records: Vec<SpillEntry> = (0u64..1_200)
+        .map(|at| a_record(100 + at, 2, ONE_COPY_DEPTH))
+        .collect();
+    let (spill, output) = a_spill_and_an_output(
+        "the_report_says_how_much_disk_the_parked_records_took",
+        records,
+    );
+
+    let run = fit_score_and_write_the_calls(
+        &spill,
+        vec![a_fittable_histogram(), a_fittable_histogram()],
+        &outbred(2),
+        an_ordinary_request(),
+        &output,
+        metadata_over(2),
+        diploid(),
+    )
+    .expect("the run finishes");
+
+    // **The size the file really had, measured here rather than taken from the field.** Comparing
+    // the printed figure against the field it was formatted from is self-consistent by
+    // construction; the spill is gone by now, so the check is that the field is a real size and
+    // that the line renders it in the unit it claims.
+    let bytes = run
+        .spill_bytes_on_disk
+        .expect("pass one finished, so the size was read");
+    assert!(
+        bytes > 64 * 1024,
+        "the fixture must exceed the 64 KiB write buffer, or a size read before the flush would \
+         pass this test too; got {bytes} bytes"
+    );
+    let lines = what_to_tell_the_operator(&run).join("\n");
+    let printed = lines
+        .split_once("the parked records took ")
+        .expect("the report gives the spill's size")
+        .1
+        .split_once(" on disk")
+        .expect("the size line ends as it began")
+        .0;
+    // Rendered as kibibytes, and the digits are the real ones: a divisor of 1000 rather than 1024
+    // moves the first decimal place at this size, and calling it MB would move the unit.
+    assert_eq!(
+        printed,
+        format!("{:.1} kiB", bytes as f64 / 1024.0),
+        "the size must be the file's own, in the unit it names: {lines}"
+    );
+    assert!(
+        lines.contains("and are gone"),
+        "and say the file does not outlive the run: {lines}"
+    );
+}
+
+/// **A spill whose size could not be read says so**, rather than leaving the line out — the figure
+/// is there so an operator can size a filesystem, and silence reads as an empty spill.
+#[test]
+fn a_spill_whose_size_is_unknown_says_so_rather_than_printing_nothing() {
+    let (spill, output) = a_spill_and_an_output(
+        "a_spill_whose_size_is_unknown_says_so_rather_than_printing_nothing",
+        vec![a_record(100, 1, ONE_COPY_DEPTH)],
+    );
+    let mut run = fit_score_and_write_the_calls(
+        &spill,
+        vec![a_fittable_histogram()],
+        &outbred(1),
+        an_ordinary_request(),
+        &output,
+        metadata_over(1),
+        diploid(),
+    )
+    .expect("the run finishes");
+
+    run.spill_bytes_on_disk = None;
+    let lines = what_to_tell_the_operator(&run).join("\n");
+    assert!(
+        lines.contains("size on disk could not be read"),
+        "an unreadable size is said, not omitted: {lines}"
+    );
+    assert!(
+        !lines.contains("the parked records took"),
+        "and it does not also claim a size: {lines}"
+    );
+}
+
+/// **Finishing pass one twice keeps the size it measured the first time.** The early return for an
+/// already-finished spill sits above the `stat`; a refactor hoisting the `stat` out of the match
+/// would clobber the size with a second read, and nothing else would notice.
+#[test]
+fn finishing_pass_one_twice_keeps_the_size_it_measured() {
+    let (mut spill, _output) = a_spill_and_an_output(
+        "finishing_pass_one_twice_keeps_the_size_it_measured",
+        vec![a_record(100, 2, ONE_COPY_DEPTH)],
+    );
+    let first = spill.bytes_on_disk().expect("pass one finished");
+    assert!(first > 0, "a parked record occupies bytes");
+    spill.finish_writing().expect("finishing twice is allowed");
+    assert_eq!(
+        spill.bytes_on_disk(),
+        Some(first),
+        "the size is the one pass one measured, not a second reading"
     );
 }

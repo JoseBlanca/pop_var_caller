@@ -30,6 +30,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use thiserror::Error;
 
@@ -60,6 +61,18 @@ const BUFFER_BYTES: usize = 64 * 1024;
 /// times larger.
 pub struct SpillFile {
     path: PathBuf,
+    /// When this spill was named, which is just before the calling loop starts — **not** when its
+    /// first record arrived, since naming one creates nothing.
+    ///
+    /// **Plan step D2 asks for the wall each pass spent**, and the calling pass is the only one
+    /// that runs outside `fit_score_and_write_the_calls`; taking the clock here rather than in
+    /// each subcommand keeps one clock instead of two copies of it in the two copies of the
+    /// wiring that already differ only by an error type.
+    named_at: Instant,
+    /// Bytes on disk when pass one finished, or `None` before that. **What it is for**: the spill
+    /// holds every record's line uncompressed plus about ten bytes a sample, so it is several
+    /// times a compressed output and nothing said by how much (B2 review M6).
+    bytes_on_disk: Option<u64>,
     /// The open writer, from the first appended entry until [`Self::finish_writing`].
     writer: Option<SpillWriter<BufWriter<File>>>,
     /// How far through its life the file is, which is what says whether there is anything to
@@ -91,6 +104,8 @@ impl SpillFile {
     pub fn beside(output: &Path) -> Self {
         Self {
             path: spill_path_beside(output),
+            named_at: Instant::now(),
+            bytes_on_disk: None,
             writer: None,
             stage: Stage::NotYetCreated,
             entries_written: 0,
@@ -176,7 +191,24 @@ impl SpillFile {
         // Dropping the `BufWriter` closes the handle. It has just been flushed, so its own
         // `Drop` has nothing left to swallow.
         drop(buffered);
+        // **After the flush, so it is the whole file and not what had reached the disk.** A
+        // failure here is not the run's problem — the spill is written and readable, and the size
+        // is a line in a report — so it leaves `None` rather than ending the run.
+        self.bytes_on_disk = fs::metadata(&self.path).ok().map(|it| it.len());
         Ok(())
+    }
+
+    /// When this spill was named — the start of the calling pass, and before its first record.
+    #[must_use]
+    pub fn named_at(&self) -> Instant {
+        self.named_at
+    }
+
+    /// How large the spill grew, once pass one has finished; `None` before that, or where the
+    /// size could not be read.
+    #[must_use]
+    pub fn bytes_on_disk(&self) -> Option<u64> {
+        self.bytes_on_disk
     }
 
     /// Open a cursor over the file, from the beginning. **May be called more than once** — pass
@@ -260,6 +292,8 @@ impl Drop for SpillFile {
             path,
             writer,
             stage,
+            named_at: _,
+            bytes_on_disk: _,
             entries_written: _,
         } = self;
         // Closing the handle before unlinking is not needed on Unix and is on Windows.
