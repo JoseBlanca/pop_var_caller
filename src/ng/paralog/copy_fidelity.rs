@@ -53,7 +53,7 @@
 //! comparison: without that the extraction would run to the end of production's file and the
 //! comparison would fail somewhere unrelated, blaming the copy.
 //!
-//! # The lines a copy may change: three sanctioned kinds
+//! # The lines a copy may change: four sanctioned kinds
 //!
 //! A copy that names `crate::paralog::` reaches back into production from inside ng — at
 //! compile time if it is a `use`, and at *read* time if it is a rustdoc link, which sends a
@@ -64,7 +64,7 @@
 //! file, header included, so a header line can be repointed without breaking the rule that
 //! production's header survives verbatim.
 //!
-//! `calibration.rs` has **seven** such lines, and two of them are the other two kinds that
+//! `calibration.rs` has **seven** such lines, and two of them are other kinds that
 //! [`WhyRepointed`] names:
 //!
 //! - a **path into production**, as above;
@@ -77,6 +77,12 @@
 //!   rule from the one `src/ng/mod.rs` states about widening a *production* item so a parity
 //!   test can see it, and with a different subject.
 //!
+//! `coverage_model.rs` has the fourth: an **input type ng owns**. The fit reads its histogram
+//! from `crate::sample_summary` in production and from `crate::ng::window_coverage` in ng, which
+//! is the whole point of the port — a copy that kept production's path would tie ng's filter to
+//! the frozen tree for good. Only the module prefix moves, so the type named after it is
+//! unchanged by construction and this can never swap one type for another.
+//!
 //! **Every rule is exact rather than loose.** Production's side must appear **exactly once**,
 //! ng's side must be **exactly** the declared replacement at that same line, and the
 //! indentation and the line ending must match. Each kind further requires that ng's line be
@@ -85,16 +91,27 @@
 //! compares production's file against that very declaration. So a *new* path edit, a dropped
 //! declaration, and a declaration that quietly changes a constant all fail.
 //!
-//! # Releasing a file
+//! # Narrowing a span, and releasing a file
 //!
-//! A file this port deliberately changes is **deleted from `guarded_copies` in the commit
-//! that changes it**, not commented out, and the release is recorded in the table below
-//! and in that file's own module header. Switching the guard off at the first divergence
-//! would throw away a working check on every file that is still a copy.
+//! **Narrow before you release.** A copy that gains content of its own — ng's
+//! `coverage_model.rs` has a test module whose fixture names ng's histogram fields, three lines
+//! where production has four — declares `ng_ends_before` and keeps the whole of its *logic*
+//! compared. Releasing that file instead would have thrown away a byte-for-byte check on 694
+//! lines to accommodate a three-line fixture, and the numeric differential next door
+//! ([`production_parity`](super::production_parity)) covers the *scorer*, not the fit, so
+//! nothing else would have been watching it.
+//!
+//! A file this port deliberately changes *throughout* is **deleted from `guarded_copies` in the
+//! commit that changes it**, not commented out, and the release is recorded in the table below
+//! and in that file's own module header.
 //!
 //! | released at | file | why |
 //! |---|---|---|
 //! | — | — | nothing released yet |
+//!
+//! | span narrowed at | file | where ng's copy stops, and why |
+//! |---|---|---|
+//! | 2026-09-07 | `coverage_model.rs` | `#[cfg(test)]` — ng's transcribed fixture builds the histogram from ng's own field names, and three lines becoming two is not a substitution any repoint can express |
 //!
 //! # What is deliberately *not* copied
 //!
@@ -155,10 +172,20 @@ enum WhyRepointed {
     /// keyword**: nothing else about the item may move, and no other visibility change is
     /// sanctioned.
     VisibilityNgsPublicModuleNeeds,
+    /// **An input type ng owns, where production names its own.** The copied statistics read
+    /// their inputs from production's modules; ng builds the same inputs itself, so a copy that
+    /// kept production's path would make ng's filter depend on the frozen tree forever — the
+    /// opposite of what the port is for. `production_type` is the path production's line names;
+    /// `ng_type` is ng's. **The rest of the line must be untouched**, and the two must name the
+    /// same type: this sanctions a different *source* for a type, never a different type.
+    InputTypeNgOwns {
+        production_type: &'static str,
+        ng_type: &'static str,
+    },
 }
 
 /// One line a copy is allowed to change: production's text, the text ng puts in its place,
-/// and which of the three sanctioned reasons it is.
+/// and which of the four sanctioned reasons it is.
 struct Repoint {
     production_line: &'static str,
     ng_line: &'static str,
@@ -188,6 +215,16 @@ struct GuardedCopy {
     /// span of a larger file. `None` where the copy runs to the end. Compared on the trimmed
     /// line, and a marker that never matches is a guard failure, not a pass.
     ends_before: Option<&'static str>,
+    /// Where **ng's** copy stops, when it does not simply end there.
+    ///
+    /// `None` — the usual case — means ng's file ends where the span ends, so the extraction
+    /// runs to its end and a copy that took *more* of production than it declared still fails.
+    /// `Some(marker)` is for a copy that has content of its own past the span: ng's
+    /// `coverage_model.rs` transcribes production's file up to its test module and then has a
+    /// test module of its own, whose fixture names ng's histogram fields rather than
+    /// production's. Declaring it here says so, where inferring it would quietly stop catching a
+    /// copy that overran.
+    ng_ends_before: Option<&'static str>,
     /// The sanctioned substitutions, each of which must occur exactly once.
     repoints: &'static [Repoint],
 }
@@ -198,14 +235,27 @@ struct GuardedCopy {
 /// time: a deleted or moved file is a build error, not a silently skipped case.
 fn guarded_copies() -> Vec<GuardedCopy> {
     vec![
+        // **The guard stops before the transcribed tests, and only there.** ng's histogram
+        // renames two of production's fields and drops a third, none of which the *fit* reads —
+        // but production's test fixture builds all eight by name, and three lines becoming two
+        // is not a substitution any repoint can express. So the 694 lines that do the work stay
+        // compared byte for byte, and the fixture below them is free to name ng's fields.
         GuardedCopy {
             file_name: "coverage_model.rs",
             production_path: "src/paralog/coverage_model.rs",
             production_source: include_str!("../../paralog/coverage_model.rs"),
             ng_source: include_str!("coverage_model.rs"),
             begins: CopyBegins::AfterTheModuleHeader,
-            ends_before: None,
-            repoints: &[],
+            ends_before: Some("#[cfg(test)]"),
+            ng_ends_before: Some("#[cfg(test)]"),
+            repoints: &[Repoint {
+                production_line: "use crate::sample_summary::CoverageByGcHistogram;",
+                ng_line: "use crate::ng::window_coverage::CoverageByGcHistogram;",
+                why: WhyRepointed::InputTypeNgOwns {
+                    production_type: "crate::sample_summary",
+                    ng_type: "crate::ng::window_coverage",
+                },
+            }],
         },
         GuardedCopy {
             file_name: "locus_score.rs",
@@ -220,6 +270,7 @@ fn guarded_copies() -> Vec<GuardedCopy> {
             // The first of those two is a `//!` line inside production's module header,
             // which is why substitutions are applied to the whole file rather than only to
             // the content past the header.
+            ng_ends_before: None,
             repoints: &[
                 Repoint {
                     production_line: "use crate::paralog::{GridSpec, SfsPriorSpec};",
@@ -245,6 +296,7 @@ fn guarded_copies() -> Vec<GuardedCopy> {
             ng_source: include_str!("model_params.rs"),
             begins: CopyBegins::AtTheFirstItemDoc,
             ends_before: None,
+            ng_ends_before: None,
             repoints: &[],
         },
         GuardedCopy {
@@ -254,6 +306,7 @@ fn guarded_copies() -> Vec<GuardedCopy> {
             ng_source: include_str!("prior.rs"),
             begins: CopyBegins::AfterTheModuleHeader,
             ends_before: None,
+            ng_ends_before: None,
             repoints: &[],
         },
         // **The one span copy.** Production keeps the calibration in the same file as the
@@ -269,6 +322,7 @@ fn guarded_copies() -> Vec<GuardedCopy> {
             ends_before: Some(
                 "/// The cohort inbreeding coefficient `F`, one value for every sample.",
             ),
+            ng_ends_before: None,
             repoints: &[
                 Repoint {
                     production_line: "/// match [`crate::paralog::prior::DEFAULT_EM_START`] (`0.03`); they are",
@@ -433,14 +487,28 @@ fn production_with_repoints_applied(copy: &GuardedCopy) -> Result<String, String
                 repoint.production_line.contains("pub(crate)")
                     && repoint.production_line.replace("pub(crate)", "pub") == repoint.ng_line
             }
+            WhyRepointed::InputTypeNgOwns {
+                production_type,
+                ng_type,
+            } => {
+                // **Only the module prefix moves**, so the type name after it is untouched by
+                // construction and this cannot swap one type for another. ng's side must point
+                // into ng, which is what stops it naming a third crate or another part of
+                // production.
+                production_type.starts_with("crate::")
+                    && ng_type.starts_with("crate::ng::")
+                    && repoint.production_line.contains(production_type)
+                    && repoint.production_line.replace(production_type, ng_type) == repoint.ng_line
+            }
         };
         if !sanctioned {
             return Err(format!(
-                "{}: THE GUARD COULD NOT RUN — `{}` → `{}` is not one of the three \
+                "{}: THE GUARD COULD NOT RUN — `{}` → `{}` is not one of the four \
                  sanctioned kinds of substitution. A repoint turns a `crate::paralog` path \
                  into a `crate::ng::paralog` one, replaces a documentation link to a \
-                 production item ng does not copy with plain words, or widens a `pub(crate)` \
-                 to a `pub` — and changes nothing else on the line. It may not change what \
+                 production item ng does not copy with plain words, widens a `pub(crate)` \
+                 to a `pub`, or points an input type at ng's own module rather than \
+                 production's — and changes nothing else on the line. It may not change what \
                  the copy computes. Fix the declaration in copy_fidelity.rs; ng's copy is \
                  not the file at fault",
                 copy.file_name, repoint.production_line, repoint.ng_line,
@@ -499,6 +567,7 @@ fn how_the_copy_differs(copy: &GuardedCopy) -> Option<String> {
         ng_source,
         begins,
         ends_before,
+        ng_ends_before,
         repoints: _,
     } = *copy;
 
@@ -549,13 +618,17 @@ fn how_the_copy_differs(copy: &GuardedCopy) -> Option<String> {
             ends_before.unwrap_or_default(),
         ));
     };
+    let Ok(ng_whole) = the_copied_content(ng_source, begins, ng_ends_before) else {
+        return Some(format!(
+            "{file_name}: THE GUARD COULD NOT RUN — the line ng's copy is declared to end              before, `{}`, is not in ng's file any more. Fix `ng_ends_before` in              copy_fidelity.rs; nothing is checking this copy until it is right",
+            ng_ends_before.unwrap_or_default(),
+        ));
+    };
     let ng_body = {
-        let whole = the_copied_content(ng_source, begins, None)
-            .expect("no end marker was asked for, so extraction cannot fail");
         // Normalised the same way as production's span, and only where there is one.
         match ends_before {
-            None => whole,
-            Some(_) => without_trailing_blank_lines(&whole),
+            None => ng_whole,
+            Some(_) => without_trailing_blank_lines(&ng_whole),
         }
     };
 
@@ -647,6 +720,7 @@ fn the_comparison_accepts_an_appended_note_and_rejects_every_other_edit() {
             ng_source: ours,
             begins: CopyBegins::AfterTheModuleHeader,
             ends_before: None,
+            ng_ends_before: None,
             repoints: &[],
         })
     };
@@ -705,6 +779,7 @@ fn the_comparison_accepts_an_appended_note_and_rejects_every_other_edit() {
             ng_source: ours,
             begins: CopyBegins::AtTheFirstItemDoc,
             ends_before: None,
+            ng_ends_before: None,
             repoints: &[],
         })
     };
@@ -744,6 +819,7 @@ fn a_repoint_is_applied_where_declared_and_nowhere_else() {
             ng_source: ours,
             begins: CopyBegins::AfterTheModuleHeader,
             ends_before: None,
+            ng_ends_before: None,
             repoints,
         })
     };
@@ -825,6 +901,7 @@ fn a_guard_that_can_find_no_copied_content_fails_rather_than_passing() {
         ng_source: "//! ng's header\n",
         begins: CopyBegins::AtTheFirstItemDoc,
         ends_before: None,
+        ng_ends_before: None,
         repoints: &[],
     })
     .expect("no copied content must be reported, not silently accepted");
@@ -853,6 +930,7 @@ fn a_span_copy_stops_at_its_marker_and_fails_when_the_marker_is_gone() {
             ng_source: ours,
             begins: CopyBegins::AtTheFirstItemDoc,
             ends_before,
+            ng_ends_before: None,
             repoints: &[],
         })
     };
@@ -887,7 +965,7 @@ fn a_span_copy_stops_at_its_marker_and_fails_when_the_marker_is_gone() {
     );
 }
 
-/// **A declaration that is not one of the three sanctioned kinds is refused, for every kind.**
+/// **A declaration that is not one of the four sanctioned kinds is refused, for every kind.**
 ///
 /// The sanction check is the one thing the content comparison cannot cross-check: the
 /// comparison rewrites production's file *using* the declaration, so a declaration that
@@ -899,7 +977,7 @@ fn a_span_copy_stops_at_its_marker_and_fails_when_the_marker_is_gone() {
 /// that line in ng's copy left the guard green.
 #[test]
 fn a_declaration_that_smuggles_an_edit_is_refused() {
-    let production = "//! header\n\nuse crate::paralog::T;\n/// Tuning knobs for [`gone`].\npub(crate) struct S {\n";
+    let production = "//! header\n\nuse crate::paralog::T;\nuse crate::sample_summary::H;\n/// Tuning knobs for [`gone`].\npub(crate) struct S {\n";
     let refuse = |repoints: &'static [Repoint]| {
         how_the_copy_differs(&GuardedCopy {
             file_name: "f.rs",
@@ -921,6 +999,7 @@ fn a_declaration_that_smuggles_an_edit_is_refused() {
             },
             begins: CopyBegins::AfterTheModuleHeader,
             ends_before: None,
+            ng_ends_before: None,
             repoints,
         })
     };
@@ -946,9 +1025,17 @@ fn a_declaration_that_smuggles_an_edit_is_refused() {
                 ng_line: "pub struct S {",
                 why: WhyRepointed::VisibilityNgsPublicModuleNeeds,
             },
+            Repoint {
+                production_line: "use crate::sample_summary::H;",
+                ng_line: "use crate::ng::window_coverage::H;",
+                why: WhyRepointed::InputTypeNgOwns {
+                    production_type: "crate::sample_summary",
+                    ng_type: "crate::ng::window_coverage",
+                },
+            },
         ])
         .is_none(),
-        "three well-formed declarations, one of each kind",
+        "four well-formed declarations, one of each kind",
     );
 
     // Each kind, smuggling something else on the same line: refused, and named as a guard
@@ -981,6 +1068,28 @@ fn a_declaration_that_smuggles_an_edit_is_refused() {
                 why: WhyRepointed::VisibilityNgsPublicModuleNeeds,
             }][..],
         ),
+        (
+            "an input-type repoint that also swaps the type",
+            &[Repoint {
+                production_line: "use crate::sample_summary::H;",
+                ng_line: "use crate::ng::window_coverage::SomethingElse;",
+                why: WhyRepointed::InputTypeNgOwns {
+                    production_type: "crate::sample_summary",
+                    ng_type: "crate::ng::window_coverage",
+                },
+            }][..],
+        ),
+        (
+            "an input-type repoint pointing somewhere that is not ng",
+            &[Repoint {
+                production_line: "use crate::sample_summary::H;",
+                ng_line: "use crate::var_calling::H;",
+                why: WhyRepointed::InputTypeNgOwns {
+                    production_type: "crate::sample_summary",
+                    ng_type: "crate::var_calling",
+                },
+            }][..],
+        ),
     ] {
         let refused = refuse(repoints).unwrap_or_else(|| {
             panic!(
@@ -994,6 +1103,66 @@ fn a_declaration_that_smuggles_an_edit_is_refused() {
              {refused:?}",
         );
     }
+}
+
+/// **A copy with content of its own past the span declares where it stops, and saying nothing
+/// still catches an overrun.**
+///
+/// Two shapes of span exist and they must not be confused. `calibration.rs` copies a prefix of
+/// production and simply ends, so `ng_ends_before` is `None` and a copy that took *more* of
+/// production than it declared is a failure. `coverage_model.rs` copies up to production's test
+/// module and then has a test module of its own — its fixture names ng's histogram fields, which
+/// no line-for-line substitution can express — so it declares `ng_ends_before` and the guard
+/// compares only the span.
+///
+/// **The declaration is what separates them, not a guess.** Inferring ng's boundary from whether
+/// the marker happens to appear would quietly turn the first case into the second, and the
+/// overrun check below would stop failing.
+#[test]
+fn a_copy_that_continues_past_the_span_says_so_and_is_believed_only_then() {
+    let production = "//! header\n\n/// One\npub const A: u8 = 1;\n\n#[cfg(test)]\nmod tests {}\n";
+    // ng copied the same item and then wrote a test module of its own.
+    let ours = "//! ng's header\n\n/// One\npub const A: u8 = 1;\n\n#[cfg(test)]\nmod tests;\n";
+    let span = |ng_ends_before| {
+        how_the_copy_differs(&GuardedCopy {
+            file_name: "f.rs",
+            production_path: "a synthetic original",
+            production_source: production,
+            ng_source: ours,
+            begins: CopyBegins::AtTheFirstItemDoc,
+            ends_before: Some("#[cfg(test)]"),
+            ng_ends_before,
+            repoints: &[],
+        })
+    };
+
+    assert!(
+        span(Some("#[cfg(test)]")).is_none(),
+        "the copied span is identical; what ng has past it is not this guard's business",
+    );
+
+    let overran = span(None).expect("without the declaration, ng's extra lines are an overrun");
+    assert!(
+        !overran.contains("THE GUARD COULD NOT RUN"),
+        "an undeclared overrun is the copy drifting, not the guard breaking; got {overran:?}",
+    );
+
+    let the_guard_is_broken = how_the_copy_differs(&GuardedCopy {
+        file_name: "f.rs",
+        production_path: "a synthetic original",
+        production_source: production,
+        ng_source: ours,
+        begins: CopyBegins::AtTheFirstItemDoc,
+        ends_before: Some("#[cfg(test)]"),
+        ng_ends_before: Some("/// A line ng's copy does not have"),
+        repoints: &[],
+    })
+    .expect("a marker that matches nothing on ng's side must be reported");
+    assert!(
+        the_guard_is_broken.contains("THE GUARD COULD NOT RUN"),
+        "a stale ng-side marker must say the guard is off, not that the copy drifted; got \
+         {the_guard_is_broken:?}",
+    );
 }
 
 /// **The item `calibration.rs`'s span stops before is still the one it means to stop before.**

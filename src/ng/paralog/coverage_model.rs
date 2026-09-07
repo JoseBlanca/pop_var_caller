@@ -35,22 +35,27 @@
 //! guards are the tomato2 prototype's, inherited and **not re-measured**
 //! (`doc/devel/ng/spec/hidden_paralog_filter.md` §3.1, plan step A1).
 //!
-//! **The histogram it fits from is still production's type, and swapping it will cost
-//! four lines, not one.** ng's own copy of the histogram lives in
-//! `src/ng/window_coverage/`, on the unmerged `ng-window-coverage` branch — both the
-//! module and the spec that describes it (`doc/devel/ng/spec/window_coverage.md` §3.5) are
-//! there and nowhere else, so a reader on this branch will not find either. The *fit*
-//! reads five of the histogram's fields — `window_bp`, `gc_bins`, `depth_bin_width`,
-//! `depth_bins`, `counts` — and ng's copy carries all five. But the file does not end at
-//! the fit: its transcribed test fixture builds the histogram with all eight of
-//! production's fields, and ng's copy drops `n_skipped_tiles` and `callable_positions` and
-//! renames `n_positions` to `windows_folded`. So the swap is the `use` line below plus
-//! three lines of that fixture — inside a file this guard forbids editing, which is
-//! exactly why it lands as its own commit that releases the file and says what it did.
+//! **The histogram it fits from is ng's own** ([`crate::ng::window_coverage`]), where
+//! production's reads `crate::sample_summary`. That one-line difference is declared to the
+//! copy guard as an *input type ng owns* — the port exists so that ng's filter does not
+//! depend on the frozen tree, and a copy that kept production's path would have tied it there
+//! for good.
+//!
+//! **The fit needed nothing else.** It reads five of the histogram's fields — `window_bp`,
+//! `gc_bins`, `depth_bin_width`, `depth_bins`, `counts` — and ng's histogram carries all five
+//! under the same names. The three that differ (production's `n_positions` and
+//! `n_skipped_tiles` are ng's `windows_folded` and `windows_under_the_floor`, and
+//! `callable_positions` has no counterpart) are read by no line of the fit.
+//!
+//! **The transcribed tests below are outside the guard, and only they are.** Production's
+//! fixture builds the histogram naming all eight of its fields; ng's names the six it has, and
+//! three lines becoming two is not a substitution any line-for-line repoint can express. So the
+//! guard's span stops at `#[cfg(test)]` and the 694 lines above it — the whole of the fit —
+//! stay compared byte for byte.
 
 use thiserror::Error;
 
-use crate::sample_summary::CoverageByGcHistogram;
+use crate::ng::window_coverage::CoverageByGcHistogram;
 
 /// Default minimum tile count for a GC bin's curve value to be trusted;
 /// thinner bins are gap-filled from neighbours (prototype `>= 50`).
@@ -720,9 +725,8 @@ mod tests {
             gc_bins,
             depth_bin_width: width,
             depth_bins,
-            n_positions: n,
-            n_skipped_tiles: 0,
-            callable_positions: n,
+            windows_folded: n,
+            windows_under_the_floor: 0,
             counts,
         }
     }
