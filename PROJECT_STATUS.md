@@ -4373,14 +4373,15 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     no position can cross, and an assert names the premise if it breaks again.
 
 #### Window coverage — each sample's depth and GC around a locus, and the histogram behind it
-- **Status:** `fixes-applied` — **Milestones A and B complete, Milestone C steps C1, C2 and C3
+- **Status:** `fixes-applied` — **Milestones A and B complete, Milestone C steps C1 to C4
   complete** (branch `ng-window-coverage`): the accumulator, the floor, the per-sample depth
   scale, the rule that turns one drawn record into covered positions with a depth at each, the
   measurement that says the rule's cheapest branch is sound on real data, the reference in the
   merge's cache, the accumulator itself in each sample's window there, and the half-window
-  look-ahead that stops each region's last centres being absent. **The measurement runs on real
-  data in both modes, no VCF byte has moved, and what the run reads now equals a whole-store
-  recomputation bit for bit.** Next: C4, the pair on the locus and beside the record.
+  look-ahead that stops each region's last centres being absent, and the pair itself on every
+  record the run writes. **The measurement runs on real data in both modes, no VCF byte has moved,
+  the two modes' windows are identical bit for bit, and what the run reads equals a whole-store
+  recomputation.** Next: C5, the histograms out of the cache, and then Checkpoint C.
 - **Plan:** [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md);
   **Spec:** [window_coverage.md](doc/devel/ng/spec/window_coverage.md). No architecture
   document — the spec's §3 type blocks are the code shape. Its consumer, built separately:
@@ -4398,7 +4399,8 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   [B2](doc/devel/reports/implementations/ng_window_coverage_b2_2026-09-06.md),
   [C1](doc/devel/reports/implementations/ng_window_coverage_c1_2026-09-06.md),
   [C2](doc/devel/reports/implementations/ng_window_coverage_c2_2026-09-06.md),
-  [C3](doc/devel/reports/implementations/ng_window_coverage_c3_2026-09-06.md);
+  [C3](doc/devel/reports/implementations/ng_window_coverage_c3_2026-09-06.md),
+  [C4](doc/devel/reports/implementations/ng_window_coverage_c4_2026-09-07.md);
   **reviews:** [A1](doc/devel/reports/reviews/ng_window_coverage_a1_2026-09-06.md) (1 Blocker,
   5 Major, 18 Minor), [A2](doc/devel/reports/reviews/ng_window_coverage_a2_2026-09-06.md)
   (4 Major, 4 Minor), [A3](doc/devel/reports/reviews/ng_window_coverage_a3_2026-09-06.md)
@@ -4407,7 +4409,9 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   9 Minor), [B2](doc/devel/reports/reviews/ng_window_coverage_b2_2026-09-06.md) (3 Major,
   11 Minor), [C1](doc/devel/reports/reviews/ng_window_coverage_c1_2026-09-06.md) (1 Blocker,
   6 Major, 8 Minor), [C2](doc/devel/reports/reviews/ng_window_coverage_c2_2026-09-06.md) (4 Major,
-  2 Minor), [C3](doc/devel/reports/reviews/ng_window_coverage_c3_2026-09-06.md) (5 Major, 9 Minor)
+  2 Minor), [C3](doc/devel/reports/reviews/ng_window_coverage_c3_2026-09-06.md) (5 Major, 9 Minor),
+  [C4](doc/devel/reports/reviews/ng_window_coverage_c4_2026-09-07.md) (1 Blocker, 4 Major,
+  12 Minor)
   — all applied or raised with a home; each step's fixes are in its own commit. **C2's correctness
   review ran a session late**, its design half having landed inside C2's own commit; its findings
   are fixed forward in their own commit after C3.
@@ -4540,6 +4544,23 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   every window the floor silenced. All four are caught now. **Raised, not fixed:** the example
   `ng_cohort_merge_real_cost` does not compile, and has not on `main` either; C1 added two further
   errors to it, and repairing it needs a decision about a module another branch is working in.
+- **C4 done (the pair on the locus and beside every record):** each cohort locus carries one
+  window per covering sample, read at its first base; the evidence gathered for output carries it
+  dense over the run's samples; and the record sink takes it beside the record, which is what keeps
+  the VCF byte-identical — the record itself gains nothing. **The two modes agree bit for bit over
+  all 13,866 rows** (2,311 records × 6 samples), which the mode-equivalence oracle now compares
+  itself, and **13,589 of them match the whole-store recomputation with 0 disagreements**; the rest
+  have nothing to report on either side. The twelve C3 measured as missing were never written
+  records. **The `None` ambiguity C2 left open is settled by refusing to compare an unmeasured
+  window rather than by splitting the type**: `render`, the one place that defines "the same
+  answer" across the merge's drivers, destructures the locus and leaves the field out, and a new
+  test states the asymmetry out loud, including that some locus carries a real number. **The review
+  found a Blocker that the branch's own green criterion could not**: two integration tests had
+  stopped compiling, and `cargo test --lib` does not build them, so twenty assertions had quietly
+  stopped running — `cargo check --lib --tests` is part of green here now. It also found the
+  extended oracle **passing when neither mode measured anything**, which is the same
+  absence-against-absence failure one level up, and that "the locus's first base" had no test at
+  all, every fixture with a real measurement using a one-base locus where first and last coincide.
 - **Open:** the floor's default (spec §3.3) and the histogram's three bin constants (spec §3.4)
   are soft until plan steps D1 and D2 measure them.
 - **Checkpoint A ruled by the owner, 2026-09-06, and the spec updated with it:** `finish` hands

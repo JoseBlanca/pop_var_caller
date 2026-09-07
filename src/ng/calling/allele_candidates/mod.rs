@@ -1297,6 +1297,12 @@ pub(super) mod fixtures {
                 end: Position(100),
             },
             alleles: alleles.iter().map(|bases| Box::from(*bases)).collect(),
+            // No window coverage: these fixtures are about the allele table, and a sample with
+            // no window there is what a run with the measurement off carries.
+            window_coverage: vec![
+                crate::ng::window_coverage::WindowCoverage::absent();
+                per_sample.len()
+            ],
             per_sample,
             kind: LocusKind::Generic,
         }

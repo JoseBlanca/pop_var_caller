@@ -54,14 +54,16 @@ use crate::ng::ref_seq::WindowedRefSeq;
 use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::run::cohort_merge::build::{CohortObservation, RegionOutcome};
 use crate::ng::run::cohort_merge::observation_cache::{ObservationCache, ObservationSource};
+use crate::ng::run::cohort_merge::recorded_windows::record_the_windows_at;
 use crate::ng::run::cohort_merge::serial::{
     merge_cohort_handing_each_locus_over,
     merge_cohort_handing_each_locus_over_covering_samples_in_parallel, merge_cohort_through_cache,
 };
 use crate::ng::run::cohort_merge::{CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads};
-use crate::ng::types::{GenomeRegion, ReadGroupId};
+use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::ng::vcf::VcfRecord;
 use crate::ng::vcf::assemble::assemble_record;
+use crate::ng::window_coverage::WindowCoverage;
 use crate::pop_var_caller::common::format_md5_hex;
 
 use super::RunError;
@@ -661,7 +663,7 @@ impl AlignedFilesVariantCaller {
     pub fn call_cohort_handing_each_record_over<S, G, E>(
         self,
         genotyper: &G,
-        hand_over: &mut impl FnMut(&VcfRecord) -> Result<(), E>,
+        hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
     ) -> Result<WrittenCohort, RunError>
     where
         G: LocusGenotyper<S>,
@@ -809,7 +811,7 @@ pub(crate) fn call_cohort_from_sources_handing_each_record_over<Source, S, G, E>
     mut cache: ObservationCache<Source>,
     inputs: CohortCallingInputs<'_>,
     genotyper: &G,
-    hand_over: &mut impl FnMut(&VcfRecord) -> Result<(), E>,
+    hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
 ) -> Result<CohortCallingOutcome<Source>, RunError>
 where
     Source: ObservationSource<Error = RunError> + Send,
@@ -861,6 +863,10 @@ where
     // merge's sink saying *stop* — one `ControlFlow` through both drivers and the region
     // builder — which is a change to the merge's interface and not this step's.
     let mut stopped: Option<RunError> = None;
+    // **One buffer for the run, refilled per record.** It is dense over the run's samples and
+    // lives only from `evidence_for_output` to the sink, which is why the sink takes a slice
+    // rather than the record carrying one.
+    let mut window_coverage: Vec<WindowCoverage> = Vec::with_capacity(run_sample_count);
 
     let merged = merge_cohort_handing_each_locus_over_covering_samples_in_parallel(
         segmentation.analysed_regions(),
@@ -910,6 +916,14 @@ where
                         verdict,
                         padding,
                     );
+                    // **Taken before the evidence is consumed**, into a buffer refilled per
+                    // record rather than allocated: the record itself carries no window, by
+                    // design — a run with the filter off writes byte for byte what it wrote
+                    // before this work — so the pair travels beside it, and this is the last
+                    // place it exists (`spec/window_coverage.md` §3.5).
+                    window_coverage.clear();
+                    window_coverage
+                        .extend(evidence.samples.iter().map(|sample| sample.window_coverage));
                     Ok(Some(assemble_record(&inference, evidence)))
                 },
             );
@@ -919,15 +933,30 @@ where
                 LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {}
                 LocusOutcome::Called(Err(error)) => stopped = Some(error),
                 LocusOutcome::Called(Ok(None)) => loci_called_but_not_written += 1,
-                LocusOutcome::Called(Ok(Some(record))) => match hand_over(&record) {
-                    Ok(()) => records_written += 1,
-                    Err(source) => {
-                        stopped = Some(RunError::RecordNotWritten {
-                            locus: region,
-                            source: Box::new(source),
-                        });
+                LocusOutcome::Called(Ok(Some(record))) => {
+                    // **What this run read, at every record it writes** — off unless the run was
+                    // asked for it, and the only thing outside the run that can see whether the
+                    // cover's look-ahead works, since the measurement changes no VCF byte
+                    // (`cohort_merge::recorded_windows`, spec `window_coverage.md` §10). Here
+                    // rather than where the locus is built, because "at every written record" is
+                    // what the spec asks and this is where that is decided.
+                    record_the_windows_at(
+                        GenomePosition {
+                            contig: region.contig,
+                            position: region.start,
+                        },
+                        &window_coverage,
+                    );
+                    match hand_over(&record, &window_coverage) {
+                        Ok(()) => records_written += 1,
+                        Err(source) => {
+                            stopped = Some(RunError::RecordNotWritten {
+                                locus: region,
+                                source: Box::new(source),
+                            });
+                        }
                     }
-                },
+                }
             }
         },
         &mut loci_too_wide_to_assemble,
@@ -5507,7 +5536,7 @@ mod records_handed_over_as_the_run_finishes_them {
             ObservationCache::over(vec![drawn.into_iter()], Box::new(reference_for_the_merge)),
             inputs,
             &the_shipped_genotyper(),
-            &mut |_record| {
+            &mut |_record, _window_coverage| {
                 handed += 1;
                 Err::<(), std::io::Error>(std::io::Error::other("the disk is full"))
             },
@@ -5543,10 +5572,13 @@ mod records_handed_over_as_the_run_finishes_them {
     fn records_of(caller: AlignedFilesVariantCaller) -> (Vec<VcfRecord>, WrittenCohort) {
         let mut records = Vec::new();
         let written = caller
-            .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |record| {
-                records.push(record.clone());
-                Ok::<(), std::io::Error>(())
-            })
+            .call_cohort_handing_each_record_over(
+                &the_shipped_genotyper(),
+                &mut |record, _window_coverage| {
+                    records.push(record.clone());
+                    Ok::<(), std::io::Error>(())
+                },
+            )
             .expect("the fixture cohort calls and every record is taken");
         (records, written)
     }
@@ -5717,10 +5749,13 @@ mod records_handed_over_as_the_run_finishes_them {
 
         let mut taken = 0;
         let stopped = open_over(std::slice::from_ref(&zeta), &reference)
-            .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |_record| {
-                taken += 1;
-                Err(std::io::Error::other("the disk is full"))
-            })
+            .call_cohort_handing_each_record_over(
+                &the_shipped_genotyper(),
+                &mut |_record, _window_coverage| {
+                    taken += 1;
+                    Err(std::io::Error::other("the disk is full"))
+                },
+            )
             .expect_err("a refused record ends the run");
 
         assert_eq!(taken, 1, "the sink is not called again after it refuses");
@@ -5875,9 +5910,10 @@ mod records_handed_over_as_the_run_finishes_them {
         let mut writer = VcfWriter::create(&path, metadata, Ploidy::try_new(2).expect("a diploid"))
             .expect("the output opens");
         let written = caller
-            .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |record| {
-                writer.write_record(record)
-            })
+            .call_cohort_handing_each_record_over(
+                &the_shipped_genotyper(),
+                &mut |record, _window_coverage| writer.write_record(record),
+            )
             .expect("calls");
         writer.finish().expect("the file is renamed into place");
 
@@ -6100,9 +6136,10 @@ mod records_handed_over_as_the_run_finishes_them {
                 VcfWriter::create(&path, metadata, Ploidy::try_new(2).expect("a diploid"))
                     .expect("the output opens");
             let written = caller
-                .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |record| {
-                    writer.write_record(record)
-                })
+                .call_cohort_handing_each_record_over(
+                    &the_shipped_genotyper(),
+                    &mut |record, _window_coverage| writer.write_record(record),
+                )
                 .expect("the mixed cohort calls");
             writer.finish().expect("the file is renamed into place");
             (std::fs::read(&path).expect("the VCF is there"), written)
@@ -6501,10 +6538,13 @@ mod records_handed_over_as_the_run_finishes_them {
                 "the record path must take the parallel sweep here, not its serial fallback",
             );
             open_over_the_tract_ground_with(&paths, &reference, MergeParameters::DEFAULT)
-                .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |record| {
-                    records.push(record.clone());
-                    Ok::<(), std::io::Error>(())
-                })
+                .call_cohort_handing_each_record_over(
+                    &the_shipped_genotyper(),
+                    &mut |record, _window_coverage| {
+                        records.push(record.clone());
+                        Ok::<(), std::io::Error>(())
+                    },
+                )
                 .expect("the record path calls")
         });
 

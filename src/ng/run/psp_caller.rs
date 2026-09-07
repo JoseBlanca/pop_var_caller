@@ -50,6 +50,7 @@ use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::region_typing::GenomeRegions;
 use crate::ng::types::{Bp, ReadGroupId};
 use crate::ng::vcf::VcfRecord;
+use crate::ng::window_coverage::WindowCoverage;
 
 use crate::ng::calling::allele_candidates::CandidateSelectionConfig;
 
@@ -428,7 +429,7 @@ impl PspVariantCaller {
     pub fn call_cohort_handing_each_record_over<S, G, E>(
         self,
         genotyper: &G,
-        hand_over: &mut impl FnMut(&VcfRecord) -> Result<(), E>,
+        hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
     ) -> Result<(CohortCallingTallies, StoredCohortTallies), RunError>
     where
         G: LocusGenotyper<S>,
@@ -1838,7 +1839,7 @@ mod tests {
         let (tallies, stored) = caller
             .call_cohort_handing_each_record_over(
                 &the_shipped_genotyper(),
-                &mut |record: &VcfRecord| {
+                &mut |record: &VcfRecord, _window_coverage: &[WindowCoverage]| {
                     handed.push(record.region());
                     Ok::<(), std::io::Error>(())
                 },

@@ -693,6 +693,28 @@ impl<'a> From<&WindowedCohort<'a>> for WindowedCohort<'a> {
     }
 }
 
+impl WindowedCohort<'static> {
+    /// **A window that answers nothing**, and the one definition of it.
+    ///
+    /// It covers no sample, holds no record and has no window at any position — which is what a
+    /// caller assembling a cohort locus from records it already holds has to hand over
+    /// ([`CohortObservation::over`](super::build::CohortObservation::over)), and what every
+    /// fixture written before the coverage measurement existed means. A locus assembled through
+    /// it gets an absent pair for every covering sample.
+    ///
+    /// **Named rather than `Default`**, because it is not a generally usable view: `samples()`
+    /// answers zero for it and `summary_at` panics on it. It is a legal answer to one question —
+    /// what was this sample's window here — and the name is what says so.
+    #[must_use]
+    pub fn with_nothing_measured() -> Self {
+        Self {
+            observations: None,
+            summaries: None,
+            finalised_windows: None,
+        }
+    }
+}
+
 /// Records alone are a window: the summaries come from them as they are asked for.
 impl<'a> From<&'a [&'a [SampleLocusObservations]]> for WindowedCohort<'a> {
     fn from(observations: &'a [&'a [SampleLocusObservations]]) -> Self {
@@ -3316,9 +3338,22 @@ mod tests {
                 .collect();
             let whole_slices: Vec<&[SampleLocusObservations]> =
                 whole.iter().map(Vec::as_slice).collect();
+            // **Rendered through `fixtures::render`, not `Debug` on the whole outcome**, which
+            // is what leaves the window coverage out: only the cached side takes that
+            // measurement, so comparing it here would fail on a difference that is not a
+            // disagreement. What checks that field is
+            // `serial::tests::the_cached_driver_measures_windows_where_the_in_memory_one_has_none`.
             let oracle: Vec<String> = builder_regions
                 .iter()
-                .map(|at| format!("{:?}", build_region(*at, &whole_slices, max_span, keep)))
+                .map(|at| {
+                    super::super::fixtures::render(&build_region(
+                        *at,
+                        &whole_slices,
+                        max_span,
+                        keep,
+                    ))
+                    .join(" | ")
+                })
                 .collect();
 
             // Under test: every builder is handed the cache's window.
@@ -3335,17 +3370,17 @@ mod tests {
                 });
                 cache.cover(*at).expect("the fixture sources hold");
                 through_cache.push(cache.with_observations(*at, |windows| {
-                    format!(
-                        "{:?}",
-                        build_region_windowed::<std::convert::Infallible>(
+                    super::super::fixtures::render(
+                        &build_region_windowed::<std::convert::Infallible>(
                             *at,
                             windows,
                             max_span,
                             keep,
                             &|_, _| unreachable!("the fixture's sources build every record"),
                         )
-                        .expect("an infallible build")
+                        .expect("an infallible build"),
                     )
+                    .join(" | ")
                 }));
             }
 

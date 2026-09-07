@@ -133,7 +133,7 @@ cache's deque at every built locus and asserts bit-identity with the probe, on t
 slice. **Green before and after this commit**, so that the absent-at-region-edges failure is
 visible if it ever returns. *Depends:* C2. *Source:* spec §3.3, §6 trap 3.
 
-**C4. ☐ The pair on the locus and beside the record.** `CohortObservation` gains
+**C4. ✅ The pair on the locus and beside the record.** `CohortObservation` gains
 `window_coverage`, parallel to `per_sample`, read at the locus's first base;
 `SampleEvidenceForOutput` gains the dense pair; the sink both callers take becomes
 `FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>`, with the VCF writer's adaptor

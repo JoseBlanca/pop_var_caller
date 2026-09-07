@@ -19,8 +19,14 @@
 //! on the other, and the comparison would then report every locus as one the run had no window
 //! for — which is the shape of a *pass* in this measurement, not of a failure.
 //!
+//! **One row a sample per record the run writes, not per locus the merge builds.** A locus that
+//! establishes no variant becomes no record and leaves no row, so it is outside what the
+//! comparison checks. That is the right set — the record is where the filter will read the pair,
+//! and spec §10 asks for "every written record" — but a reader chasing a boundary failure should
+//! know the built-but-unwritten loci are not in the file.
+//!
 //! **It is off unless [`PATH_VARIABLE`] names a file**, and off it costs one already-resolved
-//! `OnceLock` read per built locus. It is not a debugging aid left lying about: it is the only way
+//! `OnceLock` read per written record. It is not a debugging aid left lying about: it is the only way
 //! the look-ahead's failure is observable, and deleting it would leave that step proved by nothing.
 //!
 //! **The file is a process's, resolved once.** Two calling runs inside one process would interleave
@@ -32,7 +38,6 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::sync::{Mutex, OnceLock};
 
-use super::observation_cache::WindowedCohort;
 use crate::ng::types::{ContigId, GenomePosition, Position};
 use crate::ng::window_coverage::WindowCoverage;
 
@@ -42,10 +47,12 @@ pub const PATH_VARIABLE: &str = "NG_WINDOW_COVERAGE_FILE";
 /// One row: which sample, which locus, and what that sample's window there was — or that it had
 /// none.
 ///
-/// **`None` and an absent window are two different rows**, and keeping them apart is the whole
-/// point of writing this down. `None` is the run holding no window at that position at all, which
-/// is what a cover that stopped short leaves behind; an absent window is one the accumulator
-/// finalised and the floor silenced, which is a reading rather than a gap.
+/// **`None` and an absent window are two different rows, and no run writes the first.** `None` is
+/// a run holding nothing at that position at all; an absent window is one that was finalised and
+/// reports nothing. A cohort locus collapses the two before a record is written, so what reaches
+/// this type from a run is always `Some` — measured on the tomato slice, 0 of 13,866 rows carry
+/// the `-` form. The distinction is the format's, kept because reading it back is what a
+/// comparison does.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RecordedWindow {
     /// The sample's index in the run's sample order.
@@ -58,9 +65,10 @@ pub struct RecordedWindow {
 
 /// The open file, or `None` where the variable was not set. Resolved once per process.
 ///
-/// **A `Mutex` and not a per-thread file**, because the parallel merge builds several regions at
-/// once and the rows must not interleave inside a line. The lock is taken once per built locus,
-/// which is the same order of magnitude as the VCF write the same locus already causes.
+/// **A `Mutex` around it rather than a bare handle**, because a `static` has to be `Sync` and the
+/// writer is reached through a shared reference. The record loop is one thread, so it is never
+/// contended; it is taken once per written record, beside the VCF write that record already
+/// causes.
 fn sink() -> Option<&'static Mutex<BufWriter<File>>> {
     static SINK: OnceLock<Option<Mutex<BufWriter<File>>>> = OnceLock::new();
     SINK.get_or_init(|| {
@@ -148,24 +156,29 @@ pub fn read_a_row(line: &str) -> Result<RecordedWindow, String> {
 /// What both halves write and read where the run held no window at all.
 const ABSENT_FROM_THE_RUN: &str = "-";
 
-/// One locus's rows: every sample of the run, in the run's sample order.
+/// One locus's rows: one per entry of `windows_of_every_sample`, which is dense over the run's
+/// samples and in the run's own sample order.
 ///
-/// **A sample with no window is written down rather than omitted**, so that the comparison can
-/// tell "the run had nothing here" from "the run never reached this locus" — which are the two
-/// halves of the failure being looked for.
+/// **A sample with no window is written down rather than omitted**, as an *absent* pair — two
+/// `NaN`s. That is what "no window" looks like by the time it reaches here: the merge's own
+/// three-way distinction collapses on the way to the record
+/// ([`CohortObservation`](super::build::CohortObservation)'s own `window_coverage`), so **no run
+/// writes the row's `-` form**, which survives on the reading side alone. What the comparison
+/// reads is a row present against a row missing, and a row is missing only where a locus became
+/// no record.
 ///
 /// **Split from the write below because the write is unreachable under test**: the file is named
 /// by an environment variable and no fixture sets one, so without this the sample index, the
 /// position and the absent rows would all be untested — and each of the three is silently wrong
 /// in a way the comparison would blame on the merge rather than on this.
-fn rows_for(at: GenomePosition, window: &WindowedCohort<'_>) -> String {
+fn rows_for(at: GenomePosition, windows_of_every_sample: &[WindowCoverage]) -> String {
     let mut rows = String::new();
-    for sample in 0..window.samples() {
+    for (sample, window) in windows_of_every_sample.iter().enumerate() {
         write_the_row(
             RecordedWindow {
                 sample,
                 at,
-                window: window.window_coverage_at(sample, at),
+                window: Some(*window),
             },
             &mut rows,
         );
@@ -173,18 +186,19 @@ fn rows_for(at: GenomePosition, window: &WindowedCohort<'_>) -> String {
     rows
 }
 
-/// Write every sample's window at `at` — the first base of a locus the run has just built.
+/// Write every sample's window at `at` — the first base of a locus the run has just written a
+/// record for.
 ///
 /// # Panics
 ///
-/// A write or a flush that fails ends the process rather than the run, and under the parallel
-/// merge it does so on a rayon worker. That is the cost of a facility with no error channel into
-/// a builder's loop, and it is bounded by being opt-in: a run that names no file cannot reach it.
-pub fn record_the_windows_at(at: GenomePosition, window: &WindowedCohort<'_>) {
+/// A write or a flush that fails ends the process rather than the run. That is the cost of a
+/// facility with no error channel into the record loop, and it is bounded by being opt-in: a run
+/// that names no file cannot reach it.
+pub fn record_the_windows_at(at: GenomePosition, windows_of_every_sample: &[WindowCoverage]) {
     let Some(sink) = sink() else {
         return;
     };
-    let rows = rows_for(at, window);
+    let rows = rows_for(at, windows_of_every_sample);
     let mut file = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     file.write_all(rows.as_bytes())
         .unwrap_or_else(|why| panic!("writing the window-coverage record: {why}"));
@@ -252,8 +266,8 @@ mod tests {
 
     /// **One row a sample, naming that sample and that locus** — the three fields the comparison
     /// keys on, each silently wrong in its own way: an index off by one compares every sample
-    /// against its neighbour's windows, a position off by one finds no centre at all, and an
-    /// omitted absent row turns "the run had nothing here" into "the run never reached this
+    /// against its neighbour's windows, a position off by one finds no centre at all, and a
+    /// silenced sample omitted turns "the run had nothing here" into "the run never reached this
     /// locus", which is one of the two halves of the failure this whole facility exists to see.
     #[test]
     fn a_locus_writes_one_row_a_sample_naming_the_sample_and_the_locus() {
@@ -265,37 +279,24 @@ mod tests {
             gc_fraction: 0.5,
             mean_depth: 3.25,
         };
-        // Sample 0 has a window centred here; sample 1's nearest is elsewhere, so it has none.
-        let sample_0 = [(at, measured)];
-        let sample_1 = [(
-            GenomePosition {
-                contig: ContigId(1),
-                position: Position(401),
-            },
-            measured,
-        )];
-        let per_sample: [&[(GenomePosition, WindowCoverage)]; 2] = [&sample_0, &sample_1];
-        let no_summaries: [&[super::super::observation_cache::LocusSummary]; 2] = [&[], &[]];
-        let window = WindowedCohort {
-            observations: None,
-            summaries: Some(&no_summaries),
-            finalised_windows: Some(&per_sample),
-        };
+        // Sample 0 was measured here; sample 1 had no usable window and carries the absent pair.
+        let windows_of_every_sample = [measured, WindowCoverage::absent()];
 
-        let rows: Vec<RecordedWindow> = rows_for(at, &window)
+        let rows: Vec<RecordedWindow> = rows_for(at, &windows_of_every_sample)
             .lines()
             .map(|line| read_a_row(line).expect("its own rows parse"))
             .collect();
 
-        assert_eq!(rows.len(), 2, "one row a sample, present or not");
+        assert_eq!(rows.len(), 2, "one row a sample, measured or not");
         assert_eq!(rows[0].sample, 0);
         assert_eq!(rows[0].at, at);
         assert_eq!(rows[0].window, Some(measured));
         assert_eq!(rows[1].sample, 1);
         assert_eq!(rows[1].at, at);
         assert_eq!(
-            rows[1].window, None,
-            "a sample the run has no window for is written down, not left out",
+            rows[1].window,
+            Some(WindowCoverage::absent()),
+            "a sample with no usable window is written down, not left out",
         );
     }
 
@@ -316,10 +317,8 @@ mod tests {
         );
     }
 
-    /// **Off, the recorder must not look at the window at all**, which is what makes it free in
-    /// an ordinary run and what lets it be called from inside the builders' loop. A window with
-    /// no measurement would answer `None` for every sample; the point here is that it is never
-    /// asked.
+    /// **Off, the recorder must not touch the windows at all**, which is what makes it free in an
+    /// ordinary run and what lets it be called from inside the record loop.
     #[test]
     fn with_no_file_named_nothing_is_written_and_nothing_is_read() {
         // The variable is process-wide and this suite runs threaded, so the test asserts the
@@ -331,16 +330,12 @@ mod tests {
              file per locus of every fixture",
         );
         assert!(sink().is_none());
-        // A window over no samples: were the recorder to reach past `samples()`, this would
-        // panic rather than return.
-        let empty: [&[crate::ng::locus_generation::SampleLocusObservations]; 0] = [];
-        let window = WindowedCohort::from(&empty[..]);
         record_the_windows_at(
             GenomePosition {
                 contig: ContigId(0),
                 position: Position(1),
             },
-            &window,
+            &[WindowCoverage::absent()],
         );
     }
 }

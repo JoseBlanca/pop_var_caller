@@ -489,7 +489,16 @@ impl WindowRecomputation {
             .collect();
         loci.sort_unstable_by_key(|(at, _)| *at);
         for (at, run_said) in loci {
-            let walk_says = self.window_at(at);
+            // **"Nothing to report" is spelled two ways and means one thing.** The run writes an
+            // *absent* pair — two `NaN`s — for a sample whose coverage does not begin at this
+            // position and for one whose window the position floor silenced, because a cohort
+            // locus collapses the two on its way to the record. This walk answers `None` where it
+            // finalised no centre, and an absent pair where the floor silenced one. Comparing the
+            // spellings rather than the fact reports a disagreement at every locus a sample does
+            // not cover: measured, 277 of 13,866 on the tomato slice, every one of them the run
+            // saying "absent" against the walk saying "none".
+            let run_said = a_usable_window(run_said);
+            let walk_says = a_usable_window(self.window_at(at));
             match (run_said, walk_says) {
                 (None, None) => comparison.neither_side_had_a_window += 1,
                 (None, Some(_)) => {
@@ -500,7 +509,7 @@ impl WindowRecomputation {
                             .push(one_locus_as_text(at));
                     }
                 }
-                // The run finalised a centre this walk did not: impossible, since the walk sees
+                // The run reports a window this walk does not: impossible, since the walk sees
                 // every position the run does and closes strictly more. Counted as a
                 // disagreement so that it cannot pass unremarked.
                 (Some(run), None) => {
@@ -580,6 +589,22 @@ impl ComparisonWithTheRun {
             ));
         }
     }
+}
+
+/// A window that reports something, or `None` for either way of having nothing to report.
+///
+/// **Absent and missing are one answer to the consumer**, which is the filter: it skips a sample
+/// it has no window for, and an absent pair is what it is handed for one. Keeping them apart here
+/// would make this oracle fail on a difference in spelling.
+///
+/// **One thing this hides, and it is not reachable today.** A window the *run* silenced against
+/// one the walk measured would land in "the run had no window here" rather than in the
+/// disagreements — which is where a truncated cover's centres land too, so the two would be
+/// counted together. Nothing on the tomato slice silences a window (`windows-under-the-floor` is
+/// 0 there), so the case does not arise; plan step D1, which sets the floor from a distribution,
+/// is where it could start to.
+fn a_usable_window(window: Option<WindowCoverage>) -> Option<WindowCoverage> {
+    window.filter(|window| !window.is_absent())
 }
 
 /// Whether the run's window and this walk's are the same measurement.
@@ -1243,6 +1268,28 @@ mod tests {
         assert_eq!(found.wide_tract_records, 1);
         assert_eq!(found.bases_in_wide_records, 4);
         assert_eq!(found.bases_in_wide_tract_records, 4);
+    }
+
+    /// **The three spellings of "no usable window" collapse into one**, which is what stops this
+    /// oracle reporting a disagreement at every locus a sample does not cover: the run records an
+    /// absent pair there, and a walk that finalised no centre has nothing at all.
+    #[test]
+    fn absent_and_missing_are_one_answer_and_a_number_is_not() {
+        assert_eq!(a_usable_window(None), None);
+        assert_eq!(
+            a_usable_window(Some(WindowCoverage::absent())),
+            None,
+            "an absent pair is a window with nothing to report, like no window at all",
+        );
+        let measured = WindowCoverage {
+            gc_fraction: 0.5,
+            mean_depth: 3.25,
+        };
+        assert_eq!(
+            a_usable_window(Some(measured)),
+            Some(measured),
+            "a window that reports something is not collapsed with the ones that do not",
+        );
     }
 
     /// **Two absent windows are the same measurement, and two a last bit apart are not.** The

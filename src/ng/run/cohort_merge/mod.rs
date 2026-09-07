@@ -188,10 +188,21 @@ pub(super) mod fixtures {
     /// A whole outcome rendered entry by entry — what "the same answer" means across this
     /// module's drivers.
     ///
-    /// **The comparison is on the `Debug` rendering**: `CohortObservation` has no `PartialEq`,
-    /// a comparison written field by field would silently stop covering a field added later,
-    /// and two distinct `f64` sums render as distinct strings, so a quality divided differently
-    /// shows.
+    /// **Every field is rendered by `Debug` and the fields are named one at a time**, which is
+    /// what lets one of them be left out. `CohortObservation` has no `PartialEq`, and two distinct
+    /// `f64` sums render as distinct strings, so a quality divided differently shows. The
+    /// destructure is what keeps the exclusion from spreading: a field this type gains is a
+    /// compile error here, and whoever adds it has to say whether the drivers must agree on it.
+    ///
+    /// **The window coverage is the field left out, and leaving it out is a decision.** Only the
+    /// driver reading through the observation cache takes that measurement; the in-memory driver
+    /// it is compared against holds every record at once and takes none, so its every pair is
+    /// absent. Rendering it would make these comparisons fail on a difference that is not a
+    /// disagreement. **The tempting repair is worse**: asserting only that both sides are absent
+    /// passes whatever the cached driver did, including measuring nothing at all. What checks the
+    /// field is
+    /// `serial::tests::the_cached_driver_measures_windows_where_the_in_memory_one_has_none`,
+    /// which says out loud that one side has numbers and the other does not.
     pub(in crate::ng::run) fn render(outcome: &super::build::RegionOutcome) -> Vec<String> {
         // Destructured, not field-accessed: this function is what "the same answer" means for
         // every comparison in the module, so a field `RegionOutcome` gains has to be answered
@@ -202,7 +213,19 @@ pub(super) mod fixtures {
         } = outcome;
         cohort_observations
             .iter()
-            .map(|observed| format!("{observed:?}"))
+            .map(|observed| {
+                // Destructured for the same reason, one level down: a field `CohortObservation`
+                // gains is a compile error here rather than a comparison that quietly stops
+                // covering it.
+                let super::build::CohortObservation {
+                    region,
+                    alleles,
+                    per_sample,
+                    kind,
+                    window_coverage: _,
+                } = observed;
+                format!("{region:?} {alleles:?} {per_sample:?} {kind:?}")
+            })
             .chain(
                 failed_locus_spans
                     .iter()

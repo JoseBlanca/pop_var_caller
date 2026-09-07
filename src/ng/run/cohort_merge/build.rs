@@ -41,6 +41,7 @@ use crate::ng::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, WitnessedLocusPositions,
 };
 use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
+use crate::ng::window_coverage::WindowCoverage;
 use crate::pileup_record::ChainId;
 
 /// The byte a gathered reference position starts as, so that a position no member
@@ -976,7 +977,9 @@ pub fn build_region_handing_over_windowed<'a, E>(
             Verdict::Build => {
                 let observation = match window.observations {
                     // Records in hand: the members are slices of them, and nothing can fail.
-                    Some(records) => CohortObservation::over(&locus.resolved_against(records)),
+                    Some(records) => {
+                        CohortObservation::over(&locus.resolved_against(records), window)
+                    }
                     // Evidence still compressed: this is where it is decoded, and the only
                     // place after the cover where a run can fail.
                     None => {
@@ -995,23 +998,9 @@ pub fn build_region_handing_over_windowed<'a, E>(
                             refused.push(resolved.region);
                             continue;
                         }
-                        CohortObservation::over(&resolved)
+                        CohortObservation::over(&resolved, window)
                     }
                 };
-                // **What this run read, for something outside it to check** — off unless the run
-                // was asked for it, and the only way the cover's look-ahead is observable at
-                // all, since the measurement changes no VCF byte (`super::recorded_windows`).
-                // **Here rather than at the record sink, and only until the next plan step**: the
-                // loci built are exactly the loci written, and this is the read the filter will
-                // make. Once the pair travels on the observation (step C4), the sink is where
-                // "at every written record" is decided and this call belongs there.
-                super::recorded_windows::record_the_windows_at(
-                    crate::ng::types::GenomePosition {
-                        contig: observation.region.contig,
-                        position: observation.region.start,
-                    },
-                    window,
-                );
                 keep(observation);
             }
             Verdict::Failed => refused.push(locus.region),
@@ -1101,15 +1090,38 @@ pub struct CohortObservation {
     /// where a contig end clamps one. Nothing is cloned for the loci the walk closes and
     /// does not build.
     pub kind: LocusKind,
+    /// Each covering sample's read depth and GC over the 500-base window centred on this
+    /// locus's **first base** — one entry per entry of [`per_sample`](Self::per_sample), at the
+    /// same index (`doc/devel/ng/spec/window_coverage.md` §3.5).
+    ///
+    /// **Both fields `NaN` where the sample has no usable window there**, which is one answer to
+    /// three questions and deliberately so: the sample's coverage begins a base later, or the
+    /// window it would have had was built from too few covered positions and the floor silenced
+    /// it, or the run took no measurement at all. The filter that reads this skips a sample it
+    /// has no window for, which is what its scorer already does for an absent sample, so the
+    /// three need no distinguishing here — but **compared by bit pattern, never by `==`**, which
+    /// [`WindowCoverage`]'s own `PartialEq` does.
+    ///
+    /// **The third of those is why the drivers' agreement comparison excludes this field.** A
+    /// merge run over records held whole in memory takes no measurement, so its every entry is
+    /// absent; comparing it against the cache's would be comparing absence against a number.
+    /// `cohort_merge::fixtures::render` says so at the one place that decides what "the same
+    /// answer" means for this module.
+    pub window_coverage: Vec<WindowCoverage>,
 }
 
 impl CohortObservation {
-    /// Assemble one cohort locus: unify the alleles, then attribute every covering sample's
-    /// reads to them.
+    /// Assemble one cohort locus: unify the alleles, attribute every covering sample's reads to
+    /// them, and read each of those samples' window at the locus's first base.
     ///
     /// Only a locus the caller undertakes to build, for the reason
     /// [`LocusReferenceBases::over`] gives.
-    pub fn over(locus: &ClosedLocus<'_>) -> Self {
+    ///
+    /// **`window` is the same view the members were resolved against**, so the sample indices
+    /// the allele table produced are the ones its windows are asked for. A view carrying no
+    /// measurement — every fixture that predates it, and the in-memory driver the cached one is
+    /// compared against — gives every sample an absent pair.
+    pub fn over(locus: &ClosedLocus<'_>, window: &WindowedCohort<'_>) -> Self {
         // Destructured rather than field-accessed, so that anything the table gains has to
         // be answered for here — dropped deliberately or carried — instead of vanishing.
         let (
@@ -1120,11 +1132,27 @@ impl CohortObservation {
             },
             per_sample,
         ) = AlleleTable::assemble(locus);
+        // **The locus's first base, and the same reading of it the ownership rule uses.** A
+        // window is centred on a position; which position a locus is keyed by has to be one
+        // answer, and this is the one `build_region` decides ownership on.
+        let first_base = GenomePosition {
+            contig: locus.region.contig,
+            position: locus.region.start,
+        };
+        let window_coverage = per_sample
+            .iter()
+            .map(|support| {
+                window
+                    .window_coverage_at(support.sample, first_base)
+                    .unwrap_or_else(WindowCoverage::absent)
+            })
+            .collect();
         Self {
             region: locus.region,
             alleles: alleles.distinct,
             per_sample,
             kind: locus.kind.clone(),
+            window_coverage,
         }
     }
 }
@@ -2242,6 +2270,65 @@ mod tests {
             reads_discarded_by_cap: 0,
             kind: LocusKind::Generic,
         }
+    }
+
+    /// A cohort window carrying **no window-coverage measurement**, which is what every fixture
+    /// in this module has: they hold records, and the measurement is the observation cache's.
+    /// A locus assembled through one gets an absent pair for every covering sample.
+    fn no_measurement() -> WindowedCohort<'static> {
+        WindowedCohort::with_nothing_measured()
+    }
+
+    /// **A locus's window is read at its first base and not its last**, which is spec §3.5's rule
+    /// and the same position `build_region` decides ownership on.
+    ///
+    /// **The fixtures elsewhere here cannot tell the two apart**, because their loci span one
+    /// base — reading the last would give the same answer at every one of them, and the
+    /// mode-equivalence oracle cannot see it either, since both modes would read the same wrong
+    /// position. So this is a five-base locus with a different window at each end.
+    #[test]
+    fn the_window_is_read_at_the_locus_first_base_and_not_its_last() {
+        let span = region(10, 14);
+        let at_the_first = WindowCoverage {
+            gc_fraction: 0.25,
+            mean_depth: 3.0,
+        };
+        let at_the_last = WindowCoverage {
+            gc_fraction: 0.75,
+            mean_depth: 9.0,
+        };
+        let windows = [
+            (
+                GenomePosition {
+                    contig: span.contig,
+                    position: span.start,
+                },
+                at_the_first,
+            ),
+            (
+                GenomePosition {
+                    contig: span.contig,
+                    position: span.end,
+                },
+                at_the_last,
+            ),
+        ];
+        let per_sample: [&[(GenomePosition, WindowCoverage)]; 1] = [&windows];
+        let members = [member(span, b"AAAAA", b"AAAAT")];
+        let observed = CohortObservation::over(
+            &closed_locus(span, &[&members]),
+            &WindowedCohort {
+                observations: None,
+                summaries: None,
+                finalised_windows: Some(&per_sample),
+            },
+        );
+
+        assert_eq!(
+            observed.window_coverage,
+            vec![at_the_first],
+            "the window came from the locus's last base, or from neither end",
+        );
     }
 
     /// A closed locus over `region` whose members are the given observations, one entry
@@ -3398,10 +3485,14 @@ mod tests {
         }];
         let generic = [member(region(10, 13), b"ATAT", b"ATAT")];
 
-        let over_a_tract = CohortObservation::over(&closed_locus(region(10, 13), &[&tract]));
+        let over_a_tract =
+            CohortObservation::over(&closed_locus(region(10, 13), &[&tract]), &no_measurement());
         assert_eq!(over_a_tract.kind, LocusKind::Ssr(tract_detail));
 
-        let over_generic = CohortObservation::over(&closed_locus(region(10, 13), &[&generic]));
+        let over_generic = CohortObservation::over(
+            &closed_locus(region(10, 13), &[&generic]),
+            &no_measurement(),
+        );
         assert_eq!(over_generic.kind, LocusKind::Generic);
     }
 
@@ -3424,7 +3515,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&one_record, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         let support = &observed.per_sample[0];
 
         assert_eq!(support.sample, 0);
@@ -3495,7 +3586,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&two_lanes, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         let support = &observed.per_sample[0];
         let snp = observed
             .alleles
@@ -3597,7 +3688,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         let support = &observed.per_sample[0];
         let compound = observed
             .alleles
@@ -3727,7 +3818,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&records, &deletion]);
 
-        let _ = CohortObservation::over(&locus);
+        let _ = CohortObservation::over(&locus, &no_measurement());
     }
 
     /// The same refusal where the sample has three records and the disagreement is at the
@@ -3743,7 +3834,7 @@ mod tests {
         let deletion = [member(region(10, 16), b"ACGTACT", b"A")];
         let locus = closed_locus(region(10, 16), &[&records, &deletion]);
 
-        let _ = CohortObservation::over(&locus);
+        let _ = CohortObservation::over(&locus, &no_measurement());
     }
 
     /// The same refusal where the odd read group is at the sample's **first** record — the one
@@ -3765,7 +3856,7 @@ mod tests {
         let deletion = [member(region(10, 16), b"ACGTACT", b"A")];
         let locus = closed_locus(region(10, 16), &[&records, &deletion]);
 
-        let _ = CohortObservation::over(&locus);
+        let _ = CohortObservation::over(&locus, &no_measurement());
     }
 
     /// The same disagreement at the sample's **last** record — see the test above for why both
@@ -3781,7 +3872,7 @@ mod tests {
         let deletion = [member(region(10, 16), b"ACGTACT", b"A")];
         let locus = closed_locus(region(10, 16), &[&records, &deletion]);
 
-        let _ = CohortObservation::over(&locus);
+        let _ = CohortObservation::over(&locus, &no_measurement());
     }
 
     /// **The same three-record sample with one read group throughout is built without
@@ -3794,7 +3885,7 @@ mod tests {
         let deletion = [member(region(10, 16), b"ACGTACT", b"A")];
         let locus = closed_locus(region(10, 16), &[&records, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         let support = &observed.per_sample[0];
         let compound = observed
             .alleles
@@ -3831,7 +3922,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&alternative_first, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         let support = &observed.per_sample[0];
         let alleles: Vec<_> = support.supported.iter().map(|row| row.allele).collect();
 
@@ -3887,7 +3978,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&mixed, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         let keys: Vec<_> = observed.per_sample[0]
             .supported
             .iter()
@@ -3941,7 +4032,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&two_groups, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         let support = &observed.per_sample[0];
         let allele_of = |bases: &[u8]| {
             observed
@@ -4026,7 +4117,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         let support = &observed.per_sample[0];
         let compound = observed
             .alleles
@@ -4104,7 +4195,7 @@ mod tests {
             &[&two_records, &one_read_removed, &deletion],
         );
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         let allele_of = |bases: &[u8]| {
             observed
                 .alleles
@@ -4186,7 +4277,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         let compound = observed
             .alleles
             .iter()
@@ -4261,7 +4352,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&sole_record, &two_records, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         assert_eq!(
             observed.alleles.len(),
             4,
@@ -4308,7 +4399,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         let compound = observed
             .alleles
             .iter()
@@ -4351,6 +4442,7 @@ mod tests {
             &loci[0]
                 .clone()
                 .resolved_against(&[&covering, &nothing, &deletion]),
+            &no_measurement(),
         );
         assert_eq!(
             observed
@@ -4377,7 +4469,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&first, &second, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         assert_eq!(observed.alleles.len(), 4);
         for support in &observed.per_sample {
             assert_eq!(
@@ -4734,7 +4826,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         assert_eq!(observed.per_sample[0].reads_without_observation, 5);
         assert_eq!(observed.per_sample[1].reads_without_observation, 0);
     }
@@ -4813,7 +4905,7 @@ mod tests {
             "the sample must hold exactly the one partial this test is about",
         );
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
 
         assert_eq!(
             observed.per_sample[0].partials,
@@ -4874,7 +4966,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         let sample = &observed.per_sample[0];
 
         assert_eq!(
@@ -4925,7 +5017,7 @@ mod tests {
         let deletion = [member(region(10, 15), b"ACGTAC", b"A")];
         let locus = closed_locus(region(10, 15), &[&members, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
 
         assert_eq!(
             observed.per_sample[0].partials[0]
@@ -4968,7 +5060,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&members, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
 
         assert_eq!(
             observed.per_sample[0]
@@ -5011,7 +5103,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&members, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
 
         assert_eq!(
             observed.per_sample[0]
@@ -5065,7 +5157,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&members, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
 
         assert_eq!(
             observed.per_sample[0]
@@ -5123,7 +5215,7 @@ mod tests {
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
         let locus = closed_locus(region(10, 14), &[&one_read, &deletion]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
         let sample = &observed.per_sample[0];
 
         assert_eq!(
@@ -5201,7 +5293,7 @@ mod tests {
         ];
         let locus = closed_locus(region(0, LAST), &[&whole, &three_records]);
 
-        let observed = CohortObservation::over(&locus);
+        let observed = CohortObservation::over(&locus, &no_measurement());
 
         assert_eq!(
             observed.per_sample[1]

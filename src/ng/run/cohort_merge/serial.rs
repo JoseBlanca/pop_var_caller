@@ -1324,6 +1324,7 @@ mod tests {
             region: span,
             alleles: Vec::new(),
             per_sample: Vec::new(),
+            window_coverage: Vec::new(),
             kind: LocusKind::Generic,
         }
     }
@@ -1719,6 +1720,80 @@ mod tests {
             held_at(20),
             2,
             "and twenty-base regions hold only the last region's records",
+        );
+    }
+
+    /// **The cached driver's loci carry measured windows and the in-memory driver's do not**, and
+    /// this is the only place that says so.
+    ///
+    /// `fixtures::render` — what "the same answer" means for every comparison in this module —
+    /// leaves the window coverage out, because only the driver reading through the observation
+    /// cache takes that measurement. Left there and unexamined, two failures would be invisible:
+    /// the cached driver taking no measurement at all, and the comparison passing because both
+    /// sides are absent. So this asserts the asymmetry outright — the cache's pairs are numbers,
+    /// the oracle's are not, and both are one entry per covering sample.
+    ///
+    /// The fixture is 600 one-base records at three reads each, which is what makes a window
+    /// finalise at all: a centre closes only once the stream has reached 250 bases past it.
+    #[test]
+    fn the_cached_driver_measures_windows_where_the_in_memory_one_has_none() {
+        let dotted: Vec<SampleLocusObservations> = (1..=600)
+            .map(|at| member(region(at, at), b"A", b"T"))
+            .collect();
+        let per_sample: [&[SampleLocusObservations]; 1] = [&dotted];
+
+        let mut cache = ObservationCache::over_fixture(vec![source_of(&dotted)]);
+        let through_cache = merge_cohort_through_cache(
+            &[region(1, 600)],
+            &mut cache,
+            width(100),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltReads::DEFAULT,
+        )
+        .expect("the fixture source holds");
+        let in_memory = merge_cohort_serially(
+            &[region(1, 600)],
+            &per_sample,
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltReads::DEFAULT,
+        );
+
+        assert_eq!(
+            through_cache.cohort_observations.len(),
+            in_memory.cohort_observations.len(),
+            "the two drivers did not build the same loci, so the comparison below is not \
+             between the same things",
+        );
+        for (cached_locus, in_memory_locus) in through_cache
+            .cohort_observations
+            .iter()
+            .zip(&in_memory.cohort_observations)
+        {
+            for locus in [cached_locus, in_memory_locus] {
+                assert_eq!(
+                    locus.window_coverage.len(),
+                    locus.per_sample.len(),
+                    "the windows are parallel to the covering samples, one entry each",
+                );
+            }
+            assert!(
+                in_memory_locus
+                    .window_coverage
+                    .iter()
+                    .all(|window| window.is_absent()),
+                "the in-memory driver took a measurement it has no way to take",
+            );
+        }
+        // **Some locus carries a number**, which is what stops this passing over an outcome of
+        // absences. Not every one does: a centre in the last half-window of the fixture has no
+        // later position to close it.
+        assert!(
+            through_cache
+                .cohort_observations
+                .iter()
+                .flat_map(|observed| &observed.window_coverage)
+                .any(|window| !window.is_absent()),
+            "the cached driver's every window is absent, so it measured nothing",
         );
     }
 

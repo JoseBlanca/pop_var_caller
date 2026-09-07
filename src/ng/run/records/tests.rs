@@ -14,6 +14,7 @@ use crate::ng::run::cohort_merge::build::{
     AlleleSupport, PartialObservation, SampleSupport, SupportedAllele,
 };
 use crate::ng::types::{AlleleId, ContigId, Genotype, Phred, ReadGroupId};
+use crate::ng::window_coverage::WindowCoverage;
 
 /// A one-contig reference spelling `bases`, so a fetch's answer is legible from the fixture.
 fn reference_of(bases: &[u8]) -> InMemoryRefSeq {
@@ -257,6 +258,64 @@ fn locus_called_over(
     )
 }
 
+/// **A covering sample's window lands on the run sample it names, not on its own position in the
+/// merge's list.** The two are the same only when every sample of the run covered the locus.
+///
+/// The merge's windows are one per *covering* sample and the record's evidence is one per *run*
+/// sample; this is the only place the two orders meet, and getting it backwards is a wrong number
+/// rather than a failure — every sample would carry a neighbour's depth. The fixture has three
+/// run samples with the merge covering the first and the **third**, so the two indices differ.
+#[test]
+fn a_covering_samples_window_lands_on_the_run_sample_it_names() {
+    let first = WindowCoverage {
+        gc_fraction: 0.25,
+        mean_depth: 3.0,
+    };
+    let third = WindowCoverage {
+        gc_fraction: 0.75,
+        mean_depth: 9.0,
+    };
+    let mut observation = observed(
+        &[b"A", b"C"],
+        vec![
+            covering(0, vec![row(1, 3, 180)]),
+            covering(2, vec![row(1, 3, 180)]),
+        ],
+    );
+    observation.window_coverage = vec![first, third];
+    let (remap, unmatched) = selected(&observation);
+    let locus = locus_called_over(
+        &[b"A", b"C"],
+        vec![
+            called(&[0, 1], false),
+            SampleGenotypeCall::Missing,
+            called(&[0, 1], false),
+        ],
+        true,
+        None,
+    );
+
+    let evidence = evidence_for_output(
+        &locus,
+        &observation,
+        &remap,
+        &unmatched,
+        SelectionVerdict::Selected,
+        None,
+    );
+
+    assert_eq!(evidence.samples[0].window_coverage, first);
+    assert_eq!(
+        evidence.samples[1].window_coverage,
+        WindowCoverage::absent(),
+        "a run sample the merge did not cover keeps the absent pair it was built with",
+    );
+    assert_eq!(
+        evidence.samples[2].window_coverage, third,
+        "the merge's second covering sample names run sample 2, and its window belongs there",
+    );
+}
+
 /// **A locus every sample was called homozygous-reference at establishes no variant**, so it is
 /// left out of the file: its absence is what says *nothing here* (spec §9).
 #[test]
@@ -346,6 +405,7 @@ fn observed(alleles: &[&[u8]], per_sample: Vec<SampleSupport>) -> CohortObservat
     CohortObservation {
         region: region(100, 100),
         alleles: alleles.iter().map(|bases| Box::from(*bases)).collect(),
+        window_coverage: vec![WindowCoverage::absent(); per_sample.len()],
         per_sample,
         kind: LocusKind::Generic,
     }

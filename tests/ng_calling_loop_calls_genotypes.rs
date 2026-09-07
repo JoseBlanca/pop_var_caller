@@ -80,6 +80,7 @@ use pop_var_caller::ng::parameter_estimation::ssr::{
 use pop_var_caller::ng::run::cohort_merge::MinAltReads;
 use pop_var_caller::ng::run::cohort_merge::build::CohortObservation;
 use pop_var_caller::ng::run::cohort_merge::close::{ClosedLocus, SampleMembers, Verdict};
+use pop_var_caller::ng::run::cohort_merge::observation_cache::WindowedCohort;
 use pop_var_caller::ng::types::{
     AlleleId, ContigId, ErrorRate, GenomeRegion, InbreedingF, Motif, Ploidy, Position, ReadGroupId,
     SsrPeriod, SummedLogError,
@@ -198,13 +199,18 @@ fn merge(per_sample: &[SampleLocusObservations]) -> CohortObservation {
          locus no run can produce"
     );
 
-    CohortObservation::over(&ClosedLocus {
-        region: region(),
-        members,
-        non_reference_reads: per_sample.iter().map(non_reference_of).sum(),
-        verdict: Verdict::Build,
-        kind: &LocusKind::Generic,
-    })
+    CohortObservation::over(
+        &ClosedLocus {
+            region: region(),
+            members,
+            non_reference_reads: per_sample.iter().map(non_reference_of).sum(),
+            verdict: Verdict::Build,
+            kind: &LocusKind::Generic,
+        },
+        // This file is about the calling loop, which reads no window; the measurement is the
+        // observation cache's and no fixture here has one.
+        &WindowedCohort::with_nothing_measured(),
+    )
 }
 
 /// A run of `samples` outbred diploids sequenced from one library, with nothing contaminated
