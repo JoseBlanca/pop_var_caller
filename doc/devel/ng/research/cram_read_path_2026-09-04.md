@@ -35,7 +35,23 @@ so each layer's own cost is a difference between two passes:
 
 It also hashes every field of every decoded record — flags, position, mapping quality, name,
 bases, quality scores and CIGAR — so a change to the decoder has an oracle that is not a
-timing. Every number below comes with that digest unchanged at `a127ecf5083f535a002a5f461f150ede`.
+timing. Every number below comes with that digest unchanged.
+
+> **Corrected 2026-09-07.** This paragraph gave the digest as
+> `a127ecf5083f535a002a5f461f150ede`. **That value is wrong, and was wrong when written.** Re-run
+> on the whole-genome tomato CRAM, `SL4.0ch01`, 60 containers, 600,000 records, the digest is
+> `c0bdbb0e464a920b966ad487fc3ca678` — from this branch, from the merge base `52b7b787`, and from
+> `48a93310`, *the commit this note was written against*, all three built and run. `hash_record`
+> and `container_offsets` are byte-identical across that range, so neither the field set nor the
+> block selection moved: the decode has produced the same records throughout. A second sign the
+> old value could not be right is in the sentence it replaced — it claimed one digest for **both**
+> files this note measures, and two different CRAMs cannot hash to one value. The command:
+>
+> ```
+> ng_cram_decode_layers --reference <tomato 4.00 fa> \
+>     --cram benchmarks/tomato_big_cram/DRR000741.p1.cram \
+>     --contig SL4.0ch01 --containers 60 --repeats 7
+> ```
 
 **The two files it was run on, and why both.**
 
@@ -304,6 +320,13 @@ caching. What requiring sorted input would additionally buy is the index itself 
 sequential walk needs none — which is the 6.3 MB a file above, now taken by a narrower change
 that does not require the guarantee.
 
+**The ng half is built, 2026-09-07** (branch `ng-cram-window`, §9 item 2). Each open CRAM's decode
+reads through a reference reader of its own, one block's span at a time — not the cohort-shared
+window this note proposed, for the reason §9 item 2 now records. Measured on the same file: the
+decode holds **11.4 MB against 185.9 MB** and is 5 % quicker; a whole 10 Mb run holds **148.8 MB
+against 277.8 MB**, VCF byte-identical
+([the report](../../reports/implementations/ng_cram_reference_window_b1_2026-09-07.md)).
+
 ---
 
 ## 8. What was checked and is not worth doing
@@ -348,10 +371,16 @@ In order of what it pays:
    in every DNA-seq observation, which is probably the 7.9 % above. It needs its own profile at
    cohort scale first: everything in the table is a *single-sample* run, and that is the number
    least likely to survive at 63 samples.
-2. **Wire ng to the windowed reference** — §7. The noodles half is built and verified; the ng
-   half is one sliding window shared by the cohort in place of a `Repository`, which is a
-   design change in `read/input/reference.rs`. Worth 167 MB on a tomato chromosome and 416 MB
-   on a human one, fixed per run.
+2. ~~**Wire ng to the windowed reference** — §7.~~ **Done, 2026-09-07**, on branch
+   `ng-cram-window`; the report is
+   [`ng_cram_reference_window_b1_2026-09-07.md`](../../reports/implementations/ng_cram_reference_window_b1_2026-09-07.md).
+   **The design this line proposed is not the one built.** It expected one sliding window shared
+   by the cohort; what shipped is a reference *reader* per open CRAM, minted by the same factory
+   every other consumer of bases in this project uses, each holding one block's span — because a
+   real file's blocks span about 9 kb, not megabases, so a shared window buys nothing and costs a
+   lock on the hottest path (`alignment_cursor.md` §10). Measured on the whole-genome tomato CRAM:
+   the decode alone holds **11.4 MB against 185.9 MB**, and a whole 10 Mb run holds **148.8 MB
+   against 277.8 MB**, VCF byte-identical.
 3. **Re-measure everything on a CRAM 3.1 file before ever claiming it applies there** — §4.
 
 **What is finished rather than merely small.** Reading bytes off disk (1 part in 800), the

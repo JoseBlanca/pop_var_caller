@@ -205,10 +205,16 @@ pub enum AlignmentFileError {
     /// `detail` comes from `ContigList::first_disagreement` and names the first differing field
     /// and index, **file value first**, as at the gate.
     #[error(
-        "the reference accessor for alignment file '{path}' is over a different contig table: \
-         {detail}"
+        "the {reader} reference reader for alignment file '{path}' is over a different contig \
+         table: {detail}"
     )]
-    CursorAccessorContigTable { path: PathBuf, detail: String },
+    CursorAccessorContigTable {
+        path: PathBuf,
+        /// Which of the cursor's reference readers this was — see
+        /// [`Reference::reader`](Self::Reference::reader).
+        reader: &'static str,
+        detail: String,
+    },
 
     /// The reference could not **serve bases** for the contig a cursor was made for, at the
     /// point it was made.
@@ -224,9 +230,16 @@ pub enum AlignmentFileError {
     /// happened to ask for first. **Scoped to this cursor's own contig** since B1 — the check
     /// that used to ask it of every contig in the header cost ~2,580 opens per cursor for a
     /// property that matters only for the one about to be read.
-    #[error("the reference cannot serve alignment file '{path}'")]
+    #[error("the {reader} reference reader cannot serve alignment file '{path}'")]
     Reference {
         path: PathBuf,
+        /// **Which of the cursor's reference readers failed**, in the words an operator can
+        /// act on: `"read filter's"` or `"CRAM decode's"`. A CRAM cursor mints two from one
+        /// caller-supplied factory (`alignment_cursor.md` §10 point 1), and without this the
+        /// two faults render identically — both are keyed on the alignment file's path, which
+        /// is the same for both. A failure of the *second* alone means the factory did not
+        /// return the same thing twice, which is a different thing to go and look at.
+        reader: &'static str,
         #[source]
         source: crate::ng::ref_seq::RefSeqError,
     },
@@ -247,6 +260,27 @@ pub enum AlignmentFileError {
          holds no bases) — supply the reference FASTA"
     )]
     CramNeedsReferenceFasta { path: PathBuf },
+
+    /// A CRAM was opened against a reference whose FASTA is named but whose
+    /// `.fai` could not be read.
+    ///
+    /// **Its own variant rather than [`Self::Open`], because the file that
+    /// cannot be read is not an alignment file.** Reported as `Open` — as it
+    /// was for one commit — the top line reads *"opening alignment file
+    /// '<reference>.fa' failed"*, which names the wrong kind of file and points
+    /// the operator at the FASTA when the missing thing is its index.
+    #[error(
+        "'{path}' is a CRAM, and the reference it decodes against has no readable \
+         index: '{fasta}.fai' could not be read — build it with `samtools faidx`"
+    )]
+    CramReferenceIndexUnreadable {
+        /// The CRAM being opened.
+        path: PathBuf,
+        /// The reference FASTA whose index is missing.
+        fasta: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 
     /// Querying the parsed index for a region's chunks failed.
     ///
@@ -588,14 +622,20 @@ impl SampleReads {
     /// reopened the question every time — index query, seek, decode, filter — for regions
     /// that usually sat in the block the reader was already in.
     ///
-    /// **One reference accessor per file, taken here once** for the cursor's whole life
+    /// **A reference reader per consumer, built once** for the cursor's whole life
     /// rather than rebuilt per region (perf review L2). `RawRefSeq` impls are stateful
     /// readers, so the k files cannot share one: `WindowedRefSeq` holds an open per-contig
     /// reader, and each consumer is meant to own one — k cursors on one accessor would be one
-    /// file position and one window serving k readers. A factory gives each file cursor its
-    /// own; the caller writes one closure. (The type itself stopped forbidding the sharing on
+    /// file position and one window serving k readers. A factory gives each its own; the
+    /// caller writes one closure. (The type itself stopped forbidding the sharing on
     /// 2026-09-01, when it became `Sync` so a walker could cross threads — the ownership rule
     /// is the reason, and it is unchanged.)
+    ///
+    /// **The factory is forwarded, not called here**, because *how many* readers a file needs
+    /// depends on its format and this layer does not know it: a BAM cursor takes one, a CRAM
+    /// cursor two — the second for its decode, which reads reference bases of its own
+    /// (`alignment_cursor.md` §10 point 1). [`AlignmentFile::cursor`] is where that is known,
+    /// and it checks every reader it mints rather than only the first.
     ///
     /// **Every accessor the factory hands out is checked against the file it will serve** — its
     /// contig table against that file's, and its ability to fetch this chromosome's bases
@@ -613,12 +653,12 @@ impl SampleReads {
         mut make_reference: F,
     ) -> Result<SampleCursor<R>, IngestError>
     where
-        R: RawRefSeq + ContigTable,
+        R: RawRefSeq + ContigTable + Send + 'static,
         F: FnMut() -> R,
     {
         let mut cursors = Vec::with_capacity(self.files.len());
         for (source_file_index, file) in self.files.iter().enumerate() {
-            cursors.push(file.cursor(contig, make_reference()).map_err(|source| {
+            cursors.push(file.cursor(contig, &mut make_reference).map_err(|source| {
                 IngestError::File {
                     source_file_index,
                     source,

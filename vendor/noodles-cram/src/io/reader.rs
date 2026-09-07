@@ -15,6 +15,11 @@ use noodles_fasta as fasta;
 use noodles_sam as sam;
 
 pub use self::{builder::Builder, container::Container, query::Query, records::Records};
+// The three types a caller needs to name when it decodes a slice against windows of the
+// reference rather than whole sequences (`FORK.md` changes 5 and 6). `container` itself stays
+// `pub(crate)`, as upstream has it — a caller reaches a `Slice` through `Container::slices` and
+// never names the module.
+pub use self::container::slice::{ReferenceExtent, SequenceExtent, SequenceWindow};
 use self::{container::read_container, header::read_header};
 use crate::{FileDefinition, crai};
 

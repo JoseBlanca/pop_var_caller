@@ -437,28 +437,44 @@ against the accessor instead of the reference:
 > **So the loop is replaced by two checks, not one, and the second keeps exactly one of its
 > ~2,580 opens** — on the contig this cursor is for, which is the only one it will read.
 
-**As built** (`open_bam.rs`, `AlignmentFile::cursor`), in this order — the argument, then the
-accessor's description, then its ability:
+**As built** (`open_bam.rs`, `AlignmentFile::cursor`), in this order — the argument, then each
+reader's description, then its ability. Since 2026-09-07 the function takes the reference
+**factory** rather than one reader, because a CRAM cursor needs two — the mismatch filter's and
+its decode's (`alignment_cursor.md` §10) — and checks 2 and 3 are asked of every reader it mints
+rather than of one argument:
 
 ```rust
-pub fn cursor<R: RawRefSeq + ContigTable>(
-    self: &Arc<Self>, contig: ContigId, reference: R,
+pub fn cursor<R: RawRefSeq + ContigTable + Send + 'static>(
+    self: &Arc<Self>, contig: ContigId, mut make_reference: impl FnMut() -> R,
 ) -> Result<AlignmentCursor<R>, AlignmentFileError> {
-    // 1. the contig is one this file declares — and it is what makes (3) safe to index
+    // 1. the contig is one this file declares — and it is what makes (3) safe to index.
+    //    About the *argument*, so it is asked once.
     if … { return Err(AlignmentFileError::CursorContigNotInFile { … }); }
 
-    // 2. the accessor's table equals the file's — names, lengths, digests, ORDER
-    self.contigs
-        .first_disagreement(reference.contigs())
-        .map_err(|detail| AlignmentFileError::CursorAccessorContigTable { … })?;
+    // 2 and 3 are about a *reader*, so they travel with minting one.
+    let check_reference_reader = |reference: R, probe: &mut Vec<u8>, …| {
+        // 2. its table equals the file's — names, lengths, digests, ORDER
+        self.contigs
+            .first_disagreement(reference.contigs())
+            .map_err(|detail| AlignmentFileError::CursorAccessorContigTable { … })?;
+        // 3. …and it can actually serve this cursor's contig
+        reference.fetch_raw_into(contig, 1, 0, probe)
+            .map_err(|source| AlignmentFileError::Reference { … })?;
+        Ok(reference)
+    };
 
-    // 3. …and it can actually serve this cursor's contig
     let mut probe = Vec::new();
-    reference.fetch_raw_into(contig, 1, 0, &mut probe)
-        .map_err(|source| AlignmentFileError::Reference { … })?;
-    …
+    let reference = check_reference_reader(make_reference(), &mut probe, …)?;
+    // …and on the CRAM arm, a second for the decode, checked the same way.
 }
 ```
+
+> **Minting and checking are one operation on purpose.** An earlier draft checked the table of
+> the first reader only. A **permuted** table carries every name and every length the file
+> declares, so check 3 passes against it — those bases are readable, they are simply another
+> chromosome's — and `ContigId` is an index. On the filter's reader that costs a wrong mismatch
+> fraction; on the decode's it corrupts the read sequences themselves, because a CRAM stores a
+> read as its differences from the reference.
 
 > ⚠ **The error is its own variant, not the gate's `ContigReconcile`**, which this section's
 > first sketch reused. By the time `cursor` runs, `open` has already proved the file *does* match

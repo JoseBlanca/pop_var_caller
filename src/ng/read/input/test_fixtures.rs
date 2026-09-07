@@ -474,6 +474,90 @@ pub(crate) fn named_bam(
 /// bitten before. The `.crai` contig walk is covered instead by hand-built
 /// indexes, which need no file at all: the grouping in `open_bam`'s tests and
 /// the positioning in `aligned_reads_reader::cram`'s.
+/// A FASTA whose bases **vary along the contig**, with its `.fai`, plus a CRAM of `records`
+/// written against it and that CRAM's `.crai`. Returns the CRAM's dir and path and the FASTA's.
+///
+/// **Every other CRAM fixture in this tree is written against an all-`A` reference**
+/// ([`build_fasta`](crate::pileup::per_sample::cram_files::build_fasta)), and so is the
+/// in-memory accessor the cursor tests hand out. That makes them agree by construction — which
+/// is why `t8` stays valid — and it also makes them **blind to a reference read at the wrong
+/// offset**: a CRAM stores each read as its differences from the reference, so decoding against
+/// the wrong bases of an all-`A` chromosome reconstructs exactly the same read, and the slice's
+/// stored MD5 matches too, because every window of that reference has the same digest.
+///
+/// The bases here are a fixed pseudo-random `{A,C,G,T}` sequence — a 64-bit
+/// xorshift, so the fixture is identical on every machine and every run — which makes a
+/// one-base offset change the decoded sequence.
+pub(crate) fn indexed_cram_over_a_varied_reference(
+    records: &[RecordBuf],
+) -> (TempDir, PathBuf, TempDir, PathBuf) {
+    use crate::pileup::per_sample::cram_files::{ContigSpec, HeaderOverrides, build_cram};
+    use std::io::Write as _;
+
+    let specs: Vec<ContigSpec> = FIXTURE_CONTIGS
+        .iter()
+        .map(|(name, length)| ContigSpec {
+            name: (*name).to_string(),
+            length: *length as u64,
+        })
+        .collect();
+
+    let fasta_dir = tempfile::tempdir().expect("a temp dir for the fasta");
+    let fasta = fasta_dir.path().join("varied.fa");
+    let fai = fasta_dir.path().join("varied.fa.fai");
+    let mut fasta_file = std::fs::File::create(&fasta).expect("create the fasta");
+    let mut fai_file = std::fs::File::create(&fai).expect("create the fai");
+    // A fixed seed, so the fixture is the same everywhere; xorshift64, so it needs no crate.
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut offset: u64 = 0;
+    for spec in &specs {
+        let header = format!(">{}\n", spec.name);
+        fasta_file
+            .write_all(header.as_bytes())
+            .expect("write the definition line");
+        offset += header.len() as u64;
+        let bases: Vec<u8> = (0..spec.length)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state % 4) as usize]
+            })
+            .collect();
+        fasta_file.write_all(&bases).expect("write the bases");
+        fasta_file.write_all(b"\n").expect("write the newline");
+        writeln!(
+            fai_file,
+            "{}\t{}\t{}\t{}\t{}",
+            spec.name,
+            spec.length,
+            offset,
+            spec.length,
+            spec.length + 1
+        )
+        .expect("write the fai entry");
+        offset += spec.length + 1;
+    }
+    drop(fasta_file);
+    drop(fai_file);
+
+    let (cram_dir, cram_path) = build_cram(
+        &fasta,
+        &specs,
+        &HeaderOverrides {
+            read_groups: vec![("rg1".to_string(), Some("NA12878".to_string()))],
+            ..HeaderOverrides::default()
+        },
+        records,
+    )
+    .expect("build the cram against the varied reference");
+    let index = noodles_cram::fs::index(&cram_path).expect("index the single-contig cram");
+    let crai_path = PathBuf::from(format!("{}.crai", cram_path.display()));
+    noodles_cram::crai::fs::write(&crai_path, &index).expect("write crai");
+
+    (cram_dir, cram_path, fasta_dir, fasta)
+}
+
 pub(crate) fn indexed_cram(records: &[RecordBuf]) -> (TempDir, PathBuf, TempDir, PathBuf) {
     indexed_cram_declaring(records, &[("rg1", Some("NA12878"))])
 }

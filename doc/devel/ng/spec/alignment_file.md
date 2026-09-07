@@ -510,7 +510,7 @@ production and not depending on trf-mod — read_filtering already reuses `bam/a
 | index policy | `index_preflight::{preflight_alignment_indexes, load_alignment_index, AlignmentIndex}` (`pub`) | — |
 | contig compare | `ContigList::first_disagreement` (`pub(crate)`) | the reconcile call + the `NotCoordinateSorted`/`@SQ`-extraction glue |
 | canonical table | `reference_info::ReferenceInfo` / `contig_list()` | consuming it as the authority (§3.1 inversion) |
-| CRAM reference | `fasta::Repository` (build via noodles, as ng's `CramRecordSource` already does) | — |
+| CRAM reference | a `RawRefSeq` reader of the decode's own — `WindowedRefSeq` in a run, from the cursor factory — one slice's span at a time (`alignment_cursor.md` §10, 2026-09-07; `fasta::Repository` until then) | the per-slice fetch in `decode_container_at`, and the open-time check that the reference carries a FASTA whose `.fai` opens |
 | sample name | ~~`alignment_input::extract_single_sample_name`~~ — **module-private** (`alignment_input.rs:378`), so not ng-reachable; `extract_header` (`:292`) likewise | ng reads `@HD SO` / `@SQ` / `@RG SM` off the noodles `sam::Header` itself (arch §5) |
 | region read | noodles `BinningIndex::query` on the pre-parsed index + own seek/scan (**not** `IndexedReader`/`Reader::query`, §3.3) + `decode_cram_container` shape | the region-query `RecordSource` impls, incl. the `.crai` cursor |
 | filtering | ng `ReadFilter` / `MappedRead` (already ng-owned) | composing it into the per-file chain |
