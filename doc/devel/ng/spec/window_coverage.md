@@ -200,9 +200,10 @@ windows those runs do have.
 stream has passed `p + 250`. A builder handed a region ending at `r` therefore needs every sample
 drawn to `r + 250`, where today `cover` draws to the region's end plus the reach of any observation
 chaining past it ([`observation_cache.rs:761`](../../../../src/ng/run/cohort_merge/observation_cache.rs)).
-**`cover` draws half a window further.** What that costs is half a window more of held summaries
-per sample — about 250 at three reads a position, some tens of kilobytes at a thousand samples —
-and in psp mode the kept bytes behind them, which the source's arena holds regardless
+**`cover` draws half a window further.** What that costs is half a window more of retained
+positions per sample — about 250 at one record a base, each a held summary and range at 48 bytes
+plus the window its centre finalised at 24, which §4 prices at 18 kB a sample and so 18 MB at a
+thousand — and in psp mode the kept bytes behind them, which the source's arena holds regardless
 ([`cohort_merge_psp_path.md`](cohort_merge_psp_path.md) §3.4 records that arena as unreleased; this
 design neither fixes nor worsens that). **Getting this wrong is silent**: a region's last centres
 would be finalised by the *next* cover, after their builder has run, so the builder finds no value
@@ -254,7 +255,8 @@ A sample whose whole run finalises fewer than 10,000 windows sets the width from
 160 kB of live data, and the list grows by doubling, so its capacity reaches 16,384 (measured,
 2026-09-06; this paragraph previously said 120 kB, which left the budget below looking about
 145 kB roomier than it is); 80 MB at a
-thousand samples, 240 MB at three thousand. On tomato that fits today (108 kB + 80); on a human
+thousand samples, 240 MB at three thousand — the histogram alone, where §4 totals every term
+this design adds a sample. On tomato that fits today (108 kB + 80); on a human
 reference it fits once the run's readers share one contig list, the psp path plan's step D1
 (480 kB → 123).
 
@@ -372,9 +374,15 @@ impl WindowCoverageAccumulator {
 
 - **One sample.** Nothing branches: the accumulator is per sample and the reference is fetched
   per cover whatever the cohort size.
-- **Three thousand samples.** 240 MB of histograms, plus half a window of extra held summaries
-  per sample. Both are charged to the per-sample budget §7.2 of `run_streaming.md` names, and
-  §3.4 says which reference fits it today.
+- **Three thousand samples. 319 MB for the whole pass, and 1.1 GB while the samples are still
+  fitting their depth axes.** Per sample: **106.4 kB** for the pass — 80.2 kB histogram, 8.2 kB
+  sliding buffer, and 18 kB of extra positions the look-ahead makes a psp-mode sample retain at one
+  record a base — rising to **368 kB** while §3.4's held-back windows are live. Against the
+  500 kB an open sample §7.2 of `run_streaming.md` names, that is 21% and 74%; §3.4 says which
+  reference fits it today, and its 240 MB is the histogram alone.
+  Added up from the shipped constants 2026-09-07 with each per-unit size pinned by a library
+  test; a whole-run measurement beside it could only bound the per-sample cost at 1.8 MB
+  ([the report](../../reports/implementations/ng_window_coverage_d3_2026-09-07.md) has both).
 - **Three reads a position.** A window of 500 positions at three reads each is a mean over
   ~1,500 reads, which is the reason the filter windows at all (production's spec §4: per-base
   counts cannot tell one copy from two at this depth). The floor matters most here — a window
@@ -385,9 +393,20 @@ impl WindowCoverageAccumulator {
 
 ## 5. Cross-cutting concerns
 
-- **Memory** — §3.4's histogram, the ready deque (one **24-byte** entry per held position per
-  sample: §3.6's `pop_ready` hands back a `GenomePosition` beside the pair, and ng's `Position`
-  is a `u64`), and the half-window of extra held summaries. Nothing grows with the genome.
+- **Memory** — §3.4's histogram (80.2 kB), the sliding window's own buffer (8.2 kB), the
+  half-window of extra retained positions (18 kB in psp mode, at one record a base — 48 bytes of
+  record and 24 of finalised window each), and §3.4's
+  held-back windows while the depth axis is being fitted (262 kB, then nothing). **106.4 kB a
+  sample for the pass and 368 kB at the peak** (§4). Beside those sits the ready deque, one
+  **24-byte** entry per finalised window a sample holds — §3.6's `pop_ready` hands back a
+  `GenomePosition` beside the pair, and ng's `Position` is a `u64`. How many it holds is set by
+  the pace the organiser evicts at rather than by anything here, so it is counted with the
+  merge's held records and not in the figures above. Nothing grows with the genome. **What does
+  grow with the ground a run walks is a term charged to the run, not to the sample**: 33 MB over
+  the tomato slice's 200 kb and 5.5 MB over a twentieth of that ground, measured 2026-09-07,
+  and it does not multiply by the cohort — so a thousand samples do not pay for it a thousand
+  times. Which allocation it is was not measured: the reference each cover reads is the
+  candidate whose shape fits, but 200 kb of ground is only 200 kB of bases (§4's report).
 - **Errors** — a reference fetch that fails is a `RunError` naming the region, as the padding
   fetch's failure already is (`RunError::PaddingBaseUnreadable`). Nothing else here can fail: an
   absent window is a value, not an error.

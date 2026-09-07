@@ -1122,8 +1122,9 @@ where
     /// the organiser's call (milestone E). At 1,000 samples the same walk costs 616 µs a cover
     /// with 4 observations held per sample and 1,028 µs with 200. **The look-ahead adds to the
     /// `held` term rather than to the sweep count**: half a window more of held summaries per
-    /// sample, which `window_coverage.md` §3.3 prices at about 250 at three reads a position and
-    /// some tens of kilobytes across a thousand samples.
+    /// sample, which is about 250 records at one record a base — 12 kB a sample in psp mode and
+    /// so 12 MB across a thousand (`window_coverage.md` §4, and
+    /// `a_held_record_in_psp_mode_is_a_summary_and_a_range_at_48_bytes` below).
     ///
     /// **The window overshoots by at most one observation per sample**, and that is what a
     /// forward reader costs: the only way to know whether the next observation begins beyond
@@ -1896,6 +1897,68 @@ mod tests {
             cache.reference_base_at(position_on(0, 39)),
             None,
             "a base before the region's own start was fetched",
+        );
+    }
+
+    /// **A position the merge retains costs a sample 72 bytes in psp mode**: 48 for the record's
+    /// summary and the range naming its evidence, and 24 for the finalised window at that centre.
+    ///
+    /// Drawing half a window further (`spec/window_coverage.md` §3.3) means every sample holds
+    /// the records over that extra stretch, *and* the windows their centres finalised, until the
+    /// next eviction — `evict_before` drains both together. What one costs in psp mode is
+    /// `held_summaries` plus `held_bodies` plus `window_coverage.finalised`. **Direct mode is
+    /// dearer and is not priced here**: it holds the built record beside them
+    /// (`SampleWindow::held_observations`), 120 bytes of it inline plus its evidence on the heap.
+    ///
+    /// **This pins the size and not the count**, which is coverage-dependent. On the tomato
+    /// slice a sample has 0.99 records a base, so half a window is about 248 more positions
+    /// retained — about 18 kB. The 18 kB the memory report
+    /// (`reports/implementations/ng_window_coverage_d3_2026-09-07.md`) and spec §4 quote is at
+    /// one record a base, which is 250 positions on any reference, because half a window is 250
+    /// bases whatever the genome.
+    ///
+    /// **The 24-byte half is charged over the whole retained stretch, not only the look-ahead's
+    /// share of it**, and how long that stretch is nothing here measures — the report carries it
+    /// as an unpriced term. That the cover really does read half a window and no further is the
+    /// next test's.
+    #[test]
+    fn a_retained_position_in_psp_mode_costs_a_summary_a_range_and_a_window_at_72_bytes() {
+        use core::mem::size_of;
+
+        assert_eq!(
+            size_of::<LocusSummary>(),
+            32,
+            "a field added to `LocusSummary` is charged to every held record of every sample; \
+             spec `window_coverage.md` §4 and §5 and the memory report price a retained position \
+             at 72 bytes",
+        );
+        assert_eq!(
+            size_of::<core::ops::Range<usize>>(),
+            16,
+            "the range beside each summary in psp mode",
+        );
+        assert_eq!(
+            size_of::<(GenomePosition, WindowCoverage)>(),
+            24,
+            "one finalised window, held in `WindowCoverageInProgress::finalised` until eviction \
+             — the term this plan added beside the records, and the one spec §5 prices at \
+             24 bytes",
+        );
+        let a_held_record = size_of::<LocusSummary>() + size_of::<core::ops::Range<usize>>();
+        let a_retained_position = a_held_record + size_of::<(GenomePosition, WindowCoverage)>();
+        assert_eq!(a_retained_position, 72);
+
+        // Half a window is what the look-ahead added, and it comes from the constant rather than
+        // being retyped — the same number the cover's own chain is seeded with.
+        let half_a_window = usize::try_from(crate::ng::window_coverage::WINDOW_BP / 2).unwrap();
+        assert_eq!(
+            half_a_window * a_retained_position,
+            18_000,
+            "half a window is {half_a_window} bases and a retained position is \
+             {a_retained_position} bytes, so at one record a base the look-ahead holds {} bytes \
+             more a sample — where spec `window_coverage.md` §4 and the memory report both say \
+             18 kB",
+            half_a_window * a_retained_position,
         );
     }
 

@@ -164,10 +164,13 @@ scale sample and the factor of ten confirmed or moved, spec §3.4's OPEN closed.
 that the scale sample is a prefix and reads about 13% shallow, so it and the range cannot be moved
 independently.**
 
-**D3. ☐ The memory, per sample.** Peak resident of a psp-mode run at 1, 6 and 63 samples on the
+**D3. ✅ The memory, per sample.** Peak resident of a psp-mode run at 1, 6 and 63 samples on the
 tomato slice, before and after this plan, with the per-sample slope reported against
 [`run_streaming.md`](../spec/run_streaming.md) §7.2's budget; the histogram's 80 kB and the
 look-ahead's held summaries priced separately. *Depends:* C5. *Source:* spec §3.4, §4, §5.
+**106.4 kB a sample for the pass and 368 kB at the peak, added up from the code and pinned by
+tests, because the whole-run measurement can only bound it at 1.8 MB — nine cohort sizes rather
+than three, since three cannot separate a slope from an intercept at this scatter.**
 
 > **Checkpoint D: the floor and the bins are measured defaults, and the cost is a number
 > against the budget. Pause for review.**

@@ -4373,7 +4373,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     no position can cross, and an assert names the premise if it breaks again.
 
 #### Window coverage — each sample's depth and GC around a locus, and the histogram behind it
-- **Status:** `fixes-applied` — **Milestones A, B and C complete** (branch `ng-window-coverage`): the accumulator, the floor, the per-sample depth
+- **Status:** `fixes-applied` — **Milestones A, B, C and D complete** (branch `ng-window-coverage`): the accumulator, the floor, the per-sample depth
   scale, the rule that turns one drawn record into covered positions with a depth at each, the
   measurement that says the rule's cheapest branch is sound on real data, the reference in the
   merge's cache, the accumulator itself in each sample's window there, and the half-window
@@ -4381,8 +4381,9 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   the run writes, and each sample's histogram out of the cache. **The measurement runs on real data
   in both modes, no VCF byte has moved, the two modes' windows and histograms are identical bit for
   bit, and both equal a whole-store recomputation.** **Checkpoint C reached** — the filter plan may
-  start. **Milestone D under way: D1 and D2 have measured the floor and the bin scheme, and all
-  four constants stand.** Next: D3, the memory.
+  start. **Milestone D done too: all four constants measured and all four kept, and the memory
+  priced at 106.4 kB a sample for the pass and 368 kB at its peak. Checkpoint D reached, and with
+  it the whole plan.**
 - **Plan:** [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md);
   **Spec:** [window_coverage.md](doc/devel/ng/spec/window_coverage.md). No architecture
   document — the spec's §3 type blocks are the code shape. Its consumer, built separately:
@@ -4404,7 +4405,8 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   [C4](doc/devel/reports/implementations/ng_window_coverage_c4_2026-09-07.md),
   [C5](doc/devel/reports/implementations/ng_window_coverage_c5_2026-09-07.md),
   [D1](doc/devel/reports/implementations/ng_window_coverage_d1_2026-09-07.md),
-  [D2](doc/devel/reports/implementations/ng_window_coverage_d2_2026-09-07.md);
+  [D2](doc/devel/reports/implementations/ng_window_coverage_d2_2026-09-07.md),
+  [D3](doc/devel/reports/implementations/ng_window_coverage_d3_2026-09-07.md);
   **reviews:** [A1](doc/devel/reports/reviews/ng_window_coverage_a1_2026-09-06.md) (1 Blocker,
   5 Major, 18 Minor), [A2](doc/devel/reports/reviews/ng_window_coverage_a2_2026-09-06.md)
   (4 Major, 4 Minor), [A3](doc/devel/reports/reviews/ng_window_coverage_a3_2026-09-06.md)
@@ -4422,7 +4424,10 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   6 Major and 14 Minor between them, and D2's two —
   [correctness](doc/devel/reports/reviews/ng_window_coverage_d2_correctness_2026-09-07.md) and
   [naming and structure](doc/devel/reports/reviews/ng_window_coverage_d2_design_2026-09-07.md),
-  9 Major and 13 Minor between them
+  9 Major and 13 Minor between them, and D3's two —
+  [correctness](doc/devel/reports/reviews/ng_window_coverage_d3_correctness_2026-09-07.md) and
+  [naming and structure](doc/devel/reports/reviews/ng_window_coverage_d3_design_2026-09-07.md),
+  1 Blocker, 9 Major and 11 Minor between them
   — all applied or raised with a home; each step's fixes are in its own commit. **C2's correctness
   review ran a session late**, its design half having landed inside C2's own commit; its findings
   are fixed forward in their own commit after C3.
@@ -4634,7 +4639,28 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   exceptions — and the overflow fraction was divided by the accumulator's counter where the prose
   claimed production's cell totals; the two agree on every store measured, but nothing was
   checking, and two wrong denominators survived all 21 tests.
-- **Open:** nothing in this plan. Milestone D's last step, D3, prices the memory.
+- **D3 done (the memory, priced), and Milestone D complete:** **106.4 kB a psp-mode sample for the
+  whole calling pass, and 368 kB while its depth axis is being fitted** — 21% and 74% of the 500 kB
+  an open sample [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §7.2 allows. The terms are
+  the histogram (80.2 kB, allocated whole in `new`), the sliding window's buffer (8.2 kB), the
+  18 kB of extra positions the look-ahead makes a sample retain at one record a base, and the
+  262 kB of windows held back until the axis is fitted. **Added up from the code and pinned by two
+  library tests**, because the per-sample cost is far below what a whole-run peak-resident
+  measurement can resolve: over 54 runs — nine cohort sizes, three repeats, two binaries — the
+  slope is 39.5 MB a sample before this plan and 40.3 after, a difference of 0.82 with a standard
+  error of 0.49 against an effect of 0.10. **What the run gives is a ceiling, not a value**: under
+  1.8 MB a sample, and nothing above it appeared. **The 39.5 MB a sample is not §7.2's quantity** —
+  that budget is one open psp, 108 kB on tomato — and it predates this branch; the psp source's
+  unreleased arena is the named candidate and nothing here attributes it. One term this plan adds
+  *can* be seen: tens of megabytes that follow the ground a run walks rather than the cohort
+  (33 MB over 200 kb, 5.5 MB over a twentieth of it, both at one sample), which a per-sample
+  reading would put 52 standard errors from the measured slope. **Open, and named in the report:**
+  the finalised windows retained over the whole stretch between evictions are unpriced, and direct
+  mode's held record is 152 bytes against psp mode's 48. **The review found a Blocker the step's
+  own test had already disproved** — the histogram is allocated in `new`, not when the axis is
+  fitted, so all four terms are live together and the first draft's "a fifth of the budget" was
+  really three quarters.
+- **Open:** nothing in this plan.
 - **Checkpoint A ruled by the owner, 2026-09-06, and the spec updated with it:** `finish` hands
   back **`SampleHistogram`** — the histogram, or which of the three silences it was (the pass
   reached nothing; every window was under the floor, which is a reading on the floor and not a
