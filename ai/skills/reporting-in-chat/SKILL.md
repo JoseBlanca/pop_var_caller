@@ -774,6 +774,33 @@ rule I am proposing*. **A phrase that hedges where a fact comes from must not si
 takes it as the fact itself** — and the repair here was load-bearing, because the whole argument
 for the type change is that an abstention must not be storable as a measurement.
 
+### 2026-09-07 — a gate check that could only see the failures it already knew about
+
+Reporting a step, I wrote that the build gate was "unchanged from the merge base and none in this
+module". A review agent measured **11 clippy errors against the merge base's 9**, and the two extra
+were mine: `variable does not need to be mutable`, on the exact lines the step had changed.
+
+The cause was the command I had been running all session:
+
+> ❌ `cargo clippy … | grep -cE "^error: (can be|the following|this operation)"`
+>
+> ✅ `cargo clippy … | grep -E "^error: " | grep -v "could not compile" | sort | uniq -c`
+
+**The filter listed the three lint kinds the baseline already had.** A *new* kind of lint was
+invisible by construction — not missed, but excluded. And because the count it printed matched the
+baseline every time, the check kept confirming the thing it could no longer detect.
+
+**The rule: a regression check must be able to see a failure it has never seen before.** When
+comparing against a baseline, count *categories* and diff them; never grep for the ones you expect.
+The same shape hides elsewhere — a test filter that names the tests you know about, a diff summary
+read as `--stat`, a log grep for the errors you have already fixed. The tell is that the check's
+pattern was written *from* the baseline rather than from the thing being checked.
+
+**And it is worse in a report than in a terminal.** Quoting "9 errors, unchanged" gave the number
+the authority of a measurement while the measurement had a hole in it. If a figure is a *gate* —
+something asserting that nothing got worse — the command that produced it belongs in the report
+beside it, so a reader can see what it could not have caught.
+
 ## Sources
 
 The diagnosis is not project-specific and the external literature is unusually

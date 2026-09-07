@@ -23,18 +23,24 @@
 //! [`rewrite_filter_and_info`], which is how pass three puts the verdict on a line without
 //! disturbing the columns it does not touch; and [`scoring_context`]'s
 //! [`ParalogScoringContext`], which is what pass two reads — one fitted coverage model per
-//! sample, and the rule turning a spilled row into the four numbers the scorer takes. **Nothing
-//! fills a spill yet**: the sink that appends to it and the three passes themselves are later
-//! steps of the plan above.
+//! sample, and the rule turning a spilled row into the four numbers the scorer takes; and
+//! [`pass_one`]'s [`CalledRecordSink`], which is the choice itself — the VCF writer while the
+//! filter is off, the spill while it is on.
+//!
+//! **What is not built yet are passes two and three**: the scoring that turns parked records into
+//! a cut, and the writing that applies it. Until they are, a run asking for the filter is refused
+//! rather than left holding a spill and no calls.
 
 use crate::ng::types::GenomePosition;
 use crate::ng::vcf::RecordPlace;
 
+pub mod pass_one;
 pub mod patch;
 pub mod scoring_context;
 pub mod spill;
 pub mod spill_file;
 
+pub use pass_one::{CalledRecordSink, PassOneError, SpillingSink, entry_for};
 pub use patch::{LinePatchError, rewrite_filter_and_info};
 pub use scoring_context::{
     CohortSizeMismatch, CoverageFitConfigRefused, ParalogScoringContext, WhyNoCoverageModel,

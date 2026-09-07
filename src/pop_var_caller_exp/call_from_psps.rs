@@ -48,6 +48,7 @@ use crate::ng::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
 use crate::ng::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
+use crate::ng::run::paralog_filter::CalledRecordSink;
 use crate::ng::run::report::BoundsTheRunCalledUnder;
 use crate::ng::run::{OpenPspCohort, PspVariantCaller, RunError, RunReport, StoredCohortInputs};
 use crate::ng::types::MAX_MOTIF_LEN;
@@ -61,6 +62,15 @@ mod tests;
 
 /// What this subcommand is called on the command line.
 pub const SUBCOMMAND: &str = "call-from-psps";
+
+/// Default target false-discovery rate for the hidden-duplication filter.
+///
+/// **Zero, where spec §3.6 gives `0.01`, and only until the filter is finished.** The spec's
+/// default turns the filter on; its scoring and writing passes are steps C3 and C4 of
+/// `doc/devel/ng/impl_plan/hidden_paralog_filter.md`, so a run taking that default today would
+/// park every record and produce no VCF. This becomes `0.01` in the step that makes the whole
+/// path exist.
+const DEFAULT_PARALOG_FDR: f64 = 0.0;
 
 /// Call a cohort of stored psps and write a VCF.
 ///
@@ -130,6 +140,21 @@ pub struct CallFromPspsArgs {
     #[arg(long, default_value_t = DEFAULT_MAX_CANDIDATE_ALLELES.get(), help_heading = "Advanced")]
     pub max_candidate_alleles: u16,
 
+    /// Target false-discovery rate among the records the hidden-duplication filter removes —
+    /// calls better explained by two reference-collapsed copies piling their reads onto one
+    /// position than by a real variant. **Zero turns the filter off**, and a run with it off
+    /// writes byte for byte what it wrote before the filter existed.
+    #[arg(long, default_value_t = DEFAULT_PARALOG_FDR, help_heading = "Advanced")]
+    pub paralog_fdr: f64,
+
+    /// Keep the records the hidden-duplication filter flags, on the `hiddenParalog` filter,
+    /// instead of dropping them.
+    ///
+    /// **Read by nothing yet.** The pass that applies a verdict is not built, and every non-zero
+    /// `--paralog-fdr` is refused meanwhile, so this changes no run today.
+    #[arg(long, help_heading = "Advanced")]
+    pub paralog_filter_tag: bool,
+
     /// How much reference one round of locus building covers, in bases. Chosen from the
     /// cohort's size when it is not given.
     #[arg(long, help_heading = "Advanced")]
@@ -197,6 +222,40 @@ pub struct CallFromPspsArgs {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum CallFromPspsCliError {
+    /// The hidden-duplication filter's target is not a false-discovery rate.
+    #[error(
+        "--paralog-fdr {asked} is not a false-discovery rate; it must be a fraction in [0, 1), \
+         and 0 turns the filter off"
+    )]
+    ParalogTargetIsNotAFraction {
+        /// What was asked for.
+        asked: f64,
+    },
+
+    /// The calls could not be written, or the records could not be parked for the filter.
+    #[error("the calls could not be written to {}", path.display())]
+    CallsNotWritten {
+        /// Where they were going.
+        path: PathBuf,
+        /// What pass one said.
+        #[source]
+        source: crate::ng::run::paralog_filter::PassOneError,
+    },
+    /// The hidden-duplication filter was asked for before the passes that finish it exist.
+    ///
+    /// **Refused rather than run half-way.** Pass one — parking every record beside the output —
+    /// is built; the scoring pass that turns those records into a cut and the writing pass that
+    /// applies it are steps C3 and C4 of the filter's plan. A run that parked its records and
+    /// stopped would leave no VCF at all, so the flag is accepted and its non-zero values are
+    /// not, until those steps land.
+    #[error(
+        "--paralog-fdr {asked} was given, but the hidden-duplication filter's scoring and \
+         writing passes are not built yet; use 0 to run without it"
+    )]
+    ParalogFilterNotFinished {
+        /// The target the run asked for.
+        asked: f64,
+    },
     /// The reference could not be read.
     #[error("reading the reference {}", path.display())]
     Reference {
@@ -379,6 +438,24 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
             .build_global();
     }
 
+    // **A target that is not a fraction is refused before anything else looks at it.** `clap`
+    // parses any `f64`, so `7`, `inf` and `nan` all arrive here; a false-discovery rate is a
+    // probability, and `-0.0` is not "off" however it compares.
+    if !(args.paralog_fdr.is_finite()
+        && args.paralog_fdr >= 0.0
+        && args.paralog_fdr < 1.0
+        && args.paralog_fdr.is_sign_positive())
+    {
+        return Err(CallFromPspsCliError::ParalogTargetIsNotAFraction {
+            asked: args.paralog_fdr,
+        });
+    }
+    if args.paralog_fdr != 0.0 {
+        return Err(CallFromPspsCliError::ParalogFilterNotFinished {
+            asked: args.paralog_fdr,
+        });
+    }
+
     let asked_ploidy = calling_run::ploidy_asked_for(args.ploidy)?;
     let candidate_selection = calling_run::candidate_selection_for(args.max_candidate_alleles)?;
     calling_run::refuse_an_output_that_cannot_be_written(&args.output)?;
@@ -476,26 +553,37 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         &with_checksums,
         caller.sample_names().map(str::to_owned).collect(),
     )?;
-    let mut writer = VcfWriter::create(&args.output, metadata, ploidy).map_err(|source| {
-        CallFromPspsCliError::Output {
-            path: args.output.clone(),
-            source,
-        }
-    })?;
+    // **The filter is accepted and refused in one place, before anything is opened.** Pass one
+    // is built (`paralog_filter::CalledRecordSink`); the scoring and writing passes are not, so a
+    // run that parked its records would finish with no VCF. Refusing here means the flag's
+    // plumbing is real and no run can reach that state — the byte-identity oracle for
+    // `--paralog-fdr 0` is what this step actually delivers.
+    // **The sink is where the filter's flag lands** — with it off, this variant hands each record
+    // straight to the writer, which is the call the run made before the filter existed. The
+    // window coverage travels beside the record because the filter's on-path needs it; a VCF has
+    // no field for it.
+    // **The VCF is created here or not at all.** With the filter on, no record's verdict is
+    // known until every record has been scored, so opening the output during pass one would
+    // leave a file beside a run that has decided nothing — which is why the writer is built
+    // inside the choice rather than before it.
+    let mut sink = CalledRecordSink::StraightToTheVcf(
+        VcfWriter::create(&args.output, metadata, ploidy).map_err(|source| {
+            CallFromPspsCliError::Output {
+                path: args.output.clone(),
+                source,
+            }
+        })?,
+    );
 
     let (calling, stored) = caller
         .call_cohort_handing_each_record_over(
             &SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior),
-            // The slice is ignored here for the reason direct mode's is: the window coverage
-            // travels beside the record for the hidden-duplication filter, and a VCF has no
-            // field for it.
-            &mut |record, _window_coverage| writer.write_record(record),
+            &mut |record, window_coverage| sink.accept(record, window_coverage),
         )
         .map_err(|source| CallFromPspsCliError::Run { source })?;
 
-    writer
-        .finish()
-        .map_err(|source| CallFromPspsCliError::Output {
+    sink.finish()
+        .map_err(|source| CallFromPspsCliError::CallsNotWritten {
             path: args.output.clone(),
             source,
         })?;

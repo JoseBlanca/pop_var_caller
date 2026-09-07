@@ -271,6 +271,8 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         build_index_if_missing: false,
         max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
         max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        paralog_fdr: 0.0,
+        paralog_filter_tag: false,
         cohort_locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
@@ -303,6 +305,8 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         build_index_if_missing: false,
         max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
         max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        paralog_fdr: 0.0,
+        paralog_filter_tag: false,
         cohort_locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
@@ -667,6 +671,8 @@ fn a_cohort_on_disk() -> (
         build_index_if_missing: false,
         max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
         max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        paralog_fdr: 0.0,
+        paralog_filter_tag: false,
         cohort_locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
@@ -1288,4 +1294,40 @@ fn a_read_showing(name: &str, start: usize, observed: &[u8]) -> noodles_sam::ali
         .set_sequence(Sequence::from(observed.to_vec()))
         .set_quality_scores(QualityScores::from(vec![30u8; observed.len()]))
         .build()
+}
+
+/// **Direct mode refuses the unfinished filter too, and this is what says so.**
+///
+/// psp mode had this test and direct mode did not, which meant the guard here could be deleted
+/// entirely with every test in this crate still green — and a run asking for `--paralog-fdr 0.01`
+/// would have written an ordinary, unfiltered VCF while silently ignoring what it was asked for.
+/// Two modes, one rule, two tests.
+#[test]
+fn a_paralog_target_is_refused_in_direct_mode_too() {
+    let (_reference, _alignments, _directory, mut args) = a_cohort_on_disk();
+
+    args.paralog_fdr = 0.01;
+    let refused = run_call_from_alignments(&args).expect_err("the filter cannot finish a run yet");
+    assert!(
+        matches!(
+            refused,
+            CallFromAlignmentsCliError::ParalogFilterNotFinished { asked } if asked == 0.01
+        ),
+        "expected the unfinished filter to be named, got {refused:?}"
+    );
+
+    args.paralog_fdr = f64::NAN;
+    let refused = run_call_from_alignments(&args).expect_err("not a false-discovery rate");
+    assert!(
+        matches!(
+            refused,
+            CallFromAlignmentsCliError::ParalogTargetIsNotAFraction { .. }
+        ),
+        "expected a target that is not a fraction to be named, got {refused:?}"
+    );
+
+    assert!(
+        !args.output.exists(),
+        "the run was refused after opening the output"
+    );
 }

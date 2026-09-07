@@ -139,12 +139,12 @@ entry whose zero-read sample does not. *Depends:* A1, A2, B1 as reshaped. *Sourc
 > everything else on both signals. Trap 2 is struck — the decision reads `is_repeat_tract`, which
 > the entry already holds, and no allele.
 
-**C2. ☐ Pass one behind the flag, off-path proven.** `--paralog-fdr` and `--paralog-filter-tag`
+**C2. ✅ Pass one behind the flag, off-path proven.** `--paralog-fdr` and `--paralog-filter-tag`
 on both subcommands; with the target at zero the sink is the VCF writer as today and no spill
 exists. **Byte-identical on the run fixtures and the tomato slice before C3 starts.** With the
 target above zero the sink writes spill entries — the line from `record_line`, the pairs from the
-sink's slice, the AD from the record's columns, the SNP test on the record's own alleles — and
-the writer is not opened until pass three. *Depends:* B1, B2. *Source:* spec §3.4, §3.6, §1.1
+sink's slice, the AD from the record's columns summed over every alternative, and the row shape from
+`is_repeat_tract` — and the writer is not opened until pass three. *Depends:* B1, B2. *Source:* spec §3.4, §3.6, §1.1
 goal 7.
 
 **C3. ☐ Pass two. Own commit, do not bundle.** Read the spill; score each entry through C1;

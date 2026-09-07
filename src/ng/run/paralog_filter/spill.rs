@@ -141,13 +141,13 @@ const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// `contig`, `position` and `is_repeat_tract` are the fields the writer's ordering check reads,
 /// carried so that pass three can run that same check without rebuilding the record
 /// ([`place_of`](crate::ng::vcf::writer), spec §6 trap 6). Which shape [`SpilledSamples`] takes
-/// is settled once by whoever fills the entry, from the record's span — `region().len() == 1`
-/// and nothing about its alleles (spec §3.2). Nothing in this module makes that decision; the
-/// sink that fills the entry does, and it arrives with the run wiring.
+/// is settled once by whoever fills the entry, from `is_repeat_tract` and nothing else — not from
+/// the record's span, and not from its alleles (spec §3.2). The decision is made by
+/// [`entry_for`](super::entry_for), in the sink that fills the entry.
 ///
-/// **A repeat tract never occupies one position.** A tract spans at least two bases by
-/// definition, so an entry marked as a tract whose samples are [`SpilledSamples::GenericLocus`]
-/// is a caller's bug rather than a record. The writer and the reader both refuse it.
+/// **The flag and the row shape must agree**, since the file stores only the flag and the reader
+/// builds the rows from it. An entry whose two halves disagree would be written as one thing and
+/// read back as the other, so the writer refuses it.
 #[derive(Clone, Debug)]
 pub struct SpillEntry {
     /// Which contig the record is written on.

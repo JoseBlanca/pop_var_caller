@@ -212,6 +212,8 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         ploidy: None,
         max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
         max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        paralog_fdr: 0.0,
+        paralog_filter_tag: false,
         cohort_locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
@@ -421,4 +423,64 @@ fn parameters_that_name_another_cohorts_samples_are_refused() {
         rendered.contains("zeta") || rendered.contains("someone-else"),
         "the refusal names a sample the two sides disagree about, and got: {rendered}",
     );
+}
+
+/// **A filter that is not finished is refused, not run half-way.**
+///
+/// Pass one of the hidden-duplication filter — parking every record beside the output — is built.
+/// The scoring pass that turns those records into a cut and the writing pass that applies it are
+/// not. A run that parked its records and stopped would leave the operator no VCF at all, so the
+/// flag is accepted and its non-zero values are refused until those steps land.
+///
+/// **The refusal comes before anything is opened**, which is what this asserts by checking no
+/// output file appeared: an error raised after the writer was created would leave a `.tmp` beside
+/// a run that failed.
+#[test]
+fn a_paralog_target_above_zero_is_refused_while_the_filter_is_unfinished() {
+    let (cohort, mut args) = a_cohort_of_psps();
+    args.paralog_fdr = 0.01;
+
+    let refused = run_call_from_psps(&args).expect_err("the filter cannot finish a run yet");
+
+    assert!(
+        matches!(
+            refused,
+            CallFromPspsCliError::ParalogFilterNotFinished { asked } if asked == 0.01
+        ),
+        "expected the unfinished filter to be named, got {refused:?}"
+    );
+    assert!(
+        !args.output.exists(),
+        "the run was refused after opening the output"
+    );
+    drop(cohort);
+}
+
+/// **A target that is not a false-discovery rate is refused, whatever shape it takes.**
+///
+/// `clap` parses any `f64` into this flag, so a run can ask for `7`, for infinity, or for a
+/// negative zero that compares equal to the off value while not being it. A false-discovery rate
+/// is a probability; anything else is a mistake worth naming rather than clamping.
+#[test]
+fn a_paralog_target_that_is_not_a_fraction_is_refused() {
+    let (cohort, mut args) = a_cohort_of_psps();
+
+    for asked in [7.0, 1.0, -0.5, -0.0, f64::INFINITY, f64::NAN] {
+        args.paralog_fdr = asked;
+
+        let refused = run_call_from_psps(&args).expect_err("not a false-discovery rate");
+
+        assert!(
+            matches!(
+                refused,
+                CallFromPspsCliError::ParalogTargetIsNotAFraction { .. }
+            ),
+            "expected {asked} to be refused as not a fraction, got {refused:?}"
+        );
+        assert!(
+            !args.output.exists(),
+            "the run was refused after opening the output"
+        );
+    }
+    drop(cohort);
 }
