@@ -352,12 +352,18 @@ likelihood ratio, which is a change to what the filter drops, not merely to how 
 
 F = 0 is the shipped default, and the shortcut is byte-identical — it discards **5.56 million
 transcendental calls** on the 8-accession fixture. The reviewer could not separate it from the
-drift at that size and filed it with a plan for the 63-accession fixture.
+drift at that size and filed it with a plan for the 63-accession fixture and a 3% gate.
 
-**Recommendation: take it, but measure it on 63 accessions first**, where the calling pass is 20 s
-rather than 0.9 and `lgamma` was 1,385 profile samples. It is byte-identical and the guard is one
-branch, so the only question is whether it is worth anything; if the 63-accession A/B cannot
-separate it either, close it.
+**Run, and it does not clear the gate. Closed.** Four interleaved rounds on 63 accessions,
+calling-pass timer: **18.66 / 19.11 / 19.31 / 19.28 s against 18.74 / 19.04 / 19.22 / 19.15** —
+medians 19.20 and 19.10, 0.5%, with the two sets interleaved. VCF byte-identical, as predicted.
+
+Two reasons not to keep it anyway, now that the number says nothing. It is a fast path for
+`--defaults` only, and a run that fits its parameters — which is what the whole pre-pass exists
+to produce — has a non-zero F on an inbred cohort and buys nothing here. And the guard's body has
+to write `0.0 + slot` rather than leave the slot alone, because that addition turns a `-0.0` into
+a `+0.0` and the code it replaces did: a line that looks like a no-op, is not, and would invite
+exactly the simplification that silently changes a bit pattern in the genotype prior.
 
 #### L4: [src/ng/run/cohort_merge/serial.rs:343](../../../../src/ng/run/cohort_merge/serial.rs#L343) — decoding bodies and genotyping stay on the calling thread
 
@@ -464,5 +470,5 @@ Superseded by H2 for the same reason as L2, and it is in the same guarded copy. 
 in `84bfa038`. `H5` applied in `04877fdb`. `H6` applied in `2ba1f7a9`.
 
 `L1` deferred — the trade is the owner's, patch kept. `L2` closed, superseded by `H2` and blocked
-by the copy guard. `L3` open, with the experiment named. `L4` open, and it is the next piece of
-work. `S1`–`S3` won't fix at this size.
+by the copy guard. `L3` closed — the experiment was run and shows 0.5%. `L4` open, and it is the
+next piece of work. `S1`–`S3` won't fix at this size.
