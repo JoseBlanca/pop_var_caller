@@ -67,6 +67,20 @@ pub(crate) struct DecodedContainer {
     cigar_ops: Vec<Op>,
 }
 
+/// The buffers one decode reuses for every record it unpacks.
+///
+/// A CRAM stores a mapped read's bases as differences from the reference and its CIGAR as a
+/// feature list, so both have to be rebuilt somewhere before they can be copied into the
+/// container's flat buffers. These are that somewhere, and they are cleared and refilled per
+/// record rather than rebuilt, so a container of ten thousand reads grows them to the length of
+/// its longest read and no further.
+#[derive(Default)]
+struct RecordScratch {
+    bases: Vec<u8>,
+    quality_scores: Vec<u8>,
+    cigar: Vec<Op>,
+}
+
 /// One read in its packed form: where its bytes are in the container's flat buffers, and every
 /// scalar field of it that anything reads.
 ///
@@ -161,6 +175,48 @@ impl DecodedContainer {
     /// test** — building the input costs 4 GiB of memory. The refusal they propagate is pinned
     /// where the truncation would happen instead, on [`Span::new`], which a test can call
     /// directly. Recorded so a coverage audit does not re-derive it.
+    fn push_cram_record(
+        &mut self,
+        record: &cram::Record<'_>,
+        header: &sam::Header,
+        owner: ReadGroupId,
+        scratch: &mut RecordScratch,
+    ) -> io::Result<()> {
+        use noodles_sam::alignment::Record as _;
+
+        let name = record
+            .name_bytes()
+            .map(|name| self.append_bytes(name))
+            .transpose()?;
+
+        record.write_bases_into(&mut scratch.bases);
+        let sequence = self.append_bytes(&scratch.bases)?;
+
+        record.write_quality_scores_into(&mut scratch.quality_scores);
+        let quality_scores = self.append_bytes(&scratch.quality_scores)?;
+
+        let cigar_start = self.cigar_ops.len();
+        record.write_cigar_into(&mut scratch.cigar);
+        self.cigar_ops.extend_from_slice(&scratch.cigar);
+        let cigar = Span::new(cigar_start, self.cigar_ops.len())?;
+
+        self.index.push(PackedReadEntry {
+            owner,
+            flags: record.flags()?,
+            mapping_quality: record.mapping_quality().transpose()?,
+            reference_sequence_id: record.reference_sequence_id(header).transpose()?,
+            alignment_start: record.alignment_start().transpose()?,
+            mate_reference_sequence_id: record.mate_reference_sequence_id(header).transpose()?,
+            mate_alignment_start: record.mate_alignment_start().transpose()?,
+            template_length: record.template_length()?,
+            name,
+            sequence,
+            quality_scores,
+            cigar,
+        });
+        Ok(())
+    }
+
     fn push(&mut self, record: &RecordBuf, owner: ReadGroupId) -> io::Result<()> {
         let name = record
             .name()
@@ -315,20 +371,24 @@ pub(crate) fn decode_container_at(
         payload: Vec::new(),
         cigar_ops: Vec::new(),
     };
-    // **One buffer for every record in this container, not one per record.** The conversion
-    // below is `RecordBuf::default()` followed by `try_clone_from_alignment_record`, and a
-    // fresh destination builds each field from capacity zero — the name, the CIGAR, and a
-    // quality-score push loop that doubles 0 → 4 → … → 256 for a 150-base read. Reused, the
-    // clone `clear()`s and refills buffers that are already the right size, so the growth is
-    // paid once per container rather than once per record.
-    let mut record_buf = RecordBuf::default();
+    // **One set of buffers for every record in this container, not one per record.** Each
+    // record's bases, quality scores and CIGAR are written into these and then copied into the
+    // container's flat buffers; reused, they grow to the longest read of the container and no
+    // further.
+    let mut scratch = RecordScratch::default();
     for slice in container.slices() {
         let slice = slice?;
         // The decoded block data and the borrowed records live only within this block;
         // copying each record's bytes into the container's own buffers here keeps the result
         // independent of those borrows.
         let (core_data_src, external_data_srcs) = slice.decode_blocks()?;
-        for record in slice.records(
+        // **The auxiliary tags are not read at all**, where the file's own encoding lets them
+        // be skipped safely — noodles decides that from the compression header and falls back
+        // to reading them when it cannot. ng reads exactly one thing out of a record's tags,
+        // the read group, and a CRAM does not store that as a tag: it stores a *number*, an
+        // index into the header's `@RG` list, which `resolve_read_group` below gets from that
+        // number rather than from any tag. So nothing here loses an answer.
+        for record in slice.records_discarding_tags(
             repository.clone(),
             header,
             &compression_header,
@@ -346,8 +406,7 @@ pub(crate) fn decode_container_at(
                 decoded.other_sample_records += 1;
                 continue;
             };
-            record_buf.try_clone_from_alignment_record(header, &record)?;
-            decoded.push(&record_buf, owner)?;
+            decoded.push_cram_record(&record, header, owner, &mut scratch)?;
         }
     }
 

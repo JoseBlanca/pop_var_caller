@@ -203,6 +203,12 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zstd = "0.13"
 
 [features]
+# **Per-codec counters inside the vendored CRAM decompressor.** Off by default,
+# because the clock reads sit in the block-decode loop. On, a run can say how
+# many blocks each compression method decoded, how many bytes it inflated, and
+# how long it took — which is what `examples/ng_cram_decode_layers.rs` prints
+# and the only way to tell one codec's cost from another's.
+cram-perf-counters = ["noodles-cram/perf-counters"]
 # Enable in `cargo run --example dhat_pileup --features dhat-heap` to swap
 # the global allocator for `dhat::Alloc` and produce `dhat-heap.json`.
 # Off by default so production builds carry no dhat code.
@@ -396,3 +402,10 @@ required-features = ["bench-fixtures"]
 [[bench]]
 name = "ng_site_quality_perf"
 harness = false
+
+# **A vendored copy of noodles-cram, byte for byte the 0.93.0 the manifest already
+# names above**, so the CRAM read path can be changed and measured. What this copy has
+# that crates.io does not is listed in `vendor/noodles-cram/FORK.md`, and why in
+# `doc/devel/ng/research/cram_read_path_2026-09-04.md`.
+[patch.crates-io]
+noodles-cram = { path = "vendor/noodles-cram" }
