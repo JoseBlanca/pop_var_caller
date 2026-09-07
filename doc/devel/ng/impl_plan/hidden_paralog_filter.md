@@ -159,7 +159,9 @@ append the two INFO fields on every finite ratio; write through `write_line`; de
 count. The header gains the `##paralogFilter=` line and the three declarations; the run report
 gains its lines. *Depends:* B3, C3. *Source:* spec §3.5, §3.6.
 
-**C5. ☐ The oracles, all four.** (i) off is byte-identical (C2's, rerun); (ii) on at an
+**C5. ◑ The oracles — three of four.** *(i) needs the tomato slice's CRAMs, which are not on this machine; (ii), (iii) and (iv) hold on the mode-equivalence cohort. §10's (ii) amended by the owner 2026-09-07 to strip the filter's four header lines too.*
+
+**C5 (original text).** (i) off is byte-identical (C2's, rerun); (ii) on at an
 unreachable target, the two INFO keys stripped, equals off; (iii) the drop-mode file equals the
 tag-mode file minus its `hiddenParalog` lines; (iv) mode equivalence with the filter on, both
 modes' files identical. All on the six-accession slice; (i) and (iv) also on the run fixtures.

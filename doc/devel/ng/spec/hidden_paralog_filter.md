@@ -597,8 +597,17 @@ should mostly agree — and reports the difference rather than chasing it.
   inputs, over the copied tests and a randomised differential.
 - **Off is byte-identical**: `--paralog-fdr 0` reproduces the pre-filter VCF on the run fixtures
   and the tomato slice.
-- **Unflagged is byte-identical**: filter on at an unreachable target, the two INFO keys
-  stripped, equals the filter-off file.
+- **Unflagged is byte-identical**: filter on at an unreachable target, the two INFO keys **and
+  the filter's four header lines** stripped, equals the filter-off file. The four are the
+  `##paralogFilter=` line and the three declarations §3.5 gives.
+
+  **Amended 2026-09-07 (the owner), because as first written this could not pass.** §3.5's
+  declarations are emitted only on a run where the filter ran — they have to be, or the *first*
+  oracle above breaks on the header alone, and that one is what the whole plan rests on. So the
+  on-run's header carries four lines the off-run's does not, and stripping `INFO` keys does not
+  remove them. The two oracles as first written were incompatible; this is the one that gives
+  way, because what it is really asserting is that **the filter changes no record it does not
+  flag**, and the header is not a record.
 - **Tag equals drop plus the tagged**: the drop-mode file is the tag-mode file with every
   `hiddenParalog` line removed.
 - **Mode equivalence with the filter on**: direct mode and psp mode produce the same file
