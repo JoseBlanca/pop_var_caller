@@ -2,8 +2,9 @@
 
 *Draft, 2026-09-06. Turns [`../spec/hidden_paralog_filter.md`](../spec/hidden_paralog_filter.md)
 into build order — no new design here; a design question surfacing mid-plan goes back to that
-spec, and the spec's one open decision (every record scored, non-SNPs on coverage alone, §3.2) is
-confirmed with the owner before step C1 is coded. There is no architecture document: the spec's
+spec. **§3.2's decision is settled** (the owner, 2026-09-07): every record is scored, and the line
+falls between a locus at one genomic position and one spanning more, not between a biallelic SNP
+and everything else. There is no architecture document: the spec's
 §3.7 type blocks are the code shape the steps cite. This plan starts after
 [`window_coverage.md`](window_coverage.md)'s Checkpoint C. **The standing oracle is that
 `--paralog-fdr 0` writes byte for byte what the run writes today**, on the run fixtures and the
@@ -35,9 +36,11 @@ range and the measurements the spec leaves open.
 - **The algorithmic heart before the plumbing.** Score → spill → passes → flags, in that order;
   each is tested alone before the next depends on it.
 - **Isolate the silent steps.** Three failures here produce a plausible file rather than a
-  panic: a non-SNP sample skipped at zero reads (every tract scores nothing), a `NaN` turned into
-  a zero (every unscored record folds into π), and a patched line whose other columns moved.
-  Each lands as its own commit with its oracle named.
+  panic: a wide locus's sample skipped as though it had no reads (every tract scores nothing), a
+  `NaN` turned into a zero (every unscored record folds into π), and a patched line whose other
+  columns moved. Each lands as its own commit with its oracle named. **The first is now closed by
+  a type rather than by a test** — a wide locus's rows carry no read counts, so there is no zero
+  to misread (spec §3.7).
 - **Off first.** The spill and the passes are wired behind a flag whose default-off run is
   byte-identical before the flag's on-path is finished; the oracle exists before the behaviour.
 - **Verify against ground truth.** Production's scorer for the ratio; the run before this work
@@ -98,6 +101,11 @@ A1. *Source:* spec §3.2, §7, §10.
 destructuring the entry exhaustively, floats by bits; round-trip tests over entries with absent
 pairs, zero samples, a `FILTER` already set, and an `INFO` of `.`. *Depends:* —. *Source:* spec
 §3.4, §3.7.
+> **Reshaped after the fact (2026-09-07), by the owner's ruling on §3.2.** The entry's flat
+> per-sample row became the two-variant `SpilledSamples`, and `is_biallelic_snp` became
+> `spans_one_position`. Fixed forward in its own commit rather than by amending B1, since B1 was
+> settled and reviewed; the reasons are spec §3.2 and §3.7, and the failure it forecloses is
+> trap 1.
 
 **B2. ✅ The lifecycle.** The file at `<output>.paralog-spill.tmp`, created on first write,
 removed by a guard on every exit path — success, a `RunError`, a panic unwinding through the
@@ -119,12 +127,16 @@ spec §3.5, §6 traps 5–7.
 **C1. ☐ The scoring context. Own commit, do not bundle.** `ParalogScoringContext::new` from the
 histograms, the parameters file's coefficients and the model params: one fit per sample with
 rejections kept by reason, the σ₀ slice with `NaN` where absent, the precompute; and
-`observation_of(entry, sample) -> Option<SampleObservation>` applying spec §3.2's rule — a
-biallelic SNP hands the scorer its AD and is skipped at zero reads; **every other record hands
-`0/0` and is not skipped**. The silent failure is the skip applied to a tract; the test is a
-tract entry whose samples all score, against a SNP entry whose zero-read sample does not.
-*Depends:* A1, A2, B1; **the spec's §3.2 decision confirmed with the owner.** *Source:* spec
-§3.1, §3.2, §6 traps 1–3.
+`observation_of(entry, sample) -> Option<SampleObservation>` applying spec §3.2's rule — **a
+one-position locus** hands the scorer its reference count and its alternatives summed, and is
+skipped at zero total reads; **a wide locus hands the coverage pair alone and is never skipped**,
+because its rows carry no read counts to be zero. The silent failure is the skip reaching a wide
+locus; the type makes it unspellable, and the test is a tract entry whose samples all score
+against a SNP entry whose zero-read sample does not. *Depends:* A1, A2, B1 as reshaped. *Source:*
+spec §3.1, §3.2, §6 traps 1 and 3.
+> §3.2's decision is **confirmed** (the owner, 2026-09-07), and its line moved from
+> biallelic-versus-other to **one genomic position versus more than one**. Trap 2 is struck: the
+> test is `region().len() == 1` and reads no allele.
 
 **C2. ☐ Pass one behind the flag, off-path proven.** `--paralog-fdr` and `--paralog-filter-tag`
 on both subcommands; with the target at zero the sink is the VCF writer as today and no spill
@@ -171,12 +183,16 @@ parallel scoring gets a plan (spec §8). *Depends:* C5. *Source:* spec §4, §5.
 or the report says why not; the records dropped, with the ten highest ratios listed for a human
 eye. *Depends:* C5. *Source:* spec §4.
 
-**D4. ☐ The coverage-only score, counted.** On D2's and D3's runs: how many biallelic-SNP,
-indel, multiallelic and tract records were scored, how many of each were flagged, and the
-distribution of ratios by kind. Beside it, production's filter over the same six accessions as a
-sanity comparison — the flagged SNP sets' overlap, reported, not chased. **This is what closes
-spec §9's first OPEN or sends §3.2 back to the spec.** *Depends:* D2, D3. *Source:* spec §3.2,
-§8, §9.
+**D4. ☐ The coverage-only score, counted.** On D2's and D3's runs: how many records of each
+kind were scored, how many of each were flagged, and the distribution of ratios by kind — with
+the kinds being **biallelic SNP, multiallelic SNP, insertion** (the three that carry both
+signals) and **deletion, repeat tract** (the two that do not). **The two wide kinds are counted
+apart, not lumped**, because their depth is biased in opposite ways: a tract's observation depth
+runs below its read depth, while a deletion depresses depth across its own span in exactly the
+samples that carry it. Lumping them would average one bias against the other and show neither.
+Beside it, production's filter over the same six accessions as a sanity comparison — the flagged
+SNP sets' overlap, reported, not chased. **This is what can send §3.2's rule back to the spec.**
+*Depends:* D2, D3. *Source:* spec §3.2, §8, §9.
 
 > **Checkpoint D: the filter has run at one sample, at six, and at three hundred reads a
 > position, with numbers at each; the one decision beyond production has a measurement

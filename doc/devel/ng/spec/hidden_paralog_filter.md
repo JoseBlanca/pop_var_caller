@@ -44,8 +44,8 @@ instead of two (§2). In exchange it runs identically in both modes.
    behaviour (§4).
 4. **Drop by default; tag on request.** A dropped record leaves its parameters in the header; a
    tagged one carries its score.
-5. **Every written record is scored** — SNPs on coverage and allele balance, everything else on
-   coverage alone (§3.2). Repeat tracts are first-class.
+5. **Every written record is scored** — a locus at one genomic position on coverage and allele
+   balance, a locus spanning more on coverage alone (§3.2). Repeat tracts are first-class.
 6. **Memory flat in the record count and in the sample count**: one record in hand at a time,
    plus per-sample constants and one number per record.
 7. **Off means off**: with the filter disabled the run writes byte for byte what it writes today.
@@ -53,9 +53,9 @@ instead of two (§2). In exchange it runs identically in both modes.
 ### 1.2 Non-goals, and what this does not do
 
 - **No new statistics.** The likelihood ratio, the prior's estimation, the FDR curve are
-  copied from `src/paralog/`. The one thing that is not a straight copy — scoring a non-SNP
-  record on coverage alone — is a *configuration* of the copied scorer, shown in §3.2 to be the
-  same likelihood with the allele counts marginalised out; nothing new is derived.
+  copied from `src/paralog/`. The one thing that is not a straight copy — scoring a wide locus on
+  coverage alone — is a *configuration* of the copied scorer, shown in §3.2 to be the same
+  likelihood with the allele counts marginalised out; nothing new is derived.
 - **No mapping-quality term in the score.** `MQDIFF` is already an INFO field
   ([`vcf_output.md`](vcf_output.md) §6) and stays a downstream signal, for production's reason:
   it is shared with introgression.
@@ -79,6 +79,10 @@ Three that this document adds:
   applies the verdict.
 - **The coverage-only score** — the likelihood ratio for a record whose allele counts are not
   handed to the scorer (§3.2).
+- **A one-position locus** and **a wide locus** — a record whose `region().len()` is 1, and one
+  whose span is longer. The first has a reference/non-reference split at a single base; the second
+  does not, and is scored on coverage alone. SNPs and insertions are the first; deletions and
+  repeat tracts are the second.
 
 ---
 
@@ -139,7 +143,7 @@ cohort whose fits all failed says so rather than silently filtering nothing.
 **When**: once, between pass one and pass two, from the histograms
 [`window_coverage.md`](window_coverage.md) §3.5 hands over.
 
-### 3.2 What is scored, and with what — decision: every record, SNPs on both signals, the rest on coverage
+### 3.2 What is scored, and with what — decision: every record, one-position loci on both signals, wider ones on coverage
 
 Per record, per sample, the scorer takes four numbers
 ([`SampleObservation`, `locus_score.rs:43`](../../../../src/paralog/locus_score.rs)): the relative
@@ -150,6 +154,17 @@ copy number, the ALT reads, the total reads, and the sample's inbreeding coeffic
   ([`relative_copy_number`, `coverage_model.rs:302`](../../../../src/paralog/coverage_model.rs)).
   The pair comes from the spill; **a sample with an absent pair, or no model, is absent** from
   the record's score.
+
+  **One depth for the whole locus, however many positions it occupies.** A record spanning several
+  bases has no single position to measure at, so the filter takes the window centred on its
+  **first** base and treats that as the depth at every position of the span
+  ([`window_coverage.md`](window_coverage.md) §3.5). The window is 500 bases wide, so for a SNP,
+  an indel or an ordinary repeat tract the choice of base inside the span moves the window by a
+  fraction of a percent of its width and the assumption costs nothing measurable. It is a real
+  approximation for a long deletion — where the choice of end moves the window appreciably, and
+  where the deletion itself depresses depth across its own span in the samples carrying it, which
+  is not a duplication signal. That is why D4 counts deletions apart from tracts: the two wide
+  kinds are biased in different directions.
 - **Inbreeding coefficient** — ng's own, per sample: the parameters file's `[inbreeding]` row,
   fitted per sample from runs of homozygosity by the pre-pass and exposed as
   [`RunParameters::inbreeding_coefficient_by_sample`, `run_parameters.rs:695`](../../../../src/ng/calling/run_parameters.rs).
@@ -162,12 +177,23 @@ copy number, the ALT reads, the total reads, and the sample's inbreeding coeffic
   ([`is_biallelic_snp`, `calibrate.rs:135`](../../../../src/var_calling/paralog_filter/calibrate.rs)),
   because its allele term models a SNP: a real heterozygote sits near half, a collapsed copy's
   difference at `m/T`. The owner's ruling is that repeat tracts are first-class and the filter
-  must apply to them. So:
+  must apply to them.
 
-  - **A biallelic SNP record**: `alt_reads = AD[1]`, `total_reads = AD[0] + AD[1]`, from the
-    record's sample column ([`SampleReadCounts::allele_reads`, `vcf/mod.rs:597`](../../../../src/ng/vcf/mod.rs)).
+  **The line is drawn by the locus's span, not by its alleles.** A locus that occupies **one
+  genomic position** — `region().len() == 1` — has a well-defined reference/non-reference split
+  at that position, whatever its alleles are. A locus that occupies **more than one** does not
+  have one place to take that split at, and at a repeat tract the alleles are lengths that PCR
+  stutter moves reads between, so the split observed is not the split the genome carries. So:
+
+  - **A one-position locus** — a biallelic SNP, a multiallelic SNP, an insertion:
+    `alt_reads =` the sum of every alternative's reads, `total_reads = AD[0] + alt_reads`, from
+    the record's sample column
+    ([`SampleReadCounts::allele_reads`, `vcf/mod.rs:597`](../../../../src/ng/vcf/mod.rs)).
     A sample with `total_reads == 0` is absent from the score, as in production.
-  - **Every other record** — an indel, a multiallelic site, a repeat tract: `alt_reads = 0`,
+    **Alternatives are pooled**, which the H2 story permits unchanged: it asks whether the
+    non-reference share sits at some whole `m/T`, and two copies of three carrying two *different*
+    non-reference bases give the same two-thirds as two copies carrying one.
+  - **A locus spanning more than one position** — a deletion, a repeat tract: `alt_reads = 0`,
     `total_reads = 0`, **and the sample is not skipped for it.** The scorer's allele term is
     `alt·ln(vaf) + (total − alt)·ln(1 − vaf)` in both hypotheses
     ([`locus_score.rs:333-345`](../../../../src/paralog/locus_score.rs) for H1,
@@ -175,16 +201,29 @@ copy number, the ALT reads, the total reads, and the sample's inbreeding coeffic
     every genotype and every carrier configuration, so the genotype and carrier sums collapse to
     one and the ratio rests on the coverage term alone. That is the same likelihood with the
     allele counts marginalised out — no new model, less power. The homozygous-alternative veto
-    needs five reads and is inert here, which is right: a tract's or an indel's allele counts do
-    not say what a SNP's do.
+    needs five reads and is inert here, which is right.
+
+  **⚠ The zeros are an abstention, not a measurement.** A sample at a repeat tract has reads and
+  its call rests on them; what it does not have is a reference/non-reference split this scorer can
+  read. The `0, 0` is the filter declining to use that evidence, and it must never be confused
+  with a sample that observed nothing — which is exactly why §3.7 gives the two kinds of locus
+  different types rather than one type with fields that sometimes mean nothing (trap 1).
+
+  **Why the span and not the alleles.** The span is one comparison on the record's own region and
+  needs no look at `REF`/`ALT` at all, which is what removes the padding hazard that used to be
+  trap 2. It is also blunt in one direction and deliberately so: a plain deletion's
+  reference/alternative counts would probably be usable, and this rule denies them. That costs
+  power at deletions, never correctness.
 
   **Why not production's rule.** A collapsed duplication leaves the same coverage footprint at a
   tract as at a SNP, and a filter that never looked at tracts would leave every such tract in the
-  file while dropping its SNP neighbours. **What is unmeasured**: how many tract and indel records
-  the coverage-only score flags on real data, and whether the tract depth caveat
-  ([`window_coverage.md`](window_coverage.md) §3.1 — observation depth runs below read depth at a
-  tract) biases them. The plan measures both on the two benchmarks (step D4). **Confirm before
-  code** (§8).
+  file while dropping its SNP neighbours. **What is unmeasured**: how many wide-locus records the
+  coverage-only score flags on real data, and whether their depth is biased — and the two wide
+  kinds are biased *differently*, so they are counted separately (step D4). A tract's observation
+  depth runs below its read depth ([`window_coverage.md`](window_coverage.md) §3.1); a deletion
+  depresses depth across its own span in the samples that carry it, by construction. **Confirmed
+  by the owner, 2026-09-07** — including this span-based line, which replaces an earlier
+  biallelic-SNP-versus-everything-else draft.
 
 - **A record with no alternative allele is not scored.** A refused tract written `ALT .` with
   every sample no-called ([`vcf_output.md`](vcf_output.md) §8) establishes nothing to flag.
@@ -221,18 +260,29 @@ record's VCF line as the encoder produced it and what the scorer needs beside it
 
 ```text
 entry :=
-  contig          varint     -- the three fields the writer's ordering check reads
-  position        varint     -- (`place_of`, writer.rs)
-  is_repeat_tract u8
-  is_biallelic_snp u8        -- §3.2's rule, decided once, at spill time
-  line            bytes      -- length-prefixed; the record's line, no newline
-  samples         varint     -- the run's sample count, dense
-  per sample:
-    gc_fraction   u32        -- an f32's bits; NaN = absent
-    mean_depth    u32        -- an f32's bits
-    ref_reads     varint     -- AD[0]
-    alt_reads     varint     -- AD[1] on a biallelic SNP, else 0
+  contig            varint   -- the three fields the writer's ordering check reads
+  position          varint   -- (`place_of`, writer.rs)
+  is_repeat_tract   u8
+  spans_one_position u8       -- §3.2's rule, decided once, at spill time, from
+                              -- `region().len() == 1`; it selects the per-sample shape below
+  line              bytes    -- length-prefixed; the record's line, no newline
+  samples           varint   -- the run's sample count, dense
+  per sample, when spans_one_position:
+    gc_fraction     u32      -- an f32's bits; NaN = absent
+    mean_depth      u32      -- an f32's bits
+    ref_reads       varint   -- AD[0]
+    alt_reads       varint   -- every alternative's reads, summed (§3.2)
+  per sample, otherwise:
+    gc_fraction     u32      -- an f32's bits; NaN = absent
+    mean_depth      u32      -- an f32's bits
 ```
+
+**The wide-locus row carries no read counts at all, and that is the point.** Writing `0, 0` there
+would put the filter's abstention in the same two fields that elsewhere hold a measurement, where
+nothing downstream can tell it from a sample that observed nothing — and production's scorer drops
+a sample at `total == 0`, so the confusion silently empties every wide locus's score (§6 trap 1).
+Two shapes make the mistake unspellable, and they also make the file smaller: a wide locus costs
+eight bytes a sample instead of ten or more.
 
 **Why the line and not the record.** The record type has ten fields behind a constructor that
 asserts every parity between them ([`VcfRecord::new`, `vcf/mod.rs:187`](../../../../src/ng/vcf/mod.rs));
@@ -241,7 +291,7 @@ field the record gains later is a field the codec silently drops. The line is th
 bytes: pass three writes them back unchanged except for the two columns the verdict touches, so
 byte-identity for every unflagged record holds by construction, and nothing about the record's
 shape has to be mirrored. The per-sample side fields are the four numbers the scorer reads,
-written so the scorer never parses text.
+written so the scorer never parses text — and for a wide locus there are only two of them.
 
 **The codec is hand-rolled over the psp's varint primitives**
 ([`encode_u64_leb128`, `psp/varint.rs:46`](../../../../src/psp/varint.rs)), with **the encoder
@@ -356,15 +406,30 @@ pub struct SpillEntry {
     pub contig: ContigId,
     pub position: Position,
     pub is_repeat_tract: bool,
-    pub is_biallelic_snp: bool,
     pub line: Vec<u8>,
-    pub per_sample: Vec<SpilledSample>,
+    /// **Which signals this record's samples carry**, settled once at spill time from
+    /// `region().len() == 1` (§3.2). The two variants are the two kinds of locus, and a
+    /// scorer cannot ask a wide locus for an allele split it never measured.
+    pub samples: SpilledSamples,
 }
 
-pub struct SpilledSample {
+pub enum SpilledSamples {
+    /// A locus at one genomic position: a SNP of any allele count, or an insertion.
+    /// Both signals; a sample at zero total reads is absent from the score.
+    OnePosition(Vec<OnePositionSample>),
+    /// A locus spanning more than one: a deletion or a repeat tract. Coverage alone;
+    /// **no sample is skipped**, because there is no read count to be zero.
+    Wide(Vec<WideSample>),
+}
+
+pub struct OnePositionSample {
     pub window: WindowCoverage,   // the pair, NaN = absent
     pub ref_reads: u32,
-    pub alt_reads: u32,
+    pub alt_reads: u32,           // every alternative's reads, summed
+}
+
+pub struct WideSample {
+    pub window: WindowCoverage,   // the pair, NaN = absent
 }
 
 /// What pass two settles for pass three. Production's `ParalogCalibration`, copied,
@@ -417,13 +482,19 @@ pub struct ParalogVerdicts {
 
 ## 6. Traps — what will bite the coder
 
-1. **Do not skip a zero-read sample on a non-SNP record.** Production's `build_observation`
-   returns `None` at `total == 0` ([`calibrate.rs:173`](../../../../src/var_calling/paralog_filter/calibrate.rs));
-   copied as-is it would drop every sample from every tract's score and the coverage-only path
-   would score nothing, silently. The skip applies to biallelic SNP records only.
-2. **The SNP test reads the record's alleles before padding.** `VcfRecord::alleles()` is the
-   span's own sequences; the anchor base is added at encode time. Testing the written `REF`/`ALT`
-   would call a one-base deletion a two-base SNP.
+1. **Do not skip a zero-read sample on a wide locus** — and §3.7's types are what stop you.
+   Production's `build_observation` returns `None` at `total == 0`
+   ([`calibrate.rs:173`](../../../../src/var_calling/paralog_filter/calibrate.rs)), which is right
+   when the sample observed nothing and wrong when the *filter* chose not to read its alleles. A
+   wide locus's samples have reads and their calls rest on them; what they lack is a
+   reference/non-reference split at one base. Storing that abstention as `0, 0` in the fields a
+   measurement lives in is what makes the two indistinguishable, so `SpilledSamples::Wide` carries
+   no read counts and the skip cannot reach it. **The failure this prevents is silent**: every
+   wide locus scores on nothing and is never flagged, and the file looks correct.
+2. **~~The SNP test reads the record's alleles before padding.~~** *Struck, 2026-09-07.* The test
+   is now `region().len() == 1` (§3.2) and looks at no allele at all, so there is nothing to get
+   wrong about `VcfRecord::alleles()` being the span's own sequences while `REF`/`ALT` gain an
+   anchor base at encode time. This trap is the reason the span-based line was preferred.
 3. **`F` per sample, and the slice's length is the cohort's.** The scorer returns a neutral
    score on a length mismatch rather than failing ([`locus_score.rs:248`](../../../../src/paralog/locus_score.rs)).
    Build the slice from the parameters file in the run's sample order and assert the length.
@@ -483,10 +554,19 @@ should mostly agree — and reports the difference rather than chasing it.
 - **Drop by default, tag on a flag — resolved** (the owner, 2026-09-06). Production drops with
   no escape hatch.
 - **`F` per sample from the parameters file — resolved** (§3.2).
-- **OPEN — every record scored, non-SNPs on coverage alone** (§3.2). Leaning as written: it is
-  the same likelihood with the allele counts marginalised out, and the owner's ruling is that
-  tracts are first-class. What would settle it: step D4's counts on both benchmarks. **Confirm
-  before the scoring step is coded.**
+- **Every record scored — resolved** (the owner, 2026-09-07). It is the same likelihood with the
+  allele counts marginalised out where they are not read, and the owner's ruling is that tracts
+  are first-class. Step D4 still counts what it flags by kind and can send it back.
+- **Where the line falls — resolved, and moved** (the owner, 2026-09-07). The draft split
+  biallelic SNPs from everything else; the rule is now **one genomic position against more than
+  one** (§3.2). Multiallelic SNPs and insertions gain the allele signal, which the draft denied
+  them for no reason but the shape of production's test; deletions and repeat tracts keep coverage
+  alone. The test needs no look at the alleles, which struck trap 2. Two consequences are
+  recorded rather than assumed: a deletion's allele counts would probably have been usable, so
+  this costs power there and no correctness; and **the depth of a locus spanning several positions
+  is taken as one number for the whole span**, which is what §3.1's window already does by
+  centring on the locus's first base — 500 bases wide, so a short locus's span is a rounding
+  error, while a long deletion is a real approximation and one D4 counts separately.
 - **OPEN — `N = 1`.** Leaning: the copied code handles it; step D1 is the check.
 
 ## 10. How we know it works
