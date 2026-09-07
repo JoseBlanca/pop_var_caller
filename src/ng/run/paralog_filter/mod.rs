@@ -28,10 +28,12 @@ use crate::ng::types::GenomePosition;
 use crate::ng::vcf::RecordPlace;
 
 pub mod patch;
+pub mod scoring_context;
 pub mod spill;
 pub mod spill_file;
 
 pub use patch::{LinePatchError, rewrite_filter_and_info};
+pub use scoring_context::{ParalogScoringContext, WhyNoCoverageModel};
 pub use spill::{
     GenericLocusSample, RepeatTractSample, SpillEntry, SpillError, SpillReader, SpillWriter,
     SpilledSamples,

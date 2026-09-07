@@ -125,7 +125,7 @@ spec §3.5, §6 traps 5–7.
 
 ### Milestone C — the three passes, behind a flag
 
-**C1. ☐ The scoring context. Own commit, do not bundle.** `ParalogScoringContext::new` from the
+**C1. ✅ The scoring context. Own commit, do not bundle.** `ParalogScoringContext::new` from the
 histograms, the parameters file's coefficients and the model params: one fit per sample with
 rejections kept by reason, the σ₀ slice with `NaN` where absent, the precompute; and
 `observation_of(entry, sample) -> Option<SampleObservation>` applying spec §3.2's rule — **a
