@@ -108,7 +108,17 @@ Production computes the same thing — the sum of `num_obs` over every allele at
 ([`pileup_to_psp.rs:101`](../../../../src/pileup/per_sample/pileup_to_psp.rs)) — and the filter
 was validated on it.
 
-Where the number comes from depends on the record's span, which every `Drawn` carries:
+Where the number comes from depends on the record's span, which every `Drawn` carries.
+
+**This span test is not the one the filter abandoned, and the two are worth keeping apart.** The
+filter ruled on 2026-09-07 that a locus occupying one position and one occupying several are
+scored alike — "once the depth of a multi-position locus is taken as one number for the whole
+span, span distinguishes nothing"
+([`hidden_paralog_filter.md`](hidden_paralog_filter.md) §9). That is a question about *how a locus
+is judged*. This one is about *where its depth is read from*, and it turns on a fact that has not
+changed: at a one-base locus no read's evidence can stop inside the locus, so the head already
+holds the number and no body need be decoded. Both are true at once, and the filter's own depth
+is the pair this produces.
 
 - **A record spanning one base: the head count.** At a single-base locus no read's witness can
   stop *inside* the locus, so every observation is whole and the head count equals the sum of
@@ -140,8 +150,14 @@ assignment outside the STR generator; the per-position cap is 8,000 reads,
 [`walker/mod.rs:83`](../../../../src/pileup/walker/mod.rs)); both are set at tracts. So a tract's
 depth is observation depth, below its read depth by the reads that anchored no border, and the
 shortfall grows with tract length. It is consistent — the same number trains the yardstick and
-makes the measurement — but a tract window is not directly comparable to a generic one, and the
-filter has no way to tell which it is looking at. The filter document carries that caveat forward.
+makes the measurement — but **a tract window is not directly comparable to a generic one**.
+
+**The filter can tell which it is looking at, and acts on it** (updated 2026-09-07, from that
+document's own ruling): every record it scores carries `is_repeat_tract`, a tract is scored on
+coverage alone because slippage makes its allele split unreadable, and its D4 counts tracts apart
+from deletions precisely because this shortfall and a deletion's depth loss bias the depth in
+opposite directions ([`hidden_paralog_filter.md`](hidden_paralog_filter.md) §3.2, §9). An earlier
+draft of this paragraph said the filter had no way to tell; it has.
 
 ### 3.2 The GC — per sample, over the same positions
 
