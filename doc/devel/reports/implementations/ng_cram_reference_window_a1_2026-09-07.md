@@ -10,7 +10,7 @@
 
 **Plumbing only, and it decodes exactly what it decoded before.** The CRAM decode now owns a
 windowed reference reader and does not read it; step A2 is where it starts fetching bases and
-where `decode_container_at` gains the parameter. **6,276 library tests pass** and every
+where `decode_container_at` gains the parameter. **6,278 library tests pass** and every
 integration binary passes except the one that was already failing on `main`.
 
 ## What landed
@@ -77,7 +77,7 @@ Run in the container on this tree.
 
 - `cargo fmt --all -- --check` — the only drift is 29 hunks in files this step does not touch,
   identical to `main`'s.
-- `cargo test --lib --tests` — **6,276 library tests pass**, 0 failed, 15 ignored, in 60.61 s.
+- `cargo test --lib --tests` — **6,278 library tests pass**, 0 failed, 15 ignored, in 44.77 s.
   Every integration binary passes except `ng_calling_loop_calls_genotypes`, where
   `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele` fails at line 1235.
 - `cargo clippy --lib --tests --all-features -- -D warnings` — three errors remain, all
@@ -119,6 +119,20 @@ now exercised.
 `clippy::used_underscore_binding` is not enabled here, and `aligned_reads_reader/mod.rs` allows
 dead code module-wide, so the field alone would not have warned either. A2 adds the parameter in
 the commit whose body reads it, and its diff is smaller for it.
+
+**The unchecked mint is now a compile error, not a convention.** The first fix put minting and
+checking in one closure but left the factory in scope beside it, so skipping the check still
+compiled — the review demonstrated exactly that, producing a working unchecked decode reader. The
+factory is now *moved into* the closure, and because `impl FnMut() -> R` is not `Copy` the
+borrow checker refuses any other mint: the same bypass now fails with `error[E0382]: borrow of
+moved value: make_reference`. Verified both ways.
+
+**Two mutations the review found surviving, each now killed by a test, each measured.**
+Removing the servability fetch: **301 passed, 2 failed** (`ng::read`), where before it passed all
+6,276. Swapping the contig-table comparison with the fetch — which changes *which* fault an
+operator is told about, and nothing held the order: **302 passed, 1 failed**, where before it
+passed all 6,276. The first test's worth is stated narrowly in its own doc comment, because with
+one shared closure the fetch cannot be dropped for the decode's reader alone.
 
 **Renames and stale prose.** `checked_reference` → `check_reference_reader` (a closure that
 checks is a verb); `decode_reference` → `reference_reader`. The vocabulary is settled on

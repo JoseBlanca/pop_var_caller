@@ -431,54 +431,63 @@ impl AlignmentFile {
         // corrupts the read sequences themselves, silently, because a CRAM stores a read as
         // its *differences from the reference*. Minting and checking in one place is what
         // makes forgetting the second one unrepresentable.
-        let check_reference_reader = |reference: R,
-                                      probe: &mut Vec<u8>,
-                                      reader: &'static str|
-         -> Result<R, AlignmentFileError> {
-            // **Is the accessor over this file's contigs at all?** One comparison of two
-            // tables — names, lengths, and digests where both sides carry one.
-            self.contigs
-                .first_disagreement(reference.contigs())
-                .map_err(|detail| AlignmentFileError::CursorAccessorContigTable {
-                    path: self.path.to_path_buf(),
-                    reader,
-                    detail,
-                })?;
+        let mut mint_a_checked_reference_reader =
+            move |probe: &mut Vec<u8>, reader: &'static str| -> Result<R, AlignmentFileError> {
+                // **The factory lives in here, and that is what makes the check unskippable.** It
+                // is moved in, so no code outside can mint a reader at all: an edit that tried
+                // would not compile (`impl FnMut() -> R` is not `Copy`, so the move is the whole
+                // of it). An earlier shape took an already-minted reader as an argument and left
+                // the factory in scope beside it — the check was then a convention a comment asked
+                // the next author to keep, and this review demonstrated that skipping it compiled
+                // cleanly and produced a working, unchecked decode reader.
+                let reference = make_reference();
 
-            // **Can it actually serve this cursor's contig?**
-            //
-            // The comparison above proves the accessor carries the right *description*.
-            // For one accessor that is the whole story — `InMemoryRefSeq` derives its
-            // table from the bytes it holds. But `ResidentRefSeq::new` and
-            // `WindowedRefSeq::new` take the `ContigList` as a **separate constructor
-            // argument**, so nothing ties it to the bytes on disk: a `WindowedRefSeq` over
-            // a FASTA missing a contig, behind a table that names it, matches this file
-            // perfectly and cannot serve a single base of it.
-            //
-            // A zero-length fetch settles that, and it is what the deleted per-contig loop
-            // was really for. The loop asked it of **every** contig in the header — ~2,580
-            // on GRCh38, once per cursor — for a property that only matters for the one
-            // contig this cursor will read. Asking it once keeps the fail-fast and costs
-            // one `open(2)` instead of 2,580.
-            //
-            // Without it the fault surfaces mid-stream, per chromosome, after arbitrary
-            // work, under a top-level message naming the *BAM* — and on a `--regions` run
-            // whose reads are all dropped before filter #8, never at all.
-            reference
-                .fetch_raw_into(contig, 1, 0, probe)
-                .map_err(|source| AlignmentFileError::Reference {
-                    path: self.path.to_path_buf(),
-                    reader,
-                    source,
-                })?;
+                // **Is the accessor over this file's contigs at all?** One comparison of two
+                // tables — names, lengths, and digests where both sides carry one.
+                self.contigs
+                    .first_disagreement(reference.contigs())
+                    .map_err(|detail| AlignmentFileError::CursorAccessorContigTable {
+                        path: self.path.to_path_buf(),
+                        reader,
+                        detail,
+                    })?;
 
-            Ok(reference)
-        };
+                // **Can it actually serve this cursor's contig?**
+                //
+                // The comparison above proves the accessor carries the right *description*.
+                // For one accessor that is the whole story — `InMemoryRefSeq` derives its
+                // table from the bytes it holds. But `ResidentRefSeq::new` and
+                // `WindowedRefSeq::new` take the `ContigList` as a **separate constructor
+                // argument**, so nothing ties it to the bytes on disk: a `WindowedRefSeq` over
+                // a FASTA missing a contig, behind a table that names it, matches this file
+                // perfectly and cannot serve a single base of it.
+                //
+                // A zero-length fetch settles that, and it is what the deleted per-contig loop
+                // was really for. The loop asked it of **every** contig in the header — ~2,580
+                // on GRCh38, once per cursor — for a property that only matters for the one
+                // contig this cursor will read. Asking it once keeps the fail-fast and costs
+                // one `open(2)` instead of 2,580.
+                //
+                // Without it the fault surfaces mid-stream, per chromosome, after arbitrary
+                // work, under a top-level message naming the *BAM* — and on a `--regions` run
+                // whose reads are all dropped before filter #8, never at all.
+                reference
+                    .fetch_raw_into(contig, 1, 0, probe)
+                    .map_err(|source| AlignmentFileError::Reference {
+                        path: self.path.to_path_buf(),
+                        reader,
+                        source,
+                    })?;
 
-        // One buffer for every probe, since a zero-length fetch writes nothing into it and the
-        // readers are checked one after the other.
+                Ok(reference)
+            };
+
+        // One buffer for every probe. Sound because of the trait's contract rather than
+        // because the fetch is zero-length: `fetch_raw_into` replaces `dst`'s contents on
+        // success and leaves them untouched on error, so a later probe cannot read an earlier
+        // one's bytes even if the length ever stops being zero.
         let mut probe = Vec::new();
-        let reference = check_reference_reader(make_reference(), &mut probe, "read filter's")?;
+        let reference = mint_a_checked_reference_reader(&mut probe, "read filter's")?;
 
         let aligned_reads_reader = match AlignmentFileKind::from_path(&self.path) {
             Some(AlignmentFileKind::Bam) => {
@@ -526,7 +535,7 @@ impl AlignmentFile {
                 // the checks the first one did, because a factory that hands out one good
                 // reader and one bad one is not a case worth leaving to luck.
                 let decode_reference =
-                    check_reference_reader(make_reference(), &mut probe, "CRAM decode's")?;
+                    mint_a_checked_reference_reader(&mut probe, "CRAM decode's")?;
                 let entries = self
                     .crai_by_contig
                     .get(usize::try_from(contig.get()).unwrap_or(usize::MAX))
@@ -2190,6 +2199,119 @@ mod tests {
         assert!(
             file.cursor(ContigId(0), good).is_ok(),
             "two good readers open a cursor"
+        );
+    }
+
+    /// **The second reader's *servability* is checked too, not only its table.**
+    ///
+    /// Its sibling above hands the CRAM arm a permuted table, which fails the contig-table
+    /// comparison and never reaches the fetch, so it cannot see the fetch go missing. Here both
+    /// readers carry the file's contig table exactly and clear the comparison; the second is
+    /// over a FASTA holding only the *other* contig, so only a fetch can tell. That is the
+    /// stale-`.fai` case — a table naming a contig the bases do not have — and it is the one
+    /// that at A2 stops being an open-time refusal and becomes a fault mid-decode.
+    ///
+    /// **What it is worth, stated exactly, because it is less than it looks.** Removing the
+    /// fetch fails this test and `a_cursor_refuses_an_accessor_that_cannot_serve_its_contig`
+    /// together — 301 passed, 2 failed, measured. Since both readers go through one closure,
+    /// the fetch cannot be dropped for the decode's reader alone, so no mutation separates
+    /// them today. What this holds is the case itself, on the reader that will carry it: if the
+    /// closure is ever split again, the half that would go unwatched is watched here.
+    #[test]
+    fn a_cram_cursor_checks_that_its_second_reader_can_serve_the_contig() {
+        use crate::fasta::{ContigEntry, ContigList};
+        use crate::ng::ref_seq::WindowedRefSeq;
+        use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
+        use std::cell::Cell;
+
+        let (_cram_dir, cram_path, _fasta_dir, fasta) = indexed_cram(&one_read());
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
+        let file = AlignmentFile::open(
+            &cram_path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("the CRAM opens");
+
+        // The table both readers publish: the file's own, so the comparison passes for each.
+        let table = ContigList {
+            entries: FIXTURE_CONTIGS
+                .iter()
+                .map(|(name, length)| ContigEntry {
+                    name: (*name).to_string(),
+                    length: *length as u64,
+                    md5: None,
+                })
+                .collect(),
+        };
+        // …behind a FASTA holding only the second contig, so contig 0 cannot be fetched.
+        let (_short_dir, short_fasta) = build_fasta(&[ContigSpec {
+            name: FIXTURE_CONTIGS[1].0.to_string(),
+            length: FIXTURE_CONTIGS[1].1 as u64,
+        }])
+        .expect("build the one-contig fasta");
+
+        let minted = Cell::new(0u8);
+        let error = file
+            .cursor(ContigId(0), || {
+                minted.set(minted.get() + 1);
+                let over = if minted.get() == 1 {
+                    fasta.clone()
+                } else {
+                    short_fasta.clone()
+                };
+                WindowedRefSeq::new(over, table.clone())
+            })
+            .err()
+            .expect("a decode reader that cannot serve this contig must be refused");
+        assert!(
+            matches!(&error, AlignmentFileError::Reference { .. }),
+            "the refusal must be the servability one, not the table one: {error}"
+        );
+        assert_eq!(minted.get(), 2, "the CRAM arm asked for a second reader");
+    }
+
+    /// **A reader that fails both checks is reported on its *description*, not its ability.**
+    ///
+    /// The order is what `cursor`'s own doc argues for — the argument, then the description,
+    /// then the ability — and until this test nothing held it: every other fixture fails exactly
+    /// one check, so swapping the two was invisible. **Mutation-verified: swapping them leaves
+    /// 302 of `ng::read`'s tests passing and fails only this one** (the review found the same
+    /// swap passing all 6,276 library tests before it existed).
+    ///
+    /// The distinction is the operator's. A table disagreement says the *caller* wired up an
+    /// accessor over some other reference; a servability fault says the reference's own bases
+    /// are missing. Told the second when the first is true, they go looking at the FASTA for a
+    /// fault in the calling code.
+    #[test]
+    fn a_reader_failing_both_checks_is_refused_on_its_contig_table() {
+        use crate::ng::ref_seq::InMemoryRefSeq;
+
+        let (_reference_dir, _bam_dir, file) =
+            opened_over(&[read_named_with_length("r", 0, 1, 30)]);
+        // One contig where the file declares two: the table disagrees, *and* contig 1 cannot be
+        // fetched from it.
+        let one_contig_only = || {
+            InMemoryRefSeq::from_named_contigs(vec![(
+                FIXTURE_CONTIGS[0].0.to_string(),
+                vec![b'A'; FIXTURE_CONTIGS[0].1],
+            )])
+        };
+        let error = file
+            .cursor(ContigId(1), one_contig_only)
+            .err()
+            .expect("an accessor failing both checks is refused");
+        assert!(
+            matches!(&error, AlignmentFileError::CursorAccessorContigTable { .. }),
+            "the description fault is reported before the ability fault: {error}"
         );
     }
 
