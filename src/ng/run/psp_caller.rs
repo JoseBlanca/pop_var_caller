@@ -50,6 +50,7 @@ use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::region_typing::GenomeRegions;
 use crate::ng::types::{Bp, ReadGroupId};
 use crate::ng::vcf::VcfRecord;
+use crate::ng::window_coverage::{SampleHistogram, WindowCoverage};
 
 use crate::ng::calling::allele_candidates::CandidateSelectionConfig;
 
@@ -428,7 +429,7 @@ impl PspVariantCaller {
     pub fn call_cohort_handing_each_record_over<S, G, E>(
         self,
         genotyper: &G,
-        hand_over: &mut impl FnMut(&VcfRecord) -> Result<(), E>,
+        hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
     ) -> Result<(CohortCallingTallies, StoredCohortTallies), RunError>
     where
         G: LocusGenotyper<S>,
@@ -447,6 +448,10 @@ impl PspVariantCaller {
         // **One accessor for the whole run, never shared** — it walks forward with the merge
         // and releases what it has passed, exactly as direct mode's does.
         let padding_reference = walk_reference.accessor();
+        // **A second accessor, for the merge's own reading** — the padding one is read at the
+        // record and this one at the cover, and one accessor serving both would have two
+        // callers sliding a single window in two directions (`spec/window_coverage.md` §3.2).
+        let reference_for_the_merge = walk_reference.accessor();
         // **Destructured rather than reached through accessors**, so that the readers can be
         // borrowed mutably while the table they are renumbered through is borrowed by the
         // same expression: they are separate fields, and only a destructuring says so.
@@ -485,13 +490,16 @@ impl PspVariantCaller {
             candidate_selection: &candidate_selection,
             padding_reference,
         };
-        let CohortCallingOutcome { calling, sources } =
-            call_cohort_from_sources_handing_each_record_over(
-                ObservationCache::over(sources),
-                inputs,
-                genotyper,
-                hand_over,
-            )?;
+        let CohortCallingOutcome {
+            calling,
+            sources,
+            window_coverage_histograms,
+        } = call_cohort_from_sources_handing_each_record_over(
+            ObservationCache::over(sources, Box::new(reference_for_the_merge)),
+            inputs,
+            genotyper,
+            hand_over,
+        )?;
         // **The sources come back so that a mode can turn them into per-sample facts**, and
         // this is psp mode doing it: each spent source carries what it drew, which is the only
         // per-sample measurement a run over stored files makes.
@@ -520,7 +528,21 @@ impl PspVariantCaller {
             psps.len(),
             read.len(),
         );
+        // **The histograms are a third list paired by position**, and the two above are asserted
+        // for the reason this one is: a mis-pairing does not crash and does not go out of range.
+        // What it puts under the wrong sample's name here is the number the hidden-duplication
+        // filter divides a locus's depth by, so it is a wrong copy number for two samples rather
+        // than a wrong line in a report.
+        assert_eq!(
+            window_coverage_histograms.len(),
+            psps.len(),
+            "{} psps came back with {} coverage histograms. This is a defect in ng rather than \
+             anything about the data.",
+            psps.len(),
+            window_coverage_histograms.len(),
+        );
         let stored = StoredCohortTallies {
+            window_coverage_histograms,
             per_sample: psps
                 .iter()
                 .zip(read)
@@ -558,6 +580,22 @@ impl PspVariantCaller {
 pub struct StoredCohortTallies {
     /// One per sample, in the run's sample order — which is the order the psps were given.
     pub per_sample: Vec<StoredSample>,
+    /// **Each sample's coverage-by-GC histogram**, or the reason it has none —
+    /// **one entry per entry of [`per_sample`](Self::per_sample), at the same index**
+    /// (`doc/devel/ng/spec/window_coverage.md` §3.5). Direct mode carries the same list on
+    /// [`WrittenCohort`](super::callers::WrittenCohort), and the two modes produce the same
+    /// values.
+    ///
+    /// **The type does not enforce the pairing and the run asserts it**, because a slipped one
+    /// stays in range and puts one sample's yardstick under another's name — and this yardstick
+    /// is what the hidden-duplication filter divides a locus's depth by, so the cost is a wrong
+    /// copy number rather than a wrong line in a report.
+    ///
+    /// **A list here rather than a field on [`StoredSample`]**, because a `StoredSample` is built
+    /// per file as the psps are paired back with what they gave, and the histograms come out of
+    /// the cache in one piece at the end of the pass. Nothing reads them yet; the
+    /// hidden-duplication filter is their consumer.
+    pub window_coverage_histograms: Vec<SampleHistogram>,
 }
 
 /// **What one spent source read, carrying the name of the sample it read it for.**
@@ -1835,7 +1873,7 @@ mod tests {
         let (tallies, stored) = caller
             .call_cohort_handing_each_record_over(
                 &the_shipped_genotyper(),
-                &mut |record: &VcfRecord| {
+                &mut |record: &VcfRecord, _window_coverage: &[WindowCoverage]| {
                     handed.push(record.region());
                     Ok::<(), std::io::Error>(())
                 },

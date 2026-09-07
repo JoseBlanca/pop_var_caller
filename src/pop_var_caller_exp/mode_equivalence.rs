@@ -137,6 +137,8 @@ mod tests {
             build_index_if_missing: false,
             max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
             max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+            paralog_fdr: 0.0,
+            paralog_filter_tag: false,
             cohort_locus_builder_regions_len: None,
             threads: 0,
             min_copies: MinCopies::default(),
@@ -214,6 +216,8 @@ mod tests {
             ploidy: None,
             max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
             max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+            paralog_fdr: 0.0,
+            paralog_filter_tag: false,
             cohort_locus_builder_regions_len: None,
             threads: 0,
             min_copies: MinCopies::default(),
@@ -269,6 +273,186 @@ mod tests {
         assert_eq!(
             from_alignments, from_psps,
             "the same cohort and the same parameters must give the same VCF, whole",
+        );
+    }
+
+    // ------------------------------------------------------------------ the filter's oracles
+
+    /// **The four header lines the filter adds, and only when it ran** — spec §10's second
+    /// oracle strips these along with the two `INFO` keys.
+    ///
+    /// They cannot be unconditional: an off run's header would then differ from the header the
+    /// caller wrote before the filter existed, which is spec §10's *first* oracle and the one the
+    /// whole plan rests on. The owner amended the second oracle for this reason on 2026-09-07.
+    fn without_the_filters_header_lines(lines: &[String]) -> Vec<String> {
+        lines
+            .iter()
+            .filter(|line| {
+                !(line.starts_with("##paralogFilter=")
+                    || line.starts_with("##INFO=<ID=PARALOG_LR,")
+                    || line.starts_with("##INFO=<ID=PARALOG_POST,")
+                    || line.starts_with("##FILTER=<ID=hiddenParalog,"))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The same lines with the filter's two `INFO` fields removed from every record's eighth
+    /// column, leaving the rest of that column exactly as it was.
+    fn without_the_filters_info_fields(lines: &[String]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                if line.starts_with('#') {
+                    return line.clone();
+                }
+                let mut columns: Vec<String> = line.split('\t').map(str::to_owned).collect();
+                if let Some(info) = columns.get_mut(7) {
+                    let kept: Vec<&str> = info
+                        .split(';')
+                        .filter(|field| {
+                            !(field.starts_with("PARALOG_LR=")
+                                || field.starts_with("PARALOG_POST="))
+                        })
+                        .collect();
+                    *info = kept.join(";");
+                }
+                columns.join("\t")
+            })
+            .collect()
+    }
+
+    /// A target no record can reach, so the filter scores everything and removes nothing.
+    const A_TARGET_NO_RECORD_REACHES: f64 = 1e-12;
+
+    /// **Spec §10's second oracle: what the filter does not flag, it does not change.**
+    ///
+    /// Run the filter at a target nothing reaches, strip the two `INFO` fields it adds and the
+    /// four header lines it declares, and what is left must be the filter-off file — byte for
+    /// byte, every record and every other header line.
+    ///
+    /// **The stripping is the amended form** (the owner, 2026-09-07). As §10 first wrote it the
+    /// header lines were not stripped, and the oracle could not pass: the filter's declarations
+    /// are emitted only on a run that filtered, because emitting them always would break §10's
+    /// *first* oracle instead. What this asserts is that the filter changes no record it does not
+    /// flag; a header line is not a record.
+    #[test]
+    fn a_filter_that_flags_nothing_changes_nothing_but_its_own_lines() {
+        let cohort = a_varying_cohort_on_disk();
+        let output = cohort.directory.path().join("calls.vcf");
+
+        let mut off = alignments_args(&cohort, &output);
+        off.paralog_fdr = 0.0;
+        run_call_from_alignments(&off).expect("the cohort calls with the filter off");
+        let unfiltered = comparable(&output);
+        std::fs::remove_file(&output).expect("the off run's file makes way for the on run's");
+
+        let mut on = alignments_args(&cohort, &output);
+        on.paralog_fdr = A_TARGET_NO_RECORD_REACHES;
+        run_call_from_alignments(&on).expect("the cohort calls with the filter on");
+        let filtered = comparable(&output);
+
+        assert!(
+            records(&unfiltered) >= WHAT_THE_FIXTURE_VARIES_AT,
+            "the fixture must produce calls or this oracle claims nothing; got {}",
+            records(&unfiltered),
+        );
+        assert_eq!(
+            records(&filtered),
+            records(&unfiltered),
+            "a target nothing reaches must remove no record",
+        );
+        // **The filter's own lines are there to be stripped.** Without this the oracle would
+        // also pass on a run where the filter never ran at all.
+        assert!(
+            filtered
+                .iter()
+                .any(|line| line.starts_with("##paralogFilter=")),
+            "the on run must say it filtered, or this is not testing the filter",
+        );
+
+        assert_eq!(
+            without_the_filters_info_fields(&without_the_filters_header_lines(&filtered)),
+            unfiltered,
+            "what the filter does not flag, it must not change",
+        );
+    }
+
+    /// **Spec §10's fourth oracle, with the filter on: one cohort, two modes, one VCF.**
+    ///
+    /// Its sibling `one_cohort_called_both_ways_gives_one_vcf` runs both modes with the filter
+    /// off. This is the same comparison on the filter's path — which is where the two modes each
+    /// carry their own copy of the wiring that chooses the sink, takes it apart, runs the last two
+    /// passes and prints the report. A divergence between those two copies is invisible to every
+    /// other test in the crate.
+    #[test]
+    fn one_cohort_filtered_both_ways_gives_one_vcf() {
+        let cohort = a_varying_cohort_on_disk();
+        let output = cohort.directory.path().join("calls.vcf");
+
+        let mut from_alignments_args = alignments_args(&cohort, &output);
+        from_alignments_args.paralog_fdr = A_TARGET_NO_RECORD_REACHES;
+        run_call_from_alignments(&from_alignments_args)
+            .expect("the cohort calls from its alignment files, filtered");
+        let from_alignments = comparable(&output);
+
+        std::fs::remove_file(&output).expect("the first route's file makes way for the second's");
+        let psps = walked_into_psps(&cohort);
+        let mut from_psps_args = psps_args(&cohort, &output, &psps, &["one", "two"]);
+        from_psps_args.paralog_fdr = A_TARGET_NO_RECORD_REACHES;
+        run_call_from_psps(&from_psps_args).expect("the stored cohort calls, filtered");
+        let from_psps = comparable(&output);
+
+        assert!(
+            records(&from_alignments) >= WHAT_THE_FIXTURE_VARIES_AT,
+            "the fixture must produce calls or this comparison claims nothing; got {}",
+            records(&from_alignments),
+        );
+        assert!(
+            from_alignments
+                .iter()
+                .any(|line| line.starts_with("##paralogFilter=")),
+            "both runs must have filtered, or this is the unfiltered comparison again",
+        );
+        assert_eq!(
+            from_alignments, from_psps,
+            "one cohort filtered two ways must give one VCF, whole",
+        );
+    }
+
+    /// **Spec §10's third oracle: the drop-mode file is the tag-mode file without its tagged
+    /// lines.**
+    ///
+    /// The two runs differ in one flag, so every difference between their files must be a record
+    /// the filter flagged — and in tag mode those records are still there, carrying the filter's
+    /// id. **On this fixture nothing is flagged**, so what the oracle proves here is the weaker
+    /// half: that asking to tag rather than drop changes nothing else about the file. The
+    /// stronger half needs a cohort with a real duplication in it, which is the plan's D milestone.
+    #[test]
+    fn the_dropping_file_is_the_tagging_file_without_its_tagged_lines() {
+        let cohort = a_varying_cohort_on_disk();
+        let output = cohort.directory.path().join("calls.vcf");
+
+        let mut dropping = alignments_args(&cohort, &output);
+        dropping.paralog_fdr = A_TARGET_NO_RECORD_REACHES;
+        run_call_from_alignments(&dropping).expect("the cohort calls, dropping");
+        let dropped = comparable(&output);
+        std::fs::remove_file(&output).expect("the dropping run's file makes way");
+
+        let mut tagging = alignments_args(&cohort, &output);
+        tagging.paralog_fdr = A_TARGET_NO_RECORD_REACHES;
+        tagging.paralog_filter_tag = true;
+        run_call_from_alignments(&tagging).expect("the cohort calls, tagging");
+        let tagged = comparable(&output);
+
+        let untagged: Vec<String> = tagged
+            .iter()
+            .filter(|line| line.starts_with('#') || !line.contains("hiddenParalog\t"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            untagged, dropped,
+            "the tag-mode file without its tagged records must be the drop-mode file",
         );
     }
 
@@ -709,6 +893,8 @@ mod tests {
             ploidy: None,
             max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
             max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+            paralog_fdr: 0.0,
+            paralog_filter_tag: false,
             cohort_locus_builder_regions_len: None,
             threads: 0,
             min_copies: MinCopies::default(),

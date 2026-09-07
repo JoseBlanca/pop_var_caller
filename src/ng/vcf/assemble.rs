@@ -39,12 +39,24 @@ use super::{
 use crate::ng::calling::quality::artifact_correction::ArtifactPenalties;
 use crate::ng::calling::{LocusInference, SampleGenotypeCall};
 use crate::ng::types::Phred;
+use crate::ng::window_coverage::WindowCoverage;
 
 /// **What one sample showed at a locus, once the locus itself is gone.**
 ///
 /// Summed in the worker while the merge's `SampleSupport` is still in hand — the counts cannot
 /// be recovered afterwards, which is why they travel rather than being re-derived.
-#[derive(Clone, PartialEq, Eq, Debug)]
+///
+/// **Comparing two of these compares the window by bit pattern**, which is
+/// [`WindowCoverage`]'s own `PartialEq` and not the float `==` a reader might expect: it is what
+/// makes two absent windows — two pairs of `NaN`s — equal, and what would report a correct run as
+/// disagreeing at every window the position floor silenced if it were `==` instead.
+///
+/// **`Eq` is gone from the derive** only because a derive cannot reach past a field whose type
+/// withholds it, and `WindowCoverage` withholds it deliberately: bitwise equality separates `+0.0`
+/// from `-0.0`, which is what comparing two runs wants and what a lookup key must not have. It was
+/// dead weight here in any case — nothing in the tree compares two of these, and
+/// [`LocusEvidenceForOutput`], the only type that holds them, never derived `Eq` either.
+#[derive(Clone, PartialEq, Debug)]
 pub struct SampleEvidenceForOutput {
     /// Reads whose complete observation matched each allele of the locus's table, in allele
     /// order, reference first. Becomes `AD`.
@@ -52,6 +64,15 @@ pub struct SampleEvidenceForOutput {
     /// Reads this sample observed that no *written* allele explains: a dropped candidate's
     /// reads, and partial observations. Becomes `DP − ΣAD`.
     pub reads_no_written_allele_explains: u32,
+    /// This sample's read depth and GC over the 500-base window centred on the locus's first
+    /// base (`doc/devel/ng/spec/window_coverage.md` §3.5), **or an absent pair where it has no
+    /// usable window there**.
+    ///
+    /// **Dense over the run's samples, where the merge's is over the covering ones**: a sample
+    /// that covered nothing at this locus has a row here and no entry there, and both say the
+    /// same thing about its window — that there is none. It reaches no VCF field today; the
+    /// hidden-duplication filter is what reads it.
+    pub window_coverage: WindowCoverage,
 }
 
 /// **Everything a record needs that the called locus does not already carry.**

@@ -703,6 +703,144 @@ Three failures, all in one sentence:
    is meaningless until the reader knows what was fed differently between the 2.2× and the
    3.75×. The repair states both arms, what differs, and only then the two numbers.
 
+### 2026-09-07 — a spec gap put to the owner as a file-format question, in four undefined nouns
+
+Reporting a review finding, I asked the owner to rule on how the spill file should record that a
+record has no alternative allele:
+
+> ❌ "**Spec §3.2 says a record with no alternative allele is not scored — and neither pass does
+> that.** A repeat tract the caller refused, written with `ALT .` and every sample no-called, is
+> parked like any other record and scored on its coverage, so it gets a real ratio, enters the fit,
+> and can be removed from the file." … "**My recommendation: widen the existing tract byte into a
+> two-value discriminant rather than adding a field**"
+>
+> Owner: *"This writting is so aweful that I can't understand a thing. But, a record with no alt
+> allele is not variable and we don't mind about it because we remove them from the analysis."*
+
+> ✅ "Some positions get written out with no variant at them — a repeat tract the caller looked at
+> and declined to call. Should the duplication filter be allowed to remove those lines?"
+
+The owner answered in one sentence the moment the question was legible, and the answer made the
+whole recommendation moot. Four failures, and the first two are new in combination:
+
+1. **The reply opened with a specification citation instead of with the thing.** "Spec §3.2 says X
+   — and neither pass does that" makes the reader reconstruct X, then reconstruct which two passes,
+   before any fact arrives. **New rule: never open a paragraph with a document reference. Say what
+   is true, then cite.** A citation is evidence for a claim, not a substitute for making one.
+2. **Three modifiers stacked before the object was named**: *a repeat tract the caller refused,
+   written with `ALT .` and every sample no-called*. By the time the noun arrives the reader is
+   holding three unresolved qualifiers. One clause, one fact.
+3. **Every consequence was stated as internal mechanism** — *parked*, *scored on its coverage*,
+   *gets a real ratio*, *enters the fit*. Four project verbs in one sentence, none of them said in
+   plain terms, and not one of them named the thing the owner actually cares about: **a line
+   disappearing from their VCF**.
+4. **The `is this mine` test was run on the wrong question, which is why it passed.** The choice I
+   put up — a bit in the spill's layout — really was the owner's, because it edits a spec. But it
+   was *downstream* of a question that was theirs and far simpler: do these records matter at all?
+   Asking the downstream one first spent the owner's attention on machinery that a "no" deletes
+   entirely. **New rule: when a finding leads to a design choice, ask whether the thing the choice
+   is about matters, before asking how to build it.** The 2026-09-07 entry below says to run the
+   *is this mine* test before drafting; this adds that the test has to be run on the **outermost**
+   question, not the one the working reached last.
+
+### 2026-09-07 — a decision put to the owner in the vocabulary of my own tooling
+
+Asked to code a step, I hit a choice about how a copied file reaches a type, and put it to the
+owner as a table:
+
+> ❌ "Add a fourth sanctioned substitution and end the guard before the test module … the
+> existing 'path into production' substitution is hardcoded to rewrite `crate::paralog` into
+> `crate::ng::paralog`, and this one is `crate::sample_summary::CoverageByGcHistogram` into
+> `crate::ng::window_coverage::CoverageByGcHistogram`. The guard refuses anything it has not been
+> taught, by design — there is a test that says so."
+>
+> Owner: *"I don't understand what you'r talking about. What you printed is a dump of your
+> internal monolog, I don't have the context."*
+
+Every load-bearing noun — *sanctioned substitution*, *the guard*, *repoint*, *release the file* —
+names a mechanism inside a checker I wrote. None had ever been described to the reader.
+
+**But the deeper failure is that it was never their decision.** None of the three options changed
+a single number the caller produces; they differed only in which internal check keeps running.
+The skill's own two-step test — *is this mine to decide? if yes, decide it and say so in one
+line* — was not run. The repair was one sentence: **"I've made it: I'll teach the copy-check that
+this one import may differ, so the check keeps running over all the fitting code."**
+
+**New rule, and it is about ordering:** run the *is this mine* test **before** drafting the
+explanation, not after. Drafting first creates a sunk cost in the explanation and makes a
+tooling-internal choice feel like a question worth asking, because by then it has a table.
+
+### 2026-09-07 — a design rule with two reasons, and I never checked the second when the first fell
+
+I proposed splitting the filter's records by how many genomic positions a locus occupies, on two
+grounds: a multi-position locus has no single place to measure depth, and none to take an allele
+split at. The owner removed the first:
+
+> Owner: *"I don't really see the difference between loci that span one position and the ones that
+> span more than one once you decide that we assume that all positions in a locus that covers
+> several position have the same coverage."*
+
+They were right, and the rule did not survive — but **not for the reason they gave.** Checking the
+second ground against the actual variant kinds, it was also false: at a deletion every read either
+carries the deletion or does not, so the allele split is exactly as well defined as a SNP's however
+many bases it spans. Span distinguished *neither* signal. What actually stops a read reporting its
+allele is amplification slippage, which happens at repeat tracts and nowhere else — so the rule is
+*tract against everything else*, and the record already carried that flag.
+
+Two failures, and the second is the transferable one:
+
+1. **An earlier draft of the same rule had been wrong too** (biallelic SNPs against everything
+   else), and I replaced it with a rule that felt more principled without testing it against the
+   cases. *Feels more principled* is not a test. Enumerating five variant kinds against the two
+   signals takes two minutes and would have killed both drafts.
+2. **A claim resting on two reasons needs both checked independently.** When the reader knocked out
+   one, my instinct was to defend the conclusion on the survivor — and the survivor was rotten. The
+   check is mechanical: for each reason, ask *if only this one were true, would the rule still be
+   right?* If no reason passes alone, the rule is not supported by either.
+
+**And one wrong mechanism, corrected earlier the same day**, of the kind `CLAUDE.md` warns about:
+
+> ❌ "at a repeat tract, where *every* sample has zero allele reads by construction"
+>
+> Owner: *"I don't understand why in strs the samples have not reads. Their observations have
+> support, like the snp/indel ones."*
+
+> ✅ "A tract's samples have reads and their calls rest on them. What is zero is what we choose to
+> hand the scorer — the filter declining to use evidence it has no model for, not an absence in
+> the data."
+
+*By construction* was doing the damage: it read as a property of the data when it meant *by the
+rule I am proposing*. **A phrase that hedges where a fact comes from must not sit where the reader
+takes it as the fact itself** — and the repair here was load-bearing, because the whole argument
+for the type change is that an abstention must not be storable as a measurement.
+
+### 2026-09-07 — a gate check that could only see the failures it already knew about
+
+Reporting a step, I wrote that the build gate was "unchanged from the merge base and none in this
+module". A review agent measured **11 clippy errors against the merge base's 9**, and the two extra
+were mine: `variable does not need to be mutable`, on the exact lines the step had changed.
+
+The cause was the command I had been running all session:
+
+> ❌ `cargo clippy … | grep -cE "^error: (can be|the following|this operation)"`
+>
+> ✅ `cargo clippy … | grep -E "^error: " | grep -v "could not compile" | sort | uniq -c`
+
+**The filter listed the three lint kinds the baseline already had.** A *new* kind of lint was
+invisible by construction — not missed, but excluded. And because the count it printed matched the
+baseline every time, the check kept confirming the thing it could no longer detect.
+
+**The rule: a regression check must be able to see a failure it has never seen before.** When
+comparing against a baseline, count *categories* and diff them; never grep for the ones you expect.
+The same shape hides elsewhere — a test filter that names the tests you know about, a diff summary
+read as `--stat`, a log grep for the errors you have already fixed. The tell is that the check's
+pattern was written *from* the baseline rather than from the thing being checked.
+
+**And it is worse in a report than in a terminal.** Quoting "9 errors, unchanged" gave the number
+the authority of a measurement while the measurement had a hole in it. If a figure is a *gate* —
+something asserting that nothing got worse — the command that produced it belongs in the report
+beside it, so a reader can see what it could not have caught.
+
 ## Sources
 
 The diagnosis is not project-specific and the external literature is unusually

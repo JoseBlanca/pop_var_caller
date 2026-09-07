@@ -151,7 +151,7 @@ pub fn record_line(record: &VcfRecord, contigs: &[HeaderContig], ploidy: Ploidy)
 /// position does not move — which is only ever the contig's first base, where there is nothing
 /// to the left to move onto.
 #[must_use]
-fn written_position(record: &VcfRecord) -> u64 {
+pub(crate) fn written_position(record: &VcfRecord) -> u64 {
     let start = record.region().start.get();
     match record.padding_base() {
         // The record type refuses a left-hand base at position 1, so this cannot underflow.

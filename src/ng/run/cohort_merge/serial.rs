@@ -23,7 +23,9 @@ use super::build::{
     CohortObservation, RegionOutcome, build_region, build_region_handing_over_windowed,
 };
 use crate::ng::locus_generation::SampleLocusObservations;
-use super::observation_cache::{ObservationCache, ObservationSource, building_regions_of};
+use super::observation_cache::{
+    ObservationCache, ObservationSource, ReferenceUnreadable, building_regions_of,
+};
 use super::timing;
 use super::{
     CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads,
@@ -154,6 +156,7 @@ pub fn merge_cohort_through_cache<S, E>(
 ) -> Result<RegionOutcome, E>
 where
     S: ObservationSource<Error = E>,
+    E: From<ReferenceUnreadable>,
 {
     let mut merged = RegionOutcome::default();
     // Two disjoint borrows of one outcome, so that collecting the loci is this driver's
@@ -203,6 +206,7 @@ pub fn merge_cohort_handing_each_locus_over<S, E>(
 ) -> Result<(), E>
 where
     S: ObservationSource<Error = E>,
+    E: From<ReferenceUnreadable>,
 {
     merge_handing_each_locus_over_with(
         analysed,
@@ -257,7 +261,7 @@ pub fn merge_cohort_handing_each_locus_over_covering_samples_in_parallel<S, E>(
 ) -> Result<(), E>
 where
     S: ObservationSource<Error = E> + Send,
-    E: Send,
+    E: Send + From<ReferenceUnreadable>,
 {
     if rayon::current_num_threads() > 1 {
         merge_handing_each_locus_over_with(
@@ -1017,8 +1021,9 @@ mod tests {
     ) -> RegionOutcome {
         let oracle =
             merge_cohort_serially(analysed, per_sample, max_cohort_locus_span, min_alt_reads);
-        let mut cache =
-            ObservationCache::over(per_sample.iter().map(|sample| source_of(sample)).collect());
+        let mut cache = ObservationCache::over_fixture(
+            per_sample.iter().map(|sample| source_of(sample)).collect(),
+        );
         let through_cache = merge_cohort_through_cache(
             analysed,
             &mut cache,
@@ -1099,8 +1104,9 @@ mod tests {
         oracle: &RegionOutcome,
     ) {
         for regions in [1, 4, 16] {
-            let mut cache =
-                ObservationCache::over(per_sample.iter().map(|sample| source_of(sample)).collect());
+            let mut cache = ObservationCache::over_fixture(
+                per_sample.iter().map(|sample| source_of(sample)).collect(),
+            );
             let in_parallel = merge_cohort_in_parallel(
                 analysed,
                 &mut cache,
@@ -1153,8 +1159,9 @@ mod tests {
         max_cohort_locus_span: MaxCohortLocusSpan,
         min_alt_reads: MinAltReads,
     ) {
-        let mut cache =
-            ObservationCache::over(per_sample.iter().map(|sample| source_of(sample)).collect());
+        let mut cache = ObservationCache::over_fixture(
+            per_sample.iter().map(|sample| source_of(sample)).collect(),
+        );
         let mut organiser = Organiser::new();
         let mut next_index = 0u64;
 
@@ -1317,6 +1324,7 @@ mod tests {
             region: span,
             alleles: Vec::new(),
             per_sample: Vec::new(),
+            window_coverage: Vec::new(),
             kind: LocusKind::Generic,
         }
     }
@@ -1382,7 +1390,8 @@ mod tests {
         let deleting = [member(region(305, 330), &[b'A'; 26], b"A")];
         let inside = [member(region(310, 310), b"A", b"T")];
 
-        let mut cache = ObservationCache::over(vec![source_of(&deleting), source_of(&inside)]);
+        let mut cache =
+            ObservationCache::over_fixture(vec![source_of(&deleting), source_of(&inside)]);
         let merged = merge_cohort_through_cache(
             &[region(1, 600)],
             &mut cache,
@@ -1592,7 +1601,7 @@ mod tests {
         ]
         .into_iter();
 
-        let mut cache = ObservationCache::over(vec![source_of(&sample), failing]);
+        let mut cache = ObservationCache::over_fixture(vec![source_of(&sample), failing]);
         let outcome = merge_cohort_through_cache(
             &[region(1, 600)],
             &mut cache,
@@ -1616,7 +1625,7 @@ mod tests {
     fn analysed_regions_that_overlap_are_refused_through_the_cache() {
         let sample = [member(region(45, 45), b"G", b"T")];
 
-        let mut cache = ObservationCache::over(vec![source_of(&sample)]);
+        let mut cache = ObservationCache::over_fixture(vec![source_of(&sample)]);
         let _ = merge_cohort_through_cache(
             &[region(1, 60), region(40, 100)],
             &mut cache,
@@ -1649,7 +1658,7 @@ mod tests {
                 member(region(at, at), b"A", b"T")
             })
             .collect();
-        let mut cache = ObservationCache::over(vec![source_of(&dotted)]);
+        let mut cache = ObservationCache::over_fixture(vec![source_of(&dotted)]);
 
         let merged = merge_cohort_through_cache(
             &[region(1, 600)],
@@ -1690,7 +1699,7 @@ mod tests {
             .collect();
 
         let held_at = |bases: u32| {
-            let mut cache = ObservationCache::over(vec![source_of(&dotted)]);
+            let mut cache = ObservationCache::over_fixture(vec![source_of(&dotted)]);
             merge_cohort_through_cache(
                 &[region(1, 600)],
                 &mut cache,
@@ -1714,25 +1723,105 @@ mod tests {
         );
     }
 
+    /// **The cached driver's loci carry measured windows and the in-memory driver's do not**, and
+    /// this is the only place that says so.
+    ///
+    /// `fixtures::render` — what "the same answer" means for every comparison in this module —
+    /// leaves the window coverage out, because only the driver reading through the observation
+    /// cache takes that measurement. Left there and unexamined, two failures would be invisible:
+    /// the cached driver taking no measurement at all, and the comparison passing because both
+    /// sides are absent. So this asserts the asymmetry outright — the cache's pairs are numbers,
+    /// the oracle's are not, and both are one entry per covering sample.
+    ///
+    /// The fixture is 600 one-base records at three reads each, which is what makes a window
+    /// finalise at all: a centre closes only once the stream has reached 250 bases past it.
+    #[test]
+    fn the_cached_driver_measures_windows_where_the_in_memory_one_has_none() {
+        let dotted: Vec<SampleLocusObservations> = (1..=600)
+            .map(|at| member(region(at, at), b"A", b"T"))
+            .collect();
+        let per_sample: [&[SampleLocusObservations]; 1] = [&dotted];
+
+        let mut cache = ObservationCache::over_fixture(vec![source_of(&dotted)]);
+        let through_cache = merge_cohort_through_cache(
+            &[region(1, 600)],
+            &mut cache,
+            width(100),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltReads::DEFAULT,
+        )
+        .expect("the fixture source holds");
+        let in_memory = merge_cohort_serially(
+            &[region(1, 600)],
+            &per_sample,
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltReads::DEFAULT,
+        );
+
+        assert_eq!(
+            through_cache.cohort_observations.len(),
+            in_memory.cohort_observations.len(),
+            "the two drivers did not build the same loci, so the comparison below is not \
+             between the same things",
+        );
+        for (cached_locus, in_memory_locus) in through_cache
+            .cohort_observations
+            .iter()
+            .zip(&in_memory.cohort_observations)
+        {
+            for locus in [cached_locus, in_memory_locus] {
+                assert_eq!(
+                    locus.window_coverage.len(),
+                    locus.per_sample.len(),
+                    "the windows are parallel to the covering samples, one entry each",
+                );
+            }
+            assert!(
+                in_memory_locus
+                    .window_coverage
+                    .iter()
+                    .all(|window| window.is_absent()),
+                "the in-memory driver took a measurement it has no way to take",
+            );
+        }
+        // **Some locus carries a number**, which is what stops this passing over an outcome of
+        // absences. Not every one does: a centre in the last half-window of the fixture has no
+        // later position to close it.
+        assert!(
+            through_cache
+                .cohort_observations
+                .iter()
+                .flat_map(|observed| &observed.window_coverage)
+                .any(|window| !window.is_absent()),
+            "the cached driver's every window is absent, so it measured nothing",
+        );
+    }
+
     /// **The window is short at the moment a merge fails, not merely at the end of one** — the
     /// only place from outside where the driver's *drawing pace* is visible. A driver that
     /// covered the whole analysed region instead of each building region would evict down to the
     /// same window by the end, and every other test here would still pass.
+    ///
+    /// **The records are sixty bases apart rather than ten**, because a cover draws half a
+    /// window — 250 bases — past its region (`spec/window_coverage.md` §3.3): at ten bases apart
+    /// this fixture held **26** of its thirty at the moment of failure (measured, when the
+    /// look-ahead first landed) and the window was no longer visibly short. Six is what it holds
+    /// here, against the thirty a whole-region cover would.
     #[test]
     fn the_window_stays_short_up_to_a_failure() {
         let mut records: Vec<Result<SampleLocusObservations, SourceFailed>> = (0..30)
             .map(|locus| {
-                let at = 10 * locus + 1;
+                let at = 60 * locus + 1;
                 Ok(member(region(at, at), b"A", b"T"))
             })
             .collect();
         records.push(Err(SourceFailed("the block would not decode")));
-        let mut cache = ObservationCache::over(vec![records.into_iter()]);
+        let mut cache = ObservationCache::over_fixture(vec![records.into_iter()]);
 
         let outcome = merge_cohort_through_cache(
-            &[region(1, 600)],
+            &[region(1, 1_800)],
             &mut cache,
-            width(20),
+            width(60),
             MaxCohortLocusSpan::DEFAULT,
             MinAltReads::DEFAULT,
         );
@@ -1740,7 +1829,7 @@ mod tests {
         assert!(outcome.is_err());
         assert_eq!(
             cache.held_observations_len(),
-            2,
+            6,
             "the window at the moment of failure, not the thirty records behind it",
         );
     }
@@ -1759,7 +1848,7 @@ mod tests {
             start: Position(50),
             end: Position(1),
         };
-        let mut cache = ObservationCache::over(vec![source_of(&sample)]);
+        let mut cache = ObservationCache::over_fixture(vec![source_of(&sample)]);
 
         let _ = merge_cohort_through_cache(
             &[inverted],
@@ -1778,7 +1867,7 @@ mod tests {
     #[should_panic(expected = "not disjoint and ascending")]
     fn analysed_regions_sharing_one_base_are_refused() {
         let sample = [member(region(50, 50), b"G", b"T")];
-        let mut cache = ObservationCache::over(vec![source_of(&sample)]);
+        let mut cache = ObservationCache::over_fixture(vec![source_of(&sample)]);
 
         let _ = merge_cohort_through_cache(
             &[region(1, 50), region(50, 100)],
@@ -1794,7 +1883,7 @@ mod tests {
     #[test]
     fn merging_no_analysed_regions_through_the_cache_yields_nothing() {
         let sample = [member(region(12, 12), b"G", b"T")];
-        let mut cache = ObservationCache::over(vec![source_of(&sample)]);
+        let mut cache = ObservationCache::over_fixture(vec![source_of(&sample)]);
 
         let merged = merge_cohort_through_cache(
             &[],
@@ -1810,13 +1899,13 @@ mod tests {
     }
 
     /// A cohort of no samples merges to nothing rather than failing — the bottom of the range
-    /// this caller commits to (spec §7.2), and the shape `ObservationCache::over(Vec::new())`
+    /// this caller commits to (spec §7.2), and the shape `ObservationCache::over_fixture(Vec::new())`
     /// produces.
     #[test]
     fn merging_no_samples_through_the_cache_yields_nothing() {
         let mut cache: ObservationCache<
             std::vec::IntoIter<Result<SampleLocusObservations, SourceFailed>>,
-        > = ObservationCache::over(Vec::new());
+        > = ObservationCache::over_fixture(Vec::new());
 
         let merged = merge_cohort_through_cache(
             &[region(1, 100)],
@@ -1836,7 +1925,7 @@ mod tests {
     fn the_keep_threshold_reaches_the_builders_through_the_cache() {
         let sample = [member(region(12, 12), b"G", b"T")];
 
-        let mut built_cache = ObservationCache::over(vec![source_of(&sample)]);
+        let mut built_cache = ObservationCache::over_fixture(vec![source_of(&sample)]);
         let built = merge_cohort_through_cache(
             &[region(1, 50)],
             &mut built_cache,
@@ -1845,7 +1934,7 @@ mod tests {
             MinAltReads::DEFAULT,
         )
         .expect("the fixture source holds");
-        let mut quiet_cache = ObservationCache::over(vec![source_of(&sample)]);
+        let mut quiet_cache = ObservationCache::over_fixture(vec![source_of(&sample)]);
         let too_quiet = merge_cohort_through_cache(
             &[region(1, 50)],
             &mut quiet_cache,
@@ -1875,7 +1964,7 @@ mod tests {
             .build()
             .expect("a fixture pool");
         pool.install(|| {
-            let mut cache = ObservationCache::over(
+            let mut cache = ObservationCache::over_fixture(
                 layouts
                     .iter()
                     .map(|sample| source_of(sample))
@@ -1963,7 +2052,7 @@ mod tests {
             .expect("a fixture pool");
 
         let merged = pool.install(|| {
-            let mut cache = ObservationCache::over(vec![failing.into_iter()]);
+            let mut cache = ObservationCache::over_fixture(vec![failing.into_iter()]);
             let mut refused = Vec::new();
             merge_cohort_handing_each_locus_over_covering_samples_in_parallel(
                 &[region(1, 600)],

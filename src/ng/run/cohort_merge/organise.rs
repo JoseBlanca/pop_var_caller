@@ -499,6 +499,7 @@ mod tests {
             region,
             alleles: Vec::new(),
             per_sample: Vec::new(),
+            window_coverage: Vec::new(),
             kind: LocusKind::Generic,
         }
     }

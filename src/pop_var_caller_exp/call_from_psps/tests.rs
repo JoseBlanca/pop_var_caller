@@ -212,6 +212,8 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         ploidy: None,
         max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
         max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        paralog_fdr: 0.0,
+        paralog_filter_tag: false,
         cohort_locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
@@ -421,4 +423,84 @@ fn parameters_that_name_another_cohorts_samples_are_refused() {
         rendered.contains("zeta") || rendered.contains("someone-else"),
         "the refusal names a sample the two sides disagree about, and got: {rendered}",
     );
+}
+
+/// **A run asking for the filter now runs it**, where it used to be refused.
+///
+/// The step that built the scoring and writing passes is the step that deletes the refusal, and
+/// this is what says the deletion was not merely a deletion: the run finishes, writes its VCF, and
+/// the header states what the filter was calibrated to — which is the one trace a dropped record
+/// leaves.
+#[test]
+fn a_run_asking_for_the_filter_writes_a_calibrated_file() {
+    let (cohort, mut args) = a_cohort_of_psps();
+    args.paralog_fdr = 0.01;
+
+    run_call_from_psps(&args).expect("the filter finishes a run now");
+
+    let written = std::fs::read_to_string(&args.output).expect("the calls are on disk");
+    assert!(
+        written.contains("##paralogFilter=target_fdr=0.0100;"),
+        "the header must say what the filter was calibrated to: {}",
+        written.lines().take(12).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        written.contains("##FILTER=<ID=hiddenParalog,"),
+        "and it must declare the filter it may have applied"
+    );
+    assert!(
+        !std::path::Path::new(&format!("{}.paralog-spill.tmp", args.output.display())).exists(),
+        "the spill must not outlive the run"
+    );
+    drop(cohort);
+}
+
+/// **A run that says nothing about the filter runs it, at spec §3.6's target.**
+///
+/// The default was `0` while the filter's scoring and writing passes did not exist. Every fixture
+/// in this file sets the target explicitly, so nothing here would have noticed the constant going
+/// back to `0.01` — or failing to. This reads it off the parsed command line, which is where an
+/// operator's run gets it.
+#[test]
+fn a_run_that_says_nothing_about_the_filter_takes_the_specs_target() {
+    let args = args_of(&a_defaults_run());
+
+    assert!(
+        (args.paralog_fdr - 0.01).abs() < 1e-12,
+        "the filter is on by default, at about one wrongly removed record in a hundred; got {}",
+        args.paralog_fdr
+    );
+    assert!(
+        !args.paralog_filter_tag,
+        "and it removes them rather than tagging them"
+    );
+}
+
+/// **A target that is not a false-discovery rate is refused, whatever shape it takes.**
+///
+/// `clap` parses any `f64` into this flag, so a run can ask for `7`, for infinity, or for a
+/// negative zero that compares equal to the off value while not being it. A false-discovery rate
+/// is a probability; anything else is a mistake worth naming rather than clamping.
+#[test]
+fn a_paralog_target_that_is_not_a_fraction_is_refused() {
+    let (cohort, mut args) = a_cohort_of_psps();
+
+    for asked in [7.0, 1.0, -0.5, -0.0, f64::INFINITY, f64::NAN] {
+        args.paralog_fdr = asked;
+
+        let refused = run_call_from_psps(&args).expect_err("not a false-discovery rate");
+
+        assert!(
+            matches!(
+                refused,
+                CallFromPspsCliError::ParalogTargetIsNotAFraction { .. }
+            ),
+            "expected {asked} to be refused as not a fraction, got {refused:?}"
+        );
+        assert!(
+            !args.output.exists(),
+            "the run was refused after opening the output"
+        );
+    }
+    drop(cohort);
 }

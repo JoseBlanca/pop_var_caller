@@ -634,6 +634,10 @@ mod tests {
         CohortObservation {
             region: region(),
             alleles: sequences[..alleles].iter().map(|s| Box::from(*s)).collect(),
+            window_coverage: vec![
+                crate::ng::window_coverage::WindowCoverage::absent();
+                per_sample.len()
+            ],
             per_sample,
             kind: LocusKind::Generic,
         }
@@ -680,6 +684,10 @@ mod tests {
         CohortObservation {
             region: region(),
             alleles: sequences[..alleles].iter().map(|s| Box::from(*s)).collect(),
+            window_coverage: vec![
+                crate::ng::window_coverage::WindowCoverage::absent();
+                per_sample.len()
+            ],
             per_sample,
             kind: LocusKind::Ssr(ssr_detail()),
         }

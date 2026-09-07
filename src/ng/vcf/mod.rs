@@ -48,10 +48,11 @@ pub use encode::{
     mapping_quality_text, penalty_text, quality_text, record_line, sample_columns,
 };
 pub use header::{
-    FILE_FORMAT, HeaderContig, HeaderMetadataError, MAX_CONTIG_LENGTH, VcfHeaderMetadata,
-    header_text,
+    FILE_FORMAT, HIDDEN_PARALOG_FILTER_ID, HeaderContig, HeaderMetadataError,
+    HiddenParalogProvenance, MAX_CONTIG_LENGTH, PARALOG_POSTERIOR_DECIMALS, PARALOG_RATIO_DECIMALS,
+    VcfHeaderMetadata, header_text,
 };
-pub use writer::{VcfWriteError, VcfWriter};
+pub use writer::{RecordPlace, VcfWriteError, VcfWriter};
 
 use crate::ng::calling::quality::artifact_correction::ArtifactPenalties;
 use crate::ng::types::{GenomeRegion, Genotype, Motif, Phred, Position};
@@ -701,7 +702,7 @@ impl FilterVerdict {
     /// The value as it is written in the `FILTER` column.
     #[inline]
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pass => "PASS",
             Self::EmDidNotConverge => "EMNoConv",

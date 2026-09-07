@@ -271,6 +271,8 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         build_index_if_missing: false,
         max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
         max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        paralog_fdr: 0.0,
+        paralog_filter_tag: false,
         cohort_locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
@@ -303,6 +305,8 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         build_index_if_missing: false,
         max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
         max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        paralog_fdr: 0.0,
+        paralog_filter_tag: false,
         cohort_locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
@@ -667,6 +671,8 @@ fn a_cohort_on_disk() -> (
         build_index_if_missing: false,
         max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
         max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        paralog_fdr: 0.0,
+        paralog_filter_tag: false,
         cohort_locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
@@ -1288,4 +1294,54 @@ fn a_read_showing(name: &str, start: usize, observed: &[u8]) -> noodles_sam::ali
         .set_sequence(Sequence::from(observed.to_vec()))
         .set_quality_scores(QualityScores::from(vec![30u8; observed.len()]))
         .build()
+}
+
+/// **A run that says nothing about the filter runs it, at spec §3.6's target.**
+///
+/// The default was `0` while the filter's scoring and writing passes did not exist. Every fixture
+/// in this file sets the target explicitly, so nothing here would have noticed the constant going
+/// back to `0.01` — or failing to. This reads it off the parsed command line, which is where an
+/// operator's run gets it.
+#[test]
+fn a_run_that_says_nothing_about_the_filter_takes_the_specs_target() {
+    let args = args_of(&a_defaults_run());
+
+    assert!(
+        (args.paralog_fdr - 0.01).abs() < 1e-12,
+        "the filter is on by default, at about one wrongly removed record in a hundred; got {}",
+        args.paralog_fdr
+    );
+    assert!(
+        !args.paralog_filter_tag,
+        "and it removes them rather than tagging them"
+    );
+}
+
+/// **Direct mode refuses a target that is not a false-discovery rate, and this is what says so.**
+///
+/// psp mode had this test and direct mode did not, which meant the guard here could be deleted
+/// entirely with every test in this crate still green — and a run asking for a nonsense target
+/// would have gone ahead. Two modes, one rule, two tests.
+///
+/// **The refusal comes before anything is opened**, which the missing output file is what checks:
+/// an error raised after the writer was created would leave a `.tmp` beside a failed run.
+#[test]
+fn a_paralog_target_that_is_not_a_fraction_is_refused_in_direct_mode_too() {
+    let (_reference, _alignments, _directory, mut args) = a_cohort_on_disk();
+
+    for asked in [7.0, 1.0, -0.5, -0.0, f64::INFINITY, f64::NAN] {
+        args.paralog_fdr = asked;
+        let refused = run_call_from_alignments(&args).expect_err("not a false-discovery rate");
+        assert!(
+            matches!(
+                refused,
+                CallFromAlignmentsCliError::ParalogTargetIsNotAFraction { .. }
+            ),
+            "expected {asked} to be refused as not a fraction, got {refused:?}"
+        );
+        assert!(
+            !args.output.exists(),
+            "the run was refused after opening the output"
+        );
+    }
 }

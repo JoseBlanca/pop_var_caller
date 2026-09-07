@@ -67,12 +67,22 @@ use crate::ng::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
 use crate::ng::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
+use crate::ng::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
 use crate::ng::run::report::BoundsTheRunCalledUnder;
 use crate::ng::run::{AlignedFilesVariantCaller, AlignmentInputs, RunError, RunReport};
+use crate::ng::types::InbreedingF;
 use crate::ng::types::MAX_MOTIF_LEN;
 use crate::ng::vcf::writer::{VcfWriteError, VcfWriter};
 use crate::pop_var_caller_exp::calling_run;
 use crate::pop_var_caller_exp::run_ground::{self, GroundError};
+
+/// Default target false-discovery rate for the hidden-duplication filter — spec §3.6's.
+///
+/// **About one record in a hundred of those the filter removes was really a variant.** It was
+/// `0` while the filter's scoring and writing passes did not exist, because that default would
+/// have parked every record and produced no VCF; both passes are built now, so the spec's value
+/// stands and the filter is on unless an operator turns it off with `--paralog-fdr 0`.
+const DEFAULT_PARALOG_FDR: f64 = 0.01;
 
 /// `call-from-alignments` arguments.
 ///
@@ -169,6 +179,27 @@ pub struct CallFromAlignmentsArgs {
     #[arg(long, default_value_t = DEFAULT_MAX_CANDIDATE_ALLELES.get(), help_heading = "Advanced")]
     pub max_candidate_alleles: u16,
 
+    /// Target false-discovery rate among the records the hidden-duplication filter removes —
+    /// calls better explained by two reference-collapsed copies piling their reads onto one
+    /// position than by a real variant. **Zero turns the filter off**, and a run with it off
+    /// writes byte for byte what it wrote before the filter existed.
+    ///
+    /// **Above zero, the run needs scratch space beside the output.** It parks every called
+    /// record in `<output>.paralog-spill.tmp` and reads it twice, because no record's fate is
+    /// known until every record has been scored — so it needs free space on the output's own
+    /// filesystem of several times a compressed VCF's size. The file is removed when the run
+    /// ends, however it ends.
+    #[arg(long, default_value_t = DEFAULT_PARALOG_FDR, help_heading = "Advanced")]
+    pub paralog_fdr: f64,
+
+    /// Keep the records the hidden-duplication filter removes, on the `hiddenParalog` filter,
+    /// instead of dropping them.
+    ///
+    /// **What it is for**: a run that drops can be audited against one that tags, since the two
+    /// files differ by exactly the tagged lines.
+    #[arg(long, help_heading = "Advanced")]
+    pub paralog_filter_tag: bool,
+
     /// How much reference one round of locus building covers, in bases. Chosen from the
     /// cohort's size when it is not given.
     ///
@@ -254,6 +285,31 @@ pub struct CallFromAlignmentsArgs {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum CallFromAlignmentsCliError {
+    /// The hidden-duplication filter's target is not a false-discovery rate.
+    #[error("--paralog-fdr is not a false-discovery rate")]
+    ParalogTargetIsNotAFraction {
+        /// What the type said was wrong with it.
+        #[source]
+        source: crate::ng::run::paralog_filter::NotATargetFdr,
+    },
+
+    /// The hidden-duplication filter could not finish the run.
+    #[error("the hidden-duplication filter could not finish this run")]
+    ParalogFilter {
+        /// What the filter said.
+        #[source]
+        source: crate::ng::run::paralog_filter::ParalogFilterError,
+    },
+
+    /// The calls could not be written, or the records could not be parked for the filter.
+    #[error("the calls could not be written to {}", path.display())]
+    CallsNotWritten {
+        /// Where they were going.
+        path: PathBuf,
+        /// What pass one said.
+        #[source]
+        source: crate::ng::run::paralog_filter::PassOneError,
+    },
     /// The reference could not be read.
     #[error("reading the reference {}", path.display())]
     Reference {
@@ -388,6 +444,15 @@ pub fn run_call_from_alignments(
             .build_global();
     }
 
+    // **A target that is not a fraction is refused before anything else looks at it.** `clap`
+    // parses any `f64`, so `7`, `inf` and `nan` all arrive here, and the type is what says which
+    // of those is a false-discovery rate.
+    let asked_for = paralog_filter::WhatTheOperatorAskedFor::from_the_flags(
+        args.paralog_fdr,
+        args.paralog_filter_tag,
+    )
+    .map_err(|source| CallFromAlignmentsCliError::ParalogTargetIsNotAFraction { source })?;
+
     let asked_ploidy = calling_run::ploidy_asked_for(args.ploidy)?;
     let merge_parameters = calling_run::merge_parameters_for(
         args.max_cohort_locus_span,
@@ -451,6 +516,12 @@ pub fn run_call_from_alignments(
     // one the model scored at; `run_parameters` has already refused a flag that disagrees with
     // it, so on either path this is the number the operator meant.
     let ploidy = numbers.parameters.ploidy();
+    // **Captured before the parameters move into the caller.** The filter reads one coefficient
+    // a sample, in the run's sample order, and the caller consumes the parameters it lives on.
+    let inbreeding_by_sample: Vec<InbreedingF> = numbers
+        .parameters
+        .inbreeding_coefficient_by_sample()
+        .to_vec();
 
     // **The parameters file is assembled here, before a read is decoded, and written after the
     // last one.** Spec §7 makes writing unconditional, and `ParametersFile::of_run` holds its
@@ -504,26 +575,84 @@ pub fn run_call_from_alignments(
         &with_checksums,
         caller.sample_names().map(str::to_owned).collect(),
     )?;
-    let mut writer = VcfWriter::create(&args.output, metadata, ploidy).map_err(|source| {
-        CallFromAlignmentsCliError::Output {
-            path: args.output.clone(),
-            source,
-        }
-    })?;
+    // **The sink is where the filter's flag lands.** With the filter off, this hands each record
+    // straight to the writer — the call the run made before the filter existed, which is what
+    // makes `--paralog-fdr 0` byte-identical by construction rather than by hope. With it on, the
+    // records are parked and **the VCF is not opened at all**: no record's fate is known until
+    // every record has been scored, so a file opened now would stand beside a run that has
+    // decided nothing.
+    let mut sink = if asked_for.is_some() {
+        // The spill's lines are encoded against the same contigs the header names, taken from
+        // the metadata itself rather than re-derived.
+        CalledRecordSink::ParkedOnTheSpill(SpillingSink::beside(
+            &args.output,
+            metadata.contigs().to_vec(),
+            ploidy,
+        ))
+    } else {
+        CalledRecordSink::StraightToTheVcf(
+            VcfWriter::create(&args.output, metadata.clone(), ploidy).map_err(|source| {
+                CallFromAlignmentsCliError::Output {
+                    path: args.output.clone(),
+                    source,
+                }
+            })?,
+        )
+    };
 
-    let written = caller
+    let mut written = caller
         .call_cohort_handing_each_record_over(
             &SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior),
-            &mut |record| writer.write_record(record),
+            &mut |record, window_coverage| sink.accept(record, window_coverage),
         )
         .map_err(|source| CallFromAlignmentsCliError::Run { source })?;
 
-    writer
-        .finish()
-        .map_err(|source| CallFromAlignmentsCliError::Output {
-            path: args.output.clone(),
-            source,
-        })?;
+    // **The spill has to stay alive until pass three has read it**, so the sink is taken apart
+    // rather than consumed: `finish` would drop the file the next two passes need.
+    let parked = match sink {
+        CalledRecordSink::StraightToTheVcf(writer) => {
+            writer
+                .finish()
+                .map_err(|source| CallFromAlignmentsCliError::CallsNotWritten {
+                    path: args.output.clone(),
+                    source: crate::ng::run::paralog_filter::PassOneError::Vcf(source),
+                })?;
+            None
+        }
+        CalledRecordSink::ParkedOnTheSpill(mut spilling) => {
+            spilling.finish_parking().map_err(|source| {
+                CallFromAlignmentsCliError::CallsNotWritten {
+                    path: args.output.clone(),
+                    source: crate::ng::run::paralog_filter::PassOneError::Spill(source),
+                }
+            })?;
+            Some(spilling)
+        }
+    };
+
+    // **Passes two and three, through the one function both subcommands call**, so direct mode
+    // and psp mode cannot drift into filtering differently (spec §1.1 goal 2).
+    let filtered = match &parked {
+        Some(spilling) => Some(
+            paralog_filter::fit_score_and_write_the_calls(
+                spilling.spill(),
+                // **Taken, not cloned.** `ParalogScoringContext::new` consumes the histograms so
+                // each sample's bins are freed as its model is fitted; cloning here would defeat
+                // that and hold a second copy of every sample's — about 80 kB each. Nothing else
+                // reads the field afterwards.
+                std::mem::take(&mut written.window_coverage_histograms),
+                &inbreeding_by_sample,
+                // PANIC-FREE: the sink is the spill only where `asked_for` is `Some`, and this
+                // arm is reached only through that sink.
+                asked_for.expect("the records are parked only when a filter was asked for"),
+                &args.output,
+                metadata,
+                ploidy,
+            )
+            .map_err(|source| CallFromAlignmentsCliError::ParalogFilter { source })?,
+        ),
+        None => None,
+    };
 
     // **After the VCF is on disk, not before.** Spec §7's three purposes — a run reproducible
     // from its own output, a defaults run auditable, an edit that starts from something — are
@@ -551,7 +680,13 @@ pub fn run_call_from_alignments(
             source,
         })?;
 
-    calling_run::print_report(
+    // **What the filter did goes at the end of the report**, and is empty on a run with the
+    // filter off — so an off run prints what it printed before the filter existed.
+    let filter_lines = filtered
+        .as_ref()
+        .map(paralog_filter::what_to_tell_the_operator)
+        .unwrap_or_default();
+    calling_run::print_report_with_the_filter_s_lines(
         &args.output,
         &parameters_at,
         &RunReport::of(
@@ -565,6 +700,7 @@ pub fn run_call_from_alignments(
                 max_candidate_alleles: candidate_selection.max_candidate_alleles.get(),
             },
         ),
+        &filter_lines,
     );
     Ok(())
 }
