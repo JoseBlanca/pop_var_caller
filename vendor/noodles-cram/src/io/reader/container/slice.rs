@@ -39,8 +39,15 @@ impl<'c> Slice<'c> {
     /// **Which reference bases this slice needs, before any of them are fetched.**
     ///
     /// `(reference sequence id, first position, last position)`, both 1-based and inclusive, or
-    /// `None` when the slice needs no external bases — an unmapped slice, or one spanning
-    /// several reference sequences, which is resolved record by record instead.
+    /// `None` when there is no one window to fetch — an unmapped slice, or one spanning several
+    /// reference sequences.
+    ///
+    /// **`None` does not mean "needs no bases", and the two cases differ.** An unmapped slice
+    /// really needs none: every record in it is unmapped, so nothing is reconstructed against a
+    /// reference. A slice spanning several reference sequences resolves each *mapped* record's
+    /// own sequence through the `Repository` handed to
+    /// [`records_discarding_tags`](Self::records_discarding_tags), whole, and `expect`s a hit —
+    /// so a caller that passes an empty repository for such a slice gets a panic, not an error.
     ///
     /// It is readable from the slice header, which is parsed before any block is decoded, so a
     /// caller can fetch exactly this window and hand it to

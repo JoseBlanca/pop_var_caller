@@ -74,11 +74,18 @@ pub enum ReferenceBasesError {
     NoFasta,
     /// The FASTA is named but its `.fai` could not be read — usually because
     /// the sibling index is missing.
-    #[error("reference FASTA '{fasta}' cannot be read: its `.fai` did not load: {source}")]
-    Build {
+    ///
+    /// **Was `Build` until 2026-09-07**, when what it wrapped was building a
+    /// `fasta::Repository`. Nothing is built now, so the name says what the
+    /// fault is instead.
+    #[error(
+        "reference FASTA '{fasta}' has no readable index: '{fasta}.fai' did not load: {source}"
+    )]
+    IndexUnreadable {
         /// The FASTA whose index could not be read.
         fasta: PathBuf,
-        /// What went wrong reading it.
+        /// What went wrong reading it. `fai::fs::read` puts no path in its own
+        /// error, which is why the message above names the file.
         #[source]
         source: std::io::Error,
     },
@@ -126,7 +133,7 @@ impl OpenReference {
     /// # Errors
     ///
     /// [`ReferenceBasesError::NoFasta`] for a `.fai`-only reference;
-    /// [`ReferenceBasesError::Build`] when the index does not read.
+    /// [`ReferenceBasesError::IndexUnreadable`] when the index does not read.
     pub(crate) fn check_bases_can_be_read(&self) -> Result<(), ReferenceBasesError> {
         let fasta = self
             .fasta_path()
@@ -134,7 +141,7 @@ impl OpenReference {
             .to_path_buf();
         WindowedRefSeq::read_index(&fasta)
             .map(|_| ())
-            .map_err(|source| ReferenceBasesError::Build { fasta, source })
+            .map_err(|source| ReferenceBasesError::IndexUnreadable { fasta, source })
     }
 }
 
@@ -201,9 +208,18 @@ mod tests {
         let error = reference
             .check_bases_can_be_read()
             .expect_err("the index is gone");
-        match error {
-            ReferenceBasesError::Build { fasta: named, .. } => assert_eq!(named, fasta),
+        match &error {
+            ReferenceBasesError::IndexUnreadable { fasta: named, .. } => {
+                assert_eq!(named, &fasta);
+            }
             other => panic!("expected the index fault, got {other:?}"),
         }
+        // The message has to name the `.fai`, because the error it wraps does not: `fai::fs::read`
+        // is a bare `File::open`, whose failure says only "No such file or directory".
+        let message = error.to_string();
+        assert!(
+            message.contains(".fai") && message.contains("no readable index"),
+            "the message must say it is the index that is missing: {message}"
+        );
     }
 }

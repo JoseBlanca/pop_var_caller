@@ -261,6 +261,27 @@ pub enum AlignmentFileError {
     )]
     CramNeedsReferenceFasta { path: PathBuf },
 
+    /// A CRAM was opened against a reference whose FASTA is named but whose
+    /// `.fai` could not be read.
+    ///
+    /// **Its own variant rather than [`Self::Open`], because the file that
+    /// cannot be read is not an alignment file.** Reported as `Open` — as it
+    /// was for one commit — the top line reads *"opening alignment file
+    /// '<reference>.fa' failed"*, which names the wrong kind of file and points
+    /// the operator at the FASTA when the missing thing is its index.
+    #[error(
+        "'{path}' is a CRAM, and the reference it decodes against has no readable \
+         index: '{fasta}.fai' could not be read — build it with `samtools faidx`"
+    )]
+    CramReferenceIndexUnreadable {
+        /// The CRAM being opened.
+        path: PathBuf,
+        /// The reference FASTA whose index is missing.
+        fasta: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
     /// Querying the parsed index for a region's chunks failed.
     ///
     /// Distinct from [`Self::Region`]: the region has already been checked

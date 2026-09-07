@@ -133,12 +133,8 @@ pub struct AlignmentFile {
     /// This CRAM's `.crai` entries, grouped by contig — `crai_by_contig[i]`
     /// holds contig `i`'s entries in file order. Empty for a BAM.
     crai_by_contig: Vec<Arc<[cram::crai::Record]>>,
-    // **No reference is held here, and that is deliberate.** A `reference:
-    // Option<OpenReference>` field lived here until 2026-09-07, so that each CRAM cursor could
-    // ask the run's shared repository for its chromosome's bases. Nothing asks any more: a
-    // cursor's decode reads one slice's span at a time from a reader it mints itself
-    // (`cursor`), so the only thing this file ever needed the reference for is the open-time
-    // check in `open`, which asks and keeps nothing.
+    // **No reference is held here**: `open` asks its question of one and keeps nothing, and a
+    // cursor's decode reads bases from a reader it mints itself (see `open`'s check 5).
 }
 
 impl AlignmentFile {
@@ -243,19 +239,9 @@ impl AlignmentFile {
         //    by `SampleReads` (spec §4, §8).
         //
         // 5. A CRAM needs the reference *bases* to decode at all, so the run's
-        //    `OpenReference` is asked here whether they can be reached — it
-        //    names a FASTA, and that FASTA's `.fai` reads — and a reference
-        //    that has none is a hard error now rather than a mystery at the
-        //    first query.
+        //    `OpenReference` is asked whether they can be reached. That check is
+        //    the last thing this function does, below.
         //
-        //    **No sequence is read and nothing is kept.** The bases themselves
-        //    are read one slice's span at a time, at decode, through a
-        //    reference reader the cursor mints for that purpose
-        //    (`alignment_cursor.md` §10). This file holds neither the bases nor
-        //    a handle to anything holding them, which is why the field this
-        //    used to fill is gone.
-        //
-        //    A BAM never asks, so a BAM-only run still never touches the FASTA.
         // The grouping is where a `.crai` is consumed. What comes back out is either the
         // grouped entries and no flat index, or no grouping and the index a BAM cursor needs.
         let (crai_by_contig, index) = match index {
@@ -266,17 +252,36 @@ impl AlignmentFile {
             index => (Vec::new(), Some(index)),
         };
 
+        // **Check 5: a CRAM needs the reference bases to decode at all**, so ask whether they
+        // can be reached — the reference names a FASTA, and that FASTA's `.fai` reads — and
+        // refuse now rather than leaving it a mystery at the first query.
+        //
+        // **No sequence is read and nothing is kept.** The bases themselves are read one
+        // slice's span at a time, at decode, through a reference reader the cursor mints for
+        // that purpose (`alignment_cursor.md` §10). This file holds neither the bases nor a
+        // handle to anything holding them, which is why the field this used to fill is gone.
+        //
+        // A BAM never asks, so a BAM-only run still never touches the FASTA.
         if AlignmentFileKind::from_path(path) == Some(AlignmentFileKind::Cram) {
             reference
                 .check_bases_can_be_read()
-                .map_err(|source| match source {
+                .map_err(|error| match error {
                     ReferenceBasesError::NoFasta => AlignmentFileError::CramNeedsReferenceFasta {
                         path: path.to_path_buf(),
                     },
-                    ReferenceBasesError::Build { fasta, source } => AlignmentFileError::Open {
-                        path: fasta,
-                        source,
-                    },
+                    // **Both halves of the fault are named, because neither names itself.**
+                    // `fai::fs::read` reports a bare "No such file or directory" with no path
+                    // in it, and reporting this as a plain `Open` — as a first cut of this
+                    // did — calls the reference an alignment file and never mentions the
+                    // `.fai`. An operator reading that goes looking at a FASTA that is present
+                    // and perfectly readable.
+                    ReferenceBasesError::IndexUnreadable { fasta, source } => {
+                        AlignmentFileError::CramReferenceIndexUnreadable {
+                            path: path.to_path_buf(),
+                            fasta,
+                            source,
+                        }
+                    }
                 })?;
         }
 
@@ -2255,6 +2260,55 @@ mod tests {
         assert_eq!(minted.get(), 2, "the CRAM arm asked for a second reader");
     }
 
+    /// **The check that moved out of `open` on 2026-09-07, held where it landed.**
+    ///
+    /// `open` used to build a `fasta::Repository`, which opened the indexed FASTA and so proved
+    /// the FASTA itself readable. It now reads the `.fai` and nothing else, so a reference
+    /// naming a FASTA that is *gone*, with its `.fai` left beside it, opens cleanly. What has to
+    /// catch it is `cursor`'s zero-length probe, on the first reader it mints — and nothing else
+    /// in this module reaches that code path: the neighbouring test above fails at the index
+    /// lookup (a contig the `.fai` does not name), before any file is opened.
+    ///
+    /// A `.fai` outliving its FASTA is not exotic — a reference moved or a half-finished
+    /// download leaves exactly that — and the failure this prevents is a run that starts, opens
+    /// every file in the cohort, and dies on the first cursor.
+    #[test]
+    fn a_cursor_over_a_fasta_that_has_been_deleted_is_refused() {
+        use crate::ng::ref_seq::WindowedRefSeq;
+
+        let (_cram_dir, cram_path, _fasta_dir, fasta) = indexed_cram(&one_read());
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
+        let table = reference.info().contig_list();
+        let file = AlignmentFile::open(
+            &cram_path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("the CRAM opens: the `.fai` is still there");
+
+        // The FASTA goes; its `.fai` stays. This is what `open` no longer sees.
+        std::fs::remove_file(&fasta).expect("the fixture wrote a FASTA to remove");
+
+        let error = file
+            .cursor(ContigId(0), || {
+                WindowedRefSeq::new(fasta.clone(), table.clone())
+            })
+            .err()
+            .expect("a reader whose FASTA is gone cannot serve any contig");
+        assert!(
+            matches!(&error, AlignmentFileError::Reference { .. }),
+            "the refusal must be the servability one: {error}"
+        );
+    }
+
     /// **A reader that fails both checks is reported on its *description*, not its ability.**
     ///
     /// The order is what `cursor`'s own doc argues for — the argument, then the description,
@@ -2679,9 +2733,22 @@ mod tests {
         )
         .expect_err("a CRAM cannot be decoded through a FASTA with no index");
         match &error {
-            AlignmentFileError::Open { path, .. } => assert_eq!(path, &fasta),
-            other => panic!("expected the open fault naming the FASTA, got {other:?}"),
+            AlignmentFileError::CramReferenceIndexUnreadable {
+                path, fasta: named, ..
+            } => {
+                assert_eq!(named, &fasta, "the fault names the reference FASTA");
+                assert_eq!(path, &cram_path, "and the CRAM that could not be opened");
+            }
+            other => panic!("expected the index fault, got {other:?}"),
         }
+        // **The message is asserted, not just the variant.** `fai::fs::read` reports a bare
+        // "No such file or directory" with no path in it, so an operator told only that reads
+        // it as the FASTA — which is present and perfectly readable — failing to open.
+        let message = error.to_string();
+        assert!(
+            message.contains(".fai") && message.contains("no readable index"),
+            "the message must say it is the index that is missing: {message}"
+        );
     }
 
     /// A BAM is unaffected — it stores its own sequences, so a `.fai`-only

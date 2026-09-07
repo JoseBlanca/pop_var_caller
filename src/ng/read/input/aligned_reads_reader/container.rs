@@ -411,9 +411,11 @@ pub(crate) fn decode_container_at(
         // **A slice says which bases it needs before any of them are read.** Its header names
         // the contig and the first and last position its records touch, and it is parsed
         // before a block is decoded — so the decode fetches exactly that span rather than
-        // holding a chromosome. `None` is an unmapped slice or one spanning several contigs;
-        // neither needs external bases, and noodles resolves both record by record without
-        // consulting a reference at all (`alignment_cursor.md` §10 point 2).
+        // holding a chromosome. `None` is an unmapped slice or one spanning several contigs, and
+        // there is no one span to fetch for either — but only the first of them is safe here:
+        // an unmapped slice's records need no bases at all, while a multi-contig slice's mapped
+        // records are resolved through the repository, which is the hazard the `no_repository`
+        // comment above sets out (`alignment_cursor.md` §10 point 2).
         let span = slice.reference_span();
         if let Some((reference_sequence_id, start, end)) = span {
             let contig = ContigId(u32::try_from(reference_sequence_id).map_err(|_| {

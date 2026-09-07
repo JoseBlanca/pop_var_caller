@@ -44,8 +44,8 @@ argument; the empty repository noodles still requires by value is built inside
   bases that no longer exists. Deleted.
 - **The `Build` error's source type changed** from `AlignmentInputError` to `std::io::Error`,
   because the operation it wraps changed from `build_fasta_repository` to
-  `WindowedRefSeq::read_index`. The variant keeps its name and its meaning; its message now says
-  the `.fai` is what did not load, which is what the check actually asks.
+  `WindowedRefSeq::read_index`. Its meaning is unchanged; the review then renamed it
+  `IndexUnreadable`, below.
 
 ## What the check no longer covers, and where that is caught instead
 
@@ -87,15 +87,22 @@ revert confirmed by `grep` before the next run.
 | `check_bases_can_be_read` returns `Ok(())` whenever a FASTA is named — the `.fai` never read | 303 passed, 2 failed | `a_fasta_whose_index_is_missing_is_a_fault_naming_the_fasta`, `a_cram_whose_reference_has_no_fai_is_refused_at_open` |
 | the open-time check never runs (`if false &&` on its guard) | 303 passed, 2 failed | `a_cram_against_a_fai_only_reference_is_refused_at_open`, `a_cram_whose_reference_has_no_fai_is_refused_at_open` |
 
-Neither mutation reached a commit: each file was restored from a copy taken before the edit and
-the restore confirmed by `grep` for the mutation's own text before the next run.
+And the review's added test, the same way:
+
+| mutation | `cargo test --lib ng::read` | which test failed |
+|---|---|---|
+| the FASTA is left in place, so nothing about the reference is broken | 305 passed, 1 failed | `a_cursor_over_a_fasta_that_has_been_deleted_is_refused`, on its own assertion |
+
+No mutation reached a commit: each file was restored from a copy taken before the edit and the
+restore confirmed by `grep` for the mutation's own text before the next run.
 
 ## Validation
 
 Run in the container on this tree.
 
-- `cargo test --lib` — **6,280 pass**, 0 failed, 15 ignored, in 68.54 s.
-- `cargo test --lib ng::read` — **305 pass**, 0 failed, re-run as the last thing before `git add`
+- `cargo test --lib` — **6,280 pass** at the first commit, **6,281** after the review's added
+  test; 0 failed, 15 ignored, in 67.67 s.
+- `cargo test --lib ng::read` — **306 pass**, 0 failed, re-run as the last thing before `git add`
   so the tree tested is the tree committed.
 - `cargo clippy --lib --tests --all-features -- -D warnings` — the three
   `explicit lifetimes could be elided` errors in `run/cohort_merge/{build.rs:820, build.rs:893,
@@ -124,7 +131,11 @@ unmapped, so noodles asks for no bases at all.
 
 **Nothing in reach is affected, measured.** Every `.crai` under `benchmarks/` — 180 CRAMs, and the
 whole-genome tomato file among them at 112,140 slices — was read for its reference ids: 1,876
-slices with `-1` (unmapped) in that file and **not one `-2` (multi-reference) anywhere**. `samtools`
+slices with `-1` (unmapped) in that file and **not one `-2` (multi-reference) anywhere**. Those
+files are untracked, in the main checkout at `/Users/jose/devel/pop_var_caller/benchmarks/`, so the
+count cannot be reproduced from a clone; the command was
+`gzip -dc <file>.crai | awk -F'\t' '{c[$1]++} END {...}'` over `find benchmarks -name '*.crai'`.
+`samtools`
 writes them when a file is name-sorted or unsorted, and for runs of small contigs; a fragmented
 assembly is where one would first appear, which is the same case `open`'s comment on index-building
 already warns about.
@@ -137,6 +148,35 @@ the project to a per-record window design for a file shape nobody has. The alter
 the fork to resolve a multi-contig slice record by record through the `RawRefSeq` — is real work in
 the vendored crate and should wait for a file that needs it. Either way this is a change to spec
 §10 point 2, so it is not the implementer's to make.
+
+## What the review changed (commit 2)
+
+The step's review found three things worth fixing and four nits; all seven were applied in a
+follow-up commit rather than by amending, so the record shows what was found.
+
+- **The missing-`.fai` message had got worse, and the test could not see it.** Reporting the
+  fault as `AlignmentFileError::Open` kept only the inner `io::Error` — and `fai::fs::read` is a
+  bare `File::open`, whose failure says `No such file or directory` with no path in it. The top
+  line therefore read *"opening alignment file '<reference>.fa' failed"*: the wrong kind of file,
+  a FASTA that is present and readable, and no mention of the index. It now has its own variant,
+  `AlignmentFileError::CramReferenceIndexUnreadable`, naming the CRAM, the FASTA and the `.fai`
+  and saying to run `samtools faidx`. Both tests now assert the message, not only the variant.
+- **The check that moved out of `open` had no test where it landed.** A FASTA deleted with its
+  `.fai` left behind is now caught by `cursor`'s zero-length probe, and nothing held that:
+  the neighbouring `a_cram_cursor_checks_that_its_second_reader_can_serve_the_contig` fails at
+  the index lookup, before any file is opened. `a_cursor_over_a_fasta_that_has_been_deleted_is_refused`
+  holds it, and leaving the FASTA in place fails it — 305 passed / 1 failed, the one being this
+  test on its own assertion.
+- **Two comments in `container.rs` said opposite things about multi-contig slices.** The older
+  one repeated spec §10's claim that such a slice consults no reference. Corrected, along with
+  the same sentence in the fork's own `Slice::reference_span` doc, which is where the wrong
+  belief came from.
+- **`ReferenceBasesError::Build` was renamed `IndexUnreadable`.** Nothing is built any more. This
+  contradicts the plan's "keeps its name and its meaning", and the plan is right that the
+  *meaning* is unchanged — but the name described the deleted operation.
+- The `open` comment numbered "5." sat sixteen lines above the code it described, with the
+  `.crai` grouping comment butted against it; moved down to the check. The tombstone comment
+  where the deleted `reference` field was is now one line pointing at that check.
 
 ## What is not proven here
 
