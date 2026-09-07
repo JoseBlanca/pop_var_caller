@@ -24,6 +24,12 @@
 #   NG_PARALOG_FDR   the target false-discovery rate for the two on runs (default 0.01,
 #                    spec §3.6's own value)
 #   NG_THREADS       threads for the calling pass (default 4)
+#   NG_MODE          `alignments` (default) calls the CRAMs directly; `psps` walks them into
+#                    stored files once with generate-psps and calls those three times.
+#
+# **Why the mode matters.** The two subcommands carry their own copy of the filter's wiring —
+# choosing the sink, taking it apart, running passes two and three, printing the report — and
+# nothing but a run compares the copies on real data. `psps` is the route plan step D3 names.
 #
 # It expects a release build of `pop_var_caller_exp` in `target-container/release` or
 # `target/release` and takes whichever is newer, because a machine with no container runtime
@@ -70,7 +76,7 @@ for cram in "$@"; do
   samples=$((samples + 1))
 done
 
-echo "cohort: $samples sample(s); target false-discovery rate $fdr; $threads thread(s)"
+echo "cohort: $samples sample(s); target false-discovery rate $fdr; $threads thread(s); mode ${NG_MODE:-alignments}"
 # **Which build produced the numbers.** `$bin` is chosen by modification time between two target
 # directories, so the output of this script cannot be attributed to a build unless it says which.
 echo "binary: $bin ($(date -r "$bin" '+%Y-%m-%d %H:%M:%S'))"
@@ -111,6 +117,25 @@ sys.exit(finished.returncode)
 PYTHON
 }
 
+# **In psp mode the walk happens once**, before any of the three calls: the stored files are what
+# the three runs then read, so all three see identical input and the walk's cost is not charged to
+# any of them.
+stored=()
+if [[ ${NG_MODE:-alignments} == psps ]]; then
+  echo
+  echo "=== the walk, stored ==="
+  mkdir -p "$out/psps"
+  measure "$out/generate-psps.log" \
+    "$bin" generate-psps \
+    --reference "$reference" --catalog "$catalog" "${alignments[@]}" --regions "$regions" \
+    --output-dir "$out/psps" --force || {
+      echo "generate-psps failed:" >&2; tail -40 "$out/generate-psps.log" >&2; exit 1; }
+  walked=0
+  for psp in "$out/psps"/*.psp; do stored+=(--psp "$psp"); walked=$((walked + 1)); done
+  # Two array entries a file — the flag and the path — so the count is not the array's length.
+  printf '  %d stored file(s)\n' "$walked"
+fi
+
 run_one() {
   local side=$1; shift
   # **Every run writes to the same basename.** The header records the parameters file beside the
@@ -118,11 +143,19 @@ run_one() {
   # `drop.vcf` would differ in the header whatever the filter did — which would make the off run
   # uncomparable with the standing pre-filter baseline. Each writes `run.vcf` and is moved after.
   printf '%s: ' "$side"
-  measure "$out/$side.log" \
-    "$bin" call-from-alignments \
-    --reference "$reference" --catalog "$catalog" "${alignments[@]}" --regions "$regions" \
-    --defaults --threads "$threads" "$@" --output "$out/run.vcf" || {
-      echo "the $side run failed:" >&2; tail -40 "$out/$side.log" >&2; exit 1; }
+  if [[ ${NG_MODE:-alignments} == psps ]]; then
+    measure "$out/$side.log" \
+      "$bin" call-from-psps \
+      --reference "$reference" --catalog "$catalog" "${stored[@]}" \
+      --defaults --threads "$threads" "$@" --output "$out/run.vcf" || {
+        echo "the $side run failed:" >&2; tail -40 "$out/$side.log" >&2; exit 1; }
+  else
+    measure "$out/$side.log" \
+      "$bin" call-from-alignments \
+      --reference "$reference" --catalog "$catalog" "${alignments[@]}" --regions "$regions" \
+      --defaults --threads "$threads" "$@" --output "$out/run.vcf" || {
+        echo "the $side run failed:" >&2; tail -40 "$out/$side.log" >&2; exit 1; }
+  fi
   mv "$out/run.vcf" "$out/$side.vcf"
   mv "$out/run.parameters.toml" "$out/$side.parameters.toml"
 }

@@ -182,7 +182,7 @@ tagged, samples rejected by reason, π, the cut; wall per pass — calling, fit,
 and peak resident, against the filter-off run. The scoring share is what decides whether
 parallel scoring gets a plan (spec §8). *Depends:* C5. *Source:* spec §4, §5.
 
-**D3. ☐ HG002.** Filter on over the HG002 psp: the fit accepts (the scaled depth axis, spec §4)
+**D3. ✅ HG002.** Filter on over the HG002 psp: the fit accepts (the scaled depth axis, spec §4)
 or the report says why not; the records dropped, with the ten highest ratios listed for a human
 eye. *Depends:* C5. *Source:* spec §4.
 
