@@ -160,7 +160,7 @@ under *Verification* is the second offset-sensitive oracle, and the step is not 
 are green.
 *Depends:* A1. *Source:* spec §10 points 2–4; `FORK.md` §5; research note §7.
 
-**A3. The repository goes.** ☐
+**A3. The repository goes.** ✅
 `CramAlignedReadsReader::new` and its struct lose `repository`, and `decode_container_at` loses
 the argument; `AlignmentFile::cursor`'s CRAM arm stops calling `bases_for_contig`; `OpenReference` loses `bases`, `bases_for_contig`,
 `resident_contig`, `bound_to_one_contig`, `unbounded`, the `build_fasta_repository` import, and

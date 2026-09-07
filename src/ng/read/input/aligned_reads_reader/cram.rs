@@ -7,7 +7,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use noodles_cram as cram;
-use noodles_fasta as fasta;
 use noodles_sam as sam;
 
 use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
@@ -72,12 +71,9 @@ pub(crate) struct CramAlignedReadsReader {
     reader: cram::io::Reader<File>,
     /// Parsed once at open and shared, never re-read per region.
     header: Arc<sam::Header>,
-    /// The reference bases decoding consults, for this cursor's chromosome. Cheap to clone —
-    /// it is internally shared — and cloned per decode, as noodles requires.
-    repository: fasta::Repository,
     /// **The reference bases this decode reads through**, minted by the cursor factory and
-    /// owned for this reader's life (`alignment_cursor.md` §10 point 1). **Read from A2
-    /// onwards**, one slice's span at a time; A1 established the ownership.
+    /// owned for this reader's life (`alignment_cursor.md` §10 point 1). One slice's declared
+    /// span at a time — this reader holds no chromosome and no repository.
     ///
     /// Its own reader, not the cursor's: a reference reader is an open file position and a
     /// resident window, and this project gives one to every consumer of bases rather than
@@ -137,7 +133,6 @@ impl CramAlignedReadsReader {
     pub(crate) fn new(
         reader: cram::io::Reader<File>,
         header: Arc<sam::Header>,
-        repository: fasta::Repository,
         reference_reader: Box<dyn RawRefSeq + Send>,
         entries: Arc<[cram::crai::Record]>,
         resolution: ReadGroupResolution,
@@ -146,7 +141,6 @@ impl CramAlignedReadsReader {
         Self {
             reader,
             header,
-            repository,
             reference_reader,
             entries,
             resolution,
@@ -259,12 +253,6 @@ impl CramAlignedReadsReader {
             let Some(container) = decode_container_at(
                 &mut self.reader,
                 &self.header,
-                // **An empty repository, from A2 on.** Every mapped slice is decoded against
-                // the window fetched from `reference_reader`, and an unmapped or multi-contig
-                // slice needs no external bases at all — so nothing reads this, and passing a
-                // *populated* one would hide a slice that had quietly fallen back to it. The
-                // field goes at A3 along with `OpenReference`'s cache.
-                &fasta::Repository::default(),
                 &self.resolution,
                 offset,
                 &*self.reference_reader,

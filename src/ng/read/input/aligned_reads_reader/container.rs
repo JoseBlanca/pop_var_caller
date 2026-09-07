@@ -337,7 +337,6 @@ impl DecodedContainer {
 pub(crate) fn decode_container_at(
     reader: &mut cram::io::Reader<File>,
     header: &sam::Header,
-    repository: &fasta::Repository,
     resolution: &ReadGroupResolution,
     offset: u64,
     // The reference bases each slice is decoded against, one span at a time.
@@ -385,6 +384,23 @@ pub(crate) fn decode_container_at(
     // across the container's slices, it grows to the widest span this file has met and no
     // further.
     let mut window: Vec<u8> = Vec::new();
+    // **Empty, because nothing here decodes against a repository any more.** noodles takes one
+    // by value on both record surfaces below; this one's adapter serves nothing, so the bases a
+    // record is rebuilt from can only be the window fetched above (`alignment_cursor.md` §10
+    // point 2). The clones are pointer bumps — a `Repository` is an `Arc` inside.
+    //
+    // **⚠ One slice shape does read it, and it is the one shape ng cannot serve a window for.**
+    // A slice whose records span *several* contigs has no single span to fetch, so it takes the
+    // no-window call below — and noodles then resolves each mapped record's contig through the
+    // repository, whole, and `expect`s a hit (`get_record_reference_sequence`). Against an empty
+    // one that is a **panic**, where before 2026-09-07 the run's shared repository answered it.
+    // No file in this project has such a slice: the `.crai` of all 180 CRAMs under `benchmarks/`
+    // — the whole-genome tomato CRAM's 112,140 slices included — carries reference id `-1`
+    // (unmapped) 1,876 times and `-2` (multi-reference) not once. Unmapped slices are safe: their
+    // records are unmapped, so noodles asks for no bases at all. Raised at Milestone A's
+    // checkpoint; whether ng refuses such a file at open or grows a per-record window for it is
+    // not this step's to decide.
+    let no_repository = fasta::Repository::default();
     for slice in container.slices() {
         let slice = slice?;
         // The decoded block data and the borrowed records live only within this block;
@@ -433,14 +449,14 @@ pub(crate) fn decode_container_at(
             Some((_, start, _)) => slice.records_over_window(
                 &window,
                 start,
-                repository.clone(),
+                no_repository.clone(),
                 header,
                 &compression_header,
                 &core_data_src,
                 &external_data_srcs,
             )?,
             None => slice.records_discarding_tags(
-                repository.clone(),
+                no_repository.clone(),
                 header,
                 &compression_header,
                 &core_data_src,

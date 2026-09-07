@@ -133,17 +133,12 @@ pub struct AlignmentFile {
     /// This CRAM's `.crai` entries, grouped by contig — `crai_by_contig[i]`
     /// holds contig `i`'s entries in file order. Empty for a BAM.
     crai_by_contig: Vec<Arc<[cram::crai::Record]>>,
-    /// **The run's reference**, held so each cursor can ask it for the bases
-    /// narrowed to that cursor's contig — not a repository of this file's own.
-    ///
-    /// A handle, not a copy: it is an `Arc` inside, so every file in a run
-    /// points at one cache of bases. That is what keeps a cohort's resident
-    /// reference at one contig rather than `files × genome` (see
-    /// `reference.rs`, and the note at the open site).
-    ///
-    /// `None` for a BAM, which stores its own sequences and needs no
-    /// reference to decode.
-    reference: Option<OpenReference>,
+    // **No reference is held here, and that is deliberate.** A `reference:
+    // Option<OpenReference>` field lived here until 2026-09-07, so that each CRAM cursor could
+    // ask the run's shared repository for its chromosome's bases. Nothing asks any more: a
+    // cursor's decode reads one slice's span at a time from a reader it mints itself
+    // (`cursor`), so the only thing this file ever needed the reference for is the open-time
+    // check in `open`, which asks and keeps nothing.
 }
 
 impl AlignmentFile {
@@ -157,8 +152,8 @@ impl AlignmentFile {
     /// whichever check happens to run.
     ///
     /// A CRAM then needs one more thing before it can be read at all — the
-    /// reference *bases*, to decode against — so the repository is built after
-    /// those four, and a reference that cannot supply one is rejected here
+    /// reference *bases*, to decode against — so a fifth check asks whether
+    /// they can be reached, and a reference that has none is rejected here
     /// rather than at the first query.
     ///
     /// **The `@SQ` check is the permutation fix.** Comparing *in order* against
@@ -247,23 +242,20 @@ impl AlignmentFile {
         //    groups, and naming one sample is a property of the *open*, enforced
         //    by `SampleReads` (spec §4, §8).
         //
-        // 5. A CRAM needs the reference *bases* to decode at all, so the
-        //    repository is taken here — from the **run's** `OpenReference`, not
-        //    built per file — and a reference that cannot supply one is a hard
-        //    error now rather than a mystery at the first query.
+        // 5. A CRAM needs the reference *bases* to decode at all, so the run's
+        //    `OpenReference` is asked here whether they can be reached — it
+        //    names a FASTA, and that FASTA's `.fai` reads — and a reference
+        //    that has none is a hard error now rather than a mystery at the
+        //    first query.
         //
-        //    Asking `OpenReference` rather than building here is the whole of
-        //    the memory fix. A `fasta::Repository` memoises whole contigs and
-        //    never evicts, so a per-file repository costs `files × genome`:
-        //    measured at ~752 MiB per open file against the 746 MiB tomato
-        //    reference, which is a 51-sample cohort dying at 38 GiB. Sharing
-        //    the run's one makes that one contig, once (`reference.rs`).
+        //    **No sequence is read and nothing is kept.** The bases themselves
+        //    are read one slice's span at a time, at decode, through a
+        //    reference reader the cursor mints for that purpose
+        //    (`alignment_cursor.md` §10). This file holds neither the bases nor
+        //    a handle to anything holding them, which is why the field this
+        //    used to fill is gone.
         //
-        //    Nothing is *read* here — this only opens the FASTA and proves it
-        //    can be, so "this CRAM has no bases to decode against" is a fault
-        //    at open rather than a mystery at the first query. The bases
-        //    themselves arrive per contig, at query time. A BAM never asks, so
-        //    a BAM-only run still never touches the FASTA.
+        //    A BAM never asks, so a BAM-only run still never touches the FASTA.
         // The grouping is where a `.crai` is consumed. What comes back out is either the
         // grouped entries and no flat index, or no grouping and the index a BAM cursor needs.
         let (crai_by_contig, index) = match index {
@@ -274,21 +266,19 @@ impl AlignmentFile {
             index => (Vec::new(), Some(index)),
         };
 
-        let file_reference = match AlignmentFileKind::from_path(path) {
-            Some(AlignmentFileKind::Cram) => {
-                reference.bases().map_err(|source| match source {
+        if AlignmentFileKind::from_path(path) == Some(AlignmentFileKind::Cram) {
+            reference
+                .check_bases_can_be_read()
+                .map_err(|source| match source {
                     ReferenceBasesError::NoFasta => AlignmentFileError::CramNeedsReferenceFasta {
                         path: path.to_path_buf(),
                     },
                     ReferenceBasesError::Build { fasta, source } => AlignmentFileError::Open {
                         path: fasta,
-                        source: std::io::Error::other(source),
+                        source,
                     },
                 })?;
-                Some(reference.clone())
-            }
-            _ => None,
-        };
+        }
 
         // Free, and only sound now: check 2 proved this order is the
         // reference's, so position i really is `ContigId(i)`.
@@ -303,7 +293,6 @@ impl AlignmentFile {
             sq_md5s,
             filter_config,
             crai_by_contig,
-            reference: file_reference,
         }))
     }
 
@@ -515,25 +504,14 @@ impl AlignmentFile {
                     .build_from_path(&self.path)
                     .map_err(open_error)?;
                 reader.read_header().map_err(open_error)?;
-                // **The bases are taken once, for this cursor's chromosome, and held for its
-                // life.** A CRAM decodes against the reference, and a cursor covers one
-                // chromosome — so asking here rather than per region is the whole of what the
-                // cursor changes about the reference (spec §10). Asking the *run's*
-                // `OpenReference`, rather than holding a repository of our own, is what lets
-                // the run drop a chromosome's bases when every cursor on it is gone.
-                let repository = self
-                    .reference
-                    .as_ref()
-                    .and_then(|reference| reference.bases_for_contig(contig))
-                    .ok_or_else(|| AlignmentFileError::Open {
-                        path: self.path.to_path_buf(),
-                        source: std::io::Error::other(
-                            "a CRAM was opened without reference bases to decode against",
-                        ),
-                    })?;
                 // **The decode's own reader, not the cursor's** — and it goes through exactly
                 // the checks the first one did, because a factory that hands out one good
                 // reader and one bad one is not a case worth leaving to luck.
+                //
+                // This is now the *only* place a CRAM decode gets bases from. Until
+                // 2026-09-07 a whole chromosome came with it, from the run's shared
+                // repository — 198 MB for tomato chromosome 1 — where what a decode reads is
+                // one slice's declared span, about 9 kb on a real file (spec §10).
                 let decode_reference =
                     mint_a_checked_reference_reader(&mut probe, "CRAM decode's")?;
                 let entries = self
@@ -544,7 +522,6 @@ impl AlignmentFile {
                 AlignedReadsReader::Cram(CramAlignedReadsReader::new(
                     reader,
                     Arc::clone(&self.header),
-                    repository,
                     Box::new(decode_reference),
                     entries,
                     self.resolution.clone(),
@@ -598,7 +575,6 @@ impl std::fmt::Debug for AlignmentFile {
             sq_md5s: _,
             filter_config: _,
             crai_by_contig: _,
-            reference: _,
         } = self;
 
         f.debug_struct("AlignmentFile")
@@ -2667,6 +2643,45 @@ mod tests {
             error.to_string().contains("supply the reference FASTA"),
             "the message must say what to do about it: {error}"
         );
+    }
+
+    /// **The other half of the same rule, and nothing held it until
+    /// 2026-09-07.** A reference that names a real FASTA but whose sibling
+    /// `.fai` is gone cannot serve a CRAM either — a decode fetches by
+    /// coordinate, and the index is what turns a coordinate into a file
+    /// offset. It must fail at the open, naming the FASTA, rather than at the
+    /// first region query.
+    ///
+    /// The check used to be a *side effect*: `open` built a `fasta::Repository`
+    /// here, and building one opens the indexed FASTA. With the repository gone
+    /// the question is asked directly, and this is what fails if a later edit
+    /// stops asking it.
+    #[test]
+    fn a_cram_whose_reference_has_no_fai_is_refused_at_open() {
+        let (_cram_dir, cram_path, _fasta_dir, fasta) = indexed_cram(&one_read());
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
+        // Only now, so the reference above could still be read from the whole FASTA.
+        std::fs::remove_file(crate::ng::reference_info::sibling_fai_path(&fasta))
+            .expect("the fixture wrote a .fai");
+
+        let error = AlignmentFile::open(
+            &cram_path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect_err("a CRAM cannot be decoded through a FASTA with no index");
+        match &error {
+            AlignmentFileError::Open { path, .. } => assert_eq!(path, &fasta),
+            other => panic!("expected the open fault naming the FASTA, got {other:?}"),
+        }
     }
 
     /// A BAM is unaffected — it stores its own sequences, so a `.fai`-only
