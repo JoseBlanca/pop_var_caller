@@ -140,7 +140,7 @@ visible if it ever returns. *Depends:* C2. *Source:* spec §3.3, §6 trap 3.
 ignoring the slice. VCF byte-identical; the mode-equivalence oracle extended to compare the
 pairs, green. *Depends:* C2. *Source:* spec §3.5.
 
-**C5. ☐ The histograms out.** `ObservationCache::into_sources` is joined by a form that finishes
+**C5. ✅ The histograms out.** `ObservationCache::into_sources` is joined by a form that finishes
 every accumulator and returns the histograms beside the sources; both callers carry them to
 their outcome type, unused until the filter plan. The probe's histogram equals the run's, byte
 for byte, per sample. *Depends:* C2. *Source:* spec §3.4, §3.5.

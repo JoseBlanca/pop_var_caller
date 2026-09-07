@@ -54,7 +54,9 @@ use crate::ng::ref_seq::WindowedRefSeq;
 use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::run::cohort_merge::build::{CohortObservation, RegionOutcome};
 use crate::ng::run::cohort_merge::observation_cache::{ObservationCache, ObservationSource};
-use crate::ng::run::cohort_merge::recorded_windows::record_the_windows_at;
+use crate::ng::run::cohort_merge::recorded_windows::{
+    record_the_histograms, record_the_windows_at,
+};
 use crate::ng::run::cohort_merge::serial::{
     merge_cohort_handing_each_locus_over,
     merge_cohort_handing_each_locus_over_covering_samples_in_parallel, merge_cohort_through_cache,
@@ -63,7 +65,7 @@ use crate::ng::run::cohort_merge::{CohortLocusBuilderRegionsLen, MaxCohortLocusS
 use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::ng::vcf::VcfRecord;
 use crate::ng::vcf::assemble::assemble_record;
-use crate::ng::window_coverage::WindowCoverage;
+use crate::ng::window_coverage::{SampleHistogram, WindowCoverage};
 use crate::pop_var_caller::common::format_md5_hex;
 
 use super::RunError;
@@ -620,12 +622,14 @@ impl AlignedFilesVariantCaller {
             &mut loci_too_wide_to_assemble,
         )?;
 
+        let (sources, window_coverage_histograms) = cache.into_sources_and_histograms();
         Ok(CalledCohort {
             called_loci,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
             tracts,
-            walk: CohortWalkTallies::of(sample_names, cache.into_sources(), assembly_check),
+            walk: CohortWalkTallies::of(sample_names, sources, assembly_check),
+            window_coverage_histograms,
         })
     }
 
@@ -698,16 +702,20 @@ impl AlignedFilesVariantCaller {
             candidate_selection: &candidate_selection,
             padding_reference,
         };
-        let CohortCallingOutcome { calling, sources } =
-            call_cohort_from_sources_handing_each_record_over(
-                ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
-                inputs,
-                genotyper,
-                hand_over,
-            )?;
+        let CohortCallingOutcome {
+            calling,
+            sources,
+            window_coverage_histograms,
+        } = call_cohort_from_sources_handing_each_record_over(
+            ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
+            inputs,
+            genotyper,
+            hand_over,
+        )?;
         Ok(WrittenCohort {
             calling,
             walk: CohortWalkTallies::of(sample_names, sources, assembly_check),
+            window_coverage_histograms,
         })
     }
 }
@@ -756,6 +764,9 @@ pub(crate) struct CohortCallingOutcome<S> {
     /// built only after the two error returns, so a run that reaches it walked its whole
     /// analysed ground.
     pub sources: Vec<S>,
+    /// Each sample's coverage-by-GC histogram, or the reason it has none, beside the source it
+    /// was accumulated from — same order, same length.
+    pub window_coverage_histograms: Vec<SampleHistogram>,
 }
 
 /// **Call one cohort and hand every record over as it is finished, keeping none — the body both
@@ -966,6 +977,13 @@ where
     }
     merged?;
 
+    // **After the two error returns, so a run that failed never finishes an accumulator.** A
+    // half-walked sample's histogram would describe the ground the run reached and say nothing
+    // about that, which is the same reasoning `sources`' own doc gives.
+    let (sources, window_coverage_histograms) = cache.into_sources_and_histograms();
+    // What this run's yardsticks are, for something outside it to check — off unless the run was
+    // asked for it, beside the per-record rows (`cohort_merge::recorded_windows`).
+    record_the_histograms(&window_coverage_histograms);
     Ok(CohortCallingOutcome {
         calling: CohortCallingTallies {
             records_written,
@@ -974,7 +992,8 @@ where
             loci_with_nobody_to_call,
             tracts,
         },
-        sources: cache.into_sources(),
+        sources,
+        window_coverage_histograms,
     })
 }
 
@@ -1399,6 +1418,17 @@ pub struct CalledCohort {
     pub tracts: TractOutcomes,
     /// What each sample's walk saw, and what the run could check about the assembly.
     pub walk: CohortWalkTallies,
+    /// **Each sample's coverage-by-GC histogram**, or the reason it has none — one entry per
+    /// sample of [`walk`](Self::walk), at the same index, in the run's sample order
+    /// (`doc/devel/ng/spec/window_coverage.md` §3.5).
+    ///
+    /// The yardstick half of the hidden-duplication filter's input: the per-locus pairs say what
+    /// a sample's depth *was* around a locus, and this says what one copy's depth looks like in
+    /// that sample, so the filter divides one by the other. **Nothing reads it yet** — the filter
+    /// is built on its own plan — and it is carried here rather than dropped because the
+    /// accumulators stop existing when the merge returns its sources, and nothing downstream can
+    /// recompute them without a second pass over the reads.
+    pub window_coverage_histograms: Vec<SampleHistogram>,
 }
 
 /// **What a run that wrote its calls out produced** — everything [`CalledCohort`] carries
@@ -1417,6 +1447,9 @@ pub struct WrittenCohort {
     pub calling: CohortCallingTallies,
     /// What each sample's walk saw, and what the run could check about the assembly.
     pub walk: CohortWalkTallies,
+    /// Each sample's coverage-by-GC histogram, or the reason it has none — [`CalledCohort`]'s
+    /// own field, and carried for the same reason.
+    pub window_coverage_histograms: Vec<SampleHistogram>,
 }
 
 /// **What calling a cohort produced, whatever the observations were read from** — the part of
@@ -1468,8 +1501,8 @@ impl WrittenCohort {
 ///
 /// **The run does not own its walkers once the merge has them** — the observation cache does,
 /// for the merge's whole duration, and hands them back spent
-/// ([`ObservationCache::into_sources`]) — so these are copied out at that point rather than
-/// read from a walker later. What is here is what a run report has to be able to state: for
+/// ([`ObservationCache::into_sources_and_histograms`]) — so these are copied out at that point
+/// rather than read from a walker later. What is here is what a run report has to be able to state: for
 /// each sample, how much of the analysed ground its walk handled, how much it could not and
 /// why, and what the SNP/indel generator counted while doing it.
 ///

@@ -39,7 +39,7 @@ use std::io::{BufWriter, Write};
 use std::sync::{Mutex, OnceLock};
 
 use crate::ng::types::{ContigId, GenomePosition, Position};
-use crate::ng::window_coverage::WindowCoverage;
+use crate::ng::window_coverage::{CoverageByGcHistogram, SampleHistogram, WindowCoverage};
 
 /// The environment variable naming the file to write. Anything else about the run is unchanged.
 pub const PATH_VARIABLE: &str = "NG_WINDOW_COVERAGE_FILE";
@@ -208,6 +208,116 @@ pub fn record_the_windows_at(at: GenomePosition, windows_of_every_sample: &[Wind
         .unwrap_or_else(|why| panic!("flushing the window-coverage record: {why}"));
 }
 
+/// **The histograms, written beside the rows** — to the file [`PATH_VARIABLE`] names with
+/// `.histograms` after it, because they are a different shape and one file of two shapes is a
+/// reader that has to guess.
+///
+/// One line a sample, in the run's sample order: the sample's index, then either the word for the
+/// silence it was, or `fitted` and the whole histogram — the four scheme fields, the two window
+/// counts, and every cell. **Every cell, not the non-empty ones**: the comparison this exists for
+/// is byte-for-byte, and a sparse rendering would make two histograms of different widths agree
+/// wherever both were empty.
+///
+/// **Called once, when the pass ends**, with what the accumulators finished
+/// ([`ObservationCache::into_sources_and_histograms`](super::observation_cache::ObservationCache)).
+/// Off unless the variable names a file, like everything else here.
+///
+/// # Panics
+///
+/// A write that fails, for the reason [`record_the_windows_at`]'s does.
+pub fn record_the_histograms(of_every_sample: &[SampleHistogram]) {
+    let Some(rows) = std::env::var_os(PATH_VARIABLE) else {
+        return;
+    };
+    let path = histograms_beside(std::path::Path::new(&rows));
+
+    let mut text = String::new();
+    for (sample, histogram) in of_every_sample.iter().enumerate() {
+        write_the_histogram(sample, histogram, &mut text);
+    }
+    std::fs::write(&path, text).unwrap_or_else(|why| panic!("writing {}: {why}", path.display()));
+}
+
+/// What the histogram file's name is, given the file the rows went to.
+///
+/// **One derivation, called from both crate targets**, because the probe that reads the file has
+/// to build the same name: spelled twice, a suffix changed on one side alone leaves the reader
+/// looking for a file that does not exist, and its own diagnosis of that — a run that did not
+/// finish — would send the reader after the wrong cause entirely.
+#[must_use]
+pub fn histograms_beside(rows: &std::path::Path) -> std::path::PathBuf {
+    let mut path = rows.to_path_buf();
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(HISTOGRAMS_SUFFIX);
+    path.set_file_name(name);
+    path
+}
+
+/// What [`histograms_beside`] appends. **Written out in one other place**, the mode-equivalence
+/// oracle's shell script, which cannot call this.
+pub const HISTOGRAMS_SUFFIX: &str = ".histograms";
+
+/// One sample's line, whichever of the four answers it is.
+///
+/// **Exhaustively matched, so a fifth silence is a compile error here** rather than a line that
+/// says nothing about it.
+///
+/// `pub` for the same reason [`read_a_row`] is: the whole-store recomputation renders its own
+/// histogram through this, so the two sides cannot disagree about what a histogram is or about
+/// which of its fields a comparison covers.
+pub fn write_the_histogram(sample: usize, histogram: &SampleHistogram, into: &mut String) {
+    use core::fmt::Write as _;
+
+    let write = |into: &mut String, what: &str| {
+        writeln!(into, "{sample}\t{what}").expect("writing into a String cannot fail");
+    };
+    match histogram {
+        SampleHistogram::NoWindowFinalised => write(into, "no-window-finalised"),
+        SampleHistogram::EveryWindowUnderTheFloor => write(into, "every-window-under-the-floor"),
+        SampleHistogram::MedianDepthNotPositive => write(into, "median-depth-not-positive"),
+        SampleHistogram::Fitted(fitted) => {
+            // Destructured, so a field the histogram gains is a compile error here instead of a
+            // comparison that quietly stops covering it.
+            let CoverageByGcHistogram {
+                window_bp,
+                gc_bins,
+                depth_bin_width,
+                depth_bins,
+                windows_folded,
+                windows_under_the_floor,
+                counts,
+            } = fitted;
+            // **The cells must be the scheme's own count**, because the line writes the scheme
+            // and then whatever the vector holds: a `counts` shorter or longer than
+            // `gc_bins × (depth_bins + 1)` produces a line no reader can index by bin, and two
+            // such lines compare *equal* when both are wrong the same way — which is what both
+            // comparisons this file exists for would then report as a pass. The accumulator
+            // allocates exactly this and never resizes, but every field here is `pub`.
+            let cells = u64::from(*gc_bins) * (u64::from(*depth_bins) + 1);
+            assert_eq!(
+                counts.len() as u64,
+                cells,
+                "sample {sample}'s histogram holds {} cells and its scheme describes {cells} \
+                 ({gc_bins} GC bins over {depth_bins} depth bins and one overflow)",
+                counts.len(),
+            );
+            // **The width by bit pattern**, because it is fitted from a sample's own median and
+            // two runs that differ in its last bit cut every cell at a different depth.
+            write!(
+                into,
+                "{sample}\tfitted\t{window_bp}\t{gc_bins}\t{}\t{depth_bins}\t\
+                 {windows_folded}\t{windows_under_the_floor}",
+                depth_bin_width.to_bits(),
+            )
+            .expect("writing into a String cannot fail");
+            for count in counts {
+                write!(into, "\t{count}").expect("writing into a String cannot fail");
+            }
+            into.push('\n');
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +408,88 @@ mod tests {
             Some(WindowCoverage::absent()),
             "a sample with no usable window is written down, not left out",
         );
+    }
+
+    /// **A histogram's line carries everything a comparison needs to see a difference** — the
+    /// fitted bin width by bit pattern, both window counts, and every cell including the empty
+    /// ones. A sparse rendering would let two histograms of different widths agree wherever both
+    /// were empty, which is most of the matrix.
+    #[test]
+    fn a_fitted_histogram_line_carries_the_bin_width_by_bits_and_every_cell() {
+        let histogram = SampleHistogram::Fitted(CoverageByGcHistogram {
+            window_bp: 500,
+            gc_bins: 2,
+            depth_bin_width: 0.25,
+            depth_bins: 2,
+            windows_folded: 7,
+            windows_under_the_floor: 3,
+            // Two GC rows of three cells each — two regular bins and the overflow.
+            counts: vec![1, 2, 0, 0, 4, 0],
+        });
+        let mut written = String::new();
+        write_the_histogram(4, &histogram, &mut written);
+
+        // Where the cells begin: the sample index, the word `fitted`, and the six scheme and
+        // count fields come first.
+        const CELLS_START_AT: usize = 8;
+
+        let fields: Vec<&str> = written.trim_end().split('\t').collect();
+        assert_eq!(fields[0], "4", "the sample index keys the line");
+        assert_eq!(fields[1], "fitted");
+        assert_eq!(
+            &fields[2..CELLS_START_AT],
+            ["500", "2", "4598175219545276416", "2", "7", "3"]
+        );
+        assert_eq!(
+            fields[CELLS_START_AT..],
+            ["1", "2", "0", "0", "4", "0"],
+            "every cell, in row-major order, including the empty ones",
+        );
+        assert_eq!(
+            fields[4].parse::<u64>().map(f64::from_bits),
+            Ok(0.25),
+            "the bin width is written as the bits it is, so two runs a last bit apart differ here",
+        );
+    }
+
+    /// **Each silence is its own word**, because a consumer that acts on the difference is the
+    /// whole reason `SampleHistogram` is an enum rather than an `Option`.
+    #[test]
+    fn a_sample_with_no_histogram_says_which_silence_it_was() {
+        for (histogram, word) in [
+            (SampleHistogram::NoWindowFinalised, "no-window-finalised"),
+            (
+                SampleHistogram::EveryWindowUnderTheFloor,
+                "every-window-under-the-floor",
+            ),
+            (
+                SampleHistogram::MedianDepthNotPositive,
+                "median-depth-not-positive",
+            ),
+        ] {
+            let mut written = String::new();
+            write_the_histogram(0, &histogram, &mut written);
+            assert_eq!(written, format!("0\t{word}\n"));
+        }
+    }
+
+    /// **A histogram whose cells do not fit its own scheme is refused rather than written**, for
+    /// the reason the assertion gives: a line no reader can index by bin compares equal to another
+    /// wrong the same way, which is a pass in both of the comparisons this file exists for.
+    #[test]
+    #[should_panic(expected = "its scheme describes")]
+    fn a_histogram_whose_cells_do_not_fit_its_scheme_is_refused() {
+        let histogram = SampleHistogram::Fitted(CoverageByGcHistogram {
+            window_bp: 500,
+            gc_bins: 2,
+            depth_bin_width: 0.25,
+            depth_bins: 2,
+            windows_folded: 0,
+            windows_under_the_floor: 0,
+            // Two GC rows of three cells each is six; this is five.
+            counts: vec![0; 5],
+        });
+        write_the_histogram(0, &histogram, &mut String::new());
     }
 
     /// A malformed row names the column, because that is what a reader looking at the file needs.

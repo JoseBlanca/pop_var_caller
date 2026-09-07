@@ -14,7 +14,8 @@
 # absent — or all one cover behind — writes exactly the file a correct run writes
 # (doc/devel/ng/spec/window_coverage.md §10). Both routes are asked to write theirs down, and the
 # two files are compared row for row — including a check that some row carries a number, because
-# two runs that measured nothing agree perfectly.
+# two runs that measured nothing agree perfectly. The per-sample histograms the filter fits its
+# yardstick from are compared the same way, and for the same reason.
 #
 # Usage:
 #
@@ -151,5 +152,70 @@ $rows rows, $measured of them a measurement"
 else
   echo "the two modes' window coverage differs"
   diff "$out/from_alignments.windows.sorted" "$out/from_psps.windows.sorted" | head -20
+  exit 1
+fi
+
+# **And the per-sample histograms**, which the run writes beside the rows — the same path with
+# `.histograms` after it, which is `recorded_windows::HISTOGRAMS_SUFFIX` and is written out here
+# because a shell script cannot read a Rust constant. They are the filter's yardstick, one line a
+# sample carrying the fitted bin width and every cell, so a mode that folded a window the other
+# did not shows here and nowhere else.
+#
+# **Three guards.** A file with fewer lines than the run has samples puts every later sample's
+# histogram under its neighbour's index, and both modes would do it identically. A file in which
+# no sample is `fitted` is two runs agreeing about having fitted nothing. And a missing file is a
+# run that wrote its rows and stopped. A line that is *not* `fitted` is a sample with no
+# histogram, which is a legitimate answer and not compared away: the two modes must give the same
+# answer whichever it is.
+for side in from_alignments from_psps; do
+  if [ ! -f "$out/$side.windows.histograms" ]; then
+    echo "$side wrote no histogram file, though it wrote its rows"
+    exit 1
+  fi
+done
+# The sample count the run itself declared, from the VCF it wrote in the same pass.
+samples=$(grep '^#CHROM' "$out/from_alignments.vcf" | cut -f10- | tr '\t' '\n' | wc -l | tr -d ' ')
+for side in from_alignments from_psps; do
+  lines=$(wc -l < "$out/$side.windows.histograms" | tr -d ' ')
+  if [ "$lines" -ne "$samples" ]; then
+    echo "$side wrote $lines histogram lines for $samples samples"
+    exit 1
+  fi
+done
+fitted=$(cut -f2 "$out/from_alignments.windows.histograms" | grep -c '^fitted$' || true)
+if [ "$fitted" -eq 0 ]; then
+  echo "no sample has a histogram, so the two modes agree about having fitted nothing"
+  exit 1
+fi
+if cmp -s "$out/from_alignments.windows.histograms" "$out/from_psps.windows.histograms"; then
+  echo "and the two modes' coverage histograms are identical: \
+$samples samples, $fitted of them fitted"
+else
+  # **The first field that differs, not the head of the line.** A fitted line is eight header
+  # fields and one per cell — 20,050 of them at the shipped bin counts — so a `diff` of the two
+  # heads reports a cell difference as two identical-looking truncations.
+  echo "the two modes' coverage histograms differ"
+  awk -F'\t' '
+    NR == FNR { theirs[FNR] = $0; next }
+    {
+      split(theirs[FNR], alignments, "\t")
+      # Field 6 is the depth bin count, which with the overflow bin is a GC row width. It is
+      # compared before any cell, so a disagreement about it is reported as itself.
+      row = alignments[6] + 1
+      for (field = 1; field <= NF; field++) {
+        if ($field != alignments[field]) {
+          if (field <= 8 || row <= 0) {
+            what = sprintf("field %d", field - 1)
+          } else {
+            cell = field - 9
+            what = sprintf("the cell at GC bin %d depth bin %d", \
+              int(cell / row), cell % row)
+          }
+          printf "  sample %s: %s is %s from alignments and %s from psps\n", \
+            $1, what, alignments[field], $field
+          break
+        }
+      }
+    }' "$out/from_alignments.windows.histograms" "$out/from_psps.windows.histograms" | head -10
   exit 1
 fi

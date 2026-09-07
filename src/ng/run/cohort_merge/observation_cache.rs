@@ -47,7 +47,7 @@ use crate::ng::ref_seq::{ContigTable, EvictableRefSeq, RefSeq, RefSeqError};
 use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position};
 use crate::ng::window_coverage::depth::{EvidenceForOneRecord, for_each_reported_depth};
 use crate::ng::window_coverage::{
-    self, WindowCoverage, WindowCoverageAccumulator, WindowCoverageConfig,
+    self, SampleHistogram, WindowCoverage, WindowCoverageAccumulator, WindowCoverageConfig,
 };
 
 /// What the merge asks of a reference: bases, and the release of what it has walked past.
@@ -763,8 +763,9 @@ impl<S> ObservationCache<S> {
         }
     }
 
-    /// **The sources back, in the run's sample order** — the same order they were handed over
-    /// in, so entry `i` is the sample the cohort's `i`th entry describes.
+    /// **The sources back and each sample's finished coverage histogram**, both in the run's
+    /// sample order — the same order the sources were handed over in, so entry `i` of either list
+    /// is the sample the cohort's `i`th entry describes.
     ///
     /// **Why a cache hands its readers back at all.** A source is not only a reader: a run's
     /// walker carries what its walk saw — the regions it handled, the regions it could not,
@@ -776,11 +777,54 @@ impl<S> ObservationCache<S> {
     /// **It says nothing about how far the readers got**, and a caller must not infer it: a
     /// merge that failed leaves its sources wherever they stopped, and one that succeeded
     /// leaves them spent. Which of the two happened is the merge's return value, not this.
-    pub fn into_sources(self) -> Vec<S> {
+    ///
+    /// **This is the only place a sample's histogram is finished**, and finishing is not a
+    /// formality: [`WindowCoverageAccumulator::finish`] closes the centres no cover could — the
+    /// last half-window of the sample's own stream, which has no later position to complete it —
+    /// and fits the depth axis for a sample whose pass ended before the scale sample was full.
+    /// A run that dropped the accumulators instead would produce histograms short of their tails
+    /// and, at a sample with fewer than `depth_scale_windows` windows, no histogram at all.
+    /// (`spec/window_coverage.md` §3.5.)
+    ///
+    /// **The tail windows `finish` hands back are dropped here**, deliberately: a window is read
+    /// at the locus a builder is building, and by the time this runs every builder has run. They
+    /// are the same centres the whole-store recomputation finalises and a run does not
+    /// (`cohort_merge::recorded_windows`), and the histogram carries them either way.
+    ///
+    /// **There is deliberately no sources-only form.** One existed until the histograms did, and
+    /// it would now be a shorter name that finishes every accumulator and throws the result away
+    /// — and the histograms are the one thing here nothing downstream can recompute without a
+    /// second pass over the reads. A caller with no use for them says `.0`, which says so.
+    pub fn into_sources_and_histograms(self) -> (Vec<S>, Vec<SampleHistogram>) {
         self.samples
             .into_iter()
-            .map(|window| window.source)
-            .collect()
+            .map(|window| {
+                // **Both levels destructured, so a field either type gains has to be answered
+                // for here**: this is where the per-sample state stops existing, and one dropped
+                // silently is one nothing downstream can ask for. Reaching the accumulator
+                // through `.accumulator` would have left a field added beside it invisible.
+                let SampleWindow {
+                    source,
+                    window_coverage,
+                    spent: _,
+                    spare: _,
+                    held_observations: _,
+                    held_summaries: _,
+                    held_bodies: _,
+                    keeps_evidence: _,
+                    last_drawn: _,
+                } = window;
+                let WindowCoverageInProgress {
+                    accumulator,
+                    // The windows this sample had finalised and nothing had evicted. They are
+                    // read at the locus a builder is building, and every builder has run.
+                    finalised: _,
+                    observed_through: _,
+                } = window_coverage;
+                let (_tail_windows, histogram) = accumulator.finish();
+                (source, histogram)
+            })
+            .unzip()
     }
 
     /// **How many samples this cache merges** — the cohort's size, and the length of every
@@ -2129,6 +2173,63 @@ mod tests {
             !serially.samples[0].window_coverage.finalised.is_empty(),
             "no window was finalised, so this compared two empty lists",
         );
+    }
+
+    /// **A sample's histogram comes out of the cache finished, and finishing is what closes the
+    /// tail.** The centres in the last half-window of a sample's stream have no later position to
+    /// complete them, so no cover can finalise them; only `finish` does, and this is the one place
+    /// it is called. A cache that handed its sources back without it would give every sample a
+    /// histogram short of its last windows.
+    #[test]
+    fn the_histograms_come_out_finished_with_the_tail_no_cover_could_close() {
+        let mut cache = ObservationCache::over_fixture(vec![one_record_a_position(600, 3)]);
+        cache
+            .cover(region(1, 600))
+            .expect("the fixture source and reference hold");
+        // What the covers themselves finalised: everything up to half a window before the end.
+        let finalised_by_the_covers = cache.samples[0].window_coverage.finalised.len();
+
+        let (_sources, histograms) = cache.into_sources_and_histograms();
+
+        let [SampleHistogram::Fitted(histogram)] = &histograms[..] else {
+            panic!(
+                "one sample with 600 covered positions has a fitted histogram, not {histograms:?}"
+            );
+        };
+        assert_eq!(
+            histogram.windows_folded, 600,
+            "every covered position finalises one window, and the floor silenced none here",
+        );
+        assert!(
+            u64::try_from(finalised_by_the_covers).expect("a small count")
+                < histogram.windows_folded,
+            "the covers finalised {finalised_by_the_covers} of the 600, so `finish` is what closed \
+             the rest — and a histogram equal to what the covers had would mean it was never called",
+        );
+        assert_eq!(
+            histogram
+                .counts
+                .iter()
+                .map(|count| u64::from(*count))
+                .sum::<u64>(),
+            histogram.windows_folded,
+            "the cells hold every window the histogram says it folded",
+        );
+    }
+
+    /// **A sample the pass reached nothing of says which silence it was**, rather than coming back
+    /// with an empty histogram that a consumer would read as a measurement of zero.
+    #[test]
+    fn a_sample_with_no_covered_position_comes_back_with_the_reason_it_has_no_histogram() {
+        let (source, _drawn) = source_over(&[]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+        cache
+            .cover(region(1, 600))
+            .expect("the fixture source and reference hold");
+
+        let (_sources, histograms) = cache.into_sources_and_histograms();
+
+        assert_eq!(histograms, vec![SampleHistogram::NoWindowFinalised]);
     }
 
     /// **The two evictors drop the same windows**, for the reason above: eviction touches the

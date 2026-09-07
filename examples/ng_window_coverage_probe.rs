@@ -60,11 +60,13 @@
 //! finalises against the windows the run recorded. The comparison is by **bit pattern**, because
 //! an absent window is a pair of `NaN`s and `NaN != NaN`.
 //!
-//! **One difference is expected and is not a defect**: the walk calls `finish` and so finalises
-//! the tail of a sample's last records, while a run does not — nothing in the merge calls
-//! `finish` until plan step C5, so a centre in the last half-window of a sample's stream has no
-//! later position to close it. Those are counted and reported separately from a genuine
-//! disagreement.
+//! **One difference is expected and is not a defect**, and it is about the *windows*, not the
+//! histogram. Both sides call `finish`, which closes the centres in the last half-window of a
+//! sample's stream — the ones no cover can reach, since there is no later position to complete
+//! them. This walk keeps those; a run finishes only to take the histogram out, by which time
+//! every builder has run, so nothing reads them and they reach no record. They are counted and
+//! reported separately from a genuine disagreement. The histogram carries them on both sides,
+//! which is why the histograms compare equal where the per-locus windows do not.
 //!
 //! # What it prints
 //!
@@ -99,11 +101,13 @@ use pop_var_caller::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::run::cohort_merge::observation_cache::LocusSummary;
-use pop_var_caller::ng::run::cohort_merge::recorded_windows::read_a_row;
+use pop_var_caller::ng::run::cohort_merge::recorded_windows::{
+    histograms_beside, read_a_row, write_the_histogram,
+};
 use pop_var_caller::ng::types::{ContigId, GenomePosition, GenomeRegion};
 use pop_var_caller::ng::window_coverage::depth::{EvidenceForOneRecord, for_each_reported_depth};
 use pop_var_caller::ng::window_coverage::{
-    self, WindowCoverage, WindowCoverageAccumulator, WindowCoverageConfig,
+    self, SampleHistogram, WindowCoverage, WindowCoverageAccumulator, WindowCoverageConfig,
 };
 
 #[cfg(test)]
@@ -388,6 +392,15 @@ struct WindowRecomputation {
     reported: Vec<(GenomePosition, u32)>,
     /// Covered positions fed to the accumulator.
     positions_observed: u64,
+    /// Which sample of the run this store is — the index the recorded rows and histogram line
+    /// are keyed by, and the position this store was listed at.
+    sample: usize,
+    /// This sample's finished histogram, or the reason it has none — `None` until
+    /// [`close`](Self::close) has run.
+    histogram: Option<SampleHistogram>,
+    /// The same, as the run wrote it down, when a run's histograms were given. **Not `run_said`**,
+    /// which in this file is the map of the run's *windows*.
+    histogram_the_run_wrote: Option<String>,
     /// What the comparison against a run's recorded windows found, when one was given.
     comparison: Option<ComparisonWithTheRun>,
 }
@@ -422,6 +435,8 @@ impl WindowRecomputation {
     fn over(
         reference: &ReferenceFasta,
         run_windows: Option<HashMap<GenomePosition, Option<WindowCoverage>>>,
+        run_histogram: Option<String>,
+        sample: usize,
     ) -> Self {
         Self {
             accumulator: Some(WindowCoverageAccumulator::new(WindowCoverageConfig {
@@ -440,6 +455,9 @@ impl WindowRecomputation {
             bases: Vec::new(),
             reported: Vec::new(),
             positions_observed: 0,
+            sample,
+            histogram: None,
+            histogram_the_run_wrote: run_histogram,
             comparison: run_windows.map(|run_said| ComparisonWithTheRun {
                 run_said,
                 ..ComparisonWithTheRun::default()
@@ -456,7 +474,8 @@ impl WindowRecomputation {
             .accumulator
             .take()
             .expect("the pass is closed exactly once");
-        let (tail, _histogram) = accumulator.finish();
+        let (tail, histogram) = accumulator.finish();
+        self.histogram = Some(histogram);
         self.windows.extend(tail);
         // **Ascending, and asserted rather than assumed**, because the comparison below and
         // plan step D1's distribution both binary-search it.
@@ -591,6 +610,114 @@ impl ComparisonWithTheRun {
     }
 }
 
+impl WindowRecomputation {
+    /// This walk's histogram, and — when a run wrote its own down — whether the two are the same
+    /// text.
+    ///
+    /// **Compared as the run's own rendering of it, not field by field.** The rendering is the
+    /// library's (`recorded_windows::write_the_histogram`), so the two sides cannot disagree
+    /// about what a histogram *is*; and it carries the fitted bin width as a bit pattern and every
+    /// cell including the empty ones, so two histograms of different widths cannot agree by both
+    /// being sparse.
+    fn report_the_histogram(&self, label: &str) {
+        let histogram = self
+            .histogram
+            .as_ref()
+            .expect("the pass is closed before its histogram is reported");
+        let mut walk_says = String::new();
+        write_the_histogram(self.sample, histogram, &mut walk_says);
+        match histogram {
+            SampleHistogram::Fitted(fitted) => {
+                println!(
+                    "{label}\thistogram-windows-folded\t{}",
+                    fitted.windows_folded
+                );
+                println!(
+                    "{label}\thistogram-windows-under-the-floor\t{}",
+                    fitted.windows_under_the_floor
+                );
+                println!(
+                    "{label}\thistogram-depth-bin-width\t{}",
+                    fitted.depth_bin_width
+                );
+            }
+            silence => println!("{label}\thistogram\tnone: {silence:?}"),
+        }
+        let Some(run_said) = &self.histogram_the_run_wrote else {
+            return;
+        };
+        if run_said.trim_end() == walk_says.trim_end() {
+            println!("{label}\thistogram-agrees-with-the-run\tyes");
+        } else {
+            println!("{label}\thistogram-agrees-with-the-run\tno");
+            println!(
+                "{label}\thistogram-differs-at\t{}",
+                where_the_two_lines_first_differ(run_said, &walk_says),
+            );
+            panic!(
+                "the run's histogram for {label} is not the one a straight walk of the same \
+                 store makes",
+            );
+        }
+    }
+}
+
+/// What of two histogram lines first disagrees, **named** — a header field by its name, a cell by
+/// the GC bin and depth bin it holds.
+///
+/// **A whole line is not a failure message.** At the shipped bin counts a fitted line is eight
+/// header fields and 20,050 cells, so printing its head reports a cell difference as two
+/// identical-looking truncations, and the header fields are the ones most likely to agree.
+fn where_the_two_lines_first_differ(run: &str, walk: &str) -> String {
+    let run: Vec<&str> = run.trim_end().split('\t').collect();
+    let walk: Vec<&str> = walk.trim_end().split('\t').collect();
+    // The depth bins the *run* declared: what makes a cell's index into a pair of bins. Its own
+    // field is compared below, so a disagreement about it is reported before any cell is.
+    let depth_bins: usize = run.get(5).and_then(|field| field.parse().ok()).unwrap_or(0);
+    for (field, (run, walk)) in run.iter().zip(&walk).enumerate() {
+        if run != walk {
+            return format!(
+                "{}\trun={run}\twalk={walk}",
+                one_field_named(field, depth_bins)
+            );
+        }
+    }
+    format!(
+        "no field differs in the {} they share, but the run's line has {} fields and this walk's \
+         {}",
+        run.len().min(walk.len()),
+        run.len(),
+        walk.len(),
+    )
+}
+
+/// What field `field` of a histogram line holds, in the terms the histogram is written in.
+///
+/// The eight header fields are named; from there each field is one cell, row-major over
+/// `[gc_bin][depth_bin]` with one overflow bin after each row's regular ones — so `depth_bins + 1`
+/// cells to a GC row.
+fn one_field_named(field: usize, depth_bins: usize) -> String {
+    const HEADER: [&str; 8] = [
+        "the sample",
+        "the word `fitted`",
+        "the window width",
+        "the GC bin count",
+        "the fitted depth bin width, as bits",
+        "the depth bin count",
+        "the windows folded",
+        "the windows the floor silenced",
+    ];
+    if let Some(named) = HEADER.get(field) {
+        return (*named).to_owned();
+    }
+    let cell = field - HEADER.len();
+    let row = depth_bins + 1;
+    if row == 0 {
+        return format!("cell {cell}, whose bins the run's own depth bin count does not describe");
+    }
+    format!("the cell at GC bin {} depth bin {}", cell / row, cell % row,)
+}
+
 /// A window that reports something, or `None` for either way of having nothing to report.
 ///
 /// **Absent and missing are one answer to the consumer**, which is the filter: it skips a sample
@@ -676,6 +803,9 @@ impl RecordMeasurement for WindowRecomputation {
             contigs_checked: _,
             reported: _,
             comparison: _,
+            sample: _,
+            histogram: _,
+            histogram_the_run_wrote: _,
         } = self;
         let accumulator = accumulator
             .as_mut()
@@ -707,6 +837,7 @@ impl RecordMeasurement for WindowRecomputation {
             .filter(|(_, window)| window.is_absent())
             .count();
         println!("{label}\twindows-under-the-floor\t{absent}");
+        self.report_the_histogram(label);
         let Some(comparison) = &self.comparison else {
             return;
         };
@@ -860,6 +991,31 @@ fn windows_the_run_recorded(
     per_sample
 }
 
+/// The histogram line a run wrote for each sample, in the run's own sample order.
+///
+/// **One line a sample, and that is checked**: a file with a line missing would otherwise shift
+/// every later sample's histogram onto its neighbour, which is the same failure the row file's
+/// sample-index check exists for.
+fn histograms_the_run_recorded(recorded: &Path, samples: usize) -> Vec<String> {
+    let path = histograms_beside(recorded);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|why| {
+        panic!(
+            "reading {}: {why} — a run writes it beside its rows, so a missing file means the \
+             rows came from a run that did not finish",
+            path.display()
+        )
+    });
+    let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    assert_eq!(
+        lines.len(),
+        samples,
+        "{} holds {} histogram lines and {samples} stores were given",
+        path.display(),
+        lines.len(),
+    );
+    lines
+}
+
 fn main() {
     let arguments = Arguments::from_command_line();
     let stores = &arguments.stores;
@@ -868,6 +1024,12 @@ fn main() {
         .windows_from_the_run
         .as_deref()
         .map(|recorded| windows_the_run_recorded(recorded, stores.len()));
+    // **Beside the rows, from the file the run wrote its histograms to** — the same path with
+    // `.histograms` after it, which is where `recorded_windows` puts them.
+    let run_histograms = arguments
+        .windows_from_the_run
+        .as_deref()
+        .map(|recorded| histograms_the_run_recorded(recorded, stores.len()));
 
     println!("phase\tng-window-coverage-probe");
     let mut total = SingleBaseEquality::default();
@@ -882,6 +1044,10 @@ fn main() {
                 run_windows
                     .as_mut()
                     .map(|per_sample| std::mem::take(&mut per_sample[sample])),
+                run_histograms
+                    .as_ref()
+                    .map(|per_sample| per_sample[sample].clone()),
+                sample,
             )
         });
         match &mut windows {

@@ -4373,15 +4373,15 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     no position can cross, and an assert names the premise if it breaks again.
 
 #### Window coverage — each sample's depth and GC around a locus, and the histogram behind it
-- **Status:** `fixes-applied` — **Milestones A and B complete, Milestone C steps C1 to C4
-  complete** (branch `ng-window-coverage`): the accumulator, the floor, the per-sample depth
+- **Status:** `fixes-applied` — **Milestones A, B and C complete** (branch `ng-window-coverage`): the accumulator, the floor, the per-sample depth
   scale, the rule that turns one drawn record into covered positions with a depth at each, the
   measurement that says the rule's cheapest branch is sound on real data, the reference in the
   merge's cache, the accumulator itself in each sample's window there, and the half-window
-  look-ahead that stops each region's last centres being absent, and the pair itself on every
-  record the run writes. **The measurement runs on real data in both modes, no VCF byte has moved,
-  the two modes' windows are identical bit for bit, and what the run reads equals a whole-store
-  recomputation.** Next: C5, the histograms out of the cache, and then Checkpoint C.
+  look-ahead that stops each region's last centres being absent, the pair itself on every record
+  the run writes, and each sample's histogram out of the cache. **The measurement runs on real data
+  in both modes, no VCF byte has moved, the two modes' windows and histograms are identical bit for
+  bit, and both equal a whole-store recomputation.** **Checkpoint C reached** — the filter plan may
+  start. Next: Milestone D, the three numbers the spec left to measurement.
 - **Plan:** [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md);
   **Spec:** [window_coverage.md](doc/devel/ng/spec/window_coverage.md). No architecture
   document — the spec's §3 type blocks are the code shape. Its consumer, built separately:
@@ -4400,7 +4400,8 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   [C1](doc/devel/reports/implementations/ng_window_coverage_c1_2026-09-06.md),
   [C2](doc/devel/reports/implementations/ng_window_coverage_c2_2026-09-06.md),
   [C3](doc/devel/reports/implementations/ng_window_coverage_c3_2026-09-06.md),
-  [C4](doc/devel/reports/implementations/ng_window_coverage_c4_2026-09-07.md);
+  [C4](doc/devel/reports/implementations/ng_window_coverage_c4_2026-09-07.md),
+  [C5](doc/devel/reports/implementations/ng_window_coverage_c5_2026-09-07.md);
   **reviews:** [A1](doc/devel/reports/reviews/ng_window_coverage_a1_2026-09-06.md) (1 Blocker,
   5 Major, 18 Minor), [A2](doc/devel/reports/reviews/ng_window_coverage_a2_2026-09-06.md)
   (4 Major, 4 Minor), [A3](doc/devel/reports/reviews/ng_window_coverage_a3_2026-09-06.md)
@@ -4411,7 +4412,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   6 Major, 8 Minor), [C2](doc/devel/reports/reviews/ng_window_coverage_c2_2026-09-06.md) (4 Major,
   2 Minor), [C3](doc/devel/reports/reviews/ng_window_coverage_c3_2026-09-06.md) (5 Major, 9 Minor),
   [C4](doc/devel/reports/reviews/ng_window_coverage_c4_2026-09-07.md) (1 Blocker, 4 Major,
-  12 Minor)
+  12 Minor), [C5](doc/devel/reports/reviews/ng_window_coverage_c5_2026-09-07.md) (5 Major, 8 Minor)
   — all applied or raised with a home; each step's fixes are in its own commit. **C2's correctness
   review ran a session late**, its design half having landed inside C2's own commit; its findings
   are fixed forward in their own commit after C3.
@@ -4561,6 +4562,23 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   extended oracle **passing when neither mode measured anything**, which is the same
   absence-against-absence failure one level up, and that "the locus's first base" had no test at
   all, every fixture with a real measurement using a one-base locus where first and last coincide.
+- **C5 done (the histograms out), and Milestone C complete:** every sample's coverage histogram
+  leaves the merge when it returns its sources, and it is the one a straight walk of the same store
+  makes — **all six samples byte-identical to the recomputation, and the two modes byte-identical
+  to each other**, which the mode-equivalence oracle now compares itself. `windows_folded` accounts
+  for every covered position: on this slice the floor silenced none, so each sample's folded count
+  is its covered-position count, and the review reproduced the identity on a slice where the floor
+  did silence some (300,943 folded + 377 silenced against 301,320 covered). **Finishing the
+  accumulator is the step, not a formality**: it closes the centres no cover can reach — the last
+  half-window of a sample's own records, about 6 windows in 10,000 measured — and fits the depth
+  axis for a sample whose pass ended before the 10,000-window scale sample filled, which is the low
+  end this caller commits to and is carried by unit tests only, since every sample of both slices
+  passed 10,000 long before its stream ended. **`into_sources` is gone** rather than kept beside the
+  new form: it would be a shorter name that finishes every accumulator and drops the result. The
+  review's two surviving mutations are worth carrying forward — a wrong sample index in the
+  histogram recorder, and a comparison that read only the first sample, are both caught **only by
+  running the probe on a real store**, and the mode-equivalence oracle cannot catch the first
+  because both modes render the same wrong index.
 - **Open:** the floor's default (spec §3.3) and the histogram's three bin constants (spec §3.4)
   are soft until plan steps D1 and D2 measure them.
 - **Checkpoint A ruled by the owner, 2026-09-06, and the spec updated with it:** `finish` hands
