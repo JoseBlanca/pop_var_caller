@@ -217,6 +217,14 @@ pub enum PspSourceError {
 /// nothing, and a box per record would put an allocation back on every record in the window to
 /// save one on the eighth of them that gets built (§3.4 there).
 ///
+/// **And it holds the merge's window rather than the file** — a FIFO the draw extends and
+/// [`release_before`](ObservationSource::release_before) drains, which is what §3.2 asks for.
+/// The drain is not an optimisation: without it a run holds every body its cohort's psps ever
+/// handed over, which on 63 tomato accessions over 2 Mb of ground was 24 GB of resident memory
+/// against 0.4 GB with it, for the same VCF. Nothing in any output distinguishes the two, so
+/// the release has a test of its own
+/// (`releasing_what_the_merge_has_passed_leaves_the_rest_building_the_same`).
+///
 /// **What it does not do is decide.** A per-sample predicate cannot: a sample showing no
 /// non-reference read at a position can never be the one that admits the locus, but its
 /// evidence is still needed at every locus another sample admits, because thirty reference
@@ -224,7 +232,16 @@ pub enum PspSourceError {
 /// lets the cohort choose.
 pub struct PspSummarySource<'a> {
     walk: RecordIter<'a>,
+    /// The bodies drawn and not yet released, back to back in draw order.
+    ///
+    /// **A body's range addresses the whole file, not this buffer.** The merge holds ranges
+    /// across draws and hands them back to [`build`](ObservationSource::build), so they have to
+    /// mean the same thing after a release as before it: `released` is how many bytes have gone
+    /// from the front, and `body.start - released` is where a surviving body sits here.
     kept: Vec<u8>,
+    /// How many arena bytes have been dropped from the front — the offset every body range is
+    /// measured against.
+    released: usize,
     /// The individual this file holds, so a failure names them.
     sample: String,
     /// How far the walk has got — the other half of locating a failure.
@@ -260,6 +277,11 @@ pub struct KeptRecord {
     /// every so many records with the changes replayed from it, or one per building region —
     /// and choosing between them wants the measurement that has not been taken
     /// (`spec/cohort_merge_psp_path.md` §3.2).
+    ///
+    /// **The window is what it is now per, and until 2026-09-07 it was the file.** A snapshot
+    /// per record is bounded by the merge's window only because the heads are released with the
+    /// bodies they describe; before that they were not, and this set — the largest field of the
+    /// three, and the one that grows with depth — was held for every record the file had.
     pub live: LiveSet,
 }
 
@@ -280,6 +302,7 @@ impl<'a> PspSummarySource<'a> {
         Ok(Self {
             walk,
             kept: Vec::new(),
+            released: 0,
             sample,
             reached: WalkProgress::NothingYet,
             layout,
@@ -307,10 +330,33 @@ impl<'a> PspSummarySource<'a> {
         self.read
     }
 
-    /// The bytes kept so far. A body's range addresses this.
+    /// How many body bytes this source is holding — **the number the arena is bounded by**,
+    /// exposed so that a test can say the bound holds rather than assert that a call was made.
     #[must_use]
-    pub fn kept(&self) -> &[u8] {
-        &self.kept
+    pub fn held_bytes(&self) -> usize {
+        self.kept.len()
+    }
+
+    /// How many records' heads this source is holding, for the reason
+    /// [`held_bytes`](Self::held_bytes) exists.
+    #[must_use]
+    pub fn held_records(&self) -> usize {
+        self.heads.len()
+    }
+
+    /// The bytes of the body at `body`, which must be one this source still holds.
+    ///
+    /// # Panics
+    ///
+    /// If `body` was released — the merge only ever asks for a body inside its own window, so
+    /// a panic here is a defect in the eviction's bookkeeping rather than anything about a file.
+    #[must_use]
+    pub fn body_bytes(&self, body: &core::ops::Range<usize>) -> &[u8] {
+        let from = body
+            .start
+            .checked_sub(self.released)
+            .expect("a body the merge still holds was released");
+        &self.kept[from..from + body.len()]
     }
 
     /// The next record's summary, its body appended to the arena.
@@ -324,6 +370,9 @@ impl<'a> PspSummarySource<'a> {
                 let body = streamed
                     .body
                     .expect("a walk that builds nothing keeps every body");
+                // **Shifted from the buffer's terms into the file's**, which is what makes a
+                // range outlive the release that moves the bytes it names.
+                let body = body.start + self.released..body.end + self.released;
                 Some(Ok(KeptRecord {
                     summary: LocusSummary::from(&streamed.head),
                     body,
@@ -611,7 +660,7 @@ impl ObservationSource for PspSummarySource<'_> {
         };
         let found = LocatedRecord {
             head,
-            body: &self.kept[body.clone()],
+            body: self.body_bytes(&body),
             record_bytes: body.len(),
         };
         let mut record = decode_the_body_of(&found, &kept.live, &self.layout)
@@ -632,6 +681,31 @@ impl ObservationSource for PspSummarySource<'_> {
             observation.read_group = run_wide;
         }
         Ok(record)
+    }
+
+    /// Drop every kept body and head the merge has passed.
+    ///
+    /// **This is what bounds the arena by the merge's window rather than by the file.** Both
+    /// lists are drained from the front, which the module's neighbours already do for the same
+    /// reason: the entries are in draw order, so what survives is a suffix, and the move costs
+    /// what stays rather than what goes.
+    ///
+    /// A head goes when the whole of its body does. Bodies are laid down back to back in draw
+    /// order, so `body.end <= body_start` and `body.start < body_start` select the same prefix;
+    /// the end form is used because it is the one that is true by definition rather than by the
+    /// layout.
+    fn release_before(&mut self, body_start: usize) {
+        let Some(bytes) = body_start.checked_sub(self.released) else {
+            // The merge evicts forward, so a request behind the edge is a repeat and not a
+            // rewind. Nothing to do rather than an underflow.
+            return;
+        };
+        self.kept.drain(..bytes);
+        self.released = body_start;
+        let past = self
+            .heads
+            .partition_point(|kept| kept.body.end <= body_start);
+        self.heads.drain(..past);
     }
 }
 
@@ -1483,7 +1557,7 @@ mod tests {
             };
             let found = crate::ng::psp::record::LocatedRecord {
                 head,
-                body: &source.kept()[kept_record.body.clone()],
+                body: source.body_bytes(&kept_record.body),
                 record_bytes: kept_record.body.len(),
             };
             let rebuilt = crate::ng::psp::record::decode_the_body_of(&found, &live, &layout)
@@ -1548,4 +1622,68 @@ mod tests {
         }
     }
 
+    /// **What the merge has passed stops costing memory, and what it still holds still builds.**
+    ///
+    /// The arena is the one place in this path whose size is set by the file rather than by the
+    /// window: a source that never releases holds every body a psp ever handed over, which on 63
+    /// tomato accessions over 2 Mb of ground was 24 GB of resident memory. So the release has two
+    /// halves and this pins both — the bytes and the heads behind the cut are gone, and every
+    /// body in front of it decodes to exactly what it decoded to before.
+    ///
+    /// **Released in two steps, not one**, because the offsets a body carries are the file's and
+    /// not the buffer's: a second release after the first is where a range measured from the
+    /// wrong base would read another record's bytes and build a plausible wrong record.
+    #[test]
+    fn releasing_what_the_merge_has_passed_leaves_the_rest_building_the_same() {
+        let records = a_sample();
+        let (_dir, path) = a_psp_of(&records);
+        let groups = as_walked();
+
+        let built: Vec<_> = {
+            let mut psp = PspReader::open(&path).expect("the file opens");
+            let mut source =
+                PspObservationSource::over(&mut psp, &groups).expect("the walk starts");
+            std::iter::from_fn(|| source.next_observation(None))
+                .map(|next| next.expect("the fixture reads back"))
+                .collect()
+        };
+
+        let mut psp = PspReader::open(&path).expect("the file opens again");
+        let mut source = PspSummarySource::over(&mut psp, &groups).expect("the walk starts");
+        let mut bodies = Vec::new();
+        while let Some(next) = source.next_drawn(None) {
+            match next.expect("the fixture reads back") {
+                Drawn::Kept { body, .. } => bodies.push(body),
+                Drawn::Built(_) => panic!("this source keeps every body"),
+            }
+        }
+        assert!(
+            bodies.len() >= 4,
+            "the fixture needs at least four records to release across, and has {}",
+            bodies.len()
+        );
+        let whole_arena = source.held_bytes();
+        assert_eq!(source.held_records(), bodies.len(), "one head a record drawn");
+
+        for cut in [bodies.len() / 4, bodies.len() / 2] {
+            source.release_before(bodies[cut].start);
+            assert_eq!(
+                source.held_records(),
+                bodies.len() - cut,
+                "the heads behind record {cut} are gone and the rest are not"
+            );
+            assert_eq!(
+                source.held_bytes(),
+                whole_arena - bodies[cut].start,
+                "the arena holds exactly the bodies from record {cut} on"
+            );
+            for (at, body) in bodies.iter().enumerate().skip(cut).rev() {
+                let rebuilt = source.build(body.clone()).expect("a surviving body builds");
+                assert_eq!(
+                    rebuilt, built[at],
+                    "record {at} built after a release differs from the one built at once"
+                );
+            }
+        }
+    }
 }

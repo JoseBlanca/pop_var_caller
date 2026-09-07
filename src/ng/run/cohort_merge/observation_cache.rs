@@ -280,6 +280,21 @@ pub trait ObservationSource {
              whose `next_drawn` returns `Drawn::Kept` is ever asked, and this one does not"
         )
     }
+
+    /// **Nothing before `body_start` will ever be built** — the source may drop it.
+    ///
+    /// This is the other half of [`build`](Self::build), and without it a source that keeps
+    /// evidence keeps all of it. The cache holds a window and evicts behind it, so a source's
+    /// arena is bounded by the same window — but only if it is told where the window's left
+    /// edge went, which is what this says. Called from [`evict_before`](SampleWindow::evict_before)
+    /// with the first surviving body's start, so a source that honours it holds the round's
+    /// ground and no more, and one that ignores it grows with the file.
+    ///
+    /// **The default does nothing**, which is right for every source that builds each record as
+    /// it is drawn: it kept nothing, so there is nothing to release.
+    fn release_before(&mut self, body_start: usize) {
+        let _ = body_start;
+    }
 }
 
 /// Every iterator of one sample's observations is a source that does not reuse.
@@ -549,9 +564,14 @@ impl WindowCoverageInProgress {
     }
 }
 
-impl<S> SampleWindow<S> {
+impl<S: ObservationSource> SampleWindow<S> {
     /// Drop everything this sample holds that ends before `position`, offering the records back
     /// to its own spare list and pushing what will not fit onto `dead`.
+    ///
+    /// **And tell the source how far the window's left edge moved**, so that a source keeping
+    /// its evidence in an arena can drop the same prefix. Without that call the cache's window
+    /// is bounded and the arena behind it is not: over 63 tomato accessions and 2 Mb of ground
+    /// the run held 24 GB, because every body a psp had ever handed over was still in memory.
     ///
     /// **One body, called by both evictors** — the serial one frees `dead` itself and the
     /// parallel one hands it to the caller's graveyard. They differ in what becomes of the
@@ -570,15 +590,26 @@ impl<S> SampleWindow<S> {
             held_bodies,
             spare,
             window_coverage,
-            source: _,
+            source,
             spent: _,
             keeps_evidence: _,
             last_drawn: _,
         } = self;
+        // **Where the arena's left edge lands, read before the drain moves it.** The first
+        // survivor's body is the earliest one that can still be built; when nothing survives,
+        // everything drawn so far can go, and the last body's end is where that reaches. A
+        // source that builds as it draws holds no bodies and is told nothing.
+        let release_to = held_bodies
+            .get(first_survivor)
+            .map(|body| body.start)
+            .or_else(|| held_bodies.last().map(|body| body.end));
         // The finalised windows go with the records, by their own coordinates.
         window_coverage.evict_before(position);
         held_summaries.drain(..first_survivor);
         held_bodies.drain(..first_survivor.min(held_bodies.len()));
+        if let Some(release_to) = release_to {
+            source.release_before(release_to);
+        }
         let room = held_observations.len();
         for record in held_observations.drain(..first_survivor.min(room)) {
             if spare.len() < room {
@@ -1002,7 +1033,10 @@ impl<S> ObservationCache<S> {
     /// non-survivor's successor: nothing behind it could have been kept, nothing after it
     /// could have been dropped. The prefix form is chosen for its cost, which is proportional
     /// to what it drops rather than to the window, and not for a difference in what it keeps.
-    pub(super) fn evict_before(&mut self, position: GenomePosition) {
+    pub(super) fn evict_before(&mut self, position: GenomePosition)
+    where
+        S: ObservationSource,
+    {
         // The records that will not fit in a sample's spare list. The serial evictor has
         // nowhere to send them, so it frees each sample's before moving to the next — which is
         // where they were freed before this walk and the parallel one shared a body.
@@ -1038,7 +1072,7 @@ impl<S> ObservationCache<S> {
         position: GenomePosition,
         graveyard: &mut Vec<SampleLocusObservations>,
     ) where
-        S: Send,
+        S: Send + ObservationSource,
     {
         use rayon::prelude::*;
 
@@ -2846,6 +2880,92 @@ mod tests {
             handed_out(&cache, region(1, 50)),
             vec![vec![region(25, 40), region(41, 44), region(45, 45)]],
             "20–21 is gone; 25–40 ends on the evicted base and stays",
+        );
+    }
+
+    /// **A source that keeps its evidence is told where the window's left edge went**, which is
+    /// the other half of the cache's memory bound: this type holds a window, and a source that
+    /// keeps bodies holds them until it is told it may stop. Nothing in any output shows the
+    /// difference — a run that never releases produces the same VCF, out of memory that grows
+    /// with the file rather than with the window.
+    ///
+    /// The four records here have bodies 10 bytes each laid back to back, so record *i* starts
+    /// at `10i`. Evicting past the first two must name byte 20, and evicting past all of them
+    /// must name 40 — the end of the last, since nothing survives to name a start.
+    #[test]
+    fn a_source_that_keeps_its_evidence_is_told_what_the_eviction_passed() {
+        /// One sample's reader that keeps every body, recording what it was allowed to release.
+        struct KeepingSource {
+            /// Record *i*'s region, and its body is the ten bytes at `10i`.
+            regions: Vec<GenomeRegion>,
+            drawn: usize,
+            released: Rc<Cell<Option<usize>>>,
+        }
+
+        impl ObservationSource for KeepingSource {
+            type Error = SourceFailed;
+
+            fn next_observation(
+                &mut self,
+                _spare: Option<SampleLocusObservations>,
+            ) -> Option<Result<SampleLocusObservations, SourceFailed>> {
+                unreachable!("the cache draws this source through `next_drawn`")
+            }
+
+            fn next_drawn(
+                &mut self,
+                _spare: Option<SampleLocusObservations>,
+            ) -> Option<Result<Drawn, SourceFailed>> {
+                let region = *self.regions.get(self.drawn)?;
+                let body = self.drawn * 10..self.drawn * 10 + 10;
+                self.drawn += 1;
+                Some(Ok(Drawn::Kept {
+                    summary: LocusSummary::of(&observation_over(region)),
+                    body,
+                }))
+            }
+
+            fn build(
+                &self,
+                body: core::ops::Range<usize>,
+            ) -> Result<SampleLocusObservations, SourceFailed> {
+                Ok(observation_over(self.regions[body.start / 10]))
+            }
+
+            fn release_before(&mut self, body_start: usize) {
+                self.released.set(Some(body_start));
+            }
+        }
+
+        let released = Rc::new(Cell::new(None));
+        let source = KeepingSource {
+            regions: vec![
+                region(20, 21),
+                region(22, 23),
+                region(45, 45),
+                region(46, 46),
+            ],
+            drawn: 0,
+            released: Rc::clone(&released),
+        };
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+        cache
+            .cover(region(40, 50))
+            .expect("the fixture source holds");
+
+        cache.evict_before(position_on(0, 40));
+        assert_eq!(
+            released.get(),
+            Some(20),
+            "the two records behind position 40 are past, so their twenty bytes may go and the \
+             third record's body is where the arena now starts",
+        );
+
+        cache.evict_before(position_on(0, 100));
+        assert_eq!(
+            released.get(),
+            Some(40),
+            "nothing survives, so every body drawn may go — named by the last one's end",
         );
     }
 
