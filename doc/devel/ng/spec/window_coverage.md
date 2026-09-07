@@ -178,9 +178,23 @@ window built from a handful of positions is as confident-looking as one built fr
 and in ng the holes are not scattered: a tract region that emits no loci, an analysed-region edge, a
 stretch no read reached. So a window finalised over fewer than `min_window_positions` covered
 positions **emits an absent value** — `NaN` in both fields — and the filter skips the sample at
-that locus, which its scorer already does for an absent sample. **The default is soft and is set
-by measurement** (plan step D1): the distribution of covered positions per window on the tomato
-slice and on HG002. Until measured, 50.
+that locus, which its scorer already does for an absent sample.
+
+**The default is 50 of 500, and it is measured rather than inherited** — 2026-09-07, over five
+stores; the distribution and the reasoning are in
+[the measurement's report](../../reports/implementations/ng_window_coverage_d1_2026-09-07.md), and
+`MIN_WINDOW_POSITIONS`'s own doc comment carries the same table beside the constant.
+
+What the measurement found is that the floor is a rule about **how long the run's analysed
+intervals are**, not about how deep the sample is. On the same ground at a sixth of the depth the
+share of windows it silences barely moves — 360 windows in every 10,000 at 30 reads a position
+against 382 at 5 — while between intervals of 5.1 kb and intervals of 122 bases it goes from 28
+windows of 5,046,746 to 212,850 of 5,910,300, 6,500 times as many. The reason is arithmetic: an
+interval shorter than half a window lies inside every one of its own windows, so on such a run
+every window holds about as many positions as the interval is long. On intervals of 5 kb and
+longer, 50 silences at most
+1 window in 8,850 — it costs nothing in the ordinary case, and still refuses the near-empty
+windows those runs do have.
 
 **The look-ahead is a contract the cache has to keep.** A centre at `p` is complete only when the
 stream has passed `p + 250`. A builder handed a region ending at `r` therefore needs every sample
@@ -427,8 +441,14 @@ exactly the records §3.1 builds bodies for.
   filter's third pass and the histograms' memory during pass one; what it removes is a format
   change, a format-version story, and a second driver whose divergence from the first would have
   been silent.
-- **OPEN — the floor's default.** Leaning 50 of 500; **settled by plan step D1's distribution**,
-  confirm before the value is written into a default.
+- **The floor's default — resolved 2026-09-07: 50 of 500 stands** (§3.3). Measured over five
+  stores spanning 5.1 to 301 reads compared with the reference a position, and analysed intervals
+  of 122 bases to 100 kb. It silences at most 1 window in 8,850 on intervals of 5 kb and longer,
+  and between 1 in 28 and 1 in 26 on a run whose intervals average 122 bases — where the next
+  candidate, 100, would silence 44 in 100. Against raising it: nothing measured says a window
+  over 122 positions is wrong, and that question belongs to the filter's own validation. Against
+  lowering it: the one-accession tomato store has 261 windows holding fewer than 10 positions,
+  which a floor of 10 would let speak.
 - **OPEN — the bin scheme's three constants.** Leaning as §3.4; **settled by plan step D2's
   overflow fraction on both benchmarks**.
 

@@ -151,10 +151,11 @@ for byte, per sample. *Depends:* C2. *Source:* spec §3.4, §3.5.
 
 ### Milestone D — the three numbers the spec left to measurement
 
-**D1. ☐ The floor.** From the probe: the distribution of covered positions per window on the
+**D1. ✅ The floor.** From the probe: the distribution of covered positions per window on the
 tomato slice and on HG002; what share of windows fall under 50, 100, 200; the default written
 into the config with the distribution beside it in the report, and spec §3.3's OPEN closed.
-*Depends:* C3. *Source:* spec §3.3, §9.
+*Depends:* C3. *Source:* spec §3.3, §9. **Five stores rather than two, because the slice silences
+nothing and "HG002" names two benchmarks here whose intervals are 42-fold apart; 50 stands.**
 
 **D2. ☐ The bin scheme.** From the probe: each sample's fitted width, and the overflow fraction
 — windows past the range — on both benchmarks, against the fit's rejection guard at a fifth; the

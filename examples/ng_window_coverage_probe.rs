@@ -1,17 +1,22 @@
-//! **Two questions about the window-coverage measurement, asked of a real store.** Does a
+//! **Three questions about the window-coverage measurement, asked of a real store.** Does a
 //! one-base record's head really say what its evidence says (plan step B2, spec
-//! `window_coverage.md` §3.1)? And does a calling run's per-locus window equal the one a
-//! straight walk of the same store computes (plan step C3, spec §10)?
+//! `window_coverage.md` §3.1)? Does a calling run's per-locus window equal the one a straight
+//! walk of the same store computes (plan step C3, spec §10)? And how many covered positions is
+//! each window built from, which is what spec §3.3's floor is a threshold on (plan step D1)?
 //!
 //! ```text
 //! # the first question alone — plan step B2's command, unchanged
 //! cargo run --release --example ng_window_coverage_probe -- <a store.psp> [more stores...]
 //!
-//! # both — the run is asked to write down what it read, then the walk checks it
+//! # the first two — the run is asked to write down what it read, then the walk checks it
 //! NG_WINDOW_COVERAGE_FILE=windows.tsv pop_var_caller_exp call-from-psps --psp <a store.psp> ...
 //! cargo run --release --example ng_window_coverage_probe -- \
 //!     --reference <reference.fa> --windows-from-the-run windows.tsv \
 //!     <a store.psp> [more stores...]
+//!
+//! # the third — no run needed, only the stores and the reference their GC comes from
+//! cargo run --release --example ng_window_coverage_probe -- \
+//!     --reference <reference.fa> --covered-positions-per-window <a store.psp> [more stores...]
 //! ```
 //!
 //! Without `--reference` only the first question is asked, which is what plan step B2 ran. With
@@ -68,6 +73,19 @@
 //! reported separately from a genuine disagreement. The histogram carries them on both sides,
 //! which is why the histograms compare equal where the per-locus windows do not.
 //!
+//! # The third question
+//!
+//! A window is silenced — it reports nothing, and trains no yardstick — when it holds fewer than
+//! `MIN_WINDOW_POSITIONS` covered positions (spec §3.3). Setting that floor means knowing how
+//! those counts are spread over a real store's windows.
+//!
+//! **The spread is read off the shipped accumulator, at one accumulator per candidate floor.** One
+//! such accumulator is an **arm**, and [`FloorSweep`] is the set of them. An arm's silenced count
+//! at floor `F` *is* the number of windows holding fewer than `F` positions, so the arms' answers
+//! in floor order are the cumulative distribution, and nothing in this file recomputes a window.
+//! The arm at the floor the run actually ships must agree with the walk's own count of absent
+//! windows, which is what ties the sweep to the measurement it is about.
+//!
 //! # What it prints
 //!
 //! One tab-separated block per store, then one for the total. Besides the equality itself, the
@@ -87,8 +105,16 @@
 //!
 //! [`walk`] decodes every record once and hands it to whatever [`RecordMeasurement`]s the caller
 //! passed; it knows nothing about what they count. [`SingleBaseEquality`] is the first question's
-//! and [`WindowRecomputation`] the second's; neither knows about the other, and a third would be
-//! a third implementor and one more entry in `main`'s slice.
+//! and [`WindowRecomputation`] the second's; neither knows about the other, and a measurement that
+//! needs only the record is a third implementor and one more entry in `main`'s slice.
+//!
+//! **The third question is not one of those, and rides inside [`WindowRecomputation`] instead.**
+//! What it counts is not a record but a covered position with its reference base and its depth,
+//! which exists only after the recomputation has looked the bases up and decoded the record's
+//! reported depths. A separate implementor would need its own copy of that — a second reference
+//! accessor, a second contig check, a second call of the depth rule — and its answer would then be
+//! checkable only against itself. Riding along, it is fed the identical four values and its arm at
+//! the shipped floor is checked against the recomputation's own count of absent windows.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -104,7 +130,7 @@ use pop_var_caller::ng::run::cohort_merge::observation_cache::LocusSummary;
 use pop_var_caller::ng::run::cohort_merge::recorded_windows::{
     histograms_beside, read_a_row, write_the_histogram,
 };
-use pop_var_caller::ng::types::{ContigId, GenomePosition, GenomeRegion};
+use pop_var_caller::ng::types::{ContigId, GenomePosition, GenomeRegion, Position};
 use pop_var_caller::ng::window_coverage::depth::{EvidenceForOneRecord, for_each_reported_depth};
 use pop_var_caller::ng::window_coverage::{
     self, SampleHistogram, WindowCoverage, WindowCoverageAccumulator, WindowCoverageConfig,
@@ -113,7 +139,7 @@ use pop_var_caller::ng::window_coverage::{
 #[cfg(test)]
 use pop_var_caller::ng::locus_generation::{LocusLen, SequenceObservation, SsrDetail};
 #[cfg(test)]
-use pop_var_caller::ng::types::{Motif, Position, ReadGroupId, SummedLogError};
+use pop_var_caller::ng::types::{Motif, ReadGroupId, SummedLogError};
 
 /// How many disagreeing records to print in full before printing only the count. Enough to see
 /// whether counter-examples cluster in one region or are scattered.
@@ -370,6 +396,15 @@ impl RecordMeasurement for SingleBaseEquality {
 struct WindowRecomputation {
     /// `None` once [`close`](Self::close) has finished the pass.
     accumulator: Option<WindowCoverageAccumulator>,
+    /// The accumulators that measure how many covered positions each window holds, fed the same
+    /// positions as the one above and differing from it only in their floor. `None` unless
+    /// `--covered-positions-per-window` was given, because they repeat the window arithmetic once
+    /// per floor; also `None` once [`close`](Self::close) has finished the pass, which is when the
+    /// field below is filled.
+    sweep: Option<FloorSweep>,
+    /// What that measurement said, set by [`close`](Self::close) and `None` where the sweep was
+    /// not asked for.
+    windows_under_each_floor: Option<WindowsUnderEachFloor>,
     /// Every window this walk finalised, in ascending centre order — the whole store's, since
     /// nothing here evicts.
     windows: Vec<(GenomePosition, WindowCoverage)>,
@@ -431,22 +466,328 @@ struct ComparisonWithTheRun {
     where_the_run_had_no_window: Vec<String>,
 }
 
+/// The configuration a calling run gives its accumulators, **spelled with every field and no
+/// `..`**, so that a setting added to [`WindowCoverageConfig`] has to be answered for here rather
+/// than defaulting silently to something the run does not use.
+///
+/// One function rather than a literal per accumulator, because this file now builds several and a
+/// walk configured unlike the run measures something else. An accumulator that differs from the
+/// run in one setting names that setting and takes the rest from here with `..`, so it inherits
+/// the run's value for anything added later rather than a default nobody chose.
+fn the_configuration_a_run_uses() -> WindowCoverageConfig {
+    WindowCoverageConfig {
+        window_bp: window_coverage::WINDOW_BP,
+        gc_bins: window_coverage::GC_BINS,
+        depth_bins: window_coverage::DEPTH_BINS,
+        depth_scale_windows: window_coverage::DEPTH_SCALE_WINDOWS,
+        depth_range_in_medians: window_coverage::DEPTH_RANGE_IN_MEDIANS,
+        min_window_positions: window_coverage::MIN_WINDOW_POSITIONS,
+    }
+}
+
+/// **How many covered positions each window was built from, as a distribution** — the quantity
+/// spec `window_coverage.md` §3.3's floor is a threshold on.
+///
+/// A window centred at `p` holds the sample's covered positions within 250 bases either side of
+/// `p` on one contig. Choosing the floor means knowing how those counts are spread; the counts
+/// themselves are private to the accumulator and no method hands one back.
+///
+/// **So the spread is read off the shipped accumulator rather than recomputed here.** The sweep
+/// holds one accumulator per candidate floor — an **arm** — fed exactly the positions
+/// [`WindowRecomputation`] is fed, and identical to it in every setting but the floor. The windows
+/// an arm silences *are* the windows holding fewer than that arm's floor, so the arms' answers,
+/// read in floor order, are the cumulative distribution. Nothing in this file reimplements the
+/// window, which is what stops the measurement from being a check of one copy of the rule against
+/// another copy of it.
+///
+/// **The accumulators live only for the pass.** [`close`](Self::close) consumes the sweep and
+/// hands back a [`WindowsUnderEachFloor`], which is what gets printed and what a total is summed
+/// from — so there is no half-closed sweep to describe, and no state that a total would have to
+/// carry an empty copy of.
+struct FloorSweep {
+    /// One arm per candidate floor, in ascending floor order.
+    arms: Vec<OneFloor>,
+}
+
+/// One arm of a [`FloorSweep`] while the pass is running: the shipped accumulator at one candidate
+/// floor, and what it has silenced so far.
+struct OneFloor {
+    accumulator: WindowCoverageAccumulator,
+    counted: WindowsUnderOneFloor,
+}
+
+/// What one candidate floor costs — over one store, or over every store summed.
+#[derive(Clone)]
+struct WindowsUnderOneFloor {
+    /// The floor this row asks about: a window holding fewer than this many covered positions
+    /// comes back absent.
+    floor: u32,
+    /// Windows finalised at this floor. The same number at every floor, which
+    /// [`FloorSweep::close`] asserts, because the floor decides whether a window speaks and never
+    /// whether it exists.
+    windows: u64,
+    /// Windows silenced at this floor: those holding fewer than `floor` covered positions.
+    silenced: u64,
+}
+
+impl WindowsUnderOneFloor {
+    /// Count one window this floor's arm finalised, and whether the floor silenced it.
+    ///
+    /// **One counting rule, called from both drains** — the windows [`FloorSweep::observe`] pops
+    /// as the stream advances, and the tail [`FloorSweep::close`] takes from `finish`. Written
+    /// out twice it could be right on one path and inverted on the other, and the row would still
+    /// read as a distribution: [`FloorSweep::close`]'s checks compare arms against the walk, and
+    /// every arm would be wrong the same way. A stream short enough that no centre's right edge is
+    /// reached exercises only the second path, which is the shape every ten-position test here
+    /// has.
+    fn count(&mut self, window: WindowCoverage) {
+        self.windows += 1;
+        self.silenced += u64::from(window.is_absent());
+    }
+}
+
+/// A closed sweep's answer — one row a floor, ascending, and the cumulative distribution of
+/// covered positions per window read in that order.
+#[derive(Clone)]
+struct WindowsUnderEachFloor {
+    floors: Vec<WindowsUnderOneFloor>,
+}
+
+/// The floors the sweep asks about — spaced most closely over the range spec §3.3 is choosing in,
+/// and thinning out above it.
+///
+/// **The two ends are anchors rather than candidates.** A floor of 1 silences nothing, because a
+/// centre always lies in its own window, so a count above zero there is a defect and not a
+/// reading — [`FloorSweep::close`] asserts it. A floor of 501 is the highest the configuration
+/// allows, since a 500-base window spans 501 reference positions, so its arm counts the windows
+/// whose ground is *not* completely covered: every window the floor could ever be raised far
+/// enough to reach.
+const CANDIDATE_FLOORS: [u32; 25] = [
+    1, 2, 3, 5, 8, 10, 15, 20, 25, 30, 40, 50, 60, 75, 100, 125, 150, 175, 200, 250, 300, 350, 400,
+    450, 501,
+];
+
+/// [`CANDIDATE_FLOORS`] with the floor the run actually ships folded in, ascending and without
+/// repeats.
+///
+/// **The shipped floor is always among them, wherever it is set**, so that
+/// [`FloorSweep::close`]'s check of the sweep against the recomputation beside it cannot quietly
+/// stop applying if [`MIN_WINDOW_POSITIONS`](window_coverage::MIN_WINDOW_POSITIONS) is ever
+/// changed.
+fn the_floors_asked_about() -> Vec<u32> {
+    let mut floors: Vec<u32> = CANDIDATE_FLOORS.to_vec();
+    floors.push(window_coverage::MIN_WINDOW_POSITIONS);
+    floors.sort_unstable();
+    floors.dedup();
+    floors
+}
+
+impl FloorSweep {
+    /// One arm per floor in [`the_floors_asked_about`], each a fresh accumulator configured as a
+    /// run's but for its own floor.
+    ///
+    /// The `..` takes the run's own configuration as its base, so a setting added to
+    /// [`WindowCoverageConfig`] reaches every arm with the value the run gives it — and
+    /// [`the_configuration_a_run_uses`] still has to name it before this compiles.
+    fn new() -> Self {
+        Self {
+            arms: the_floors_asked_about()
+                .into_iter()
+                .map(|floor| OneFloor {
+                    accumulator: WindowCoverageAccumulator::new(WindowCoverageConfig {
+                        min_window_positions: floor,
+                        ..the_configuration_a_run_uses()
+                    }),
+                    counted: WindowsUnderOneFloor {
+                        floor,
+                        windows: 0,
+                        silenced: 0,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    /// One covered position, into every arm.
+    ///
+    /// **The windows are counted and dropped**, not kept: this measurement is about how many
+    /// positions each window held, and an arm's windows are the same centres the recomputation
+    /// beside it already stores.
+    fn observe(&mut self, contig: ContigId, position: Position, reference_base: u8, depth: u32) {
+        for arm in &mut self.arms {
+            arm.accumulator
+                .observe(contig, position, reference_base, depth);
+            while let Some((_, window)) = arm.accumulator.pop_ready() {
+                arm.counted.count(window);
+            }
+        }
+    }
+
+    /// Finish every arm and hand back the distribution, having checked the six things that would
+    /// make it a fiction.
+    ///
+    /// `windows_the_walk_finalised` and `silenced_at_the_shipped_floor` come from the
+    /// recomputation this sweep rides along with — a separate accumulator over the same positions
+    /// — so an arm disagreeing with it means the two were not fed alike, and every number here is
+    /// about a different stream.
+    ///
+    /// **What none of the six can see is the arms' own configuration.** Every arm finalises one
+    /// window per covered position whatever its window width, so a bank built with a window the
+    /// run does not use passes all of these and prints a distribution of a window nothing else
+    /// computes. Only the unit tests pin the width, by fixing the counts a 500-base window
+    /// produces over 600 consecutive positions. The practical guard is to walk at least one store
+    /// whose own windows the floor silences something in, and
+    /// [`WindowsUnderEachFloor::print`]'s first row says whether a store was one.
+    fn close(
+        self,
+        windows_the_walk_finalised: u64,
+        silenced_at_the_shipped_floor: u64,
+    ) -> WindowsUnderEachFloor {
+        let floors: Vec<WindowsUnderOneFloor> = self
+            .arms
+            .into_iter()
+            .map(|arm| {
+                let OneFloor {
+                    accumulator,
+                    mut counted,
+                } = arm;
+                let (tail, _) = accumulator.finish();
+                for (_, window) in tail {
+                    counted.count(window);
+                }
+                counted
+            })
+            .collect();
+        assert!(
+            windows_the_walk_finalised > 0,
+            "the walk finalised no window, so this sweep says nothing about how many covered \
+             positions a window holds",
+        );
+        // **Both floor-keyed checks below have to find their floor.** Each is written as "if this
+        // is the row at floor `F`", which on a floor list that has stopped holding `F` is silently
+        // no check at all rather than a failure — and that list is edited by hand.
+        for anchor in [1, window_coverage::MIN_WINDOW_POSITIONS] {
+            assert!(
+                floors.iter().any(|at| at.floor == anchor),
+                "no arm at a floor of {anchor}, so the check written against it never ran",
+            );
+        }
+        for at in &floors {
+            assert_eq!(
+                at.windows, windows_the_walk_finalised,
+                "the arm at a floor of {} finalised {} windows and the walk beside it {}; the \
+                 floor decides whether a window speaks, never whether it exists, so the two were \
+                 not fed the same positions",
+                at.floor, at.windows, windows_the_walk_finalised,
+            );
+            if at.floor == 1 {
+                assert_eq!(
+                    at.silenced, 0,
+                    "the arm at a floor of 1 silenced {} windows; a centre always lies in its own \
+                     window, so no window can hold fewer than one covered position",
+                    at.silenced,
+                );
+            }
+            if at.floor == window_coverage::MIN_WINDOW_POSITIONS {
+                assert_eq!(
+                    at.silenced, silenced_at_the_shipped_floor,
+                    "the arm at the shipped floor of {} silenced {} windows and the walk beside \
+                     it {}, over the same positions",
+                    at.floor, at.silenced, silenced_at_the_shipped_floor,
+                );
+            }
+        }
+        assert!(
+            floors
+                .windows(2)
+                .all(|pair| pair[0].silenced <= pair[1].silenced),
+            "a higher floor silenced fewer windows than a lower one, which no set of window \
+             counts can produce",
+        );
+        WindowsUnderEachFloor { floors }
+    }
+}
+
+impl WindowsUnderEachFloor {
+    /// One row a floor, in the same three-then-tagged shape the counter-example rows use: the
+    /// floor, then how many windows it silences and how many in every 10,000.
+    ///
+    /// **A share in every 10,000 rather than a percentage**, because the end of this distribution
+    /// the floor is being chosen for is the sparse one, where a percentage rounds to zero.
+    ///
+    /// The denominator is not printed: [`FloorSweep::close`] has asserted it equal to the
+    /// `windows-finalised` row above.
+    ///
+    /// **The first row says whether the tie to the walk was a comparison or two zeroes.**
+    /// [`FloorSweep::close`] checks the row at the shipped floor against the walk's own count of
+    /// absent windows; on a store where the walk silences nothing, that check compares 0 with 0
+    /// and would pass over arms fed anything. A store printing 0 there contributes rows that
+    /// nothing outside the sweep has confirmed, and the reader has to see it beside them.
+    fn print(&self, label: &str) {
+        let windows = self.floors.first().map_or(0, |at| at.windows);
+        let tied = self
+            .floors
+            .iter()
+            .find(|at| at.floor == window_coverage::MIN_WINDOW_POSITIONS)
+            .map_or(0, |at| at.silenced);
+        println!(
+            "{label}\tsweep-tied-to-the-walk\tfloor={}\twindows={tied}",
+            window_coverage::MIN_WINDOW_POSITIONS,
+        );
+        for at in &self.floors {
+            let per_ten_thousand = if windows == 0 {
+                0.0
+            } else {
+                at.silenced as f64 * 10_000.0 / windows as f64
+            };
+            println!(
+                "{label}\twindows-under-a-floor-of\t{}\twindows={}\tper-10000={per_ten_thousand:.2}",
+                at.floor, at.silenced,
+            );
+        }
+    }
+
+    /// Add another store's answer into this one, floor by floor.
+    ///
+    /// **Destructured with every field named**, so that a count added to
+    /// [`WindowsUnderOneFloor`] is a compile error rather than a total that stays zero while the
+    /// per-store rows show it.
+    fn add(&mut self, other: &WindowsUnderEachFloor) {
+        assert_eq!(
+            self.floors.len(),
+            other.floors.len(),
+            "two sweeps over different numbers of floors cannot be added",
+        );
+        for (into, from) in self.floors.iter_mut().zip(&other.floors) {
+            let WindowsUnderOneFloor {
+                floor,
+                windows,
+                silenced,
+            } = from;
+            assert_eq!(
+                into.floor, *floor,
+                "two sweeps' floors are not in the same order",
+            );
+            into.windows += windows;
+            into.silenced += silenced;
+        }
+    }
+}
+
 impl WindowRecomputation {
     fn over(
         reference: &ReferenceFasta,
         run_windows: Option<HashMap<GenomePosition, Option<WindowCoverage>>>,
         run_histogram: Option<String>,
         sample: usize,
+        covered_positions_per_window: bool,
     ) -> Self {
         Self {
-            accumulator: Some(WindowCoverageAccumulator::new(WindowCoverageConfig {
-                window_bp: window_coverage::WINDOW_BP,
-                gc_bins: window_coverage::GC_BINS,
-                depth_bins: window_coverage::DEPTH_BINS,
-                depth_scale_windows: window_coverage::DEPTH_SCALE_WINDOWS,
-                depth_range_in_medians: window_coverage::DEPTH_RANGE_IN_MEDIANS,
-                min_window_positions: window_coverage::MIN_WINDOW_POSITIONS,
-            })),
+            accumulator: Some(WindowCoverageAccumulator::new(
+                the_configuration_a_run_uses(),
+            )),
+            sweep: covered_positions_per_window.then(FloorSweep::new),
+            windows_under_each_floor: None,
             windows: Vec::new(),
             reference: reference.accessor(),
             reference_contigs: reference.contigs.clone(),
@@ -477,12 +818,20 @@ impl WindowRecomputation {
         let (tail, histogram) = accumulator.finish();
         self.histogram = Some(histogram);
         self.windows.extend(tail);
-        // **Ascending, and asserted rather than assumed**, because the comparison below and
-        // plan step D1's distribution both binary-search it.
+        // **Ascending, and asserted rather than assumed**, because the comparison below
+        // binary-searches it.
         assert!(
             self.windows.windows(2).all(|pair| pair[0].0 < pair[1].0),
             "the walk's windows are not in ascending centre order",
         );
+        if let Some(sweep) = self.sweep.take() {
+            let absent = self
+                .windows
+                .iter()
+                .filter(|(_, window)| window.is_absent())
+                .count() as u64;
+            self.windows_under_each_floor = Some(sweep.close(self.windows.len() as u64, absent));
+        }
         self.compare_against_the_run();
     }
 
@@ -794,6 +1143,7 @@ impl RecordMeasurement for WindowRecomputation {
         // has to be answered for here rather than silently going unfed.
         let Self {
             accumulator,
+            sweep,
             bases,
             positions_observed,
             windows,
@@ -806,6 +1156,8 @@ impl RecordMeasurement for WindowRecomputation {
             sample: _,
             histogram: _,
             histogram_the_run_wrote: _,
+            // Filled by `close` out of `sweep`, and never fed a record.
+            windows_under_each_floor: _,
         } = self;
         let accumulator = accumulator
             .as_mut()
@@ -816,6 +1168,11 @@ impl RecordMeasurement for WindowRecomputation {
                 panic!("the record at {region} reports a depth at {at:?}, which is off its ground")
             });
             accumulator.observe(at.contig, at.position, base, depth);
+            // **The same four values, in the same order, into the sweep** — which is what makes
+            // its arms answer about this walk's windows and not about some other stream.
+            if let Some(sweep) = sweep.as_mut() {
+                sweep.observe(at.contig, at.position, base, depth);
+            }
             *positions_observed += 1;
         }
         while let Some(window) = accumulator.pop_ready() {
@@ -837,6 +1194,9 @@ impl RecordMeasurement for WindowRecomputation {
             .filter(|(_, window)| window.is_absent())
             .count();
         println!("{label}\twindows-under-the-floor\t{absent}");
+        if let Some(under_each_floor) = &self.windows_under_each_floor {
+            under_each_floor.print(label);
+        }
         self.report_the_histogram(label);
         let Some(comparison) = &self.comparison else {
             return;
@@ -897,19 +1257,25 @@ struct Arguments {
     reference: Option<PathBuf>,
     /// The windows a calling run recorded, to check the recomputation against.
     windows_from_the_run: Option<PathBuf>,
+    /// Also report how many covered positions each window was built from, as the share of windows
+    /// a floor of each candidate size would silence.
+    covered_positions_per_window: bool,
 }
 
 const USAGE: &str = "usage: ng_window_coverage_probe [--reference <reference.fa>] \
-                     [--windows-from-the-run <windows.tsv>] <a store.psp> [more stores...]";
+                     [--windows-from-the-run <windows.tsv>] \
+                     [--covered-positions-per-window] <a store.psp> [more stores...]";
 
 impl Arguments {
     fn from_command_line() -> Self {
         let mut stores = Vec::new();
         let mut reference = None;
         let mut windows_from_the_run = None;
+        let mut covered_positions_per_window = false;
         let mut argv = std::env::args().skip(1);
         while let Some(argument) = argv.next() {
             match argument.as_str() {
+                "--covered-positions-per-window" => covered_positions_per_window = true,
                 "--reference" => {
                     reference = Some(PathBuf::from(
                         argv.next().expect("--reference takes a path"),
@@ -931,10 +1297,16 @@ impl Arguments {
             windows_from_the_run.is_none() || reference.is_some(),
             "--windows-from-the-run compares against the recomputation, which needs --reference",
         );
+        assert!(
+            !covered_positions_per_window || reference.is_some(),
+            "--covered-positions-per-window counts the positions in each window, which are the \
+             recomputation's, and that needs --reference",
+        );
         Self {
             stores,
             reference,
             windows_from_the_run,
+            covered_positions_per_window,
         }
     }
 }
@@ -1048,6 +1420,7 @@ fn main() {
                     .as_ref()
                     .map(|per_sample| per_sample[sample].clone()),
                 sample,
+                arguments.covered_positions_per_window,
             )
         });
         match &mut windows {
@@ -1125,6 +1498,10 @@ struct WindowTotals {
     windows_finalised: u64,
     /// `None` where no run's recorded windows were given.
     comparison: Option<ComparisonTotals>,
+    /// The stores' floor sweeps summed, `None` where the sweep was not asked for. **Every store
+    /// has one or none**: the flag is the run's, not the store's, so a total built from some of
+    /// them would be a distribution over a subset nothing names.
+    windows_under_each_floor: Option<WindowsUnderEachFloor>,
 }
 
 #[derive(Default)]
@@ -1143,6 +1520,15 @@ impl WindowTotals {
     fn add(&mut self, store: &WindowRecomputation) {
         self.positions_observed += store.positions_observed;
         self.windows_finalised += store.windows.len() as u64;
+        if let Some(this_store) = &store.windows_under_each_floor {
+            // **The first store's rows are cloned and later stores are added into them**, so that
+            // the total's floors are the same floors in the same order whatever the store count,
+            // and so that no second constructor has to reproduce that list.
+            match &mut self.windows_under_each_floor {
+                Some(total) => total.add(this_store),
+                nothing_yet => *nothing_yet = Some(this_store.clone()),
+            }
+        }
         let Some(ComparisonWithTheRun {
             run_said,
             agreed,
@@ -1169,6 +1555,9 @@ impl WindowTotals {
     fn print(&self, label: &str) {
         println!("{label}\tpositions-observed\t{}", self.positions_observed);
         println!("{label}\twindows-finalised\t{}", self.windows_finalised);
+        if let Some(under_each_floor) = &self.windows_under_each_floor {
+            under_each_floor.print(label);
+        }
         let Some(comparison) = &self.comparison else {
             return;
         };
@@ -1483,5 +1872,193 @@ mod tests {
             !the_same_window(one, a_bit_apart),
             "the comparison is bit for bit, and this pair differs in the last bit",
         );
+    }
+
+    /// Feed `positions` consecutive covered positions from base 1 of one contig to a floor sweep
+    /// and to a plain accumulator configured as a run's, exactly as the walk feeds both, and
+    /// close the sweep against what the plain one said.
+    ///
+    /// Every base is `A` and every depth 1, so nothing here turns on GC or on depth: what the
+    /// sweep counts is how many positions fell inside each window.
+    fn a_sweep_over_consecutive_positions(positions: u64) -> WindowsUnderEachFloor {
+        let mut sweep = FloorSweep::new();
+        let mut beside_it = WindowCoverageAccumulator::new(the_configuration_a_run_uses());
+        let mut windows = Vec::new();
+        for position in 1..=positions {
+            sweep.observe(ContigId(0), Position(position), b'A', 1);
+            beside_it.observe(ContigId(0), Position(position), b'A', 1);
+            while let Some(window) = beside_it.pop_ready() {
+                windows.push(window);
+            }
+        }
+        let (tail, _) = beside_it.finish();
+        windows.extend(tail);
+        let absent = windows
+            .iter()
+            .filter(|(_, window)| window.is_absent())
+            .count() as u64;
+        sweep.close(windows.len() as u64, absent)
+    }
+
+    /// Windows silenced at one floor of a closed sweep's answer.
+    fn silenced_at(under_each_floor: &WindowsUnderEachFloor, floor: u32) -> u64 {
+        under_each_floor
+            .floors
+            .iter()
+            .find(|at| at.floor == floor)
+            .unwrap_or_else(|| panic!("the sweep has no arm at a floor of {floor}"))
+            .silenced
+    }
+
+    /// Ten covered positions within 250 bases of each other, so each is a centre and each of the
+    /// ten windows holds all ten: a floor of ten silences none and a floor of fifteen silences
+    /// every one.
+    ///
+    /// The claim under test is that an arm's silenced count is the number of windows holding fewer
+    /// positions than its floor, checked where both numbers are countable by hand.
+    ///
+    /// **Ten positions never reach any centre's right edge**, so every window here comes back from
+    /// `finish` and none is popped mid-stream: the drain in [`FloorSweep::observe`] is exercised by
+    /// `the_sweep_traces_a_distribution_whose_windows_hold_different_counts`, whose 600 positions
+    /// close 350 centres before the stream ends, and by nothing else here.
+    #[test]
+    fn an_arms_silenced_count_is_the_windows_holding_fewer_positions_than_its_floor() {
+        let sweep = a_sweep_over_consecutive_positions(10);
+        assert_eq!(sweep.floors[0].windows, 10, "ten positions, ten centres");
+        for floor in [1, 2, 3, 5, 8, 10] {
+            assert_eq!(
+                silenced_at(&sweep, floor),
+                0,
+                "every window holds all ten positions, so a floor of {floor} silences none",
+            );
+        }
+        for floor in [15, 20, 501] {
+            assert_eq!(
+                silenced_at(&sweep, floor),
+                10,
+                "every window holds ten positions, so a floor of {floor} silences all ten windows",
+            );
+        }
+    }
+
+    /// Six hundred consecutive covered positions, where the counts differ between windows and are
+    /// arithmetic: the window centred at `p` holds `[p − 250, p + 250]` clipped to `1..=600`, so
+    /// the centres in the middle hold the full 501 and those at either end hold as few as 251.
+    ///
+    /// The three floors checked are the three shapes the distribution has: below every count,
+    /// through the middle of it, and above every count.
+    #[test]
+    fn the_sweep_traces_a_distribution_whose_windows_hold_different_counts() {
+        let sweep = a_sweep_over_consecutive_positions(600);
+        assert_eq!(sweep.floors[0].windows, 600);
+        assert_eq!(
+            silenced_at(&sweep, 250),
+            0,
+            "the thinnest window here is the one centred at base 1, holding bases 1 to 251",
+        );
+        // A centre at `p <= 250` holds `p + 250`, which is under 300 for `p` in 1..=49; a centre
+        // at `p >= 351` holds `851 - p`, under 300 for `p` in 552..=600. Forty-nine at each end.
+        assert_eq!(silenced_at(&sweep, 300), 98);
+        // The hundred centres at 251..=350 are the only ones holding the full 501, and 501 is the
+        // highest floor the configuration allows.
+        assert_eq!(silenced_at(&sweep, 501), 500);
+    }
+
+    /// Two identical stores summed: every count doubles — 1,200 windows against 600, 196 silenced
+    /// at a floor of 300 against 98, 1,000 at 501 against 500 — and the total's floors are the
+    /// same floors in the same order, which is what `main` prints the total block from.
+    #[test]
+    fn two_sweeps_sum_floor_by_floor() {
+        let one = a_sweep_over_consecutive_positions(600);
+        let other = a_sweep_over_consecutive_positions(600);
+        let mut total = one.clone();
+        total.add(&other);
+        assert_eq!(
+            total.floors.iter().map(|at| at.floor).collect::<Vec<_>>(),
+            the_floors_asked_about(),
+        );
+        assert_eq!(total.floors[0].windows, 1_200);
+        assert_eq!(silenced_at(&total, 300), 196);
+        assert_eq!(silenced_at(&total, 501), 1_000);
+    }
+
+    /// A sweep fed different positions from the walk beside it is caught, rather than reporting a
+    /// distribution of a stream nothing else saw.
+    #[test]
+    #[should_panic(expected = "not fed the same positions")]
+    fn a_sweep_whose_windows_differ_from_the_walks_is_refused() {
+        let mut sweep = FloorSweep::new();
+        for position in 1..=10u64 {
+            sweep.observe(ContigId(0), Position(position), b'A', 1);
+        }
+        sweep.close(11, 0);
+    }
+
+    /// The arm at the shipped floor must agree with the walk's own count of absent windows —
+    /// the one place the sweep and the recomputation answer the same question.
+    #[test]
+    #[should_panic(expected = "the arm at the shipped floor")]
+    fn a_sweep_disagreeing_with_the_walk_at_the_shipped_floor_is_refused() {
+        let mut sweep = FloorSweep::new();
+        for position in 1..=10u64 {
+            sweep.observe(ContigId(0), Position(position), b'A', 1);
+        }
+        // Ten positions in one window clear the shipped floor of 50 nowhere, so the walk beside
+        // this sweep would have called all ten absent; claiming none were is the mismatch.
+        sweep.close(10, 0);
+    }
+
+    /// A walk that finalised nothing says nothing, and is refused rather than printing a row of
+    /// zeroes at every floor, which reads as "no window was ever too thin".
+    #[test]
+    #[should_panic(expected = "says nothing about how many covered positions")]
+    fn a_sweep_over_an_empty_store_is_refused() {
+        FloorSweep::new().close(0, 0);
+    }
+
+    /// A sweep whose rows are stated outright rather than counted from a stream: one arm a
+    /// `(floor, windows, silenced)` triple, its accumulator fed nothing so `finish` adds an empty
+    /// tail.
+    ///
+    /// The two checks below are about counts no stream can produce, so a stream cannot set them
+    /// up.
+    fn a_sweep_saying(rows: &[(u32, u64, u64)]) -> FloorSweep {
+        FloorSweep {
+            arms: rows
+                .iter()
+                .map(|&(floor, windows, silenced)| OneFloor {
+                    accumulator: WindowCoverageAccumulator::new(WindowCoverageConfig {
+                        min_window_positions: floor,
+                        ..the_configuration_a_run_uses()
+                    }),
+                    counted: WindowsUnderOneFloor {
+                        floor,
+                        windows,
+                        silenced,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    /// A centre always lies in its own window, so no window holds fewer than one covered position
+    /// and a floor of 1 can silence nothing.
+    ///
+    /// **It is the only check in `close` that names a number rather than comparing two quantities
+    /// that can both be zero**, which is what makes it the one that cannot be vacuous on a store
+    /// whose windows are all thick.
+    #[test]
+    #[should_panic(expected = "the arm at a floor of 1 silenced 1 windows")]
+    fn an_arm_at_a_floor_of_one_silencing_a_window_is_refused() {
+        a_sweep_saying(&[(1, 5, 1), (window_coverage::MIN_WINDOW_POSITIONS, 5, 1)]).close(5, 1);
+    }
+
+    /// The two floor-keyed checks are written as "if this is the row at floor `F`", so a floor
+    /// list that no longer holds `F` would run neither and fail nothing. `close` refuses that
+    /// instead.
+    #[test]
+    #[should_panic(expected = "no arm at a floor of 1")]
+    fn a_sweep_that_lost_the_floor_a_check_is_written_against_is_refused() {
+        a_sweep_saying(&[(window_coverage::MIN_WINDOW_POSITIONS, 5, 0)]).close(5, 0);
     }
 }

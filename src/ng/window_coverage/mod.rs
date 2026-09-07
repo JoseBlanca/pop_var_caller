@@ -86,13 +86,46 @@ pub const DEPTH_SCALE_WINDOWS: u32 = 10_000;
 /// bins are cut at is this times the sample's median, over [`DEPTH_BINS`].
 pub const DEPTH_RANGE_IN_MEDIANS: f64 = 10.0;
 
-/// How many covered positions a window must hold before it is allowed to speak — **soft, and
-/// set by measurement at plan step D1** (spec §3.3's open question). Until then, 50 of 500.
+/// How many covered positions a window must hold before it is allowed to speak. Below this many,
+/// the window comes back absent instead.
 ///
 /// A window built from a handful of positions looks exactly as confident as one built from five
 /// hundred, and in ng the holes are not scattered: a repeat-tract region that emits no loci, an
-/// analysed-region edge, a stretch no read reached. Below this many, the window comes back
-/// absent instead.
+/// analysed-region edge, a stretch no read reached.
+///
+/// **The value is measured, not inherited** — 2026-09-07, over five stores, by
+/// `ng_window_coverage_probe --covered-positions-per-window`, which reads the spread off this very
+/// accumulator at one instance per candidate floor (spec `window_coverage.md` §3.3). Windows
+/// silenced, per 10,000:
+///
+/// | store | intervals asked for | reads compared with the reference, a position | under 50 | under 100 | under 200 |
+/// |---|---|---|---|---|---|
+/// | tomato, 6 accessions | 2 × 100 kb | 14.4 | 0.00 | 0.08 | 8.10 |
+/// | tomato, 1 accession | 80 × 100 kb | 10.3 | 1.13 | 1.69 | 15.39 |
+/// | HG002, GIAB high-confidence | 1,000 × 5.1 kb | 301.4 | 0.06 | 6.68 | 16.18 |
+/// | HG002, tandem-repeat tiers | 50,000 × 122 bp | 30.3 | 360.13 | 4,393.07 | 5,848.64 |
+/// | HG002, tandem-repeat tiers | 50,000 × 122 bp | 5.1 | 381.69 | 4,432.50 | 5,913.10 |
+///
+/// **The floor is a rule about how long the run's analysed intervals are, not about how deep the
+/// sample is.** The last two rows are the same ground at a sixth of the depth, and the share
+/// silenced at 50 barely moves: 360 windows in every 10,000 at 30 reads a position against 382 at
+/// 5. Between the third row and the fourth the intervals shorten 42-fold and that share goes from
+/// 28 windows of 5,046,746 to 212,850 of 5,910,300 — 6,500 times as many. The reason is
+/// arithmetic: an interval shorter than half a window is inside every one of its own windows, so
+/// on such a run *every* window holds about as many positions as the interval is long, and the
+/// floor is asking how short an interval is too short. Checked against the request rather than the
+/// answer: 2.9 in 100 of the tandem-repeat tiers' bases lie in intervals under 50 bases and 42.8
+/// in 100 in intervals under 100, against the 3.6 and 43.9 in 100 of windows the floor silences
+/// there.
+///
+/// **50 of 500 stands.** On intervals of 5 kb and longer it silences at most 1 window in 8,850,
+/// so it costs nothing in the ordinary case while still refusing the near-empty windows those
+/// runs do have — 261 of the one-accession tomato store's windows hold fewer than 10 positions.
+/// The next candidate, 100, would silence 44 in 100 windows on short-interval ground, and nothing
+/// measured here says such a window is wrong: at 122 positions and 5.1 reads a position it is
+/// still a mean over about 630 reads, where spec §4's reason for windowing at all is that a
+/// *single* position at 3 reads cannot tell one copy from two. Whether a thin window's copy number
+/// is wrong is the hidden-duplication filter's own question and is measured on its branch.
 pub const MIN_WINDOW_POSITIONS: u32 = 50;
 
 /// How wide the window is, how many cells the histogram has, and how its depth axis is scaled.
@@ -137,7 +170,8 @@ pub struct WindowCoverageConfig {
     /// [`DEPTH_RANGE_IN_MEDIANS`].
     pub depth_range_in_medians: f64,
     /// Fewest covered positions a window may be built from and still report a number; below
-    /// this it comes back absent. Provisionally [`MIN_WINDOW_POSITIONS`] — see spec §3.3.
+    /// this it comes back absent. [`MIN_WINDOW_POSITIONS`] in a run — measured, and its doc
+    /// comment carries what each setting costs (spec §3.3).
     ///
     /// **This is ng's one departure from production's window**, which lets a single covered
     /// position emit a window over itself alone.
