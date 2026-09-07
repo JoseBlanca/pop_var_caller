@@ -129,8 +129,7 @@ so the process aborts. Until 2026-09-07 the run's shared repository answered it 
 correctly, at the cost of holding whole contigs. Unmapped slices are unaffected: their records are
 unmapped, so noodles asks for no bases at all.
 
-**Nothing in reach is affected, measured.** Every `.crai` under `benchmarks/` — 180 CRAMs, and the
-whole-genome tomato file among them at 112,140 slices — was read for its reference ids: 1,876
+**Nothing in reach is affected, measured.** Every `.crai` under `benchmarks/` — 179 CRAMs, and the whole-genome tomato file among them at 112,140 slices — was read for its reference ids: 1,876
 slices with `-1` (unmapped) in that file and **not one `-2` (multi-reference) anywhere**. Those
 files are untracked, in the main checkout at `/Users/jose/devel/pop_var_caller/benchmarks/`, so the
 count cannot be reproduced from a clone; the command was

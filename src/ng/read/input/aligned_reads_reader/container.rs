@@ -394,7 +394,7 @@ pub(crate) fn decode_container_at(
     // no-window call below — and noodles then resolves each mapped record's contig through the
     // repository, whole, and `expect`s a hit (`get_record_reference_sequence`). Against an empty
     // one that is a **panic**, where before 2026-09-07 the run's shared repository answered it.
-    // No file in this project has such a slice: the `.crai` of all 180 CRAMs under `benchmarks/`
+    // No file in this project has such a slice: the `.crai` of all 179 CRAMs under `benchmarks/`
     // — the whole-genome tomato CRAM's 112,140 slices included — carries reference id `-1`
     // (unmapped) 1,876 times and `-2` (multi-reference) not once. Unmapped slices are safe: their
     // records are unmapped, so noodles asks for no bases at all. Raised at Milestone A's
