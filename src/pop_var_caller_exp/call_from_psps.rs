@@ -486,7 +486,10 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     let (calling, stored) = caller
         .call_cohort_handing_each_record_over(
             &SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior),
-            &mut |record| writer.write_record(record),
+            // The slice is ignored here for the reason direct mode's is: the window coverage
+            // travels beside the record for the hidden-duplication filter, and a VCF has no
+            // field for it.
+            &mut |record, _window_coverage| writer.write_record(record),
         )
         .map_err(|source| CallFromPspsCliError::Run { source })?;
 

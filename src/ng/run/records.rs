@@ -52,6 +52,7 @@ use crate::ng::run::cohort_merge::build::CohortObservation;
 use crate::ng::types::{GenomeRegion, Position};
 use crate::ng::vcf::assemble::{LocusEvidenceForOutput, SampleEvidenceForOutput};
 use crate::ng::vcf::{FilterVerdict, MapqPool, PaddingBase, TractAnnotation};
+use crate::ng::window_coverage::WindowCoverage;
 
 /// The first base of every contig, 1-based — the one position with no base to its left.
 const FIRST_POSITION_OF_A_CONTIG: Position = Position(1);
@@ -158,6 +159,9 @@ where
 /// defect in the driver that built both, which is
 /// [`assemble_record`](crate::ng::vcf::assemble::assemble_record)'s reasoning for its own
 /// checks and the same choice.
+///
+/// And on an observation whose windows and covering samples are different lengths, for the same
+/// reason: the two are one sequence held twice.
 #[must_use]
 pub fn evidence_for_output(
     locus: &LocusInference,
@@ -173,6 +177,10 @@ pub fn evidence_for_output(
         .map(|_| SampleEvidenceForOutput {
             allele_reads: vec![0; written_alleles],
             reads_no_written_allele_explains: 0,
+            // **Absent until a covering sample's own pair is copied in below.** A sample that
+            // covered nothing at this locus keeps it, which says the same thing its missing
+            // entry in the merge's own list says.
+            window_coverage: WindowCoverage::absent(),
         })
         .collect();
     let mut allele_mapq = vec![
@@ -182,6 +190,21 @@ pub fn evidence_for_output(
         };
         written_alleles
     ];
+
+    // **The merge's two per-sample lists are one sequence held twice**, and this is the only
+    // place that indexes the second by the first's index. Both fields are public and every
+    // fixture builds them separately, so a locus whose lists came apart would otherwise fail as a
+    // bare bounds panic below — blaming the reader for what the builder did, which is exactly
+    // what the assertion inside the loop exists to prevent for the other index.
+    assert_eq!(
+        observation.window_coverage.len(),
+        observation.per_sample.len(),
+        "the locus at {} carries {} windows and {} covering samples: the two are one sequence \
+         held twice, so two lengths mean they were not built together",
+        observation.region,
+        observation.window_coverage.len(),
+        observation.per_sample.len(),
+    );
 
     for (covering, support) in observation.per_sample.iter().enumerate() {
         assert!(
@@ -193,6 +216,11 @@ pub fn evidence_for_output(
             support.sample
         );
         let sample = &mut samples[support.sample];
+        // **From sparse to dense, at the same index the support came from.** The merge's windows
+        // are one per covering sample and this row set is one per run sample; `covering` is the
+        // index into the first and `support.sample` into the second, which is exactly the
+        // translation this loop already does for the counts.
+        sample.window_coverage = observation.window_coverage[covering];
         for row in &support.supported {
             // **The merge's allele index is not the record's.** A row whose allele candidate
             // selection dropped has no slot to be counted in, and its reads reach `DP` through

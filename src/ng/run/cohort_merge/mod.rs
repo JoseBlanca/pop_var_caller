@@ -40,6 +40,7 @@ pub mod close;
 pub mod observation_cache;
 pub mod organise;
 pub mod parallel;
+pub mod recorded_windows;
 pub mod serial;
 pub mod timing;
 
@@ -187,10 +188,21 @@ pub(super) mod fixtures {
     /// A whole outcome rendered entry by entry — what "the same answer" means across this
     /// module's drivers.
     ///
-    /// **The comparison is on the `Debug` rendering**: `CohortObservation` has no `PartialEq`,
-    /// a comparison written field by field would silently stop covering a field added later,
-    /// and two distinct `f64` sums render as distinct strings, so a quality divided differently
-    /// shows.
+    /// **Every field is rendered by `Debug` and the fields are named one at a time**, which is
+    /// what lets one of them be left out. `CohortObservation` has no `PartialEq`, and two distinct
+    /// `f64` sums render as distinct strings, so a quality divided differently shows. The
+    /// destructure is what keeps the exclusion from spreading: a field this type gains is a
+    /// compile error here, and whoever adds it has to say whether the drivers must agree on it.
+    ///
+    /// **The window coverage is the field left out, and leaving it out is a decision.** Only the
+    /// driver reading through the observation cache takes that measurement; the in-memory driver
+    /// it is compared against holds every record at once and takes none, so its every pair is
+    /// absent. Rendering it would make these comparisons fail on a difference that is not a
+    /// disagreement. **The tempting repair is worse**: asserting only that both sides are absent
+    /// passes whatever the cached driver did, including measuring nothing at all. What checks the
+    /// field is
+    /// `serial::tests::the_cached_driver_measures_windows_where_the_in_memory_one_has_none`,
+    /// which says out loud that one side has numbers and the other does not.
     pub(in crate::ng::run) fn render(outcome: &super::build::RegionOutcome) -> Vec<String> {
         // Destructured, not field-accessed: this function is what "the same answer" means for
         // every comparison in the module, so a field `RegionOutcome` gains has to be answered
@@ -201,7 +213,19 @@ pub(super) mod fixtures {
         } = outcome;
         cohort_observations
             .iter()
-            .map(|observed| format!("{observed:?}"))
+            .map(|observed| {
+                // Destructured for the same reason, one level down: a field `CohortObservation`
+                // gains is a compile error here rather than a comparison that quietly stops
+                // covering it.
+                let super::build::CohortObservation {
+                    region,
+                    alleles,
+                    per_sample,
+                    kind,
+                    window_coverage: _,
+                } = observed;
+                format!("{region:?} {alleles:?} {per_sample:?} {kind:?}")
+            })
             .chain(
                 failed_locus_spans
                     .iter()
@@ -245,6 +269,101 @@ pub(super) mod fixtures {
     /// (`doc/devel/ng/arch/run_streaming.md` §2, §5).
     #[derive(Debug, PartialEq, Eq)]
     pub(super) struct SourceFailed(pub &'static str);
+
+    /// A fixture's source failure can also carry the cache's own — the reference fetch it makes
+    /// once per cover — because [`cover`](super::observation_cache::ObservationCache::cover)
+    /// asks every caller for the conversion.
+    ///
+    /// **A fixture reference is built in memory, so the only way to reach this is to ask it for
+    /// ground it does not hold** — a contig past its four, or a position past its 2,000 bases —
+    /// which the cache's own reference tests do deliberately and no other fixture does by
+    /// accident. What the ground *was* is thrown away here, so a test that cares which ground
+    /// failed uses [`ReferenceFailureRecorded`] instead.
+    impl From<super::observation_cache::ReferenceUnreadable> for SourceFailed {
+        fn from(_: super::observation_cache::ReferenceUnreadable) -> Self {
+            Self("the fixture reference could not serve the cover's ground")
+        }
+    }
+
+    /// A source failure that keeps the ground a failed fetch named, for the one test that is
+    /// about the naming.
+    ///
+    /// **[`SourceFailed`] cannot carry it** — it holds a `&'static str` — so a test asserting on
+    /// the region would be asserting on a constant, and any change to the ground a failure
+    /// names would pass unnoticed.
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) struct ReferenceFailureRecorded(pub Option<GenomeRegion>);
+
+    impl From<super::observation_cache::ReferenceUnreadable> for ReferenceFailureRecorded {
+        fn from(failure: super::observation_cache::ReferenceUnreadable) -> Self {
+            Self(Some(failure.region))
+        }
+    }
+
+    /// A reference the cache's fixtures cover against: four contigs of 2,000 bases, the widest
+    /// any fixture here reaches being 600.
+    ///
+    /// **The bases repeat `ACGT`**, so a window over any stretch of it has a GC fraction of a
+    /// half — a value a test can predict without counting, and one no arithmetic slip lands on
+    /// by accident the way `0` or `1` would.
+    pub(super) fn a_reference() -> Box<dyn super::observation_cache::MergeReference + Send + Sync> {
+        let bases: Vec<u8> = b"ACGT".iter().copied().cycle().take(2_000).collect();
+        Box::new(crate::ng::ref_seq::InMemoryRefSeq::from_contigs(vec![
+            bases;
+            4
+        ]))
+    }
+
+    /// A reference that answers like [`a_reference`] and counts what it was told to release —
+    /// the only way a test can see that the merge lets go of what it has walked past, since an
+    /// in-memory reference holds nothing to release.
+    pub(super) struct ReferenceCountingItsReleases {
+        bases: crate::ng::ref_seq::InMemoryRefSeq,
+        pub(super) released_before: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl crate::ng::ref_seq::RefSeq for ReferenceCountingItsReleases {
+        fn fetch_into(
+            &self,
+            contig: ContigId,
+            start_1based: u64,
+            length: u64,
+            dst: &mut Vec<u8>,
+        ) -> Result<(), crate::ng::ref_seq::RefSeqError> {
+            self.bases.fetch_into(contig, start_1based, length, dst)
+        }
+    }
+
+    /// The lengths the cover's look-ahead stops at, forwarded from the bases behind this
+    /// counter so that the two cannot describe different contigs.
+    impl crate::ng::ref_seq::ContigTable for ReferenceCountingItsReleases {
+        fn contigs(&self) -> &crate::fasta::ContigList {
+            self.bases.contigs()
+        }
+    }
+
+    impl crate::ng::ref_seq::EvictableRefSeq for ReferenceCountingItsReleases {
+        fn evict_before(&self, pos: u64) {
+            self.released_before
+                .lock()
+                .expect("a fixture reference is used by one test at a time")
+                .push(pos);
+        }
+
+        fn resident_bases(&self) -> usize {
+            0
+        }
+    }
+
+    impl ReferenceCountingItsReleases {
+        pub(super) fn new() -> std::sync::Arc<Self> {
+            let bases: Vec<u8> = b"ACGT".iter().copied().cycle().take(2_000).collect();
+            std::sync::Arc::new(Self {
+                bases: crate::ng::ref_seq::InMemoryRefSeq::from_contigs(vec![bases; 4]),
+                released_before: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
 }
 
 use std::num::{NonZeroU32, NonZeroUsize};

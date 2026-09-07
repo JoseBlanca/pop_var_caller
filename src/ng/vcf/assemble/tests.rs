@@ -105,6 +105,9 @@ fn sample(allele_reads: Vec<u32>, unexplained: u32) -> SampleEvidenceForOutput {
     SampleEvidenceForOutput {
         allele_reads,
         reads_no_written_allele_explains: unexplained,
+        // No window: this module's fixtures are about what a record states, and no field of a
+        // record states one.
+        window_coverage: crate::ng::window_coverage::WindowCoverage::absent(),
     }
 }
 

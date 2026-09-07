@@ -54,25 +54,15 @@ impl From<&SpillEntry> for RecordPlace {
     }
 }
 
-/// One sample's coverage at one locus: the GC fraction of the window centred on it and that
-/// window's mean read depth. **Both fields `NaN` where the sample has no usable window
-/// there** — stored and compared by bit pattern, never by `==`.
+/// One sample's coverage at one locus, re-exported from the module that owns it.
 ///
-/// **This is a stand-in, and it is scheduled for deletion.** The type belongs to the window
-/// coverage design, which puts it in `src/ng/window_coverage/` on branch `ng-window-coverage`;
-/// neither that module nor its specification is on `main`, and this module must not create or
-/// touch anything under that path. So the two fields that design pins are declared here, and
-/// this declaration goes away when the branches meet — the codec reads the two fields and
-/// nothing else, so the swap is an import.
+/// **This was a stand-in until `ng-window-coverage` merged.** The two fields it declared —
+/// the window's GC fraction and its mean read depth, both `NaN` where the sample has no usable
+/// window — are exactly what [`crate::ng::window_coverage::WindowCoverage`] carries, so the
+/// swap was this re-export and the deletion of the copy. The codec in [`spill`] reads the two
+/// fields and nothing else, and did not change.
 ///
 /// The crate holds a second, unrelated `WindowCoverage` in
 /// [`crate::sample_summary::coverage`], which is production's per-tile summary; the two do not
-/// meet, and this one outlives the rebase in neither name nor place.
-#[derive(Clone, Copy, Debug)]
-pub struct WindowCoverage {
-    /// The share of the window's bases that are G or C, between 0 and 1 — or `NaN` where the
-    /// sample has no usable window at this locus.
-    pub gc_fraction: f32,
-    /// The window's mean read depth in this sample, or `NaN` in the same case.
-    pub mean_depth: f32,
-}
+/// meet.
+pub use crate::ng::window_coverage::WindowCoverage;

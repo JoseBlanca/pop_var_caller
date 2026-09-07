@@ -83,6 +83,7 @@ use pop_var_caller::ng::run::cohort_merge::build::{
 };
 use pop_var_caller::ng::run::cohort_merge::{MinAltObs, MinAltReadShare, MinAltReads};
 use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
+use pop_var_caller::ng::window_coverage::WindowCoverage;
 
 /// One sample's evidence at one fixture locus: its reads on each allele of the merge's table,
 /// and its compared reads at the locus.
@@ -234,6 +235,10 @@ fn observation_of(locus: &FixtureLocus) -> CohortObservation {
                 reads_composed_across_records: 0,
             })
             .collect(),
+        // No window: this file is about which alleles survive selection, and nothing in that
+        // path reads one. One absent pair per covering sample, which is the shape the field
+        // promises whether or not a run measured anything.
+        window_coverage: vec![WindowCoverage::absent(); locus.samples.len()],
         kind: LocusKind::Generic,
     }
 }

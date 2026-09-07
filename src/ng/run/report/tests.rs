@@ -90,6 +90,9 @@ fn a_run(
     per_sample: Vec<SampleWalkTallies>,
 ) -> WrittenCohort {
     WrittenCohort {
+        // The run report says nothing about the coverage histograms — the hidden-duplication
+        // filter is their only consumer and it is built on its own plan.
+        window_coverage_histograms: Vec::new(),
         calling: CohortCallingTallies {
             records_written,
             loci_called_but_not_written,
@@ -922,6 +925,7 @@ fn stored_rendered(
 fn a_run_over_stored_files_says_how_much_it_read_and_how_deep_it_was() {
     let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
     let stored = StoredCohortTallies {
+        window_coverage_histograms: Vec::new(),
         per_sample: vec![
             a_stored_sample("zeta", 100, 300, Some(20)),
             a_stored_sample("alpha", 40, 1_000, Some(20)),
@@ -959,6 +963,7 @@ fn a_run_over_stored_files_says_how_much_it_read_and_how_deep_it_was() {
 fn a_stored_file_that_held_no_locus_is_named_rather_than_given_a_depth() {
     let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
     let stored = StoredCohortTallies {
+        window_coverage_histograms: Vec::new(),
         per_sample: vec![
             a_stored_sample("zeta", 100, 300, Some(20)),
             a_stored_sample("alpha", 0, 0, Some(20)),
@@ -996,6 +1001,7 @@ fn a_stored_file_that_held_no_locus_is_named_rather_than_given_a_depth() {
 fn a_run_over_stored_files_does_not_partition_ground_it_did_not_walk() {
     let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
     let stored = StoredCohortTallies {
+        window_coverage_histograms: Vec::new(),
         per_sample: vec![a_stored_sample("zeta", 100, 300, Some(20))],
     };
 
@@ -1033,6 +1039,7 @@ fn a_run_over_stored_files_does_not_partition_ground_it_did_not_walk() {
 fn files_walked_under_different_read_filters_are_named_with_their_values() {
     let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
     let stored = StoredCohortTallies {
+        window_coverage_histograms: Vec::new(),
         per_sample: vec![
             a_stored_sample("zeta", 100, 300, Some(20)),
             a_stored_sample("alpha", 100, 300, Some(37)),
@@ -1072,6 +1079,7 @@ fn a_file_that_recorded_no_read_filter_differs_from_one_that_did() {
         stored_rendered(
             &CohortCallingTallies::default(),
             &StoredCohortTallies {
+                window_coverage_histograms: Vec::new(),
                 per_sample: vec![first, second],
             },
             &read_groups,
@@ -1107,6 +1115,7 @@ fn a_file_that_recorded_no_read_filter_differs_from_one_that_did() {
 fn a_cohort_walked_alike_says_nothing_about_its_read_filters() {
     let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
     let stored = StoredCohortTallies {
+        window_coverage_histograms: Vec::new(),
         per_sample: vec![
             a_stored_sample("zeta", 100, 300, Some(20)),
             a_stored_sample("alpha", 100, 300, Some(20)),
@@ -1149,6 +1158,7 @@ fn the_calling_half_of_the_report_does_not_depend_on_the_mode() {
         vec![walked("zeta", ground_mostly_called(), Vec::new())],
     );
     let stored = StoredCohortTallies {
+        window_coverage_histograms: Vec::new(),
         per_sample: vec![a_stored_sample("zeta", 100, 300, Some(20))],
     };
 

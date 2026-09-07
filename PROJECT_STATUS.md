@@ -4374,9 +4374,9 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 
 
 #### Step 11a — the hidden-duplication filter (ng's port)
-- **Status:** fixes-applied — **Milestone B complete: all three steps implemented, reviewed and fixed. At Checkpoint B, awaiting the owner's review** (branch `ng-paralog-filter`). Milestone C waits on the window-coverage branch reaching `main`.
+- **Status:** fixes-applied — **Milestone B complete: all three steps implemented, reviewed and fixed. At Checkpoint B, awaiting the owner's review** (branch `ng-paralog-filter`). **`ng-window-coverage` is merged in at `cdfd7821`**, so Milestone C's precondition holds without waiting for `main`: `src/ng/window_coverage/` now supplies both types this plan stood in for.
 - **Plan:** [hidden_paralog_filter.md](doc/devel/ng/impl_plan/hidden_paralog_filter.md); **Spec:** [hidden_paralog_filter.md](doc/devel/ng/spec/hidden_paralog_filter.md); the model it ports: [specs/hidden_paralog_filter.md](doc/devel/specs/hidden_paralog_filter.md) and [architecture/hidden_paralog_single_sample_scoring.md](doc/devel/architecture/hidden_paralog_single_sample_scoring.md). No architecture document — the spec's §3.7 type blocks are the code shape.
-- **Code:** five copies of production's statistics, each guarded — [coverage_model.rs](src/ng/paralog/coverage_model.rs) (the per-sample coverage fit), [locus_score.rs](src/ng/paralog/locus_score.rs) (the per-locus score), [prior.rs](src/ng/paralog/prior.rs) (the EM prior, the FDR curve and the cut), [model_params.rs](src/ng/paralog/model_params.rs) (the constants and grids), [calibration.rs](src/ng/paralog/calibration.rs) (a *span* of `src/var_calling/paralog_filter/calibrate.rs`; `CohortInbreeding` deliberately left behind, since ng's `F` is per sample) — plus two files of ng's own: [copy_fidelity.rs](src/ng/paralog/copy_fidelity.rs) (the textual guard, three sanctioned kinds of substitution) and [production_parity.rs](src/ng/paralog/production_parity.rs) (the bit-identity differential over the score, the prior, the curve and the cut). [mod.rs](src/ng/paralog/mod.rs) holds ng's declarations, re-exports and three added tests. Beside them, the run wiring in [src/ng/run/paralog_filter/](src/ng/run/paralog_filter/) — all ng's own, none of it a copy: [spill.rs](src/ng/run/paralog_filter/spill.rs), the entry a called record is parked as between the calling pass and the verdict, and the codec that carries it; [spill_file.rs](src/ng/run/paralog_filter/spill_file.rs), where those bytes live, the three-stage life that stops a run writing over its own spill, and the `Drop` that unlinks it on every exit path; [patch.rs](src/ng/run/paralog_filter/patch.rs), which puts the verdict on a line by splicing its seventh and eighth columns and keeping every other byte. Beside them, [vcf/writer.rs](src/ng/vcf/writer.rs) gains `write_line` and a public `RecordPlace` — carrying a `GenomePosition`, so it is type-for-type what `SpillEntry` holds — with `write_record` expressed in terms of it so there is one ordering check rather than two, and `place_of` reading the padding rule from `encode::written_position` rather than a second copy of it. `From<&SpillEntry> for RecordPlace` is how pass three builds a place, since the check reads the place and never the line's bytes. [mod.rs](src/ng/run/paralog_filter/mod.rs) holds the declarations and the temporary `WindowCoverage`.
+- **Code:** five copies of production's statistics, each guarded — [coverage_model.rs](src/ng/paralog/coverage_model.rs) (the per-sample coverage fit), [locus_score.rs](src/ng/paralog/locus_score.rs) (the per-locus score), [prior.rs](src/ng/paralog/prior.rs) (the EM prior, the FDR curve and the cut), [model_params.rs](src/ng/paralog/model_params.rs) (the constants and grids), [calibration.rs](src/ng/paralog/calibration.rs) (a *span* of `src/var_calling/paralog_filter/calibrate.rs`; `CohortInbreeding` deliberately left behind, since ng's `F` is per sample) — plus two files of ng's own: [copy_fidelity.rs](src/ng/paralog/copy_fidelity.rs) (the textual guard, three sanctioned kinds of substitution) and [production_parity.rs](src/ng/paralog/production_parity.rs) (the bit-identity differential over the score, the prior, the curve and the cut). [mod.rs](src/ng/paralog/mod.rs) holds ng's declarations, re-exports and three added tests. Beside them, the run wiring in [src/ng/run/paralog_filter/](src/ng/run/paralog_filter/) — all ng's own, none of it a copy: [spill.rs](src/ng/run/paralog_filter/spill.rs), the entry a called record is parked as between the calling pass and the verdict, and the codec that carries it; [spill_file.rs](src/ng/run/paralog_filter/spill_file.rs), where those bytes live, the three-stage life that stops a run writing over its own spill, and the `Drop` that unlinks it on every exit path; [patch.rs](src/ng/run/paralog_filter/patch.rs), which puts the verdict on a line by splicing its seventh and eighth columns and keeping every other byte. Beside them, [vcf/writer.rs](src/ng/vcf/writer.rs) gains `write_line` and a public `RecordPlace` — carrying a `GenomePosition`, so it is type-for-type what `SpillEntry` holds — with `write_record` expressed in terms of it so there is one ordering check rather than two, and `place_of` reading the padding rule from `encode::written_position` rather than a second copy of it. `From<&SpillEntry> for RecordPlace` is how pass three builds a place, since the check reads the place and never the line's bytes. [mod.rs](src/ng/run/paralog_filter/mod.rs) holds the declarations and `From<&SpillEntry> for RecordPlace`; the temporary `WindowCoverage` is gone, replaced by the merged `crate::ng::window_coverage::WindowCoverage`.
 - **Impl reports:** [A1 (constants + coverage model)](doc/devel/reports/implementations/ng_paralog_filter_a1_2026-09-06.md), [A2 (the score + the differential)](doc/devel/reports/implementations/ng_paralog_filter_a2_2026-09-06.md), [A3 (the prior, the curve, the calibration)](doc/devel/reports/implementations/ng_paralog_filter_a3_2026-09-06.md), [B1 (the spill entry and its codec)](doc/devel/reports/implementations/ng_paralog_filter_b1_2026-09-06.md), [B2 (the spill file and its guard)](doc/devel/reports/implementations/ng_paralog_filter_b2_2026-09-06.md), [B3 (the writer's line entry point and the two-column patch)](doc/devel/reports/implementations/ng_paralog_filter_b3_2026-09-06.md)
 - **Latest reviews:** [A1](doc/devel/reports/reviews/ng_paralog_filter_a1_2026-09-06.md) (0 Blocker / 4 Major / 8 Minor) — **fixes** [applied](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_a1_2026-09-06.md) (10 of 12); [A2](doc/devel/reports/reviews/ng_paralog_filter_a2_2026-09-06.md) (0 Blocker / 6 Major / 12 Minor) — **fixes** [applied](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_a2_2026-09-06.md) (17 of 18); [A3](doc/devel/reports/reviews/ng_paralog_filter_a3_2026-09-06.md) (**1 Blocker** / 6 Major / 7 Minor, Request-changes) — **fixes** [applied](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_a3_2026-09-06.md) (all); [B1](doc/devel/reports/reviews/ng_paralog_filter_b1_2026-09-06.md) (**1 Blocker** / 11 Major / 21 Minor, Request-changes; eight sub-agents in isolated worktrees) — **fixes** [applied](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_b1_2026-09-06.md) (36 applied, 3 adapted, 4 deferred); [B2](doc/devel/reports/reviews/ng_paralog_filter_b2_2026-09-06.md) (0 Blocker / 6 Major / 18 Minor, Request-changes; four sub-agents) — **fixes** [applied](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_b2_2026-09-06.md) (24 applied, 3 adapted, 2 deferred); [B3](doc/devel/reports/reviews/ng_paralog_filter_b3_2026-09-06.md) (**1 Blocker** / 7 Major / 15 Minor, Request-changes; three sub-agents, after a first fan-out was killed and its probe code salvaged) — **fixes** [applied](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_b3_2026-09-06.md) (19 applied, 3 adapted, 6 deferred).
 - **Open:**
@@ -4398,6 +4398,224 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **Spec §9's second OPEN (`N = 1`) is closed at the copy level by A2**: the copied precompute runs at one sample and agrees with production's bit for bit on 144 scored loci of 200 drawn. What it says about real data is still step D1's.
   - **Spec §3.2's one decision beyond production — every record scored, non-SNPs on coverage alone — is confirmed with the owner before step C1 is coded.**
   - **`main` is red on four checks**, which costs this branch (and every branch) the `--all-targets` gate: `examples/ng_candidate_selection_probe.rs` does not compile against the current `ClosedLocus`; `ng_calling_loop_calls_genotypes::a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele` fails; `cargo fmt --check` is dirty on nine files; `cargo clippy -D warnings` fires three `needless_lifetimes`. None is this plan's to fix.
+#### Window coverage — each sample's depth and GC around a locus, and the histogram behind it
+- **Status:** `fixes-applied` — **Milestones A, B and C complete** (branch `ng-window-coverage`): the accumulator, the floor, the per-sample depth
+  scale, the rule that turns one drawn record into covered positions with a depth at each, the
+  measurement that says the rule's cheapest branch is sound on real data, the reference in the
+  merge's cache, the accumulator itself in each sample's window there, and the half-window
+  look-ahead that stops each region's last centres being absent, the pair itself on every record
+  the run writes, and each sample's histogram out of the cache. **The measurement runs on real data
+  in both modes, no VCF byte has moved, the two modes' windows and histograms are identical bit for
+  bit, and both equal a whole-store recomputation.** **Checkpoint C reached** — the filter plan may
+  start. Next: Milestone D, the three numbers the spec left to measurement.
+- **Plan:** [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md);
+  **Spec:** [window_coverage.md](doc/devel/ng/spec/window_coverage.md). No architecture
+  document — the spec's §3 type blocks are the code shape. Its consumer, built separately:
+  [hidden_paralog_filter.md](doc/devel/ng/spec/hidden_paralog_filter.md).
+- **Code:** [src/ng/window_coverage/](src/ng/window_coverage/) —
+  [mod.rs](src/ng/window_coverage/mod.rs) (`WindowCoverageConfig`, `WindowCoverage`,
+  `CoverageByGcHistogram`), [accumulator.rs](src/ng/window_coverage/accumulator.rs)
+  (`WindowCoverageAccumulator`), [depth.rs](src/ng/window_coverage/depth.rs)
+  (`for_each_depth_the_record_reports`),
+  [production_parity.rs](src/ng/window_coverage/production_parity.rs).
+- **Impl reports:** [A1](doc/devel/reports/implementations/ng_window_coverage_a1_2026-09-06.md),
+  [A2](doc/devel/reports/implementations/ng_window_coverage_a2_2026-09-06.md),
+  [A3](doc/devel/reports/implementations/ng_window_coverage_a3_2026-09-06.md),
+  [B1](doc/devel/reports/implementations/ng_window_coverage_b1_2026-09-06.md),
+  [B2](doc/devel/reports/implementations/ng_window_coverage_b2_2026-09-06.md),
+  [C1](doc/devel/reports/implementations/ng_window_coverage_c1_2026-09-06.md),
+  [C2](doc/devel/reports/implementations/ng_window_coverage_c2_2026-09-06.md),
+  [C3](doc/devel/reports/implementations/ng_window_coverage_c3_2026-09-06.md),
+  [C4](doc/devel/reports/implementations/ng_window_coverage_c4_2026-09-07.md),
+  [C5](doc/devel/reports/implementations/ng_window_coverage_c5_2026-09-07.md);
+  **reviews:** [A1](doc/devel/reports/reviews/ng_window_coverage_a1_2026-09-06.md) (1 Blocker,
+  5 Major, 18 Minor), [A2](doc/devel/reports/reviews/ng_window_coverage_a2_2026-09-06.md)
+  (4 Major, 4 Minor), [A3](doc/devel/reports/reviews/ng_window_coverage_a3_2026-09-06.md)
+  (1 Blocker, 3 Major, 8 Minor),
+  [B1](doc/devel/reports/reviews/ng_window_coverage_b1_2026-09-06.md) (2 Blocker, 3 Major,
+  9 Minor), [B2](doc/devel/reports/reviews/ng_window_coverage_b2_2026-09-06.md) (3 Major,
+  11 Minor), [C1](doc/devel/reports/reviews/ng_window_coverage_c1_2026-09-06.md) (1 Blocker,
+  6 Major, 8 Minor), [C2](doc/devel/reports/reviews/ng_window_coverage_c2_2026-09-06.md) (4 Major,
+  2 Minor), [C3](doc/devel/reports/reviews/ng_window_coverage_c3_2026-09-06.md) (5 Major, 9 Minor),
+  [C4](doc/devel/reports/reviews/ng_window_coverage_c4_2026-09-07.md) (1 Blocker, 4 Major,
+  12 Minor), [C5](doc/devel/reports/reviews/ng_window_coverage_c5_2026-09-07.md) (5 Major, 8 Minor)
+  — all applied or raised with a home; each step's fixes are in its own commit. **C2's correctness
+  review ran a session late**, its design half having landed inside C2's own commit; its findings
+  are fixed forward in their own commit after C3.
+- **A1 done (the accumulator, copied):** production's `SlidingWindowCoverageAccumulator`
+  ([coverage.rs](src/sample_summary/coverage.rs)) transcribed with its eleven sliding-window
+  tests, under spec §3.6's names and ng's coordinate types; the fixed-tile accumulator and the
+  heterozygosity fields left behind, and two histogram fields dropped. **The copy is checked
+  against the original, not only against hand arithmetic:** 200 pseudo-random streams over
+  window widths 1 to 600 compare **447,581 window means and GC fractions bit for bit**, plus
+  every histogram cell. **Fourteen of the module's fifteen new unit tests exist because a
+  mutation survived the twelve the step started with** — nineteen mutations run, seven
+  survivors, every one now carried by a unit test rather than by the differential alone, which
+  matters because the differential's histogram half stops applying at step A3.
+- **The standing oracle for every step of this plan:** a run with the filter off writes byte for
+  byte what it writes today. Baseline taken 2026-09-06 on six tomato accessions over the first
+  two 100 kb intervals of `benchmarks/tomato1/regions.bed` — 2,311 records, direct mode and psp
+  mode identical apart from `##commandline` (sha256 `84ad19c2…`).
+- **A2 done (the floor):** a window built from fewer than `min_window_positions` **distinct**
+  covered positions comes back absent — both numbers `NaN` — and is kept out of the histogram,
+  so a window too thin to report a depth also trains no yardstick. Provisionally 50 of 500,
+  which plan step D1 measures. **The review caught a real defect, not only missing tests:** the
+  floor first counted records rather than distinct coordinates, so one base observed five times
+  cleared a floor of five and was folded. Seven mutations run on the fixed tree, each caught.
+- **A3 done (the depth axis, fitted per sample):** the accumulator holds its first
+  `depth_scale_windows` windows back, takes the median of their mean depths, and cuts the depth
+  axis so the 400 regular bins span ten times it — **50 × 401 × 4 bytes, 80.2 kB a sample**,
+  against production's fixed 0.5× bin at 400 kB. A sample nothing can be fitted from has no
+  histogram. **The review found the failure this step was warned about:** a fit that failed
+  part-way through a sample silently retried and dropped the windows it failed on — measured, six
+  windows emitted and two folded — so the width is now three-state and latches unfittable. The
+  differential against production keeps the windows and gives up the histogram cells, which is
+  why A1's review gave the four behaviours it used to guard alone their own unit tests first.
+- **B1 done (which positions a record reports depth at):** one function turns a drawn record into
+  covered positions with a depth at each. A record spanning **one base** reports the count its
+  summary already carries and decodes nothing; a **generic** record spanning more reports at its
+  first base only, because the positions inside it have records of their own; a **repeat tract**
+  reports at every position of its span, because nothing else covers that ground. **The span
+  decides which rule applies, never the shape the draw arrived in** — so a one-base record is
+  answered from its summary even in direct mode, where the evidence is in hand, which is what
+  stops the two modes computing different numbers. **The review found two wrong-result paths with
+  no test between them**: a generic record arriving from a stored file could have spread a
+  deletion's depth over its whole span in psp mode alone, and a failing body decode could have
+  been swallowed, taking that record's positions out of the window and the histogram while the run
+  reported success. Both are now pinned, and the guard that makes the summary parameter safe is a
+  release assert rather than a debug-only one, because this repo ships with debug assertions off.
+  Eighteen tests including a property test over the whole small domain; thirteen mutations run,
+  each caught, five by exactly one test.
+- **B2 done (the head-equals-evidence claim, measured):** the rule takes a one-base record's
+  depth from the count its head already carries rather than decoding the evidence, and that is
+  only right if the two agree. **They agree at every one of 8,784,182 one-base records** across
+  two tomato stores — six accessions over 200 kb of one chromosome at a mean 14.4 reads compared
+  with the reference, and the sample of `SRR7279481.p1` over all 80 benchmark intervals, 8 Mb on
+  all 12 chromosomes at 10.3 — and the mechanism that could break it, a read whose evidence stops
+  inside a one-base locus, occurs **nowhere in either store**. Spec §3.1 stands; the rule does not
+  become "build every body". **The cheap branch decides 992 positions in every 1,000 on the slice
+  and 994 on the wider store**; in records, 1 in 871 and 1 in 1,221 span more than one base. **No
+  one-base record was a tract**, which is spec §3.1's "generic by construction" measured rather
+  than assumed. **The review turned a reading into a check:** as first written the probe could
+  report the rule confirmed having checked nothing — a store with no records printed zeros and
+  exited 0 — and the evidence offered that its comparison could fail did not exercise the
+  mechanism the claim is about; two mutations that both tomato stores cannot distinguish from
+  correct code are now killed by a shipped fixture. Two figures in the first draft were wrong,
+  both flattering the rule. The probe
+  ([examples/ng_window_coverage_probe.rs](examples/ng_window_coverage_probe.rs)) is what plan step
+  C3 extends into the whole-store window recomputation, through the measurement seam the review
+  added. **Deviation:** the plan asks for a whole-genome store, and no ng store this build can
+  read — nor any over a whole genome — exists on this machine; the tomato CRAMs are cut to the
+  benchmark's intervals, so the 80-interval store stands in for it, and the claim is measured over
+  8 Mb of tomato at 10–14 reads a position rather than over a genome at 3×.
+- **C1 done (the reference into the cache):** the merge's observation cache holds a reference
+  accessor of its own — minted beside the padding one both callers already held — and reads the
+  ground each cover drew, **once per cover** into a buffer every sample will read by offset. **The
+  fetch happens after the cover's fixpoint, not before it**, because the ground a cover reaches is
+  not known until it has been drawn: an observation chaining past the region widens the reach, and
+  every position of it needs a base. A failed fetch is the cache's own failure, converted by the
+  caller into `RunError::WindowCoverageGroundUnreadable`, which names the ground; it ends the
+  cover rather than being absorbed, because one failure would cost every sample its coverage over
+  that stretch. Five tests; **the oracle is unmoved either side — 2,311 records, sha256
+  `84ad19c2…`, on both routes.**
+- **C1 done (the reference into the cache):** the merge's observation cache holds a reference
+  accessor of its own and reads, **once per cover**, the ground that cover's records lie on, into
+  a buffer every sample reads by offset. **The fetch happens after the cover's fixpoint**, because
+  what the cache holds is not known until the drawing has stopped. A failed fetch ends the cover
+  naming the ground rather than being absorbed. **The review found the ground itself wrong**, from
+  two directions independently: the first cut fetched region-to-reach, which misses the record
+  each sample is drawn *past* the reach and the head of every record held from an earlier cover.
+  **And the accessor never released what the merge had walked past** — `RefSeq` alone has no
+  `evict_before`, and a merge that never released would end a contig holding every base it passed,
+  about 250 MB on human chromosome 1 against a 25 MB peak. Ten tests.
+- **C2 done (the accumulator in the cache):** every sample carries a window-coverage accumulator
+  inside the merge's cache, is fed every record it holds **exactly once** — a per-sample cursor is
+  what makes it once, since a record is held across every cover it reaches into — and a builder
+  reads the window at a position through `window_coverage_at`. **The oracle is unmoved: 2,311
+  records, sha256 `84ad19c2…`, on both routes**, and this is the first step where the measurement
+  runs on real data. **Implementation found what the design had not**: a cover crosses contigs,
+  because drawing stops at the first record past the reach and a reach on a later contig is past
+  every position of an earlier one — so the cover that first reaches contig *n* also draws
+  whatever a sample still had on contig *n − 1*. Seven existing tests failed the moment the
+  accumulator was wired in; a cover now reads each contig it added records on, ending on the
+  region's own. Five tests. **Left open for C4:** `window_coverage_at` answers `None` both for a
+  sample with no window there and for a window carrying no measurement at all, and the oracle
+  C4's plan names as its green criterion runs through the second — so it would pass by comparing
+  absent against absent.
+- **C3 done (the look-ahead, and the oracle that can see it):** each cover draws half a window
+  past the region it was asked for, clamped to the contig's end, and the number comes from
+  `window_coverage::WINDOW_BP` rather than being retyped. **Its failure was invisible from inside
+  the run** — a region's last centres finalise after their builder has run, and the VCF is
+  unchanged either way — so this step also builds the two things that can see it: a recorder in
+  the run (`NG_WINDOW_COVERAGE_FILE`) that writes every sample's window at every built locus as
+  bit patterns, and a whole-store recomputation in the probe that walks the same store end to end
+  with no covers and no eviction. **On the six-accession slice, of 26,754 sample-loci: without the
+  look-ahead 571 have no window in the run and one in the walk; with it, 12** — and those 12 are
+  two positions, the same in all six samples, at the end of the last analysed interval, where no
+  later record exists to close the centre and only `finish` (step C5) can. **0 disagreements
+  either way**, so the look-ahead moves only which windows exist, never their values. The oracle
+  is unmoved: 2,311 records, sha256 `84ad19c2…`, on both routes. Six existing fixtures moved their
+  coordinates — one written when a cover stopped at its region's end is drawn whole by the first
+  cover now — and one in `callers.rs` gained a record on the next contig to keep staging a refusal
+  ahead of a source failure. Nine tests added. **The review found three defects rather than three
+  clarities.** A cover that draws a sample onto the next contig ended holding *that* contig's bases,
+  so the accessor a builder reads at C4 would answer nothing over its own region — found
+  independently by both C3 agents and by C2's re-run correctness review, three times from three
+  directions, and fixed here because the look-ahead turns it from a corner into the ordinary case at
+  every contig boundary. The `callers.rs` fixture this step changed stopped testing its own name:
+  its subject is that a refused record outranks a source failure behind it, and the record added to
+  stage the two stopped the draw for the whole of `chr1`, so the failure was never drawn — swapping
+  the two arms left all 515 tests green. And every field the recorder writes, plus the whole of the
+  comparison, had no test: four deliberate defects survived the suite, the worst of them a bit
+  comparison replaced by float equality, which would report a **correct** run as disagreeing at
+  every window the floor silenced. All four are caught now. **Raised, not fixed:** the example
+  `ng_cohort_merge_real_cost` does not compile, and has not on `main` either; C1 added two further
+  errors to it, and repairing it needs a decision about a module another branch is working in.
+- **C4 done (the pair on the locus and beside every record):** each cohort locus carries one
+  window per covering sample, read at its first base; the evidence gathered for output carries it
+  dense over the run's samples; and the record sink takes it beside the record, which is what keeps
+  the VCF byte-identical — the record itself gains nothing. **The two modes agree bit for bit over
+  all 13,866 rows** (2,311 records × 6 samples), which the mode-equivalence oracle now compares
+  itself, and **13,589 of them match the whole-store recomputation with 0 disagreements**; the rest
+  have nothing to report on either side. The twelve C3 measured as missing were never written
+  records. **The `None` ambiguity C2 left open is settled by refusing to compare an unmeasured
+  window rather than by splitting the type**: `render`, the one place that defines "the same
+  answer" across the merge's drivers, destructures the locus and leaves the field out, and a new
+  test states the asymmetry out loud, including that some locus carries a real number. **The review
+  found a Blocker that the branch's own green criterion could not**: two integration tests had
+  stopped compiling, and `cargo test --lib` does not build them, so twenty assertions had quietly
+  stopped running — `cargo check --lib --tests` is part of green here now. It also found the
+  extended oracle **passing when neither mode measured anything**, which is the same
+  absence-against-absence failure one level up, and that "the locus's first base" had no test at
+  all, every fixture with a real measurement using a one-base locus where first and last coincide.
+- **C5 done (the histograms out), and Milestone C complete:** every sample's coverage histogram
+  leaves the merge when it returns its sources, and it is the one a straight walk of the same store
+  makes — **all six samples byte-identical to the recomputation, and the two modes byte-identical
+  to each other**, which the mode-equivalence oracle now compares itself. `windows_folded` accounts
+  for every covered position: on this slice the floor silenced none, so each sample's folded count
+  is its covered-position count, and the review reproduced the identity on a slice where the floor
+  did silence some (300,943 folded + 377 silenced against 301,320 covered). **Finishing the
+  accumulator is the step, not a formality**: it closes the centres no cover can reach — the last
+  half-window of a sample's own records, about 6 windows in 10,000 measured — and fits the depth
+  axis for a sample whose pass ended before the 10,000-window scale sample filled, which is the low
+  end this caller commits to and is carried by unit tests only, since every sample of both slices
+  passed 10,000 long before its stream ended. **`into_sources` is gone** rather than kept beside the
+  new form: it would be a shorter name that finishes every accumulator and drops the result. The
+  review's two surviving mutations are worth carrying forward — a wrong sample index in the
+  histogram recorder, and a comparison that read only the first sample, are both caught **only by
+  running the probe on a real store**, and the mode-equivalence oracle cannot catch the first
+  because both modes render the same wrong index.
+- **Open:** the floor's default (spec §3.3) and the histogram's three bin constants (spec §3.4)
+  are soft until plan steps D1 and D2 measure them.
+- **Checkpoint A ruled by the owner, 2026-09-06, and the spec updated with it:** `finish` hands
+  back **`SampleHistogram`** — the histogram, or which of the three silences it was (the pass
+  reached nothing; every window was under the floor, which is a reading on the floor and not a
+  fault; the windows reported no positive median depth, which is) — and
+  `CoverageByGcHistogram` carries **`windows_under_the_floor`**, so a yardstick fitted from a
+  small share of a sample's positions is visible as such. Spec §3.4, §3.5, §3.6, §5 and §7
+  amended in the same commit, including three figures that were wrong: an absent window is
+  finalised and deliberately not folded, the hold-back transient is 262 kB and not 120, and the
+  ready deque's entry is 24 bytes and not 12.
 
 ---
 

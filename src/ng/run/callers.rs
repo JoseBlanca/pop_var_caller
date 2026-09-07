@@ -54,14 +54,18 @@ use crate::ng::ref_seq::WindowedRefSeq;
 use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::run::cohort_merge::build::{CohortObservation, RegionOutcome};
 use crate::ng::run::cohort_merge::observation_cache::{ObservationCache, ObservationSource};
+use crate::ng::run::cohort_merge::recorded_windows::{
+    record_the_histograms, record_the_windows_at,
+};
 use crate::ng::run::cohort_merge::serial::{
     merge_cohort_handing_each_locus_over,
     merge_cohort_handing_each_locus_over_covering_samples_in_parallel, merge_cohort_through_cache,
 };
 use crate::ng::run::cohort_merge::{CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads};
-use crate::ng::types::{GenomeRegion, ReadGroupId};
+use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::ng::vcf::VcfRecord;
 use crate::ng::vcf::assemble::assemble_record;
+use crate::ng::window_coverage::{SampleHistogram, WindowCoverage};
 use crate::pop_var_caller::common::format_md5_hex;
 
 use super::RunError;
@@ -484,10 +488,11 @@ impl AlignedFilesVariantCaller {
     /// this is the merge's own oracle, not the path a run takes.
     /// [`call_cohort`](Self::call_cohort) is the run's, and it hands the tallies back.
     pub fn merge_cohort(self) -> Result<RegionOutcome, RunError> {
+        let reference_for_the_merge = self.walk_reference.accessor();
         let pieces = self.walkers()?;
         let merge = pieces.merge_parameters;
         let segmentation = Arc::clone(&pieces.segmentation);
-        let mut cache = ObservationCache::over(pieces.walkers);
+        let mut cache = ObservationCache::over(pieces.walkers, Box::new(reference_for_the_merge));
         merge_cohort_through_cache(
             segmentation.analysed_regions(),
             &mut cache,
@@ -545,6 +550,10 @@ impl AlignedFilesVariantCaller {
     {
         let run_sample_count = self.samples.len();
         let sample_names: Vec<String> = self.sample_names().map(str::to_owned).collect();
+        // **The merge's own accessor, minted beside the padding one** — one for the whole run,
+        // sliding forward with the merge and shared with nothing (`spec/window_coverage.md`
+        // §3.2). Taken before `walkers()` consumes the run.
+        let reference_for_the_merge = self.walk_reference.accessor();
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -579,7 +588,7 @@ impl AlignedFilesVariantCaller {
         // and what the report owes is how many, not where each one was.
         let mut tracts = TractOutcomes::default();
 
-        let mut cache = ObservationCache::over(walkers);
+        let mut cache = ObservationCache::over(walkers, Box::new(reference_for_the_merge));
         merge_cohort_handing_each_locus_over(
             segmentation.analysed_regions(),
             &mut cache,
@@ -613,12 +622,14 @@ impl AlignedFilesVariantCaller {
             &mut loci_too_wide_to_assemble,
         )?;
 
+        let (sources, window_coverage_histograms) = cache.into_sources_and_histograms();
         Ok(CalledCohort {
             called_loci,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
             tracts,
-            walk: CohortWalkTallies::of(sample_names, cache.into_sources(), assembly_check),
+            walk: CohortWalkTallies::of(sample_names, sources, assembly_check),
+            window_coverage_histograms,
         })
     }
 
@@ -656,7 +667,7 @@ impl AlignedFilesVariantCaller {
     pub fn call_cohort_handing_each_record_over<S, G, E>(
         self,
         genotyper: &G,
-        hand_over: &mut impl FnMut(&VcfRecord) -> Result<(), E>,
+        hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
     ) -> Result<WrittenCohort, RunError>
     where
         G: LocusGenotyper<S>,
@@ -668,6 +679,10 @@ impl AlignedFilesVariantCaller {
         // caller. One accessor for the whole run, never shared: it walks forward with the merge
         // and releases what it has passed.
         let padding_reference = self.walk_reference.accessor();
+        // **A second accessor, for the merge's own reading** — the padding one is read at the
+        // record and this one at the cover, and one accessor serving both would have two
+        // callers sliding a single window in two directions (`spec/window_coverage.md` §3.2).
+        let reference_for_the_merge = self.walk_reference.accessor();
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -687,16 +702,20 @@ impl AlignedFilesVariantCaller {
             candidate_selection: &candidate_selection,
             padding_reference,
         };
-        let CohortCallingOutcome { calling, sources } =
-            call_cohort_from_sources_handing_each_record_over(
-                ObservationCache::over(walkers),
-                inputs,
-                genotyper,
-                hand_over,
-            )?;
+        let CohortCallingOutcome {
+            calling,
+            sources,
+            window_coverage_histograms,
+        } = call_cohort_from_sources_handing_each_record_over(
+            ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
+            inputs,
+            genotyper,
+            hand_over,
+        )?;
         Ok(WrittenCohort {
             calling,
             walk: CohortWalkTallies::of(sample_names, sources, assembly_check),
+            window_coverage_histograms,
         })
     }
 }
@@ -745,6 +764,9 @@ pub(crate) struct CohortCallingOutcome<S> {
     /// built only after the two error returns, so a run that reaches it walked its whole
     /// analysed ground.
     pub sources: Vec<S>,
+    /// Each sample's coverage-by-GC histogram, or the reason it has none, beside the source it
+    /// was accumulated from — same order, same length.
+    pub window_coverage_histograms: Vec<SampleHistogram>,
 }
 
 /// **Call one cohort and hand every record over as it is finished, keeping none — the body both
@@ -800,7 +822,7 @@ pub(crate) fn call_cohort_from_sources_handing_each_record_over<Source, S, G, E>
     mut cache: ObservationCache<Source>,
     inputs: CohortCallingInputs<'_>,
     genotyper: &G,
-    hand_over: &mut impl FnMut(&VcfRecord) -> Result<(), E>,
+    hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
 ) -> Result<CohortCallingOutcome<Source>, RunError>
 where
     Source: ObservationSource<Error = RunError> + Send,
@@ -852,6 +874,10 @@ where
     // merge's sink saying *stop* — one `ControlFlow` through both drivers and the region
     // builder — which is a change to the merge's interface and not this step's.
     let mut stopped: Option<RunError> = None;
+    // **One buffer for the run, refilled per record.** It is dense over the run's samples and
+    // lives only from `evidence_for_output` to the sink, which is why the sink takes a slice
+    // rather than the record carrying one.
+    let mut window_coverage: Vec<WindowCoverage> = Vec::with_capacity(run_sample_count);
 
     let merged = merge_cohort_handing_each_locus_over_covering_samples_in_parallel(
         segmentation.analysed_regions(),
@@ -901,6 +927,14 @@ where
                         verdict,
                         padding,
                     );
+                    // **Taken before the evidence is consumed**, into a buffer refilled per
+                    // record rather than allocated: the record itself carries no window, by
+                    // design — a run with the filter off writes byte for byte what it wrote
+                    // before this work — so the pair travels beside it, and this is the last
+                    // place it exists (`spec/window_coverage.md` §3.5).
+                    window_coverage.clear();
+                    window_coverage
+                        .extend(evidence.samples.iter().map(|sample| sample.window_coverage));
                     Ok(Some(assemble_record(&inference, evidence)))
                 },
             );
@@ -910,15 +944,30 @@ where
                 LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {}
                 LocusOutcome::Called(Err(error)) => stopped = Some(error),
                 LocusOutcome::Called(Ok(None)) => loci_called_but_not_written += 1,
-                LocusOutcome::Called(Ok(Some(record))) => match hand_over(&record) {
-                    Ok(()) => records_written += 1,
-                    Err(source) => {
-                        stopped = Some(RunError::RecordNotWritten {
-                            locus: region,
-                            source: Box::new(source),
-                        });
+                LocusOutcome::Called(Ok(Some(record))) => {
+                    // **What this run read, at every record it writes** — off unless the run was
+                    // asked for it, and the only thing outside the run that can see whether the
+                    // cover's look-ahead works, since the measurement changes no VCF byte
+                    // (`cohort_merge::recorded_windows`, spec `window_coverage.md` §10). Here
+                    // rather than where the locus is built, because "at every written record" is
+                    // what the spec asks and this is where that is decided.
+                    record_the_windows_at(
+                        GenomePosition {
+                            contig: region.contig,
+                            position: region.start,
+                        },
+                        &window_coverage,
+                    );
+                    match hand_over(&record, &window_coverage) {
+                        Ok(()) => records_written += 1,
+                        Err(source) => {
+                            stopped = Some(RunError::RecordNotWritten {
+                                locus: region,
+                                source: Box::new(source),
+                            });
+                        }
                     }
-                },
+                }
             }
         },
         &mut loci_too_wide_to_assemble,
@@ -928,6 +977,13 @@ where
     }
     merged?;
 
+    // **After the two error returns, so a run that failed never finishes an accumulator.** A
+    // half-walked sample's histogram would describe the ground the run reached and say nothing
+    // about that, which is the same reasoning `sources`' own doc gives.
+    let (sources, window_coverage_histograms) = cache.into_sources_and_histograms();
+    // What this run's yardsticks are, for something outside it to check — off unless the run was
+    // asked for it, beside the per-record rows (`cohort_merge::recorded_windows`).
+    record_the_histograms(&window_coverage_histograms);
     Ok(CohortCallingOutcome {
         calling: CohortCallingTallies {
             records_written,
@@ -936,7 +992,8 @@ where
             loci_with_nobody_to_call,
             tracts,
         },
-        sources: cache.into_sources(),
+        sources,
+        window_coverage_histograms,
     })
 }
 
@@ -1361,6 +1418,17 @@ pub struct CalledCohort {
     pub tracts: TractOutcomes,
     /// What each sample's walk saw, and what the run could check about the assembly.
     pub walk: CohortWalkTallies,
+    /// **Each sample's coverage-by-GC histogram**, or the reason it has none — one entry per
+    /// sample of [`walk`](Self::walk), at the same index, in the run's sample order
+    /// (`doc/devel/ng/spec/window_coverage.md` §3.5).
+    ///
+    /// The yardstick half of the hidden-duplication filter's input: the per-locus pairs say what
+    /// a sample's depth *was* around a locus, and this says what one copy's depth looks like in
+    /// that sample, so the filter divides one by the other. **Nothing reads it yet** — the filter
+    /// is built on its own plan — and it is carried here rather than dropped because the
+    /// accumulators stop existing when the merge returns its sources, and nothing downstream can
+    /// recompute them without a second pass over the reads.
+    pub window_coverage_histograms: Vec<SampleHistogram>,
 }
 
 /// **What a run that wrote its calls out produced** — everything [`CalledCohort`] carries
@@ -1379,6 +1447,9 @@ pub struct WrittenCohort {
     pub calling: CohortCallingTallies,
     /// What each sample's walk saw, and what the run could check about the assembly.
     pub walk: CohortWalkTallies,
+    /// Each sample's coverage-by-GC histogram, or the reason it has none — [`CalledCohort`]'s
+    /// own field, and carried for the same reason.
+    pub window_coverage_histograms: Vec<SampleHistogram>,
 }
 
 /// **What calling a cohort produced, whatever the observations were read from** — the part of
@@ -1430,8 +1501,8 @@ impl WrittenCohort {
 ///
 /// **The run does not own its walkers once the merge has them** — the observation cache does,
 /// for the merge's whole duration, and hands them back spent
-/// ([`ObservationCache::into_sources`]) — so these are copied out at that point rather than
-/// read from a walker later. What is here is what a run report has to be able to state: for
+/// ([`ObservationCache::into_sources_and_histograms`]) — so these are copied out at that point
+/// rather than read from a walker later. What is here is what a run report has to be able to state: for
 /// each sample, how much of the analysed ground its walk handled, how much it could not and
 /// why, and what the SNP/indel generator counted while doing it.
 ///
@@ -3869,7 +3940,10 @@ mod cohort_loci_from_reads_match_cohort_loci_from_records {
             "every sample must have walked something, or this compares two empty answers"
         );
 
-        let sources: Vec<std::vec::IntoIter<Result<SampleLocusObservations, Infallible>>> =
+        // `RunError` rather than `Infallible`, because the cache's cover can fail on its own
+        // account now — it reads the reference once a cover — and a source that cannot fail
+        // does not make the merge infallible.
+        let sources: Vec<std::vec::IntoIter<Result<SampleLocusObservations, RunError>>> =
             per_sample
                 .iter()
                 .map(|sample| {
@@ -3883,7 +3957,14 @@ mod cohort_loci_from_reads_match_cohort_loci_from_records {
                 .collect();
         let segmentation = segmentation_built_on([7; 16]);
         let merge = MergeParameters::DEFAULT;
-        let mut cache = ObservationCache::over(sources);
+        // **The run's own reference and not a fixture one**: this test compares a merge over
+        // records held in memory against a merge over the walkers that produced them, and the
+        // cache reads the reference over the ground it covers, so the two must read the same
+        // bases from the same file.
+        let mut cache = ObservationCache::over(
+            sources,
+            Box::new(open_over(&paths, &reference).walk_reference.accessor()),
+        );
         let from_memory = merge_cohort_through_cache(
             segmentation.analysed_regions(),
             &mut cache,
@@ -5345,6 +5426,8 @@ mod records_handed_over_as_the_run_finishes_them {
         fixture_reference_from_its_index, header, indexed_named_bam, matching_contigs,
         read_group_for,
     };
+    use crate::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion};
+    use crate::ng::repeat_catalog::StrRepeatCriteria;
     use crate::ng::run::WalkProgress;
     use crate::ng::run::cohort_merge::CohortLocusBuilderRegionsLen;
     use crate::ng::types::{ContigId, Ploidy, Position};
@@ -5355,6 +5438,44 @@ mod records_handed_over_as_the_run_finishes_them {
     use std::num::NonZeroU32;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    /// A segmentation over **both** of the fixture's contigs, all generic.
+    ///
+    /// **The run's own covers `chr1` alone, and that is not enough for the test below**, which
+    /// needs the merge to reach past the record it shields `chr1` with. `chr1` is a hundred bases
+    /// and a cover draws half a window — 250 — past its region, so every cover on `chr1` reaches
+    /// that contig's end: nothing placed on `chr1` can stop a draw there, and the source failure
+    /// behind it would never be drawn at all.
+    fn segmentation_over_both_fixture_contigs() -> Segmentation {
+        let bounds: Vec<crate::regions::ContigBounds<'_>> =
+            crate::ng::read::input::test_fixtures::FIXTURE_CONTIGS
+                .iter()
+                .map(|(name, length)| crate::regions::ContigBounds {
+                    name,
+                    length: *length as u32,
+                })
+                .collect();
+        let pieces: Vec<TypedRegion> = bounds
+            .iter()
+            .enumerate()
+            .map(|(contig, entry)| TypedRegion {
+                region: GenomeRegion {
+                    contig: ContigId(contig as u32),
+                    start: Position(1),
+                    end: Position(u64::from(entry.length)),
+                },
+                kind: RegionKind::Generic,
+            })
+            .collect();
+        Segmentation::build(
+            pieces.into_iter().map(Ok),
+            GenomeRegions::whole_contigs(&bounds),
+            crate::ng::run::test_fixtures::catalog_header(),
+            StrRepeatCriteria::default(),
+            PathBuf::from("/genomes/test.catalog.parquet"),
+        )
+        .expect("a clean stream builds")
+    }
 
     /// **A refused record is the run's answer even when the source fails afterwards** — the
     /// refusal happened first, so it outranks the failure the merge itself comes back with.
@@ -5374,8 +5495,12 @@ mod records_handed_over_as_the_run_finishes_them {
         // **Minted before `walkers` takes the run apart**, exactly as the run's own driver
         // does — `walkers` consumes the caller.
         let padding_reference = caller.walk_reference.accessor();
+        // Taken before the caller is consumed below, for the same reason the run's own two are
+        // minted side by side: the merge reads the reference at the cover and the record writer
+        // at the record, and one accessor cannot serve both.
+        let reference_for_the_merge = caller.walk_reference.accessor();
         let RunReadyToWalk {
-            segmentation,
+            segmentation: _,
             mut merge_parameters,
             walkers,
             parameters,
@@ -5383,6 +5508,11 @@ mod records_handed_over_as_the_run_finishes_them {
             candidate_selection,
             assembly_check: _,
         } = caller.walkers().expect("the fixture's one sample opens");
+        // **Both contigs analysed, not the run's own `chr1` alone**, so that the merge reaches
+        // the ground the record below shields `chr1` with and the source failure behind it is
+        // really drawn. Without it this test asserts a precedence between two failures of which
+        // only one ever happens.
+        let segmentation = segmentation_over_both_fixture_contigs();
 
         // **Ten bases a building region, and that is what makes the test possible.** A cover
         // draws every sample before it builds anything, so a failure in the same batch as the
@@ -5401,6 +5531,25 @@ mod records_handed_over_as_the_run_finishes_them {
                 drawn.push(next);
             }
         }
+        // **One record on the next contig, so that the failure behind it is not drawn in the
+        // same batch as the first locus.** A cover draws half a window past its region
+        // (`spec/window_coverage.md` §3.3) and the fixture's `chr1` is a hundred bases, so the
+        // first cover would otherwise reach the end of this source and come back with the
+        // failure before the sink had been called once — which is the staging this test needs
+        // and the ten-base regions above were doing on their own before the look-ahead landed.
+        // A record on another contig is past every reach on this one, so it is drawn, held, and
+        // stops the draw there.
+        let mut on_the_next_contig = drawn
+            .first()
+            .and_then(|first| first.as_ref().ok())
+            .expect("the walker made at least one observation")
+            .clone();
+        on_the_next_contig.region = crate::ng::types::GenomeRegion {
+            contig: ContigId(1),
+            start: Position(150),
+            end: Position(150),
+        };
+        drawn.push(Ok(on_the_next_contig));
         drawn.push(Err(RunError::SourceFailed {
             sample: "zeta".to_owned(),
             reached: WalkProgress::NothingYet,
@@ -5417,10 +5566,10 @@ mod records_handed_over_as_the_run_finishes_them {
         };
         let mut handed = 0;
         let outcome = call_cohort_from_sources_handing_each_record_over(
-            ObservationCache::over(vec![drawn.into_iter()]),
+            ObservationCache::over(vec![drawn.into_iter()], Box::new(reference_for_the_merge)),
             inputs,
             &the_shipped_genotyper(),
-            &mut |_record| {
+            &mut |_record, _window_coverage| {
                 handed += 1;
                 Err::<(), std::io::Error>(std::io::Error::other("the disk is full"))
             },
@@ -5456,10 +5605,13 @@ mod records_handed_over_as_the_run_finishes_them {
     fn records_of(caller: AlignedFilesVariantCaller) -> (Vec<VcfRecord>, WrittenCohort) {
         let mut records = Vec::new();
         let written = caller
-            .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |record| {
-                records.push(record.clone());
-                Ok::<(), std::io::Error>(())
-            })
+            .call_cohort_handing_each_record_over(
+                &the_shipped_genotyper(),
+                &mut |record, _window_coverage| {
+                    records.push(record.clone());
+                    Ok::<(), std::io::Error>(())
+                },
+            )
             .expect("the fixture cohort calls and every record is taken");
         (records, written)
     }
@@ -5630,10 +5782,13 @@ mod records_handed_over_as_the_run_finishes_them {
 
         let mut taken = 0;
         let stopped = open_over(std::slice::from_ref(&zeta), &reference)
-            .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |_record| {
-                taken += 1;
-                Err(std::io::Error::other("the disk is full"))
-            })
+            .call_cohort_handing_each_record_over(
+                &the_shipped_genotyper(),
+                &mut |_record, _window_coverage| {
+                    taken += 1;
+                    Err(std::io::Error::other("the disk is full"))
+                },
+            )
             .expect_err("a refused record ends the run");
 
         assert_eq!(taken, 1, "the sink is not called again after it refuses");
@@ -5788,9 +5943,10 @@ mod records_handed_over_as_the_run_finishes_them {
         let mut writer = VcfWriter::create(&path, metadata, Ploidy::try_new(2).expect("a diploid"))
             .expect("the output opens");
         let written = caller
-            .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |record| {
-                writer.write_record(record)
-            })
+            .call_cohort_handing_each_record_over(
+                &the_shipped_genotyper(),
+                &mut |record, _window_coverage| writer.write_record(record),
+            )
             .expect("calls");
         writer.finish().expect("the file is renamed into place");
 
@@ -6013,9 +6169,10 @@ mod records_handed_over_as_the_run_finishes_them {
                 VcfWriter::create(&path, metadata, Ploidy::try_new(2).expect("a diploid"))
                     .expect("the output opens");
             let written = caller
-                .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |record| {
-                    writer.write_record(record)
-                })
+                .call_cohort_handing_each_record_over(
+                    &the_shipped_genotyper(),
+                    &mut |record, _window_coverage| writer.write_record(record),
+                )
                 .expect("the mixed cohort calls");
             writer.finish().expect("the file is renamed into place");
             (std::fs::read(&path).expect("the VCF is there"), written)
@@ -6414,10 +6571,13 @@ mod records_handed_over_as_the_run_finishes_them {
                 "the record path must take the parallel sweep here, not its serial fallback",
             );
             open_over_the_tract_ground_with(&paths, &reference, MergeParameters::DEFAULT)
-                .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |record| {
-                    records.push(record.clone());
-                    Ok::<(), std::io::Error>(())
-                })
+                .call_cohort_handing_each_record_over(
+                    &the_shipped_genotyper(),
+                    &mut |record, _window_coverage| {
+                        records.push(record.clone());
+                        Ok::<(), std::io::Error>(())
+                    },
+                )
                 .expect("the record path calls")
         });
 

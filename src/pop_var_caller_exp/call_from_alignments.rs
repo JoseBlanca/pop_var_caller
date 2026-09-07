@@ -514,7 +514,11 @@ pub fn run_call_from_alignments(
     let written = caller
         .call_cohort_handing_each_record_over(
             &SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior),
-            &mut |record| writer.write_record(record),
+            // **The slice is ignored, and that is the point of the signature.** The window
+            // coverage travels beside the record for the hidden-duplication filter to read; a
+            // run writing a VCF has no field for it, and writes byte for byte what it wrote
+            // before this measurement existed.
+            &mut |record, _window_coverage| writer.write_record(record),
         )
         .map_err(|source| CallFromAlignmentsCliError::Run { source })?;
 
