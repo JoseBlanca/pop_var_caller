@@ -29,6 +29,7 @@ use std::io::SeekFrom;
 
 use noodles_core::Position as RecordPosition;
 use noodles_cram as cram;
+use noodles_cram::io::reader::{ReferenceExtent, SequenceExtent, SequenceWindow};
 use noodles_fasta as fasta;
 use noodles_sam as sam;
 use noodles_sam::alignment::RecordBuf;
@@ -37,7 +38,8 @@ use noodles_sam::alignment::record::{Flags, MappingQuality};
 
 use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
 use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
-use crate::ng::types::ReadGroupId;
+use crate::ng::ref_seq::RawRefSeq;
+use crate::ng::types::{ContigId, ReadGroupId};
 
 /// One CRAM container, decoded and held in two flat buffers.
 ///
@@ -65,6 +67,20 @@ pub(crate) struct DecodedContainer {
     /// Every record's CIGAR operations, back to back. Separate from [`payload`](Self::payload)
     /// because an `Op` is not a byte and packing it into one would mean encoding and decoding it.
     cigar_ops: Vec<Op>,
+}
+
+/// The buffers one decode reuses for every record it unpacks.
+///
+/// A CRAM stores a mapped read's bases as differences from the reference and its CIGAR as a
+/// feature list, so both have to be rebuilt somewhere before they can be copied into the
+/// container's flat buffers. These are that somewhere, and they are cleared and refilled per
+/// record rather than rebuilt, so a container of ten thousand reads grows them to the length of
+/// its longest read and no further.
+#[derive(Default)]
+struct RecordScratch {
+    bases: Vec<u8>,
+    quality_scores: Vec<u8>,
+    cigar: Vec<Op>,
 }
 
 /// One read in its packed form: where its bytes are in the container's flat buffers, and every
@@ -161,6 +177,48 @@ impl DecodedContainer {
     /// test** — building the input costs 4 GiB of memory. The refusal they propagate is pinned
     /// where the truncation would happen instead, on [`Span::new`], which a test can call
     /// directly. Recorded so a coverage audit does not re-derive it.
+    fn push_cram_record(
+        &mut self,
+        record: &cram::Record<'_>,
+        header: &sam::Header,
+        owner: ReadGroupId,
+        scratch: &mut RecordScratch,
+    ) -> io::Result<()> {
+        use noodles_sam::alignment::Record as _;
+
+        let name = record
+            .name_bytes()
+            .map(|name| self.append_bytes(name))
+            .transpose()?;
+
+        record.write_bases_into(&mut scratch.bases);
+        let sequence = self.append_bytes(&scratch.bases)?;
+
+        record.write_quality_scores_into(&mut scratch.quality_scores);
+        let quality_scores = self.append_bytes(&scratch.quality_scores)?;
+
+        let cigar_start = self.cigar_ops.len();
+        record.write_cigar_into(&mut scratch.cigar);
+        self.cigar_ops.extend_from_slice(&scratch.cigar);
+        let cigar = Span::new(cigar_start, self.cigar_ops.len())?;
+
+        self.index.push(PackedReadEntry {
+            owner,
+            flags: record.flags()?,
+            mapping_quality: record.mapping_quality().transpose()?,
+            reference_sequence_id: record.reference_sequence_id(header).transpose()?,
+            alignment_start: record.alignment_start().transpose()?,
+            mate_reference_sequence_id: record.mate_reference_sequence_id(header).transpose()?,
+            mate_alignment_start: record.mate_alignment_start().transpose()?,
+            template_length: record.template_length()?,
+            name,
+            sequence,
+            quality_scores,
+            cigar,
+        });
+        Ok(())
+    }
+
     fn push(&mut self, record: &RecordBuf, owner: ReadGroupId) -> io::Result<()> {
         let name = record
             .name()
@@ -280,9 +338,10 @@ impl DecodedContainer {
 pub(crate) fn decode_container_at(
     reader: &mut cram::io::Reader<File>,
     header: &sam::Header,
-    repository: &fasta::Repository,
     resolution: &ReadGroupResolution,
     offset: u64,
+    // The reference bases each slice is decoded against, one span at a time.
+    reference: &dyn RawRefSeq,
 ) -> io::Result<Option<DecodedContainer>> {
     reader.seek(SeekFrom::Start(offset))?;
 
@@ -315,26 +374,142 @@ pub(crate) fn decode_container_at(
         payload: Vec::new(),
         cigar_ops: Vec::new(),
     };
-    // **One buffer for every record in this container, not one per record.** The conversion
-    // below is `RecordBuf::default()` followed by `try_clone_from_alignment_record`, and a
-    // fresh destination builds each field from capacity zero — the name, the CIGAR, and a
-    // quality-score push loop that doubles 0 → 4 → … → 256 for a 150-base read. Reused, the
-    // clone `clear()`s and refills buffers that are already the right size, so the growth is
-    // paid once per container rather than once per record.
-    let mut record_buf = RecordBuf::default();
+    // **One set of buffers for every record in this container, not one per record.** Each
+    // record's bases, quality scores and CIGAR are written into these and then copied into the
+    // container's flat buffers; reused, they grow to the longest read of the container and no
+    // further.
+    let mut scratch = RecordScratch::default();
+    // **The windows are their own buffers, not `scratch`'s, and the borrow checker is why.**
+    // The decoded records borrow them for as long as they live, while `scratch` is borrowed
+    // *mutably* to build each of them — so the two cannot be fields of one struct. Reused across
+    // the container's slices, each grows to the widest span this file has met and no further.
+    //
+    // **Several, because a slice may hold reads from several contigs.** Almost every slice holds
+    // one and uses `windows[0]` alone; the exception is set out at the `SeveralSequences` arm
+    // below. The `Vec` is reused, so a container of ordinary slices allocates one buffer for its
+    // whole life.
+    let mut windows: Vec<Vec<u8>> = Vec::new();
+    // **Empty, and nothing reads it.** noodles takes a repository by value on the record surfaces
+    // ng calls; this one's adapter serves nothing, so the bases a record is rebuilt from can only
+    // be a window fetched here (`alignment_cursor.md` §10 point 2). The clones are pointer bumps —
+    // a `Repository` is an `Arc` inside.
+    let no_repository = fasta::Repository::default();
     for slice in container.slices() {
         let slice = slice?;
         // The decoded block data and the borrowed records live only within this block;
         // copying each record's bytes into the container's own buffers here keeps the result
         // independent of those borrows.
         let (core_data_src, external_data_srcs) = slice.decode_blocks()?;
-        for record in slice.records(
-            repository.clone(),
-            header,
-            &compression_header,
-            &core_data_src,
-            &external_data_srcs,
-        )? {
+
+        // **A slice usually says which bases it needs before any of them are read.** Its
+        // header names the contig and the first and last position its records touch, and it is
+        // parsed before a block is decoded — so the decode fetches exactly that stretch rather
+        // than holding a chromosome. Three answers, and each obliges something different
+        // (`alignment_cursor.md` §10 point 2, and the fork's `ReferenceExtent`).
+        let extent = slice.reference_extent();
+
+        // Fetch first, into buffers that outlive the records: `sequence_windows` below borrows
+        // them, and the records borrow that.
+        let mut wanted: Vec<SequenceExtent> = Vec::new();
+        match extent {
+            ReferenceExtent::OneSequence {
+                reference_sequence_id,
+                start,
+                end,
+            } => wanted.push(SequenceExtent {
+                reference_sequence_id,
+                start,
+                end,
+            }),
+            // **The slice holds reads from several contigs, and its header names none of them.**
+            // So the records are decoded once to ask *them* where they sit — which needs no
+            // reference at all, because a read's contig, start and CIGAR come out of the file and
+            // only its bases are rebuilt — and then decoded again against the windows that answer
+            // names. The blocks are decompressed once, above; what repeats is the cheap half.
+            //
+            // **samtools writes such a slice whenever slices would be under-full**, which on a
+            // reference of many short contigs is most of them, so this is an ordinary path for a
+            // draft assembly and an unused one for a chromosome-scale reference (`cram_encode.c`
+            // merges across contigs at `c->curr_rec < c->max_rec/4+10`).
+            ReferenceExtent::SeveralSequences => {
+                wanted = slice.record_extents(
+                    header,
+                    &compression_header,
+                    &core_data_src,
+                    &external_data_srcs,
+                )?;
+            }
+            // Every record is unplaced, so nothing is rebuilt against a reference and no bases
+            // are wanted. This is the one arm that genuinely needs none.
+            ReferenceExtent::Unmapped => {}
+        }
+
+        windows.resize_with(wanted.len().max(windows.len()), Vec::new);
+        for (want, buffer) in wanted.iter().zip(windows.iter_mut()) {
+            let contig = ContigId(u32::try_from(want.reference_sequence_id).map_err(|_| {
+                io::Error::other(format!(
+                    "slice names reference sequence {}, which is not a contig index this \
+                     reference can hold",
+                    want.reference_sequence_id
+                ))
+            })?);
+            let length = (usize::from(want.end) - usize::from(want.start) + 1) as u64;
+            reference
+                .fetch_raw_into(contig, usize::from(want.start) as u64, length, buffer)
+                .map_err(|source| {
+                    io::Error::other(format!(
+                        "the reference could not serve the {length} bases from {} that a CRAM \
+                         slice is stored against: {source}",
+                        usize::from(want.start)
+                    ))
+                })?;
+        }
+        let sequence_windows: Vec<SequenceWindow<'_>> = wanted
+            .iter()
+            .zip(windows.iter())
+            .map(|(want, buffer)| SequenceWindow {
+                reference_sequence_id: want.reference_sequence_id,
+                bases: buffer.as_slice(),
+                start: want.start,
+            })
+            .collect();
+
+        // **The auxiliary tags are not read at all**, where the file's own encoding lets them
+        // be skipped safely — noodles decides that from the compression header and falls back
+        // to reading them when it cannot. ng reads exactly one thing out of a record's tags,
+        // the read group, and a CRAM does not store that as a tag: it stores a *number*, an
+        // index into the header's `@RG` list, which `resolve_read_group` below gets from that
+        // number rather than from any tag. So nothing here loses an answer.
+        //
+        // **All three arms skip the tags; they differ only in where the bases come from.** Both
+        // windowed arms hand over what was fetched, and noodles refuses — naming both spans —
+        // rather than decoding a record against bases that fall short of it.
+        let records = match extent {
+            ReferenceExtent::OneSequence { start, .. } => slice.records_over_window(
+                sequence_windows[0].bases,
+                start,
+                no_repository.clone(),
+                header,
+                &compression_header,
+                &core_data_src,
+                &external_data_srcs,
+            )?,
+            ReferenceExtent::SeveralSequences => slice.records_over_windows(
+                &sequence_windows,
+                header,
+                &compression_header,
+                &core_data_src,
+                &external_data_srcs,
+            )?,
+            ReferenceExtent::Unmapped => slice.records_discarding_tags(
+                no_repository.clone(),
+                header,
+                &compression_header,
+                &core_data_src,
+                &external_data_srcs,
+            )?,
+        };
+        for record in records {
             // **Who owns this record is decided before anything is built.** A CRAM stores
             // the read group as a number, so asking costs an index lookup into the header
             // and no allocation — where building the `RecordBuf` below copies the name,
@@ -346,8 +521,7 @@ pub(crate) fn decode_container_at(
                 decoded.other_sample_records += 1;
                 continue;
             };
-            record_buf.try_clone_from_alignment_record(header, &record)?;
-            decoded.push(&record_buf, owner)?;
+            decoded.push_cram_record(&record, header, owner, &mut scratch)?;
         }
     }
 

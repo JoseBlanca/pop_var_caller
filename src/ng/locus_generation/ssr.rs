@@ -2202,7 +2202,7 @@ impl<A> RepeatDelimiter for A where
 /// §8) — **and D3 took most of its cost away**: the factory is called once per file per
 /// *chromosome* now, where it used to run at every locus, so a file-backed `R` whose factory
 /// reloads is no longer the per-locus tax it was.
-pub struct SsrGenerator<R: RawRefSeq + EvictableRefSeq, A: RepeatDelimiter> {
+pub struct SsrGenerator<R: RawRefSeq + EvictableRefSeq + Send + 'static, A: RepeatDelimiter> {
     /// The reference the margin fetch reads the flanks from.
     reference: R,
     /// Builds a fresh read reference for the cursor's mismatch-fraction filter — one per file,
@@ -2273,7 +2273,7 @@ pub struct SsrGenerator<R: RawRefSeq + EvictableRefSeq, A: RepeatDelimiter> {
 
 impl<R> SsrGenerator<R, SsrUnitRobustAligner<PerQualityEmission>>
 where
-    R: RefSeq + ContigTable + RawRefSeq + EvictableRefSeq,
+    R: RefSeq + ContigTable + RawRefSeq + EvictableRefSeq + Send + 'static,
 {
     /// A generator with the **recommended** delimiter — algorithm 4u, the *unit-robust* aligner over
     /// production's [`PerQualityEmission`] table. It is algorithm 4 (unit-slip) hardened by the
@@ -2304,7 +2304,7 @@ where
 
 impl<R, A> SsrGenerator<R, A>
 where
-    R: RefSeq + ContigTable + RawRefSeq + EvictableRefSeq,
+    R: RefSeq + ContigTable + RawRefSeq + EvictableRefSeq + Send + 'static,
     A: RepeatDelimiter,
 {
     /// Build a generator over `reference` (the margin fetch), `make_reference` (the read-query
@@ -2581,7 +2581,7 @@ pub struct SegmentDelimitations {
 
 impl<R, A> LocusGenerator<SsrSegment> for SsrGenerator<R, A>
 where
-    R: RefSeq + ContigTable + RawRefSeq + EvictableRefSeq,
+    R: RefSeq + ContigTable + RawRefSeq + EvictableRefSeq + Send + 'static,
     A: RepeatDelimiter,
 {
     fn begin_segment(&mut self, region: GenomeRegion) {
@@ -3267,7 +3267,7 @@ mod tests {
             contig: u32,
             name: &str,
         ) where
-            R: RefSeq + ContigTable + RawRefSeq + EvictableRefSeq,
+            R: RefSeq + ContigTable + RawRefSeq + EvictableRefSeq + Send + 'static,
             A: RepeatDelimiter,
         {
             let segment =

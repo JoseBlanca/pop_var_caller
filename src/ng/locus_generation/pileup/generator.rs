@@ -769,7 +769,10 @@ struct RegionWalk {
 /// per segment would give two fragments of different regions the same id (spec
 /// §8). What that costs — `reset()` between segments, and counters that must be
 /// folded as deltas because `reset()` preserves them — is C3's.
-pub struct PileupGenerator<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> {
+pub struct PileupGenerator<
+    R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static,
+    P: ReadPreparer,
+> {
     /// The reference the walk fetches REF bases from. Built once, for the run,
     /// and handed to each walk as a shared handle.
     reference: Arc<R>,
@@ -884,7 +887,9 @@ pub struct PileupGenerator<R: RawRefSeq + EvictableRefSeq + ContigTable, P: Read
     failed: bool,
 }
 
-impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenerator<R, P> {
+impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPreparer>
+    PileupGenerator<R, P>
+{
     /// Build a generator over `reference` (the walk's REF fetches),
     /// `make_reference` (the cursor's per-file accessor factory) and
     /// `preparer` (per-read canonicalisation), with `config` checked before
@@ -1389,8 +1394,8 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
 /// the tests in this module drive: an inherent method wins name resolution
 /// against a trait method, so `generator.next_locus(&reads)` is the two-argument
 /// one below and never a mis-resolved trait call.
-impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> LocusGenerator<()>
-    for PileupGenerator<R, P>
+impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPreparer>
+    LocusGenerator<()> for PileupGenerator<R, P>
 {
     fn begin_segment(&mut self, region: GenomeRegion) {
         PileupGenerator::begin_segment(self, region);
@@ -1648,7 +1653,7 @@ mod tests {
     }
 
     /// Drain a whole segment: every locus `next_locus` yields for `region`.
-    fn loci_of<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer>(
+    fn loci_of<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPreparer>(
         generator: &mut PileupGenerator<R, P>,
         region: GenomeRegion,
         reads: &SampleReads,

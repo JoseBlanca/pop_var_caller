@@ -27,6 +27,7 @@
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
+use crate::bam::index_preflight::AlignmentFileKind;
 use crate::ng::calling::allele_candidates::generic::select_generic;
 use crate::ng::calling::allele_candidates::ssr::{
     SsrLocusSelection, SsrSelectionConfig, select_ssr,
@@ -1735,14 +1736,33 @@ pub(super) fn refuse_parameters_assembled_for_another_cohort(
 ///   into memory at open and an open
 ///   [`AlignmentFile`](crate::ng::read::input::open_bam::AlignmentFile) keeps no handle, so
 ///   neither half of the spec's sentence is where the cost is.
-/// - **A cursor costs 2 a file** (4 → 130 for 63 cursors, 2.00 a file): one for the file's own
-///   reader, and one for the reference accessor [`SampleReads::cursor`] mints per file, which
-///   opens the FASTA. A run holds one cursor per file for the whole walk (spec §5.1), so this is
-///   the shape the refusal has to size for.
+/// - **A cursor over a BAM costs 2 a file** (4 → 130 for 63 cursors, 2.00 a file): one for the
+///   file's own reader, and one for the reference reader [`AlignmentFile::cursor`] mints for the
+///   mismatch filter, which opens the FASTA. A run holds one cursor per file for the whole walk
+///   (spec §5.1), so this is the shape the refusal has to size for.
 ///
 /// **Milestone E can move it**: spec §11's question 2 puts several callers in flight, and nobody
 /// has counted what that opens. Re-run the probe there.
-const DESCRIPTORS_AN_ALIGNMENT_FILE_NEEDS: u64 = 2;
+const DESCRIPTORS_A_BAM_NEEDS: u64 = 2;
+
+/// Descriptors one **CRAM** needs — a BAM's, and one more.
+///
+/// **Arithmetic, not measurement, and that is the difference from the constant above.** The
+/// tomato cohort the probe was run on is BAM, so nothing has counted a CRAM cohort's descriptors.
+/// What is known is where the third comes from: a CRAM stores its reads as differences from the
+/// reference, so its decode reads bases too, and it does that through a reference reader of its
+/// own rather than sharing the mismatch filter's (`alignment_cursor.md` §10 point 1). That reader
+/// opens the FASTA at `AlignmentFile::cursor`, because the servability check fetches through it.
+///
+/// **Counted apart rather than folded into one figure**, because rounding a BAM up to three would
+/// refuse cohorts that fit: at a thousand samples it demands a thousand descriptors nothing opens.
+/// The guard must never sit *below* what the code opens — this constant's neighbour records that
+/// failing once already — but sitting needlessly above it turns a safety check into a limit of its
+/// own.
+///
+/// **Re-run `examples/ng_open_cohort_descriptors.rs` on a CRAM cohort** to replace this with a
+/// measurement; the expectation it should meet is 3 a file.
+const DESCRIPTORS_A_CRAM_NEEDS: u64 = 3;
 
 /// Descriptors one sample's **locus generator** holds, on top of what its files cost.
 ///
@@ -1796,9 +1816,17 @@ fn refuse_if_more_descriptors_are_needed_than_allowed(
         .iter()
         .map(|(_, read_group)| read_group.file.as_ref())
         .collect();
-    let alignment_files = files.len();
+    // **Counted by format, because a CRAM costs one more than a BAM** — its decode reads the
+    // reference through a reader of its own. A path this run cannot classify is counted as a
+    // CRAM: the cursor would refuse it later either way, and the safe direction for a *budget*
+    // is the larger figure.
+    let cram_files = files
+        .iter()
+        .filter(|path| AlignmentFileKind::from_path(path) != Some(AlignmentFileKind::Bam))
+        .count();
+    let bam_files = files.len() - cram_files;
     let samples = read_groups.read_groups_per_sample().len();
-    let needed = descriptors_needed_for(alignment_files, samples);
+    let needed = descriptors_needed_for(bam_files, cram_files, samples);
 
     let Some(limit) = limit else {
         return Ok(());
@@ -1807,8 +1835,10 @@ fn refuse_if_more_descriptors_are_needed_than_allowed(
     if needed > limit {
         return Err(RunError::NotEnoughFileDescriptors {
             samples,
-            alignment_files,
-            per_file: DESCRIPTORS_AN_ALIGNMENT_FILE_NEEDS,
+            bam_files,
+            cram_files,
+            per_bam: DESCRIPTORS_A_BAM_NEEDS,
+            per_cram: DESCRIPTORS_A_CRAM_NEEDS,
             per_sample: DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES,
             allowance: DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES,
             needed,
@@ -1820,8 +1850,9 @@ fn refuse_if_more_descriptors_are_needed_than_allowed(
 
 /// How many descriptors a walking run needs: **two terms and an allowance**, because two of the
 /// four a sample costs are per file and two are per sample.
-fn descriptors_needed_for(alignment_files: usize, samples: usize) -> u64 {
-    alignment_files as u64 * DESCRIPTORS_AN_ALIGNMENT_FILE_NEEDS
+fn descriptors_needed_for(bam_files: usize, cram_files: usize, samples: usize) -> u64 {
+    bam_files as u64 * DESCRIPTORS_A_BAM_NEEDS
+        + cram_files as u64 * DESCRIPTORS_A_CRAM_NEEDS
         + samples as u64 * DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES
         + DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES
 }
@@ -2559,14 +2590,16 @@ mod construction_checks {
         match &error {
             RunError::NotEnoughFileDescriptors {
                 samples,
-                alignment_files,
+                bam_files,
+                cram_files,
                 needed,
                 limit,
                 ..
             } => {
                 assert_eq!(*samples, 1);
-                assert_eq!(*alignment_files, 1);
-                assert_eq!(*needed, descriptors_needed_for(1, 1));
+                assert_eq!(*bam_files, 1);
+                assert_eq!(*cram_files, 0, "a BAM is not counted as a CRAM");
+                assert_eq!(*needed, descriptors_needed_for(1, 0, 1));
                 assert_eq!(*limit, 4);
             }
             other => panic!("expected NotEnoughFileDescriptors, got {other:?}"),
@@ -2585,8 +2618,9 @@ mod construction_checks {
             "names the limit, not just a digit of it: {message}",
         );
         assert!(
-            message.contains("1 alignment files at 2 each"),
-            "shows the per-file term: {message}",
+            message.contains("1 BAMs at 2 each and 0 CRAMs at 3 each"),
+            "shows both per-file terms, because a CRAM costs one more than a BAM and an \
+             operator has to be able to reproduce the total: {message}",
         );
         assert!(
             message.contains("1 samples at 2 more each"),
@@ -2612,7 +2646,7 @@ mod construction_checks {
 
         refuse_if_more_descriptors_are_needed_than_allowed(
             &read_groups,
-            Some(descriptors_needed_for(1, 1)),
+            Some(descriptors_needed_for(1, 0, 1)),
         )
         .expect("exactly enough is enough");
         refuse_if_more_descriptors_are_needed_than_allowed(&read_groups, None)
@@ -2629,17 +2663,26 @@ mod construction_checks {
     #[test]
     fn the_descriptor_count_grows_with_files_and_with_samples_separately() {
         assert_eq!(
-            descriptors_needed_for(1, 1) + 2 * DESCRIPTORS_AN_ALIGNMENT_FILE_NEEDS,
-            descriptors_needed_for(3, 1),
+            descriptors_needed_for(1, 0, 1) + 2 * DESCRIPTORS_A_BAM_NEEDS,
+            descriptors_needed_for(3, 0, 1),
             "a sample sequenced across three lanes pays for three files and one walk",
         );
         assert_eq!(
-            descriptors_needed_for(1, 1) + 2 * DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES,
-            descriptors_needed_for(1, 3),
+            descriptors_needed_for(1, 0, 1) + 2 * DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES,
+            descriptors_needed_for(1, 0, 3),
             "three samples sharing one file pay for one file and three walks",
         );
+        // **A CRAM costs one more than a BAM, and the budget has to know.** Its decode reads
+        // the reference through a reader of its own, which opens the FASTA at cursor
+        // construction — so a guard that priced a CRAM as a BAM would pass a cohort that then
+        // meets `EMFILE`, which is the failure this whole check exists to prevent.
         assert_eq!(
-            descriptors_needed_for(0, 0),
+            descriptors_needed_for(0, 1, 1),
+            descriptors_needed_for(1, 0, 1) + 1,
+            "a CRAM costs one descriptor more than a BAM: its decode's reference reader",
+        );
+        assert_eq!(
+            descriptors_needed_for(0, 0, 0),
             DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES,
             "with no cohort at all, only the run's own allowance is needed",
         );
@@ -3071,15 +3114,15 @@ mod checks_that_needed_their_own_fixtures {
         match &error {
             RunError::NotEnoughFileDescriptors {
                 samples,
-                alignment_files,
+                bam_files,
                 needed,
                 ..
             } => {
                 assert_eq!(*samples, 1);
-                assert_eq!(*alignment_files, 2);
+                assert_eq!(*bam_files, 2);
                 assert_eq!(
                     *needed,
-                    descriptors_needed_for(2, 1),
+                    descriptors_needed_for(2, 0, 1),
                     "two files and one sample, each counted on its own term",
                 );
             }
@@ -3101,15 +3144,15 @@ mod checks_that_needed_their_own_fixtures {
         match &error {
             RunError::NotEnoughFileDescriptors {
                 samples,
-                alignment_files,
+                bam_files,
                 needed,
                 ..
             } => {
                 assert_eq!(*samples, 2);
-                assert_eq!(*alignment_files, 1);
+                assert_eq!(*bam_files, 1);
                 assert_eq!(
                     *needed,
-                    descriptors_needed_for(1, 2),
+                    descriptors_needed_for(1, 0, 2),
                     "one file and two samples, each counted on its own term",
                 );
             }

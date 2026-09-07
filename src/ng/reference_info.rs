@@ -85,7 +85,7 @@ pub struct ReferenceInfo {
     /// than incidental**: a `.fai` describes a genome's geometry but holds no
     /// bases, so a consumer that needs the sequence itself — CRAM decoding is
     /// the one that exists — cannot proceed from it. Carrying the path lets
-    /// such a consumer build a `fasta::Repository`, and lets it fail with a
+    /// such a consumer open a reader over the FASTA, and lets it fail with a
     /// clear message when it cannot (owner, 2026-07-20).
     ///
     /// Not used for anything this module does; it is provenance passed through

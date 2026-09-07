@@ -179,12 +179,14 @@ after: the path, the header, the parsed index, the chromosome list, the read-gro
 for CRAM only — a **way to fetch reference bases**, which CRAM needs because it decodes against
 the reference.
 
-That last one is a way to get bases, not the sequence itself. `OpenReference` holds a lazily-built
-accessor (`bases: OnceLock<fasta::Repository>`, `reference.rs:116-143`), so a run over BAM never
-opens the FASTA at all. A run over CRAM keeps resident only the chromosomes that a cursor is
-currently reading — normally one, briefly two while workers cross a boundary — and frees each when
-the last cursor on it goes away. Section 10 gives the rule and why the two modes that exist today
-do not fit. Holding a whole reference would cost more memory than the entire walk.
+That last one is a way to get bases, not the sequence itself. A CRAM slice states in its header
+which contig it lies on and the first and last position its records touch; since 2026-09-07 the
+decode asks for exactly those bases, through **a windowed reference reader of its own** — minted
+by the same factory that gives every cursor the one its mismatch filter uses (§9). So a run over
+BAM never opens the FASTA, and a run over CRAM holds, per open file, one buffer the size of the
+largest slice span that file has met: about 9 kb on a real coordinate-sorted file. Nothing
+chromosome-sized is resident for the decode. Section 10 gives the rule, the measured spans, and
+what this replaced.
 
 **`AlignmentCursor` is the iterator.** The open file descriptor, the position in the file, the
 reads being kept, the last region served. None of this can be shared, ever — it is one consumer's
@@ -193,7 +195,7 @@ place in the file.
 | | shared between threads? | how |
 |---|---|---|
 | path, header, index, chromosome list, read groups | yes — never changes | one shared copy |
-| the CRAM reference bases | yes — one copy per chromosome being read (section 10) | shared while a cursor needs it, freed when none does |
+| the CRAM reference bases | **no** — one window per CRAM reader (section 10) | fetched per slice through a windowed reference reader the decode owns |
 | file descriptor, position, kept reads, last region served, tallies | **no** | owned by one cursor |
 
 **Nothing on the shared side is written to, and the file keeps no counters.** It keeps two kinds
@@ -593,20 +595,124 @@ refused region both returns the error and leaves the cursor serving its own chro
 used from many threads; a cursor cannot be, in the same way and for the same reason as the
 windowed reference reader — an open file position belongs to one consumer.
 
-### The CRAM reference bases — unchanged, and here is why the redesign is deferred
+### The CRAM reference bases — a window per slice, from a reader of the decode's own
 
-A cursor covers one chromosome, so it calls `bases_for_contig` **once at construction** and holds
-the handle for its life. For every caller that exists today — all single-threaded — the accessor's
-existing one-chromosome bound is then exactly right: one chromosome resident, cleared when the
-walk moves on.
+**Amended 2026-09-07 (owner's ruling on the evaluation in chat).** Until then this section kept
+the whole-chromosome repository: a cursor called `OpenReference::bases_for_contig` once at
+construction and held one chromosome's bases for its life, and a registry of per-chromosome
+references was deferred because the fan-out that motivated it did not exist. What retired that
+was not the fan-out but a measurement: noodles holds a chromosome at about two bytes a base —
+`Repository::get` clones the contig into a cache that never evicts, so the peak holds both — which
+is 198 MB for tomato chromosome 1 (90.9 Mb) and 493 MB for human chromosome 1, against a decode
+that never needs more than one slice's span at a time
+([`cram_read_path_2026-09-04.md`](../research/cram_read_path_2026-09-04.md) §7).
 
-**An earlier draft replaced that with a registry of weak per-chromosome references, and it is now
-deferred (§12).** The design is sound and the motivation is real — workers on different
-chromosomes evicting each other's bases — but the motivation is the fan-out, *which does not
-exist*. Meanwhile every measurement behind this document is BAM, and **a BAM run never opens the
-FASTA at all** (perf review L4 prices this at "zero cost today"). Rebuilding a piece of the
-cohort-memory design on the strength of a workload nobody has run is the kind of unmeasured work
-this document is otherwise arguing against.
+**The rule.** The CRAM decode reads its reference bases one slice's span at a time, from **a
+`RawRefSeq` reader of its own**, minted by the same factory the cursor's comes from. It holds no
+repository and nothing chromosome-sized.
+
+1. **Where the bases come from, and why the decode gets its own reader.** A reference reader is a
+   *stateful* thing — an open file position and a resident window — so this project gives one to
+   every consumer that reads bases and shares none. `SampleReads::cursor` takes a **factory**
+   rather than an accessor for exactly that reason, and one worker already mints several: the
+   pileup generator's own, its left-aligner's, the tract generator's own, and one per file for
+   each generator's cursor (`walker.rs:1612-1641`; `run_streaming.md` §9, *"One accessor per
+   worker per file; wrapping a shared one in a lock serialises the walk's hottest path"*). The
+   CRAM decode is a new consumer of bases, so it takes the same deal: `AlignmentFile::cursor`
+   receives the factory, mints one reader for the cursor's mismatch filter as it always has, and
+   on the CRAM arm mints a **second** for the decode, which `CramAlignedReadsReader` owns for its
+   life as `Box<dyn RawRefSeq + Send>` and fetches from with `fetch_raw_into`.
+
+   **What is shared instead is the expensive part**, and it already is: `WindowedRefSeq::with_shared_index`
+   takes the parsed `.fai` and the contig table by `Arc`, so an extra reader costs about 18 µs
+   rather than 189 — 137 µs of that is not re-parsing the index and 34 µs is not re-cloning a
+   2,580-entry contig table on a GRCh38-shaped reference, measured. The 18 µs that remains is the
+   `open(2)` that owning a cursor into the FASTA actually means.
+
+   *Raw* bytes, not canonical: a CRAM reconstructs a read against the reference as written and
+   checks the slice's stored digest against the bases it was given, so the letters must be the
+   file's own.
+
+   **Nothing below `AlignmentFile::cursor` changes.** `AlignedReadsReader` and
+   `RegionRawAlignedReads` keep no reference bound, so filtering reads on flag and mapping quality
+   with no reference in scope stays constructible — the capability
+   [`read_filtering_stages.md`](read_filtering_stages.md) §5 corrected itself to state and
+   `read/reference_free_first_filter.rs` exists to pin.
+
+2. **Which bases.** `Slice::reference_span()` names the contig and the first and last position the
+   slice's records touch, from the slice header, before any block is decoded. The decode fetches
+   exactly that span into one buffer reused across the file's slices and decodes with
+   `records_over_window` (the vendored noodles, [`FORK.md`](../../../../vendor/noodles-cram/FORK.md)
+   §5). A slice with no single reference — an unmapped slice, or one spanning several contigs —
+   needs no external bases; it takes the existing no-window call, whose repository argument is
+   then an empty `fasta::Repository::default()` and is never consulted. A window that does not
+   cover the span is refused by noodles with both spans named, never decoded short.
+
+3. **What is resident, measured.** Per open CRAM, one buffer that grows to the largest slice span
+   that file has met and no further. Slice spans read out of the `.crai` of every CRAM in this
+   repository:
+
+   | file | slices | mean span | median | p95 | max |
+   |---|---:|---:|---:|---:|---:|
+   | `tomato_big_cram/DRR000741.p1` — whole genome, samtools 1.21, **a real input** | 112,140 | 7,075 bp | 8,139 | 9,248 | 349,769 |
+   | `human_genome_bottle/HG002_reads_selected_1000_rg` — a region subset | 1,081 | 2,475,840 bp | 245,522 | 10,390,970 | 54,570,373 |
+   | `tomato1/SRR7279481.p1.bench` — a region subset | 65 | 8,228,451 bp | 4,116,639 | 25,002,061 | 40,254,864 |
+
+   The two subset files are the artefact the research note's §2 documents: a slice holds a fixed
+   number of records, so on a file cut down to scattered windows one slice's records run from one
+   window to the next and its span covers the megabases between. **Do not size anything against
+   them.** On the real file, 63 open CRAMs hold at most 63 × 350 kB = 22 MB where one chromosome
+   cost 198 MB, and the cost scales as *files × span* rather than staying fixed — which is the
+   right direction for a caller that must run at a thousand samples. **A real whole-genome human
+   CRAM has not been measured**; samtools' default of 10,000 records a slice at 30× and 150 bp
+   reads gives a span near 50 kb, and that is arithmetic, not a measurement. If a real file shows
+   megabase spans, the shared cohort window the research note §7 proposed is the design to build
+   instead, and §12 keeps it.
+
+4. **Two hazards a shared reader would have carried, and this shape does not.** The walk evicts
+   *its own* reader's window behind its position (`evict_before`); the decode's reader is a
+   different object, so an eviction can never make the decode re-read, and the two never contend
+   for one lock. A draft of this section shared one reader between the decode and the mismatch
+   filter and had to state an obligation instead — that no path may fetch while holding a fetch
+   open, because `WindowedRefSeq`'s lock hangs on re-entry rather than panicking. **Owning
+   separate readers retires that obligation rather than documenting it.**
+
+5. **What the second reader costs, stated plainly.** One `open(2)` and one window per open CRAM —
+   about 9 kb on a real file (point 3), and about 18 µs to build (point 1). A run over BAM mints
+   nothing extra.
+
+   **The descriptor budget had to be told, and this is the part that could have gone wrong
+   quietly.** `run_streaming.md` §7.1a refuses at construction a cohort this process may not hold
+   open, and it sized a cursor at two descriptors a file — the file's reader and the mismatch
+   filter's reference reader. A CRAM's is now three, because the servability check fetches
+   through the decode's reader and a fetch is what opens the FASTA. A guard left at two would
+   have passed a CRAM cohort that then met `EMFILE` mid-genome, which is the exact failure it
+   exists to prevent and which its own doc records happening once before. So the constant is
+   **split by format** rather than raised: `DESCRIPTORS_A_BAM_NEEDS` stays 2 and
+   `DESCRIPTORS_A_CRAM_NEEDS` is 3, and the refusal counts the two kinds apart. Rounding a BAM up
+   to three instead would demand a thousand descriptors nothing opens at a thousand samples,
+   turning a safety check into a limit of its own. The BAM figure is measured; **the CRAM figure
+   is arithmetic** — no CRAM cohort's descriptors have been counted, and
+   `examples/ng_open_cohort_descriptors.rs` on one is what would replace it.
+
+   **The alternative was sharing the cursor's own reader**, reached either as an argument threaded
+   down `read_next` or as an `Arc` handle cloned into the CRAM reader. Both save the descriptor and
+   the 9 kb; both make this the first place in the tree where two consumers share one window, which
+   is the arrangement the factory exists to prevent; and the argument form additionally puts a
+   reference bound on `AlignedReadsReader` and `RegionRawAlignedReads`, which is what
+   `read_filtering_stages.md` §5 says must not happen. Ruled out by the owner, 2026-09-07.
+
+6. **What goes, what stays.** `OpenReference` keeps the reference's description and the question
+   it answers at open — *does this reference carry a FASTA, and does its `.fai` open* — so a CRAM
+   against a `.fai`-only reference is still refused at open (`CramNeedsReferenceFasta`) and a
+   missing `.fai` is still a fault at open rather than at the first query. It loses the repository,
+   the one-contig bound, `unbounded`, and `bases_for_contig`. `CramAlignedReadsReader` trades its
+   `repository` field for the reader of point 1. `AlignmentFile::cursor` takes the factory in place
+   of one accessor, and bounds it `R: RawRefSeq + ContigTable + Send + 'static` so the reader it
+   boxes keeps the cursor `Send` — every accessor handed to a cursor today already satisfies that.
+   The zero-length probe `cursor` already makes is what proves, per cursor, that the bases for its
+   chromosome can actually be served; **the decode's reader is probed the same way**, since a
+   factory that mints one good reader and one bad one is not a case worth trusting to luck.
 
 ## 11. How we will know it works
 
@@ -648,6 +754,11 @@ file changes all of them.
 - **The per-region reference-accessor factory** (perf review finding L2). The cursor is the
   natural owner of the reference accessor its mismatch filter needs. Home: fold in during
   implementation if it is free; otherwise its own change.
+- **One reference window shared by the whole cohort for the CRAM decode**
+  ([`cram_read_path_2026-09-04.md`](../research/cram_read_path_2026-09-04.md) §7). Not needed at
+  the slice spans measured on a real file (§10, point 3), where a window per cursor is a few
+  kilobytes. It returns only if a real whole-genome human CRAM shows megabase spans. Home: a
+  research note measuring such a file, then a revision of §10.
 
 ## 13. Decisions made, questions open
 
@@ -674,7 +785,8 @@ file changes all of them.
    handling at every call site.
 
    *Changing chromosome was restricted.* The cost is chromosome-sized rather than block-sized: on
-   CRAM it means re-reading the reference bases, hundreds of megabytes. The caller already has
+   CRAM it meant re-reading the reference bases, hundreds of megabytes, until §10 made the decode
+   windowed on 2026-09-07 — the rule stands on the two reasons that follow. The caller already has
    that boundary, since the region walk goes chromosome by chromosome. And nothing in a cursor
    survives the change anyway — kept reads and bases are both useless — so the rule states what is
    already true rather than imposing something. It also removes the swap logic and the
