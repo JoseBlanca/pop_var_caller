@@ -151,20 +151,26 @@ for byte, per sample. *Depends:* C2. *Source:* spec §3.4, §3.5.
 
 ### Milestone D — the three numbers the spec left to measurement
 
-**D1. ☐ The floor.** From the probe: the distribution of covered positions per window on the
+**D1. ✅ The floor.** From the probe: the distribution of covered positions per window on the
 tomato slice and on HG002; what share of windows fall under 50, 100, 200; the default written
 into the config with the distribution beside it in the report, and spec §3.3's OPEN closed.
-*Depends:* C3. *Source:* spec §3.3, §9.
+*Depends:* C3. *Source:* spec §3.3, §9. **Five stores rather than two, because the slice silences
+nothing and "HG002" names two benchmarks here whose intervals are 42-fold apart; 50 stands.**
 
-**D2. ☐ The bin scheme.** From the probe: each sample's fitted width, and the overflow fraction
+**D2. ✅ The bin scheme.** From the probe: each sample's fitted width, and the overflow fraction
 — windows past the range — on both benchmarks, against the fit's rejection guard at a fifth; the
 scale sample and the factor of ten confirmed or moved, spec §3.4's OPEN closed. *Depends:* C5.
-*Source:* spec §3.4, §9.
+*Source:* spec §3.4, §9. **All three constants kept; the finding that constrains a later change is
+that the scale sample is a prefix and reads about 13% shallow, so it and the range cannot be moved
+independently.**
 
-**D3. ☐ The memory, per sample.** Peak resident of a psp-mode run at 1, 6 and 63 samples on the
+**D3. ✅ The memory, per sample.** Peak resident of a psp-mode run at 1, 6 and 63 samples on the
 tomato slice, before and after this plan, with the per-sample slope reported against
 [`run_streaming.md`](../spec/run_streaming.md) §7.2's budget; the histogram's 80 kB and the
 look-ahead's held summaries priced separately. *Depends:* C5. *Source:* spec §3.4, §4, §5.
+**106.4 kB a sample for the pass and 368 kB at the peak, added up from the code and pinned by
+tests, because the whole-run measurement can only bound it at 1.8 MB — nine cohort sizes rather
+than three, since three cannot separate a slope from an intercept at this scatter.**
 
 > **Checkpoint D: the floor and the bins are measured defaults, and the cost is a number
 > against the budget. Pause for review.**

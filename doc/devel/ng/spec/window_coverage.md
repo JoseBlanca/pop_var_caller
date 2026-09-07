@@ -108,7 +108,17 @@ Production computes the same thing — the sum of `num_obs` over every allele at
 ([`pileup_to_psp.rs:101`](../../../../src/pileup/per_sample/pileup_to_psp.rs)) — and the filter
 was validated on it.
 
-Where the number comes from depends on the record's span, which every `Drawn` carries:
+Where the number comes from depends on the record's span, which every `Drawn` carries.
+
+**This span test is not the one the filter abandoned, and the two are worth keeping apart.** The
+filter ruled on 2026-09-07 that a locus occupying one position and one occupying several are
+scored alike — "once the depth of a multi-position locus is taken as one number for the whole
+span, span distinguishes nothing"
+([`hidden_paralog_filter.md`](hidden_paralog_filter.md) §9). That is a question about *how a locus
+is judged*. This one is about *where its depth is read from*, and it turns on a fact that has not
+changed: at a one-base locus no read's evidence can stop inside the locus, so the head already
+holds the number and no body need be decoded. Both are true at once, and the filter's own depth
+is the pair this produces.
 
 - **A record spanning one base: the head count.** At a single-base locus no read's witness can
   stop *inside* the locus, so every observation is whole and the head count equals the sum of
@@ -140,8 +150,14 @@ assignment outside the STR generator; the per-position cap is 8,000 reads,
 [`walker/mod.rs:83`](../../../../src/pileup/walker/mod.rs)); both are set at tracts. So a tract's
 depth is observation depth, below its read depth by the reads that anchored no border, and the
 shortfall grows with tract length. It is consistent — the same number trains the yardstick and
-makes the measurement — but a tract window is not directly comparable to a generic one, and the
-filter has no way to tell which it is looking at. The filter document carries that caveat forward.
+makes the measurement — but **a tract window is not directly comparable to a generic one**.
+
+**The filter can tell which it is looking at, and acts on it** (updated 2026-09-07, from that
+document's own ruling): every record it scores carries `is_repeat_tract`, a tract is scored on
+coverage alone because slippage makes its allele split unreadable, and its D4 counts tracts apart
+from deletions precisely because this shortfall and a deletion's depth loss bias the depth in
+opposite directions ([`hidden_paralog_filter.md`](hidden_paralog_filter.md) §3.2, §9). An earlier
+draft of this paragraph said the filter had no way to tell; it has.
 
 ### 3.2 The GC — per sample, over the same positions
 
@@ -178,17 +194,32 @@ window built from a handful of positions is as confident-looking as one built fr
 and in ng the holes are not scattered: a tract region that emits no loci, an analysed-region edge, a
 stretch no read reached. So a window finalised over fewer than `min_window_positions` covered
 positions **emits an absent value** — `NaN` in both fields — and the filter skips the sample at
-that locus, which its scorer already does for an absent sample. **The default is soft and is set
-by measurement** (plan step D1): the distribution of covered positions per window on the tomato
-slice and on HG002. Until measured, 50.
+that locus, which its scorer already does for an absent sample.
+
+**The default is 50 of 500, and it is measured rather than inherited** — 2026-09-07, over five
+stores; the distribution and the reasoning are in
+[the measurement's report](../../reports/implementations/ng_window_coverage_d1_2026-09-07.md), and
+`MIN_WINDOW_POSITIONS`'s own doc comment carries the same table beside the constant.
+
+What the measurement found is that the floor is a rule about **how long the run's analysed
+intervals are**, not about how deep the sample is. On the same ground at a sixth of the depth the
+share of windows it silences barely moves — 360 windows in every 10,000 at 30 reads a position
+against 382 at 5 — while between intervals of 5.1 kb and intervals of 122 bases it goes from 28
+windows of 5,046,746 to 212,850 of 5,910,300, 6,500 times as many. The reason is arithmetic: an
+interval shorter than half a window lies inside every one of its own windows, so on such a run
+every window holds about as many positions as the interval is long. On intervals of 5 kb and
+longer, 50 silences at most
+1 window in 8,850 — it costs nothing in the ordinary case, and still refuses the near-empty
+windows those runs do have.
 
 **The look-ahead is a contract the cache has to keep.** A centre at `p` is complete only when the
 stream has passed `p + 250`. A builder handed a region ending at `r` therefore needs every sample
 drawn to `r + 250`, where today `cover` draws to the region's end plus the reach of any observation
 chaining past it ([`observation_cache.rs:761`](../../../../src/ng/run/cohort_merge/observation_cache.rs)).
-**`cover` draws half a window further.** What that costs is half a window more of held summaries
-per sample — about 250 at three reads a position, some tens of kilobytes at a thousand samples —
-and in psp mode the kept bytes behind them, which the source's arena holds regardless
+**`cover` draws half a window further.** What that costs is half a window more of retained
+positions per sample — about 250 at one record a base, each a held summary and range at 48 bytes
+plus the window its centre finalised at 24, which §4 prices at 18 kB a sample and so 18 MB at a
+thousand — and in psp mode the kept bytes behind them, which the source's arena holds regardless
 ([`cohort_merge_psp_path.md`](cohort_merge_psp_path.md) §3.4 records that arena as unreleased; this
 design neither fixes nor worsens that). **Getting this wrong is silent**: a region's last centres
 would be finalised by the *next* cover, after their builder has run, so the builder finds no value
@@ -240,16 +271,37 @@ A sample whose whole run finalises fewer than 10,000 windows sets the width from
 160 kB of live data, and the list grows by doubling, so its capacity reaches 16,384 (measured,
 2026-09-06; this paragraph previously said 120 kB, which left the budget below looking about
 145 kB roomier than it is); 80 MB at a
-thousand samples, 240 MB at three thousand. On tomato that fits today (108 kB + 80); on a human
+thousand samples, 240 MB at three thousand — the histogram alone, where §4 totals every term
+this design adds a sample. On tomato that fits today (108 kB + 80); on a human
 reference it fits once the run's readers share one contig list, the psp path plan's step D1
-(480 kB → 123). The plan measures the overflow fraction — the share of windows above the range,
-which is the fit's own rejection guard — on both benchmarks (step D2).
+(480 kB → 123).
 
-**Soft, and marked so.** The 10,000-window scale sample, the factor of ten, and 400 bins are
-starting values chosen to fit the budget and cover both ends of the depth axis; none has been
-measured against the fit's accuracy. The alternative that lost: a depth axis on a log scale, which
-would give the same resolution at every depth in fewer bins, and lost because the fit's three
-functions assume uniform bins and would have to be rewritten rather than copied.
+**All three examined against measurement 2026-09-07, and all three stand** (plan step D2; the full
+tables are in
+[the measurement's report](../../reports/implementations/ng_window_coverage_d2_2026-09-07.md) and,
+shortened, beside each constant). Over ten sample-stores of two species:
+
+- **the factor of ten.** The fit refuses a sample once more than a fifth of its windows are past
+  the top of the range. At ten, nine of the ten sample-stores overflow nothing at all and the tenth
+  overflows 1,972 windows of 7,666,421 — **2.6 in 10,000, some 780 times under the guard**. At a
+  range of 5 the worst is 35 in 10,000; at 2.5 it is 1,103 in 10,000, within a factor of 1.8 of the
+  guard. No setting tried made the fit reject a sample; ten was kept for the size of its margin,
+  and 40 is where the settings tried stop rather than where a cost appears.
+- **the 10,000-window scale sample.** Kept, but **not because a prefix of 10,000 windows is
+  representative** — the median fitted from it came out below the median over every window of the
+  same store in eight of the ten, by 13% on average and 34% at worst, and a longer prefix does not
+  fix it (on the worst store the fitted median barely moves from 100 windows to 100,000). What
+  makes the bias harmless is the range's margin under the guard, so **the two constants are not
+  independent**: a step that narrows the range has to re-check the prefix first.
+- **400 bins.** Nothing measured forces the count; what it decides is the 80.2 kB above. What the
+  *scaling* is for is measured: the fitted medians span 3.97 to 246.21 reads a position, 62-fold,
+  where production's fixed 0.5× bin would give the shallowest seven bins below its own single-copy
+  peak and waste three quarters of the axis on the deepest.
+
+**None of this is measured against the fit's accuracy**, which is the filter's own branch; what is
+measured is the one failure the fit can see for itself. The alternative that lost: a depth axis on
+a log scale, which would give the same resolution at every depth in fewer bins, and lost because
+the fit's three functions assume uniform bins and would have to be rewritten rather than copied.
 
 **Determinism holds at any thread count.** Each sample's records arrive in one fixed coordinate
 order whatever the cover's schedule (the parallel cover reaches the same fixpoint by any
@@ -319,8 +371,9 @@ pub struct CoverageByGcHistogram { /* copied; §7 */ }
 pub struct WindowCoverageAccumulator { /* private */ }
 
 impl WindowCoverageAccumulator {
-    /// `window_bp` 500, `gc_bins` 50, `depth_bins` 400, `min_window_positions` (soft, §3.3),
-    /// `depth_scale_windows` 10,000 (soft, §3.4).
+    /// `window_bp` 500, `gc_bins` 50, `depth_bins` 400, `min_window_positions` 50 (§3.3),
+    /// `depth_scale_windows` 10,000 (§3.4). The last two were the soft ones; both were
+    /// measured 2026-09-07 and kept.
     pub fn new(config: WindowCoverageConfig) -> Self;
     /// One covered position, in non-decreasing `(contig, position)` order.
     pub fn observe(&mut self, contig: ContigId, position: Position, reference_base: u8, depth: u32);
@@ -337,9 +390,15 @@ impl WindowCoverageAccumulator {
 
 - **One sample.** Nothing branches: the accumulator is per sample and the reference is fetched
   per cover whatever the cohort size.
-- **Three thousand samples.** 240 MB of histograms, plus half a window of extra held summaries
-  per sample. Both are charged to the per-sample budget §7.2 of `run_streaming.md` names, and
-  §3.4 says which reference fits it today.
+- **Three thousand samples. 319 MB for the whole pass, and 1.1 GB while the samples are still
+  fitting their depth axes.** Per sample: **106.4 kB** for the pass — 80.2 kB histogram, 8.2 kB
+  sliding buffer, and 18 kB of extra positions the look-ahead makes a psp-mode sample retain at one
+  record a base — rising to **368 kB** while §3.4's held-back windows are live. Against the
+  500 kB an open sample §7.2 of `run_streaming.md` names, that is 21% and 74%; §3.4 says which
+  reference fits it today, and its 240 MB is the histogram alone.
+  Added up from the shipped constants 2026-09-07 with each per-unit size pinned by a library
+  test; a whole-run measurement beside it could only bound the per-sample cost at 1.8 MB
+  ([the report](../../reports/implementations/ng_window_coverage_d3_2026-09-07.md) has both).
 - **Three reads a position.** A window of 500 positions at three reads each is a mean over
   ~1,500 reads, which is the reason the filter windows at all (production's spec §4: per-base
   counts cannot tell one copy from two at this depth). The floor matters most here — a window
@@ -350,9 +409,20 @@ impl WindowCoverageAccumulator {
 
 ## 5. Cross-cutting concerns
 
-- **Memory** — §3.4's histogram, the ready deque (one **24-byte** entry per held position per
-  sample: §3.6's `pop_ready` hands back a `GenomePosition` beside the pair, and ng's `Position`
-  is a `u64`), and the half-window of extra held summaries. Nothing grows with the genome.
+- **Memory** — §3.4's histogram (80.2 kB), the sliding window's own buffer (8.2 kB), the
+  half-window of extra retained positions (18 kB in psp mode, at one record a base — 48 bytes of
+  record and 24 of finalised window each), and §3.4's
+  held-back windows while the depth axis is being fitted (262 kB, then nothing). **106.4 kB a
+  sample for the pass and 368 kB at the peak** (§4). Beside those sits the ready deque, one
+  **24-byte** entry per finalised window a sample holds — §3.6's `pop_ready` hands back a
+  `GenomePosition` beside the pair, and ng's `Position` is a `u64`. How many it holds is set by
+  the pace the organiser evicts at rather than by anything here, so it is counted with the
+  merge's held records and not in the figures above. Nothing grows with the genome. **What does
+  grow with the ground a run walks is a term charged to the run, not to the sample**: 33 MB over
+  the tomato slice's 200 kb and 5.5 MB over a twentieth of that ground, measured 2026-09-07,
+  and it does not multiply by the cohort — so a thousand samples do not pay for it a thousand
+  times. Which allocation it is was not measured: the reference each cover reads is the
+  candidate whose shape fits, but 200 kb of ground is only 200 kB of bases (§4's report).
 - **Errors** — a reference fetch that fails is a `RunError` naming the region, as the padding
   fetch's failure already is (`RunError::PaddingBaseUnreadable`). Nothing else here can fail: an
   absent window is a value, not an error.
@@ -427,10 +497,22 @@ exactly the records §3.1 builds bodies for.
   filter's third pass and the histograms' memory during pass one; what it removes is a format
   change, a format-version story, and a second driver whose divergence from the first would have
   been silent.
-- **OPEN — the floor's default.** Leaning 50 of 500; **settled by plan step D1's distribution**,
-  confirm before the value is written into a default.
-- **OPEN — the bin scheme's three constants.** Leaning as §3.4; **settled by plan step D2's
-  overflow fraction on both benchmarks**.
+- **The floor's default — resolved 2026-09-07: 50 of 500 stands** (§3.3). Measured over five
+  stores spanning 5.1 to 301 reads compared with the reference a position, and analysed intervals
+  of 122 bases to 100 kb. It silences at most 1 window in 8,850 on intervals of 5 kb and longer,
+  and between 1 in 28 and 1 in 26 on a run whose intervals average 122 bases — where the next
+  candidate, 100, would silence 44 in 100. Against raising it: nothing measured says a window
+  over 122 positions is wrong, and that question belongs to the filter's own validation. Against
+  lowering it: the one-accession tomato store has 261 windows holding fewer than 10 positions,
+  which a floor of 10 would let speak.
+- **The bin scheme's three constants — resolved 2026-09-07: all three stand** (§3.4). 400 bins
+  spanning ten times the sample's median, fitted from its first 10,000 windows. Measured over ten
+  sample-stores: at the shipped range, nine overflow nothing and the tenth overflows 2.6 windows in
+  10,000, against a fit that rejects a sample at 2,000 in 10,000. The one finding that constrains a
+  later change is that the scale sample is a **prefix** of the run's ground and fits a median about
+  13% shallow on average and 34% shallow at worst — which shortens the axis by as much, and is
+  harmless only because the range leaves that much margin under the guard. The two cannot be moved
+  independently.
 
 ## 10. How we know it works
 

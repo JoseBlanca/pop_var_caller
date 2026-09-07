@@ -1296,6 +1296,136 @@ mod tests {
         );
     }
 
+    /// **What one sample's accumulator costs a calling run, in bytes**, at the constants a run
+    /// ships. The figures are asserted here rather than derived in prose, so that a struct or a
+    /// constant that grows fails a test instead of quietly making three documents wrong:
+    /// `spec/window_coverage.md` §4 and §5 and
+    /// `reports/implementations/ng_window_coverage_d3_2026-09-07.md` all quote them.
+    ///
+    /// Three terms, all charged to the per-open-sample budget (`spec/run_streaming.md` §7.2,
+    /// 500 kB a sample), and the first two live for the whole pass:
+    ///
+    /// - **the histogram, 80.2 kB** — one `u32` a cell over 50 GC bins and 401 depth columns,
+    ///   allocated whole at [`new`](WindowCoverageAccumulator::new) and never resized, which is
+    ///   what makes it a size rather than a peak;
+    /// - **the sliding buffer, 8.2 kB** — one entry a covered position. A centre is finalised
+    ///   once the stream is half a window past it, so on the one-record-a-position stream the
+    ///   walk produces the buffer holds at most `window_bp + 1` entries: 501 of 16 bytes is
+    ///   8,016, and the deque grows by doubling, so it takes a capacity of 512 and the
+    ///   allocation is **8,192**. A stream that repeated a position without advancing would
+    ///   hold more, which is the case the type's own doc excludes;
+    /// - **the held-back windows, 262 kB** — a transient that ends at the sample's
+    ///   ten-thousandth window: 10,000 pairs of `f64` is 160 kB of live data, and the `Vec`
+    ///   doubles, so its capacity reaches 16,384.
+    ///
+    /// The last two are read off a fed accumulator's own capacities rather than multiplied out,
+    /// because what a growing collection allocates is its capacity and not its length.
+    ///
+    /// **The ready deque is not one of the three.** How many finalised windows sit in it is set
+    /// by the pace the merge drains and the organiser evicts at, not by anything this type
+    /// decides, so it is priced with the merge's own held records rather than here. Its entry is
+    /// 24 bytes — the figure spec §5 quotes — and that is asserted below.
+    ///
+    /// Nothing here grows with the genome.
+    #[test]
+    fn one_samples_accumulator_is_88_kb_for_the_pass_and_262_kb_more_until_the_axis_is_fitted() {
+        use core::mem::size_of;
+
+        assert_eq!(
+            size_of::<CoveredPosition>(),
+            16,
+            "a field added here changes the sliding buffer's 8.2 kB, which spec \
+             `window_coverage.md` §4 and §5 and the memory report quote",
+        );
+        assert_eq!(
+            size_of::<WindowMeans>(),
+            16,
+            "a field added here changes the 262 kB transient, which this type's doc, spec \
+             `window_coverage.md` §3.4 and the memory report quote",
+        );
+        assert_eq!(
+            size_of::<(GenomePosition, WindowCoverage)>(),
+            24,
+            "spec `window_coverage.md` §5 calls a ready-deque entry 24 bytes",
+        );
+
+        // **The six constants are re-spelled rather than reached for**, with no `..`: a field
+        // added to `WindowCoverageConfig` is a compile error here, as it is at the one site
+        // that builds a run's accumulator (`cohort_merge::observation_cache`).
+        let shipped = WindowCoverageConfig {
+            window_bp: crate::ng::window_coverage::WINDOW_BP,
+            gc_bins: crate::ng::window_coverage::GC_BINS,
+            depth_bins: crate::ng::window_coverage::DEPTH_BINS,
+            depth_scale_windows: crate::ng::window_coverage::DEPTH_SCALE_WINDOWS,
+            depth_range_in_medians: crate::ng::window_coverage::DEPTH_RANGE_IN_MEDIANS,
+            min_window_positions: crate::ng::window_coverage::MIN_WINDOW_POSITIONS,
+        };
+        let mut accumulator = WindowCoverageAccumulator::new(shipped);
+
+        // **The counts vector is allocated whole at `new` and never resized**, which is what
+        // makes 80.2 kB a figure rather than a peak: `fold` writes a cell, it never pushes.
+        assert_eq!(accumulator.counts.len(), 50 * 401);
+        let histogram = accumulator.counts.len() * size_of::<u32>();
+        assert_eq!(
+            histogram, 80_200,
+            "the histogram is the term that scales with the cohort; the three documents above \
+             carry this number and its 80 MB at a thousand samples",
+        );
+
+        // **The buffer is measured on a fed accumulator rather than multiplied out**, because
+        // what a `VecDeque` allocates is its capacity and not its length. Two thousand
+        // consecutive positions on one contig is the stream the walk produces, and it is long
+        // enough for the window to reach its steady state.
+        for position in 1..=2_000u64 {
+            accumulator.observe(ContigId(0), Position(position), b'G', 7);
+            while accumulator.pop_ready().is_some() {}
+        }
+        assert_eq!(
+            accumulator.positions.len(),
+            usize::try_from(shipped.window_bp).unwrap() + 1,
+            "the buffer holds the positions from the next centre's left edge to the newest \
+             observed, which is a window's span inclusive",
+        );
+        let sliding_buffer = accumulator.positions.capacity() * size_of::<CoveredPosition>();
+        assert_eq!(
+            sliding_buffer,
+            8_192,
+            "the deque took a capacity of {} for 501 entries; if that has changed, the 8.2 kB \
+             in spec `window_coverage.md` §4 and §5 and in the memory report has too",
+            accumulator.positions.capacity(),
+        );
+
+        // **The transient is read off the list too.** Windows are held back until the sample's
+        // ten-thousandth, and what that costs is the capacity the list's doubling reaches — not
+        // the 160 kB its 10,000 entries occupy.
+        let mut held_back = 0;
+        for position in 2_001..=12_000u64 {
+            accumulator.observe(ContigId(0), Position(position), b'G', 7);
+            while accumulator.pop_ready().is_some() {}
+            if let DepthBinWidth::AwaitingWindows(windows) = &accumulator.depth_bin_width {
+                held_back = held_back.max(windows.capacity() * size_of::<WindowMeans>());
+            }
+        }
+        assert_eq!(
+            held_back, 262_144,
+            "the transient a sample carries until its depth axis is fitted; spec \
+             `window_coverage.md` §3.4 carries it beside the histogram, and the memory report \
+             makes it the difference between a sample's 100.4 kB and its 362 kB peak",
+        );
+        assert!(
+            matches!(accumulator.depth_bin_width, DepthBinWidth::Fitted(_)),
+            "the axis is fitted by the ten-thousandth window, which is what ends the transient",
+        );
+
+        assert_eq!(
+            histogram + sliding_buffer,
+            88_392,
+            "what one sample's accumulator holds for the whole pass, which \
+             `reports/implementations/ng_window_coverage_d3_2026-09-07.md` adds to the merge's \
+             12 kB of extra held records to reach 100.4 kB a sample",
+        );
+    }
+
     #[test]
     #[should_panic(expected = "window_bp must be >= 1")]
     fn new_panics_on_zero_window_bp() {

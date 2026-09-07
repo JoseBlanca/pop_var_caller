@@ -4401,7 +4401,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **Spec §3.2's one decision beyond production — every record scored, non-SNPs on coverage alone — is confirmed with the owner before step C1 is coded.**
   - **`main` is red on four checks**, which costs this branch (and every branch) the `--all-targets` gate: `examples/ng_candidate_selection_probe.rs` does not compile against the current `ClosedLocus`; `ng_calling_loop_calls_genotypes::a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele` fails; `cargo fmt --check` is dirty on nine files; `cargo clippy -D warnings` fires three `needless_lifetimes`. None is this plan's to fix.
 #### Window coverage — each sample's depth and GC around a locus, and the histogram behind it
-- **Status:** `fixes-applied` — **Milestones A, B and C complete** (branch `ng-window-coverage`): the accumulator, the floor, the per-sample depth
+- **Status:** `fixes-applied` — **Milestones A, B, C and D complete** (branch `ng-window-coverage`): the accumulator, the floor, the per-sample depth
   scale, the rule that turns one drawn record into covered positions with a depth at each, the
   measurement that says the rule's cheapest branch is sound on real data, the reference in the
   merge's cache, the accumulator itself in each sample's window there, and the half-window
@@ -4409,7 +4409,9 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   the run writes, and each sample's histogram out of the cache. **The measurement runs on real data
   in both modes, no VCF byte has moved, the two modes' windows and histograms are identical bit for
   bit, and both equal a whole-store recomputation.** **Checkpoint C reached** — the filter plan may
-  start. Next: Milestone D, the three numbers the spec left to measurement.
+  start. **Milestone D done too: all four constants measured and all four kept, and the memory
+  priced at 106.4 kB a sample for the pass and 368 kB at its peak. Checkpoint D reached, and with
+  it the whole plan.**
 - **Plan:** [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md);
   **Spec:** [window_coverage.md](doc/devel/ng/spec/window_coverage.md). No architecture
   document — the spec's §3 type blocks are the code shape. Its consumer, built separately:
@@ -4429,7 +4431,10 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   [C2](doc/devel/reports/implementations/ng_window_coverage_c2_2026-09-06.md),
   [C3](doc/devel/reports/implementations/ng_window_coverage_c3_2026-09-06.md),
   [C4](doc/devel/reports/implementations/ng_window_coverage_c4_2026-09-07.md),
-  [C5](doc/devel/reports/implementations/ng_window_coverage_c5_2026-09-07.md);
+  [C5](doc/devel/reports/implementations/ng_window_coverage_c5_2026-09-07.md),
+  [D1](doc/devel/reports/implementations/ng_window_coverage_d1_2026-09-07.md),
+  [D2](doc/devel/reports/implementations/ng_window_coverage_d2_2026-09-07.md),
+  [D3](doc/devel/reports/implementations/ng_window_coverage_d3_2026-09-07.md);
   **reviews:** [A1](doc/devel/reports/reviews/ng_window_coverage_a1_2026-09-06.md) (1 Blocker,
   5 Major, 18 Minor), [A2](doc/devel/reports/reviews/ng_window_coverage_a2_2026-09-06.md)
   (4 Major, 4 Minor), [A3](doc/devel/reports/reviews/ng_window_coverage_a3_2026-09-06.md)
@@ -4440,7 +4445,17 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   6 Major, 8 Minor), [C2](doc/devel/reports/reviews/ng_window_coverage_c2_2026-09-06.md) (4 Major,
   2 Minor), [C3](doc/devel/reports/reviews/ng_window_coverage_c3_2026-09-06.md) (5 Major, 9 Minor),
   [C4](doc/devel/reports/reviews/ng_window_coverage_c4_2026-09-07.md) (1 Blocker, 4 Major,
-  12 Minor), [C5](doc/devel/reports/reviews/ng_window_coverage_c5_2026-09-07.md) (5 Major, 8 Minor)
+  12 Minor), [C5](doc/devel/reports/reviews/ng_window_coverage_c5_2026-09-07.md) (5 Major,
+  8 Minor), and D1's two —
+  [correctness](doc/devel/reports/reviews/ng_window_coverage_d1_correctness_2026-09-07.md) and
+  [naming and structure](doc/devel/reports/reviews/ng_window_coverage_d1_design_2026-09-07.md),
+  6 Major and 14 Minor between them, and D2's two —
+  [correctness](doc/devel/reports/reviews/ng_window_coverage_d2_correctness_2026-09-07.md) and
+  [naming and structure](doc/devel/reports/reviews/ng_window_coverage_d2_design_2026-09-07.md),
+  9 Major and 13 Minor between them, and D3's two —
+  [correctness](doc/devel/reports/reviews/ng_window_coverage_d3_correctness_2026-09-07.md) and
+  [naming and structure](doc/devel/reports/reviews/ng_window_coverage_d3_design_2026-09-07.md),
+  1 Blocker, 9 Major and 11 Minor between them
   — all applied or raised with a home; each step's fixes are in its own commit. **C2's correctness
   review ran a session late**, its design half having landed inside C2's own commit; its findings
   are fixed forward in their own commit after C3.
@@ -4607,8 +4622,73 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   histogram recorder, and a comparison that read only the first sample, are both caught **only by
   running the probe on a real store**, and the mode-equivalence oracle cannot catch the first
   because both modes render the same wrong index.
-- **Open:** the floor's default (spec §3.3) and the histogram's three bin constants (spec §3.4)
-  are soft until plan steps D1 and D2 measure them.
+- **D1 done (the floor, measured — 50 of 500 stands):** the share of windows the floor would
+  silence, over **five stores spanning 5.1 to 301 reads compared with the reference a position and
+  analysed intervals from 122 bases to 100 kb**. **What the floor turns out to be a rule about is
+  how long the run's analysed intervals are, not how deep the sample is**: on the same ground at a
+  sixth of the depth the share silenced at 50 barely moves — 360 windows in every 10,000 at 30
+  reads a position against 382 at 5 — while between intervals of 5.1 kb and intervals of 122 bases
+  it goes from 28 windows of 5,046,746 to 212,850 of 5,910,300, 6,500 times as many. The reason is
+  arithmetic: an interval shorter than half a window lies inside every one of its own windows.
+  Checked from the region file rather than from the answer — 2.9 in 100 of the tandem-repeat
+  tiers' bases lie in intervals under 50 bases, against the 3.6 in 100 of windows silenced there.
+  **On intervals of 5 kb and longer, 50 silences at most 1 window in 8,850**; the next candidate,
+  100, would silence 44 in 100 on short-interval ground, and nothing measured says such a window is
+  wrong — **this step measures the floor's cost and not its benefit**, which belongs to the
+  hidden-duplication filter's own branch. **The six-accession slice this branch used at every
+  earlier step silences nothing at all**, so three stores were built to test the floor: one tomato
+  accession over all 80 benchmark intervals, and HG002 over the `human_genome_bottle` benchmark's
+  1,000 intervals of 5 kb and over the 50,000 tandem-repeat Tier intervals at 30× and 5×. **No
+  whole-genome store of either species exists here and none can be built** — every alignment file
+  is cut to its benchmark's intervals — so the one case the measurement lacks is a sample whose
+  *coverage* is patchy over continuous analysed ground. **The distribution is read off the shipped
+  accumulator at one instance per candidate floor**, so nothing in the probe reimplements the
+  window; six checks guard it, and the reviews established that none of them can see the arms' own
+  configuration, which only the unit tests pin. The same five walks re-answer B2's question:
+  **the head count equals the evidence's sum at every one of 24,793,279 one-base records**, now on
+  human data at 5.1, 30.3 and 301.4 reads a position as well as tomato.
+- **D2 done (the bin scheme, measured — all three constants kept):** 400 depth bins spanning ten
+  times the sample's median, fitted from its first 10,000 windows. The coverage-model fit that
+  reads these histograms rejects a sample once more than **a fifth** of its windows sit above the
+  top of the axis; over the same ten sample-stores, **nine overflow nothing at all and the tenth
+  overflows 1,972 windows of 7,666,421 — 2.6 in every 10,000** against a guard that fires at
+  2,000. **No setting tried made the fit reject a sample**, 2.5 medians included, so what the
+  measurement ranks is margin: quartering the range takes the worst store from 2.6 to 1,103 in
+  10,000, halving it to 35. **The finding that constrains any later change is about the scale
+  sample**: the median fitted from a sample's first 10,000 windows comes out *below* the median
+  over all its windows on eight of the ten sample-stores, 13% low on average and 34% at worst, and
+  a longer prefix is not the fix — on the worst store the fitted median barely moves from 100
+  windows to 100,000, and only a million (16.8 MB a sample, against 262 kB at 10,000) reaches the
+  whole-store value. What makes the bias harmless is the range's margin, so **the two constants
+  cannot be moved independently**; that is now written into both their docs and into spec §3.4.
+  Like D1 this measures each setting's cost and not its benefit, which belongs to the filter's
+  branch. **The reviews found two claims wrong**: "nine of the ten" stores fitted a shallow median
+  is eight — both agents found it independently, and the report's own table printed the two
+  exceptions — and the overflow fraction was divided by the accumulator's counter where the prose
+  claimed production's cell totals; the two agree on every store measured, but nothing was
+  checking, and two wrong denominators survived all 21 tests.
+- **D3 done (the memory, priced), and Milestone D complete:** **106.4 kB a psp-mode sample for the
+  whole calling pass, and 368 kB while its depth axis is being fitted** — 21% and 74% of the 500 kB
+  an open sample [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §7.2 allows. The terms are
+  the histogram (80.2 kB, allocated whole in `new`), the sliding window's buffer (8.2 kB), the
+  18 kB of extra positions the look-ahead makes a sample retain at one record a base, and the
+  262 kB of windows held back until the axis is fitted. **Added up from the code and pinned by two
+  library tests**, because the per-sample cost is far below what a whole-run peak-resident
+  measurement can resolve: over 54 runs — nine cohort sizes, three repeats, two binaries — the
+  slope is 39.5 MB a sample before this plan and 40.3 after, a difference of 0.82 with a standard
+  error of 0.49 against an effect of 0.10. **What the run gives is a ceiling, not a value**: under
+  1.8 MB a sample, and nothing above it appeared. **The 39.5 MB a sample is not §7.2's quantity** —
+  that budget is one open psp, 108 kB on tomato — and it predates this branch; the psp source's
+  unreleased arena is the named candidate and nothing here attributes it. One term this plan adds
+  *can* be seen: tens of megabytes that follow the ground a run walks rather than the cohort
+  (33 MB over 200 kb, 5.5 MB over a twentieth of it, both at one sample), which a per-sample
+  reading would put 52 standard errors from the measured slope. **Open, and named in the report:**
+  the finalised windows retained over the whole stretch between evictions are unpriced, and direct
+  mode's held record is 152 bytes against psp mode's 48. **The review found a Blocker the step's
+  own test had already disproved** — the histogram is allocated in `new`, not when the axis is
+  fitted, so all four terms are live together and the first draft's "a fifth of the budget" was
+  really three quarters.
+- **Open:** nothing in this plan.
 - **Checkpoint A ruled by the owner, 2026-09-06, and the spec updated with it:** `finish` hands
   back **`SampleHistogram`** — the histogram, or which of the three silences it was (the pass
   reached nothing; every window was under the floor, which is a reading on the floor and not a
