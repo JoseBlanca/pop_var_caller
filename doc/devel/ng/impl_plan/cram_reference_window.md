@@ -21,14 +21,13 @@ already owns; no new reader, no new window, no new file descriptor.
 
 **In:**
 
-- `decode_container_at` decoding each slice against exactly the span its header declares,
-  fetched through the cursor's reference accessor, with the no-window call kept for slices that
-  need no external bases (spec §10, points 1–2).
-- The accessor handed down the `read_next` chain as `&dyn RawRefSeq` — `RegionRawAlignedReads`
-  → `AlignedReadsReader` → `CramAlignedReadsReader` (spec §10, points 1 and 5).
+- `decode_container_at` decoding each slice against exactly the span its header declares, with
+  the no-window call kept for slices that need no external bases (spec §10, points 1–2).
+- `AlignmentFile::cursor` taking the reference **factory** in place of one accessor, and the
+  CRAM arm minting a second reader from it for the decode to own (spec §10, points 1 and 5).
 - `OpenReference` reduced to the description plus the open-time FASTA check; the repository, the
-  one-contig bound, `unbounded` and `bases_for_contig` deleted; `CramAlignedReadsReader` loses
-  its `repository` field (spec §10, point 6).
+  one-contig bound, `unbounded` and `bases_for_contig` deleted; `CramAlignedReadsReader` trading
+  its `repository` field for that reader (spec §10, point 6).
 - The measurement that closes the research note's §9 item 2: resident memory and wall time on
   the real whole-genome tomato CRAM, VCF byte-identical.
 
@@ -71,11 +70,16 @@ already owns; no new reader, no new window, no new file descriptor.
   `Slice::reference_span`, `Slice::records_over_window`, the `ReferenceSequence::Window`
   variant and the too-small-window refusal (`FORK.md` §5); its 298 tests pass; `main` is at
   `52b7b787` or later.
-- **The cursor already owns the accessor.** `AlignmentFile::cursor<R: RawRefSeq + ContigTable>`
-  takes `reference: R`, probes it with a zero-length fetch for the cursor's contig, and moves it
-  into `AlignmentCursor::over_records`; `AlignmentCursor` holds `reads: RegionRawAlignedReads`
-  and `reference: R` as disjoint fields; `next_filtered_read` calls
-  `self.reads.read_next(&mut self.buffer)`.
+- **A factory already exists one level up.** `SampleReads::cursor<R, F: FnMut() -> R>(contig,
+  make_reference)` calls the factory once per file and passes the result to
+  `AlignmentFile::cursor<R: RawRefSeq + ContigTable>(contig, reference: R)`, which probes it with
+  a zero-length fetch for the cursor's contig and moves it into `AlignmentCursor::over_records`.
+  A1 moves the call site of that factory down one level, from `SampleReads` into
+  `AlignmentFile`.
+- **Every accessor a cursor is given is already `Send + 'static`.** The production sites pass
+  `WindowedRefSeq` (`walker.rs`, `generator.rs`, `ssr.rs`, `parity.rs`) and the tests pass
+  `InMemoryRefSeq`. The `Rc`-based `SharedReference` in `parity.rs` is `!Send` but is never handed
+  to a cursor — it serves the production walk's `MultiChromRefFetcher`.
 - **`RawRefSeq` is object-safe** — `&self` methods with concrete types only — and
   `impl<T: RawRefSeq + ?Sized> RawRefSeq for Arc<T>` exists; `WindowedRefSeq` implements it with
   raw (uncanonicalised) bytes.
@@ -100,25 +104,32 @@ already owns; no new reader, no new window, no new file descriptor.
 
 ### Milestone A — the decode takes its bases from the cursor's accessor
 
-**A1. The accessor travels down `read_next`, and nothing decodes differently yet.** ☐
-`RegionRawAlignedReads::read_next(&mut self, buf, reference: &dyn RawRefSeq)`,
-`AlignedReadsReader::read_next(buf, reference)`, `CramAlignedReadsReader::read_next(buf,
-reference)` and `decode_next_container(reference)`; the cursor passes `&self.reference`. The BAM
-and in-memory arms take the argument and ignore it. `decode_container_at` gains the parameter
-but still decodes with `records_discarding_tags` and the repository — this step is plumbing
-only, and every test that calls `read_next` directly (`region_raw_aligned_reads.rs`,
-`in_memory.rs`, `reference_free_first_filter.rs`, `aligned_reads_reader/mod.rs`) passes the
-in-memory fixture accessor, which those arms never consult. The reference-free filter's test
-says so in a comment: the accessor reaches a reader that does not read it, which is the property
-that module tests.
-*Depends:* —. *Source:* spec §10 points 1 and 5; arch §1.3 (the contract's new bullet), §4.
+**A1. The decode is handed a reference reader of its own, and nothing decodes differently yet.** ☐
+`AlignmentFile::cursor<R: RawRefSeq + ContigTable + Send + 'static>(contig, make_reference: impl
+FnMut() -> R)` takes the factory in place of one accessor; `SampleReads::cursor` forwards its own
+factory rather than calling it. The BAM arm mints one reader, for the cursor, exactly as today.
+The CRAM arm mints a second, probes it with the same zero-length fetch the first gets, and hands
+it to `CramAlignedReadsReader`, which owns it as `Box<dyn RawRefSeq + Send>` and passes it to
+`decode_container_at`. That function gains the parameter but still decodes with
+`records_discarding_tags` and the repository — this step is plumbing only, so the step that
+*changes decoded bases* is a diff of its own.
+
+**Nothing below `AlignmentFile::cursor` is touched**: `AlignedReadsReader` and
+`RegionRawAlignedReads` keep their signatures and their freedom from a reference bound, so
+`read/reference_free_first_filter.rs` and the tests that drive `read_next` directly are
+untouched. *(A first attempt threaded the accessor down `read_next` instead and had to make that
+module construct a reference, which is the one thing its docs say it must not do; discarded
+2026-09-07, and spec §10 point 5 now records why.)*
+*Depends:* —. *Source:* spec §10 points 1, 5 and 6; arch §1.2, §1.3, §4;
+`read_filtering_stages.md` §5.
 
 **A2. The decode fetches each slice's span and decodes over it.** ☐ **Own commit — do not
 bundle.** Guarded by the two oracles named under *Verification*, green before and after.
 In `decode_container_at`, per slice: `slice.reference_span()`; when `Some((contig, start,
 end))`, `reference.fetch_raw_into(ContigId(contig), start, end − start + 1, &mut
-scratch.window)` and `slice.records_over_window(&scratch.window, start, …)`; when `None`, the
-existing `records_discarding_tags`. `RecordScratch` gains `window: Vec<u8>`, cleared and refilled
+scratch.window)` — `reference` being the reader A1 gave the CRAM arm — and
+`slice.records_over_window(&scratch.window, start, …)`; when `None`, the existing
+`records_discarding_tags`. `RecordScratch` gains `window: Vec<u8>`, cleared and refilled
 per slice like its other buffers. The repository argument becomes `fasta::Repository::default()`
 at the one call site, so from this commit on the accessor is the only source of bases — a slice
 that somehow fell through to the repository would fail loudly rather than decode against a
@@ -141,8 +152,8 @@ are green.
 *Depends:* A1. *Source:* spec §10 points 2–4; `FORK.md` §5; research note §7.
 
 **A3. The repository goes.** ☐
-`CramAlignedReadsReader::new` and its struct lose `repository`; `AlignmentFile::cursor`'s CRAM
-arm stops calling `bases_for_contig`; `OpenReference` loses `bases`, `bases_for_contig`,
+`CramAlignedReadsReader::new` and its struct lose `repository`, and `decode_container_at` loses
+the argument; `AlignmentFile::cursor`'s CRAM arm stops calling `bases_for_contig`; `OpenReference` loses `bases`, `bases_for_contig`,
 `resident_contig`, `bound_to_one_contig`, `unbounded`, the `build_fasta_repository` import, and
 the three tests of the one-contig bound. The open-time check in `AlignmentFile::open` — today
 `reference.bases()` — becomes a check that the reference names a FASTA and that its `.fai` opens

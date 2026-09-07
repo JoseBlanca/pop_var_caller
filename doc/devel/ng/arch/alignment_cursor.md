@@ -83,10 +83,11 @@ pub struct AlignmentCursor<R: RawRefSeq> {
     /// (spec §6): reuse `kept` when the next region starts at or after it.
     last_region_start: Option<u64>,
     contig: ContigId,
-    // No CRAM-only field. The reference accessor above serves the CRAM decode
-    // too: it is borrowed per `read_next` as `&dyn RawRefSeq`, one slice's
-    // span at a time (spec §10, 2026-09-07). The `bases: Option<fasta::Repository>`
-    // an earlier draft carried here is gone with the repository.
+    // No CRAM-only field. The decode's reference reader lives in
+    // `CramAlignedReadsReader`, minted by the same factory as the accessor
+    // above and owned for the reader's life (spec §10, 2026-09-07). The
+    // `bases: Option<fasta::Repository>` an earlier draft carried here is gone
+    // with the repository.
 }
 ```
 
@@ -123,9 +124,10 @@ drift:
   unsound three ways (spec §6).
 - Records are yielded **raw**: no contig test, no overlap test, no read-group resolution. Those
   belong to the cursor.
-- **`next` takes the cursor's reference accessor as `&dyn RawRefSeq`** (spec §10, 2026-09-07).
-  Only the CRAM arm reads it — one slice's span at a time, into a buffer reused across the file's
-  slices. The BAM and in-memory arms accept it and ignore it, so the contract has one shape.
+- **The contract is unchanged by the windowed decode** (spec §10, 2026-09-07). The CRAM arm owns
+  the reference reader it decodes against; no method here gains a reference parameter, and neither
+  `AlignedReadsReader` nor `RegionRawAlignedReads` gains a reference bound — which is what keeps
+  `read_filtering_stages.md` §5's reference-free pass constructible.
 
 ### 1.4 Errors
 
@@ -342,7 +344,7 @@ that only moves the checking to whoever implements this.
 | *(no replacement)* | `RegionReads<R>` (`open_bam.rs:248`) | **deleted**; its `Drop`-returns-to-pool goes with it |
 | the filter seam | `trait RecordSource` (`filtering.rs:365`), `ReadFilter` (`:800`, `:949`) | **changes by one accessor** — see §2.3. An earlier row claimed "unchanged", which was wrong: `ReadFilter` owns its source, exposes no `source_mut` (zero occurrences), and returns it only by being consumed |
 | the reference accessor | `reads_in_region<R>(…, reference: R)` (`open_bam.rs:489-493`) | moves to `cursor()`; `SampleReads::reads_in_region`'s `make_reference: F` factory (`mod.rs:541-549`) goes with it |
-| the per-slice window | `OpenReference::bases` / `bases_for_contig` / `unbounded` (`reference.rs`), `CramAlignedReadsReader::repository` (`aligned_reads_reader/cram.rs`) | **replaced, 2026-09-07** (spec §10). The repository, the one-contig bound and `unbounded` go; `OpenReference` keeps the description and the open-time "carries a FASTA whose `.fai` opens" check. The decode fetches each slice's span through the cursor's own accessor, handed down `read_next`. Plan: [`cram_reference_window.md`](../impl_plan/cram_reference_window.md) |
+| the per-slice window | `OpenReference::bases` / `bases_for_contig` / `unbounded` (`reference.rs`), `CramAlignedReadsReader::repository` (`aligned_reads_reader/cram.rs`) | **replaced, 2026-09-07** (spec §10). The repository, the one-contig bound and `unbounded` go; `OpenReference` keeps the description and the open-time "carries a FASTA whose `.fai` opens" check. The CRAM reader owns a `Box<dyn RawRefSeq + Send>` minted by the cursor factory, and fetches each slice's span into a reused buffer. `AlignmentFile::cursor` takes the factory in place of one accessor. Plan: [`cram_reference_window.md`](../impl_plan/cram_reference_window.md) |
 | `ContigList`, `ContigId`, `GenomeRegion` | `types.rs`, `reference_info.rs` | used as they are; nothing new minted |
 | **the layer callers actually use** | `SampleReads::reads_in_region` (`mod.rs:541`), `SampleRegionReads` (`mod.rs:566-571`), `MergedRegionReads` (`merge.rs`) | **⚠ an earlier draft omitted this entirely.** Neither generator calls `AlignmentFile` — the generic one calls `SampleReads::reads_in_region` (`generator.rs:853`) and so does the STR one (`ssr.rs:375`). A sample spans k files, so a sample-level cursor is required: it holds k file cursors, re-points all of them on `move_to_region`, and merges their output. See §2.4 |
 

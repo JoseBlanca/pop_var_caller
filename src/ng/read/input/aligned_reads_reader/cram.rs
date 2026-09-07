@@ -15,6 +15,7 @@ use crate::ng::read::input::aligned_reads_reader::container::{
     DecodedContainer, decode_container_at,
 };
 use crate::ng::read::input::read_groups::ReadGroupResolution;
+use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::types::GenomeRegion;
 
 /// A CRAM reader that stays where it is between regions.
@@ -74,6 +75,17 @@ pub(crate) struct CramAlignedReadsReader {
     /// The reference bases decoding consults, for this cursor's chromosome. Cheap to clone —
     /// it is internally shared — and cloned per decode, as noodles requires.
     repository: fasta::Repository,
+    /// **This decode's own windowed reference reader**, minted by the cursor factory and owned
+    /// for this reader's life (`alignment_cursor.md` §10 point 1).
+    ///
+    /// Its own, and not the cursor's: a reference reader is an open file position and a
+    /// resident window, and this project gives one to every consumer of bases rather than
+    /// sharing. So the walk evicting behind itself can never make a decode re-read, and the two
+    /// never contend for one lock. `Box<dyn …>` because this reader is not generic — making it
+    /// so would put a type parameter through `AlignedReadsReader` and every one of its callers
+    /// for a field only this arm has. `+ Send` keeps the cursor `Send`
+    /// (`a_sample_cursor_is_send_in_both_arms`).
+    decode_reference: Box<dyn RawRefSeq + Send>,
     /// **This contig's** `.crai` entries, in file order, grouped once at open.
     entries: Arc<[cram::crai::Record]>,
     /// A copy of the file's, settled at open. Owned, so this reader carries no lifetime.
@@ -119,6 +131,7 @@ impl CramAlignedReadsReader {
         reader: cram::io::Reader<File>,
         header: Arc<sam::Header>,
         repository: fasta::Repository,
+        decode_reference: Box<dyn RawRefSeq + Send>,
         entries: Arc<[cram::crai::Record]>,
         resolution: ReadGroupResolution,
         path: Arc<Path>,
@@ -127,6 +140,7 @@ impl CramAlignedReadsReader {
             reader,
             header,
             repository,
+            decode_reference,
             entries,
             resolution,
             path,
@@ -241,6 +255,7 @@ impl CramAlignedReadsReader {
                 &self.repository,
                 &self.resolution,
                 offset,
+                &*self.decode_reference,
             )?
             else {
                 // End of stream reached through the index — nothing further.

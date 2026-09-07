@@ -588,14 +588,20 @@ impl SampleReads {
     /// reopened the question every time — index query, seek, decode, filter — for regions
     /// that usually sat in the block the reader was already in.
     ///
-    /// **One reference accessor per file, taken here once** for the cursor's whole life
+    /// **A reference accessor per consumer, minted here once** for the cursor's whole life
     /// rather than rebuilt per region (perf review L2). `RawRefSeq` impls are stateful
     /// readers, so the k files cannot share one: `WindowedRefSeq` holds an open per-contig
     /// reader, and each consumer is meant to own one — k cursors on one accessor would be one
-    /// file position and one window serving k readers. A factory gives each file cursor its
-    /// own; the caller writes one closure. (The type itself stopped forbidding the sharing on
+    /// file position and one window serving k readers. A factory gives each its own; the
+    /// caller writes one closure. (The type itself stopped forbidding the sharing on
     /// 2026-09-01, when it became `Sync` so a walker could cross threads — the ownership rule
     /// is the reason, and it is unchanged.)
+    ///
+    /// **The factory is forwarded, not called here**, because *how many* readers a file needs
+    /// depends on its format and this layer does not know it: a BAM cursor takes one, a CRAM
+    /// cursor two — the second for its decode, which reads reference bases of its own
+    /// (`alignment_cursor.md` §10 point 1). [`AlignmentFile::cursor`] is where that is known,
+    /// and it checks every reader it mints rather than only the first.
     ///
     /// **Every accessor the factory hands out is checked against the file it will serve** — its
     /// contig table against that file's, and its ability to fetch this chromosome's bases
@@ -613,12 +619,15 @@ impl SampleReads {
         mut make_reference: F,
     ) -> Result<SampleCursor<R>, IngestError>
     where
-        R: RawRefSeq + ContigTable,
+        R: RawRefSeq + ContigTable + Send + 'static,
         F: FnMut() -> R,
     {
         let mut cursors = Vec::with_capacity(self.files.len());
         for (source_file_index, file) in self.files.iter().enumerate() {
-            cursors.push(file.cursor(contig, make_reference()).map_err(|source| {
+            // **The factory, not one accessor.** How many readers a file needs is the file's
+            // question, not this layer's: a BAM takes one, a CRAM two — the second for its
+            // decode (`alignment_cursor.md` §10 point 1).
+            cursors.push(file.cursor(contig, &mut make_reference).map_err(|source| {
                 IngestError::File {
                     source_file_index,
                     source,

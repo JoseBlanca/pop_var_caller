@@ -344,10 +344,15 @@ impl AlignmentFile {
     ///
     /// # Three checks, in order: the argument, the accessor's description, its ability
     ///
-    /// Nothing else checks the accessor. [`open`](Self::open) proved the *file* against the
-    /// *reference*, but the accessor arrives here from the caller, one per file, and could be
-    /// over a different FASTA entirely — which would make filter #8 compare every read against
-    /// the wrong bases and drop and keep the wrong reads with no error at all.
+    /// Nothing else checks the accessors. [`open`](Self::open) proved the *file* against the
+    /// *reference*, but they arrive here from the caller's factory and could be over a different
+    /// FASTA entirely — which would make filter #8 compare every read against the wrong bases
+    /// and drop and keep the wrong reads with no error at all.
+    ///
+    /// **Every accessor this function mints is put through all three**, not just the first: a
+    /// CRAM cursor mints a second for its decode (below), and a factory that returned one good
+    /// reader and one bad one would otherwise decode every read against bases nothing had
+    /// checked.
     ///
     /// 1. **The contig is one this file declares**
     ///    ([`CursorContigNotInFile`](AlignmentFileError::CursorContigNotInFile)).
@@ -370,14 +375,29 @@ impl AlignmentFile {
     /// **The file is the left operand of (2)**, so the message reads *file value vs accessor
     /// value*, the direction the open gate prints for the same class of fault.
     ///
-    /// **What none of them catches** is a caller passing an unrelated accessor *that happens to
-    /// carry a matching table and can serve it*. Closing that means the file owning its
-    /// reference and handing out accessors itself, which is its own change (spec §10).
-    pub fn cursor<R: RawRefSeq + ContigTable>(
+    /// **What none of them catches** is a caller whose factory returns an unrelated accessor
+    /// *that happens to carry a matching table and can serve it*. Closing that means the file
+    /// owning its reference and building the readers itself, which is its own change (spec §10).
+    ///
+    /// # Why a factory rather than one accessor
+    ///
+    /// **How many reference readers a cursor needs is the *format's* question, and this is the
+    /// first place that is known.** A BAM cursor needs one, for the mismatch filter. A CRAM
+    /// cursor needs two, because its decode reads reference bases as well — and a reference
+    /// reader is an open file position and a resident window, which this project gives to every
+    /// consumer separately rather than sharing (`run_streaming.md` §9;
+    /// `alignment_cursor.md` §10 point 1). [`SampleReads::cursor`] holds the factory and cannot
+    /// answer that question, so it forwards it here rather than calling it.
+    pub fn cursor<R: RawRefSeq + ContigTable + Send + 'static>(
         self: &Arc<Self>,
         contig: ContigId,
-        reference: R,
+        mut make_reference: impl FnMut() -> R,
     ) -> Result<AlignmentCursor<R>, AlignmentFileError> {
+        // **The factory reaches this far down, and only here can it be called the right number
+        // of times.** A BAM cursor needs one reference reader — the mismatch filter's. A CRAM
+        // cursor needs two, because the decode reads bases as well and a reference reader is a
+        // file position and a resident window, which no two consumers share (spec §10 point 1).
+        // Above this, `SampleReads::cursor` cannot know which it is handing a factory to.
         let open_error = |source: std::io::Error| AlignmentFileError::Open {
             path: self.path.to_path_buf(),
             source,
@@ -403,40 +423,61 @@ impl AlignmentFile {
             });
         }
 
-        // **Second check: is the accessor over this file's contigs at all?** One comparison of
-        // two tables — names, lengths, and digests where both sides carry one.
-        self.contigs
-            .first_disagreement(reference.contigs())
-            .map_err(|detail| AlignmentFileError::CursorAccessorContigTable {
-                path: self.path.to_path_buf(),
-                detail,
-            })?;
+        // **Checks 2 and 3, and they are one thing because they are asked of every accessor
+        // this function mints rather than of the argument.** A CRAM cursor mints two — the
+        // read filter's and the decode's — and an earlier draft checked the table of only the
+        // first. What that would have let through is worth naming, because the probe cannot
+        // catch it: a **permuted** table resolves every `ContigId` (an index, not a name) to
+        // the wrong chromosome, and a zero-length fetch at position 1 succeeds against it,
+        // because those bases are perfectly readable — they are simply another chromosome's.
+        // On the filter's accessor that costs a wrong mismatch fraction; on the decode's it
+        // corrupts the read sequences themselves, silently, because a CRAM stores a read as
+        // its *differences from the reference*. Minting and checking in one place is what
+        // makes forgetting the second one unrepresentable.
+        let checked_reference =
+            |reference: R, probe: &mut Vec<u8>| -> Result<R, AlignmentFileError> {
+                // **Is the accessor over this file's contigs at all?** One comparison of two
+                // tables — names, lengths, and digests where both sides carry one.
+                self.contigs
+                    .first_disagreement(reference.contigs())
+                    .map_err(|detail| AlignmentFileError::CursorAccessorContigTable {
+                        path: self.path.to_path_buf(),
+                        detail,
+                    })?;
 
-        // **Third check: can it actually serve this cursor's contig?**
-        //
-        // The comparison above proves the accessor carries the right *description*. For one
-        // accessor that is the whole story — `InMemoryRefSeq` derives its table from the bytes
-        // it holds. But `ResidentRefSeq::new` and `WindowedRefSeq::new` take the `ContigList`
-        // as a **separate constructor argument**, so nothing ties it to the bytes on disk: a
-        // `WindowedRefSeq` over a FASTA missing a contig, behind a table that names it, matches
-        // this file perfectly and cannot serve a single base of it.
-        //
-        // A zero-length fetch settles that, and it is what the deleted per-contig loop was
-        // really for. The loop asked it of **every** contig in the header — ~2,580 on GRCh38,
-        // once per cursor — for a property that only matters for the one contig this cursor
-        // will read. Asking it once keeps the fail-fast and costs one `open(2)` instead of
-        // 2,580.
-        //
-        // Without it the fault surfaces mid-stream, per chromosome, after arbitrary work, under
-        // a top-level message naming the *BAM* — and on a `--regions` run whose reads are all
-        // dropped before filter #8, never at all.
+                // **Can it actually serve this cursor's contig?**
+                //
+                // The comparison above proves the accessor carries the right *description*.
+                // For one accessor that is the whole story — `InMemoryRefSeq` derives its
+                // table from the bytes it holds. But `ResidentRefSeq::new` and
+                // `WindowedRefSeq::new` take the `ContigList` as a **separate constructor
+                // argument**, so nothing ties it to the bytes on disk: a `WindowedRefSeq` over
+                // a FASTA missing a contig, behind a table that names it, matches this file
+                // perfectly and cannot serve a single base of it.
+                //
+                // A zero-length fetch settles that, and it is what the deleted per-contig loop
+                // was really for. The loop asked it of **every** contig in the header — ~2,580
+                // on GRCh38, once per cursor — for a property that only matters for the one
+                // contig this cursor will read. Asking it once keeps the fail-fast and costs
+                // one `open(2)` instead of 2,580.
+                //
+                // Without it the fault surfaces mid-stream, per chromosome, after arbitrary
+                // work, under a top-level message naming the *BAM* — and on a `--regions` run
+                // whose reads are all dropped before filter #8, never at all.
+                reference
+                    .fetch_raw_into(contig, 1, 0, probe)
+                    .map_err(|source| AlignmentFileError::Reference {
+                        path: self.path.to_path_buf(),
+                        source,
+                    })?;
+
+                Ok(reference)
+            };
+
+        // One buffer for every probe, since a zero-length fetch writes nothing into it and the
+        // readers are checked one after the other.
         let mut probe = Vec::new();
-        reference
-            .fetch_raw_into(contig, 1, 0, &mut probe)
-            .map_err(|source| AlignmentFileError::Reference {
-                path: self.path.to_path_buf(),
-                source,
-            })?;
+        let reference = checked_reference(make_reference(), &mut probe)?;
 
         let aligned_reads_reader = match AlignmentFileKind::from_path(&self.path) {
             Some(AlignmentFileKind::Bam) => {
@@ -480,6 +521,10 @@ impl AlignmentFile {
                             "a CRAM was opened without reference bases to decode against",
                         ),
                     })?;
+                // **The decode's own reader, not the cursor's** — and it goes through exactly
+                // the checks the first one did, because a factory that hands out one good
+                // reader and one bad one is not a case worth leaving to luck.
+                let decode_reference = checked_reference(make_reference(), &mut probe)?;
                 let entries = self
                     .crai_by_contig
                     .get(usize::try_from(contig.get()).unwrap_or(usize::MAX))
@@ -489,6 +534,7 @@ impl AlignmentFile {
                     reader,
                     Arc::clone(&self.header),
                     repository,
+                    Box::new(decode_reference),
                     entries,
                     self.resolution.clone(),
                     Arc::clone(&self.path),
@@ -1091,7 +1137,7 @@ mod tests {
         .expect("the fixture opens");
 
         let mut cursor = file
-            .cursor(ContigId(0), big_reference_bases())
+            .cursor(ContigId(0), big_reference_bases)
             .expect("a cursor for contig 0");
 
         // Ascending, adjacent, overlapping, far apart, backward, repeated, and empty — the
@@ -1225,7 +1271,7 @@ mod tests {
         .expect("the fixture opens");
 
         let mut cursor = file
-            .cursor(ContigId(0), cram_cursor_reference_bases(&fasta))
+            .cursor(ContigId(0), || cram_cursor_reference_bases(&fasta))
             .expect("a cursor for contig 0");
 
         // Ascending, adjacent, overlapping, far apart, backward, repeated, and the whole
@@ -1337,7 +1383,7 @@ mod tests {
         .expect("the fixture opens");
 
         let mut cursor = file
-            .cursor(ContigId(0), cram_cursor_reference_bases(&fasta))
+            .cursor(ContigId(0), || cram_cursor_reference_bases(&fasta))
             .expect("a cursor for contig 0");
         cursor
             .move_to_region(GenomeRegion {
@@ -1445,7 +1491,7 @@ mod tests {
         .expect("the fixture opens");
 
         let mut cursor = file
-            .cursor(ContigId(0), big_reference_bases())
+            .cursor(ContigId(0), big_reference_bases)
             .expect("a cursor for contig 0");
 
         // Overlapping, ascending — what a real region walk looks like.
@@ -1542,7 +1588,7 @@ mod tests {
     /// (aligned-reads reader → region narrowing → step-1 filter → order guard).
     fn cursor_names(file: &Arc<AlignmentFile>, region: GenomeRegion) -> Vec<String> {
         let mut cursor = file
-            .cursor(region.contig, reference_bases())
+            .cursor(region.contig, reference_bases)
             .expect("a cursor for this contig");
         cursor.move_to_region(region).expect("on this chromosome");
         let mut names = Vec::new();
@@ -1572,7 +1618,7 @@ mod tests {
         ]);
 
         let mut cursor = file
-            .cursor(ContigId(0), reference_bases())
+            .cursor(ContigId(0), reference_bases)
             .expect("a cursor for contig 0");
         cursor
             .move_to_region(whole_first_contig())
@@ -1614,7 +1660,7 @@ mod tests {
             end: Position(35),
         };
         let mut cursor = file
-            .cursor(ContigId(0), reference_bases())
+            .cursor(ContigId(0), reference_bases)
             .expect("a cursor for contig 0");
         cursor.move_to_region(region).expect("on this chromosome");
         let mut reads = Vec::new();
@@ -1678,7 +1724,7 @@ mod tests {
         // The cursor is minted before the truncation, as a real run's would be: the gate and
         // the index are intact and the fault can only appear mid-stream.
         let mut cursor = file
-            .cursor(ContigId(0), reference_bases())
+            .cursor(ContigId(0), reference_bases)
             .expect("a cursor for contig 0");
 
         let full = std::fs::metadata(&path).expect("stat").len();
@@ -1776,7 +1822,7 @@ mod tests {
             opened_over(&[read_named_with_length("r", 0, 1, 30)]);
 
         let error = file
-            .cursor(ContigId(9), reference_bases())
+            .cursor(ContigId(9), reference_bases)
             .err()
             .expect("a contig the file does not declare must be refused");
         match error {
@@ -1793,7 +1839,7 @@ mod tests {
 
         // And the contigs it *does* have are fine, so the check is a check and not a refusal
         // of everything.
-        assert!(file.cursor(ContigId(0), reference_bases()).is_ok());
+        assert!(file.cursor(ContigId(0), reference_bases).is_ok());
     }
 
     /// **An accessor over a different reference is refused, and the refusal compares
@@ -1823,12 +1869,14 @@ mod tests {
             opened_over(&[read_named_with_length("r", 0, 1, 30)]);
 
         // Right lengths, wrong names.
-        let wrong_names = InMemoryRefSeq::from_named_contigs(
-            FIXTURE_CONTIGS
-                .iter()
-                .map(|(name, length)| (format!("not_{name}"), vec![b'A'; *length]))
-                .collect(),
-        );
+        let wrong_names = || {
+            InMemoryRefSeq::from_named_contigs(
+                FIXTURE_CONTIGS
+                    .iter()
+                    .map(|(name, length)| (format!("not_{name}"), vec![b'A'; *length]))
+                    .collect(),
+            )
+        };
         let error = file
             .cursor(ContigId(0), wrong_names)
             .err()
@@ -1844,12 +1892,14 @@ mod tests {
 
         // Right names, wrong lengths — the case the probe could never catch, because a
         // zero-length window at position 1 resolves whatever the contig's length is.
-        let wrong_lengths = InMemoryRefSeq::from_named_contigs(
-            FIXTURE_CONTIGS
-                .iter()
-                .map(|(name, length)| ((*name).to_string(), vec![b'A'; *length + 1]))
-                .collect(),
-        );
+        let wrong_lengths = || {
+            InMemoryRefSeq::from_named_contigs(
+                FIXTURE_CONTIGS
+                    .iter()
+                    .map(|(name, length)| ((*name).to_string(), vec![b'A'; *length + 1]))
+                    .collect(),
+            )
+        };
         let error = file
             .cursor(ContigId(0), wrong_lengths)
             .err()
@@ -1864,7 +1914,7 @@ mod tests {
 
         // And the matching accessor is accepted, so the check discriminates rather than
         // refusing everything.
-        assert!(file.cursor(ContigId(0), reference_bases()).is_ok());
+        assert!(file.cursor(ContigId(0), reference_bases).is_ok());
     }
 
     /// **A permuted table is refused, and this is the case the whole check exists for.**
@@ -1892,7 +1942,9 @@ mod tests {
         permuted.reverse();
 
         let error = file
-            .cursor(ContigId(0), InMemoryRefSeq::from_named_contigs(permuted))
+            .cursor(ContigId(0), || {
+                InMemoryRefSeq::from_named_contigs(permuted.clone())
+            })
             .err()
             .expect("a permuted contig table must be refused");
         assert!(
@@ -1913,10 +1965,12 @@ mod tests {
 
         let (_reference_dir, _bam_dir, file) =
             opened_over(&[read_named_with_length("r", 0, 1, 30)]);
-        let short = InMemoryRefSeq::from_named_contigs(vec![(
-            FIXTURE_CONTIGS[0].0.to_string(),
-            vec![b'A'; FIXTURE_CONTIGS[0].1],
-        )]);
+        let short = || {
+            InMemoryRefSeq::from_named_contigs(vec![(
+                FIXTURE_CONTIGS[0].0.to_string(),
+                vec![b'A'; FIXTURE_CONTIGS[0].1],
+            )])
+        };
 
         let error = file
             .cursor(ContigId(0), short)
@@ -1969,17 +2023,19 @@ mod tests {
 
         // chr1 is servable, so the accessor is fine for a cursor over it …
         assert!(
-            file.cursor(
-                ContigId(0),
-                WindowedRefSeq::new(fasta.clone(), table.clone())
-            )
+            file.cursor(ContigId(0), || WindowedRefSeq::new(
+                fasta.clone(),
+                table.clone()
+            ))
             .is_ok(),
             "the contig the FASTA does hold is servable"
         );
 
         // … and chr2 is not, which is refused here rather than at the first read.
         let error = file
-            .cursor(ContigId(1), WindowedRefSeq::new(fasta, table))
+            .cursor(ContigId(1), || {
+                WindowedRefSeq::new(fasta.clone(), table.clone())
+            })
             .err()
             .expect("an accessor that cannot serve this contig must be refused");
         assert!(
@@ -2044,6 +2100,95 @@ mod tests {
     /// covers).
     fn names_from(file: &Arc<AlignmentFile>, region: GenomeRegion) -> Vec<String> {
         cursor_names(file, region)
+    }
+
+    /// **Every reference reader a cursor mints is checked, not just the first.**
+    ///
+    /// A CRAM cursor mints two — the read filter's and the decode's — from one caller-supplied
+    /// factory. This hands it a factory that is right the first time and wrong the second, and
+    /// requires the refusal.
+    ///
+    /// **The table it hands out second is a *permutation* of the file's, and that is the whole
+    /// point**: a permuted table has every name and every length the file declares, so it
+    /// passes anything that compares them as sets, and a zero-length fetch at position 1
+    /// resolves happily — the bases are readable, they are simply the other chromosome's. Only
+    /// the order comparison catches it. What it would cost is asymmetric, which is why the
+    /// decode's reader cannot be the unchecked one: a wrong reference on the *filter's* reader
+    /// gives a wrong mismatch fraction, while on the *decode's* it corrupts the read sequences
+    /// themselves, because a CRAM stores a read as its differences from the reference.
+    ///
+    /// Mutation-checked: dropping the `checked_reference` call in the CRAM arm leaves the rest
+    /// of the suite green and fails only this.
+    #[test]
+    fn a_cram_cursor_checks_the_second_reference_reader_it_mints() {
+        use crate::ng::ref_seq::InMemoryRefSeq;
+        use std::cell::Cell;
+
+        let (_cram_dir, cram_path, _fasta_dir, fasta) = indexed_cram(&one_read());
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
+        let file = AlignmentFile::open(
+            &cram_path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("the CRAM opens");
+
+        let good = || {
+            InMemoryRefSeq::from_named_contigs(
+                FIXTURE_CONTIGS
+                    .iter()
+                    .map(|(name, length)| ((*name).to_string(), vec![b'A'; *length]))
+                    .collect(),
+            )
+        };
+        // The same names and the same lengths, in the other order.
+        let permuted = || {
+            InMemoryRefSeq::from_named_contigs(
+                FIXTURE_CONTIGS
+                    .iter()
+                    .rev()
+                    .map(|(name, length)| ((*name).to_string(), vec![b'A'; *length]))
+                    .collect(),
+            )
+        };
+
+        // The first reader is the good one, so a check applied only to it would pass.
+        let minted = Cell::new(0u8);
+        let error = file
+            .cursor(ContigId(0), || {
+                minted.set(minted.get() + 1);
+                if minted.get() == 1 {
+                    good()
+                } else {
+                    permuted()
+                }
+            })
+            .err()
+            .expect("the decode's reader is over a permuted table and must be refused");
+        assert!(
+            matches!(&error, AlignmentFileError::CursorAccessorContigTable { .. }),
+            "the refusal must name the contig-table disagreement, not something downstream: {error}"
+        );
+        assert_eq!(
+            minted.get(),
+            2,
+            "the CRAM arm must have asked the factory for a second reader"
+        );
+
+        // And the same factory, good both times, opens a cursor — so the assertion above is
+        // about the *permutation* and not about minting twice.
+        assert!(
+            file.cursor(ContigId(0), good).is_ok(),
+            "two good readers open a cursor"
+        );
     }
 
     /// **T8 — the same reads written as BAM and as CRAM produce the same
