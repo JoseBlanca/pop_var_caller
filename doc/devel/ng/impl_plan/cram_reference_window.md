@@ -187,17 +187,23 @@ mapped read's *whole* chromosome from the repository — which A3 emptied, so th
 where before this branch it decoded. Spec §10 point 2 says such a block "needs no external bases",
 and that is true of an unmapped block and false of this one.
 
-**How common, measured, and the first measurement was wrong.** A multi-chromosome block is written
-to the `.crai` as **one line per chromosome, all sharing the container offset and the slice
-landmark** (`htslib/cram/cram_index.c:715`, `cram_index_build_multiref`); the reference id `-2`
-that the slice header carries never reaches the index. A first survey looked for `-2` and so could
-not have found one. Re-measured by grouping index lines on (offset, landmark) and counting distinct
-chromosomes: **0 such blocks in 179 CRAMs and 134,860 blocks under `benchmarks/`**, the
-whole-genome tomato file's 112,140 included. But `samtools` 1.16.1 writes one **by default** for a
-two-chromosome file with five reads each — it merges under-full blocks across chromosomes
-(`cram_encode.c:3964`) — so **any reference with many short contigs produces them routinely**, and
-a coordinate-sorted file is not protection. That is what makes this a correctness gap rather than
-a curiosity.
+**How common, measured, and the first two measurements were both wrong.** A multi-chromosome block
+is written to the `.crai` as **one line per chromosome, all sharing the container offset and the
+slice landmark** (`htslib/cram/cram_index.c:715`, `cram_index_build_multiref`); the reference id
+`-2` that the slice header carries never reaches the index. A first survey looked for `-2` and so
+could not have found one. Re-measured by grouping index lines on (offset, landmark) and counting
+distinct chromosomes: **0 such blocks in 179 CRAMs and 134,860 blocks under `benchmarks/`**, the
+whole-genome tomato file's 112,140 included.
+
+A second claim — that samtools writes one *by default* for a two-chromosome file — was also wrong,
+and wrong because a probe loop overwrote one output file so the "default" row was reading a forced
+one. Measured per setting, each to its own file: **two chromosomes with six reads each, defaults:
+not merged**; the same forced with `multi_seq_per_slice=1`: merged. **Twenty-four chromosomes with
+three reads each, defaults: 4 blocks, 2 of them multi-chromosome, the largest holding 20.** So the
+trigger is not a chromosome boundary but a *fragmented reference*: samtools merges once several
+blocks in a row would be under-full (`cram_encode.c:3964`), which a draft or scaffold-level
+assembly does constantly and a chromosome-scale one never does. That is what makes this a
+correctness gap rather than a curiosity.
 
 **The design, ruled by the owner 2026-09-07:** *"we might find crams in which a block has reads
 from two chromosomes, that span the boundary. We should be prepared for that. We could decompress
@@ -212,7 +218,7 @@ because it makes the *bases a read is rebuilt from* depend on the index being ri
 the index is trusted only for where to seek. At one extra record-decode per rare block, the safety
 is free.
 
-**A4. The fork learns to decode a block against one window per chromosome.** ☐
+**A4. The fork learns to decode a block against one window per chromosome.** ✅
 `vendor/noodles-cram`, and `FORK.md` gains change 6. Three additions to
 `io/reader/container/slice.rs`:
 - `Slice::reference_extent()` replacing `reference_span()` — a three-state answer
@@ -233,7 +239,7 @@ is free.
   what happens to be there.
 *Depends:* A3. *Source:* this milestone's preamble; `FORK.md` §5 for the shape to follow.
 
-**A5. ng decodes such a block, and a fixture proves it.** ☐
+**A5. ng decodes such a block, and a fixture proves it.** ✅
 `decode_container_at` takes the `SeveralChromosomes` arm: `record_extents`, then one
 `fetch_raw_into` per chromosome into a reused buffer set, then `records_over_windows`. The buffers
 are per call and sized by the extents, so what is resident stays bounded by the block's reads and

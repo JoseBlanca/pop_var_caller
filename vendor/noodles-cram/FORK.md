@@ -34,7 +34,9 @@ fork, not in the diff.
 | `src/record/sequence/iter.rs` | `Iter` widened | 3 |
 | `src/io/reader/container/slice/records.rs` | `TagPolicy`, and the tag loop acting on it | 4 |
 | `src/io/reader/container/slice/tag_streams.rs` | new — when tags may be left unread | 4 |
-| `src/io/reader/container/slice.rs` | `records_discarding_tags`, `records_over_window`, `reference_span`, the `Window` variant | 4, 5 |
+| `src/io/reader/container/slice.rs` | `records_discarding_tags`, `records_over_window`, the `Window` variant | 4, 5 |
+| `src/io/reader/container/slice.rs` | `reference_extent`, `record_extents`, `records_over_windows` | 6 |
+| `src/io/reader.rs` | re-exports `ReferenceExtent`, `SequenceExtent`, `SequenceWindow` | 6 |
 
 Two files the registry has and this copy does not — `.cargo-ok` and `.cargo_vcs_info.json` —
 are the extraction's own bookkeeping, and are ignored rather than committed.
@@ -185,3 +187,37 @@ spans — because the failure it prevents is silent: every read decoded against 
 **Not upstream as it stands**, for the same reason as changes 3 and 4. The shape may be worth
 proposing, since it is what a coordinate-ordered reader wants and noodles already does the
 same coordinate rebasing for embedded references.
+
+### 6. Decoding a slice that spans several reference sequences, against one window each
+
+`src/io/reader/container/slice.rs`: `Slice::reference_extent` replaces `reference_span`;
+`Slice::record_extents` says which sequences a slice's records touch and how much of each;
+`Slice::records_over_windows` decodes against one window per sequence. `src/io/reader.rs`
+re-exports the three types a caller has to name.
+
+**Change 5 left one slice shape unserved, and it aborts rather than erroring.** A slice whose
+records span several reference sequences names none in its header — no id, no start, no span — so
+there is no one window to fetch. Upstream resolves each mapped record's *whole* sequence from the
+repository, ending in `.expect("invalid reference sequence name")`, which against the empty
+repository a windowed caller passes is a panic. So a caller that had stopped holding whole
+sequences could not read such a file at all.
+
+**The header cannot say what to fetch, so the records are asked.** `record_extents` decodes them
+with no reference attached — a record's sequence id, start and CIGAR come out of the file, and
+only its *bases* are rebuilt against a reference — and reports one extent per sequence touched.
+The caller fetches those and calls `records_over_windows`. **The blocks are decompressed once**:
+`decode_blocks` has already run and both passes read its output, so what the second pass costs is
+a record decode.
+
+**`reference_span` became `reference_extent` because the `Option` was the bug.** `None` meant
+both "unmapped, needs nothing" and "several sequences, needs one window each", and a caller
+reading it as the first got a decode that panicked on the second. Three named states cannot be
+folded that way.
+
+**A record whose sequence has no window, or whose span its window falls short of, is refused with
+both spans named.** That check is the whole guard on this path: a several-sequence slice header
+carries no reference MD5, where the single-sequence path is also covered by one. Deleting the
+bound turns a short window into an index-out-of-range panic inside `record/sequence/iter.rs`,
+measured.
+
+**Not upstream as it stands**, for the same reason as changes 3, 4 and 5.

@@ -35,32 +35,215 @@ pub struct Slice<'c> {
     src: &'c [u8],
 }
 
+/// Which reference bases a slice needs, in the three shapes a slice can take.
+///
+/// **Three states rather than an `Option`, because the two "no single window" cases want
+/// opposite things of a caller**, and folding them together is a mistake that decodes silently:
+/// an unmapped slice needs no bases at all, while one spanning several reference sequences needs
+/// *one window per sequence* and will otherwise reach for whole sequences from a repository.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReferenceExtent {
+    /// Every record sits on one reference sequence, and these are the first and last positions
+    /// they touch — 1-based and inclusive. Fetch this and call
+    /// [`Slice::records_over_window`].
+    OneSequence {
+        /// Index into the header's reference sequences.
+        reference_sequence_id: usize,
+        /// First position any record touches.
+        start: Position,
+        /// Last position any record touches.
+        end: Position,
+    },
+    /// The records sit on **several** reference sequences, and the slice header names none of
+    /// them: it carries no id, no start and no span. Which sequences and which stretches is
+    /// answered by [`Slice::record_extents`], which decodes the records without needing any
+    /// bases; the windows then go to [`Slice::records_over_windows`].
+    SeveralSequences,
+    /// No record is placed on a reference. Nothing is reconstructed against one, so no bases are
+    /// needed and no repository is consulted.
+    Unmapped,
+}
+
+/// One reference sequence's window, for a slice whose records span several
+/// ([`Slice::records_over_windows`]).
+#[derive(Clone, Copy, Debug)]
+pub struct SequenceWindow<'w> {
+    /// Which reference sequence these bases are, as an index into the header's list.
+    pub reference_sequence_id: usize,
+    /// The bases, starting at [`start`](Self::start).
+    pub bases: &'w [u8],
+    /// The position `bases[0]` is, 1-based.
+    pub start: Position,
+}
+
+/// The stretch of one reference sequence a slice's records actually touch — what
+/// [`Slice::record_extents`] reports, and what a caller fetches to build a [`SequenceWindow`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SequenceExtent {
+    /// Which reference sequence, as an index into the header's list.
+    pub reference_sequence_id: usize,
+    /// First position any of this slice's records touches on it.
+    pub start: Position,
+    /// Last position any of them touches.
+    pub end: Position,
+}
+
+/// Where a decode gets the reference bases it rebuilds each read from.
+#[derive(Clone, Copy)]
+enum ReferenceBases<'w> {
+    /// Whole sequences, from the repository passed alongside — upstream's behaviour, and what
+    /// [`Slice::records`] and [`Slice::records_discarding_tags`] use.
+    Repository,
+    /// One window, for a slice all of whose records sit on one reference sequence.
+    OneWindow(&'w [u8], Position),
+    /// One window per reference sequence, for a slice whose records span several.
+    WindowPerSequence(&'w [SequenceWindow<'w>]),
+    /// None at all: the records are decoded but no reference is attached to them, so their
+    /// coordinates are readable and their bases are not ([`Slice::record_extents`]).
+    Unresolved,
+}
+
+/// Whether a decode pass links each record to its mate.
+///
+/// Mate resolution walks the whole slice and names every unnamed record, which the extents pass
+/// has no use for — it reads coordinates and drops the records.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MateResolution {
+    Resolve,
+    Skip,
+}
+
 impl<'c> Slice<'c> {
     /// **Which reference bases this slice needs, before any of them are fetched.**
     ///
-    /// `(reference sequence id, first position, last position)`, both 1-based and inclusive, or
-    /// `None` when there is no one window to fetch — an unmapped slice, or one spanning several
-    /// reference sequences.
+    /// Read from the slice header, which is parsed before any block is decoded — so a caller can
+    /// fetch exactly what is wanted rather than holding a whole sequence. See
+    /// [`ReferenceExtent`] for what each answer obliges the caller to do.
     ///
-    /// **`None` does not mean "needs no bases", and the two cases differ.** An unmapped slice
-    /// really needs none: every record in it is unmapped, so nothing is reconstructed against a
-    /// reference. A slice spanning several reference sequences resolves each *mapped* record's
-    /// own sequence through the `Repository` handed to
-    /// [`records_discarding_tags`](Self::records_discarding_tags), whole, and `expect`s a hit —
-    /// so a caller that passes an empty repository for such a slice gets a panic, not an error.
-    ///
-    /// It is readable from the slice header, which is parsed before any block is decoded, so a
-    /// caller can fetch exactly this window and hand it to
-    /// [`records_over_window`](Self::records_over_window) rather than holding a whole contig.
-    pub fn reference_span(&self) -> Option<(usize, Position, Position)> {
+    /// *(Was `reference_span`, returning an `Option` that folded the unmapped and
+    /// several-sequences cases together. They are not the same case, and ng shipped a decode
+    /// that panicked on the second because of the fold.)*
+    pub fn reference_extent(&self) -> ReferenceExtent {
         match self.header.reference_sequence_context() {
-            ReferenceSequenceContext::Some(context) => Some((
-                context.reference_sequence_id(),
-                context.alignment_start(),
-                context.alignment_end(),
-            )),
-            _ => None,
+            ReferenceSequenceContext::Some(context) => ReferenceExtent::OneSequence {
+                reference_sequence_id: context.reference_sequence_id(),
+                start: context.alignment_start(),
+                end: context.alignment_end(),
+            },
+            ReferenceSequenceContext::Many => ReferenceExtent::SeveralSequences,
+            ReferenceSequenceContext::None => ReferenceExtent::Unmapped,
         }
+    }
+
+    /// **Which sequences this slice's records touch, and how much of each — reading no reference
+    /// bases at all.**
+    ///
+    /// For a slice whose header says only "several reference sequences"
+    /// ([`ReferenceExtent::SeveralSequences`]) this is the only way to learn what to fetch: the
+    /// header carries no id, no start and no span, and the answer is in the records.
+    ///
+    /// **It costs a decode of the records, and that is the whole cost of supporting such a
+    /// slice.** It is not a second decode of the *blocks*: `decode_blocks` has already run, and
+    /// its output is what both this and [`records_over_windows`](Self::records_over_windows)
+    /// read. What makes the pass possible is that a record's reference sequence, its start and
+    /// its CIGAR come out of the file, and only its **bases** are rebuilt against a reference —
+    /// so nothing here needs one.
+    ///
+    /// One entry per reference sequence any *mapped* record sits on, in ascending id order, each
+    /// running from the first to the last position touched on it. An unmapped slice yields an
+    /// empty `Vec`.
+    ///
+    /// **The records are dropped rather than returned**, deliberately: nothing was resolved for
+    /// them, so asking one for its bases would panic, and a function that hands back such a
+    /// record invites exactly that.
+    pub fn record_extents<'h: 'c, 'ch: 'c>(
+        &self,
+        header: &'h sam::Header,
+        compression_header: &'ch CompressionHeader,
+        core_data_src: &'c [u8],
+        external_data_srcs: &'c [(block::ContentId, Cow<'c, [u8]>)],
+    ) -> io::Result<Vec<SequenceExtent>> {
+        let records = self.read_records(
+            fasta::Repository::default(),
+            ReferenceBases::Unresolved,
+            header,
+            compression_header,
+            core_data_src,
+            external_data_srcs,
+            if tag_streams::tags_can_be_left_unread(compression_header) {
+                TagPolicy::SkipStreams
+            } else {
+                TagPolicy::DiscardValues
+            },
+            MateResolution::Skip,
+        )?;
+
+        let mut extents: Vec<SequenceExtent> = Vec::new();
+        for record in &records {
+            if record.bam_flags.is_unmapped() || record.cram_flags.sequence_is_missing() {
+                continue;
+            }
+            let (Some(reference_sequence_id), Some(start), Some(end)) = (
+                record.reference_sequence_id,
+                record.alignment_start,
+                record.alignment_end(),
+            ) else {
+                continue;
+            };
+            match extents
+                .iter_mut()
+                .find(|extent| extent.reference_sequence_id == reference_sequence_id)
+            {
+                Some(extent) => {
+                    extent.start = extent.start.min(start);
+                    extent.end = extent.end.max(end);
+                }
+                None => extents.push(SequenceExtent {
+                    reference_sequence_id,
+                    start,
+                    end,
+                }),
+            }
+        }
+        extents.sort_by_key(|extent| extent.reference_sequence_id);
+        Ok(extents)
+    }
+
+    /// The slice's records, decoded against **one window per reference sequence** — for a slice
+    /// whose records span several ([`ReferenceExtent::SeveralSequences`]). Tags are dropped, as
+    /// [`records_discarding_tags`](Self::records_discarding_tags).
+    ///
+    /// `windows` is what [`record_extents`](Self::record_extents) asked for, fetched: one entry
+    /// per reference sequence, each carrying its bases and the position the first of them is.
+    /// Order does not matter and extra entries are harmless.
+    ///
+    /// **A record whose sequence is missing from `windows`, or whose span its window does not
+    /// cover, is refused with both spans named** — never decoded against whatever bases happen
+    /// to be to hand. That refusal is the only guard here: a slice spanning several sequences
+    /// carries no reference MD5 to check a window against, where the single-sequence path has
+    /// one.
+    pub fn records_over_windows<'h: 'c, 'ch: 'c>(
+        &self,
+        windows: &'c [SequenceWindow<'c>],
+        header: &'h sam::Header,
+        compression_header: &'ch CompressionHeader,
+        core_data_src: &'c [u8],
+        external_data_srcs: &'c [(block::ContentId, Cow<'c, [u8]>)],
+    ) -> io::Result<Vec<Record<'c>>> {
+        self.read_records(
+            fasta::Repository::default(),
+            ReferenceBases::WindowPerSequence(windows),
+            header,
+            compression_header,
+            core_data_src,
+            external_data_srcs,
+            if tag_streams::tags_can_be_left_unread(compression_header) {
+                TagPolicy::SkipStreams
+            } else {
+                TagPolicy::DiscardValues
+            },
+            MateResolution::Resolve,
+        )
     }
 
     pub(crate) fn header(&self) -> &Header {
@@ -133,12 +316,13 @@ impl<'c> Slice<'c> {
     ) -> io::Result<Vec<Record<'c>>> {
         self.read_records(
             reference_sequence_repository,
-            None,
+            ReferenceBases::Repository,
             header,
             compression_header,
             core_data_src,
             external_data_srcs,
             TagPolicy::Keep,
+            MateResolution::Resolve,
         )
     }
 
@@ -165,7 +349,7 @@ impl<'c> Slice<'c> {
     ) -> io::Result<Vec<Record<'c>>> {
         self.read_records(
             reference_sequence_repository,
-            None,
+            ReferenceBases::Repository,
             header,
             compression_header,
             core_data_src,
@@ -175,6 +359,7 @@ impl<'c> Slice<'c> {
             } else {
                 TagPolicy::DiscardValues
             },
+            MateResolution::Resolve,
         )
     }
 
@@ -206,7 +391,7 @@ impl<'c> Slice<'c> {
     ) -> io::Result<Vec<Record<'c>>> {
         self.read_records(
             reference_sequence_repository,
-            Some((window, window_start)),
+            ReferenceBases::OneWindow(window, window_start),
             header,
             compression_header,
             core_data_src,
@@ -216,18 +401,20 @@ impl<'c> Slice<'c> {
             } else {
                 TagPolicy::DiscardValues
             },
+            MateResolution::Resolve,
         )
     }
 
     fn read_records<'h: 'c, 'ch: 'c>(
         &self,
         reference_sequence_repository: fasta::Repository,
-        window: Option<(&'c [u8], Position)>,
+        bases: ReferenceBases<'c>,
         header: &'h sam::Header,
         compression_header: &'ch CompressionHeader,
         core_data_src: &'c [u8],
         external_data_srcs: &'c [(block::ContentId, Cow<'c, [u8]>)],
         tag_policy: TagPolicy,
+        mate_resolution: MateResolution,
     ) -> io::Result<Vec<Record<'c>>> {
         let core_data_reader = BitReader::new(core_data_src);
 
@@ -252,14 +439,24 @@ impl<'c> Slice<'c> {
         #[cfg(feature = "perf-counters")]
         let phase_started = std::time::Instant::now();
 
-        let slice_reference_sequence = get_slice_reference_sequence(
-            &reference_sequence_repository,
-            window,
-            header,
-            compression_header,
-            &self.header,
-            external_data_srcs,
-        )?;
+        // **Nothing is resolved for the extents pass**, on either path: it reads coordinates,
+        // and a slice-wide fetch here would consult the repository for a single-sequence slice
+        // and defeat the whole point of the pass.
+        let slice_reference_sequence = if matches!(bases, ReferenceBases::Unresolved) {
+            None
+        } else {
+            get_slice_reference_sequence(
+                &reference_sequence_repository,
+                match bases {
+                    ReferenceBases::OneWindow(window, start) => Some((window, start)),
+                    _ => None,
+                },
+                header,
+                compression_header,
+                &self.header,
+                external_data_srcs,
+            )?
+        };
 
         #[cfg(feature = "perf-counters")]
         {
@@ -295,7 +492,27 @@ impl<'c> Slice<'c> {
 
             if !record.bam_flags.is_unmapped() && !record.cram_flags.sequence_is_missing() {
                 record.reference_sequence = if reference_sequence_context.is_many() {
-                    get_record_reference_sequence(&reference_sequence_repository, header, record)?
+                    match bases {
+                        // **The multi-sequence path, and the only one that needs a window per
+                        // record.** The slice header names no sequence, so each record answers
+                        // for itself, and its window is looked up by the sequence it names.
+                        ReferenceBases::WindowPerSequence(windows) => {
+                            Some(window_for_record(windows, header, record)?)
+                        }
+                        // No reference at all: the extents pass, which reads coordinates.
+                        ReferenceBases::Unresolved => None,
+                        // Whole sequences from the repository — upstream's behaviour. An *empty*
+                        // repository panics here rather than erroring, which is upstream's
+                        // `expect`; a caller that cannot serve whole sequences uses
+                        // `records_over_windows` instead.
+                        ReferenceBases::Repository | ReferenceBases::OneWindow(..) => {
+                            get_record_reference_sequence(
+                                &reference_sequence_repository,
+                                header,
+                                record,
+                            )?
+                        }
+                    }
                 } else {
                     slice_reference_sequence.clone()
                 };
@@ -315,7 +532,9 @@ impl<'c> Slice<'c> {
         #[cfg(feature = "perf-counters")]
         let phase_started = std::time::Instant::now();
 
-        resolve_mates(&mut records)?;
+        if mate_resolution == MateResolution::Resolve {
+            resolve_mates(&mut records)?;
+        }
 
         #[cfg(feature = "perf-counters")]
         {
@@ -613,6 +832,75 @@ fn get_slice_reference_sequence<'c>(
     } else {
         Ok(None)
     }
+}
+
+/// The window one record of a several-sequence slice is rebuilt against.
+///
+/// **Every failure here is an error, never a fallback.** The bases a read is reconstructed from
+/// decide what that read *says*, so serving it the wrong window — or the right window a base
+/// short — produces a read that is wrong and complains about nothing. A several-sequence slice
+/// carries no reference MD5 either, so this check is the whole guard.
+fn window_for_record<'c>(
+    windows: &'c [SequenceWindow<'c>],
+    header: &sam::Header,
+    record: &Record<'c>,
+) -> io::Result<ReferenceSequence<'c>> {
+    let name_of = |id: usize| {
+        header
+            .reference_sequences()
+            .get_index(id)
+            .map(|(name, _)| String::from_utf8_lossy(name).into_owned())
+            .unwrap_or_else(|| format!("reference sequence {id}"))
+    };
+
+    let reference_sequence_id = record.reference_sequence_id.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "a mapped record in a slice spanning several reference sequences names none",
+        )
+    })?;
+
+    let window = windows
+        .iter()
+        .find(|window| window.reference_sequence_id == reference_sequence_id)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "no reference window was given for {}, which this slice holds records on",
+                    name_of(reference_sequence_id)
+                ),
+            )
+        })?;
+
+    let (Some(start), Some(end)) = (record.alignment_start, record.alignment_end()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "a mapped record in a slice spanning several reference sequences has no position",
+        ));
+    };
+
+    let covers = usize::from(start) >= usize::from(window.start)
+        && usize::from(end) <= usize::from(window.start) + window.bases.len() - 1;
+    if !covers {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the reference window given for {} covers {}..{} but a record of this slice \
+                 spans {}..{}",
+                name_of(reference_sequence_id),
+                usize::from(window.start),
+                usize::from(window.start) + window.bases.len().saturating_sub(1),
+                usize::from(start),
+                usize::from(end),
+            ),
+        ));
+    }
+
+    Ok(ReferenceSequence::Window {
+        reference_start: window.start,
+        sequence: window.bases,
+    })
 }
 
 fn get_record_reference_sequence<'c>(

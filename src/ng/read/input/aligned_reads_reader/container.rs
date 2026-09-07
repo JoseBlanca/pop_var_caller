@@ -29,6 +29,7 @@ use std::io::SeekFrom;
 
 use noodles_core::Position as RecordPosition;
 use noodles_cram as cram;
+use noodles_cram::io::reader::{ReferenceExtent, SequenceExtent, SequenceWindow};
 use noodles_fasta as fasta;
 use noodles_sam as sam;
 use noodles_sam::alignment::RecordBuf;
@@ -378,31 +379,20 @@ pub(crate) fn decode_container_at(
     // container's flat buffers; reused, they grow to the longest read of the container and no
     // further.
     let mut scratch = RecordScratch::default();
-    // **The window is its own buffer, not one of `scratch`'s, and the borrow checker is why.**
-    // The decoded records borrow it for as long as they live, while `scratch` is borrowed
-    // *mutably* to build each of them — so the two cannot be fields of one struct. Reused
-    // across the container's slices, it grows to the widest span this file has met and no
-    // further.
-    let mut window: Vec<u8> = Vec::new();
-    // **Empty, because nothing here decodes against a repository any more.** noodles takes one
-    // by value on both record surfaces below; this one's adapter serves nothing, so the bases a
-    // record is rebuilt from can only be the window fetched above (`alignment_cursor.md` §10
-    // point 2). The clones are pointer bumps — a `Repository` is an `Arc` inside.
+    // **The windows are their own buffers, not `scratch`'s, and the borrow checker is why.**
+    // The decoded records borrow them for as long as they live, while `scratch` is borrowed
+    // *mutably* to build each of them — so the two cannot be fields of one struct. Reused across
+    // the container's slices, each grows to the widest span this file has met and no further.
     //
-    // **⚠ One slice shape does read it, and A′ is the milestone that fixes it.** A slice whose
-    // records span *several* contigs has no single span to fetch, so it takes the no-window call
-    // below — and noodles then resolves each mapped record's contig through the repository,
-    // whole, and `expect`s a hit (`get_record_reference_sequence`). Against an empty one that is
-    // a **panic**, where before 2026-09-07 the run's shared repository answered it. Unmapped
-    // slices are safe by contrast: their records are unmapped, so noodles asks for no bases.
-    //
-    // **How rare, and the first count of it was measured wrongly.** htslib writes such a slice to
-    // the `.crai` as one line per contig, all sharing the container offset and the landmark
-    // (`cram_index_build_multiref`); the `-2` the slice header carries never reaches the index,
-    // so a survey looking for `-2` — which the first one was — could not have found any. Counted
-    // properly, by grouping index lines on (offset, landmark): **0 such slices in 179 CRAMs and
-    // 134,860 slices under `benchmarks/`**. But samtools writes one by *default* for two short
-    // contigs with a handful of reads each, so a fragmented reference produces them routinely.
+    // **Several, because a slice may hold reads from several contigs.** Almost every slice holds
+    // one and uses `windows[0]` alone; the exception is set out at the `SeveralSequences` arm
+    // below. The `Vec` is reused, so a container of ordinary slices allocates one buffer for its
+    // whole life.
+    let mut windows: Vec<Vec<u8>> = Vec::new();
+    // **Empty, and nothing reads it.** noodles takes a repository by value on the record surfaces
+    // ng calls; this one's adapter serves nothing, so the bases a record is rebuilt from can only
+    // be a window fetched here (`alignment_cursor.md` §10 point 2). The clones are pointer bumps —
+    // a `Repository` is an `Arc` inside.
     let no_repository = fasta::Repository::default();
     for slice in container.slices() {
         let slice = slice?;
@@ -411,33 +401,78 @@ pub(crate) fn decode_container_at(
         // independent of those borrows.
         let (core_data_src, external_data_srcs) = slice.decode_blocks()?;
 
-        // **A slice says which bases it needs before any of them are read.** Its header names
-        // the contig and the first and last position its records touch, and it is parsed
-        // before a block is decoded — so the decode fetches exactly that span rather than
-        // holding a chromosome. `None` is an unmapped slice or one spanning several contigs, and
-        // there is no one span to fetch for either — but only the first of them is safe here:
-        // an unmapped slice's records need no bases at all, while a multi-contig slice's mapped
-        // records are resolved through the repository, which is the hazard the `no_repository`
-        // comment above sets out (`alignment_cursor.md` §10 point 2).
-        let span = slice.reference_span();
-        if let Some((reference_sequence_id, start, end)) = span {
-            let contig = ContigId(u32::try_from(reference_sequence_id).map_err(|_| {
+        // **A slice usually says which bases it needs before any of them are read.** Its
+        // header names the contig and the first and last position its records touch, and it is
+        // parsed before a block is decoded — so the decode fetches exactly that stretch rather
+        // than holding a chromosome. Three answers, and each obliges something different
+        // (`alignment_cursor.md` §10 point 2, and the fork's `ReferenceExtent`).
+        let extent = slice.reference_extent();
+
+        // Fetch first, into buffers that outlive the records: `sequence_windows` below borrows
+        // them, and the records borrow that.
+        let mut wanted: Vec<SequenceExtent> = Vec::new();
+        match extent {
+            ReferenceExtent::OneSequence {
+                reference_sequence_id,
+                start,
+                end,
+            } => wanted.push(SequenceExtent {
+                reference_sequence_id,
+                start,
+                end,
+            }),
+            // **The slice holds reads from several contigs, and its header names none of them.**
+            // So the records are decoded once to ask *them* where they sit — which needs no
+            // reference at all, because a read's contig, start and CIGAR come out of the file and
+            // only its bases are rebuilt — and then decoded again against the windows that answer
+            // names. The blocks are decompressed once, above; what repeats is the cheap half.
+            //
+            // **samtools writes such a slice whenever slices would be under-full**, which on a
+            // reference of many short contigs is most of them, so this is an ordinary path for a
+            // draft assembly and an unused one for a chromosome-scale reference (`cram_encode.c`
+            // merges across contigs at `c->curr_rec < c->max_rec/4+10`).
+            ReferenceExtent::SeveralSequences => {
+                wanted = slice.record_extents(
+                    header,
+                    &compression_header,
+                    &core_data_src,
+                    &external_data_srcs,
+                )?;
+            }
+            // Every record is unplaced, so nothing is rebuilt against a reference and no bases
+            // are wanted. This is the one arm that genuinely needs none.
+            ReferenceExtent::Unmapped => {}
+        }
+
+        windows.resize_with(wanted.len().max(windows.len()), Vec::new);
+        for (want, buffer) in wanted.iter().zip(windows.iter_mut()) {
+            let contig = ContigId(u32::try_from(want.reference_sequence_id).map_err(|_| {
                 io::Error::other(format!(
-                    "slice names reference sequence {reference_sequence_id}, which is not a \
-                     contig index this reference can hold"
+                    "slice names reference sequence {}, which is not a contig index this \
+                     reference can hold",
+                    want.reference_sequence_id
                 ))
             })?);
-            let length = (usize::from(end) - usize::from(start) + 1) as u64;
+            let length = (usize::from(want.end) - usize::from(want.start) + 1) as u64;
             reference
-                .fetch_raw_into(contig, usize::from(start) as u64, length, &mut window)
+                .fetch_raw_into(contig, usize::from(want.start) as u64, length, buffer)
                 .map_err(|source| {
                     io::Error::other(format!(
                         "the reference could not serve the {length} bases from {} that a CRAM \
                          slice is stored against: {source}",
-                        usize::from(start)
+                        usize::from(want.start)
                     ))
                 })?;
         }
+        let sequence_windows: Vec<SequenceWindow<'_>> = wanted
+            .iter()
+            .zip(windows.iter())
+            .map(|(want, buffer)| SequenceWindow {
+                reference_sequence_id: want.reference_sequence_id,
+                bases: buffer.as_slice(),
+                start: want.start,
+            })
+            .collect();
 
         // **The auxiliary tags are not read at all**, where the file's own encoding lets them
         // be skipped safely — noodles decides that from the compression header and falls back
@@ -446,13 +481,12 @@ pub(crate) fn decode_container_at(
         // index into the header's `@RG` list, which `resolve_read_group` below gets from that
         // number rather than from any tag. So nothing here loses an answer.
         //
-        // **Both arms skip the tags; they differ only in where the bases come from.** The
-        // windowed one hands over the span fetched above; noodles checks it covers what the
-        // slice declares and refuses, naming both spans, rather than decoding against bases
-        // that fall short.
-        let records = match span {
-            Some((_, start, _)) => slice.records_over_window(
-                &window,
+        // **All three arms skip the tags; they differ only in where the bases come from.** Both
+        // windowed arms hand over what was fetched, and noodles refuses — naming both spans —
+        // rather than decoding a record against bases that fall short of it.
+        let records = match extent {
+            ReferenceExtent::OneSequence { start, .. } => slice.records_over_window(
+                sequence_windows[0].bases,
                 start,
                 no_repository.clone(),
                 header,
@@ -460,7 +494,14 @@ pub(crate) fn decode_container_at(
                 &core_data_src,
                 &external_data_srcs,
             )?,
-            None => slice.records_discarding_tags(
+            ReferenceExtent::SeveralSequences => slice.records_over_windows(
+                &sequence_windows,
+                header,
+                &compression_header,
+                &core_data_src,
+                &external_data_srcs,
+            )?,
+            ReferenceExtent::Unmapped => slice.records_discarding_tags(
                 no_repository.clone(),
                 header,
                 &compression_header,

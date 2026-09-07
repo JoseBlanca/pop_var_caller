@@ -2260,6 +2260,121 @@ mod tests {
         assert_eq!(minted.get(), 2, "the CRAM arm asked for a second reader");
     }
 
+    /// **A CRAM block holding reads from several chromosomes, decoded — the case that used to
+    /// abort the process.**
+    ///
+    /// A CRAM stores a read as its differences from the reference, so rebuilding one needs the
+    /// bases under it. A block's header normally names the one chromosome and the one stretch its
+    /// reads cover, which is what the decode fetches. **A block whose reads sit on several
+    /// chromosomes names none of them** — no id, no start, no span — and noodles then resolves
+    /// each read's *whole* chromosome from a repository and `expect`s a hit, which against the
+    /// empty repository ng passes is a panic, not an error. So this decoded correctly only while
+    /// ng held whole chromosomes, which is exactly what this branch removed.
+    ///
+    /// **The fixture is a real `samtools` file, committed, with no writer options set**
+    /// (`testdata/multi_contig_slice.*`, and its README says how it was made). It has to be: the
+    /// CRAM writer this project vendors puts one chromosome in every block, so a fixture built
+    /// the way every other CRAM fixture here is built cannot reach this code at all. samtools
+    /// merges under-full blocks across chromosomes on its own once several in a row are
+    /// under-full — 24 short contigs with three reads each gives 4 blocks, two of them
+    /// multi-chromosome and one holding 20 chromosomes — so a draft or scaffold-level assembly
+    /// produces these as a matter of course.
+    ///
+    /// **The oracle is the SAM the file was written from**, read here and compared read for
+    /// read: it is the input samtools was given, so it is independent of anything ng or noodles
+    /// does. The reference is 24 pseudo-random contigs rather than a run of one base, for the
+    /// reason A2's fixture is: against an all-`A` reference a read rebuilt at the wrong offset
+    /// comes out identical and no assertion can fail.
+    #[test]
+    fn a_cram_block_spanning_several_contigs_rebuilds_the_reads_its_sam_holds() {
+        use crate::ng::ref_seq::WindowedRefSeq;
+        use std::collections::HashMap;
+
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ng/read/input/testdata");
+        let fasta = dir.join("multi_contig_slice.fa");
+        let cram = dir.join("multi_contig_slice.cram");
+
+        // Ground truth: name → (contig name, 1-based start, bases), straight out of the SAM.
+        let sam = std::fs::read_to_string(dir.join("multi_contig_slice.sam")).expect("the SAM");
+        let expected: HashMap<String, (String, u64, String)> = sam
+            .lines()
+            .filter(|line| !line.starts_with('@'))
+            .map(|line| {
+                let f: Vec<&str> = line.split('\t').collect();
+                (
+                    f[0].to_string(),
+                    (
+                        f[2].to_string(),
+                        f[3].parse().expect("a position"),
+                        f[9].to_string(),
+                    ),
+                )
+            })
+            .collect();
+        assert_eq!(expected.len(), 72, "24 contigs, three reads each");
+
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read the fixture reference"),
+        );
+        let contigs = reference.info().contig_list();
+        let file = AlignmentFile::open(
+            &cram,
+            &reference,
+            // **Filter #8 off.** It drops a read mismatching the reference too often, and one
+            // read a contig here carries a planted substitution; with 60-base reads that is a
+            // fraction the default may refuse. What is under test is the bases coming back
+            // right, not which reads a filter keeps.
+            ReadFilterConfig {
+                max_read_mismatch_fraction: None,
+                ..ReadFilterConfig::default()
+            },
+            false,
+            fixture_read_group(),
+        )
+        .expect("the fixture CRAM opens");
+
+        let mut seen = 0usize;
+        for (index, entry) in contigs.entries.iter().enumerate() {
+            let contig = ContigId(index as u32);
+            let mut cursor = file
+                .cursor(contig, || {
+                    WindowedRefSeq::new(fasta.clone(), contigs.clone())
+                })
+                .expect("a cursor for this contig");
+            cursor
+                .move_to_region(GenomeRegion {
+                    contig,
+                    start: crate::ng::types::Position(1),
+                    end: crate::ng::types::Position(entry.length),
+                })
+                .expect("on this chromosome");
+            while let Some(read) = cursor.next_read() {
+                let read = read.expect("no fatal read error");
+                let name = String::from_utf8_lossy(&read.qname).into_owned();
+                let (chrom, start, bases) = expected
+                    .get(&name)
+                    .unwrap_or_else(|| panic!("{name} is not in the SAM"));
+                assert_eq!(chrom, &entry.name, "{name} came back on the wrong contig");
+                assert_eq!(read.pos, *start, "{name} came back at the wrong position");
+                assert_eq!(
+                    String::from_utf8_lossy(&read.seq),
+                    *bases,
+                    "{name}'s bases were rebuilt against the wrong reference window"
+                );
+                seen += 1;
+            }
+        }
+        assert_eq!(
+            seen, 72,
+            "every read of the fixture must come back, or the comparison is vacuous"
+        );
+    }
+
     /// **The check that moved out of `open` on 2026-09-07, held where it landed.**
     ///
     /// `open` used to build a `fasta::Repository`, which opened the indexed FASTA and so proved
@@ -2472,6 +2587,115 @@ mod tests {
             );
             assert_eq!(cram_read.qual, bam_read.qual, "quality scores");
         }
+    }
+
+    /// **And on a block spanning several contigs, where nothing else can catch it.**
+    ///
+    /// The single-contig path has two guards: the bounds check, and the reference MD5 the slice
+    /// header stores over its own span. A block spanning several contigs **has no MD5** — its
+    /// header carries no contig, no start and no span to compute one over — so the bounds check
+    /// is the whole of what stands between a short window and reads rebuilt against whatever
+    /// happens to be in the buffer.
+    ///
+    /// Same lying accessor as the test above, on the committed samtools fixture. Without the
+    /// refusal this yields reads, and the wrong ones.
+    #[test]
+    fn a_short_window_on_a_block_spanning_several_contigs_is_refused() {
+        use crate::fasta::ContigList;
+        use crate::ng::ref_seq::{ContigTable, RefSeq, RefSeqError, WindowedRefSeq};
+
+        /// Serves one base fewer than asked, except for the cursor's zero-length probe.
+        struct OneBaseShort(WindowedRefSeq);
+        impl RefSeq for OneBaseShort {
+            fn fetch_into(
+                &self,
+                contig: ContigId,
+                start_1based: u64,
+                length: u64,
+                dst: &mut Vec<u8>,
+            ) -> Result<(), RefSeqError> {
+                self.0.fetch_into(contig, start_1based, length, dst)?;
+                if dst.len() > 1 {
+                    dst.pop();
+                }
+                Ok(())
+            }
+        }
+        impl RawRefSeq for OneBaseShort {
+            fn fetch_raw_into(
+                &self,
+                contig: ContigId,
+                start_1based: u64,
+                length: u64,
+                dst: &mut Vec<u8>,
+            ) -> Result<(), RefSeqError> {
+                self.0.fetch_raw_into(contig, start_1based, length, dst)?;
+                if dst.len() > 1 {
+                    dst.pop();
+                }
+                Ok(())
+            }
+        }
+        impl ContigTable for OneBaseShort {
+            fn contigs(&self) -> &ContigList {
+                self.0.contigs()
+            }
+        }
+
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ng/read/input/testdata");
+        let fasta = dir.join("multi_contig_slice.fa");
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read the fixture reference"),
+        );
+        let table = reference.info().contig_list();
+        let cram = AlignmentFile::open(
+            &dir.join("multi_contig_slice.cram"),
+            &reference,
+            ReadFilterConfig {
+                max_read_mismatch_fraction: None,
+                ..ReadFilterConfig::default()
+            },
+            false,
+            fixture_read_group(),
+        )
+        .expect("the fixture CRAM opens");
+
+        // Every contig, because which of them land in a multi-contig block is samtools'
+        // business and not something this test should pin. At least one refusal must name a
+        // window; a run that refused nothing would mean the short window was decoded against.
+        let mut refusals = 0;
+        for (index, entry) in table.entries.iter().enumerate() {
+            let contig = ContigId(index as u32);
+            let mut cursor = cram
+                .cursor(contig, || {
+                    OneBaseShort(WindowedRefSeq::new(fasta.clone(), table.clone()))
+                })
+                .expect("the zero-length probe is untouched, so the cursor opens");
+            cursor
+                .move_to_region(GenomeRegion {
+                    contig,
+                    start: crate::ng::types::Position(1),
+                    end: crate::ng::types::Position(entry.length),
+                })
+                .expect("the region is this cursor's chromosome");
+            if let Some(Err(error)) = cursor.next_read() {
+                let rendered = format!("{error:?}");
+                assert!(
+                    rendered.contains("window"),
+                    "the refusal must name the window that fell short: {rendered}"
+                );
+                refusals += 1;
+            }
+        }
+        assert!(
+            refusals > 0,
+            "a window one base short must be refused on every contig it is served for"
+        );
     }
 
     /// **A window that does not cover the slice is refused, not decoded short.**
