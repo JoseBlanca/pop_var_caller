@@ -20,7 +20,8 @@ use std::io::Cursor;
 use proptest::prelude::*;
 
 use super::{
-    OnePositionSample, SpillEntry, SpillError, SpillReader, SpillWriter, SpilledSamples, WideSample,
+    GenericLocusSample, RepeatTractSample, SpillEntry, SpillError, SpillReader, SpillWriter,
+    SpilledSamples,
 };
 use crate::ng::run::paralog_filter::WindowCoverage;
 use crate::ng::types::{ContigId, Position};
@@ -45,8 +46,8 @@ fn a_sample_with_a_window(
     mean_depth: f32,
     ref_reads: u32,
     alt_reads: u32,
-) -> OnePositionSample {
-    OnePositionSample {
+) -> GenericLocusSample {
+    GenericLocusSample {
         window: a_window(gc_fraction, mean_depth),
         ref_reads,
         alt_reads,
@@ -54,8 +55,8 @@ fn a_sample_with_a_window(
 }
 
 /// A one-position sample with no usable window — the `NaN` pair — but reads all the same.
-fn a_sample_without_a_window(ref_reads: u32, alt_reads: u32) -> OnePositionSample {
-    OnePositionSample {
+fn a_sample_without_a_window(ref_reads: u32, alt_reads: u32) -> GenericLocusSample {
+    GenericLocusSample {
         window: no_window(),
         ref_reads,
         alt_reads,
@@ -63,15 +64,15 @@ fn a_sample_without_a_window(ref_reads: u32, alt_reads: u32) -> OnePositionSampl
 }
 
 /// A wide-locus sample, which carries a window and nothing else.
-fn a_wide_sample(gc_fraction: f32, mean_depth: f32) -> WideSample {
-    WideSample {
+fn a_tract_sample(gc_fraction: f32, mean_depth: f32) -> RepeatTractSample {
+    RepeatTractSample {
         window: a_window(gc_fraction, mean_depth),
     }
 }
 
 /// A wide-locus sample with no usable window — the case that must survive by bit pattern.
-fn a_wide_sample_without_a_window() -> WideSample {
-    WideSample {
+fn a_tract_sample_without_a_window() -> RepeatTractSample {
+    RepeatTractSample {
         window: no_window(),
     }
 }
@@ -84,7 +85,7 @@ fn a_snp_two_samples_covered() -> SpillEntry {
         is_repeat_tract: false,
         line: b"SL4.0ch04\t1000000\t.\tA\tG\t42.5\tPASS\tAF=0.5;AC=1\tGT:GQ:AD\t0/1:30:5,5\t0/0:99:8,0"
             .to_vec(),
-        samples: SpilledSamples::OnePosition(vec![
+        samples: SpilledSamples::GenericLocus(vec![
             a_sample_with_a_window(0.41, 6.25, 5, 5),
             a_sample_without_a_window(8, 0),
         ]),
@@ -100,9 +101,9 @@ fn a_tract_two_samples_covered() -> SpillEntry {
         is_repeat_tract: true,
         line: b"SL4.0ch04\t2000000\t.\tATAT\tAT\t31.0\tPASS\tAN=4;DP=12;STR;RU=AT;PERIOD=2\tGT:GQ:DP:AD:REPCN\t1/1:30:6:0,6:2\t0/0:99:6:6,0:4"
             .to_vec(),
-        samples: SpilledSamples::Wide(vec![
-            a_wide_sample(0.38, 5.75),
-            a_wide_sample_without_a_window(),
+        samples: SpilledSamples::RepeatTract(vec![
+            a_tract_sample(0.38, 5.75),
+            a_tract_sample_without_a_window(),
         ]),
     }
 }
@@ -115,14 +116,13 @@ fn a_tiny_record() -> SpillEntry {
         position: Position(300),
         is_repeat_tract: false,
         line: b"AB".to_vec(),
-        samples: SpilledSamples::OnePosition(vec![a_sample_with_a_window(0.5, 2.0, 3, 130)]),
+        samples: SpilledSamples::GenericLocus(vec![a_sample_with_a_window(0.5, 2.0, 3, 130)]),
     }
 }
 
 /// Offsets into [`a_tiny_record`]'s encoding, read off the byte list in
 /// [`the_encoding_matches_the_layout_the_spec_fixes`].
 const TRACT_FLAG_OFFSET_IN_TINY_RECORD: usize = 3;
-const SPAN_FLAG_OFFSET_IN_TINY_RECORD: usize = 4;
 
 /// Whether two entries hold the same bytes and the same bit patterns — the only comparison
 /// that is meaningful over fields that can be `NaN`.
@@ -158,35 +158,35 @@ fn holds_the_same_bits(left: &SpillEntry, right: &SpillEntry) -> bool {
 /// record**, so the two variants never compare equal to each other.
 fn samples_hold_the_same_bits(left: &SpilledSamples, right: &SpilledSamples) -> bool {
     match (left, right) {
-        (SpilledSamples::OnePosition(one), SpilledSamples::OnePosition(other)) => {
+        (SpilledSamples::GenericLocus(one), SpilledSamples::GenericLocus(other)) => {
             one.len() == other.len()
                 && one
                     .iter()
                     .zip(other)
                     .all(|(one, other)| one_position_sample_holds_the_same_bits(one, other))
         }
-        (SpilledSamples::Wide(one), SpilledSamples::Wide(other)) => {
+        (SpilledSamples::RepeatTract(one), SpilledSamples::RepeatTract(other)) => {
             one.len() == other.len()
                 && one
                     .iter()
                     .zip(other)
                     .all(|(one, other)| wide_sample_holds_the_same_bits(one, other))
         }
-        (SpilledSamples::OnePosition(_) | SpilledSamples::Wide(_), _) => false,
+        (SpilledSamples::GenericLocus(_) | SpilledSamples::RepeatTract(_), _) => false,
     }
 }
 
 /// One one-position sample's four numbers, by bit pattern. Destructured for the same reason.
 fn one_position_sample_holds_the_same_bits(
-    one: &OnePositionSample,
-    other: &OnePositionSample,
+    one: &GenericLocusSample,
+    other: &GenericLocusSample,
 ) -> bool {
-    let OnePositionSample {
+    let GenericLocusSample {
         window,
         ref_reads,
         alt_reads,
     } = one;
-    let OnePositionSample {
+    let GenericLocusSample {
         window: other_window,
         ref_reads: other_ref_reads,
         alt_reads: other_alt_reads,
@@ -198,9 +198,9 @@ fn one_position_sample_holds_the_same_bits(
 }
 
 /// One wide sample's window, by bit pattern. Destructured for the same reason.
-fn wide_sample_holds_the_same_bits(one: &WideSample, other: &WideSample) -> bool {
-    let WideSample { window } = one;
-    let WideSample {
+fn wide_sample_holds_the_same_bits(one: &RepeatTractSample, other: &RepeatTractSample) -> bool {
+    let RepeatTractSample { window } = one;
+    let RepeatTractSample {
         window: other_window,
     } = other;
 
@@ -307,9 +307,9 @@ fn holds_the_same_bits_separates_entries_that_differ_in_any_one_field() {
             "is_repeat_tract",
             SpillEntry {
                 is_repeat_tract: true,
-                samples: SpilledSamples::Wide(vec![
-                    a_wide_sample(0.41, 6.25),
-                    a_wide_sample_without_a_window(),
+                samples: SpilledSamples::RepeatTract(vec![
+                    a_tract_sample(0.41, 6.25),
+                    a_tract_sample_without_a_window(),
                 ]),
                 ..base.clone()
             },
@@ -317,9 +317,9 @@ fn holds_the_same_bits_separates_entries_that_differ_in_any_one_field() {
         (
             "the samples' shape, with the same windows in them",
             SpillEntry {
-                samples: SpilledSamples::Wide(vec![
-                    a_wide_sample(0.41, 6.25),
-                    a_wide_sample_without_a_window(),
+                samples: SpilledSamples::RepeatTract(vec![
+                    a_tract_sample(0.41, 6.25),
+                    a_tract_sample_without_a_window(),
                 ]),
                 ..base.clone()
             },
@@ -334,7 +334,7 @@ fn holds_the_same_bits_separates_entries_that_differ_in_any_one_field() {
         (
             "the sample count",
             SpillEntry {
-                samples: SpilledSamples::OnePosition(vec![a_sample_with_a_window(
+                samples: SpilledSamples::GenericLocus(vec![a_sample_with_a_window(
                     0.41, 6.25, 5, 5,
                 )]),
                 ..base.clone()
@@ -343,7 +343,7 @@ fn holds_the_same_bits_separates_entries_that_differ_in_any_one_field() {
         (
             "gc_fraction",
             SpillEntry {
-                samples: SpilledSamples::OnePosition(vec![
+                samples: SpilledSamples::GenericLocus(vec![
                     a_sample_with_a_window(0.42, 6.25, 5, 5),
                     a_sample_without_a_window(8, 0),
                 ]),
@@ -353,7 +353,7 @@ fn holds_the_same_bits_separates_entries_that_differ_in_any_one_field() {
         (
             "mean_depth",
             SpillEntry {
-                samples: SpilledSamples::OnePosition(vec![
+                samples: SpilledSamples::GenericLocus(vec![
                     a_sample_with_a_window(0.41, 6.26, 5, 5),
                     a_sample_without_a_window(8, 0),
                 ]),
@@ -363,7 +363,7 @@ fn holds_the_same_bits_separates_entries_that_differ_in_any_one_field() {
         (
             "an absent window against a zeroed one",
             SpillEntry {
-                samples: SpilledSamples::OnePosition(vec![
+                samples: SpilledSamples::GenericLocus(vec![
                     a_sample_with_a_window(0.41, 6.25, 5, 5),
                     a_sample_with_a_window(0.0, 0.0, 8, 0),
                 ]),
@@ -373,7 +373,7 @@ fn holds_the_same_bits_separates_entries_that_differ_in_any_one_field() {
         (
             "ref_reads",
             SpillEntry {
-                samples: SpilledSamples::OnePosition(vec![
+                samples: SpilledSamples::GenericLocus(vec![
                     a_sample_with_a_window(0.41, 6.25, 6, 5),
                     a_sample_without_a_window(8, 0),
                 ]),
@@ -383,7 +383,7 @@ fn holds_the_same_bits_separates_entries_that_differ_in_any_one_field() {
         (
             "alt_reads",
             SpillEntry {
-                samples: SpilledSamples::OnePosition(vec![
+                samples: SpilledSamples::GenericLocus(vec![
                     a_sample_with_a_window(0.41, 6.25, 5, 6),
                     a_sample_without_a_window(8, 0),
                 ]),
@@ -424,7 +424,7 @@ fn a_nan_comes_back_as_the_same_nan_and_not_merely_as_a_nan() {
     // `f32::NAN` on the way out would pass an `is_nan()` test and fail this one.
     let odd_nan = f32::from_bits(0x7F80_0001);
     let entry = SpillEntry {
-        samples: SpilledSamples::OnePosition(vec![OnePositionSample {
+        samples: SpilledSamples::GenericLocus(vec![GenericLocusSample {
             window: WindowCoverage {
                 gc_fraction: odd_nan,
                 mean_depth: f32::NAN,
@@ -455,7 +455,7 @@ fn a_wide_locus_carries_an_absent_window_through_by_its_bits_too() {
     // codec stands between it and the file.
     let odd_nan = f32::from_bits(0x7F80_0001);
     let entry = SpillEntry {
-        samples: SpilledSamples::Wide(vec![WideSample {
+        samples: SpilledSamples::RepeatTract(vec![RepeatTractSample {
             window: WindowCoverage {
                 gc_fraction: odd_nan,
                 mean_depth: f32::NAN,
@@ -480,13 +480,13 @@ fn a_wide_locus_carries_an_absent_window_through_by_its_bits_too() {
 #[test]
 fn a_record_with_no_samples_at_all_round_trips() {
     let entry = SpillEntry {
-        samples: SpilledSamples::OnePosition(Vec::new()),
+        samples: SpilledSamples::GenericLocus(Vec::new()),
         ..a_snp_two_samples_covered()
     };
     assert!(assert_round_trips(&entry).samples.is_empty());
 
     let wide = SpillEntry {
-        samples: SpilledSamples::Wide(Vec::new()),
+        samples: SpilledSamples::RepeatTract(Vec::new()),
         ..a_tract_two_samples_covered()
     };
     assert!(assert_round_trips(&wide).samples.is_empty());
@@ -501,7 +501,7 @@ fn a_tract_comes_back_carrying_its_windows_and_no_read_counts() {
     let came_back = assert_round_trips(&entry);
 
     assert!(
-        matches!(came_back.samples, SpilledSamples::Wide(_)),
+        matches!(came_back.samples, SpilledSamples::RepeatTract(_)),
         "a wide locus came back as {:?}",
         came_back.samples
     );
@@ -538,14 +538,14 @@ fn a_repeat_tract_round_trips_with_its_tract_flag_and_no_read_counts_at_all() {
         is_repeat_tract: true,
         line: b"SL4.0ch00\t1\t.\tATATAT\tATATATAT\t61.0\tPASS\tAF=0.25\tGT:GQ:AD\t0/1:20:4,4"
             .to_vec(),
-        samples: SpilledSamples::Wide(vec![
-            a_wide_sample(0.19, 3.5),
-            a_wide_sample_without_a_window(),
+        samples: SpilledSamples::RepeatTract(vec![
+            a_tract_sample(0.19, 3.5),
+            a_tract_sample_without_a_window(),
         ]),
     };
     let came_back = assert_round_trips(&entry);
     assert!(came_back.is_repeat_tract);
-    assert!(matches!(came_back.samples, SpilledSamples::Wide(_)));
+    assert!(matches!(came_back.samples, SpilledSamples::RepeatTract(_)));
 }
 
 #[test]
@@ -566,7 +566,7 @@ fn values_at_the_edges_of_their_fields_round_trip() {
     let entry = SpillEntry {
         contig: ContigId(u32::MAX),
         position: Position(u64::MAX),
-        samples: SpilledSamples::OnePosition(vec![
+        samples: SpilledSamples::GenericLocus(vec![
             a_sample_with_a_window(f32::MAX, f32::MIN_POSITIVE, u32::MAX, u32::MAX),
             a_sample_with_a_window(-0.0, f32::INFINITY, 0, 0),
             a_sample_with_a_window(f32::NEG_INFINITY, 0.0, 1, 1),
@@ -604,7 +604,7 @@ fn a_cohort_of_a_thousand_samples_round_trips() {
     // The sample count's prefix is one byte below 128 and two above it, and every other
     // fixture has 0, 1 or 2 samples.
     let entry = SpillEntry {
-        samples: SpilledSamples::OnePosition(
+        samples: SpilledSamples::GenericLocus(
             (0..1000u32)
                 .map(|index| {
                     if index % 3 == 0 {
@@ -619,7 +619,7 @@ fn a_cohort_of_a_thousand_samples_round_trips() {
     };
     let came_back = assert_round_trips(&entry);
     assert_eq!(came_back.samples.len(), 1000);
-    let SpilledSamples::OnePosition(samples) = &came_back.samples else {
+    let SpilledSamples::GenericLocus(samples) = &came_back.samples else {
         panic!("a one-position entry came back wide");
     };
     assert_eq!(samples[999].ref_reads, 999);
@@ -630,13 +630,13 @@ fn a_cohort_of_a_thousand_at_a_wide_locus_round_trips() {
     // Same crossing of the varint boundary, on the shape that carries eight bytes a sample
     // instead of ten or more.
     let entry = SpillEntry {
-        samples: SpilledSamples::Wide(
+        samples: SpilledSamples::RepeatTract(
             (0..1000u32)
                 .map(|index| {
                     if index % 3 == 0 {
-                        a_wide_sample_without_a_window()
+                        a_tract_sample_without_a_window()
                     } else {
-                        a_wide_sample(0.4, index as f32)
+                        a_tract_sample(0.4, index as f32)
                     }
                 })
                 .collect(),
@@ -654,16 +654,16 @@ fn a_stream_of_records_comes_back_in_the_order_it_was_written() {
         position: Position(1_000_001),
         is_repeat_tract: true,
         line: b"SL4.0ch04\t1000001\t.\tAT\tATAT\t9.0\tPASS\t.\tGT\t0/1\t0/0".to_vec(),
-        samples: SpilledSamples::Wide(vec![
-            a_wide_sample(0.41, 6.25),
-            a_wide_sample_without_a_window(),
+        samples: SpilledSamples::RepeatTract(vec![
+            a_tract_sample(0.41, 6.25),
+            a_tract_sample_without_a_window(),
         ]),
         ..a_snp_two_samples_covered()
     };
     let third = SpillEntry {
         contig: ContigId(4),
         position: Position(7),
-        samples: SpilledSamples::OnePosition(Vec::new()),
+        samples: SpilledSamples::GenericLocus(Vec::new()),
         ..a_snp_two_samples_covered()
     };
 
@@ -694,11 +694,10 @@ fn the_encoding_matches_the_layout_the_spec_fixes() {
         vec![
             0x01, // contig 1, one varint byte                          — offset 0
             0xAC, 0x02, // position 300, two varint bytes               — offsets 1, 2
-            0x00, // is_repeat_tract = false                            — offset 3
-            0x01, // spans_one_position = true                         — offset 4
-            0x02, // the line is two bytes long                         — offset 5
-            b'A', b'B', // the line                                     — offsets 6, 7
-            0x01, // one sample                                         — offset 8
+            0x00, // is_repeat_tract = false, so generic-locus rows      — offset 3
+            0x02, // the line is two bytes long                         — offset 4
+            b'A', b'B', // the line                                     — offsets 5, 6
+            0x01, // one sample                                         — offset 7
             0x00, 0x00, 0x00, 0x3F, // gc_fraction 0.5, an f32's bits little-endian
             0x00, 0x00, 0x00, 0x40, // mean_depth 2.0
             0x03, // ref_reads 3
@@ -720,28 +719,27 @@ fn a_file_cut_anywhere_inside_a_record_names_the_field_the_bytes_ran_out_in() {
         (1, "position"),
         (2, "position"),
         (3, "is_repeat_tract"),
-        (4, "spans_one_position"),
-        (5, "line_length"),
+        (4, "line_length"),
+        (5, "line"),
         (6, "line"),
-        (7, "line"),
-        (8, "sample_count"),
+        (7, "sample_count"),
+        (8, "gc_fraction"),
         (9, "gc_fraction"),
         (10, "gc_fraction"),
         (11, "gc_fraction"),
-        (12, "gc_fraction"),
+        (12, "mean_depth"),
         (13, "mean_depth"),
         (14, "mean_depth"),
         (15, "mean_depth"),
-        (16, "mean_depth"),
-        (17, "ref_reads"),
+        (16, "ref_reads"),
+        (17, "alt_reads"),
         (18, "alt_reads"),
-        (19, "alt_reads"),
     ];
 
     let whole = encoded_bytes(&[a_tiny_record()]);
     assert_eq!(
         whole.len(),
-        20,
+        19,
         "the byte list moved and the offsets below move with it"
     );
 
@@ -764,12 +762,12 @@ fn a_failure_inside_the_samples_names_which_sample() {
     // At a cohort of three thousand a message that names only the field points at three
     // thousand places at once.
     let entry = SpillEntry {
-        samples: SpilledSamples::OnePosition(vec![a_sample_with_a_window(0.5, 2.0, 1, 1); 3]),
+        samples: SpilledSamples::GenericLocus(vec![a_sample_with_a_window(0.5, 2.0, 1, 1); 3]),
         ..a_tiny_record()
     };
     let whole = encoded_bytes(std::slice::from_ref(&entry));
     let head = encoded_bytes(&[SpillEntry {
-        samples: SpilledSamples::OnePosition(Vec::new()),
+        samples: SpilledSamples::GenericLocus(Vec::new()),
         ..entry
     }])
     .len();
@@ -806,57 +804,38 @@ fn a_tract_flag_byte_that_is_neither_zero_nor_one_is_refused() {
 }
 
 #[test]
-fn a_span_flag_byte_that_is_neither_zero_nor_one_is_refused() {
-    let mut bytes = encoded_bytes(&[a_tiny_record()]);
-    bytes[SPAN_FLAG_OFFSET_IN_TINY_RECORD] = 2;
-    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
-
-    match reader.next_entry() {
-        Some(Err(SpillError::NotABoolean { field, byte })) => {
-            assert_eq!(field, "spans_one_position");
-            assert_eq!(byte, 2);
-        }
-        other => panic!("expected a refused flag byte, got {other:?}"),
-    }
-}
-
-#[test]
-fn a_record_marked_as_a_tract_carrying_one_position_samples_is_refused_by_the_reader() {
-    // A tract spans at least two bases, so it can never be the one-position kind; a file
-    // holding the pair is corrupt, and absorbing it would hand a tract the allele term.
-    let mut bytes = encoded_bytes(&[a_tiny_record()]);
-    bytes[TRACT_FLAG_OFFSET_IN_TINY_RECORD] = 1;
-    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
-
-    match reader.next_entry() {
-        Some(Err(SpillError::TractMarkedAsOnePosition { contig, position })) => {
-            assert_eq!(contig, 1);
-            assert_eq!(position, 300);
-        }
-        other => panic!("expected a refused tract-at-one-position record, got {other:?}"),
-    }
-}
-
-#[test]
-fn a_record_marked_as_a_tract_carrying_one_position_samples_is_refused_by_the_writer() {
-    let entry = SpillEntry {
+fn an_entry_whose_sample_shape_disagrees_with_its_tract_flag_is_refused_by_the_writer() {
+    // **There is no reader-side counterpart, and that is by design.** The row shape is read off
+    // the tract flag, so the file cannot hold the two disagreeing — which is why the check lives
+    // where the caller that built the entry can still be named. Both directions, because either
+    // one silently changes what the scorer is handed.
+    let a_tract_carrying_read_counts = SpillEntry {
         is_repeat_tract: true,
         ..a_tiny_record()
     };
-    let mut writer = SpillWriter::new(Vec::new());
+    let a_generic_locus_carrying_none = SpillEntry {
+        is_repeat_tract: false,
+        ..a_tract_two_samples_covered()
+    };
 
-    match writer.append(&entry) {
-        Err(SpillError::TractMarkedAsOnePosition { contig, position }) => {
-            assert_eq!(contig, 1);
-            assert_eq!(position, 300);
+    for (entry, flag) in [
+        (a_tract_carrying_read_counts, true),
+        (a_generic_locus_carrying_none, false),
+    ] {
+        let mut writer = SpillWriter::new(Vec::new());
+
+        match writer.append(&entry) {
+            Err(SpillError::SampleShapeDisagreesWithTheTractFlag {
+                is_repeat_tract, ..
+            }) => assert_eq!(is_repeat_tract, flag),
+            other => panic!("expected the writer to refuse the record, got {other:?}"),
         }
-        other => panic!("expected the writer to refuse the record, got {other:?}"),
+        assert_eq!(
+            writer.entries_written(),
+            0,
+            "a record the writer refused is not counted"
+        );
     }
-    assert_eq!(
-        writer.entries_written(),
-        0,
-        "a record the writer refused is not counted"
-    );
 }
 
 #[test]
@@ -883,8 +862,7 @@ fn a_read_count_too_large_for_its_field_is_refused() {
     let mut bytes = Vec::new();
     encode_u64_leb128(0, &mut bytes); // contig
     encode_u64_leb128(1, &mut bytes); // position
-    bytes.push(0); // not a tract
-    bytes.push(1); // one position, so the samples carry read counts
+    bytes.push(0); // not a tract, so the samples carry read counts
     encode_u64_leb128(0, &mut bytes); // an empty line
     encode_u64_leb128(1, &mut bytes); // one sample
     bytes.extend_from_slice(&0.5f32.to_bits().to_le_bytes());
@@ -945,8 +923,7 @@ fn a_line_longer_than_the_ceiling_is_refused_before_it_is_read() {
     let mut bytes = Vec::new();
     encode_u64_leb128(0, &mut bytes); // contig
     encode_u64_leb128(1, &mut bytes); // position
-    bytes.push(0); // not a tract
-    bytes.push(0); // not a biallelic SNP
+    bytes.push(0); // not a tract, so generic-locus rows
     encode_u64_leb128(u64::from(u32::MAX), &mut bytes); // a line of four billion bytes
     bytes.extend_from_slice(&vec![b'X'; 4096]);
 
@@ -970,8 +947,7 @@ fn a_sample_count_larger_than_the_file_is_an_error_and_not_an_allocation() {
     let mut bytes = vec![
         0x00, // contig 0
         0x01, // position 1
-        0x00, // not a tract
-        0x00, // not a biallelic SNP
+        0x00, // not a tract, so generic-locus rows
         0x00, // an empty line
     ];
     encode_u64_leb128(900_000, &mut bytes);
@@ -995,8 +971,7 @@ fn a_sample_count_past_the_ceiling_is_refused_before_the_samples_are_built() {
     let mut bytes = vec![
         0x00, // contig 0
         0x01, // position 1
-        0x00, // not a tract
-        0x00, // not a biallelic SNP
+        0x00, // not a tract, so generic-locus rows
         0x00, // an empty line
     ];
     encode_u64_leb128(10_000_000, &mut bytes);
@@ -1055,8 +1030,7 @@ fn a_source_that_fails_mid_float_says_the_read_failed_and_not_that_the_file_ende
     let head = vec![
         0x00, // contig 0
         0x01, // position 1
-        0x00, // not a tract
-        0x00, // not a biallelic SNP
+        0x00, // not a tract, so generic-locus rows
         0x00, // an empty line
         0x01, // one sample
     ];
@@ -1136,13 +1110,14 @@ fn any_float() -> impl Strategy<Value = f32> {
 }
 
 /// An entry of any shape the writer will accept — lines and cohorts on both sides of the
-/// 128-byte varint boundary, both sample shapes, and never a tract carrying one-position
-/// samples.
+/// 128-byte varint boundary, and both row shapes.
+///
+/// **The shape follows the tract flag** rather than being drawn beside it, which is the writer's
+/// rule and now also the file's: there is one flag, and it decides.
 fn any_entry() -> impl Strategy<Value = SpillEntry> {
     (
         any::<u32>(),
         any::<u64>(),
-        any::<bool>(),
         any::<bool>(),
         prop::collection::vec(any::<u8>(), 0..400),
         prop::collection::vec(
@@ -1150,37 +1125,32 @@ fn any_entry() -> impl Strategy<Value = SpillEntry> {
             0..300,
         ),
     )
-        .prop_map(
-            |(contig, position, is_repeat_tract, one_position, line, samples)| {
-                // A tract spans more than one base, so it is always the wide shape; anything
-                // else takes whichever the draw asked for.
-                let one_position = one_position && !is_repeat_tract;
-                let samples = if one_position {
-                    SpilledSamples::OnePosition(
-                        samples
-                            .into_iter()
-                            .map(|(gc, depth, ref_reads, alt_reads)| {
-                                a_sample_with_a_window(gc, depth, ref_reads, alt_reads)
-                            })
-                            .collect(),
-                    )
-                } else {
-                    SpilledSamples::Wide(
-                        samples
-                            .into_iter()
-                            .map(|(gc, depth, _, _)| a_wide_sample(gc, depth))
-                            .collect(),
-                    )
-                };
-                SpillEntry {
-                    contig: ContigId(contig),
-                    position: Position(position),
-                    is_repeat_tract,
-                    line,
-                    samples,
-                }
-            },
-        )
+        .prop_map(|(contig, position, is_repeat_tract, line, samples)| {
+            let samples = if is_repeat_tract {
+                SpilledSamples::RepeatTract(
+                    samples
+                        .into_iter()
+                        .map(|(gc, depth, _, _)| a_tract_sample(gc, depth))
+                        .collect(),
+                )
+            } else {
+                SpilledSamples::GenericLocus(
+                    samples
+                        .into_iter()
+                        .map(|(gc, depth, ref_reads, alt_reads)| {
+                            a_sample_with_a_window(gc, depth, ref_reads, alt_reads)
+                        })
+                        .collect(),
+                )
+            };
+            SpillEntry {
+                contig: ContigId(contig),
+                position: Position(position),
+                is_repeat_tract,
+                line,
+                samples,
+            }
+        })
 }
 
 proptest! {

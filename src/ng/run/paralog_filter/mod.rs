@@ -33,7 +33,8 @@ pub mod spill_file;
 
 pub use patch::{LinePatchError, rewrite_filter_and_info};
 pub use spill::{
-    OnePositionSample, SpillEntry, SpillError, SpillReader, SpillWriter, SpilledSamples, WideSample,
+    GenericLocusSample, RepeatTractSample, SpillEntry, SpillError, SpillReader, SpillWriter,
+    SpilledSamples,
 };
 pub use spill_file::{SpillFile, SpillFileError};
 

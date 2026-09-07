@@ -22,32 +22,35 @@
 //!
 //! ```text
 //! entry :=
-//!   contig             varint  -- the three fields the writer's ordering check reads
-//!   position           varint
-//!   is_repeat_tract    u8
-//!   spans_one_position u8      -- settled once by whoever fills the entry, from
-//!                              -- `region().len() == 1`; it selects the row shape below
-//!   line_length        varint
-//!   line               bytes   -- the record's line, no newline
-//!   sample_count       varint  -- the run's sample count, dense
-//!   per sample, when spans_one_position:
-//!     gc_fraction      4 bytes -- an f32's bits, little-endian; NaN = absent
-//!     mean_depth       4 bytes -- an f32's bits, little-endian
-//!     ref_reads        varint  -- AD[0]
-//!     alt_reads        varint  -- every alternative's reads, summed
-//!   per sample, otherwise:
-//!     gc_fraction      4 bytes
-//!     mean_depth       4 bytes
+//!   contig           varint    -- the three fields the writer's ordering check reads
+//!   position         varint
+//!   is_repeat_tract  u8        -- and it also selects the row shape below
+//!   line_length      varint
+//!   line             bytes     -- the record's line, no newline
+//!   sample_count     varint    -- the run's sample count, dense
+//!   per sample, when is_repeat_tract is 0:
+//!     gc_fraction    4 bytes   -- an f32's bits, little-endian; NaN = absent
+//!     mean_depth     4 bytes   -- an f32's bits, little-endian
+//!     ref_reads      varint    -- AD[0]
+//!     alt_reads      varint    -- every alternative's reads, summed
+//!   per sample, when it is 1:
+//!     gc_fraction    4 bytes
+//!     mean_depth     4 bytes
 //! ```
 //!
-//! **Why the row has two shapes** (spec §3.2, §3.7). The filter reads a reference/non-reference
-//! split only where the locus occupies one base; at a deletion or a repeat tract it declines to,
-//! and rests the verdict on coverage. Writing that abstention as `0, 0` would put it in the same
-//! two fields a real measurement lives in — and production's scorer drops a sample at zero total
-//! reads, which would then silently empty every wide locus's score and leave every tract
-//! unfiltered while the file looked correct (spec §6 trap 1). A wide locus's row carries no read
-//! counts at all, so there is no zero to misread. It is also eight bytes a sample instead of ten
-//! or more.
+//! **Why the row has two shapes** (spec §3.2, §3.7). Everything but a repeat tract is scored on
+//! coverage *and* allele balance; a tract is scored on coverage alone, because slippage moves
+//! reads between its length alleles and the split the scorer's model expects is not the split it
+//! would see. Writing that abstention as `0, 0` would put it in the same two fields a real
+//! measurement lives in — and production's scorer drops a sample at zero total reads, which would
+//! then silently empty every tract's score and leave every tract unfiltered while the file looked
+//! correct (spec §6 trap 1). A tract's row carries no read counts at all, so there is no zero to
+//! misread. It is also eight bytes a sample instead of ten or more.
+//!
+//! **One flag does both jobs.** `is_repeat_tract` is in the entry for the writer's ordering rule
+//! — a tract may share a position with the generic locus owning its anchor base — and the scoring
+//! rule is the same question, so the row shape is read off it rather than off a second flag. One
+//! byte less a record, and one fewer pair of fields that can disagree.
 //!
 //! Every field is either fixed-width, length-prefixed, or self-delimiting — a varint ends at
 //! the first byte whose top bit is clear — so an entry ends where the next begins and there is
@@ -86,7 +89,6 @@ mod field {
     pub const CONTIG: &str = "contig";
     pub const POSITION: &str = "position";
     pub const IS_REPEAT_TRACT: &str = "is_repeat_tract";
-    pub const SPANS_ONE_POSITION: &str = "spans_one_position";
     pub const LINE_LENGTH: &str = "line_length";
     pub const LINE: &str = "line";
     pub const SAMPLE_COUNT: &str = "sample_count";
@@ -144,7 +146,7 @@ const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// sink that fills the entry does, and it arrives with the run wiring.
 ///
 /// **A repeat tract never occupies one position.** A tract spans at least two bases by
-/// definition, so an entry marked as a tract whose samples are [`SpilledSamples::OnePosition`]
+/// definition, so an entry marked as a tract whose samples are [`SpilledSamples::GenericLocus`]
 /// is a caller's bug rather than a record. The writer and the reader both refuse it.
 #[derive(Clone, Debug)]
 pub struct SpillEntry {
@@ -176,12 +178,13 @@ pub struct SpillEntry {
 /// the file looked correct (spec §6 trap 1). With two shapes there is no zero to misread.
 #[derive(Clone, Debug)]
 pub enum SpilledSamples {
-    /// A locus at one genomic position — a SNP of any allele count, or an insertion. Both
-    /// signals reach the scorer, and a sample at zero total reads is absent from the score.
-    OnePosition(Vec<OnePositionSample>),
-    /// A locus spanning more than one — a deletion or a repeat tract. Coverage alone, and **no
-    /// sample is skipped**, because there is no read count that could be zero.
-    Wide(Vec<WideSample>),
+    /// Anything that is not a repeat tract — a SNP of any allele count, an insertion, a
+    /// deletion. Both signals reach the scorer, and a sample at zero total reads is absent from
+    /// the score, as in production.
+    GenericLocus(Vec<GenericLocusSample>),
+    /// A repeat tract. Coverage alone, and **no sample is skipped**, because there is no read
+    /// count that could be zero.
+    RepeatTract(Vec<RepeatTractSample>),
 }
 
 impl SpilledSamples {
@@ -192,8 +195,8 @@ impl SpilledSamples {
     #[must_use]
     pub fn len(&self) -> usize {
         match self {
-            Self::OnePosition(samples) => samples.len(),
-            Self::Wide(samples) => samples.len(),
+            Self::GenericLocus(samples) => samples.len(),
+            Self::RepeatTract(samples) => samples.len(),
         }
     }
 
@@ -210,8 +213,8 @@ impl SpilledSamples {
     #[must_use]
     pub fn window(&self, index: usize) -> Option<WindowCoverage> {
         match self {
-            Self::OnePosition(samples) => samples.get(index).map(|sample| sample.window),
-            Self::Wide(samples) => samples.get(index).map(|sample| sample.window),
+            Self::GenericLocus(samples) => samples.get(index).map(|sample| sample.window),
+            Self::RepeatTract(samples) => samples.get(index).map(|sample| sample.window),
         }
     }
 }
@@ -219,7 +222,7 @@ impl SpilledSamples {
 /// What one sample showed at a record covering a single base: its window, and the split between
 /// reads carrying the reference base and reads carrying anything else.
 #[derive(Clone, Copy, Debug)]
-pub struct OnePositionSample {
+pub struct GenericLocusSample {
     /// The sample's window at this locus, or the `NaN` pair where it has none.
     pub window: WindowCoverage,
     /// Reads supporting the reference allele — `AD[0]`.
@@ -237,7 +240,7 @@ pub struct OnePositionSample {
 /// reference/non-reference split. See [`SpilledSamples`] for why that is a missing field rather
 /// than a zero.
 #[derive(Clone, Copy, Debug)]
-pub struct WideSample {
+pub struct RepeatTractSample {
     /// The sample's window at this locus, or the `NaN` pair where it has none.
     pub window: WindowCoverage,
 }
@@ -326,20 +329,24 @@ pub enum SpillError {
         read: u64,
     },
 
-    /// A record is marked as a repeat tract but carries one-position samples.
+    /// A record's sample shape disagrees with its `is_repeat_tract` flag.
     ///
-    /// **A tract spans at least two bases**, so it can never be the one-position kind spec §3.2
-    /// scores on both signals. Reaching this means whoever filled the entry derived the two from
-    /// different things.
+    /// **The flag is what the file stores**, and the reader builds the row shape from it (spec
+    /// §3.4), so an entry whose two halves disagree would be written as one thing and read back
+    /// as the other — a tract's samples silently gaining read counts they never measured, or a
+    /// generic locus's being dropped. Refused at the writer, where the caller that built them
+    /// can still be blamed.
     #[error(
-        "the record at contig {contig} position {position} is marked as a repeat tract but \
-         carries one-position samples, and a tract spans at least two bases"
+        "the record at contig {contig} position {position} has is_repeat_tract={is_repeat_tract} \
+         but the other sample shape, and the flag is what the file stores"
     )]
-    TractMarkedAsOnePosition {
+    SampleShapeDisagreesWithTheTractFlag {
         /// The record's contig.
         contig: u32,
         /// The record's written position.
         position: u64,
+        /// What the entry's flag said.
+        is_repeat_tract: bool,
     },
 
     /// One sample of a record could not be decoded. **Carries which sample**: at a cohort of
@@ -387,14 +394,15 @@ impl<W: Write> SpillWriter<W> {
     ///
     /// # Errors
     ///
-    /// If the entry is marked as a repeat tract but carries one-position samples — a tract
-    /// spans at least two bases, so the two cannot both be true; or if the sink refuses the
-    /// bytes. An entry the sink refused is not counted.
+    /// If the entry's sample shape disagrees with its tract flag — the flag is what the file
+    /// stores, so a mismatch would be written as the flag and read back as the other shape; or
+    /// if the sink refuses the bytes. An entry the sink refused is not counted.
     pub fn append(&mut self, entry: &SpillEntry) -> Result<(), SpillError> {
-        if entry.is_repeat_tract && matches!(entry.samples, SpilledSamples::OnePosition(_)) {
-            return Err(SpillError::TractMarkedAsOnePosition {
+        if entry.is_repeat_tract != matches!(entry.samples, SpilledSamples::RepeatTract(_)) {
+            return Err(SpillError::SampleShapeDisagreesWithTheTractFlag {
                 contig: entry.contig.get(),
                 position: entry.position.get(),
+                is_repeat_tract: entry.is_repeat_tract,
             });
         }
         self.scratch.clear();
@@ -538,15 +546,14 @@ fn encode_entry(entry: &SpillEntry, out: &mut Vec<u8>) {
     encode_u64_leb128(u64::from(contig.get()), out);
     encode_u64_leb128(position.get(), out);
     out.push(u8::from(*is_repeat_tract));
-    out.push(u8::from(matches!(samples, SpilledSamples::OnePosition(_))));
     encode_u64_leb128(line.len() as u64, out);
     out.extend_from_slice(line);
     encode_u64_leb128(samples.len() as u64, out);
 
     match samples {
-        SpilledSamples::OnePosition(samples) => {
+        SpilledSamples::GenericLocus(samples) => {
             for sample in samples {
-                let OnePositionSample {
+                let GenericLocusSample {
                     window,
                     ref_reads,
                     alt_reads,
@@ -557,9 +564,9 @@ fn encode_entry(entry: &SpillEntry, out: &mut Vec<u8>) {
                 encode_u64_leb128(u64::from(*alt_reads), out);
             }
         }
-        SpilledSamples::Wide(samples) => {
+        SpilledSamples::RepeatTract(samples) => {
             for sample in samples {
-                let WideSample { window } = sample;
+                let RepeatTractSample { window } = sample;
 
                 encode_window(window, out);
             }
@@ -583,10 +590,6 @@ fn decode_entry<R: BufRead>(source: &mut R) -> Result<SpillEntry, SpillError> {
     let contig = read_u32(source, field::CONTIG)?;
     let position = read_varint(source, field::POSITION)?;
     let is_repeat_tract = read_bool(source, field::IS_REPEAT_TRACT)?;
-    let spans_one_position = read_bool(source, field::SPANS_ONE_POSITION)?;
-    if is_repeat_tract && spans_one_position {
-        return Err(SpillError::TractMarkedAsOnePosition { contig, position });
-    }
 
     let line = read_line(source)?;
 
@@ -598,27 +601,31 @@ fn decode_entry<R: BufRead>(source: &mut R) -> Result<SpillEntry, SpillError> {
         });
     }
     let reserve = sample_count.min(MAX_SAMPLES_RESERVED_UP_FRONT);
-    let samples = if spans_one_position {
+    // **The tract flag chooses the row shape** (spec §3.2, §3.4). Reading it rather than a
+    // second flag is what makes a mismatch unrepresentable in the file: there is only one thing
+    // to be wrong.
+    let samples = if is_repeat_tract {
         let mut samples = Vec::with_capacity(reserve);
         for index in 0..sample_count {
             let sample =
-                decode_one_position_sample(source).map_err(|source| SpillError::InSample {
+                decode_repeat_tract_sample(source).map_err(|source| SpillError::InSample {
                     index,
                     source: Box::new(source),
                 })?;
             samples.push(sample);
         }
-        SpilledSamples::OnePosition(samples)
+        SpilledSamples::RepeatTract(samples)
     } else {
         let mut samples = Vec::with_capacity(reserve);
         for index in 0..sample_count {
-            let sample = decode_wide_sample(source).map_err(|source| SpillError::InSample {
-                index,
-                source: Box::new(source),
-            })?;
+            let sample =
+                decode_generic_locus_sample(source).map_err(|source| SpillError::InSample {
+                    index,
+                    source: Box::new(source),
+                })?;
             samples.push(sample);
         }
-        SpilledSamples::Wide(samples)
+        SpilledSamples::GenericLocus(samples)
     };
 
     Ok(SpillEntry {
@@ -658,11 +665,13 @@ fn read_line<R: BufRead>(source: &mut R) -> Result<Vec<u8>, SpillError> {
 }
 
 /// Read one sample's four numbers, at a record covering a single base.
-fn decode_one_position_sample<R: BufRead>(source: &mut R) -> Result<OnePositionSample, SpillError> {
+fn decode_generic_locus_sample<R: BufRead>(
+    source: &mut R,
+) -> Result<GenericLocusSample, SpillError> {
     let window = decode_window(source)?;
     let ref_reads = read_u32(source, field::REF_READS)?;
     let alt_reads = read_u32(source, field::ALT_READS)?;
-    Ok(OnePositionSample {
+    Ok(GenericLocusSample {
         window,
         ref_reads,
         alt_reads,
@@ -670,8 +679,8 @@ fn decode_one_position_sample<R: BufRead>(source: &mut R) -> Result<OnePositionS
 }
 
 /// Read one sample's window, at a record covering more than one base — there is nothing else.
-fn decode_wide_sample<R: BufRead>(source: &mut R) -> Result<WideSample, SpillError> {
-    Ok(WideSample {
+fn decode_repeat_tract_sample<R: BufRead>(source: &mut R) -> Result<RepeatTractSample, SpillError> {
+    Ok(RepeatTractSample {
         window: decode_window(source)?,
     })
 }

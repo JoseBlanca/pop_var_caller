@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use super::{SpillFile, SpillFileError};
 use crate::ng::run::RunError;
 use crate::ng::run::paralog_filter::{
-    OnePositionSample, SpillEntry, SpillError, SpillWriter, SpilledSamples, WindowCoverage,
+    GenericLocusSample, SpillEntry, SpillError, SpillWriter, SpilledSamples, WindowCoverage,
 };
 use crate::ng::types::{ContigId, GenomeRegion, Position};
 
@@ -47,8 +47,8 @@ fn a_record_at(position: u64) -> SpillEntry {
         is_repeat_tract: false,
         line: format!("SL4.0ch03\t{position}\t.\tA\tG\t42.5\tPASS\tAF=0.5\tGT:AD\t0/1:5,5")
             .into_bytes(),
-        samples: SpilledSamples::OnePosition(vec![
-            OnePositionSample {
+        samples: SpilledSamples::GenericLocus(vec![
+            GenericLocusSample {
                 window: WindowCoverage {
                     gc_fraction: 0.41,
                     mean_depth: 6.25,
@@ -56,7 +56,7 @@ fn a_record_at(position: u64) -> SpillEntry {
                 ref_reads: 5,
                 alt_reads: 5,
             },
-            OnePositionSample {
+            GenericLocusSample {
                 window: WindowCoverage {
                     gc_fraction: f32::NAN,
                     mean_depth: f32::NAN,
