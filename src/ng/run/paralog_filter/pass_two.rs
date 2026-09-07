@@ -30,10 +30,12 @@
 
 use crate::ng::paralog::{
     CalibrationConfig, DEFAULT_LR_HISTOGRAM_BINS, DEFAULT_LR_HISTOGRAM_HI, DEFAULT_LR_HISTOGRAM_LO,
-    ParalogCalibration, ParalogLrHistogram, SampleObservation, calibrate_from_the_ratio_histogram,
+    ParalogCalibration, ParalogLrHistogram, calibrate_from_the_ratio_histogram,
 };
 
-use super::{CohortSizeMismatch, ParalogScoringContext, SpillFile, SpillFileError};
+use rayon::prelude::*;
+
+use super::{CohortSizeMismatch, ParalogScoringContext, SpillEntry, SpillFile, SpillFileError};
 
 /// **The operator's target false-discovery rate**, checked once at the boundary.
 ///
@@ -235,6 +237,10 @@ pub enum PassTwoError {
     CohortSize(#[source] CohortSizeMismatch),
 }
 
+/// How many decoded entries are scored on the pool at once. Big enough that the fork-join is
+/// lost beside the scoring, small enough that the batch's lines are a bounded amount of memory.
+const SCORING_BATCH: usize = 2048;
+
 /// **Score every record pass one parked, and resolve the target false-discovery rate to a cut.**
 ///
 /// One sequential read of the spill. Nothing is held across records but the ratios: each entry
@@ -268,21 +274,48 @@ pub fn score_the_parked_records_and_resolve_the_cut(
     // instead, which costs time and never correctness.
     let mut ratios: Vec<f64> =
         Vec::with_capacity(usize::try_from(spill.entries_written()).unwrap_or(0));
-    let mut observations: Vec<Option<SampleObservation>> =
-        Vec::with_capacity(context.sample_count());
-
-    for entry in entries {
-        let entry = entry.map_err(|source| PassTwoError::Spill(spill.naming_this_file(source)))?;
-        let ratio = context
-            .score(&entry, &mut observations)
-            .map_err(PassTwoError::CohortSize)?;
+    // **Read serially, score concurrently, fold serially.** The spill is a stream of
+    // variable-length entries with no index, so nothing can seek into it — the decode stays on
+    // this thread. Scoring is what costs, and it is a pure function of one entry
+    // (`ParalogScoringContext::score` takes `&self` and a scratch buffer), so a batch of decoded
+    // entries is scored on the pool and the ratios come back **in the batch's own order**. The
+    // histogram is then folded and `ratios` extended on this thread, in that order, so both are
+    // what a serial walk would have produced, value for value — which the run's output being
+    // identical at 1, 3, 4, 5, 7, 8 and 18 threads is the check on.
+    //
+    // **One shape, not two.** A serial arm beside this one was measured and dropped: on a pool of
+    // one thread this loop costs what the plain `for` cost (769 ms against 773 over 8 accessions
+    // and 2 Mb), so the second copy bought nothing and was a second place for the fold's order to
+    // be got wrong.
+    let mut batch: Vec<SpillEntry> = Vec::with_capacity(SCORING_BATCH);
+    let mut scored: Vec<Result<f64, CohortSizeMismatch>> = Vec::with_capacity(SCORING_BATCH);
+    let mut entries = entries;
+    loop {
+        batch.clear();
+        for entry in entries.by_ref().take(SCORING_BATCH) {
+            let entry =
+                entry.map_err(|source| PassTwoError::Spill(spill.naming_this_file(source)))?;
+            batch.push(entry);
+        }
+        if batch.is_empty() {
+            break;
+        }
+        batch
+            .par_iter()
+            .map_init(
+                || Vec::with_capacity(context.sample_count()),
+                |observations, entry| context.score(entry, observations),
+            )
+            .collect_into_vec(&mut scored);
         // **One binding, pushed to both.** The histogram drops a non-finite ratio and the vector
         // keeps it, which is the whole difference between "did not enter the fit" and "kept,
         // never flagged" — but they are the same number, so no rule can apply to one and not the
         // other (spec §6 trap 4).
-        histogram.push(ratio);
-        ratios.push(ratio);
-        // `entry` is dropped here: its line and its per-sample rows are not carried forward.
+        for ratio in scored.drain(..) {
+            let ratio = ratio.map_err(PassTwoError::CohortSize)?;
+            histogram.push(ratio);
+            ratios.push(ratio);
+        }
     }
 
     // The reader refuses a file holding a different number of records than pass one counted, in
