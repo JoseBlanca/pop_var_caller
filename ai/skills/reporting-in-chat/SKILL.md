@@ -703,6 +703,77 @@ Three failures, all in one sentence:
    is meaningless until the reader knows what was fed differently between the 2.2× and the
    3.75×. The repair states both arms, what differs, and only then the two numbers.
 
+### 2026-09-07 — a decision put to the owner in the vocabulary of my own tooling
+
+Asked to code a step, I hit a choice about how a copied file reaches a type, and put it to the
+owner as a table:
+
+> ❌ "Add a fourth sanctioned substitution and end the guard before the test module … the
+> existing 'path into production' substitution is hardcoded to rewrite `crate::paralog` into
+> `crate::ng::paralog`, and this one is `crate::sample_summary::CoverageByGcHistogram` into
+> `crate::ng::window_coverage::CoverageByGcHistogram`. The guard refuses anything it has not been
+> taught, by design — there is a test that says so."
+>
+> Owner: *"I don't understand what you'r talking about. What you printed is a dump of your
+> internal monolog, I don't have the context."*
+
+Every load-bearing noun — *sanctioned substitution*, *the guard*, *repoint*, *release the file* —
+names a mechanism inside a checker I wrote. None had ever been described to the reader.
+
+**But the deeper failure is that it was never their decision.** None of the three options changed
+a single number the caller produces; they differed only in which internal check keeps running.
+The skill's own two-step test — *is this mine to decide? if yes, decide it and say so in one
+line* — was not run. The repair was one sentence: **"I've made it: I'll teach the copy-check that
+this one import may differ, so the check keeps running over all the fitting code."**
+
+**New rule, and it is about ordering:** run the *is this mine* test **before** drafting the
+explanation, not after. Drafting first creates a sunk cost in the explanation and makes a
+tooling-internal choice feel like a question worth asking, because by then it has a table.
+
+### 2026-09-07 — a design rule with two reasons, and I never checked the second when the first fell
+
+I proposed splitting the filter's records by how many genomic positions a locus occupies, on two
+grounds: a multi-position locus has no single place to measure depth, and none to take an allele
+split at. The owner removed the first:
+
+> Owner: *"I don't really see the difference between loci that span one position and the ones that
+> span more than one once you decide that we assume that all positions in a locus that covers
+> several position have the same coverage."*
+
+They were right, and the rule did not survive — but **not for the reason they gave.** Checking the
+second ground against the actual variant kinds, it was also false: at a deletion every read either
+carries the deletion or does not, so the allele split is exactly as well defined as a SNP's however
+many bases it spans. Span distinguished *neither* signal. What actually stops a read reporting its
+allele is amplification slippage, which happens at repeat tracts and nowhere else — so the rule is
+*tract against everything else*, and the record already carried that flag.
+
+Two failures, and the second is the transferable one:
+
+1. **An earlier draft of the same rule had been wrong too** (biallelic SNPs against everything
+   else), and I replaced it with a rule that felt more principled without testing it against the
+   cases. *Feels more principled* is not a test. Enumerating five variant kinds against the two
+   signals takes two minutes and would have killed both drafts.
+2. **A claim resting on two reasons needs both checked independently.** When the reader knocked out
+   one, my instinct was to defend the conclusion on the survivor — and the survivor was rotten. The
+   check is mechanical: for each reason, ask *if only this one were true, would the rule still be
+   right?* If no reason passes alone, the rule is not supported by either.
+
+**And one wrong mechanism, corrected earlier the same day**, of the kind `CLAUDE.md` warns about:
+
+> ❌ "at a repeat tract, where *every* sample has zero allele reads by construction"
+>
+> Owner: *"I don't understand why in strs the samples have not reads. Their observations have
+> support, like the snp/indel ones."*
+
+> ✅ "A tract's samples have reads and their calls rest on them. What is zero is what we choose to
+> hand the scorer — the filter declining to use evidence it has no model for, not an absence in
+> the data."
+
+*By construction* was doing the damage: it read as a property of the data when it meant *by the
+rule I am proposing*. **A phrase that hedges where a fact comes from must not sit where the reader
+takes it as the fact itself** — and the repair here was load-bearing, because the whole argument
+for the type change is that an abstention must not be storable as a measurement.
+
 ## Sources
 
 The diagnosis is not project-specific and the external literature is unusually
