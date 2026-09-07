@@ -62,6 +62,25 @@ fn a_record(position: u64, samples: usize, depth: f32) -> SpillEntry {
     }
 }
 
+/// A record no sample can speak for: every window absent, so nothing is scored and its ratio is
+/// not a number.
+fn a_record_no_sample_covered(position: u64, samples: usize) -> SpillEntry {
+    let mut entry = a_record(position, samples, ONE_COPY_DEPTH);
+    entry.samples = SpilledSamples::GenericLocus(
+        (0..samples)
+            .map(|_| GenericLocusSample {
+                window: WindowCoverage {
+                    gc_fraction: f32::NAN,
+                    mean_depth: f32::NAN,
+                },
+                ref_reads: 20,
+                alt_reads: 10,
+            })
+            .collect(),
+    );
+    entry
+}
+
 fn scratch(name: &str) -> PathBuf {
     let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tmp")
@@ -90,7 +109,9 @@ fn metadata_over(samples: usize) -> VcfHeaderMetadata {
             length: 1_000_000,
             md5: None,
         }],
-        (0..samples).map(|i| format!("sample{i}")).collect(),
+        // **Names an operator would recognise**, because the report prints the name and not the
+        // index — `sample0` would read as "sample sample0" and hide whether the name is used.
+        (0..samples).map(|i| format!("SRR72794{i:02}")).collect(),
         String::new(),
         String::new(),
         String::new(),
@@ -155,6 +176,43 @@ fn the_header_states_the_run_s_calibration_and_declares_the_filter() {
     assert_eq!(run.did.written + run.did.dropped, 2);
 }
 
+/// **Zero means no filter, and it is the type that says so.**
+///
+/// **This is not decoration.** Handed a target of zero the scoring would not remove nothing: a
+/// strongly duplicated record's tail false-discovery value underflows to exactly zero, and zero
+/// is not above zero, so the most extreme records would go — measured next door in
+/// `a_looser_target_removes_more_records`, where the strictest target a run can ask for still
+/// removes four of seven. Until this rule lived in one place, all that stood between that and an
+/// operator who asked for no filtering was a `> 0.0` comparison copied into two call sites.
+#[test]
+fn a_target_of_zero_is_no_filter_rather_than_a_filter_that_removes_nothing() {
+    assert_eq!(
+        WhatTheOperatorAskedFor::from_the_flags(0.0, false).expect("zero is a legal flag value"),
+        None,
+        "zero asks for no filter at all"
+    );
+    assert_eq!(
+        WhatTheOperatorAskedFor::from_the_flags(0.0, true).expect("zero is a legal flag value"),
+        None,
+        "and the tag flag has nothing to act on, so it changes nothing"
+    );
+
+    let asked = WhatTheOperatorAskedFor::from_the_flags(0.01, true)
+        .expect("a hundredth is a target")
+        .expect("and it asks for the filter");
+    assert!((asked.target_fdr.get() - 0.01).abs() < 1e-12);
+    assert!(asked.tag_instead_of_dropping);
+
+    // **A negative zero is a mistake, not a way of saying "off".** It compares equal to zero, so
+    // a sign-blind rule would answer a wrong target with "the filter did not run".
+    for refused in [-0.0, -1.0, 1.0, 5.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            WhatTheOperatorAskedFor::from_the_flags(refused, false).is_err(),
+            "{refused} is neither a target nor a way of turning the filter off"
+        );
+    }
+}
+
 /// **A run with the filter off declares none of it** — which is what keeps its header the header
 /// it wrote before the filter existed, and spec §10's first oracle a property of the code.
 #[test]
@@ -198,16 +256,20 @@ fn the_report_names_each_sample_that_has_no_coverage_model_and_why() {
         lines.contains("1 of 3 sample(s) with a coverage model"),
         "the report must say how much of the cohort was fitted: {lines}"
     );
+    // **By name, not by index.** An index is a fact about the order the run's arguments were
+    // typed in, and an operator would have to count their own command line to use it.
     assert!(
-        lines.contains("sample 1 has no coverage model: no window was finalised"),
+        lines.contains("sample SRR7279401 has no coverage model: no window was finalised"),
         "and name the first that was not, with its reason: {lines}"
     );
     assert!(
-        lines.contains("sample 2 has no coverage model: every window this sample finalised held"),
+        lines.contains(
+            "sample SRR7279402 has no coverage model: every window this sample finalised held"
+        ),
         "and the second, whose reason is a different one: {lines}"
     );
     assert!(
-        !lines.contains("sample 0 has no coverage model"),
+        !lines.contains("SRR7279400 has no coverage model"),
         "the sample that was fitted is not named: {lines}"
     );
 }
@@ -238,12 +300,209 @@ fn the_report_says_when_the_rate_is_the_fallback_and_not_this_run_s() {
     assert_eq!(run.did.unscored, 1);
     let lines = what_to_tell_the_operator(&run).join("\n");
     assert!(
-        lines.contains("the documented fallback — this run's could not be fitted"),
+        lines.contains("the documented fallback"),
         "the report must not present the fallback as a measurement: {lines}"
+    );
+    // **The warning C3 wrote, and the half the rate line cannot carry**: that the records this
+    // run removed were calibrated against a constant rather than against this cohort.
+    assert!(
+        lines.contains("warning: the hidden-duplication rate could not be fitted"),
+        "the warning must be printed, not merely available: {lines}"
+    );
+    assert!(
+        lines.contains("calibrated against that rate and not against this run"),
+        "and it must say what that means for the file: {lines}"
     );
     assert!(
         lines.contains("0 of 2 sample(s) with a coverage model"),
-        "and must say the evidence was absent: {lines}"
+        "and the report must say the evidence was absent: {lines}"
+    );
+}
+
+/// **The report's four counts are four different numbers, and each is the one it says it is.**
+///
+/// The fixture is deliberately asymmetric — one record removed, one written, one of them
+/// unscorable — because on a fixture where two of the counts happen to be equal, swapping them
+/// changes nothing. Two such swaps survived the first version of this suite.
+#[test]
+fn the_report_counts_what_went_and_what_stayed() {
+    let entries = vec![
+        // Duplication-shaped: over-covered, reads split at a third. This is the one that goes.
+        a_record(100, 3, ONE_COPY_DEPTH * 2.0),
+        // One-copy depth: kept, and scored.
+        a_record(200, 3, ONE_COPY_DEPTH),
+        // No usable window anywhere: kept, and unscored.
+        a_record_no_sample_covered(300, 3),
+    ];
+
+    let (dropping, dropping_output) = a_spill_and_an_output(
+        "the_report_counts_what_went_and_what_stayed__drop",
+        entries.clone(),
+    );
+    let dropped = fit_score_and_write_the_calls(
+        &dropping,
+        (0..3).map(|_| a_fittable_histogram()).collect(),
+        &outbred(3),
+        an_ordinary_request(),
+        &dropping_output,
+        metadata_over(3),
+        diploid(),
+    )
+    .expect("the run finishes");
+
+    assert_eq!(dropped.did.dropped, 1, "the duplication-shaped record goes");
+    assert_eq!(dropped.did.tagged, 0, "and nothing is tagged when dropping");
+    assert_eq!(dropped.did.written, 2, "the other two are written");
+    assert_eq!(
+        dropped.did.unscored, 1,
+        "one of which no sample could speak for"
+    );
+
+    let lines = what_to_tell_the_operator(&dropped).join("\n");
+    assert!(
+        lines.contains("1 record(s) dropped, 0 tagged, 2 written; 2 were scored, 1 could not be"),
+        "each count must be the one it is named for: {lines}"
+    );
+
+    // **The same records with the tag flag**: nothing is dropped, the same one is tagged, and the
+    // file holds all three. A pass three called with the flag hardcoded would give the drop counts.
+    let (tagging, tagging_output) =
+        a_spill_and_an_output("the_report_counts_what_went_and_what_stayed__tag", entries);
+    let tagged = fit_score_and_write_the_calls(
+        &tagging,
+        (0..3).map(|_| a_fittable_histogram()).collect(),
+        &outbred(3),
+        WhatTheOperatorAskedFor {
+            tag_instead_of_dropping: true,
+            ..an_ordinary_request()
+        },
+        &tagging_output,
+        metadata_over(3),
+        diploid(),
+    )
+    .expect("the run finishes");
+
+    assert_eq!(tagged.did.dropped, 0, "tagging drops nothing");
+    assert_eq!(
+        tagged.did.tagged, 1,
+        "and tags what dropping would have dropped"
+    );
+    assert_eq!(tagged.did.written, 3, "so every record is in the file");
+}
+
+/// **The header says how much of the cohort the coverage evidence rested on, in that order.**
+///
+/// The fixture fits one sample of three, so the two numbers differ and a swap reads as `3/1`.
+/// It also fits a rate, so `em_converged` is `true` here where every other fixture in this file
+/// has it `false` — a negation would otherwise be invisible.
+#[test]
+fn the_header_says_how_much_of_the_cohort_was_fitted_and_whether_the_rate_was() {
+    let (spill, output) = a_spill_and_an_output(
+        "the_header_says_how_much_of_the_cohort_was_fitted_and_whether_the_rate_was",
+        vec![
+            a_record(100, 3, ONE_COPY_DEPTH),
+            a_record(200, 3, ONE_COPY_DEPTH * 2.0),
+        ],
+    );
+
+    let run = fit_score_and_write_the_calls(
+        &spill,
+        vec![
+            a_fittable_histogram(),
+            SampleHistogram::NoWindowFinalised,
+            SampleHistogram::NoWindowFinalised,
+        ],
+        &outbred(3),
+        an_ordinary_request(),
+        &output,
+        metadata_over(3),
+        diploid(),
+    )
+    .expect("the run finishes");
+
+    let written = fs::read_to_string(&output).expect("the calls are on disk");
+    assert!(
+        written.contains("samples_with_coverage_model=1/3"),
+        "one of three was fitted, in that order: {}",
+        written.lines().take(10).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        written.contains("em_converged=true"),
+        "and this run's rate was fitted, not fallen back to"
+    );
+    assert!(run.verdicts.calibration.prior.converged);
+}
+
+/// **The report writes the rate and the cut to the precisions the header uses**, so the two can
+/// be read against each other.
+#[test]
+fn the_report_writes_the_rate_and_the_cut_to_their_precisions() {
+    let (spill, output) = a_spill_and_an_output(
+        "the_report_writes_the_rate_and_the_cut_to_their_precisions",
+        vec![a_record(100, 2, ONE_COPY_DEPTH)],
+    );
+
+    let run = fit_score_and_write_the_calls(
+        &spill,
+        vec![SampleHistogram::NoWindowFinalised; 2],
+        &outbred(2),
+        an_ordinary_request(),
+        &output,
+        metadata_over(2),
+        diploid(),
+    )
+    .expect("the run finishes");
+
+    let lines = what_to_tell_the_operator(&run).join("\n");
+    assert!(
+        lines.contains("duplication rate 0.030000 "),
+        "the rate carries six decimals, as the header's does: {lines}"
+    );
+    let cut = lines
+        .split("cut at ")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .expect("the report states a cut");
+    assert_eq!(
+        cut.split_once('.').expect("a decimal point").1.len(),
+        4,
+        "and the cut carries four, as a record's own ratio does: {cut}"
+    );
+}
+
+/// **A run whose ratios ran past the ends of the histogram says how many did.**
+///
+/// The score is a sum over the samples weighed, so it grows with the cohort while the range does
+/// not; a run where every record saturates has one bin for the cut to work with. Nothing acts on
+/// the count yet, and the plan's D2 and D3 are what report it on real data — but a line that is
+/// never printed cannot be read there either.
+#[test]
+fn the_report_says_when_ratios_sat_past_the_ends_of_the_range() {
+    let (spill, output) = a_spill_and_an_output(
+        "the_report_says_when_ratios_sat_past_the_ends_of_the_range",
+        vec![a_record(100, 6, ONE_COPY_DEPTH * 2.0)],
+    );
+
+    let run = fit_score_and_write_the_calls(
+        &spill,
+        (0..6).map(|_| a_fittable_histogram()).collect(),
+        &outbred(6),
+        an_ordinary_request(),
+        &output,
+        metadata_over(6),
+        diploid(),
+    )
+    .expect("the run finishes");
+
+    assert_eq!(
+        run.verdicts.ratios_outside_the_histogram, 1,
+        "six samples all at twice one copy score past the range's top; the ratio was {:?}",
+        run.verdicts.ratios
+    );
+    let lines = what_to_tell_the_operator(&run).join("\n");
+    assert!(
+        lines.contains("1 scored record(s) sat past the ends of the ratio range"),
+        "and the report must say so: {lines}"
     );
 }
 

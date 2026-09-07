@@ -424,6 +424,134 @@ fn a_ratio_vector_that_is_not_the_spill_s_length_is_refused() {
     assert_eq!(ratios, 1);
 }
 
+// ---------------------------------------------------------------- what a failure says
+
+/// **A line that cannot be given its verdict names the record and where in the spill it is.**
+///
+/// Pass three walks millions of records; a failure that said only what was wrong with the line
+/// would not say which line. The ordinal counts from one, because it is a place in a file a person
+/// will go and look at.
+#[test]
+fn a_line_that_cannot_be_patched_names_its_record_and_its_ordinal() {
+    // A line with fewer than the nine columns the patch splits on. The second record, on the
+    // second contig, so neither the ordinal nor the contig can be a hardcoded first.
+    let mut malformed = a_record(1, 200, "PASS");
+    malformed.line = b"chr1\t200\t.\tA\tG".to_vec();
+    let (spill, output) = a_spill_and_an_output(
+        "a_line_that_cannot_be_patched_names_its_record_and_its_ordinal",
+        vec![a_record(0, 100, "PASS"), malformed],
+    );
+
+    let verdicts = verdicts_that_remove_nothing(vec![-1.0, -2.0]);
+    let mut writer = a_writer(&output);
+    let failure = write_the_records_the_filter_kept(&spill, &verdicts, false, &mut writer)
+        .expect_err("a five-column line is not a record");
+
+    let PassThreeError::Patch {
+        contig,
+        position,
+        ordinal,
+        ..
+    } = failure
+    else {
+        panic!("expected a patch failure, got {failure:?}")
+    };
+    assert_eq!(contig, 1, "the record's own contig, not the first");
+    assert_eq!(position, 200, "and its own position");
+    assert_eq!(ordinal, 2, "and its place in the spill, counting from one");
+}
+
+/// **A record the writer refuses names itself too.**
+///
+/// The spill's writer does not check the order of what it is given, so a spill can hold records
+/// that run backwards; the VCF's writer refuses them, and the failure has to say which record it
+/// choked on. Same reason as the patch failure above, on the other path.
+#[test]
+fn a_write_failure_names_the_record() {
+    let (spill, output) = a_spill_and_an_output(
+        "a_write_failure_names_the_record",
+        vec![a_record(0, 300, "PASS"), a_record(0, 100, "PASS")],
+    );
+
+    let verdicts = verdicts_that_remove_nothing(vec![-1.0, -2.0]);
+    let mut writer = a_writer(&output);
+    let failure = write_the_records_the_filter_kept(&spill, &verdicts, false, &mut writer)
+        .expect_err("a VCF cannot run backwards");
+
+    let PassThreeError::Write {
+        contig, position, ..
+    } = failure
+    else {
+        panic!("expected a write failure, got {failure:?}")
+    };
+    assert_eq!(
+        position, 100,
+        "the record that could not go, not the one before"
+    );
+    assert_eq!(contig, 0);
+}
+
+/// **More ratios than records is refused, as well as fewer.**
+///
+/// Its sibling covers the short vector. This is the other direction, and it is a different
+/// mistake: a longer vector pairs correctly for every record the spill holds and silently
+/// discards the tail, so nothing about the file would look wrong.
+#[test]
+fn a_ratio_vector_longer_than_the_spill_is_refused() {
+    let (spill, output) = a_spill_and_an_output(
+        "a_ratio_vector_longer_than_the_spill_is_refused",
+        vec![a_record(0, 100, "PASS")],
+    );
+
+    let verdicts = verdicts_that_remove_nothing(vec![-1.0, -2.0, -3.0]);
+    let mut writer = a_writer(&output);
+    let refused = write_the_records_the_filter_kept(&spill, &verdicts, false, &mut writer)
+        .expect_err("three ratios cannot answer for one record");
+
+    let PassThreeError::RatiosDoNotMatchTheSpill { records, ratios } = refused else {
+        panic!("expected a pairing failure, got {refused:?}")
+    };
+    assert_eq!(records, 1);
+    assert_eq!(ratios, 3);
+}
+
+/// **The probability is written to six decimals, and the ratio to four.**
+///
+/// The two precisions are the header's — a record's `PARALOG_LR` is compared against the header's
+/// `lr_cut`, and its `PARALOG_POST` read beside the header's fitted rate — so a record written to
+/// a different precision than the header cannot be compared with it as written.
+#[test]
+fn the_two_info_fields_are_written_to_the_headers_precisions() {
+    let (spill, output) = a_spill_and_an_output(
+        "the_two_info_fields_are_written_to_the_headers_precisions",
+        vec![a_record(0, 100, "PASS")],
+    );
+
+    let verdicts = verdicts_that_remove_nothing(vec![-4.25]);
+    let (_, lines) = write_and_read_back(&spill, &output, &verdicts, false);
+
+    let info = lines[0].split('\t').nth(7).expect("an INFO column");
+    let ratio = info
+        .split(';')
+        .find_map(|field| field.strip_prefix("PARALOG_LR="))
+        .expect("the ratio is written");
+    let posterior = info
+        .split(';')
+        .find_map(|field| field.strip_prefix("PARALOG_POST="))
+        .expect("the probability is written");
+
+    assert_eq!(
+        ratio.split_once('.').expect("a decimal point").1.len(),
+        4,
+        "the ratio carries the header's cut precision: {ratio}"
+    );
+    assert_eq!(
+        posterior.split_once('.').expect("a decimal point").1.len(),
+        6,
+        "the probability carries the header's rate precision: {posterior}"
+    );
+}
+
 // ---------------------------------------------------------------- the ends
 
 /// **A run that called nothing writes a header and no records**, rather than failing.

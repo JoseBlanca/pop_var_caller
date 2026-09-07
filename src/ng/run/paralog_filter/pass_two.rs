@@ -38,7 +38,16 @@ use super::{CohortSizeMismatch, ParalogScoringContext, SpillFile, SpillFileError
 /// **The operator's target false-discovery rate**, checked once at the boundary.
 ///
 /// The share of the records the filter removes that were really variants: `0.01` means about one
-/// wrong removal in a hundred, and `0` removes nothing.
+/// wrong removal in a hundred.
+///
+/// **Zero is not one of these, and that is the point.** `--paralog-fdr 0` means *do not run the
+/// filter*, and it has to mean that somewhere a caller cannot forget. Handed a target of zero the
+/// scoring does **not** remove nothing — a strongly duplicated record's tail false-discovery value
+/// underflows to exactly zero, and zero is not above zero, so the most extreme records go. Until
+/// this type refused it, the only thing standing between that and an operator who asked for no
+/// filtering was a `> 0.0` comparison copied into two call sites.
+/// [`WhatTheOperatorAskedFor::from_the_flags`](crate::ng::run::paralog_filter::WhatTheOperatorAskedFor::from_the_flags)
+/// is where zero becomes *no filter*, once.
 ///
 /// **A newtype because both ways of getting it wrong are silent.** Handed a bare `f64`, the
 /// calibration compares it against the curve and asks no questions — measured on a three-record
@@ -54,19 +63,23 @@ use super::{CohortSizeMismatch, ParalogScoringContext, SpillFile, SpillFileError
 pub struct TargetFdr(f64);
 
 impl TargetFdr {
-    /// The only constructor. A target that is not a fraction in `[0, 1)` is refused rather than
-    /// coerced.
+    /// The only constructor. A target that is not a fraction strictly between `0` and `1` is
+    /// refused rather than coerced.
+    ///
+    /// **Zero is refused here** — it means *no filter*, which is a different thing from a target,
+    /// and it is spelled by the absence of one of these. See the type's own note.
     ///
     /// **`-0.0` is refused too, and it is the one that needs saying.** It compares equal to zero,
-    /// so a range check alone admits it and the filter would read it as *off* — but a run asking
-    /// for a negative target has asked for something, and answering "the filter did not run" is
-    /// the wrong reply to a mistake.
+    /// so a sign-blind check would read it as *off* — but a run asking for a negative target has
+    /// asked for something, and answering "the filter did not run" is the wrong reply to a
+    /// mistake.
     ///
     /// # Errors
     ///
-    /// If the value is not finite, is negative — negative zero included — or is `1` or more.
+    /// If the value is not finite, is zero or negative — negative zero included — or is `1` or
+    /// more.
     pub fn try_new(target: f64) -> Result<Self, NotATargetFdr> {
-        if target.is_finite() && target.is_sign_positive() && (0.0..1.0).contains(&target) {
+        if target.is_finite() && target.is_sign_positive() && target > 0.0 && target < 1.0 {
             Ok(Self(target))
         } else {
             Err(NotATargetFdr { given: target })
@@ -84,8 +97,9 @@ impl TargetFdr {
 /// **What was offered as a target false-discovery rate is not one.**
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 #[error(
-    "the target false-discovery rate is {given}; it must be a fraction of one, at least 0 and \
-     below 1 — 0.01 means about one wrongly removed record in a hundred, not one in a hundredth"
+    "the target false-discovery rate is {given}; it must be a fraction of one, above 0 and below \
+     1 — 0.01 means about one wrongly removed record in a hundred, not one in a hundredth. Use \
+     exactly 0 to run without the filter"
 )]
 pub struct NotATargetFdr {
     /// The value that was offered.

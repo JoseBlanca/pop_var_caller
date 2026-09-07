@@ -425,6 +425,23 @@ const HIDDEN_PARALOG_DECLARATIONS: &[&str] = &[
     r#"##FILTER=<ID=hiddenParalog,Description="Better explained by a reference-collapsed duplication than by a variant; tail FDR at or below the run's target">"#,
 ];
 
+/// **The filter's id, as it appears in a removed record's `FILTER` column.**
+///
+/// Here rather than beside the pass that writes it, because a `FILTER` value a record carries and
+/// the `##FILTER` line that declares it are one fact spelled twice — and a file whose records
+/// carry an id its header does not declare is invalid VCF. `the_declared_filter_id_is_the_one_a_record_carries`
+/// is what holds the two together.
+pub const HIDDEN_PARALOG_FILTER_ID: &str = "hiddenParalog";
+
+/// **How a record's likelihood ratio is written**, and how the header writes the cut it is
+/// compared against — one number of decimals, because an operator auditing why a record went
+/// compares the two as written and a difference must be a real one.
+pub const PARALOG_RATIO_DECIMALS: usize = 4;
+
+/// How a record's posterior probability is written, and how the header writes the fitted rate it
+/// is read against.
+pub const PARALOG_POSTERIOR_DECIMALS: usize = 6;
+
 /// **What the run calibrated the hidden-duplication filter to** — the `##paralogFilter=` line.
 ///
 /// A dropped record leaves no trace in the file, so without this a reader cannot tell a run that
@@ -464,13 +481,14 @@ impl HiddenParalogProvenance {
             samples_in_the_run,
         } = self;
         let cut = match lr_cut {
-            Some(lr) => format!("{lr:.4}"),
+            Some(lr) => format!("{:.*}", PARALOG_RATIO_DECIMALS, lr),
             None => "none".to_string(),
         };
         format!(
-            "target_fdr={target_fdr:.4};pi={paralog_rate:.6};lr_cut={cut};\
+            "target_fdr={:.*};pi={:.*};lr_cut={cut};\
 em_converged={rate_was_fitted};\
-samples_with_coverage_model={samples_with_a_coverage_model}/{samples_in_the_run}"
+samples_with_coverage_model={samples_with_a_coverage_model}/{samples_in_the_run}",
+            PARALOG_RATIO_DECIMALS, target_fdr, PARALOG_POSTERIOR_DECIMALS, paralog_rate,
         )
     }
 }
@@ -513,6 +531,21 @@ const FORMAT_DECLARATIONS: &[&str] = &[
 /// reference it could not name.
 #[must_use]
 pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
+    // **Destructured exhaustively, so a field added to the metadata cannot be silently left out
+    // of the header it exists to state.** That is not hypothetical: the filter's provenance field
+    // was added one commit ago, and reading the metadata field by field is what would have let it
+    // be added and never written. The bindings below are used through `metadata`'s accessors
+    // where those do work (the contigs, the sample names); what matters is that the compiler
+    // names every field here.
+    let VcfHeaderMetadata {
+        contigs: _,
+        sample_names: _,
+        command_line: _,
+        reference_path: _,
+        parameters_file_name: _,
+        hidden_paralog,
+    } = metadata;
+
     let mut lines: Vec<String> = vec![format!("##fileformat={FILE_FORMAT}")];
 
     for (key, value) in [
@@ -533,14 +566,14 @@ pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
         lines.push(contig_line(contig));
     }
 
-    if let Some(paralog) = &metadata.hidden_paralog {
+    if let Some(paralog) = hidden_paralog {
         lines.push(format!("##paralogFilter={}", paralog.as_header_value()));
     }
 
     lines.extend(INFO_DECLARATIONS.iter().map(ToString::to_string));
     lines.extend(FILTER_DECLARATIONS.iter().map(ToString::to_string));
     // Only where the filter ran — see `HIDDEN_PARALOG_DECLARATIONS`.
-    if metadata.hidden_paralog.is_some() {
+    if hidden_paralog.is_some() {
         lines.extend(HIDDEN_PARALOG_DECLARATIONS.iter().map(ToString::to_string));
     }
     lines.extend(FORMAT_DECLARATIONS.iter().map(ToString::to_string));
@@ -584,6 +617,118 @@ mod header_text_tests {
             "run.parameters.toml".to_string(),
         )
         .expect("a well-formed header")
+    }
+
+    /// **The id a removed record carries is the id the header declares.**
+    ///
+    /// A `FILTER` value and the `##FILTER` line declaring it are one fact spelled twice, and a
+    /// file whose records carry an id its header does not declare is invalid VCF. The two lived
+    /// in different modules for one commit; this is what stops them drifting apart again.
+    #[test]
+    fn the_declared_filter_id_is_the_one_a_record_carries() {
+        let declaration = HIDDEN_PARALOG_DECLARATIONS
+            .iter()
+            .find(|line| line.starts_with("##FILTER="))
+            .expect("the filter declares itself");
+
+        assert!(
+            declaration.contains(&format!("<ID={HIDDEN_PARALOG_FILTER_ID},")),
+            "the declaration must name the id records carry: {declaration}"
+        );
+    }
+
+    /// **The header writes its two numbers to the precisions a record's own fields use.**
+    ///
+    /// An operator auditing why a record went compares its `PARALOG_LR` against the header's
+    /// `lr_cut`; if the two were rounded differently, a difference between them would not say
+    /// whether the record was above the cut or merely printed differently.
+    #[test]
+    fn the_provenance_writes_the_cut_and_the_rate_to_the_records_own_precisions() {
+        let stated = HiddenParalogProvenance {
+            target_fdr: 0.01,
+            paralog_rate: 0.031_25,
+            lr_cut: Some(4.211_712_3),
+            rate_was_fitted: true,
+            samples_with_a_coverage_model: 61,
+            samples_in_the_run: 63,
+        }
+        .as_header_value();
+
+        assert_eq!(
+            stated,
+            "target_fdr=0.0100;pi=0.031250;lr_cut=4.2117;em_converged=true;\
+samples_with_coverage_model=61/63",
+        );
+        assert_eq!(PARALOG_RATIO_DECIMALS, 4);
+        assert_eq!(PARALOG_POSTERIOR_DECIMALS, 6);
+    }
+
+    /// **A run whose target the curve never reaches says so in words, not with a number.**
+    #[test]
+    fn the_provenance_says_none_where_no_ratio_reached_the_target() {
+        let stated = HiddenParalogProvenance {
+            target_fdr: 0.0,
+            paralog_rate: 0.03,
+            lr_cut: None,
+            rate_was_fitted: false,
+            samples_with_a_coverage_model: 0,
+            samples_in_the_run: 2,
+        }
+        .as_header_value();
+
+        assert!(
+            stated.contains("lr_cut=none;"),
+            "an unreachable target has no cut to state: {stated}"
+        );
+        assert!(stated.contains("em_converged=false"));
+        assert!(stated.contains("samples_with_coverage_model=0/2"));
+    }
+
+    /// **The calibration line comes before the declarations, where the provenance lines are.**
+    ///
+    /// The header's order is spec §4's: what wrote the file and how, then what it was called
+    /// against, then the contigs, then the declarations. `##paralogFilter=` is provenance — what
+    /// the run was calibrated to — so it belongs with the first group and not among the `##INFO`
+    /// lines. Moving it is a change a reader of the file would see and no other test would.
+    #[test]
+    fn the_calibration_line_comes_before_the_info_declarations() {
+        let metadata = metadata_with(
+            vec![HeaderContig {
+                name: "chr1".to_string(),
+                length: 1000,
+                md5: None,
+            }],
+            &["one"],
+        )
+        .the_hidden_duplication_filter_ran(HiddenParalogProvenance {
+            target_fdr: 0.01,
+            paralog_rate: 0.03,
+            lr_cut: Some(4.2),
+            rate_was_fitted: true,
+            samples_with_a_coverage_model: 1,
+            samples_in_the_run: 1,
+        });
+
+        let text = header_text(&metadata);
+        let lines: Vec<&str> = text.lines().collect();
+        let calibration = lines
+            .iter()
+            .position(|line| line.starts_with("##paralogFilter="))
+            .expect("the calibration line is written");
+        let first_info = lines
+            .iter()
+            .position(|line| line.starts_with("##INFO="))
+            .expect("the INFO declarations are written");
+        let contigs = lines
+            .iter()
+            .position(|line| line.starts_with("##contig="))
+            .expect("the contigs are written");
+
+        assert!(
+            contigs < calibration && calibration < first_info,
+            "the calibration sits after the contigs and before the declarations; \
+             contigs at {contigs}, calibration at {calibration}, first INFO at {first_info}"
+        );
     }
 
     #[test]

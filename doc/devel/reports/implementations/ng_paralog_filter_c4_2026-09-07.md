@@ -112,16 +112,25 @@ which reads it off the parsed command line.
 
 | command | at this step | at C3's last commit `420b041f` |
 |---|---|---|
-| `cargo test --all-features --lib --bins --tests` | lib `ok. 6619 passed; 0 failed; 15 ignored` | `6605 passed; 0 failed; 15 ignored` |
+| `cargo test --all-features --lib --bins --tests` | lib `ok. 6621 passed; 0 failed; 15 ignored` | `6605 passed; 0 failed; 15 ignored` |
 | `cargo clippy --lib --bins --tests --all-features -- -D warnings` | 9 errors, three kinds | same 9, same kinds |
 | `cargo fmt --check` | dirty on 9 files, none this step's | the same 9 |
 
-6,619 is 6,605 plus the 14 library tests this step adds; the other two are the command-line ones,
-which are in the same lib target. The one integration failure is `main`'s.
+6,621 is 6,605 plus this step's 16 tests. The one integration failure is `main`'s.
+
+**This figure was wrong in the first version of this report, and the way it went wrong is the one
+this project's writing log names first.** It said 6,619 — the number from a gate run made *before*
+the last two tests were added, and then written up from memory of that run rather than after a new
+one. The two missing were the command-line tests two paragraphs above, which is why the sentence
+also had to explain away a discrepancy of exactly two. Caught by the step's own review, re-measured
+at `627104f4`, and corrected forward.
 
 **Clippy first went to 13, in four kinds the baseline does not have** — a loop counter, two unused
 imports, and the eight-argument function that became deviation 2. Counting error *kinds* is what
-saw them; a check greping for the baseline's three could not have.
+saw them; a check greping for the baseline's three could not have. **That figure describes a
+working tree no commit preserves**, so unlike every other number here a reader cannot re-derive it;
+it is kept because the lesson is the counting method, and marked because it sits among numbers that
+can be checked.
 
 ## What this leaves for C5
 

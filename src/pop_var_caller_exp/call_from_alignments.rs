@@ -67,7 +67,7 @@ use crate::ng::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
 use crate::ng::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
-use crate::ng::run::paralog_filter::{self, CalledRecordSink, SpillingSink, TargetFdr};
+use crate::ng::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
 use crate::ng::run::report::BoundsTheRunCalledUnder;
 use crate::ng::run::{AlignedFilesVariantCaller, AlignmentInputs, RunError, RunReport};
 use crate::ng::types::InbreedingF;
@@ -183,6 +183,12 @@ pub struct CallFromAlignmentsArgs {
     /// calls better explained by two reference-collapsed copies piling their reads onto one
     /// position than by a real variant. **Zero turns the filter off**, and a run with it off
     /// writes byte for byte what it wrote before the filter existed.
+    ///
+    /// **Above zero, the run needs scratch space beside the output.** It parks every called
+    /// record in `<output>.paralog-spill.tmp` and reads it twice, because no record's fate is
+    /// known until every record has been scored — so it needs free space on the output's own
+    /// filesystem of several times a compressed VCF's size. The file is removed when the run
+    /// ends, however it ends.
     #[arg(long, default_value_t = DEFAULT_PARALOG_FDR, help_heading = "Advanced")]
     pub paralog_fdr: f64,
 
@@ -441,8 +447,11 @@ pub fn run_call_from_alignments(
     // **A target that is not a fraction is refused before anything else looks at it.** `clap`
     // parses any `f64`, so `7`, `inf` and `nan` all arrive here, and the type is what says which
     // of those is a false-discovery rate.
-    let target_fdr = TargetFdr::try_new(args.paralog_fdr)
-        .map_err(|source| CallFromAlignmentsCliError::ParalogTargetIsNotAFraction { source })?;
+    let asked_for = paralog_filter::WhatTheOperatorAskedFor::from_the_flags(
+        args.paralog_fdr,
+        args.paralog_filter_tag,
+    )
+    .map_err(|source| CallFromAlignmentsCliError::ParalogTargetIsNotAFraction { source })?;
 
     let asked_ploidy = calling_run::ploidy_asked_for(args.ploidy)?;
     let merge_parameters = calling_run::merge_parameters_for(
@@ -572,7 +581,7 @@ pub fn run_call_from_alignments(
     // records are parked and **the VCF is not opened at all**: no record's fate is known until
     // every record has been scored, so a file opened now would stand beside a run that has
     // decided nothing.
-    let mut sink = if target_fdr.get() > 0.0 {
+    let mut sink = if asked_for.is_some() {
         // The spill's lines are encoded against the same contigs the header names, taken from
         // the metadata itself rather than re-derived.
         CalledRecordSink::ParkedOnTheSpill(SpillingSink::beside(
@@ -591,7 +600,7 @@ pub fn run_call_from_alignments(
         )
     };
 
-    let written = caller
+    let mut written = caller
         .call_cohort_handing_each_record_over(
             &SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior),
             &mut |record, window_coverage| sink.accept(record, window_coverage),
@@ -627,12 +636,15 @@ pub fn run_call_from_alignments(
         Some(spilling) => Some(
             paralog_filter::fit_score_and_write_the_calls(
                 spilling.spill(),
-                written.window_coverage_histograms.clone(),
+                // **Taken, not cloned.** `ParalogScoringContext::new` consumes the histograms so
+                // each sample's bins are freed as its model is fitted; cloning here would defeat
+                // that and hold a second copy of every sample's — about 80 kB each. Nothing else
+                // reads the field afterwards.
+                std::mem::take(&mut written.window_coverage_histograms),
                 &inbreeding_by_sample,
-                paralog_filter::WhatTheOperatorAskedFor {
-                    target_fdr,
-                    tag_instead_of_dropping: args.paralog_filter_tag,
-                },
+                // PANIC-FREE: the sink is the spill only where `asked_for` is `Some`, and this
+                // arm is reached only through that sink.
+                asked_for.expect("the records are parked only when a filter was asked for"),
                 &args.output,
                 metadata,
                 ploidy,

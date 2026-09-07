@@ -22,9 +22,9 @@ use crate::ng::vcf::{HiddenParalogProvenance, VcfHeaderMetadata, VcfWriteError, 
 use crate::ng::window_coverage::SampleHistogram;
 
 use super::{
-    CoverageFitConfigRefused, ParalogScoringContext, ParalogVerdicts, PassThreeError, PassTwoError,
-    SpillFile, TargetFdr, WhatTheFilterDid, score_the_parked_records_and_resolve_the_cut,
-    write_the_records_the_filter_kept,
+    CoverageFitConfigRefused, NotATargetFdr, ParalogScoringContext, ParalogVerdicts,
+    PassThreeError, PassTwoError, SpillFile, TargetFdr, WhatTheFilterDid,
+    score_the_parked_records_and_resolve_the_cut, write_the_records_the_filter_kept,
 };
 
 /// **The two knobs the operator sets, together** — because they are one decision.
@@ -43,6 +43,38 @@ pub struct WhatTheOperatorAskedFor {
     pub tag_instead_of_dropping: bool,
 }
 
+impl WhatTheOperatorAskedFor {
+    /// **What the two flags come to, or `None` where the operator asked for no filter.**
+    ///
+    /// `--paralog-fdr 0` means *do not run the filter*, and this is the one place that rule
+    /// lives. It matters that it is one place and that the answer is an `Option`: handed a target
+    /// of zero the scoring would not remove nothing — a strongly duplicated record's tail
+    /// false-discovery value underflows to exactly zero, and zero is not above zero, so the most
+    /// extreme records would go. A `TargetFdr` in hand therefore always means the filter runs,
+    /// and "off" is the absence of one rather than a particular value of one.
+    ///
+    /// `--paralog-filter-tag` on its own, with the filter off, is accepted and does nothing —
+    /// there is no verdict for it to change.
+    ///
+    /// # Errors
+    ///
+    /// If the target is not zero and not a fraction strictly between zero and one.
+    pub fn from_the_flags(
+        target_fdr: f64,
+        tag_instead_of_dropping: bool,
+    ) -> Result<Option<Self>, NotATargetFdr> {
+        // Exactly `+0.0`, and not `-0.0`: a negative target is a mistake, and answering it with
+        // "the filter did not run" would be the wrong reply.
+        if target_fdr == 0.0 && target_fdr.is_sign_positive() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            target_fdr: TargetFdr::try_new(target_fdr)?,
+            tag_instead_of_dropping,
+        }))
+    }
+}
+
 /// **What the filter did, and everything the run report needs to say so.**
 #[derive(Debug)]
 pub struct FilteredRun {
@@ -54,6 +86,10 @@ pub struct FilteredRun {
     /// [`why_no_model`](ParalogScoringContext::why_no_model), which spec §3.5's report line names
     /// each rejected sample from.
     pub scoring: ParalogScoringContext,
+    /// The run's sample names, in its sample order. **Kept because the report names a sample and
+    /// does not number it**: an index is a fact about this run's argument order and an operator
+    /// would have to count their own command line to use it.
+    pub sample_names: Vec<String>,
 }
 
 /// What can stop a run once its records are parked.
@@ -143,6 +179,10 @@ pub fn fit_score_and_write_the_calls(
     )
     .map_err(ParalogFilterError::Scoring)?;
 
+    // Taken before the metadata is consumed by the header: the report names each sample whose
+    // coverage model was refused, and this is the only place the names are still in hand.
+    let sample_names: Vec<String> = metadata.sample_names().to_vec();
+
     // **The header states what the run was calibrated to**, because a dropped record leaves no
     // trace of it anywhere else in the file.
     let metadata = metadata.the_hidden_duplication_filter_ran(HiddenParalogProvenance {
@@ -179,6 +219,7 @@ pub fn fit_score_and_write_the_calls(
         did,
         verdicts,
         scoring,
+        sample_names,
     })
 }
 
@@ -193,6 +234,7 @@ pub fn what_to_tell_the_operator(run: &FilteredRun) -> Vec<String> {
         did,
         verdicts,
         scoring,
+        sample_names,
     } = run;
     let mut lines = vec![format!(
         "hidden-duplication filter: {} record(s) dropped, {} tagged, {} written; \
@@ -206,7 +248,7 @@ pub fn what_to_tell_the_operator(run: &FilteredRun) -> Vec<String> {
         if verdicts.calibration.prior.converged {
             "fitted from this run"
         } else {
-            "the documented fallback — this run's could not be fitted"
+            "the documented fallback"
         },
         match verdicts.calibration.lr_threshold {
             Some(cut) => format!("{cut:.4}"),
@@ -216,12 +258,25 @@ pub fn what_to_tell_the_operator(run: &FilteredRun) -> Vec<String> {
         scoring.sample_count(),
     ));
 
-    // **Named, not counted.** "The model rested on 61 of 63" and "on 61 of 63, and the two that
-    // dropped out were nearly uncovered" are different statements, and only the second tells an
-    // operator whether to look at those samples' reads.
+    // **The warning C3 wrote, printed here** — this is the step that has a report to print it in.
+    // It says the half the rate line above cannot: that the records this run removed were
+    // calibrated against a constant rather than against this cohort, which is what an operator
+    // needs before trusting the output.
+    if let Some(warning) = verdicts.why_the_paralog_rate_is_not_fitted() {
+        lines.push(format!("  warning: {warning}"));
+    }
+
+    // **Named, not counted, and named by its name.** "The model rested on 61 of 63" and "on 61 of
+    // 63, and the two that dropped out were nearly uncovered" are different statements, and only
+    // the second tells an operator whether to look at those samples' reads. An index would make
+    // them count their own command line to find out which sample it was.
     for (sample, why) in scoring.why_no_model().iter().enumerate() {
         if let Some(why) = why {
-            lines.push(format!("  sample {sample} has no coverage model: {why}"));
+            let name = sample_names.get(sample).map_or_else(
+                || format!("sample {sample}"),
+                |name| format!("sample {name}"),
+            );
+            lines.push(format!("  {name} has no coverage model: {why}"));
         }
     }
 

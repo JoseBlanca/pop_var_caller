@@ -425,13 +425,6 @@ fn parameters_that_name_another_cohorts_samples_are_refused() {
     );
 }
 
-/// **A filter that is not finished is refused, not run half-way.**
-///
-/// Pass one of the hidden-duplication filter — parking every record beside the output — is built.
-/// The scoring pass that turns those records into a cut and the writing pass that applies it are
-/// not. A run that parked its records and stopped would leave the operator no VCF at all, so the
-/// flag is accepted and its non-zero values are refused until those steps land.
-///
 /// **A run asking for the filter now runs it**, where it used to be refused.
 ///
 /// The step that built the scoring and writing passes is the step that deletes the refusal, and

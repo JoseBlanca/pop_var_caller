@@ -19,23 +19,12 @@
 //!
 //! Spec: `doc/devel/ng/spec/hidden_paralog_filter.md` §3.5.
 
-use crate::ng::vcf::{RecordPlace, VcfWriteError, VcfWriter};
+use crate::ng::vcf::{
+    HIDDEN_PARALOG_FILTER_ID, PARALOG_POSTERIOR_DECIMALS, PARALOG_RATIO_DECIMALS, RecordPlace,
+    VcfWriteError, VcfWriter,
+};
 
 use super::{LinePatchError, ParalogVerdicts, SpillFile, SpillFileError, rewrite_filter_and_info};
-
-/// **The filter's id, as it appears in a written record's `FILTER` column.**
-///
-/// Declared in the header by [`crate::ng::vcf::header`] whenever the filter ran.
-pub const HIDDEN_PARALOG_FILTER_ID: &str = "hiddenParalog";
-
-/// **How a record's likelihood ratio is written**, and it is the same number of decimals the
-/// header's `lr_cut` carries — so an operator auditing why a record went can compare the two
-/// as written, without wondering whether a difference is real or a rounding.
-const RATIO_DECIMALS: usize = 4;
-
-/// How a record's posterior probability is written — the precision the header gives `pi`, which
-/// is the other number it is read against.
-const POSTERIOR_DECIMALS: usize = 6;
 
 /// **What the filter did to the run's records**, for the run report and spec §3.5's lines.
 ///
@@ -161,13 +150,16 @@ pub fn write_the_records_the_filter_kept(
         // §3.5). An unscored record gets neither, because it has nothing to report.
         let mut info_to_add: Vec<String> = Vec::new();
         if ratio.is_finite() {
-            info_to_add.push(format!("PARALOG_LR={:.*}", RATIO_DECIMALS, ratio));
+            info_to_add.push(format!("PARALOG_LR={:.*}", PARALOG_RATIO_DECIMALS, ratio));
             // **The probability can be missing where the ratio is not.** It needs the run's
             // fitted duplication rate to be a rate — strictly between none and all — and a run
             // that fitted 0 or 1 has no log-odds to add. The copied calibration answers `None`
             // there rather than a saturated 0 or 1, and the field is then simply absent.
             if let Some(posterior) = verdicts.calibration.posterior(ratio) {
-                info_to_add.push(format!("PARALOG_POST={:.*}", POSTERIOR_DECIMALS, posterior));
+                info_to_add.push(format!(
+                    "PARALOG_POST={:.*}",
+                    PARALOG_POSTERIOR_DECIMALS, posterior
+                ));
             }
         } else {
             did.unscored += 1;

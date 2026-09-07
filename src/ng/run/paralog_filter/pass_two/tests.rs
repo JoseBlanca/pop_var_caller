@@ -212,8 +212,14 @@ fn default_config() -> CalibrationConfig {
 
 /// A target false-discovery rate the type admits.
 fn target(fdr: f64) -> TargetFdr {
-    TargetFdr::try_new(fdr).expect("a fraction below one is a target")
+    TargetFdr::try_new(fdr).expect("a fraction between zero and one is a target")
 }
+
+/// **The strictest target a run can ask for.** Zero is not a target — it means *do not run the
+/// filter* — so the strictest thing that reaches the scoring is a fraction just above it. Records
+/// whose tail false-discovery value underflows to exactly zero still meet it, which is the whole
+/// reason zero could not be left as a target.
+const THE_STRICTEST_TARGET: f64 = 1e-12;
 
 /// **A configuration whose fallback rate is not the iteration's starting guess.**
 ///
@@ -682,7 +688,7 @@ fn a_looser_target_removes_more_records() {
             .count()
     };
 
-    let strict = removed_at(0.0);
+    let strict = removed_at(THE_STRICTEST_TARGET);
     let ordinary = removed_at(0.01);
     let loose = removed_at(0.5);
     assert!(
@@ -834,7 +840,7 @@ fn an_unscored_record_is_never_flagged_however_loose_the_target() {
         ],
     );
 
-    for target_fdr in [0.0, 0.01, 0.5, 0.999] {
+    for target_fdr in [THE_STRICTEST_TARGET, 0.01, 0.5, 0.999] {
         let verdicts = score_the_parked_records_and_resolve_the_cut(
             &spill,
             &context,
@@ -999,13 +1005,18 @@ fn a_spill_holding_more_records_than_pass_one_counted_is_refused() {
 /// reports. Neither is distinguishable afterwards, so the type refuses them up front.
 #[test]
 fn a_target_that_is_not_a_fraction_of_one_is_refused() {
-    for refused in [5.0, 1.0, -1.0, f64::NAN, f64::INFINITY] {
+    // **Zero is among the refused, and it is the one worth saying.** It means *do not run the
+    // filter*, which is a different thing from a target — and handed to the scoring it would not
+    // remove nothing: a strongly duplicated record's tail false-discovery value underflows to
+    // exactly zero, and zero is not above zero. `WhatTheOperatorAskedFor::from_the_flags` is
+    // where zero becomes "no filter", once, so that this type never has to hold it.
+    for refused in [5.0, 1.0, 0.0, -0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert!(
             TargetFdr::try_new(refused).is_err(),
             "{refused} is not a target false-discovery rate"
         );
     }
-    for admitted in [0.0, 0.001, 0.01, 0.5, 0.999_999] {
+    for admitted in [1e-12, 0.001, 0.01, 0.5, 0.999_999] {
         assert_eq!(
             TargetFdr::try_new(admitted)
                 .expect("a fraction below one is a target")

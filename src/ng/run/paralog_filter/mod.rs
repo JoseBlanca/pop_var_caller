@@ -32,6 +32,9 @@
 //!   record, fit how common duplications are in this run, resolve the target to a cut.
 //! - [`pass_three`] — [`write_the_records_the_filter_kept`]: read the spill again in step with
 //!   those ratios and write the VCF, dropping or tagging what the cut removes.
+//! - [`finish`] — [`fit_score_and_write_the_calls`]: **what a run actually calls.** The fit, then
+//!   passes two and three, then the header's provenance and the report's words. Both subcommands
+//!   go through it, which is what stops the two modes filtering differently.
 
 use crate::ng::types::GenomePosition;
 use crate::ng::vcf::RecordPlace;
@@ -50,9 +53,7 @@ pub use finish::{
     what_to_tell_the_operator,
 };
 pub use pass_one::{CalledRecordSink, PassOneError, SpillingSink, entry_for};
-pub use pass_three::{
-    HIDDEN_PARALOG_FILTER_ID, PassThreeError, WhatTheFilterDid, write_the_records_the_filter_kept,
-};
+pub use pass_three::{PassThreeError, WhatTheFilterDid, write_the_records_the_filter_kept};
 pub use pass_two::{
     LrHistogramShape, NotATargetFdr, ParalogVerdicts, PassTwoError, TargetFdr,
     score_the_parked_records_and_resolve_the_cut,

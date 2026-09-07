@@ -48,7 +48,8 @@ pub use encode::{
     mapping_quality_text, penalty_text, quality_text, record_line, sample_columns,
 };
 pub use header::{
-    FILE_FORMAT, HeaderContig, HeaderMetadataError, HiddenParalogProvenance, MAX_CONTIG_LENGTH,
+    FILE_FORMAT, HIDDEN_PARALOG_FILTER_ID, HeaderContig, HeaderMetadataError,
+    HiddenParalogProvenance, MAX_CONTIG_LENGTH, PARALOG_POSTERIOR_DECIMALS, PARALOG_RATIO_DECIMALS,
     VcfHeaderMetadata, header_text,
 };
 pub use writer::{RecordPlace, VcfWriteError, VcfWriter};
