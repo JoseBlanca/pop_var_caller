@@ -17,21 +17,22 @@
 //! Spec: `doc/devel/ng/spec/hidden_paralog_filter.md`. Plan:
 //! `doc/devel/ng/impl_plan/hidden_paralog_filter.md`.
 //!
-//! **What exists so far:** [`spill`]'s entry and its codec — what pass one writes and passes
-//! two and three read back; [`spill_file`]'s [`SpillFile`], which says where those bytes live
-//! and makes the file go away when the run ends, whatever way it ends; and [`patch`]'s
-//! [`rewrite_filter_and_info`], which is how pass three puts the verdict on a line without
-//! disturbing the columns it does not touch; and [`scoring_context`]'s
-//! [`ParalogScoringContext`], which is what pass two reads — one fitted coverage model per
-//! sample, and the rule turning a spilled row into the four numbers the scorer takes; and
-//! [`pass_one`]'s [`CalledRecordSink`], which is the choice itself — the VCF writer while the
-//! filter is off, the spill while it is on; and [`pass_two`]'s
-//! [`score_the_parked_records_and_resolve_the_cut`], which reads the spill back, scores every
-//! record, fits how common duplications are in this run, and turns the operator's target
-//! false-discovery rate into a likelihood ratio to cut at.
+//! **What exists so far**, module by module:
 //!
-//! **What is not built yet is pass three**: the writing that applies the verdict. Until it is,
-//! a run asking for the filter is refused rather than left holding a spill and no calls.
+//! - [`spill`] — the entry a called record is parked as, and the codec that carries it.
+//! - [`spill_file`] — [`SpillFile`]: where those bytes live, the three-stage life that stops a
+//!   run writing over its own spill, and the `Drop` that unlinks it on every exit path.
+//! - [`patch`] — [`rewrite_filter_and_info`]: how pass three puts the verdict on a line without
+//!   disturbing the columns it does not touch.
+//! - [`scoring_context`] — [`ParalogScoringContext`]: one fitted coverage model a sample, and the
+//!   rule that turns a spilled row into the four numbers the scorer takes.
+//! - [`pass_one`] — [`CalledRecordSink`]: the VCF writer while the filter is off, the spill while
+//!   it is on.
+//! - [`pass_two`] — [`score_the_parked_records_and_resolve_the_cut`]: read the spill, score every
+//!   record, fit how common duplications are in this run, resolve the target to a cut.
+//!
+//! **Pass three is not built.** Until it is, a run asking for the filter is refused rather than
+//! left holding a spill and no calls.
 
 use crate::ng::types::GenomePosition;
 use crate::ng::vcf::RecordPlace;
@@ -44,7 +45,10 @@ pub mod spill;
 pub mod spill_file;
 
 pub use pass_one::{CalledRecordSink, PassOneError, SpillingSink, entry_for};
-pub use pass_two::{ParalogVerdicts, PassTwoError, score_the_parked_records_and_resolve_the_cut};
+pub use pass_two::{
+    LrHistogramShape, NotATargetFdr, ParalogVerdicts, PassTwoError, TargetFdr,
+    score_the_parked_records_and_resolve_the_cut,
+};
 pub use patch::{LinePatchError, rewrite_filter_and_info};
 pub use scoring_context::{
     CohortSizeMismatch, CoverageFitConfigRefused, ParalogScoringContext, WhyNoCoverageModel,

@@ -52,10 +52,10 @@ pub fn entry_for(
 ) -> SpillEntry {
     // **Both slices are the run's samples, and a disagreement is a wiring error.** The zip below
     // would take the shorter of the two — which never *mis-pairs*, since both are prefixes of the
-    // same sample order, but silently loses a suffix. Step C3 catches the short entry when it
-    // scores, and only on the generic branch: a tract's rows never consult the columns, so a
-    // tract would park the full count and look right. Asserting here names the sink instead of
-    // pointing at pass two after the whole calling pass has finished.
+    // same sample order, but silently loses a suffix. Pass two does catch it, for either row
+    // shape: its check is on the entry's row count and answers for a tract as well as a generic
+    // locus. Asserting here names the sink instead of pointing at pass two after the whole
+    // calling pass has finished.
     assert_eq!(
         windows.len(),
         record.sample_columns().len(),

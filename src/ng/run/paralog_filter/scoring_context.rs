@@ -242,9 +242,11 @@ impl ParalogScoringContext {
                     ref_reads,
                     alt_reads,
                 } = samples.get(sample)?;
-                // A pair that cannot be summed is a corrupt spill row; it is treated as an
-                // absence here and counted by the caller, which is the only place that can tell
-                // one corrupt row from a sparse cohort.
+                // A pair that cannot be summed is a corrupt spill row — two counts whose
+                // total overflows `u32`, which no run produces and no codec refuses. It is
+                // treated as an absence, which is what an unreadable row is: the sample says
+                // nothing about this record. **Nothing counts it**, and the only caller is
+                // `score`, which cannot tell it from a sample that was simply not covered.
                 let total = ref_reads.checked_add(*alt_reads)?;
                 if total == 0 {
                     return None;
@@ -353,8 +355,8 @@ impl ParalogScoringContext {
             &LocusObservations {
                 samples: observations,
             },
-            self.single_copy_depth_sd(),
-            self.score_tables(),
+            &self.single_copy_depth_sd,
+            &self.precompute,
         );
         Ok(if score.samples_used == 0 {
             f64::NAN
@@ -380,19 +382,6 @@ impl ParalogScoringContext {
     #[must_use]
     pub fn why_no_model(&self) -> &[Option<WhyNoCoverageModel>] {
         &self.why_no_model
-    }
-
-    /// σ₀ per sample, the slice the scorer takes beside the observations.
-    #[must_use]
-    fn single_copy_depth_sd(&self) -> &[f64] {
-        &self.single_copy_depth_sd
-    }
-
-    /// The per-pass tables the scorer reuses across every record. **Built once in
-    /// [`Self::new`]; this only hands them out.**
-    #[must_use]
-    fn score_tables(&self) -> &ParalogScorePrecompute {
-        &self.precompute
     }
 }
 

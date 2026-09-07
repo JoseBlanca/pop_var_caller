@@ -1077,3 +1077,110 @@ fn an_empty_histogram_and_an_unconverged_em_agree_on_both_sides() {
         "an unconverged pi must be the same on both sides"
     );
 }
+
+/// **The fallback, the curve and the cut agree with production's, bit for bit.**
+///
+/// The three pieces underneath are copies, compared with production's above. What is ng's own is
+/// [`calibrate_from_the_ratio_histogram`](ng::calibrate_from_the_ratio_histogram) — the four lines
+/// that put them together and substitute the documented rate for an estimate that did not settle.
+/// Production's `calibrate_from_histogram` does the same four, so it is the oracle.
+///
+/// **Three configurations**, because two of them are invisible at the shipped defaults: the
+/// iteration's starting guess and the fallback rate are both `0.03`, so a run that reads the wrong
+/// one of the two, or never substitutes at all, gives the same answer as a correct one. The second
+/// configuration separates them; the third also cramps the iteration so that the substitution
+/// happens.
+#[test]
+fn the_fallback_and_the_cut_agree_with_productions_bit_for_bit() {
+    use crate::var_calling::paralog_filter::calibrate::{
+        CalibrationConfig as TheirConfig, calibrate_from_histogram,
+    };
+
+    /// A fallback rate that is not the iteration's starting guess, so a substitution reading the
+    /// wrong field of the configuration shows up as a different number.
+    const A_FALLBACK_THAT_IS_NOT_THE_SEED: f64 = 0.41;
+    const A_SEED_THAT_IS_NOT_THE_FALLBACK: f64 = 0.17;
+
+    // **Production's configuration is built from ng's, field by field**, so the two sides cannot
+    // drift into comparing different questions.
+    let theirs_of = |ours: &ng::CalibrationConfig| TheirConfig {
+        em: production::EmConfig {
+            start: ours.em.start,
+            tol: ours.em.tol,
+            max_iter: ours.em.max_iter,
+        },
+        fallback_prior: ours.fallback_prior,
+    };
+
+    let configs = [
+        ng::CalibrationConfig::default(),
+        ng::CalibrationConfig {
+            em: ng::EmConfig {
+                start: A_SEED_THAT_IS_NOT_THE_FALLBACK,
+                ..ng::EmConfig::default()
+            },
+            fallback_prior: A_FALLBACK_THAT_IS_NOT_THE_SEED,
+        },
+        ng::CalibrationConfig {
+            em: ng::EmConfig {
+                max_iter: 1,
+                tol: 1e-300,
+                start: A_SEED_THAT_IS_NOT_THE_FALLBACK,
+            },
+            fallback_prior: A_FALLBACK_THAT_IS_NOT_THE_SEED,
+        },
+    ];
+
+    let mut compared = 0usize;
+    for ours_config in configs {
+        let theirs_config = theirs_of(&ours_config);
+        for ratios in [
+            Vec::new(),
+            vec![-4.0, -2.0, -1.0, 0.5, 1.0],
+            (0..500)
+                .map(|i| f64::from(i % 50) - 25.0 + f64::from(i % 7) * 0.1)
+                .collect(),
+        ] {
+            let mut ours = ng::ParalogLrHistogram::with_defaults();
+            let mut theirs = production::ParalogLrHistogram::with_defaults();
+            for &lr in &ratios {
+                ours.push(lr);
+                theirs.push(lr);
+            }
+            for target_fdr in TARGET_FALSE_DISCOVERY_RATES {
+                let ours = ng::calibrate_from_the_ratio_histogram(&ours, target_fdr, &ours_config);
+                let theirs = calibrate_from_histogram(&theirs, target_fdr, &theirs_config);
+                let case = format!("{} ratios, target {target_fdr}", ratios.len());
+                assert_eq!(
+                    ours.prior.prior_probability.to_bits(),
+                    theirs.prior.prior_probability.to_bits(),
+                    "{case}: the two trees fitted different rates — ng {}, src/var_calling/ {}",
+                    ours.prior.prior_probability,
+                    theirs.prior.prior_probability,
+                );
+                assert_eq!(ours.prior.converged, theirs.prior.converged, "{case}");
+                assert_eq!(
+                    ours.lr_threshold.map(f64::to_bits),
+                    theirs.lr_threshold.map(f64::to_bits),
+                    "{case}: the two trees cut at different ratios — ng {:?}, \
+                     src/var_calling/ {:?}",
+                    ours.lr_threshold,
+                    theirs.lr_threshold,
+                );
+                for lr in [-100.0, -8.0, -1.0, 0.0, 1.0, 8.0, 30.0, 100.0, f64::NAN] {
+                    assert_eq!(
+                        ours.flags(lr),
+                        theirs.flags(lr),
+                        "{case}: the two trees disagree about removing a record at ratio {lr}"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        compared,
+        3 * 3 * TARGET_FALSE_DISCOVERY_RATES.len() * 9,
+        "every combination is compared: {compared}"
+    );
+}

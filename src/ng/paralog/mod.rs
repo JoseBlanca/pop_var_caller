@@ -44,6 +44,7 @@
 //! - **A3:** how common hidden duplications are in this run and where to cut them
 //!   ([`ParalogPrior`] and [`ParalogFdrCurve`] in [`prior`], [`calibration::ParalogCalibration`]).
 
+pub mod calibrate;
 pub mod calibration;
 pub mod coverage_model;
 pub mod locus_score;
@@ -62,6 +63,7 @@ mod production_parity;
 
 // Production's own surface (`src/paralog/mod.rs`), name for name, so that the call sites
 // arriving with the later steps resolve unchanged.
+pub use calibrate::calibrate_from_the_ratio_histogram;
 pub use calibration::{CalibrationConfig, DEFAULT_FALLBACK_PARALOG_PRIOR, ParalogCalibration};
 pub use coverage_model::{
     CoverageFitConfig, CoverageModelError, ModeMedianRatioBounds, SingleCopyCoverageModel,
@@ -76,7 +78,10 @@ pub use model_params::{
     DEFAULT_HOMALT_VAF_THRESHOLD, DEFAULT_MAX_RELATIVE_COPY_NUMBER, DEFAULT_PSEUDOCOUNT_VAF,
     GridSpec, ParalogModelParams, SfsPriorSpec,
 };
-pub use prior::{EmConfig, ParalogFdrCurve, ParalogLrHistogram, ParalogPrior};
+pub use prior::{
+    DEFAULT_LR_HISTOGRAM_BINS, DEFAULT_LR_HISTOGRAM_HI, DEFAULT_LR_HISTOGRAM_LO, EmConfig,
+    ParalogFdrCurve, ParalogLrHistogram, ParalogPrior,
+};
 
 /// **ng's own tests, beside production's transcribed ones** — the cases the copied suite
 /// does not reach. They live here rather than in [`model_params`] because that file is

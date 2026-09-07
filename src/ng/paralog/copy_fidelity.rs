@@ -127,6 +127,15 @@
 //! is that helper's doc comment, so a rename would otherwise leave the guard green while the
 //! copy silently grew.
 //!
+//! # What is ng's own in this module
+//!
+//! Four files, and none of them is a copy: `mod.rs` (declarations, re-exports and ng's own
+//! tests), `copy_fidelity.rs` (this guard), `production_parity.rs` (the differentials against
+//! production) and `calibrate.rs` (the fallback, the curve and the cut, put together). The last
+//! is here rather than in the run stage because it is statistics, and it cannot be a guarded copy
+//! because production's counterpart sits below four items ng deliberately does not port — so it
+//! is checked by a differential instead, beside the other nine.
+//!
 //! **A deleted entry and a dropped one look the same**, which is why
 //! [`every_file_in_the_module_is_guarded_ng_s_own_or_released`] makes the directory
 //! listing the authority: a file in neither list fails the build, so the guard cannot go
@@ -1197,7 +1206,16 @@ fn every_file_in_the_module_is_guarded_ng_s_own_or_released() {
     // list is the very thing this test exists to remove, and a length check — which is all
     // two lists can cheaply agree on — passes when one name is swapped in only one of them.
     let guarded: Vec<&str> = guarded_copies().iter().map(|c| c.file_name).collect();
-    const NG_OWN: [&str; 3] = ["mod.rs", "copy_fidelity.rs", "production_parity.rs"];
+    // `calibrate.rs` is ng's own and not a copy: production keeps its counterpart below four
+    // items ng deliberately does not port, so it falls outside any span this guard can express.
+    // It is checked against production all the same, by the differential in
+    // `production_parity.rs`.
+    const NG_OWN: [&str; 4] = [
+        "mod.rs",
+        "copy_fidelity.rs",
+        "production_parity.rs",
+        "calibrate.rs",
+    ];
 
     // Grows as files are released; keep it in step with the table in this module's header.
     const RELEASED: [&str; 0] = [];

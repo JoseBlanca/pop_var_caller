@@ -285,7 +285,7 @@ fn the_sigma_slice_is_the_cohorts_length_with_nan_where_a_sample_has_no_model() 
     ];
     let context = a_context_from(histograms, &fit_config());
 
-    let sigma = context.single_copy_depth_sd();
+    let sigma = &context.single_copy_depth_sd;
 
     assert_eq!(sigma.len(), 3, "the slice must be the cohort's length");
     assert!(sigma[0].is_finite());

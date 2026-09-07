@@ -71,7 +71,7 @@ An estimate that did not settle is replaced by the documented rate rather than u
 unconverged iterate is not distinguishable from a real estimate by its value alone. Production does
 this in `calibrate_from_histogram`, which sits in its file *below* four items ng deliberately does
 not copy — so it is not in the span `copy_fidelity.rs` guards, and the file it would join is
-compared byte for byte against production's and may not gain a line. It is four lines, and it lives
+compared byte for byte against production's and may not gain a line. It is four lines, and at the time of this step it lived
 beside its only caller with the oracle beside it:
 `the_fallback_and_the_cut_agree_with_productions_bit_for_bit` compares ng's against production's
 across empty, small and 500-ratio histograms, five targets and both convergence outcomes.
@@ -121,10 +121,18 @@ fixture now lives.
 
 **Two tests were rewritten because their premise was wrong, and the measurement is what said so.**
 The first draft asserted that a target false-discovery rate of zero is unreachable and flags
-nothing. On a fixture of twenty records where every sample of a record looks identical, the two
-classes separate completely — measured ratios of `+156.26` and `−31.15` and nothing between — so
-every target from 0 to 0.5 gives the same cut and removes the same five records. The target was
-doing nothing, and a test asserting "some records are flagged" would have passed while proving it.
+nothing. On a fixture of twenty records where every sample of a record looks identical, five
+records were removed at *every* target from 0 to 0.5 — so the knob was doing nothing, and a test
+asserting "some records are flagged" would have passed while proving it.
+
+**Why, and the first version of this paragraph got the reason wrong.** The two classes do separate
+completely — measured ratios of `+156.26` and `−31.15`, nothing between — but separation is not
+what made the cut constant. The removal rule is `tail value ≤ target`, and the two measured tail
+values are **exactly `0`** for the duplicated class and **`0.7499999999999927`** for the other. So
+a target of zero was reachable because a class the fit is certain about underflows to exactly zero,
+and the cut never moved because the second class sits *above every target the test tried*. The same
+fixture with ten duplicated records instead of five removes all twenty at a target of one in two.
+Separation gives two values; it does not say where the second one falls.
 The fixture is now seven records graded by how many of the six samples look duplicated, none to
 all: ratios `−31.15, −3.43, 24.29, 52.01, 79.74, 115.19, 156.26`, and 4, 5 and 7 records removed at
 targets of 0, one in a hundred and one in two. Both tests assert the *order* — ratios rising with
@@ -149,8 +157,10 @@ file restored afterwards and its checksum compared with the original. **All eigh
 
 Defect 7 is worth a line: it changes only `lr_threshold`, the number the header quotes, and **not
 which records are removed** — the removal decision reads the curve rather than the threshold. So
-none of the eleven behavioural tests can see it, and the only thing that does is the comparison
-against production's cut, bit for bit.
+**twelve of the thirteen tests cannot see it** — every one that goes through the pass — and the
+only thing that does is the comparison against production's cut, bit for bit. (This report first
+said eleven. Re-running the mutation gives `120 passed; 1 failed`: exactly one of the thirteen
+bypasses the pass.)
 
 ## The gate
 
@@ -182,8 +192,8 @@ It is fixed — the assertion now destructures the error rather than formatting 
 above are from the re-run after the fix.
 
 **`cargo fmt` reformats the nine baseline files**, so they were reverted with `git checkout --`
-before staging and the fmt set was re-counted by *unique file*, not by line: 12 files before, 9
-after, and the three that went away are this step's.
+before staging and the fmt set was re-counted by *unique file*, not by line — 9 files after,
+exactly the nine the merge base has, and none of this step's four.
 
 ## What this leaves for C4
 

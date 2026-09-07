@@ -18,42 +18,169 @@
 //! enter the fitted rate. Its ratio is `NaN`, and the histogram refuses to fold a `NaN`. Turn it
 //! into a zero anywhere along the way and it becomes a record voting "not a duplication" — so a
 //! run where nothing could be scored would fit a duplication rate out of nothing at all and
-//! produce a plausible file. Two things stand against it here: [`ParalogScoringContext::score`]
-//! returns `NaN` rather than the scorer's neutral `0.0`, and the ratio pushed to the histogram
-//! and the ratio pushed to the vector are **the same binding**, so no rule can apply to one and
-//! not the other.
+//! produce a plausible file. Three things stand against it, and the third was missing until the
+//! step's own review: [`ParalogScoringContext::score`] returns `NaN` rather than the scorer's
+//! neutral `0.0`; the ratio pushed to the histogram and the ratio pushed to the vector are **the
+//! same binding**, so no rule can apply to one and not the other; and the verdict screens on
+//! finiteness before it consults the curve — which matters more than it looks, because the
+//! curve's own answer for a `NaN` sits *inside* a target of one in two by about
+//! 1.5 × 10⁻¹⁴. `an_unscored_record_is_never_flagged_however_loose_the_target` is what holds that.
 //!
 //! Spec: `doc/devel/ng/spec/hidden_paralog_filter.md` §3.3, §6 trap 4.
 
 use crate::ng::paralog::{
-    CalibrationConfig, ParalogCalibration, ParalogFdrCurve, ParalogLrHistogram, ParalogPrior,
-    SampleObservation,
+    CalibrationConfig, DEFAULT_LR_HISTOGRAM_BINS, DEFAULT_LR_HISTOGRAM_HI, DEFAULT_LR_HISTOGRAM_LO,
+    ParalogCalibration, ParalogLrHistogram, SampleObservation, calibrate_from_the_ratio_histogram,
 };
 
 use super::{CohortSizeMismatch, ParalogScoringContext, SpillFile, SpillFileError};
 
+/// **The operator's target false-discovery rate**, checked once at the boundary.
+///
+/// The share of the records the filter removes that were really variants: `0.01` means about one
+/// wrong removal in a hundred, and `0` removes nothing.
+///
+/// **A newtype because both ways of getting it wrong are silent.** Handed a bare `f64`, the
+/// calibration compares it against the curve and asks no questions — measured on a three-record
+/// spill: a target of `5`, which is what someone typing five for "five percent" gets, removes
+/// **every** scored record; a negative one, or a `NaN` arriving through some upstream arithmetic,
+/// removes none and reports no cut, which is exactly what the calibration reports when a target
+/// is simply unreachable. So a run report cannot tell a wrong knob from a clean cohort. The crate
+/// already draws this line for [`InbreedingF`](crate::ng::types::InbreedingF); this mirrors it.
+///
+/// The admitted range is `[0, 1)`, the same range the `--paralog-fdr` flag already parses, so the
+/// flag and this type cannot disagree about what a target is.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct TargetFdr(f64);
+
+impl TargetFdr {
+    /// The only constructor. A target that is not a fraction in `[0, 1)` is refused rather than
+    /// coerced.
+    ///
+    /// # Errors
+    ///
+    /// If the value is not finite, is negative, or is `1` or more.
+    pub fn try_new(target: f64) -> Result<Self, NotATargetFdr> {
+        if target.is_finite() && (0.0..1.0).contains(&target) {
+            Ok(Self(target))
+        } else {
+            Err(NotATargetFdr { given: target })
+        }
+    }
+
+    /// The target as the copied calibration takes it.
+    #[must_use]
+    #[inline]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+/// **What was offered as a target false-discovery rate is not one.**
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[error(
+    "the target false-discovery rate is {given}; it must be a fraction of one, at least 0 and \
+     below 1 — 0.01 means about one wrongly removed record in a hundred, not one in a hundredth"
+)]
+pub struct NotATargetFdr {
+    /// The value that was offered.
+    pub given: f64,
+}
+
+/// **The range and resolution the run's ratios were binned over.**
+///
+/// Recorded because the cut depends on it and nothing else in the output would say what it was: a
+/// ratio past either edge is folded into that end's bin, so a run whose ratios all sit outside the
+/// range leaves the curve one occupied bin to work with.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LrHistogramShape {
+    /// The lowest ratio the histogram distinguishes; anything below folds into the first bin.
+    pub lowest_ratio: f64,
+    /// The highest; anything above folds into the last bin.
+    pub highest_ratio: f64,
+    /// How many bins the range is cut into.
+    pub bins: usize,
+}
+
+impl LrHistogramShape {
+    /// The shipped range and resolution — production's, inherited.
+    #[must_use]
+    pub fn shipped() -> Self {
+        Self {
+            lowest_ratio: DEFAULT_LR_HISTOGRAM_LO,
+            highest_ratio: DEFAULT_LR_HISTOGRAM_HI,
+            bins: DEFAULT_LR_HISTOGRAM_BINS,
+        }
+    }
+
+    /// **An empty histogram of this shape — the only way pass two builds one.**
+    ///
+    /// The shape is recorded on the verdicts and the histogram is what the ratios are folded
+    /// into, and the two must be the same thing: a run reporting a range it did not use would
+    /// mis-count how many ratios saturated and mis-describe the cut. Building the histogram
+    /// *from* the shape is what stops them drifting — there is no second place where a range is
+    /// written down. A mutation that changed the range at the old call site survived the whole
+    /// suite, which is why this is a method rather than a comment.
+    ///
+    /// # Panics
+    ///
+    /// If the shape is not a range a histogram can be cut from — impossible for
+    /// [`Self::shipped`], which is the only shape pass two builds.
+    #[must_use]
+    pub fn histogram(self) -> ParalogLrHistogram {
+        ParalogLrHistogram::new(self.lowest_ratio, self.highest_ratio, self.bins)
+            .expect("the likelihood-ratio histogram's shape is a valid range")
+    }
+}
+
 /// **What pass two settles for pass three**: how common duplications are in this run, where the
 /// cut falls, and every record's ratio in spill order.
 ///
-/// Spec §3.7's `ParalogVerdicts`, with the count of scored records added — see
-/// [`Self::records_scored`].
-#[derive(Debug, Clone)]
+/// Spec §3.7's `ParalogVerdicts`, with four additions the run report needs — see
+/// [`Self::records_in_the_fit`], [`Self::ratios_outside_the_histogram`], [`Self::config`] and
+/// [`Self::lr_histogram`].
+#[derive(Debug)]
 pub struct ParalogVerdicts {
     /// The fitted rate, the false-discovery curve, and the resolved cut. Its `flags` and
     /// `posterior` are what pass three asks about each record.
     pub calibration: ParalogCalibration,
-    /// One ratio a record, **in spill order**, `NaN` where the record was not scored. Pass three
-    /// walks the spill again in the same order, so the *i*th entry it reads is this *i*th ratio.
+    /// One ratio a record, **in spill order**, `NaN` where the record was not scored.
+    ///
+    /// **A ratio's only tie to its record is its position here.** Pass three walks the spill again
+    /// and must take these front to back, in step with its own read — `zip`, not an index. Nothing
+    /// in the type enforces that, and it is the one invariant this step cannot test because its
+    /// consumer does not exist yet: a pass three that read the spill filtered, chunked or sharded
+    /// would give every record its neighbour's verdict, with nothing about the file looking wrong.
     pub ratios: Vec<f64>,
-    /// How many records the calibration actually rests on — the number of ratios that were
-    /// folded, which is the number that are finite.
+    /// How many records the fitted rate actually rests on — the ratios that were folded, which
+    /// are the finite ones.
     ///
     /// **Kept because the two counts can only be told apart from outside.** A run over a million
-    /// records whose coverage models were all rejected produces a million `NaN`s, fits the
-    /// fallback rate, and writes a VCF that looks exactly like a run where the filter worked;
-    /// the difference between "a million records scored" and "none" is this number, and spec
-    /// §3.5's run-report line is where an operator sees it.
-    pub records_scored: u64,
+    /// records whose coverage models were all rejected produces a million `NaN`s, falls back, and
+    /// writes a VCF that looks exactly like a run where the filter worked; the difference between
+    /// "a million records in the fit" and "none" is this number.
+    pub records_in_the_fit: u64,
+    /// How many of those ratios landed past an end of the histogram and were folded into its end
+    /// bin.
+    ///
+    /// **The score grows with the cohort**, because it is a sum over the samples that were
+    /// weighed, while the histogram's range is fixed — measured on one duplication-shaped record,
+    /// 24.2 at one sample, 156.3 at six, 1,663 at 63, against a range of ±100. Saturating is
+    /// harmless while it happens to one class, whose probability is saturated anyway. It stops
+    /// being harmless if a cohort is large enough that real variants *and* duplications both land
+    /// past the same edge: they then share one bin and the operator's target has nothing left to
+    /// move. Nothing acts on this count yet; the plan's D2 and D3 are the runs that report it on
+    /// real data.
+    pub ratios_outside_the_histogram: u64,
+    /// The rate-fitting knobs the run used — the iteration's start, tolerance and cap, and the
+    /// fallback rate.
+    ///
+    /// **Recorded because they are inherited constants that nothing has re-measured.** Spec §3.1
+    /// says the model's are prototype-tuned on tomato2 and taken as given; a number in that
+    /// position which no run ever prints is a number nobody checks.
+    pub config: CalibrationConfig,
+    /// The range and resolution the ratios were binned over.
+    pub lr_histogram: LrHistogramShape,
 }
 
 impl ParalogVerdicts {
@@ -72,7 +199,7 @@ impl ParalogVerdicts {
             "the hidden-duplication rate could not be fitted from this run's {} scored \
              record(s), so the filter used the fallback rate of {:.6}; the records it removes \
              are calibrated against that rate and not against this run",
-            self.records_scored, self.calibration.prior.prior_probability,
+            self.records_in_the_fit, self.calibration.prior.prior_probability,
         ))
     }
 }
@@ -95,26 +222,33 @@ pub enum PassTwoError {
 /// is decoded, scored, and dropped, and the observation buffer is refilled rather than
 /// reallocated.
 ///
-/// `target_fdr` is the operator's `--paralog-fdr`. `config` carries the fitting knobs and the
-/// fallback rate; [`CalibrationConfig::default`] is production's.
+/// `config` carries the fitting knobs and the fallback rate; [`CalibrationConfig::default`] is
+/// production's.
 ///
 /// # Errors
 ///
-/// If the spill cannot be read — including a spill that ends before the number of records pass
-/// one counted — or if a parked record carries a different number of samples than the run has.
+/// If the spill cannot be read — including one that ends before, or runs past, the number of
+/// records pass one counted — or if a parked record carries a different number of samples than
+/// the run has.
 pub fn score_the_parked_records_and_resolve_the_cut(
     spill: &SpillFile,
     context: &ParalogScoringContext,
-    target_fdr: f64,
+    target_fdr: TargetFdr,
     config: &CalibrationConfig,
 ) -> Result<ParalogVerdicts, PassTwoError> {
     let entries = spill.read().map_err(PassTwoError::Spill)?;
 
+    // **The shape is written down once and the histogram is built from it**, so the range the
+    // run reports and the range the ratios were folded into cannot be two different ranges.
+    let lr_histogram = LrHistogramShape::shipped();
+    let mut histogram = lr_histogram.histogram();
+
     // Pass one counted them, so the vector is sized once rather than doubling its way up to
-    // millions of records.
+    // millions of records — 40 MB at the five million spec §3.3 contemplates. On a target too
+    // narrow to hold that count the reservation is skipped and the vector grows by doubling
+    // instead, which costs time and never correctness.
     let mut ratios: Vec<f64> =
         Vec::with_capacity(usize::try_from(spill.entries_written()).unwrap_or(0));
-    let mut histogram = ParalogLrHistogram::with_defaults();
     let mut observations: Vec<Option<SampleObservation>> =
         Vec::with_capacity(context.sample_count());
 
@@ -125,58 +259,40 @@ pub fn score_the_parked_records_and_resolve_the_cut(
             .map_err(PassTwoError::CohortSize)?;
         // **One binding, pushed to both.** The histogram drops a non-finite ratio and the vector
         // keeps it, which is the whole difference between "did not enter the fit" and "kept,
-        // never flagged" — but they are the same number, so no later edit can fold one value and
-        // record another (spec §6 trap 4).
+        // never flagged" — but they are the same number, so no rule can apply to one and not the
+        // other (spec §6 trap 4).
         histogram.push(ratio);
         ratios.push(ratio);
         // `entry` is dropped here: its line and its per-sample rows are not carried forward.
     }
 
-    let records_scored = histogram.total();
-    Ok(ParalogVerdicts {
-        calibration: calibrate_from_the_ratio_histogram(&histogram, target_fdr, config),
-        ratios,
-        records_scored,
-    })
-}
+    // The reader refuses a file holding a different number of records than pass one counted, in
+    // either direction, so arriving here with a different length would be a defect in the reader
+    // rather than in the file — and pass three pairs the two by position.
+    debug_assert_eq!(
+        ratios.len() as u64,
+        spill.entries_written(),
+        "pass three pairs each spilled record with the ratio at its own index, so the two counts \
+         cannot differ"
+    );
 
-/// **Fit the duplication rate, build the false-discovery curve, and resolve the cut.**
-///
-/// ng's own three lines over three copied pieces — the estimate, the curve and the threshold are
-/// all [`crate::ng::paralog`]'s, transcribed from production and checked against it bit for bit.
-/// What is ng's is the *fallback*: an estimate that did not settle is replaced by the documented
-/// rate rather than used, because an unconverged iterate is not distinguishable from a real
-/// estimate by its value alone and would silently calibrate the whole run. `converged` stays
-/// `false` so the run report can say which happened.
-///
-/// It lives here rather than beside the copied statistics because its only caller is pass two,
-/// and because the file it would join is compared byte for byte against production's and may not
-/// gain a line. Production's counterpart is `calibrate_from_histogram`
-/// (`src/var_calling/paralog_filter/calibrate.rs`), and the test
-/// `the_fallback_and_the_cut_agree_with_productions_bit_for_bit` is what says the two do the same
-/// thing.
-fn calibrate_from_the_ratio_histogram(
-    histogram: &ParalogLrHistogram,
-    target_fdr: f64,
-    config: &CalibrationConfig,
-) -> ParalogCalibration {
-    let estimated = ParalogPrior::estimate(histogram, &config.em);
-    let prior = if estimated.converged {
-        estimated
-    } else {
-        ParalogPrior {
-            prior_probability: config.fallback_prior,
-            converged: false,
-        }
-    };
-    let curve = ParalogFdrCurve::from_histogram(histogram, &prior);
-    let lr_threshold = curve.lr_threshold_for_fdr(target_fdr);
-    ParalogCalibration {
-        prior,
-        curve,
-        lr_threshold,
-        target_fdr,
-    }
+    let records_in_the_fit = histogram.total();
+    let ratios_outside_the_histogram = ratios
+        .iter()
+        .filter(|ratio| {
+            ratio.is_finite()
+                && (**ratio < lr_histogram.lowest_ratio || **ratio > lr_histogram.highest_ratio)
+        })
+        .count() as u64;
+
+    Ok(ParalogVerdicts {
+        calibration: calibrate_from_the_ratio_histogram(&histogram, target_fdr.get(), config),
+        ratios,
+        records_in_the_fit,
+        ratios_outside_the_histogram,
+        config: *config,
+        lr_histogram,
+    })
 }
 
 #[cfg(test)]

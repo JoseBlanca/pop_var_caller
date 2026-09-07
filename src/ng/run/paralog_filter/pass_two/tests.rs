@@ -11,27 +11,36 @@
 //! `the_histogram_folds_exactly_the_finite_ratios`, and
 //! `an_empty_spill_falls_back_rather_than_fitting_a_rate_from_nothing`.
 //!
-//! **Which dimensions these fixtures vary, and which they do not.** They vary whether a record
-//! is scorable, where the unscorable one sits in the file, whether a record is a repeat tract or
-//! a generic locus, how many samples the run has (one and six), and whether the rate estimate
-//! settles. They hold GC content constant — every histogram here has one GC bin — because GC
-//! enters through the coverage model and nothing in this pass reads it; the tests that vary GC
-//! are in `scoring_context/tests.rs`, where a one-bin fixture was the defect that hid a wrong
-//! argument.
+//! **Which dimensions these fixtures vary.** Whether a record can be scored; where the
+//! unscorable one sits in the file; whether the file's order and the evidence's order agree;
+//! repeat tract against generic locus, including a spill of nothing else; how many samples the run
+//! has, at one and at six; whether the rate estimate settles, and whether its fallback rate is the
+//! same number as the iteration's starting guess; and — in the two cohort-mismatch tests — the
+//! contig, which is the one otherwise-constant dimension this pass reads and reports.
+//!
+//! **And three they hold constant, argued rather than tested here.** GC content (one bin per
+//! histogram), the inbreeding coefficient (every sample outbred), and the coverage model (every
+//! sample fitted from the same histogram). All three reach the score through
+//! `ParalogScoringContext`, which this pass calls once a record and never indexes into, so varying
+//! them changes the number and not the path; the fixtures that vary them live in
+//! `scoring_context/tests.rs`, where a one-GC-bin fixture was the defect that hid a wrong
+//! argument. **Naming only one of them was this file's own review finding** — a list that names a
+//! single constant reads as "we checked, there is one", and the contig hole survived under it.
 
 use std::fs;
 use std::path::PathBuf;
 
 use super::{
-    PassTwoError, calibrate_from_the_ratio_histogram, score_the_parked_records_and_resolve_the_cut,
+    LrHistogramShape, PassTwoError, TargetFdr, score_the_parked_records_and_resolve_the_cut,
 };
 use crate::ng::paralog::{
-    CalibrationConfig, CoverageFitConfig, DEFAULT_FALLBACK_PARALOG_PRIOR, EmConfig,
+    CalibrationConfig, CoverageFitConfig, DEFAULT_FALLBACK_PARALOG_PRIOR,
+    DEFAULT_LR_HISTOGRAM_BINS, DEFAULT_LR_HISTOGRAM_HI, DEFAULT_LR_HISTOGRAM_LO, EmConfig,
     ParalogLrHistogram, ParalogModelParams,
 };
 use crate::ng::run::paralog_filter::{
     GenericLocusSample, ParalogScoringContext, RepeatTractSample, SpillEntry, SpillFile,
-    SpilledSamples,
+    SpillFileError, SpilledSamples,
 };
 use crate::ng::types::{ContigId, InbreedingF, Position};
 use crate::ng::window_coverage::{CoverageByGcHistogram, SampleHistogram, WindowCoverage};
@@ -201,15 +210,42 @@ fn default_config() -> CalibrationConfig {
     CalibrationConfig::default()
 }
 
+/// A target false-discovery rate the type admits.
+fn target(fdr: f64) -> TargetFdr {
+    TargetFdr::try_new(fdr).expect("a fraction below one is a target")
+}
+
+/// **A configuration whose fallback rate is not the iteration's starting guess.**
+///
+/// `DEFAULT_EM_START` and `DEFAULT_FALLBACK_PARALOG_PRIOR` are both `0.03`, and an empty
+/// histogram's estimate *is* the starting guess — so at the shipped defaults a test cannot tell
+/// "the fallback was substituted" from "nothing happened", nor "the fallback was read" from "the
+/// starting guess was read". Two mutations survived the first version of this suite for exactly
+/// that reason. Every test that asserts the fallback uses these two separated numbers; the
+/// shipped default stays pinned by `the_shipped_fallback_rate_is_the_documented_one` here, and by
+/// the differential against production in `src/ng/paralog/production_parity.rs`.
+const A_FALLBACK_THAT_IS_NOT_THE_SEED: f64 = 0.41;
+const A_SEED_THAT_IS_NOT_THE_FALLBACK: f64 = 0.17;
+
+fn a_config_whose_fallback_differs_from_its_seed() -> CalibrationConfig {
+    CalibrationConfig {
+        em: EmConfig {
+            start: A_SEED_THAT_IS_NOT_THE_FALLBACK,
+            ..EmConfig::default()
+        },
+        fallback_prior: A_FALLBACK_THAT_IS_NOT_THE_SEED,
+    }
+}
+
 /// A fit that cannot settle: one iteration at a tolerance nothing reaches.
 fn a_config_whose_estimate_cannot_settle() -> CalibrationConfig {
     CalibrationConfig {
         em: EmConfig {
             max_iter: 1,
             tol: 1e-300,
-            ..EmConfig::default()
+            start: A_SEED_THAT_IS_NOT_THE_FALLBACK,
         },
-        ..CalibrationConfig::default()
+        fallback_prior: A_FALLBACK_THAT_IS_NOT_THE_SEED,
     }
 }
 
@@ -228,9 +264,13 @@ fn a_record_no_sample_can_speak_for_is_unscored() {
         vec![a_record_no_sample_covered(100, 6)],
     );
 
-    let verdicts =
-        score_the_parked_records_and_resolve_the_cut(&spill, &context, 0.01, &default_config())
-            .expect("the spill is readable");
+    let verdicts = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect("the spill is readable");
 
     assert_eq!(verdicts.ratios.len(), 1, "the record still gets a slot");
     assert!(
@@ -239,7 +279,7 @@ fn a_record_no_sample_can_speak_for_is_unscored() {
         verdicts.ratios[0]
     );
     assert_eq!(
-        verdicts.records_scored, 0,
+        verdicts.records_in_the_fit, 0,
         "nothing was scored, so nothing was folded"
     );
 }
@@ -270,16 +310,20 @@ fn a_record_whose_samples_have_models_but_no_usable_spread_is_unscored() {
         vec![a_record_shaped_like_a_duplication(100, 6)],
     );
 
-    let verdicts =
-        score_the_parked_records_and_resolve_the_cut(&spill, &context, 0.01, &default_config())
-            .expect("the spill is readable");
+    let verdicts = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect("the spill is readable");
 
     assert!(
         verdicts.ratios[0].is_nan(),
         "the scorer weighed no sample, so the record is unscored; it carried {}",
         verdicts.ratios[0]
     );
-    assert_eq!(verdicts.records_scored, 0);
+    assert_eq!(verdicts.records_in_the_fit, 0);
 }
 
 /// **The plan's test: the histogram holds exactly the finite ratios, no more and no fewer.**
@@ -299,9 +343,13 @@ fn the_histogram_folds_exactly_the_finite_ratios() {
         ],
     );
 
-    let verdicts =
-        score_the_parked_records_and_resolve_the_cut(&spill, &context, 0.01, &default_config())
-            .expect("the spill is readable");
+    let verdicts = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect("the spill is readable");
 
     let finite = verdicts.ratios.iter().filter(|r| r.is_finite()).count();
     assert_eq!(
@@ -311,7 +359,7 @@ fn the_histogram_folds_exactly_the_finite_ratios() {
     );
     assert_eq!(finite, 3, "one of the four could not be scored");
     assert_eq!(
-        verdicts.records_scored, finite as u64,
+        verdicts.records_in_the_fit, finite as u64,
         "the fit rests on exactly the finite ratios"
     );
     assert!(
@@ -341,9 +389,13 @@ fn the_ratios_are_in_spill_order_and_each_belongs_to_its_own_record() {
             .collect(),
     );
 
-    let verdicts =
-        score_the_parked_records_and_resolve_the_cut(&spill, &context, 0.01, &default_config())
-            .expect("the spill is readable");
+    let verdicts = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect("the spill is readable");
 
     assert_eq!(verdicts.ratios.len(), 7);
     assert!(
@@ -370,12 +422,16 @@ fn a_spill_of_nothing_but_repeat_tracts_is_still_scored() {
         ],
     );
 
-    let verdicts =
-        score_the_parked_records_and_resolve_the_cut(&spill, &context, 0.01, &default_config())
-            .expect("the spill is readable");
+    let verdicts = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect("the spill is readable");
 
     assert_eq!(
-        verdicts.records_scored, 2,
+        verdicts.records_in_the_fit, 2,
         "both tracts must be scored: their ratios are {:?}",
         verdicts.ratios
     );
@@ -392,11 +448,15 @@ fn a_run_of_one_sample_scores_finitely() {
         vec![a_record_shaped_like_a_duplication(100, 1)],
     );
 
-    let verdicts =
-        score_the_parked_records_and_resolve_the_cut(&spill, &context, 0.01, &default_config())
-            .expect("the spill is readable");
+    let verdicts = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect("the spill is readable");
 
-    assert_eq!(verdicts.records_scored, 1);
+    assert_eq!(verdicts.records_in_the_fit, 1);
     assert!(
         verdicts.ratios[0].is_finite(),
         "a one-sample run must produce a number, not NaN; got {}",
@@ -406,7 +466,13 @@ fn a_run_of_one_sample_scores_finitely() {
 
 // ---------------------------------------------------------------- the rate and the cut
 
-/// **A run with nothing to fit uses the documented rate and says it did not fit one.**
+/// **A run with nothing to fit uses the configured fallback rate, and says it did not fit one.**
+///
+/// **The configuration here deliberately separates two numbers the defaults make equal.** The
+/// iteration's starting guess and the documented fallback are both `0.03`, and an empty
+/// histogram's estimate *is* the starting guess — so at the defaults this test passes whether the
+/// fallback is substituted at all, and whether the substitution reads the right field. Both
+/// mistakes survived the first version of this suite.
 #[test]
 fn an_empty_spill_falls_back_rather_than_fitting_a_rate_from_nothing() {
     let context = a_context_over(6);
@@ -415,20 +481,54 @@ fn an_empty_spill_falls_back_rather_than_fitting_a_rate_from_nothing() {
         vec![],
     );
 
-    let verdicts =
-        score_the_parked_records_and_resolve_the_cut(&spill, &context, 0.01, &default_config())
-            .expect("an empty spill is a spill");
+    let verdicts = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &a_config_whose_fallback_differs_from_its_seed(),
+    )
+    .expect("an empty spill is a spill");
 
     assert!(verdicts.ratios.is_empty());
-    assert_eq!(verdicts.records_scored, 0);
+    assert_eq!(verdicts.records_in_the_fit, 0);
     assert!(!verdicts.calibration.prior.converged);
     assert!(
-        (verdicts.calibration.prior.prior_probability - DEFAULT_FALLBACK_PARALOG_PRIOR).abs()
+        (verdicts.calibration.prior.prior_probability - A_FALLBACK_THAT_IS_NOT_THE_SEED).abs()
             < 1e-12,
-        "an unfitted rate must be the fallback, not the last iterate; got {}",
+        "an unfitted rate must be the configured fallback of {A_FALLBACK_THAT_IS_NOT_THE_SEED} \
+         and not the iteration's starting guess of {A_SEED_THAT_IS_NOT_THE_FALLBACK}; got {}",
         verdicts.calibration.prior.prior_probability
     );
     assert!(verdicts.why_the_paralog_rate_is_not_fitted().is_some());
+}
+
+/// **The rate a run falls back to, when nobody configures one, is the documented default.**
+///
+/// Its sibling above deliberately configures a fallback the starting guess does not share, so
+/// that it can tell the two apart; this is what pins the number an ordinary run actually uses.
+#[test]
+fn the_shipped_fallback_rate_is_the_documented_one() {
+    let context = a_context_over(6);
+    let spill = a_spill_holding("the_shipped_fallback_rate_is_the_documented_one", vec![]);
+
+    let verdicts = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect("an empty spill is a spill");
+
+    assert!(
+        (verdicts.calibration.prior.prior_probability - DEFAULT_FALLBACK_PARALOG_PRIOR).abs()
+            < 1e-12,
+        "the shipped fallback is {DEFAULT_FALLBACK_PARALOG_PRIOR}; got {}",
+        verdicts.calibration.prior.prior_probability
+    );
+    assert_eq!(
+        verdicts.config.fallback_prior, DEFAULT_FALLBACK_PARALOG_PRIOR,
+        "and the verdicts record which rate the run used"
+    );
 }
 
 /// **An estimate that runs out of iterations is replaced, not used** — and the words the run
@@ -447,15 +547,18 @@ fn an_estimate_that_cannot_settle_is_replaced_by_the_fallback() {
     let verdicts = score_the_parked_records_and_resolve_the_cut(
         &spill,
         &context,
-        0.01,
+        target(0.01),
         &a_config_whose_estimate_cannot_settle(),
     )
     .expect("the spill is readable");
 
     assert!(!verdicts.calibration.prior.converged);
     assert!(
-        (verdicts.calibration.prior.prior_probability - DEFAULT_FALLBACK_PARALOG_PRIOR).abs()
-            < 1e-12
+        (verdicts.calibration.prior.prior_probability - A_FALLBACK_THAT_IS_NOT_THE_SEED).abs()
+            < 1e-12,
+        "the fallback must be the configured {A_FALLBACK_THAT_IS_NOT_THE_SEED} and not the \
+         iteration's last value; got {}",
+        verdicts.calibration.prior.prior_probability
     );
     let warning = verdicts
         .why_the_paralog_rate_is_not_fitted()
@@ -463,6 +566,49 @@ fn an_estimate_that_cannot_settle_is_replaced_by_the_fallback() {
     assert!(
         warning.contains("2 scored record"),
         "the warning must say how much evidence there was: {warning}"
+    );
+}
+
+/// **The warning counts the records the fit rested on, not the records that were parked.**
+///
+/// Its sibling above runs on a spill where every record scores, so the two counts are equal there
+/// and reporting either one passes — which is the whole reason `records_in_the_fit` exists as a
+/// separate number. Here one of the three records cannot be scored, so the two differ.
+#[test]
+fn the_warning_counts_the_records_in_the_fit_and_not_the_records_parked() {
+    let context = a_context_over(6);
+    let spill = a_spill_holding(
+        "the_warning_counts_the_records_in_the_fit_and_not_the_records_parked",
+        vec![
+            a_record_shaped_like_a_variant(100, 6),
+            a_record_no_sample_covered(200, 6),
+            a_record_shaped_like_a_duplication(300, 6),
+        ],
+    );
+
+    let verdicts = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &a_config_whose_estimate_cannot_settle(),
+    )
+    .expect("the spill is readable");
+
+    assert_eq!(verdicts.ratios.len(), 3, "three records were parked");
+    assert_eq!(
+        verdicts.records_in_the_fit, 2,
+        "one of them could not be scored"
+    );
+    let warning = verdicts
+        .why_the_paralog_rate_is_not_fitted()
+        .expect("an unfitted rate is worth a warning");
+    assert!(
+        warning.contains("2 scored record"),
+        "the warning must count what the fit rested on, not what was parked: {warning}"
+    );
+    assert!(
+        warning.contains("0.410000"),
+        "and it must name the rate the run actually used: {warning}"
     );
 }
 
@@ -478,9 +624,13 @@ fn a_settled_estimate_is_used_and_warns_about_nothing() {
         ],
     );
 
-    let verdicts =
-        score_the_parked_records_and_resolve_the_cut(&spill, &context, 0.01, &default_config())
-            .expect("the spill is readable");
+    let verdicts = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect("the spill is readable");
 
     assert!(
         verdicts.calibration.prior.converged,
@@ -512,7 +662,7 @@ fn a_looser_target_removes_more_records() {
         let verdicts = score_the_parked_records_and_resolve_the_cut(
             &spill,
             &context,
-            target_fdr,
+            target(target_fdr),
             &default_config(),
         )
         .expect("the spill is readable");
@@ -540,6 +690,10 @@ fn a_looser_target_removes_more_records() {
         "a looser false-discovery target must remove more records; got {strict}, {ordinary}, \
          {loose}"
     );
+    // **This holds because four of the seven tail false-discovery values underflow to *exactly*
+    // zero**, not merely to something tiny — measured `[0.2747, 0.1538, 2.23e-12, 0, 0, 0, 0]` —
+    // and the rule is `q <= target`. A fixture whose strongest records merely came close would
+    // remove nothing here.
     assert!(
         strict > 0,
         "the fixture must reach the cut even at the strictest target"
@@ -552,26 +706,64 @@ fn a_looser_target_removes_more_records() {
 ///
 /// The scorer answers a cohort-length mismatch with a *neutral score* rather than an error, so a
 /// pass that let it through would fold zeros for every short record and finish looking calibrated.
+///
+/// **The fixture is deliberately not on contig 0.** Every other record in this file is, so a
+/// failure that reported a hardcoded first contig would be right on all of them — and on a real
+/// run, where almost nothing is on the first contig, it would send whoever debugs the wiring
+/// error to the wrong chromosome. That mutation survived the first version of this suite.
 #[test]
 fn a_record_that_is_not_the_runs_cohort_stops_the_pass() {
     let context = a_context_over(3);
+    let mut narrower = a_record_shaped_like_a_variant(700, 2);
+    narrower.contig = ContigId(7);
     let spill = a_spill_holding(
         "a_record_that_is_not_the_runs_cohort_stops_the_pass",
-        vec![a_record_shaped_like_a_variant(700, 2)],
+        vec![narrower],
     );
 
-    let failure =
-        score_the_parked_records_and_resolve_the_cut(&spill, &context, 0.01, &default_config())
-            .expect_err("a two-sample record in a three-sample run is a wiring error");
+    let failure = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect_err("a two-sample record in a three-sample run is a wiring error");
 
-    match failure {
-        PassTwoError::CohortSize(mismatch) => {
-            assert_eq!(mismatch.record, 2);
-            assert_eq!(mismatch.cohort, 3);
-            assert_eq!(mismatch.position, 700, "the failure names the record");
-        }
-        other => panic!("expected a cohort-size failure, got {other:?}"),
-    }
+    let PassTwoError::CohortSize(mismatch) = failure else {
+        panic!("expected a cohort-size failure, got {failure:?}")
+    };
+    assert_eq!(mismatch.record, 2);
+    assert_eq!(mismatch.cohort, 3);
+    assert_eq!(mismatch.position, 700, "the failure names the record");
+    assert_eq!(mismatch.contig, 7, "on the record's own contig");
+}
+
+/// **A record wider than the cohort stops the pass too.**
+///
+/// Its sibling above is narrower than the run. The two are different wrong answers — a narrow
+/// record would be scored on a prefix of the cohort, a wide one truncated — and the scorer
+/// answers both with a neutral score rather than an error, so both have to be refused here.
+#[test]
+fn a_record_wider_than_the_runs_cohort_stops_the_pass() {
+    let context = a_context_over(2);
+    let spill = a_spill_holding(
+        "a_record_wider_than_the_runs_cohort_stops_the_pass",
+        vec![a_record_shaped_like_a_variant(700, 5)],
+    );
+
+    let failure = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect_err("a five-sample record in a two-sample run is a wiring error");
+
+    let PassTwoError::CohortSize(mismatch) = failure else {
+        panic!("expected a cohort-size failure, got {failure:?}")
+    };
+    assert_eq!(mismatch.record, 5);
+    assert_eq!(mismatch.cohort, 2);
 }
 
 /// **A spill that lost its tail is refused, not calibrated on what survived.**
@@ -598,9 +790,13 @@ fn a_spill_that_lost_its_tail_is_refused() {
         .set_len(whole / 2)
         .expect("the spill is truncated");
 
-    let failure =
-        score_the_parked_records_and_resolve_the_cut(&spill, &context, 0.01, &default_config())
-            .expect_err("half a spill is not a spill");
+    let failure = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect_err("half a spill is not a spill");
 
     let PassTwoError::Spill(why) = &failure else {
         panic!("a short spill is a read failure, got {failure:?}")
@@ -614,91 +810,296 @@ fn a_spill_that_lost_its_tail_is_refused() {
 
 // ---------------------------------------------------------------- against production
 
-/// **The fallback, the curve and the cut agree with production's, bit for bit.**
+/// **An unscored record is never flagged, however loose the operator's target.**
 ///
-/// The three pieces underneath are copies checked against production elsewhere
-/// (`src/ng/paralog/production_parity.rs`); what is ng's own is the four lines that put them
-/// together and substitute the documented rate for an estimate that did not settle. Production's
-/// `calibrate_from_histogram` does the same four, so it is the oracle. Both settled and unsettled
-/// estimates are compared, because the fallback only shows up in one of them.
+/// "Kept, never flagged, and out of the fit" is the whole contract for a record no sample could
+/// speak for, and the other two thirds are covered several times over. This is the third.
+///
+/// **It is closer to failing than it looks.** The removal rule is `q <= target`, and the
+/// false-discovery curve's own answer for a value that is not a number is *not* large — measured
+/// on this fixture it is `0.4999999999999852`, which sits **inside** a target of one in two. So
+/// the only thing keeping an unscorable record out of the removed set is that the verdict screens
+/// on finiteness before it consults the curve. Nothing in this pass would notice if that screen
+/// moved: the record would be dropped from the VCF as a hidden duplication, nothing would panic,
+/// and `records_in_the_fit` would still say it was never scored.
 #[test]
-fn the_fallback_and_the_cut_agree_with_productions_bit_for_bit() {
-    use crate::paralog::{EmConfig as TheirEmConfig, ParalogLrHistogram as TheirHistogram};
-    use crate::var_calling::paralog_filter::calibrate::{
-        CalibrationConfig as TheirConfig, calibrate_from_histogram,
-    };
-
-    // Two runs of the estimate: one that settles, and one given a single iteration at a
-    // tolerance nothing meets. Only the second reaches the fallback.
-    let settling = (
-        CalibrationConfig::default(),
-        TheirConfig {
-            em: TheirEmConfig::default(),
-            fallback_prior: DEFAULT_FALLBACK_PARALOG_PRIOR,
-        },
-    );
-    let cramped_em = TheirEmConfig {
-        max_iter: 1,
-        tol: 1e-300,
-        ..TheirEmConfig::default()
-    };
-    let cramped = (
-        a_config_whose_estimate_cannot_settle(),
-        TheirConfig {
-            em: cramped_em,
-            fallback_prior: DEFAULT_FALLBACK_PARALOG_PRIOR,
-        },
+fn an_unscored_record_is_never_flagged_however_loose_the_target() {
+    let context = a_context_over(6);
+    let spill = a_spill_holding(
+        "an_unscored_record_is_never_flagged_however_loose_the_target",
+        vec![
+            a_record_shaped_like_a_variant(100, 6),
+            a_record_no_sample_covered(200, 6),
+            a_record_shaped_like_a_duplication(300, 6),
+        ],
     );
 
-    let mut compared = 0usize;
-    for (ours_config, theirs_config) in [settling, cramped] {
-        for ratios in [
-            Vec::new(),
-            vec![-4.0, -2.0, -1.0, 0.5, 1.0],
-            (0..500)
-                .map(|i| f64::from(i % 50) - 25.0 + f64::from(i % 7) * 0.1)
-                .collect(),
-        ] {
-            let mut ours = ParalogLrHistogram::with_defaults();
-            let mut theirs = TheirHistogram::with_defaults();
-            for &lr in &ratios {
-                ours.push(lr);
-                theirs.push(lr);
-            }
-            for target_fdr in [0.0, 0.01, 0.05, 0.2, 0.5] {
-                let ours = calibrate_from_the_ratio_histogram(&ours, target_fdr, &ours_config);
-                let theirs = calibrate_from_histogram(&theirs, target_fdr, &theirs_config);
-                let case = format!("{} ratios, target {target_fdr}", ratios.len());
-                assert_eq!(
-                    ours.prior.prior_probability.to_bits(),
-                    theirs.prior.prior_probability.to_bits(),
-                    "{case}: the two trees fitted different rates — ng {}, src/var_calling/ {}",
-                    ours.prior.prior_probability,
-                    theirs.prior.prior_probability,
-                );
-                assert_eq!(ours.prior.converged, theirs.prior.converged, "{case}");
-                assert_eq!(
-                    ours.lr_threshold.map(f64::to_bits),
-                    theirs.lr_threshold.map(f64::to_bits),
-                    "{case}: the two trees cut at different ratios — ng {:?}, \
-                     src/var_calling/ {:?}",
-                    ours.lr_threshold,
-                    theirs.lr_threshold,
-                );
-                for lr in [-100.0, -8.0, -1.0, 0.0, 1.0, 8.0, 30.0, 100.0, f64::NAN] {
-                    assert_eq!(
-                        ours.flags(lr),
-                        theirs.flags(lr),
-                        "{case}: the two trees disagree about dropping a record at ratio {lr}"
-                    );
-                    compared += 1;
-                }
-            }
-        }
+    for target_fdr in [0.0, 0.01, 0.5, 0.999] {
+        let verdicts = score_the_parked_records_and_resolve_the_cut(
+            &spill,
+            &context,
+            target(target_fdr),
+            &default_config(),
+        )
+        .expect("the spill is readable");
+        assert!(
+            verdicts.ratios[1].is_nan(),
+            "the middle record is the unscored one"
+        );
+        assert!(
+            !verdicts.calibration.flags(verdicts.ratios[1]),
+            "an unscored record must never be removed; at a target of {target_fdr} the curve \
+             answers {} for a value that is not a number",
+            verdicts.calibration.curve.q_of_lr(f64::NAN)
+        );
     }
+
+    // **And at the loosest target the two scored records are removed**, so the assertions above
+    // are not passing because nothing is removed at all.
+    let loose = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.999),
+        &default_config(),
+    )
+    .expect("the spill is readable");
     assert_eq!(
-        compared,
-        2 * 3 * 5 * 9,
-        "every combination is compared: {compared}"
+        loose
+            .ratios
+            .iter()
+            .filter(|ratio| loose.calibration.flags(**ratio))
+            .count(),
+        2,
+        "both scored records are removed at the loosest target, so only the unscored one is \
+         held back; the ratios were {:?}",
+        loose.ratios
+    );
+}
+
+/// **The ratios follow the file's order, not the evidence's.**
+///
+/// Its sibling `the_ratios_are_in_spill_order_and_each_belongs_to_its_own_record` parks its
+/// records with the evidence rising, so spill order and ascending order are the same order there
+/// and an implementation that returned the ratios *sorted* would satisfy it. Here the file's order
+/// is deliberately not sorted — the strongest record is first and the weakest is in the middle —
+/// so each ratio must rank exactly as its own record's evidence does. Pass three pairs the *i*th
+/// spilled record with the *i*th ratio, and a misalignment there gives every record its
+/// neighbour's verdict with nothing about the file looking wrong.
+#[test]
+fn the_ratios_follow_the_spill_and_not_the_evidence() {
+    let context = a_context_over(6);
+    let carriers_in_file_order = [6usize, 2, 0, 4, 1];
+    let spill = a_spill_holding(
+        "the_ratios_follow_the_spill_and_not_the_evidence",
+        carriers_in_file_order
+            .iter()
+            .enumerate()
+            .map(|(i, &carriers)| a_record_with_carriers(100 + i as u64 * 10, 6, carriers))
+            .collect(),
+    );
+
+    let verdicts = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect("the spill is readable");
+
+    let mut by_ratio: Vec<usize> = (0..carriers_in_file_order.len()).collect();
+    by_ratio.sort_by(|&a, &b| {
+        verdicts.ratios[a]
+            .partial_cmp(&verdicts.ratios[b])
+            .expect("every ratio here is a number")
+    });
+    let mut by_carriers: Vec<usize> = (0..carriers_in_file_order.len()).collect();
+    by_carriers.sort_by_key(|&i| carriers_in_file_order[i]);
+    assert_eq!(
+        by_ratio, by_carriers,
+        "the i-th ratio must belong to the i-th record of the file; got {:?} for carrier counts \
+         {carriers_in_file_order:?}",
+        verdicts.ratios
+    );
+}
+
+/// **A spill pass one has not finished writing is refused, not read.**
+///
+/// Whatever has reached the disk is a prefix, and scoring it would calibrate the run on however
+/// much happened to be flushed. Calling pass two before pass one has ended is a plausible C4
+/// wiring mistake, and this is the only test that takes that branch.
+#[test]
+fn a_spill_pass_one_has_not_finished_writing_is_refused() {
+    let context = a_context_over(6);
+    let output = scratch("a_spill_pass_one_has_not_finished_writing_is_refused").join("cohort.vcf");
+    let _ = fs::remove_file(SpillFile::beside(&output).path());
+    let mut spill = SpillFile::beside(&output);
+    spill
+        .append(&a_record_shaped_like_a_variant(100, 6))
+        .expect("the entry is appended");
+    // deliberately no `finish_writing`
+
+    let failure = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect_err("a spill still being written is not a spill");
+
+    let PassTwoError::Spill(why) = &failure else {
+        panic!("an unfinished spill is a read failure, got {failure:?}")
+    };
+    assert!(
+        matches!(why, SpillFileError::PassOneHasNotEnded { .. }),
+        "the refusal must say pass one has not ended; it said {why}"
+    );
+}
+
+/// **A spill holding more records than pass one counted is refused too**, not calibrated on the
+/// surplus.
+///
+/// Its sibling truncates; this is the other direction, and it is a different path in the reader —
+/// the count is compared only at end of file, so the extra records are decoded, scored and folded
+/// *before* the mismatch is seen. A long file is what two writers on one path, or a run resumed
+/// over a leftover, would leave.
+#[test]
+fn a_spill_holding_more_records_than_pass_one_counted_is_refused() {
+    let context = a_context_over(6);
+    let spill = a_spill_holding(
+        "a_spill_holding_more_records_than_pass_one_counted_is_refused",
+        vec![a_record_shaped_like_a_variant(100, 6)],
+    );
+    let bytes = fs::read(spill.path()).expect("the spill reads");
+    let mut doubled = bytes.clone();
+    doubled.extend_from_slice(&bytes);
+    fs::write(spill.path(), &doubled).expect("the spill is rewritten");
+
+    let failure = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect_err("a spill longer than its own count is not a spill");
+
+    let PassTwoError::Spill(why) = &failure else {
+        panic!("a long spill is a read failure, got {failure:?}")
+    };
+    assert!(
+        why.to_string().contains("paralog-spill"),
+        "the failure must name the file it happened on; it said {why}"
+    );
+}
+
+/// **A target that is not a fraction of one is refused, and both wrong ends are refused.**
+///
+/// Handed a bare `f64` the calibration would take either without a word: a target of `5` — what
+/// someone typing five for "five percent" gets — removes every scored record, and a negative or
+/// not-a-number one removes none while reporting no cut, which is also what an unreachable target
+/// reports. Neither is distinguishable afterwards, so the type refuses them up front.
+#[test]
+fn a_target_that_is_not_a_fraction_of_one_is_refused() {
+    for refused in [5.0, 1.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            TargetFdr::try_new(refused).is_err(),
+            "{refused} is not a target false-discovery rate"
+        );
+    }
+    for admitted in [0.0, 0.001, 0.01, 0.5, 0.999_999] {
+        assert_eq!(
+            TargetFdr::try_new(admitted)
+                .expect("a fraction below one is a target")
+                .get(),
+            admitted
+        );
+    }
+}
+
+/// **The shape the verdicts record is the histogram the ratios were actually folded into.**
+///
+/// The run report reads the range off the verdicts, and `ratios_outside_the_histogram` is counted
+/// against it — so a run that folded into one range and reported another would mis-count how many
+/// ratios saturated and mis-describe the cut. **The first version of this test could not see
+/// that**: it compared the recorded shape against the constants and never against the histogram,
+/// so doubling the range where the histogram was built survived it. The pass now builds the
+/// histogram *from* the shape, and this asserts the shape's own histogram is the shipped one.
+#[test]
+fn the_recorded_shape_is_the_histogram_the_ratios_were_folded_into() {
+    let context = a_context_over(6);
+    let spill = a_spill_holding(
+        "the_recorded_shape_is_the_histogram_the_ratios_were_folded_into",
+        vec![a_record_shaped_like_a_duplication(100, 6)],
+    );
+
+    let verdicts = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect("the spill is readable");
+
+    assert_eq!(
+        verdicts.lr_histogram,
+        LrHistogramShape {
+            lowest_ratio: DEFAULT_LR_HISTOGRAM_LO,
+            highest_ratio: DEFAULT_LR_HISTOGRAM_HI,
+            bins: DEFAULT_LR_HISTOGRAM_BINS,
+        },
+        "the run reports the shipped range"
+    );
+    // **The same constructor the pass uses**, so a range that drifted inside it is caught here
+    // rather than being reported as whatever the shape happens to say.
+    assert_eq!(
+        verdicts.lr_histogram.histogram(),
+        ParalogLrHistogram::with_defaults(),
+        "the histogram the ratios were folded into is the shipped one"
+    );
+}
+
+/// **A ratio past the end of the histogram is counted, because at a large cohort they all will
+/// be.**
+///
+/// The likelihood ratio is a sum over the samples that were weighed, so it grows with the cohort
+/// while the histogram's range stays at ±100: measured on one duplication-shaped record, 24.2 at
+/// one sample, 156.3 at six. Saturating costs nothing while it happens to one class — its
+/// probability is saturated long before — but a cohort large enough to push *both* classes past
+/// the same edge leaves them sharing one bin, with nothing left for the target to move. This
+/// count is what the plan's D2 and D3 runs report on real data.
+#[test]
+fn a_ratio_past_the_end_of_the_histogram_is_counted() {
+    let context = a_context_over(6);
+    let spill = a_spill_holding(
+        "a_ratio_past_the_end_of_the_histogram_is_counted",
+        vec![
+            a_record_shaped_like_a_variant(100, 6),
+            a_record_no_sample_covered(200, 6),
+            a_record_shaped_like_a_duplication(300, 6),
+        ],
+    );
+
+    let verdicts = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect("the spill is readable");
+
+    assert!(
+        verdicts.ratios[2] > verdicts.lr_histogram.highest_ratio,
+        "the duplication-shaped record's ratio must be past the top of the range for this test \
+         to mean anything; it was {}",
+        verdicts.ratios[2]
+    );
+    assert_eq!(
+        verdicts.ratios_outside_the_histogram, 1,
+        "one of the three is outside, one is inside, and the unscored one is neither"
+    );
+    assert!(
+        verdicts.ratios[0] > verdicts.lr_histogram.lowest_ratio
+            && verdicts.ratios[0] < verdicts.lr_histogram.highest_ratio,
+        "the variant-shaped record's ratio must be inside the range; it was {}",
+        verdicts.ratios[0]
     );
 }

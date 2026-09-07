@@ -147,7 +147,7 @@ sink's slice, the AD from the record's columns summed over every alternative, an
 `is_repeat_tract` — and the writer is not opened until pass three. *Depends:* B1, B2. *Source:* spec §3.4, §3.6, §1.1
 goal 7.
 
-**C3. ☐ Pass two. Own commit, do not bundle.** Read the spill; score each entry through C1;
+**C3. ✅ Pass two. Own commit, do not bundle.** Read the spill; score each entry through C1;
 keep the ratio in a `Vec<f64>` and fold the finite ones into the LR histogram; estimate π, build
 the curve, resolve the cut; warn and fall back when the EM does not converge. The silent failure
 is a `NaN` becoming a zero somewhere between the scorer and the histogram; the test folds a
