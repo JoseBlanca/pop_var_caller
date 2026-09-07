@@ -1091,6 +1091,29 @@ impl<S> ObservationCache<S> {
     }
 }
 
+/// **Fold each sample's newly drawn records into its own coverage accumulator, one after
+/// another** — what closing a cover does with the bases it fetched, on the calling thread.
+///
+/// A free function rather than the loop it replaces so that the two covers can hand
+/// [`ObservationCache::close_the_cover`] the schedule they want without the tail existing twice:
+/// [`ObservationCache::cover`] passes this, and
+/// [`ObservationCache::cover_in_parallel`] passes the same walk on the pool. The bases are one
+/// borrowed slice every sample reads by offset, and a sample touches nothing but its own
+/// accumulator, which is what makes the second form sound.
+fn measure_each_sample_in_turn<S, E>(
+    samples: &mut [SampleWindow<S>],
+    bases: &[u8],
+    bases_from: GenomePosition,
+) -> Result<(), E>
+where
+    S: ObservationSource<Error = E>,
+{
+    for sample in samples {
+        sample.measure_coverage_on(bases, bases_from)?;
+    }
+    Ok(())
+}
+
 impl<S, E> ObservationCache<S>
 where
     S: ObservationSource<Error = E>,
@@ -1178,7 +1201,7 @@ where
         // The fixpoint: sweep until a whole sweep moves nothing.
         while self.sweep(&mut chain_reach)? {}
 
-        self.close_the_cover(region, chain_reach)
+        self.close_the_cover(region, chain_reach, &mut measure_each_sample_in_turn)
     }
 
     /// How far the chain reaches before a single sweep has run: **half a window past the
@@ -1282,7 +1305,16 @@ where
             chain_reach = widest;
         }
 
-        self.close_the_cover(region, chain_reach)
+        // **The one part of closing a cover that is per sample.** The bases are shared and read
+        // only; each sample folds its own newly drawn records into its own accumulator, so this
+        // is the same walk on the pool. The `Send` bound lives here, on the parallel cover, and
+        // not on `close_the_cover` — a source built on `Rc` still merges through
+        // [`cover`](Self::cover), which is what the fixtures do.
+        self.close_the_cover(region, chain_reach, &mut |samples, bases, bases_from| {
+            samples
+                .par_iter_mut()
+                .try_for_each(|sample| sample.measure_coverage_on(bases, bases_from))
+        })
     }
 
     /// What both fixpoints do once the drawing has stopped: read the ground, then record how
@@ -1306,11 +1338,12 @@ where
         &mut self,
         region: GenomeRegion,
         chain_reach: GenomePosition,
+        measure: &mut impl FnMut(&mut [SampleWindow<S>], &[u8], GenomePosition) -> Result<(), E>,
     ) -> Result<(), E>
     where
         E: From<ReferenceUnreadable>,
     {
-        self.read_the_ground_and_measure_coverage_over_it(region, chain_reach)?;
+        self.read_the_ground_and_measure_coverage_over_it(region, chain_reach, measure)?;
         self.keeps_evidence |= self.samples.iter().any(|sample| sample.keeps_evidence);
         self.covered_to = Some(
             self.covered_to
@@ -1356,6 +1389,7 @@ where
         &mut self,
         region: GenomeRegion,
         chain_reach: GenomePosition,
+        measure: &mut impl FnMut(&mut [SampleWindow<S>], &[u8], GenomePosition) -> Result<(), E>,
     ) -> Result<(), E>
     where
         E: From<ReferenceUnreadable>,
@@ -1383,9 +1417,7 @@ where
             // what set it, and it is `None` only when the fetch failed and `?` already left.
             let bases_from = reference_bases_from
                 .expect("a fetch that returned `Ok` recorded where its bases start");
-            for sample in &mut *samples {
-                sample.measure_coverage_on(reference_bases, bases_from)?;
-            }
+            measure(samples, reference_bases, bases_from)?;
         }
         // **The region's ground back in the buffer**, where observing ascending did not leave it
         // there. Nothing is observed against it: every record on this contig was seen on its own
