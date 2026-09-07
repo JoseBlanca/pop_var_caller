@@ -424,6 +424,19 @@ Superseded by H2 for the same reason as L2, and it is in the same guarded copy. 
 - **`cargo test --release --lib` cannot be used as a gate without a filter**: 8 of 6,635 tests fail
   on an unmodified tree, all of them `#[should_panic]` tests waiting on debug assertions a release
   build does not compile in.
+- **One integration test fails on `cfad6b71` and this branch alike** —
+  `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele` in
+  [ng_calling_loop_calls_genotypes.rs:1241](../../../../tests/ng_calling_loop_calls_genotypes.rs#L1241),
+  which expects `0/1` and gets `0/0` with the message *"a smaller fitted fraction cannot explain
+  the same four reads"*. Checked out at `cfad6b71` in a worktree of its own, it fails identically,
+  so it is not this branch's — but it means the integration suite is red on `main` and a genotype
+  the contamination model was meant to protect is not being called.
+- **Three examples do not compile on `cfad6b71`** — `ng_candidate_selection_probe`,
+  `ng_cohort_merge_parallel_cost` and `ng_cohort_merge_real_cost`, on API drift (a
+  `CohortObservation` field, a `ClosedLocusRanges` field, and `cover`'s signature). `cargo test`
+  builds examples, so the suite cannot run to the end without `--lib --bins --tests`. This branch
+  repairs a fourth, `ng_call_from_psps_cost`, because its measurement plan needs it; the other
+  three are the same kind of staleness and were left.
 - **The repository is not `rustfmt`-clean**: 28 files differ from `cargo fmt` output at
   `cfad6b71`, and it is still 28 after this branch. Worth a one-off pass so that a formatting
   failure means something.

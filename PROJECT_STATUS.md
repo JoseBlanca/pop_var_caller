@@ -27,7 +27,38 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-05):** **the fit stage is finished — the four commands compose,
+> - **Last completed task (2026-09-08):** **calling a cohort from stored psps is twice as fast on
+> a sixtieth of the memory, and writes the same VCF** (branch `ng-psp-vcf-perf`;
+> [review](doc/devel/reports/reviews/perf_ng-psp-to-vcf_2026-09-07.md)).
+>
+> On 63 tomato accessions over 2 Mb of SL4.0 at about three reads a position, `call-from-psps`
+> went from **44.3 s and 22.9 GB of peak resident memory to 22.6 s and 0.40 GB** — three
+> interleaved rounds each on an idle machine, with the VCF body identical.
+>
+> **The memory was a defect, not a tuning question.** Each sample's reader appended every
+> record's evidence to a buffer and never released any of it, so peak memory grew with samples ×
+> ground until the run ended. Over the full 8 Mb region set the same cohort now peaks at 573 MB;
+> the old binary passed 45.6 GB after 48 seconds and was still rising when it was stopped, on a
+> machine with 64 GB. **A whole-genome cohort was not reachable before and is now bounded** by
+> the merge's window — about 3 MB a sample over a 190 MB floor.
+>
+> **Half the wall clock was one pass that ran alone.** The hidden-duplication filter scored every
+> record on the main thread while seventeen workers slept — 18.2 s of a 41.6 s span — and scoring
+> a record is a pure function of that record, so it now runs on the pool in batches and folds
+> back in order: **18.21 s to 1.57 s**. Threads went from buying 11% to buying 2.0×.
+>
+> Six changes in all; the other four are a per-record clone, a per-record read-set allocation
+> (together 35.1 million allocations a calling pass down to about 5 million), the per-sample
+> coverage measurement moved onto the pool, and a reference's two MD5s hashed side by side
+> instead of one after the other.
+>
+> **Two things the review found and did not fix, both on `main` rather than on this branch.** The
+> integration test `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele` fails at
+> `cfad6b71` — it expects a heterozygote at a contaminated tract and gets a homozygous reference
+> — and three examples no longer compile against the API they call, which stops `cargo test` from
+> reaching the end.
+>
+> - **Earlier (2026-09-05):** **the fit stage is finished — the four commands compose,
 > and fitted numbers change the calls** (branch `ng-psp-mode`, Checkpoint D of
 > [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
 > [report](doc/devel/reports/implementations/ng_fit_stage_d_2026-09-05.md)).
