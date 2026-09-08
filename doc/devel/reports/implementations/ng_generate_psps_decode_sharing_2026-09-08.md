@@ -680,7 +680,7 @@ to look: `write_a_record` 10.0% of the walking thread, `encode_record_body_reusi
 ## 7d. Two more, one kept and one refused
 
 - **The psp encoder no longer sorts a chain-id list that already ascends** (`ea595c66`, then
-  `THIS`). Every record asks `sort_and_dedup` to order the union of its observations' lists, and
+  `bc2aef62`). Every record asks `sort_and_dedup` to order the union of its observations' lists, and
   each of those lists is already ascending, so the union is a concatenation of ascending runs.
   Counted over the same 10 Mb, of **11,534,336 calls** to that function — one per record from
   `write_changes`, plus two more from `residual_observation_of` at a record with several
