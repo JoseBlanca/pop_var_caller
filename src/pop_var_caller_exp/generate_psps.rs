@@ -12,12 +12,22 @@
 //! sample is one sample to re-run, and the alignments are decoded exactly once instead of
 //! once per cohort they take part in.
 //!
-//! **The samples are walked one at a time, in the order given** (owner's ruling,
-//! 2026-09-03). There is no concurrency knob here and that is deliberate: each sample's
-//! generation is independent of every other's, so a cohort is parallelised by running
-//! invocations — typically one sample each, on as many machines or cores as there are. That
-//! independence is the difference from direct mode, which must hold every sample open at one
-//! shared frontier and therefore has to parallelise inside one process.
+//! **Several samples may be walked at once, one worker each, and each sample's own walk is
+//! serial** (spec §5.2, §3.5). Samples are independent — nothing one sample's walk computes is
+//! read by another's — so the pool is over samples and never inside one, which is the
+//! difference from direct mode: that mode must hold every sample open at one shared frontier,
+//! because it needs the same stretch of genome from all of them at once to build a cohort
+//! locus, and so it has no choice but to parallelise inside one process.
+//!
+//! **`--samples-in-flight` is the bound, and it defaults to one.** A cohort is still best
+//! spread by running this command once per sample — one invocation each, sharing nothing, with
+//! a failed sample re-runnable alone — which is why the default changes nothing for the recipe
+//! this command recommends. The knob is for the case that recipe does not cover: one invocation
+//! naming several samples, on a machine with cores to spare. What it costs is memory, and the
+//! multiplier is read groups rather than samples; the flag's own documentation prices it.
+//!
+//! **A run naming one sample gets one worker whatever the knob says**, which is the walk's
+//! remaining gap (spec §11 question 8): the machine is idle and the sample is not divided.
 //!
 //! **Two files a sample, and the walk is once** (spec §2). Beside each psp goes that sample's
 //! census — the smaller file a parameters fit reads, holding what the sample showed at a fixed
@@ -37,10 +47,12 @@
 //! differently would keep disjoint sets of positions, and their samples could not be pooled.
 
 use std::fmt::Write as _;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Args;
+use rayon::prelude::*;
 use thiserror::Error;
 
 use crate::fasta::ContigList;
@@ -119,6 +131,27 @@ pub struct GeneratePspsArgs {
     /// if it does not exist.
     #[arg(long)]
     pub output_dir: PathBuf,
+
+    /// How many samples are walked at once. Zero means one per core, capped at the samples
+    /// there are.
+    ///
+    /// **One worker per sample, and each sample's own walk is serial** — samples are
+    /// independent, so this is the axis the walk parallelises on. A run naming one sample gets
+    /// one worker whatever this says, and gains nothing from raising it.
+    ///
+    /// **What it costs is memory, and the multiplier is read groups rather than samples.**
+    /// A sample in flight holds its own open alignment files and its own census accumulator,
+    /// and the accumulator is about 6 MB per read group. One read group a sample — both
+    /// benchmark cohorts — is a few tens of megabytes each; a sample sequenced over sixteen
+    /// lanes is sixteen read groups and costs proportionally more. Raise this knowing the read
+    /// group count, not only the sample count.
+    ///
+    /// **The default is 1, and a cohort is still best spread by running this command once per
+    /// sample** — one invocation each, which needs no shared memory and lets a failed sample be
+    /// re-run alone. This knob is for the case that recipe does not cover: one invocation
+    /// holding several samples, on a machine with cores to spare.
+    #[arg(long, default_value_t = 1)]
+    pub samples_in_flight: usize,
 
     /// BED of the stretch of genome to walk. Without it, every base of every contig.
     ///
@@ -205,6 +238,19 @@ pub struct GeneratePspsArgs {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum GeneratePspsCliError {
+    /// The pool the samples in flight are walked on could not be built.
+    ///
+    /// **Only reachable above one in flight**, because one takes the plain loop and builds no
+    /// pool at all. What it means in practice is that the process cannot have more threads.
+    #[error("building the pool that walks {in_flight} samples at once")]
+    WalkPool {
+        /// How many were asked for.
+        in_flight: usize,
+        /// What rayon said.
+        #[source]
+        source: rayon::ThreadPoolBuildError,
+    },
+
     /// The reference could not be read.
     #[error("reading the reference {}", path.display())]
     Reference {
@@ -632,11 +678,23 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
     .map_err(|source| GeneratePspsCliError::CensusNotPlanned { source })?;
     drop(catalog);
 
-    // **The samples are walked one at a time, in the order given** (spec §5.2). Nothing here
-    // holds two samples' files open at once, which is the property psp mode exists for.
-    let mut walked: Vec<SampleWalkOutcome> =
-        Vec::with_capacity(read_groups.read_groups_per_sample().len());
-    for sample in read_groups.read_groups_per_sample() {
+    // **Several samples are walked at once, one worker each, and each sample's walk is serial
+    // inside** (spec §5.2, §3.5). Samples are independent — nothing one sample's walk computes
+    // is read by another's — so the pool is over samples, which is what makes the psp writer's
+    // worker-count invariance come for free rather than having to be designed for, keeps the
+    // census accumulator fed from one thread, and keeps the read-filter tallies from
+    // under-reporting by the worker count.
+    //
+    // **What is in flight is bounded and it is not a thread per sample**, because a sample in
+    // flight is an open alignment file and a census accumulator, and at a thousand samples a
+    // thread each would be a thousand open files. `--samples-in-flight` is that bound.
+    //
+    // **The report is in the order the samples were given**, however they finished: the walk is
+    // an indexed parallel map, which collects in index order. The per-sample progress lines are
+    // not — they are printed as each sample finishes, which is what they are for.
+    let samples = read_groups.read_groups_per_sample();
+    let in_flight = samples_in_flight(args, samples.len());
+    let walk_one = |sample: &SampleReadGroups| -> Result<SampleWalkOutcome, GeneratePspsCliError> {
         let files = alignment_files_of(sample, &read_groups);
         let psp_path = psp_path_for(&args.output_dir, sample.sample.as_ref());
         // **Written beside the psp and renamed once it is whole.** `PspWriter::create`
@@ -731,14 +789,58 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
         // hung one. **To stderr**, so a shell capturing the report gets the report and a
         // person watching gets the progress — and in the same words, because both come from
         // `SampleWalkOutcome::line`.
+        //
+        // **With several samples in flight these arrive out of order**, which is why the line
+        // names its sample: it is a progress line, not the report.
         eprintln!("{}", outcome.line());
-        walked.push(outcome);
-    }
+        Ok(outcome)
+    };
+    let walked: Vec<SampleWalkOutcome> = if in_flight.get() == 1 {
+        // **One in flight takes the plain loop and not a pool of one**, so the default path
+        // builds no threads at all and a cohort walked one invocation per sample — this
+        // command's own advice — costs exactly what it costed before this knob existed.
+        samples.iter().map(walk_one).collect::<Result<_, _>>()?
+    } else {
+        // **A pool of its own, sized to the bound.** The global pool is sized to the machine
+        // and shared with whatever else in the process wants it; what may be in flight here is
+        // an open alignment file and a census accumulator per sample, which is a memory bound
+        // and not a core count.
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(in_flight.get())
+            .build()
+            .map_err(|source| GeneratePspsCliError::WalkPool {
+                in_flight: in_flight.get(),
+                source,
+            })?
+            .install(|| {
+                samples
+                    .par_iter()
+                    .map(walk_one)
+                    .collect::<Result<Vec<_>, _>>()
+            })?
+    };
     Ok(WalkReport {
         ground: describe(&analysed, &contigs),
         analysed_bases: analysed.iter().map(|region| region.len()).sum(),
         samples: walked,
     })
+}
+
+/// How many samples this run walks at once — the flag, resolved against the machine and the
+/// cohort.
+///
+/// **Never more than there are samples**, because a worker with no sample to walk is a thread
+/// that exists to park, and never zero. Zero on the command line means *one per core*, which is
+/// the only place `available_parallelism` is consulted: the number is a memory bound, so a
+/// person who has counted their read groups should be able to say a number that has nothing to
+/// do with the core count and be obeyed.
+fn samples_in_flight(args: &GeneratePspsArgs, samples: usize) -> NonZeroUsize {
+    let asked = if args.samples_in_flight == 0 {
+        std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
+    } else {
+        args.samples_in_flight
+    };
+    NonZeroUsize::new(asked.min(samples.max(1))).expect("at least one sample and at least one ask")
 }
 
 /// Refuse a sample whose name cannot be the file name of its own psp.
