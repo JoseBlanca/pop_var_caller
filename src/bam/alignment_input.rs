@@ -1066,19 +1066,66 @@ pub(crate) fn read_exceeds_mismatch_fraction(
         match *op {
             CigarOp::Match(n) | CigarOp::SeqMatch(n) | CigarOp::SeqMismatch(n) => {
                 let n = n as usize;
-                for k in 0..n {
-                    let r = seq.get(read_pos + k).copied().unwrap_or(b'N');
-                    let g = ref_seq.get(ref_pos + k).copied().unwrap_or(b'N');
-                    let q = qual.get(read_pos + k).copied().unwrap_or(0);
-                    let r_atgc = matches!(r, b'A' | b'C' | b'G' | b'T');
-                    let g_atgc = matches!(g, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't');
-                    if r_atgc && g_atgc {
-                        comparable_bases += 1;
-                        if r != g.to_ascii_uppercase() && q >= bq_floor {
-                            mismatches += 1;
-                        }
-                    }
+
+                // **A position past the end of the read or of the reference contributes to
+                // neither count, so the loop stops there rather than stepping through it.**
+                // Both used to be read as `N`, and `N` is in neither the read's ATGC set nor
+                // the reference's, so such a position could never reach either counter.
+                // Cutting the range at the shorter of the two therefore leaves both counts
+                // exactly as they were — and lets the body below index three slices taken
+                // once per CIGAR run instead of bounds-checking each of them per base.
+                // **The starts are clamped as well as the lengths, and that is not
+                // belt-and-braces.** A malformed record whose CIGAR claims more read bases
+                // than it carries leaves `read_pos` past the end of `seq`, and Rust rejects
+                // `&seq[read_pos..read_pos]` there even though the range is empty — so
+                // clamping only the length turns a record the old loop merely counted
+                // nothing for into a panic that stops the run. Where `usable` is non-zero the
+                // clamps are identities, so nothing else sees them.
+                let read_from = read_pos.min(seq.len());
+                let ref_from = ref_pos.min(ref_seq.len());
+                let score_from = read_pos.min(qual.len());
+                let usable = n.min(seq.len() - read_from).min(ref_seq.len() - ref_from);
+                // The quality scores are the one slice a short tail of does **not** make the
+                // position uncountable: an absent score was read as 0, and a position scored
+                // 0 is still comparable. So the zipped loop is cut at the qualities too and
+                // the remainder finished after it at quality 0 — a tail that is empty for
+                // every record whose bases and qualities are the same length.
+                let scored = usable.min(qual.len() - score_from);
+
+                let bases = &seq[read_from..read_from + scored];
+                let reference = &ref_seq[ref_from..ref_from + scored];
+                let scores = &qual[score_from..score_from + scored];
+
+                for ((&base, &reference_base), &score) in bases.iter().zip(reference).zip(scores) {
+                    // **`& 0xdf` is exactly `to_ascii_uppercase` on the bytes that matter,
+                    // and it needs no branch.** Clearing bit five maps `a`→`A` … `t`→`T`,
+                    // and the only bytes it maps *into* `ACGT` are those eight — so testing
+                    // the folded byte accepts precisely the eight-case set this arm used to
+                    // test the reference against, and the two `matches!` become symmetric.
+                    let folded = reference_base & 0xdf;
+                    let read_is_acgt = matches!(base, b'A' | b'C' | b'G' | b'T');
+                    let reference_is_acgt = matches!(folded, b'A' | b'C' | b'G' | b'T');
+
+                    // Counted rather than branched on, so the body is straight-line.
+                    let comparable = read_is_acgt & reference_is_acgt;
+                    comparable_bases += u32::from(comparable);
+                    mismatches += u32::from(comparable & (base != folded) & (score >= bq_floor));
                 }
+
+                // The positions past the end of the quality scores. An absent score was read
+                // as 0, and 0 clears the floor exactly when the floor is 0 — which is the
+                // whole of `score >= bq_floor` here, hoisted out of the loop.
+                let absent_score_clears_the_floor = bq_floor == 0;
+                for k in scored..usable {
+                    let base = seq[read_from + k];
+                    let folded = ref_seq[ref_from + k] & 0xdf;
+                    let comparable = matches!(base, b'A' | b'C' | b'G' | b'T')
+                        & matches!(folded, b'A' | b'C' | b'G' | b'T');
+                    comparable_bases += u32::from(comparable);
+                    mismatches +=
+                        u32::from(comparable & (base != folded) & absent_score_clears_the_floor);
+                }
+
                 read_pos += n;
                 ref_pos += n;
             }
@@ -1204,6 +1251,155 @@ mod tests {
         assert_ne!(with_md5, different_md5);
         assert_ne!(with_md5, different_name);
         assert_ne!(with_md5, different_length);
+    }
+
+    /// **The rewritten loop against the one it replaced, on 20,000 random reads.**
+    ///
+    /// This filter is shared with the frozen production caller
+    /// (`src/pileup/per_sample/read_processor.rs`), so the loop that stopped bounds-checking
+    /// three slices per base had to be *exactly* the loop it replaced rather than close to
+    /// it. Two of its steps are arguments rather than rewrites — that a position past the end
+    /// of the read or of the reference can reach neither counter, and that `& 0xdf` accepts
+    /// the same eight reference bytes the two-case list did — and an argument is what a
+    /// randomised comparison is for.
+    ///
+    /// The generator aims at exactly the cases the arguments turn on: sequences, qualities
+    /// and reference deliberately allowed to run short of what the CIGAR claims; every base
+    /// drawn from `ACGTNacgtn` so both cases and the excluded byte appear; qualities
+    /// straddling the floor, and a floor of 0 so that the short-quality tail's `0 >= bq_floor`
+    /// is exercised in both directions.
+    #[test]
+    fn the_rewritten_mismatch_loop_agrees_with_the_one_it_replaced() {
+        /// The loop exactly as it stood before the rewrite, kept here as the oracle and
+        /// nowhere else.
+        fn as_it_was(
+            cigar: &[CigarOp],
+            seq: &[u8],
+            qual: &[u8],
+            ref_seq: &[u8],
+            bq_floor: u8,
+            threshold: f32,
+        ) -> bool {
+            let mut read_pos: usize = 0;
+            let mut ref_pos: usize = 0;
+            let mut mismatches: u32 = 0;
+            let mut comparable_bases: u32 = 0;
+            for op in cigar {
+                match *op {
+                    CigarOp::Match(n) | CigarOp::SeqMatch(n) | CigarOp::SeqMismatch(n) => {
+                        let n = n as usize;
+                        for k in 0..n {
+                            let r = seq.get(read_pos + k).copied().unwrap_or(b'N');
+                            let g = ref_seq.get(ref_pos + k).copied().unwrap_or(b'N');
+                            let q = qual.get(read_pos + k).copied().unwrap_or(0);
+                            let r_atgc = matches!(r, b'A' | b'C' | b'G' | b'T');
+                            let g_atgc =
+                                matches!(g, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't');
+                            if r_atgc && g_atgc {
+                                comparable_bases += 1;
+                                if r != g.to_ascii_uppercase() && q >= bq_floor {
+                                    mismatches += 1;
+                                }
+                            }
+                        }
+                        read_pos += n;
+                        ref_pos += n;
+                    }
+                    CigarOp::Insertion(n) | CigarOp::SoftClip(n) => read_pos += n as usize,
+                    CigarOp::Deletion(n) | CigarOp::Skip(n) => ref_pos += n as usize,
+                    CigarOp::HardClip(_) | CigarOp::Padding(_) => {}
+                }
+            }
+            if comparable_bases == 0 {
+                return false;
+            }
+            (mismatches as f32) / (comparable_bases as f32) > threshold
+        }
+
+        // A fixed generator rather than a crate: the sequence is the same on every machine
+        // and every run, so a disagreement can be reproduced from the seed alone.
+        let mut state: u64 = 0x2026_09_08_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        const ALPHABET: &[u8] = b"ACGTNacgtn";
+
+        let mut compared_something = 0usize;
+        for _ in 0..20_000 {
+            let ops = 1 + (next() % 4) as usize;
+            let mut cigar = Vec::with_capacity(ops);
+            let mut read_span = 0usize;
+            let mut ref_span = 0usize;
+            for _ in 0..ops {
+                let n = 1 + (next() % 12) as u32;
+                match next() % 7 {
+                    0 => {
+                        cigar.push(CigarOp::Insertion(n));
+                        read_span += n as usize;
+                    }
+                    1 => {
+                        cigar.push(CigarOp::Deletion(n));
+                        ref_span += n as usize;
+                    }
+                    2 => {
+                        cigar.push(CigarOp::SoftClip(n));
+                        read_span += n as usize;
+                    }
+                    3 => cigar.push(CigarOp::HardClip(n)),
+                    op => {
+                        cigar.push(match op {
+                            4 => CigarOp::SeqMatch(n),
+                            5 => CigarOp::SeqMismatch(n),
+                            _ => CigarOp::Match(n),
+                        });
+                        read_span += n as usize;
+                        ref_span += n as usize;
+                    }
+                }
+            }
+
+            // Deliberately allowed to fall short of the span the CIGAR claims — a
+            // well-formed record never does, and the truncation argument is about exactly
+            // the records that do.
+            let short_by = |limit: usize, draw: u64| limit.saturating_sub((draw % 4) as usize);
+            let seq: Vec<u8> = (0..short_by(read_span, next()))
+                .map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize])
+                .collect();
+            let qual: Vec<u8> = (0..short_by(read_span, next()))
+                .map(|_| (next() % 60) as u8)
+                .collect();
+            let reference: Vec<u8> = (0..short_by(ref_span, next()))
+                .map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize])
+                .collect();
+            // 0 among the floors so the short-quality tail's `0 >= bq_floor` is true
+            // sometimes and false sometimes.
+            let bq_floor = [0u8, 1, 20, 30][(next() % 4) as usize];
+            let threshold = [0.0f32, 0.05, 0.10, 0.5][(next() % 4) as usize];
+
+            if !seq.is_empty() && !reference.is_empty() {
+                compared_something += 1;
+            }
+            assert_eq!(
+                read_exceeds_mismatch_fraction(
+                    &cigar, &seq, &qual, &reference, bq_floor, threshold
+                ),
+                as_it_was(&cigar, &seq, &qual, &reference, bq_floor, threshold),
+                "the two loops disagreed on cigar {cigar:?}, seq {seq:?}, qual {qual:?}, \
+                 reference {reference:?}, floor {bq_floor}, threshold {threshold}",
+            );
+        }
+        // A guard on the generator, not on the loops: a CIGAR drawn as all clips, insertions
+        // and deletions gives a read or a reference of nothing, and a run of those would let
+        // this test pass while comparing two functions that both returned `false`. It lands at
+        // about 13,900 of 20,000.
+        assert!(
+            compared_something > 10_000,
+            "the generator produced too many empty cases to be comparing anything: only \
+             {compared_something} of 20,000 had both a read and a reference",
+        );
     }
 
     // --- F1 mismatch-fraction helper: pure-logic tests ---------------

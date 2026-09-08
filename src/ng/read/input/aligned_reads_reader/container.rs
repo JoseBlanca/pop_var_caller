@@ -508,7 +508,14 @@ fn decode_container_at(
         // The decoded block data and the borrowed records live only within this block;
         // copying each record's bytes into the container's own buffers here keeps the result
         // independent of those borrows.
-        let (core_data_src, external_data_srcs) = slice.decode_blocks()?;
+        //
+        // **The blocks only the auxiliary tags read are left compressed**, on the same
+        // condition that lets the tags be left unread below — no data series reads them, so
+        // nothing that is still consulted can be starved by dropping them. ng reads no tags,
+        // so their inflated bytes were being produced for nobody: 780 of 2,254 blocks and
+        // 14.8 MB of 111.1 MB per 60 containers of a whole-genome tomato CRAM.
+        let (core_data_src, external_data_srcs) =
+            slice.decode_blocks_skipping_tag_only(&compression_header)?;
 
         // **A slice usually says which bases it needs before any of them are read.** Its
         // header names the contig and the first and last position its records touch, and it is

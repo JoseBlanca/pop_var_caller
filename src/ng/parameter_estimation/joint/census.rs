@@ -2437,6 +2437,16 @@ impl CensusWriter {
     }
 
     fn add_generic(&mut self, locus: &SampleLocusObservations) {
+        // **A locus the selection kept nothing in writes nothing, so it is left before the
+        // depth array is built.** Every write below sits inside `for offset in 0..span`
+        // behind `generic_index`, which answers `None` at every position of such a locus —
+        // so the depth array is built, filled from every observation, and thrown away. On
+        // this 2 Mb fixture that is 4 loci in 5; on a whole-genome walk it is 399 in 400,
+        // because the census budget is the same two million positions over four hundred
+        // times the ground.
+        if !self.keeps_a_position_in(locus.region) {
+            return;
+        }
         // **Depth is per read group, not pooled.** `num_obs_along_locus` sums the sample's
         // observations, which is the wrong grain for a record keyed by read group — and it
         // is the grain the error rate is fitted at, so pooling here would score every read
@@ -2667,6 +2677,22 @@ impl CensusWriter {
             self.digested += 1;
         }
         debug_assert_eq!(self.generic_loci[index], position);
+    }
+
+    /// Whether the selection kept any generic position inside `region`.
+    ///
+    /// **Exact rather than conservative**, which is what lets [`add_generic`](Self::add_generic)
+    /// leave on it: the kept positions are sorted by contig and position, so the first one at
+    /// or after the region's start settles the question in one binary search. Same shape as
+    /// [`mark_walked`](Self::mark_walked)'s scan, which walks forward from the same point.
+    fn keeps_a_position_in(&self, region: GenomeRegion) -> bool {
+        let start = (region.contig.get(), region.start.get());
+        let at = self
+            .generic_loci
+            .partition_point(|kept| (kept.contig.get(), kept.position.get()) < start);
+        self.generic_loci.get(at).is_some_and(|kept| {
+            kept.contig == region.contig && kept.position.get() <= region.end.get()
+        })
     }
 
     fn generic_index(&self, position: GenomePosition) -> Option<usize> {

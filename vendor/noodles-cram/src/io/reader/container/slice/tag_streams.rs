@@ -34,22 +34,37 @@ use crate::container::{
 ///
 /// `false` is always a safe answer and is the one returned whenever anything is unrecognised.
 pub(super) fn tags_can_be_left_unread(compression_header: &CompressionHeader) -> bool {
+    tag_only_blocks(compression_header).is_some()
+}
+
+/// The external blocks **only the tags read**, or `None` when the tags may not be left unread.
+///
+/// `Some(set)` is the same answer [`tags_can_be_left_unread`] gives as `true`, carrying the
+/// blocks that answer makes dead: a caller reading no tags will never look inside any of them,
+/// so their bytes need not be decompressed at all. The set is disjoint from every external
+/// block a data series reads — that disjointness *is* the condition — so dropping them cannot
+/// starve a reader that is still consulted.
+pub(super) fn tag_only_blocks(
+    compression_header: &CompressionHeader,
+) -> Option<HashSet<block::ContentId>> {
     let mut data_series_blocks = HashSet::new();
     if !collect_data_series_blocks(compression_header, &mut data_series_blocks) {
         // A data series reads the core stream, which is expected and fine; what is collected
         // here is only the set of external blocks. `collect_data_series_blocks` returns false
         // when it meets an encoding it does not recognise, and then nothing is skipped.
-        return false;
+        return None;
     }
 
     let mut tag_blocks = HashSet::new();
     for encoding in compression_header.tag_encodings().values() {
         if !collect_byte_array_blocks(encoding, &mut tag_blocks) {
-            return false;
+            return None;
         }
     }
 
-    tag_blocks.is_disjoint(&data_series_blocks)
+    tag_blocks
+        .is_disjoint(&data_series_blocks)
+        .then_some(tag_blocks)
 }
 
 /// The external blocks every data series reads. `false` if an encoding is not one this
@@ -128,8 +143,20 @@ fn collect_byte_array_blocks(
             len_encoding,
             value_encoding,
         } => {
-            collect_integer_blocks(len_encoding, blocks)
-                && collect_byte_blocks(value_encoding, blocks)
+            // **Both sides are collected before they are combined, and `&&` would not do
+            // that.** It short-circuits, so a length encoding that reads the core stream —
+            // which returns `false` and is perfectly ordinary — would leave the *value*
+            // encoding's external block uninserted. On the tag side that is harmless: the
+            // `false` propagates and nothing is skipped. On the data-series side it is not,
+            // because `collect_data_series_blocks` deliberately ignores this return value for
+            // its `byte_arrays` encodings — so such a series' external block would be missing
+            // from the set a tag block is tested for disjointness against, and a tag sharing
+            // it would look safe to skip. Skipping it desynchronises the reader that is still
+            // consulted, which is wrong values rather than an error. It does not fire on the
+            // files here (samtools writes read names as `ByteArrayStop`, the other arm).
+            let length_recognised = collect_integer_blocks(len_encoding, blocks);
+            let value_recognised = collect_byte_blocks(value_encoding, blocks);
+            length_recognised && value_recognised
         }
     }
 }

@@ -37,6 +37,8 @@ fork, not in the diff.
 | `src/io/reader/container/slice.rs` | `records_discarding_tags`, `records_over_window`, the `Window` variant | 4, 5 |
 | `src/io/reader/container/slice.rs` | `reference_extent`, `record_extents`, `records_over_windows` | 6 |
 | `src/io/reader.rs` | re-exports `ReferenceExtent`, `SequenceExtent`, `SequenceWindow` | 6 |
+| `src/io/reader/container/slice.rs` | `decode_blocks_skipping_tag_only`, `decode_blocks_inner` | 7 |
+| `src/io/reader/container/slice/tag_streams.rs` | `tag_only_blocks`, and both sides of a `&&` evaluated | 7 |
 
 Two files the registry has and this copy does not — `.cargo-ok` and `.cargo_vcs_info.json` —
 are the extraction's own bookkeeping, and are ignored rather than committed.
@@ -221,3 +223,47 @@ bound turns a short window into an index-out-of-range panic inside `record/seque
 measured.
 
 **Not upstream as it stands**, for the same reason as changes 3, 4 and 5.
+
+### 7. Blocks only the auxiliary tags read are left compressed — a new API
+
+`src/io/reader/container/slice.rs`: `Slice::decode_blocks_skipping_tag_only` beside
+`decode_blocks` (both now call one private `decode_blocks_inner`);
+`src/io/reader/container/slice/tag_streams.rs`: `tag_only_blocks` returns the set that
+`tags_can_be_left_unread` used to reduce to a `bool`, and that function becomes a thin wrapper
+over it.
+
+**This is the second half of change 4.** That one stopped *reading* the tag streams for a
+caller that reads no tags; the blocks those streams live in were still being decompressed, into
+buffers nothing ever indexed. The condition that makes skipping the reads safe is the same one
+that makes skipping the inflation safe, and `tag_streams` already computed it: a tag may be
+left unread only when no data series reads its external block, so the tag-only block set is
+disjoint from every block a reader still consults. The change lifts that set out of the
+predicate and hands it to the block loop.
+
+**A skipped block is left out of the returned list rather than handed over empty.** A reader
+that did consult one after all meets `missing external block: <id>`, naming it, where an empty
+slice would have decoded silently wrong values. Every block is still framed and CRC-checked,
+skipped or not: the checksum covers the *compressed* bytes.
+
+Measured over 60 containers / 600,000 records of a whole-genome tomato CRAM: **780 of the 2,254
+inflated blocks, and 14.8 MB of the 111.1 MB inflated, were decompressed and never read**.
+Block inflation 0.251 s → 0.208 s. End to end on `generate-psps` over 2 Mb of `SL4.0ch01`, this
+change with three of ng's own, −1.14% of retired instructions on its own.
+
+**One correctness fix travels with it**, in `collect_byte_array_blocks`. Its `ByteArrayLength`
+arm was `collect_integer_blocks(..) && collect_byte_blocks(..)`, and `&&` short-circuits: a
+length encoding reading the core stream — ordinary, and returning `false` — left the value
+encoding's external block uninserted. On the tag side that is harmless, the `false` propagating
+and nothing being skipped. On the data-series side it is not: `collect_data_series_blocks`
+ignores this return value for its five `byte_arrays` encodings, so such a series' external
+block would be missing from the set tag blocks are tested against, a tag sharing it would look
+disjoint, and skipping it desynchronises a reader that is still consulted — wrong values, not
+an error. Both sides are now evaluated before they are combined. It does not fire on any file
+here: samtools writes read names as `ByteArrayStop`, which takes the other arm.
+
+**Not upstream as it stands**, for the same reason as changes 3, 4 and 5: it is an API with one
+caller, in the same family as `records_discarding_tags` and `records_over_window`. The
+interesting half is change 4's — `tags_can_be_left_unread` is what makes either skip safe to
+offer at all, and if that check were ever proposed upstream this would go with it as the reason
+the check is worth having. **The `&&` fix is offerable on its own**, and should be: it is a
+latent bug in this fork's own change 4 and would be one in any upstream version of it.

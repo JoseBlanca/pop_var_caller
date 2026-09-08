@@ -1465,7 +1465,15 @@ impl OpenPileupRecordTable {
     /// Precondition: `event_start < event_end`. Empty events
     /// (`event_start == event_end`) are not produced by any caller —
     /// every `ReadEvent::footprint_span()` returns ≥ 1.
+    #[inline]
     pub fn find_overlapping(&self, event_start: u32, event_end: u32) -> Option<u32> {
+        // **The table is usually empty**, and the ordinary-column lane asks this at every
+        // covered base before it does anything else. Answering it here keeps the two
+        // `partition_point` searches and the reversed scan below out of the common path, and
+        // lets the whole call inline away where there is nothing open.
+        if self.records.is_empty() {
+            return None;
+        }
         debug_assert!(
             event_start < event_end,
             "find_overlapping called with empty event [{event_start}, {event_end})",

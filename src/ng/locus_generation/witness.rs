@@ -47,6 +47,12 @@ where
     if runs.is_empty() || runs.iter().any(|(start, end)| start >= end) {
         return None;
     }
+    // **One run is what a DNA-seq read gives at almost every position**, and one run is
+    // already canonical: there is nothing to order and nothing to merge. Saying so here keeps
+    // the sort off the ordinary case rather than paying a call that finds nothing to swap.
+    if runs.len() == 1 {
+        return Some(runs);
+    }
     runs.sort_unstable();
     // Merge left to right, writing back into the same buffer. `start <= open_end` covers
     // both cases the invariant forbids: overlapping (`start < open_end`) and merely

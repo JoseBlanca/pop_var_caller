@@ -254,18 +254,57 @@ impl<'c> Slice<'c> {
     pub fn decode_blocks(
         &self,
     ) -> io::Result<(Cow<'c, [u8]>, Vec<(block::ContentId, Cow<'c, [u8]>)>)> {
+        self.decode_blocks_inner(None)
+    }
+
+    /// The slice's blocks, **leaving the ones only the auxiliary tags read compressed**.
+    ///
+    /// A caller that reads no tags never looks inside those blocks, so decompressing them is
+    /// work whose result is dropped. Which blocks those are is the same question
+    /// [`records_over_window`](Self::records_over_window) and its siblings already answer from
+    /// the compression header before a record is read: a tag block may be left unread only when
+    /// no data series reads it, and that disjointness is what makes it safe to leave compressed
+    /// too.
+    ///
+    /// **A skipped block is left out of the result rather than handed over empty.** If some
+    /// reader did consult one after all, it meets `missing external block: <id>` and the decode
+    /// fails by name — where an empty slice would have decoded silently wrong values.
+    ///
+    /// When the header does not allow the tags to be left unread, this decodes every block and
+    /// is [`decode_blocks`](Self::decode_blocks).
+    ///
+    /// Every block is still framed and CRC-checked, skipped or not: the checksum covers the
+    /// *compressed* bytes, so leaving one compressed loses no integrity check.
+    #[allow(clippy::type_complexity)]
+    pub fn decode_blocks_skipping_tag_only(
+        &self,
+        compression_header: &CompressionHeader,
+    ) -> io::Result<(Cow<'c, [u8]>, Vec<(block::ContentId, Cow<'c, [u8]>)>)> {
+        self.decode_blocks_inner(tag_streams::tag_only_blocks(compression_header).as_ref())
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn decode_blocks_inner(
+        &self,
+        skip: Option<&std::collections::HashSet<block::ContentId>>,
+    ) -> io::Result<(Cow<'c, [u8]>, Vec<(block::ContentId, Cow<'c, [u8]>)>)> {
         let mut src = self.src;
 
         let block = read_block_as(&mut src, ContentType::CoreData)?;
         let core_data_src = block.decode()?;
 
         let external_data_block_count = self.header.block_count() - 1;
-        let external_data_srcs = (0..external_data_block_count)
-            .map(|_| {
-                let block = read_block_as(&mut src, ContentType::ExternalData)?;
-                block.decode().map(|src| (block.content_id, src))
-            })
-            .collect::<io::Result<_>>()?;
+        let mut external_data_srcs = Vec::with_capacity(external_data_block_count);
+
+        for _ in 0..external_data_block_count {
+            let block = read_block_as(&mut src, ContentType::ExternalData)?;
+
+            if skip.is_some_and(|skip| skip.contains(&block.content_id)) {
+                continue;
+            }
+
+            external_data_srcs.push((block.content_id, block.decode()?));
+        }
 
         Ok((core_data_src, external_data_srcs))
     }
