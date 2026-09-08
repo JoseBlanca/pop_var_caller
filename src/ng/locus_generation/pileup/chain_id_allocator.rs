@@ -40,6 +40,7 @@
 //! - [`ChainIdAllocatorCounters::pending_mates_high_water`] is new, so the headroom
 //!   above is a measured number rather than an assumed one.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use ahash::AHashMap;
@@ -98,7 +99,26 @@ fn high_water_warn_threshold(cap: u32) -> u32 {
 pub struct PendingMate {
     pub chain_id: ChainId,
     pub first_mate_read_id: u32,
-    pub seen_at: u32,
+    /// Which registration this entry is, counted from the allocator's birth.
+    ///
+    /// **It exists to tell one registration of a qname from another**, which matters only
+    /// because [`ChainIdAllocator::pending_order`] names entries by qname and a file may
+    /// register the same qname twice — a completed pair, then another read with the same
+    /// name. Without it the first registration's queue slot would evict the second one
+    /// early, and its second mate would get a fresh chain id instead of pairing: wrong
+    /// output, silently, on input that is merely malformed rather than unreadable.
+    serial: u64,
+}
+
+/// One registration's place in [`ChainIdAllocator::pending_order`].
+#[derive(Debug)]
+struct PendingOrder {
+    /// The alignment start the first mate was registered at — the queue's ordering key.
+    seen_at: u32,
+    /// Which registration this is, so a slot left behind by a second mate, or by an earlier
+    /// registration of the same qname, is recognised and skipped. See [`PendingMate::serial`].
+    serial: u64,
+    qname: Arc<str>,
 }
 
 #[derive(Debug)]
@@ -118,6 +138,26 @@ pub struct ChainIdAllocator {
     /// genuinely-pending pairs only — solo reads
     /// (`MateRole::Solo`) never enter this map.
     pending_mates: AHashMap<Arc<str>, PendingMate>,
+    /// **The order [`pending_mates`](Self::pending_mates) was registered in, so that dropping
+    /// the stale ones pops rather than scans.**
+    ///
+    /// Eviction used to be an `AHashMap::retain` over the whole map, run once per admitted
+    /// read — and the map holds every first mate still inside the 10 kb lookup window, which
+    /// on a 104× sample is thousands of entries. That is a full scan per read, and it was
+    /// **11.3% of the walking thread**, 4.2 s of a 37 s run over 10 Mb of tomato chromosome 1.
+    ///
+    /// Reads arrive sorted by alignment start (`WalkerState::admit_read` refuses one that does
+    /// not), and an entry's `seen_at` **is** its read's alignment start, so this queue is
+    /// non-decreasing in `seen_at` by construction. Everything stale is therefore at the front,
+    /// and eviction stops at the first entry that is not.
+    ///
+    /// **It holds entries the map no longer has**, because a second mate removes its partner
+    /// from the map and not from here. Those are skipped when they reach the front, which is
+    /// what `serial` is for. They cost the queue's length rather than the map's, and the window
+    /// bounds both.
+    pending_order: VecDeque<PendingOrder>,
+    /// The serial the next registration gets — see [`PendingMate::serial`].
+    next_pending_serial: u64,
     /// Bookkeeping for the run summary.
     counters: ChainIdAllocatorCounters,
     /// Set the first time the active-read count reaches
@@ -172,6 +212,8 @@ impl ChainIdAllocator {
             next_id: 0,
             active_count: 0,
             pending_mates: AHashMap::new(),
+            pending_order: VecDeque::new(),
+            next_pending_serial: 0,
             counters: ChainIdAllocatorCounters::default(),
             high_water_warned: false,
             max_active_reads,
@@ -211,6 +253,9 @@ impl ChainIdAllocator {
     pub fn reset(&mut self) {
         self.active_count = 0;
         self.pending_mates.clear();
+        // Cleared with the map it names, or its stale entries would evict the next
+        // chromosome's registrations by qname.
+        self.pending_order.clear();
         // counters, high_water_warned, max_active_reads,
         // mate_lookup_window, and crucially next_id are preserved
         // across chromosome resets — they are file-scoped.
@@ -293,14 +338,23 @@ impl ChainIdAllocator {
                     pos: read.alignment_start,
                 });
             }
+            let serial = self.next_pending_serial;
+            self.next_pending_serial += 1;
             self.pending_mates.insert(
                 read.qname.clone(),
                 PendingMate {
                     chain_id,
                     first_mate_read_id: 0, // caller fills via `register_first_mate_read_id`
-                    seen_at: read.alignment_start,
+                    serial,
                 },
             );
+            // The second `Arc` bump this registration costs, and the whole price of the
+            // queue. Against a scan of the map per read it is not close.
+            self.pending_order.push_back(PendingOrder {
+                seen_at: read.alignment_start,
+                serial,
+                qname: read.qname.clone(),
+            });
             // **ng's.** Read after the insert, so the number reported is a size the map
             // actually reached rather than the size it was about to reach.
             let held = self.pending_mates.len() as u32;
@@ -399,24 +453,41 @@ impl ChainIdAllocator {
         }
     }
 
+    /// Drop the pending first mates the walk has passed the lookup window of.
+    ///
+    /// **This pops rather than scans, and the set it drops is exactly what a scan would drop.**
+    /// It used to be an `AHashMap::retain` over the whole map on every admitted read; see
+    /// [`pending_order`](Self::pending_order) for what that cost. The queue is non-decreasing in
+    /// `seen_at`, so the first entry that is still inside the window ends the loop and every
+    /// entry behind it is inside the window too.
+    ///
+    /// The eviction only clears the `pending_mates` entry; `active_count` stays attached to the
+    /// first mate's still-live active-read entry and is released when that read exits.
     fn evict_stale_pending(&mut self, walker_pos: u32) {
-        // `AHashMap::retain` lets us mutate the map in a single
-        // pass without per-entry `Arc::clone`. The eviction only
-        // clears the `pending_mates` entry; `active_count` stays
-        // attached to the first mate's still-live active-read entry
-        // and is released when that read exits.
-        let counters = &mut self.counters;
         let mate_lookup_window = self.mate_lookup_window;
-        self.pending_mates.retain(|_qname, entry| {
-            // `saturating_add` guards `seen_at` near `u32::MAX` on
-            // multi-Gbp chromosomes.
-            if walker_pos > entry.seen_at.saturating_add(mate_lookup_window) {
-                counters.mate_lookup_evictions += 1;
-                false // drop
-            } else {
-                true // keep
+        while let Some(oldest) = self.pending_order.front() {
+            // `saturating_add` guards `seen_at` near `u32::MAX` on multi-Gbp chromosomes.
+            if walker_pos <= oldest.seen_at.saturating_add(mate_lookup_window) {
+                break;
             }
-        });
+            // PANIC-FREE: `front` above says there is one.
+            let oldest = self
+                .pending_order
+                .pop_front()
+                .expect("the queue has a front, just read");
+            // **Only if the map still holds *this* registration.** A second mate takes its
+            // partner out of the map and leaves this slot behind, and a qname registered twice
+            // has two slots — in both cases the map's entry is not the one this slot names, and
+            // a scan would not have dropped it either.
+            let still_ours = self
+                .pending_mates
+                .get(&oldest.qname)
+                .is_some_and(|entry| entry.serial == oldest.serial);
+            if still_ours {
+                self.pending_mates.remove(&oldest.qname);
+                self.counters.mate_lookup_evictions += 1;
+            }
+        }
     }
 }
 
@@ -516,6 +587,56 @@ mod tests {
             matches!(err, WalkerError::ActiveReadsExhausted { .. }),
             "got {err:?}"
         );
+    }
+
+    /// **A qname registered a second time must not be evicted by the first registration's
+    /// place in the queue**, and this is the whole reason a pending entry carries a serial.
+    ///
+    /// Eviction names entries by qname, so without the serial the older queue slot would find
+    /// the *newer* map entry under that name and drop it. Its second mate would then get a
+    /// fresh chain id instead of pairing with its partner — wrong output, silently, on input
+    /// that is merely malformed rather than unreadable. A duplicate read name is exactly that
+    /// kind of input.
+    ///
+    /// The scan this replaced could not get it wrong, because it read each map entry's own
+    /// `seen_at` rather than a queue slot's.
+    #[test]
+    fn a_qname_registered_twice_keeps_the_second_registration() {
+        let mut a = ChainIdAllocator::new();
+        let window = super::super::DEFAULT_MATE_LOOKUP_WINDOW;
+
+        // First pair, completed — so the map entry goes and its queue slot is left behind.
+        let first = make_read("dup", MateRole::FirstOfPair, 100);
+        a.allocate_for_read(&first).unwrap();
+        let second = make_read("dup", MateRole::SecondOfPair, 150);
+        a.allocate_for_read(&second).unwrap();
+        assert!(a.pending_mates.is_empty(), "the pair completed");
+
+        // The same qname again, still well inside the window, so nothing may evict it.
+        let again = make_read("dup", MateRole::FirstOfPair, 200);
+        let (again_chain, _) = a.allocate_for_read(&again).unwrap();
+        assert_eq!(a.pending_mates.len(), 1);
+
+        // Walk past the *first* registration's window but not the second's. The stale slot
+        // reaches the front here, and must be skipped rather than taking the live entry.
+        let passer = make_read("passer", MateRole::Solo, 100 + window + 1);
+        a.allocate_for_read(&passer).unwrap();
+        assert_eq!(
+            a.pending_mates.len(),
+            1,
+            "the second registration is inside its own window and must still be pending",
+        );
+        assert_eq!(
+            a.counters().mate_lookup_evictions,
+            0,
+            "nothing was evicted, so nothing may be counted",
+        );
+
+        // And it still pairs, which is what the whole entry was for.
+        let partner = make_read("dup", MateRole::SecondOfPair, 100 + window + 2);
+        let (partner_chain, first_mate) = a.allocate_for_read(&partner).unwrap();
+        assert_eq!(partner_chain, again_chain, "the pair shares one chain id");
+        assert!(first_mate.is_some(), "it paired rather than minting afresh");
     }
 
     #[test]
