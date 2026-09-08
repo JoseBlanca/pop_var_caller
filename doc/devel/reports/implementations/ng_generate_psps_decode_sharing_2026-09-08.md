@@ -1,8 +1,8 @@
 # `generate-psps`: each CRAM container read once, decoded a step early, and the psp compressed off the walking thread
 
 **Date:** 2026-09-08
-**Branch:** `main`, commits `a2a77780`, `aa598441`, `c9018a70`, `a6457dbb` and `5548c5fb` on
-`8203d218`
+**Branch:** `main`, commits `a2a77780`, `aa598441`, `c9018a70`, `a6457dbb`, `5548c5fb` and
+`9969cc65` on `8203d218`
 **Acting on:** the BAM/CRAM → psp performance review of 2026-09-08
 
 **One tomato accession over 10 Mb of `SL4.0ch01`, out of a 49 GB whole-genome CRAM, now takes
@@ -512,13 +512,25 @@ column where it is active. Those 2.03 M columns are 67% of the general path's tr
 roughly **18% of the walking thread, about 6.5 s**; taken by the fast lane instead they would
 cost about 3.4%, so the prize is around **5 s of a 35.6 s run**.
 
-**Whether the test can be per-position instead is a correctness question, not a performance one**,
-and it is not answered here. The predicate's own note gives the reason for the whole-CIGAR form —
-"every read answers with at most one `Match` at any position, so no event can open a wider record
-or reach in from an earlier anchor" — and the second half of that is what the *first* test
-(`find_overlapping`, which fires on 0.2% of columns) already covers. That is an argument for
-looking, not a proof; the gate is the psp and the census byte-identical, and `parity.rs` against
-production's walker.
+**Asked per-base instead, and the answer came back split (2026-09-08, `9969cc65`).** The
+whole-read test bought two things: a fact about this base — no read here is doing anything but
+showing a letter — and a fact about history — no event from an earlier base is still reaching in.
+The first is now asked at the base, through `CigarCursor::plain_match_at`: an indel is anchored at
+the last reference base of the match run before it, so exactly one base of a read is not one
+letter. The second stays a whole-read question, and **not by argument**:
+
+| | wall, 10 Mb | psp against the unchanged run |
+|---|---:|---|
+| the whole-read test, as it was | 36.13 s | — |
+| **insertions asked per base, deletions still whole-read** | **34.66 s** | **byte-identical** |
+| both asked per base | 30.67 s | **differs from byte 33,403,518 of 157,822,123** |
+
+So the insertion half was free and the deletion half was load-bearing. **The case that diverges
+is not identified.** A deletion's footprint is the only one that reaches past its own anchor, and
+the open-record test — which asks whether anything is *already open* over this base — evidently
+does not catch every way that happens; the code says exactly that rather than adding one more
+condition and hoping. **About 3.9 s are still there for whoever finds it**, and the way to find it
+is the psp diff above: byte 33,403,518 names the locus.
 
 **Mate overlap at 9.1% is the second reason and it will grow with depth**, which the module's own
 note says: at 300× a pair is present at most columns and the skip stops firing. This fixture is
