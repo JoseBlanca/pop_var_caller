@@ -1235,17 +1235,46 @@ measured yet (§11, questions 2 and 7).
    eighteen** — 56.53 s of user time for 55.72 s of wall — which at that rate is about 75
    minutes for a tomato genome and three hours for a human one, per sample.
 
-   **Two candidates, and the second was not on the table when this question was written.**
-   Question 3's — split the sample's walk across its segments, which needs §12.1's
-   worker-count invariance to keep holding. And **move a stage of the sample's own pipeline off
-   the walking thread** (owner, 2026-09-08): decoding the alignment file and building its read
-   objects is 29% of the walking thread by profile — 20% CRAM decode, 9% read preparation — and
-   nothing downstream of a prepared read is needed to prepare the next one. Its ceiling is what
-   the profile says, about 1.4×, and unlike question 3's it changes nothing about the order
-   observations are produced in, so the writer's invariance is not on the line.
+   **Two candidates.** Question 3's — split the sample's walk across its segments, which needs
+   §12.1's worker-count invariance to keep holding. And **move a stage of the sample's own
+   pipeline off the walking thread** (owner, 2026-09-08): decoding the alignment file and
+   building its read objects is work nothing downstream of a prepared read needs, so a
+   prefetcher could do it on its own thread.
 
-   **Settled by:** question 3's sweep for the first, and for the second, wall and peak resident
-   at 2 Mb and 10 Mb with the psp and census required identical outside the header.
+   **The second candidate is measured and not recommended, 2026-09-08.** Its ceiling is
+   whatever share of the walking thread the decode and the read preparation hold, and that
+   share has fallen twice since the question was written:
+
+   | | CRAM decode | reading and filtering the reads, and the reference bases the decode needs | together | ceiling |
+   |---|---:|---:|---:|---:|
+   | when the question was written | 20% | 9% | **29%** | 1.41× |
+   | with the two CRAM readers sharing their decoded containers | 12.0% | 7.7% | **19.7%** | 1.25× |
+   | and with the review's four smaller changes | 11.0% | 6.1% | **17.1%** | 1.21× |
+
+   Every one of those samples was taken the same way — macOS `sample`, 30 s into a 10 Mb walk of
+   the whole-genome tomato CRAM, `RAYON_NUM_THREADS=1`, parked threads excluded. The two changes
+   that moved it are in
+   [the implementation report](../../reports/implementations/ng_generate_psps_decode_sharing_2026-09-08.md),
+   which also carries the run's own cost: 57.03 s to 47.20 s over 10 Mb, and 264.6 MB to 245.7 MB
+   peak resident.
+
+   **1.21× is the ceiling and not the gain.** A bounded queue never hides a stage completely, and
+   the design adds a copy of every prepared read through a channel — the same review's
+   compression offload, which is the one stage-offload anyone has actually built here, bought its
+   wall at the cost of 1.1% more user time for exactly that reason.
+
+   So the pipeline split now costs **two prefetch threads, two bounded queues and a prefetcher
+   that has to be stoppable and rewindable** — two, because the two locus generators hold
+   separate cursors whose regions interleave — for at most 1.21× on one sample and nothing at
+   all on a cohort run as one invocation a sample, where the machine is already saturated.
+   Question 3's split emulated as concurrent processes over disjoint BEDs — an upper bound,
+   since processes share nothing — reached **2.97× at four ways and 3.88× at eight** on this
+   same 10 Mb fixture, needs the same `--threads` knob, and gives each worker its own cursors,
+   which decode on their own threads anyway. **The 1.21× is largely inside the 2.97×.** Build
+   the pipeline split only if question 3's is rejected on memory.
+
+   **Settled by:** question 3's sweep. The second candidate is answered above and needs no
+   further measurement unless question 3 is refused.
 
    **Two things follow from the answer, which is why this is not idle.** If the split works, the
    psp writer must go on honouring §12.1's worker-count invariance, because observations then
