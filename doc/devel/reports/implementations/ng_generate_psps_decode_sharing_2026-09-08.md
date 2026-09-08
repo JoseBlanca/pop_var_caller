@@ -679,16 +679,18 @@ to look: `write_a_record` 10.0% of the walking thread, `encode_record_body_reusi
 
 ## 7d. Two more, one kept and one refused
 
-- **The psp encoder no longer sorts a record's chain ids when they already ascend** (`ea595c66`).
-  Every record asks `sort_and_dedup` to order the union of its observations' lists, and each of
-  those lists is already ascending, so the union is a concatenation of ascending runs. Counted
-  over the same 10 Mb, of **11,534,336** records written **9,508,466 — 8,242 in 10,000 — already
-  ascend**, and **73** hold a duplicate at all, 6 in a million. Skipping the sort where the test
-  passes is **−0.31% of instructions** (841,697 G → 839,128 G, 4 pairs, spread 88 G and 36 G);
-  the wall moves 28.98 s → 28.85 s, which is inside this host's resolution and is **not** claimed.
-  Kept for what the comment now says rather than for the tenth of a percent: it used to say the
-  union is "neither sorted nor distinct", which is right about the general case and wrong about
-  four records in five.
+- **The psp encoder no longer sorts a chain-id list that already ascends** (`ea595c66`, then
+  `THIS`). Every record asks `sort_and_dedup` to order the union of its observations' lists, and
+  each of those lists is already ascending, so the union is a concatenation of ascending runs.
+  Counted over the same 10 Mb, of **11,534,336 calls** to that function — one per record from
+  `write_changes`, plus two more from `residual_observation_of` at a record with several
+  observations — **9,508,466, or 8,242 in 10,000, arrive already ascending**, and **73** hold a
+  duplicate at all, 6 in a million. Testing for *strictly* ascending settles sortedness and
+  distinctness in one pass and returns, where `is_sorted` followed by `dedup` walks the list
+  twice: **−0.73% of instructions** in total (841,697 G → 835,541 G), of which the second step is
+  −0.43% (839,080 G → 835,541 G, 3 pairs, spread 32 G and 78 G). The wall moves 28.98 s →
+  28.37 s across the two, which is at this host's resolution and is **not** claimed as the win;
+  the instruction count is, at 45 times its own spread.
 - **Reserving the fast lane's chain-id list to its exact final length — refused.** Each emitted
   observation starts from an empty `Vec`, because the finished one is moved into the locus, so an
   87-deep column's list is reallocated and copied about seven times; the allocator is 3.0% of the

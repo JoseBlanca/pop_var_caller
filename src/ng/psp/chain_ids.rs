@@ -184,18 +184,22 @@ impl LiveSetChanges {
 /// nor distinct in general: one read pair that showed the same sequence at two observations of
 /// one record is named twice, and observations are stored in no particular id order.
 ///
-/// **In the ordinary record it is both, and the sort is skipped.** Every producer of a locus
-/// leaves each observation's own list ascending, so a record whose reads all agree arrives as
-/// one ascending run; only a record whose reads split across two or more alleles or read groups
-/// interleaves them. Counted over 10 Mb of tomato chromosome 1 at 103.5×, of **11,534,336**
-/// records written: **9,508,466 — 8,242 in 10,000 — already ascend**, and **73** hold a
-/// duplicate at all, which is 6 in a million. So the test is one pass that stands in for the
-/// sort at four records in five, and the `dedup` behind it is a scan that finds nothing at
-/// nearly every record and must stay for the ones where it does.
+/// **In the ordinary call it is already both, and then there is nothing to do at all.** Every
+/// producer of a locus leaves each observation's own list ascending, so a record whose reads all
+/// agree arrives as one ascending run; only a record whose reads split across two or more alleles
+/// or read groups interleaves them. Counted over 10 Mb of tomato chromosome 1 at 103.5×, of
+/// **11,534,336** calls to this function: **9,508,466 — 8,242 in 10,000 — arrive already
+/// ascending**, and **73** hold a duplicate at all, which is 6 in a million.
+///
+/// **So the test is for *strictly* ascending, which settles sortedness and distinctness
+/// together in one pass.** Asking `is_sorted` and then running `dedup` walks the list twice to
+/// learn two things that one comparison per adjacent pair already decides; at four calls in five
+/// both answers are "nothing to do".
 fn sort_and_dedup(ids: &mut Vec<ChainId>) {
-    if !ids.is_sorted() {
-        ids.sort_unstable();
+    if ids.windows(2).all(|pair| pair[0] < pair[1]) {
+        return;
     }
+    ids.sort_unstable();
     ids.dedup();
 }
 
