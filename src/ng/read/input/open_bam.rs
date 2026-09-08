@@ -22,7 +22,7 @@
 
 use std::fs::File;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use noodles_bam as bam;
 use noodles_cram as cram;
@@ -34,7 +34,7 @@ use crate::bam::index_preflight::{
 use crate::fasta::{ContigEntry, ContigList};
 use crate::ng::read::filtering::ReadFilterConfig;
 use crate::ng::read::input::aligned_reads_reader::{
-    AlignedReadsReader, BamAlignedReadsReader, CramAlignedReadsReader,
+    AlignedReadsReader, BamAlignedReadsReader, CramAlignedReadsReader, DecodedContainerCache,
 };
 use crate::ng::read::input::cursor::AlignmentCursor;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
@@ -133,6 +133,21 @@ pub struct AlignmentFile {
     /// This CRAM's `.crai` entries, grouped by contig — `crai_by_contig[i]`
     /// holds contig `i`'s entries in file order. Empty for a BAM.
     crai_by_contig: Vec<Arc<[cram::crai::Record]>>,
+    /// The decoded CRAM containers **every cursor on this file shares**. Never
+    /// read on the BAM arm.
+    ///
+    /// It lives on the file rather than on a cursor because that is the scope
+    /// the sharing needs: a walk gives its two locus generators a cursor each
+    /// over one sample, deliberately, and their regions interleave — so both
+    /// reach the same container and, before this, both inflated it. See
+    /// [`DecodedContainerCache`] for the counts and for why two slots.
+    ///
+    /// **One cache per open file is one cache per walk.** `SampleReads` is not
+    /// `Clone` and opens its own `AlignmentFile` per sample, so nothing shares
+    /// this between two samples or between two workers; a walk split across
+    /// workers would give each its own, which is what a cache of the container
+    /// a reader is on wants.
+    container_cache: Arc<Mutex<DecodedContainerCache>>,
     // **No reference is held here**: `open` asks its question of one and keeps nothing, and a
     // cursor's decode reads bases from a reader it mints itself (see `open`'s check 5).
 }
@@ -298,6 +313,7 @@ impl AlignmentFile {
             sq_md5s,
             filter_config,
             crai_by_contig,
+            container_cache: Arc::new(Mutex::new(DecodedContainerCache::new())),
         }))
     }
 
@@ -531,6 +547,7 @@ impl AlignmentFile {
                     entries,
                     self.resolution.clone(),
                     Arc::clone(&self.path),
+                    Arc::clone(&self.container_cache),
                 ))
             }
             _ => {
@@ -580,6 +597,7 @@ impl std::fmt::Debug for AlignmentFile {
             sq_md5s: _,
             filter_config: _,
             crai_by_contig: _,
+            container_cache: _,
         } = self;
 
         f.debug_struct("AlignmentFile")
@@ -1318,6 +1336,88 @@ mod tests {
                 cram_names_by_linear_scan(&path, &fasta, asked),
                 "the CRAM cursor disagreed with a linear scan at [{start}, {end}] — and it \
                  had already served every region before it",
+            );
+        }
+    }
+
+    /// **Two cursors on one file, their regions interleaved — which is what a walk does, and
+    /// what the shared container cache had to be made safe for.**
+    ///
+    /// A walk drives two locus generators over one sample and gives each its own cursor on
+    /// purpose, because their regions interleave (`walker.rs`'s `generic_path_generators`).
+    /// Since the two readers now take their decoded containers from one cache on the open file
+    /// rather than each inflating their own, a cache that handed a reader the *wrong*
+    /// container — a stale slot, an offset collision, a slot given up while a reader was still
+    /// serving it — would serve another stretch of the contig's reads under this region's name.
+    /// Nothing above would notice: the reads are real reads and the count is plausible.
+    ///
+    /// So both cursors are stepped in turn over regions that leapfrog each other, and every
+    /// answer is compared against a scan of the whole file. The single-cursor version of this,
+    /// [`a_run_of_regions_through_one_cram_cursor_matches_a_linear_scan`], cannot fail for any
+    /// of those reasons — it has one reader, so every hit is its own container.
+    #[test]
+    fn two_cram_cursors_over_one_file_each_see_every_read() {
+        let (_cram_dir, path, _fasta_dir, fasta) =
+            multi_container_cram(CRAM_CURSOR_CONTIG_LENGTH, CRAM_CURSOR_READS);
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("the fixture opens");
+
+        let mut cursors = [
+            file.cursor(ContigId(0), || cram_cursor_reference_bases(&fasta))
+                .expect("a cursor for contig 0"),
+            file.cursor(ContigId(0), || cram_cursor_reference_bases(&fasta))
+                .expect("a second cursor for contig 0"),
+        ];
+
+        // Regions the two cursors take in turn, so that each hands the other a cache holding
+        // containers from somewhere else. They advance together for a while — the case the
+        // cache exists for, where both readers want one container — then leapfrog, so a slot
+        // is given up under a reader that is still serving from it.
+        let regions = [
+            (1, 20_000),
+            (1, 20_000),
+            (20_001, 40_000),
+            (20_001, 40_000),
+            (150_000, 152_000),
+            (40_001, 42_000),
+            (300_000, 340_000),
+            (42_001, 44_000),
+            (1, 400_000),
+            (399_000, 400_000),
+        ];
+
+        for (i, (start, end)) in regions.into_iter().enumerate() {
+            let asked = GenomeRegion {
+                contig: ContigId(0),
+                start: Position(start),
+                end: Position(end),
+            };
+            let cursor = &mut cursors[i % 2];
+            cursor.move_to_region(asked).expect("on this chromosome");
+            let mut actual = Vec::new();
+            while let Some(read) = cursor.next_read() {
+                let read = read.expect("the fixture reads decode and filter");
+                actual.push(String::from_utf8_lossy(&read.qname).into_owned());
+            }
+
+            assert_eq!(
+                actual,
+                cram_names_by_linear_scan(&path, &fasta, asked),
+                "cursor {} disagreed with a linear scan at [{start}, {end}]",
+                i % 2,
             );
         }
     }

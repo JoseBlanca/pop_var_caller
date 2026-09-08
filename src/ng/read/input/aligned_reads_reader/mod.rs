@@ -117,6 +117,7 @@ use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
 use crate::ng::types::GenomeRegion;
 
 pub(crate) use bam::BamAlignedReadsReader;
+pub(crate) use container::DecodedContainerCache;
 pub(crate) use cram::CramAlignedReadsReader;
 pub(crate) use in_memory::InMemoryAlignedReadsReader;
 

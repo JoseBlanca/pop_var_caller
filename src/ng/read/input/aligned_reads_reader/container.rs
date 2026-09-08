@@ -26,6 +26,7 @@
 use std::fs::File;
 use std::io;
 use std::io::SeekFrom;
+use std::sync::{Arc, Mutex};
 
 use noodles_core::Position as RecordPosition;
 use noodles_cram as cram;
@@ -43,9 +44,10 @@ use crate::ng::types::{ContigId, ReadGroupId};
 
 /// One CRAM container, decoded and held in two flat buffers.
 ///
-/// **It is what is currently being served, not a cache.** The reader above decodes one, hands
-/// its records out in order, and drops it when the next one is decoded. What survives between
-/// regions is the cursor's *reads*, one layer up (spec §5).
+/// **A reader holds the one it is serving.** It takes a container, hands its records out in
+/// order, and lets it go when it takes the next. What survives between regions is the cursor's
+/// *reads*, one layer up (spec §5). One open file's readers take them from a shared
+/// [`DecodedContainerCache`], so a container two readers both walk over is inflated once.
 pub(crate) struct DecodedContainer {
     /// Records of this container that belong to **another sample**, counted at decode and not
     /// otherwise kept.
@@ -332,10 +334,117 @@ impl DecodedContainer {
     }
 }
 
+/// The decoded containers **one open CRAM's readers share**, so that a container two of them
+/// walk over is inflated, decoded and matched against the reference once rather than twice.
+///
+/// # Why an open file has two readers at all
+///
+/// A walk drives two locus generators over one sample — the SNP/indel one and the repeat-tract
+/// one — and each holds its own [`SampleCursor`](crate::ng::read::input::sample_cursor::SampleCursor),
+/// hence its own [`CramAlignedReadsReader`](super::cram::CramAlignedReadsReader), on purpose:
+/// their regions interleave, and one cursor between them would tie their lifetimes together
+/// (`walker.rs`'s `generic_path_generators`). Interleaving is exactly the case where both
+/// reach the same container, so before this cache **every container of the file was decoded
+/// twice**: 498 decodes of 249 distinct containers over 2 Mb of tomato chromosome 1, and 2,534
+/// of 1,267 over 10 Mb, with no container decoded twice by either reader on its own.
+///
+/// # Two slots, and the number is measured rather than chosen
+///
+/// Of the 249 repeats over 2 Mb, 245 were the very next decode and all 249 fell within two;
+/// over 10 Mb, 1,246 of 1,267 fell within two and the worst gap on either was four. So two
+/// slots catch 98% of the repeats, and they hold **what the two readers were holding anyway** —
+/// one decoded container each. Four slots would catch the rest for about 7 MB more per open
+/// file; the cheap option is also the one that costs no memory.
+///
+/// # The lock, and why it is not held across a decode
+///
+/// The cache sits on the open file, which is shared behind an `Arc` and whose cursors are
+/// minted from several threads
+/// (`cursors_on_one_file_read_the_same_thing_from_many_threads`), so it has to be `Sync`: a
+/// `RefCell` cannot go here whatever the walk currently does on one thread. The lock is taken
+/// twice per container — once to look, once to store — and never across the decode itself, so
+/// two readers that ever did run at once would at worst both decode a container rather than
+/// wait on each other.
+pub(crate) struct DecodedContainerCache {
+    /// The containers held, least recently taken first, never more than [`CACHE_SLOTS`] of
+    /// them. Keyed by the container's offset in the file, which is what a `.crai` entry names.
+    held: Vec<(u64, Arc<DecodedContainer>)>,
+}
+
+/// How many decoded containers one open file's readers keep between them — see
+/// [`DecodedContainerCache`] for the measurement behind the number.
+const CACHE_SLOTS: usize = 2;
+
+impl DecodedContainerCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            held: Vec::with_capacity(CACHE_SLOTS),
+        }
+    }
+
+    /// The container decoded at `offset`, if it is still held — and it becomes the most
+    /// recently taken, so the slot given up next is the one neither reader has asked for.
+    fn take(&mut self, offset: u64) -> Option<Arc<DecodedContainer>> {
+        let at = self.held.iter().position(|(held, _)| *held == offset)?;
+        let entry = self.held.remove(at);
+        let container = Arc::clone(&entry.1);
+        self.held.push(entry);
+        Some(container)
+    }
+
+    /// Hold `container`, giving up the least recently taken one if the slots are full.
+    fn store(&mut self, offset: u64, container: &Arc<DecodedContainer>) {
+        // A re-store of something already held would otherwise put the same container in two
+        // slots and halve the cache. It happens whenever two readers decode one container at
+        // once, which nothing does today and which the short lock above permits.
+        self.held.retain(|(held, _)| *held != offset);
+        if self.held.len() == CACHE_SLOTS {
+            self.held.remove(0);
+        }
+        self.held.push((offset, Arc::clone(container)));
+    }
+}
+
+/// The container at `offset`: the shared cache's, if it is still there, and a fresh decode if
+/// not.
+///
+/// `Ok(None)` at end of stream (`read_container` reads 0 — the EOF marker); nothing is stored
+/// for it, so a reader that ran off the end does not evict a container another reader wants.
+pub(crate) fn container_at(
+    cache: &Mutex<DecodedContainerCache>,
+    reader: &mut cram::io::Reader<File>,
+    header: &sam::Header,
+    resolution: &ReadGroupResolution,
+    offset: u64,
+    reference: &dyn RawRefSeq,
+) -> io::Result<Option<Arc<DecodedContainer>>> {
+    if let Some(held) = lock_cache(cache).take(offset) {
+        return Ok(Some(held));
+    }
+    let Some(decoded) = decode_container_at(reader, header, resolution, offset, reference)? else {
+        return Ok(None);
+    };
+    let decoded = Arc::new(decoded);
+    lock_cache(cache).store(offset, &decoded);
+    Ok(Some(decoded))
+}
+
+/// **A poisoned cache is recovered from rather than propagated.** What it holds is decoded
+/// containers and nothing else — no invariant a panicking thread could have left half-written —
+/// so the worst a poisoned lock can mean here is that one entry is stale, and a stale entry is
+/// keyed by an offset no lookup will match.
+fn lock_cache(
+    cache: &Mutex<DecodedContainerCache>,
+) -> std::sync::MutexGuard<'_, DecodedContainerCache> {
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Seek to a container and decode it into a [`DecodedContainer`].
 ///
 /// `Ok(None)` at end of stream (`read_container` reads 0 — the EOF marker).
-pub(crate) fn decode_container_at(
+fn decode_container_at(
     reader: &mut cram::io::Reader<File>,
     header: &sam::Header,
     resolution: &ReadGroupResolution,
@@ -608,6 +717,12 @@ mod tests {
     //! `sequence.clear()` grows sequences past 300,000 bases while the rest of the suite passes —
     //! the CRAM-versus-BAM oracle included. A regression in these clears would corrupt production
     //! reads today, silently, and only this module would catch it.
+    //!
+    //! **The shared cache's policy is checked here too**, for the same reason: which slot it
+    //! gives up decides whether the second reader finds the container the first just decoded,
+    //! and that is arithmetic over offsets rather than anything a CRAM is needed for. What a
+    //! CRAM *is* needed for — two cursors on one file still serving every record — is
+    //! `two_cram_cursors_over_one_file_each_see_every_read` in `open_bam.rs`.
 
     use super::*;
     use crate::ng::types::ReadGroupId;
@@ -1035,6 +1150,85 @@ mod tests {
         assert_eq!(
             raw_read_from(&container, 2).record.sequence().as_ref(),
             b"GGGGGGGGGG"
+        );
+    }
+
+    /// A container distinguishable from every other by its foreign-record count, which is the
+    /// one field a caller reads back off a cached container.
+    fn container_marked(marker: u64) -> Arc<DecodedContainer> {
+        let mut container = empty_container();
+        container.other_sample_records = marker;
+        Arc::new(container)
+    }
+
+    /// **The hit the whole change is for**: the second reader asks for the container the first
+    /// one has just decoded, and gets it rather than decoding it again.
+    #[test]
+    fn a_container_one_reader_decoded_is_served_to_the_next() {
+        let mut cache = DecodedContainerCache::new();
+        cache.store(4_096, &container_marked(7));
+
+        let served = cache
+            .take(4_096)
+            .expect("the container just stored is held");
+
+        assert_eq!(served.other_sample_records(), 7);
+        assert!(
+            cache.take(8_192).is_none(),
+            "a container nothing stored cannot be served",
+        );
+    }
+
+    /// **Two slots, so the two readers' containers both survive while their regions
+    /// interleave.** A one-slot cache would give up the first reader's container the moment the
+    /// second decoded its own, and every hit would be lost exactly when the readers are apart.
+    #[test]
+    fn both_readers_containers_are_held_at_once_and_the_third_gives_up_the_oldest() {
+        let mut cache = DecodedContainerCache::new();
+        cache.store(1, &container_marked(11));
+        cache.store(2, &container_marked(22));
+
+        assert_eq!(
+            cache.take(1).expect("still held").other_sample_records(),
+            11
+        );
+        assert_eq!(
+            cache.take(2).expect("still held").other_sample_records(),
+            22
+        );
+
+        // Taking 1 and then 2 above made 1 the least recently taken, so it is the one given up.
+        cache.store(3, &container_marked(33));
+        assert!(cache.take(1).is_none(), "the oldest slot was given up");
+        assert_eq!(
+            cache.take(2).expect("still held").other_sample_records(),
+            22
+        );
+        assert_eq!(
+            cache.take(3).expect("still held").other_sample_records(),
+            33
+        );
+    }
+
+    /// **Storing a container twice must not put it in both slots**, which would halve the cache
+    /// and lose the other reader's container. Nothing does it today — one reader decodes a
+    /// container and stores it before the other looks — but the lock is deliberately not held
+    /// across a decode, so two readers on two threads may both decode one container and both
+    /// store it.
+    #[test]
+    fn storing_one_container_twice_still_leaves_room_for_the_other() {
+        let mut cache = DecodedContainerCache::new();
+        cache.store(1, &container_marked(11));
+        cache.store(1, &container_marked(11));
+        cache.store(2, &container_marked(22));
+
+        assert_eq!(
+            cache.take(1).expect("still held").other_sample_records(),
+            11
+        );
+        assert_eq!(
+            cache.take(2).expect("still held").other_sample_records(),
+            22
         );
     }
 }

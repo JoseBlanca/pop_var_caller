@@ -4,14 +4,14 @@
 use std::fs::File;
 use std::io;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use noodles_cram as cram;
 use noodles_sam as sam;
 
 use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
 use crate::ng::read::input::aligned_reads_reader::container::{
-    DecodedContainer, decode_container_at,
+    DecodedContainer, DecodedContainerCache, container_at,
 };
 use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::ref_seq::RawRefSeq;
@@ -97,12 +97,19 @@ pub(crate) struct CramAlignedReadsReader {
     /// The next `.crai` entry to decode. Set by [`begin_region`](Self::begin_region) and
     /// advanced by reading; never reset by reading, so a walk carries on to the contig's end.
     next_entry: usize,
+    /// The decoded containers **this open file's readers share** — see
+    /// [`DecodedContainerCache`], which carries the count that made it worth having.
+    ///
+    /// It is the open file's rather than this reader's, which is the whole of the change: two
+    /// readers walking one file's interleaved regions take a container from here instead of
+    /// each inflating it.
+    cache: Arc<Mutex<DecodedContainerCache>>,
     /// The container being served, and how far into it we have got.
     ///
-    /// **One container, and it is not a cache.** It is what is currently being read: a
-    /// container is decoded, drained, and dropped when the next one is decoded. What survives
-    /// between regions is the cursor's *reads*, one layer up (spec §5).
-    container: Option<DecodedContainer>,
+    /// **One container, and this reader does not own it.** It is what is currently being read:
+    /// a container is taken from the shared cache, drained, and let go when the next is taken.
+    /// What survives between regions is the cursor's *reads*, one layer up (spec §5).
+    container: Option<Arc<DecodedContainer>>,
     served: usize,
     /// The offset last decoded, so a container that appears under several `.crai` entries — one
     /// per slice — is decoded once rather than served twice.
@@ -137,6 +144,7 @@ impl CramAlignedReadsReader {
         entries: Arc<[cram::crai::Record]>,
         resolution: ReadGroupResolution,
         path: Arc<Path>,
+        cache: Arc<Mutex<DecodedContainerCache>>,
     ) -> Self {
         Self {
             reader,
@@ -145,6 +153,7 @@ impl CramAlignedReadsReader {
             entries,
             resolution,
             path,
+            cache,
             next_entry: 0,
             container: None,
             served: 0,
@@ -221,7 +230,8 @@ impl CramAlignedReadsReader {
         }
     }
 
-    /// Decode the next container of this contig. `Ok(false)` once the entries run out.
+    /// Take the next container of this contig — from the shared cache, or by decoding it.
+    /// `Ok(false)` once the entries run out.
     ///
     /// **No region is consulted.** Which containers hold records worth having is the caller's
     /// question, asked above; this walks the contig's entries in order until they are spent.
@@ -250,7 +260,8 @@ impl CramAlignedReadsReader {
             }
             self.last_decoded_offset = Some(offset);
 
-            let Some(container) = decode_container_at(
+            let Some(container) = container_at(
+                &self.cache,
                 &mut self.reader,
                 &self.header,
                 &self.resolution,
@@ -261,6 +272,10 @@ impl CramAlignedReadsReader {
                 // End of stream reached through the index — nothing further.
                 return Ok(false);
             };
+            // **Charged here, so a container the cache served counts exactly as a container
+            // this reader decoded.** The tally is per reader and container-granular (see the
+            // field): a reader that skipped the charge because the other one had already
+            // decoded the container would silently report half the foreign records it met.
             self.other_sample_records += container.other_sample_records();
             let has_records = container.len() > 0;
             self.container = Some(container);
