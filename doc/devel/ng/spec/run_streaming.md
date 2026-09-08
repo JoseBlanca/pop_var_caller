@@ -1250,28 +1250,53 @@ measured yet (§11, questions 2 and 7).
    | when the question was written | 20% | 9% | **29%** | 1.41× |
    | with the two CRAM readers sharing their decoded containers | 12.0% | 7.7% | **19.7%** | 1.25× |
    | and with the review's four smaller changes | 11.0% | 6.1% | **17.1%** | 1.21× |
+   | and with the psp compression on its own thread | 11.9% | 6.6% | **18.5%** | 1.23× |
 
-   Every one of those samples was taken the same way — macOS `sample`, 30 s into a 10 Mb walk of
-   the whole-genome tomato CRAM, `RAYON_NUM_THREADS=1`, parked threads excluded. The two changes
+   Every one of those samples was taken the same way — macOS `sample`, 25–30 s into a 10 Mb walk
+   of the whole-genome tomato CRAM, `RAYON_NUM_THREADS=1`, parked and waiting threads excluded so
+   the denominator is the walking thread alone. **The last row goes back up because the walking
+   thread got smaller, not because the decode got bigger**: the decode's own samples are flat at
+   about 2,460 while the thread it sits on fell from 22,480 to 20,643. The two changes
    that moved it are in
    [the implementation report](../../reports/implementations/ng_generate_psps_decode_sharing_2026-09-08.md),
    which also carries the run's own cost: 57.03 s to 47.20 s over 10 Mb, and 264.6 MB to 245.7 MB
    peak resident.
 
-   **1.21× is the ceiling and not the gain.** A bounded queue never hides a stage completely, and
+   **1.23× is the ceiling and not the gain.** A bounded queue never hides a stage completely, and
    the design adds a copy of every prepared read through a channel — the same review's
    compression offload, which is the one stage-offload anyone has actually built here, bought its
    wall at the cost of 1.1% more user time for exactly that reason.
 
    So the pipeline split now costs **two prefetch threads, two bounded queues and a prefetcher
    that has to be stoppable and rewindable** — two, because the two locus generators hold
-   separate cursors whose regions interleave — for at most 1.21× on one sample and nothing at
+   separate cursors whose regions interleave — for at most 1.23× on one sample and nothing at
    all on a cohort run as one invocation a sample, where the machine is already saturated.
    Question 3's split emulated as concurrent processes over disjoint BEDs — an upper bound,
    since processes share nothing — reached **2.97× at four ways and 3.88× at eight** on this
    same 10 Mb fixture, needs the same `--threads` knob, and gives each worker its own cursors,
-   which decode on their own threads anyway. **The 1.21× is largely inside the 2.97×.** Build
+   which decode on their own threads anyway. **The 1.23× is largely inside the 2.97×.** Build
    the pipeline split only if question 3's is rejected on memory.
+
+   **What question 3's split is capped by, and what was done about it (2026-09-08).** Its k
+   workers feed one serial merger that owns the psp writer and the census — one writer, because
+   the block cut follows the coordinate grid rather than the workers (§12.1), and one census,
+   because it is order-sensitive and 1% of the thread. So *writing* is that design's serial
+   floor, and Amdahl's arithmetic on it is the ceiling nobody had computed:
+
+   | the writer's share of the walking thread | 4 workers | 8 workers | however many |
+   |---|---:|---:|---:|
+   | 14.2% — compressing 7.3%, encoding 5.9%, census 1.0% | 2.8× | 4.0× | 7.0× |
+   | **7.4% — encoding 6.4%, census 1.1%**, compression moved to its own thread | **3.3×** | **5.3×** | **13.5×** |
+
+   The second row is the tree as it stands: `PspWriter` hands each closed block to a
+   compressing thread and writes the compressed blocks back in order, which cost 7.3% of the
+   walking thread and bought 7.1% of the 10 Mb wall on its own
+   ([the implementation report](../../reports/implementations/ng_generate_psps_decode_sharing_2026-09-08.md)).
+   **That roughly doubles what splitting the walk is worth**, and it is why it was done first.
+   What is left on the serial thread is encoding records into block payloads, which is
+   order-dependent *within* a block and independent *between* blocks — so if 3.3× at four
+   workers turns out not to be enough, building a whole block off-thread is the next place to
+   look, and it is an encoding question rather than a scheduling one.
 
    **Settled by:** question 3's sweep. The second candidate is answered above and needs no
    further measurement unless question 3 is refused.

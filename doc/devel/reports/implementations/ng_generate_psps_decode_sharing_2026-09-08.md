@@ -1,13 +1,18 @@
-# `generate-psps` reads each CRAM container once instead of twice
+# `generate-psps`: each CRAM container read once, and the psp compressed off the walking thread
 
 **Date:** 2026-09-08
-**Branch:** `main`, commits `a2a77780` and `aa598441` on `8203d218`
+**Branch:** `main`, commits `a2a77780`, `aa598441` and `c9018a70` on `8203d218`
 **Acting on:** the BAM/CRAM → psp performance review of 2026-09-08
 
 **One tomato accession over 10 Mb of `SL4.0ch01`, out of a 49 GB whole-genome CRAM, now takes
-47.20 s and 245.7 MB where it took 57.03 s and 264.6 MB** — 1.21× the throughput for 19 MB less
-resident memory, with the psp and the census byte-identical outside their own timestamp. Most of
-it is one change: the walk's two readers were decoding every container of the file separately.
+43.99 s and 249.0 MB where it took 57.03 s and 264.6 MB** — 1.30× the throughput for 16 MB less
+resident memory, with the psp and the census byte-identical outside their own timestamp. Two
+changes carry it: the walk's two readers were decoding every container of the file separately,
+and the walk was compressing every psp block itself.
+
+**The fixture is a 103.5× sample**, measured with `samtools coverage` on 100 kb at
+SL4.0ch01:1.0–1.1 Mb — the high end of the depth range this caller commits to, not the tomato
+cohort's 3×. Every share quoted below is a fact about that corner.
 
 The command:
 
@@ -104,8 +109,9 @@ The baseline's own instruction spread over four runs is 12.8 M on 309 G — one 
 the container-sharing effect is 1,800 times the noise.
 
 **And with the rayon pool left alone, which is how the command actually runs**, three interleaved
-pairs at 10 Mb: **57.03 s → 47.20 s** and **264.6 MB → 245.7 MB**. The pinned figures above are
-what the arms are *compared* on; these are what the command costs.
+pairs at 10 Mb: **57.03 s → 47.20 s** and **264.6 MB → 245.7 MB** for these two commits, and
+**43.99 s and 249.0 MB** with §6a's compression offload on top. The pinned figures above are what
+the arms are *compared* on; these are what the command costs.
 
 The 10 Mb peak rises 7 MB between the second and third columns where the 2 Mb peak falls 5 MB.
 Both are mimalloc holding different segments for a different allocation mix, both reproduce across
@@ -188,6 +194,91 @@ granularity instead of 3.6 MB and would leave the record decoding doubled anyway
 serving both cursors, which is the arrangement `walker.rs` declines for a reason. Recorded here so
 it is not re-derived.
 
+## 6a. Compressing the psp's blocks on a thread of their own
+
+`push` closed a block, decoded its head, compressed it at zstd level 9 and wrote it, all inline —
+and **nothing downstream of a block waits for its compressed bytes**. No record after it depends
+on them, and its index entry is not built until the write returns. The only thing tying
+compression to the walk is the *order* blocks reach the file in, which one compressing thread with
+FIFO queues keeps by construction; and `BlockCompressor::compress` is a pure function of one
+payload, so which thread ran it cannot be read out of the file.
+
+**Measured on wall, not on retired instructions, and that is the point.** The change moves work
+rather than removing it, so the instruction counter — which counts the whole process — cannot see
+it. Instructions move +0.02% and user time +0.2%, which is the copy the offload adds; wall is what
+it buys.
+
+| | | before | after |
+|---|---|---:|---:|
+| **2 Mb**, 5 pairs, pinned | wall | 12.57 s | **11.92 s** (−5.2%, won 5/5 by 0.65–0.73 s) |
+| | instructions | 276,719 G | 276,748 G (+0.01%) |
+| | user | 12.31 s | 12.34 s (+0.24%) |
+| | peak resident | 190.92 MB | 206.06 MB (+15.1 MB) |
+| **10 Mb**, 3 pairs, pinned | wall | 48.10 s | **44.67 s** (−7.1%, won 3/3 by 3.20–3.43 s) |
+| | peak resident | 241.12 MB | 235.47 MB (−5.6 MB) |
+| **10 Mb**, 3 pairs, pool left alone | wall | 47.44 s | **43.99 s** (−7.3%, won 3/3 by 2.84–3.45 s) |
+| | peak resident | 245.7 MB | 249.0 MB (+3.3 MB) |
+
+**The memory cost is small and does not keep a sign**: +15 MB at 2 Mb and within a few megabytes
+either way at 10 Mb. It is two block payloads in flight, and a payload grows with read depth —
+which this fixture already exercises near the top of the range at 103.5×.
+
+**A profile says directly that the compression left the walking thread.** Taken 6 s into a 10 Mb
+walk: **47 ZSTD frames on the `psp-block-compression` thread and none on the main one**, where
+before they were 1,631 of that thread's 22,480 busy samples. The walking thread parks zero times,
+so it never waits on the compressor.
+
+### No knob, which is a change from what the review recommended
+
+It proposed one because a cohort is parallelised by running invocations and a saturated machine
+cannot use the extra thread. Measured rather than assumed — **eight concurrent invocations over
+disjoint 2 Mb windows, four pairs**:
+
+| | wall for the whole set | sum of the eight peaks |
+|---|---|---:|
+| before | 15.65, 16.71, 15.82, 16.30 s | 1,701 MB |
+| after | 16.19, 16.07, 15.50, 16.74 s | 1,796 MB |
+
+**The two arms cannot be separated on wall** — the variant is ahead in two pairs of four, and each
+arm's own spread is seven times the difference of the medians. What it costs on a saturated
+machine is memory, and it is **about +12 MB a sample on a 240 MB footprint**. A flag, its
+documentation and a second code path are not worth 5% of one sample's memory when the wall is
+unchanged; the thread is blocked on a channel rather than spinning, and it is created and joined
+per psp, so a cohort walked in one process accumulates none.
+
+### Why it went before splitting the walk
+
+Under a walk split across workers (§11 question 3) the workers feed **one serial merger that owns
+the psp writer and the census** — one writer, because the block cut follows the coordinate grid
+rather than the workers, which is exactly what
+`one_sample_gathered_at_any_worker_count_gives_byte_identical_files` guarantees. So writing is that
+design's serial floor:
+
+| the writer's share of the walking thread | 4 workers | 8 workers | however many |
+|---|---:|---:|---:|
+| 14.2% — compressing 7.3%, encoding 5.9%, census 1.0% | 2.8× | 4.0× | 7.0× |
+| **7.4% — encoding 6.4%, census 1.1%** | **3.3×** | **5.3×** | **13.5×** |
+
+**This roughly doubles what splitting the walk is worth**, which is the reason it went first
+rather than sitting with the other small wins. What is left on that thread is encoding records
+into block payloads — order-dependent *within* a block and independent *between* blocks — so if
+3.3× at four workers is not enough, building a whole block off-thread is the next place to look,
+and it is an encoding question rather than a scheduling one.
+
+### Two invariants, and one behaviour that changed
+
+The result channel is **unbounded**, or the two sides can wait on each other; and the line is
+**joined on drop**, so no thread outlives its psp.
+`writers_abandoned_with_blocks_in_flight_neither_hang_nor_pile_up` covers the path nothing else
+reached — the existing drop tests push one record, so no block is ever in flight — by abandoning
+twenty writers in turn, each with ten blocks closed, in one process. Mutation-verified: a drop that
+joins without first closing the channel hangs it, and 90 seconds was not enough for it to finish.
+
+**A compression or write failure is now raised a few records after the record that caused it**,
+because handing a block over is not writing it. Nothing a reader can see changes — the file stops
+in the same place and `finish` still refuses to seal it — and the line hands back the sentence
+`spent` records, so the message still says which of the two things went wrong.
+
 ## 7. What was measured and stopped
 
 **The second candidate under §11 question 8 — a prefetcher moving the decode and the read
@@ -200,11 +291,14 @@ preparation, so 29% and about 1.4×. Re-measured the same way after each change:
 | before | 20% | 9% | **29%** | 1.41× |
 | with the containers shared | 12.0% | 7.7% | **19.7%** | 1.25× |
 | and with the four smaller changes | 11.0% | 6.1% | **17.1%** | 1.21× |
+| and with the psp compression on its own thread | 11.9% | 6.6% | **18.5%** | 1.23× |
 
-macOS `sample`, 30 s into a 10 Mb walk, `RAYON_NUM_THREADS=1`, parked threads excluded from the
-busy count.
+macOS `sample`, 25–30 s into a 10 Mb walk, `RAYON_NUM_THREADS=1`, parked and waiting threads
+excluded so the denominator is the walking thread alone. **The last row goes back up because the
+walking thread got smaller, not because the decode got bigger**: the decode's own samples are flat
+at about 2,460 while the thread it sits on fell from 22,480 to 20,643.
 
-**1.21× is the ceiling and not the gain**: a bounded queue never hides a stage completely, and the
+**1.23× is the ceiling and not the gain**: a bounded queue never hides a stage completely, and the
 design adds a copy of every prepared read through a channel — the same review's compression
 offload, the one stage-offload anyone here has actually built, bought its wall at the cost of 1.1%
 more user time for exactly that reason.
@@ -217,7 +311,7 @@ machine is already saturated, so it needs a knob as well.
 **Question 3's split of the walk across segments is the axis worth building instead.** Emulated as
 concurrent processes over disjoint BEDs — an upper bound, since processes share nothing — it
 reached 2.97× at four ways and 3.88× at eight on this same 10 Mb fixture. It needs the same knob,
-and a sharded worker holds its own cursors and decodes on its own thread anyway, so **the 1.21× is
+and a sharded worker holds its own cursors and decodes on its own thread anyway, so **the 1.23× is
 largely inside the 2.97×**. §11 question 8 now says so.
 
 ## 8. How it was checked
@@ -231,11 +325,14 @@ largely inside the 2.97×**. §11 question 8 now says so.
   here sits on it.
 - **`examples/ng_cram_decode_layers`**, which hashes every field of every decoded record, still
   gives `c0bdbb0e464a920b966ad487fc3ca678` over 60 containers and 600,000 records.
-- **`cargo test --lib`: 6,657 passing**, five of them new. noodles-cram's own 223 and 75 pass.
+- **`cargo test --lib`: 6,658 passing**, six of them new. noodles-cram's own 223 and 75 pass.
   `diff -r` against the registry copy prints exactly FORK.md's list.
 - **Mutation-verified.** A `take` that ignores the offset fails
   `two_cram_cursors_over_one_file_each_see_every_read`; one cache slot instead of two fails the
-  policy test; the unclamped slice start fails the mismatch-loop comparison.
+  policy test; the unclamped slice start fails the mismatch-loop comparison; and a drop that
+  joins the compressing thread without first closing its channel hangs
+  `writers_abandoned_with_blocks_in_flight_neither_hang_nor_pile_up`.
+- **The CRAM decode was not re-run for §6a**, which touches only the psp writer.
 
 `cargo test` on its own still fails for three examples that have not compiled since before this
 work and one integration test that fails on `main` and did before — neither touched here.
