@@ -149,7 +149,30 @@ pub(super) struct FastColumnScratch {
     chains: Vec<ChainId>,
     observations: Vec<PlainObservation>,
     ref_base: Vec<u8>,
+    /// Which observation each contributing read landed in, indexed by that read's `read_id`
+    /// less the smallest `read_id` contributing to this column — see
+    /// [`OBSERVATION_OF_NO_CONTRIBUTOR`] and the chain-ordered pass that reads it.
+    observation_of_read: Vec<u16>,
 }
+
+/// The entry [`FastColumnScratch::observation_of_read`] holds for a `read_id` that
+/// contributed nothing to this column — a read masked to `N` here, or one inside a deleted
+/// run, or simply an id no live read carries.
+///
+/// It doubles as the bound on how many observations a slot can name: the table is used only
+/// where the live set is smaller than this, so no real observation index can reach it.
+const OBSERVATION_OF_NO_CONTRIBUTOR: u16 = u16::MAX;
+
+/// How far apart the smallest and largest contributing `read_id` may be before the column
+/// gives up on the dense table above and sorts its chain ids the way the general path does.
+///
+/// **It is a guard and not a tuning knob.** Reads are admitted in ascending `read_id` and
+/// leave in very nearly the same order, so the live set's ids are all but contiguous: on 10
+/// Mb of tomato chromosome 1 at 103.5× the span never reached twice the column's depth. What
+/// this bounds is the pathological set — one read held open across a long stretch while
+/// thousands are admitted past it — where a dense table indexed by id offset would be a
+/// megabyte of memset per column.
+const MAX_READ_ID_SPAN: u32 = 4_096;
 
 /// What [`try_ordinary_column`] decided.
 #[derive(Debug)]
@@ -362,6 +385,26 @@ pub(super) fn try_ordinary_column(
         .expect("one base was fetched and the fetch succeeded");
 
     scratch.observations.clear();
+    // **The dense table the chain-ordered pass below reads.** One slot per `read_id` between
+    // the smallest and largest contributing to this column, which is the column's depth plus
+    // whatever ids expired inside it.
+    //
+    // PANIC-FREE: `scratch.reads` was found non-empty above and is ascending by `read_id`.
+    let first_read_id = scratch.reads.first().expect("checked non-empty").read_id;
+    let last_read_id = scratch.reads.last().expect("checked non-empty").read_id;
+    let read_id_span = last_read_id - first_read_id + 1;
+    // The second condition is what makes the `u16` slot below exact rather than lossy: a
+    // column has at most one observation per contributor, and at most one contributor per
+    // live read, so a set smaller than the sentinel cannot name a slot the sentinel collides
+    // with. The walk's own admission ceiling is far below it — 32,768 — so this never binds.
+    let dense = read_id_span <= MAX_READ_ID_SPAN
+        && active_reads.len() < OBSERVATION_OF_NO_CONTRIBUTOR as usize;
+    if dense {
+        scratch.observation_of_read.clear();
+        scratch
+            .observation_of_read
+            .resize(read_id_span as usize, OBSERVATION_OF_NO_CONTRIBUTOR);
+    }
     // **Measurement scaffolding, hoisted out of the loop** — this lane emits observations
     // without ever building an open record, so a census hooked only into `finalise` would
     // miss every read that came through here. See
@@ -408,7 +451,57 @@ pub(super) fn try_ordinary_column(
         observation.placed_left += u32::from(read.placed_left);
         observation.mapq_sum += mapq;
         observation.mapq_sum_sq += u64::from(mapq) * u64::from(mapq);
-        observation.chain_ids.push(read.chain_id);
+        if dense {
+            // PANIC-FREE: `read_id` is between the first and last of an ascending buffer, and
+            // the table was resized to that span.
+            // PANIC-FREE: `at` indexes a list with one entry per contributor at most, and
+            // `dense` is false unless the live set is smaller than the sentinel.
+            scratch.observation_of_read[(read.read_id - first_read_id) as usize] =
+                u16::try_from(at).expect("fewer observations than the sentinel");
+        } else {
+            observation.chain_ids.push(read.chain_id);
+        }
+    }
+
+    // **The chain ids, in ascending order, without ordering them.** They have to come out
+    // ascending — the general path reaches that by sorting each observation's list once the
+    // reads are folded, and this lane did the same until the active set began keeping the
+    // order (`ActiveReads::chain_order`). Walking that order and pushing as we go leaves each
+    // observation's list ascending by construction, because a subsequence of an ascending
+    // sequence is ascending.
+    //
+    // **No `dedup`, and it is not an omission.** Two entries of one observation could only
+    // repeat a chain id if two contributors shared one, which is a mate overlap — and this
+    // lane refuses those columns outright, exactly so that it never has to reconcile a pair.
+    // The `debug_assert` states it.
+    //
+    // The fallback arm is the old shape and is reached only when the live read ids are spread
+    // wider than `MAX_READ_ID_SPAN`.
+    if dense {
+        for &(chain_id, read_id) in active_reads.chain_order() {
+            let Some(offset) = read_id.checked_sub(first_read_id) else {
+                continue;
+            };
+            let Some(&at) = scratch.observation_of_read.get(offset as usize) else {
+                continue;
+            };
+            if at != OBSERVATION_OF_NO_CONTRIBUTOR {
+                scratch.observations[at as usize].chain_ids.push(chain_id);
+            }
+        }
+        debug_assert!(
+            scratch
+                .observations
+                .iter()
+                .all(|o| o.chain_ids.windows(2).all(|w| w[0] < w[1])),
+            "the chain-ordered pass left an observation's chain ids unordered or repeated at \
+             {walker_pos}",
+        );
+    } else {
+        for o in &mut scratch.observations {
+            o.chain_ids.sort_unstable();
+            o.chain_ids.dedup();
+        }
     }
 
     // `finalise` sorts on `(bases, read_witness, read_group)`; one byte of bases and one
@@ -421,8 +514,6 @@ pub(super) fn try_ordinary_column(
         .observations
         .iter_mut()
         .map(|o| {
-            o.chain_ids.sort_unstable();
-            o.chain_ids.dedup();
             SequenceObservation {
                 bases: vec![o.base].into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
