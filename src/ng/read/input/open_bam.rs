@@ -34,7 +34,8 @@ use crate::bam::index_preflight::{
 use crate::fasta::{ContigEntry, ContigList};
 use crate::ng::read::filtering::ReadFilterConfig;
 use crate::ng::read::input::aligned_reads_reader::{
-    AlignedReadsReader, BamAlignedReadsReader, CramAlignedReadsReader, DecodedContainerCache,
+    AlignedReadsReader, BamAlignedReadsReader, ContainerPrefetcher, CramAlignedReadsReader,
+    SharedContainers, SharedDecode,
 };
 use crate::ng::read::input::cursor::AlignmentCursor;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
@@ -140,14 +141,24 @@ pub struct AlignmentFile {
     /// the sharing needs: a walk gives its two locus generators a cursor each
     /// over one sample, deliberately, and their regions interleave — so both
     /// reach the same container and, before this, both inflated it. See
-    /// [`DecodedContainerCache`] for the counts and for why two slots.
+    /// [`SharedContainers`] for the counts and for why four slots.
     ///
     /// **One cache per open file is one cache per walk.** `SampleReads` is not
     /// `Clone` and opens its own `AlignmentFile` per sample, so nothing shares
     /// this between two samples or between two workers; a walk split across
     /// workers would give each its own, which is what a cache of the container
     /// a reader is on wants.
-    container_cache: Arc<Mutex<DecodedContainerCache>>,
+    container_cache: Arc<SharedContainers>,
+    /// **The thread that decodes this file's containers a little ahead of the
+    /// walk**, started by the first CRAM cursor and shared by every cursor after
+    /// it. `None` for a BAM, and until the first CRAM cursor is minted.
+    ///
+    /// It lives here for the same reason the cache does — it feeds that cache,
+    /// and both readers draw from it — and it is **started from `cursor`
+    /// rather than from `open`** because it needs a reference reader of its own
+    /// and `cursor` is where the factory that mints checked ones is. See
+    /// [`ContainerPrefetcher`].
+    prefetcher: Mutex<Option<Arc<ContainerPrefetcher>>>,
     // **No reference is held here**: `open` asks its question of one and keeps nothing, and a
     // cursor's decode reads bases from a reader it mints itself (see `open`'s check 5).
 }
@@ -313,7 +324,8 @@ impl AlignmentFile {
             sq_md5s,
             filter_config,
             crai_by_contig,
-            container_cache: Arc::new(Mutex::new(DecodedContainerCache::new())),
+            container_cache: Arc::new(SharedContainers::new()),
+            prefetcher: Mutex::new(None),
         }))
     }
 
@@ -540,6 +552,15 @@ impl AlignmentFile {
                     .get(usize::try_from(contig.get()).unwrap_or(usize::MAX))
                     .cloned()
                     .unwrap_or_else(|| Vec::new().into());
+                // **Started here, once, and shared by every cursor after this one.** It needs a
+                // third descriptor and a *third* checked reference reader — both are positions
+                // rather than values, so neither can be shared with a reader that is seeking
+                // somewhere else — and this is the only place a checked one can be minted.
+                let prefetcher = self.prefetcher_started_with(
+                    &mut probe,
+                    &mut mint_a_checked_reference_reader,
+                    &open_error,
+                )?;
                 AlignedReadsReader::Cram(CramAlignedReadsReader::new(
                     reader,
                     Arc::clone(&self.header),
@@ -547,7 +568,10 @@ impl AlignmentFile {
                     entries,
                     self.resolution.clone(),
                     Arc::clone(&self.path),
-                    Arc::clone(&self.container_cache),
+                    SharedDecode {
+                        containers: Arc::clone(&self.container_cache),
+                        prefetcher,
+                    },
                 ))
             }
             _ => {
@@ -566,6 +590,46 @@ impl AlignmentFile {
             self.filter_config,
             Arc::clone(&self.path),
         ))
+    }
+
+    /// This file's container prefetcher, started on first use.
+    ///
+    /// **Started rather than constructed at `open`**, because it needs a reference reader that
+    /// has been through `cursor`'s three checks, and `open` has no factory to mint one from. So
+    /// the first CRAM cursor pays for it and every cursor after shares it.
+    ///
+    /// **A file that cannot start the thread is not a file that cannot be read.** The only
+    /// failure here is opening a third descriptor or minting a reader, and both are refused
+    /// rather than swallowed — a reference reader that would not pass the checks is the fault
+    /// `cursor` exists to catch, and letting the prefetcher quietly run without one would decode
+    /// this file's reads against unchecked bases.
+    fn prefetcher_started_with<R: RawRefSeq + ContigTable + Send + 'static>(
+        &self,
+        probe: &mut Vec<u8>,
+        mint: &mut impl FnMut(&mut Vec<u8>, &'static str) -> Result<R, AlignmentFileError>,
+        open_error: &impl Fn(std::io::Error) -> AlignmentFileError,
+    ) -> Result<Option<Arc<ContainerPrefetcher>>, AlignmentFileError> {
+        let mut held = self
+            .prefetcher
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(prefetcher) = held.as_ref() {
+            return Ok(Some(Arc::clone(prefetcher)));
+        }
+        let mut reader = cram::io::reader::Builder::default()
+            .build_from_path(&self.path)
+            .map_err(open_error)?;
+        reader.read_header().map_err(open_error)?;
+        let reference = mint(probe, "CRAM prefetch's")?;
+        let started = Arc::new(ContainerPrefetcher::start(
+            Arc::clone(&self.container_cache),
+            reader,
+            Arc::clone(&self.header),
+            self.resolution.clone(),
+            Box::new(reference),
+        ));
+        *held = Some(Arc::clone(&started));
+        Ok(Some(started))
     }
 
     /// The `@SQ M5` tags, indexed by `ContigId`, for the deferred assembly
@@ -598,6 +662,7 @@ impl std::fmt::Debug for AlignmentFile {
             filter_config: _,
             crai_by_contig: _,
             container_cache: _,
+            prefetcher: _,
         } = self;
 
         f.debug_struct("AlignmentFile")
@@ -1337,6 +1402,67 @@ mod tests {
                 "the CRAM cursor disagreed with a linear scan at [{start}, {end}] — and it \
                  had already served every region before it",
             );
+        }
+    }
+
+    /// **A CRAM file that is opened and closed must leave no prefetch thread behind, and
+    /// closing it must not hang.**
+    ///
+    /// The first CRAM cursor on a file starts a thread that decodes containers ahead of the
+    /// walk, and that thread is joined when the last handle to it goes. Getting the join wrong
+    /// has two shapes and neither shows up as a failing assertion elsewhere: a join on a thread
+    /// that was never told to stop hangs at the drop, and a detached thread leaks — one per
+    /// sample in a cohort walked in one process, each holding a CRAM descriptor and a reference
+    /// reader.
+    ///
+    /// So this opens and closes ten files in turn, each having read enough to have the thread
+    /// running and a hint outstanding. A hang fails it by timing out; a leak is what the ten are
+    /// for. Every other CRAM test here exercises the prefetcher *while* it runs — it is on by
+    /// default — but none of them closes the file and waits.
+    #[test]
+    fn a_cram_file_that_is_closed_leaves_no_prefetch_thread_behind() {
+        let (_cram_dir, path, _fasta_dir, fasta) =
+            multi_container_cram(CRAM_CURSOR_CONTIG_LENGTH, CRAM_CURSOR_READS);
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
+
+        for _ in 0..10 {
+            let file = AlignmentFile::open(
+                &path,
+                &reference,
+                ReadFilterConfig::default(),
+                false,
+                fixture_read_group(),
+            )
+            .expect("the fixture opens");
+            let mut cursor = file
+                .cursor(ContigId(0), || cram_cursor_reference_bases(&fasta))
+                .expect("a cursor for contig 0");
+            cursor
+                .move_to_region(GenomeRegion {
+                    contig: ContigId(0),
+                    start: Position(1),
+                    end: Position(20_000),
+                })
+                .expect("on this chromosome");
+            // Enough reads to have decoded a container and hinted the next one, so the thread is
+            // awake and has work outstanding when the file goes.
+            let mut seen = 0;
+            while let Some(read) = cursor.next_read() {
+                read.expect("the fixture reads decode and filter");
+                seen += 1;
+                if seen == 5 {
+                    break;
+                }
+            }
+            assert!(seen > 0, "the fixture has reads in the first region");
+            drop(cursor);
+            drop(file);
         }
     }
 

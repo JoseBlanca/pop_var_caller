@@ -335,7 +335,8 @@ impl DecodedContainer {
 }
 
 /// The decoded containers **one open CRAM's readers share**, so that a container two of them
-/// walk over is inflated, decoded and matched against the reference once rather than twice.
+/// walk over — or one a prefetcher decoded ahead of both — is inflated, decoded and matched
+/// against the reference once rather than twice.
 ///
 /// # Why an open file has two readers at all
 ///
@@ -343,37 +344,60 @@ impl DecodedContainer {
 /// one — and each holds its own [`SampleCursor`](crate::ng::read::input::sample_cursor::SampleCursor),
 /// hence its own [`CramAlignedReadsReader`](super::cram::CramAlignedReadsReader), on purpose:
 /// their regions interleave, and one cursor between them would tie their lifetimes together
-/// (`walker.rs`'s `generic_path_generators`). Interleaving is exactly the case where both
-/// reach the same container, so before this cache **every container of the file was decoded
-/// twice**: 498 decodes of 249 distinct containers over 2 Mb of tomato chromosome 1, and 2,534
-/// of 1,267 over 10 Mb, with no container decoded twice by either reader on its own.
+/// (`walker.rs`'s `generic_path_generators`). Interleaving is exactly the case where both reach
+/// the same container, so before this cache **every container of the file was decoded twice**:
+/// 498 decodes of 249 distinct containers over 2 Mb of tomato chromosome 1, and 2,534 of 1,267
+/// over 10 Mb, with no container decoded twice by either reader on its own.
 ///
-/// # Two slots, and the number is measured rather than chosen
+/// # Four slots: two the readers hold, and two the prefetcher runs ahead into
 ///
-/// Of the 249 repeats over 2 Mb, 245 were the very next decode and all 249 fell within two;
-/// over 10 Mb, 1,246 of 1,267 fell within two and the worst gap on either was four. So two
-/// slots catch 98% of the repeats, and they hold **what the two readers were holding anyway** —
-/// one decoded container each. Four slots would catch the rest for about 7 MB more per open
-/// file; the cheap option is also the one that costs no memory.
+/// Two slots is what the sharing alone needs, and that count was measured: of the 249 repeats
+/// over 2 Mb, 245 were the very next decode and all 249 fell within two; over 10 Mb, 1,246 of
+/// 1,267 fell within two and the worst gap on either was four. Those two hold what the two
+/// readers were holding anyway, so the sharing cost no memory.
 ///
-/// # The lock, and why it is not held across a decode
+/// The prefetcher needs room *beyond* that, or the container it decodes ahead gives up one a
+/// reader is about to want and running ahead makes things worse rather than better. Four slots
+/// is two held and two ahead, at about 3.6 MB each on this file.
 ///
-/// The cache sits on the open file, which is shared behind an `Arc` and whose cursors are
-/// minted from several threads
-/// (`cursors_on_one_file_read_the_same_thing_from_many_threads`), so it has to be `Sync`: a
-/// `RefCell` cannot go here whatever the walk currently does on one thread. The lock is taken
-/// twice per container — once to look, once to store — and never across the decode itself, so
-/// two readers that ever did run at once would at worst both decode a container rather than
-/// wait on each other.
+/// # One decode per container even when two threads want it at once, which is the part that has
+/// to be right
+///
+/// A prefetcher makes real a race that was only theoretical before: the walk can reach a
+/// container while the prefetch thread is still decoding it. Left alone both would decode it —
+/// the doubling this cache exists to remove, arriving by a new route, and worst exactly when the
+/// prefetcher is behind.
+///
+/// So a slot is claimed before its decode starts and the claim is visible to everyone.
+/// [`Slot::Decoding`] says *someone is on it*, and a second thread waits on the condition
+/// variable instead of starting its own. A decode that fails clears its claim and wakes the
+/// waiters, who try it themselves and meet the same failure with their own error — no waiter is
+/// left holding a promise nobody will keep.
 pub(crate) struct DecodedContainerCache {
-    /// The containers held, least recently taken first, never more than [`CACHE_SLOTS`] of
-    /// them. Keyed by the container's offset in the file, which is what a `.crai` entry names.
-    held: Vec<(u64, Arc<DecodedContainer>)>,
+    /// The slots, least recently used first, keyed by the container's offset in the file, which
+    /// is what a `.crai` entry names.
+    held: Vec<(u64, Slot)>,
 }
 
-/// How many decoded containers one open file's readers keep between them — see
-/// [`DecodedContainerCache`] for the measurement behind the number.
-const CACHE_SLOTS: usize = 2;
+/// What is known about one container offset.
+enum Slot {
+    /// A thread has claimed this offset and is decoding it. Nobody else may start.
+    Decoding,
+    /// Decoded, and here it is.
+    Ready(Arc<DecodedContainer>),
+}
+
+/// How many decoded containers one open file keeps — see [`DecodedContainerCache`].
+const CACHE_SLOTS: usize = 4;
+
+/// What a caller asking for a container is told to do.
+enum Claim {
+    /// It is here.
+    Ready(Arc<DecodedContainer>),
+    /// Nobody held it or was decoding it, so the caller now owns the claim and must report the
+    /// end of its decode however that turns out.
+    YoursToDecode,
+}
 
 impl DecodedContainerCache {
     pub(crate) fn new() -> Self {
@@ -382,63 +406,145 @@ impl DecodedContainerCache {
         }
     }
 
-    /// The container decoded at `offset`, if it is still held — and it becomes the most
-    /// recently taken, so the slot given up next is the one neither reader has asked for.
-    fn take(&mut self, offset: u64) -> Option<Arc<DecodedContainer>> {
-        let at = self.held.iter().position(|(held, _)| *held == offset)?;
-        let entry = self.held.remove(at);
-        let container = Arc::clone(&entry.1);
-        self.held.push(entry);
-        Some(container)
+    /// Look for `offset`, claiming it for the caller if nobody holds it or is decoding it, and
+    /// `None` if someone is — in which case the caller waits rather than starting a second
+    /// decode of the same bytes.
+    ///
+    /// A hit becomes the most recently used, so the slot given up next is the one no reader has
+    /// asked for.
+    fn claim(&mut self, offset: u64) -> Option<Claim> {
+        match self.held.iter().position(|(held, _)| *held == offset) {
+            Some(at) => match &self.held[at].1 {
+                Slot::Ready(container) => {
+                    let container = Arc::clone(container);
+                    let entry = self.held.remove(at);
+                    self.held.push(entry);
+                    Some(Claim::Ready(container))
+                }
+                Slot::Decoding => None,
+            },
+            None => {
+                self.make_room();
+                self.held.push((offset, Slot::Decoding));
+                Some(Claim::YoursToDecode)
+            }
+        }
     }
 
-    /// Hold `container`, giving up the least recently taken one if the slots are full.
-    fn store(&mut self, offset: u64, container: &Arc<DecodedContainer>) {
-        // A re-store of something already held would otherwise put the same container in two
-        // slots and halve the cache. It happens whenever two readers decode one container at
-        // once, which nothing does today and which the short lock above permits.
+    /// Report the end of a decode this caller claimed: `Some` on success, `None` on a failure or
+    /// on end of stream. Either way the claim is released.
+    fn finished(&mut self, offset: u64, container: Option<&Arc<DecodedContainer>>) {
         self.held.retain(|(held, _)| *held != offset);
-        if self.held.len() == CACHE_SLOTS {
-            self.held.remove(0);
+        if let Some(container) = container {
+            self.make_room();
+            self.held.push((offset, Slot::Ready(Arc::clone(container))));
         }
-        self.held.push((offset, Arc::clone(container)));
+    }
+
+    /// Give up the least recently used **ready** slots until there is room for one more.
+    ///
+    /// A slot being decoded is never given up: a thread is on it and a waiter may be promised
+    /// it, and dropping it would turn that promise into a second decode. So while decodes are in
+    /// flight the cache can hold more than [`CACHE_SLOTS`], bounded by how many threads can be
+    /// decoding at once — two readers and one prefetcher.
+    fn make_room(&mut self) {
+        while self.held.len() >= CACHE_SLOTS {
+            let Some(oldest) = self
+                .held
+                .iter()
+                .position(|(_, slot)| matches!(slot, Slot::Ready(_)))
+            else {
+                return;
+            };
+            self.held.remove(oldest);
+        }
     }
 }
 
-/// The container at `offset`: the shared cache's, if it is still there, and a fresh decode if
-/// not.
+/// The cache, and the condition variable that says a claim has been settled.
+///
+/// One per open file, shared by its two readers and its prefetcher. The condition variable is
+/// what lets a thread wait for a container another thread is already decoding instead of
+/// decoding it a second time.
+pub(crate) struct SharedContainers {
+    cache: Mutex<DecodedContainerCache>,
+    settled: std::sync::Condvar,
+}
+
+impl SharedContainers {
+    pub(crate) fn new() -> Self {
+        Self {
+            cache: Mutex::new(DecodedContainerCache::new()),
+            settled: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Whether `offset` is already decoded or already being decoded — asked by the prefetcher,
+    /// which has nothing to do when the answer is yes.
+    pub(crate) fn is_spoken_for(&self, offset: u64) -> bool {
+        self.lock().held.iter().any(|(held, _)| *held == offset)
+    }
+
+    /// **A poisoned lock is recovered from rather than propagated.** What it holds is decoded
+    /// containers and claims — no invariant a panicking thread could have left half-written — so
+    /// the worst it can mean is a stale claim, whose waiters are woken by the next settled claim
+    /// on any offset.
+    fn lock(&self) -> std::sync::MutexGuard<'_, DecodedContainerCache> {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// The container at `offset`: the shared cache's if it is there, the one another thread is
+/// decoding if there is one, and a fresh decode otherwise.
 ///
 /// `Ok(None)` at end of stream (`read_container` reads 0 — the EOF marker); nothing is stored
-/// for it, so a reader that ran off the end does not evict a container another reader wants.
+/// for it, so a reader that ran off the end does not give up a container another reader wants.
 pub(crate) fn container_at(
-    cache: &Mutex<DecodedContainerCache>,
+    shared: &SharedContainers,
     reader: &mut cram::io::Reader<File>,
     header: &sam::Header,
     resolution: &ReadGroupResolution,
     offset: u64,
     reference: &dyn RawRefSeq,
 ) -> io::Result<Option<Arc<DecodedContainer>>> {
-    if let Some(held) = lock_cache(cache).take(offset) {
-        return Ok(Some(held));
-    }
-    let Some(decoded) = decode_container_at(reader, header, resolution, offset, reference)? else {
-        return Ok(None);
+    let mut cache = shared.lock();
+    let claim = loop {
+        match cache.claim(offset) {
+            Some(claim) => break claim,
+            None => {
+                cache = shared
+                    .settled
+                    .wait(cache)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        }
     };
-    let decoded = Arc::new(decoded);
-    lock_cache(cache).store(offset, &decoded);
-    Ok(Some(decoded))
-}
+    drop(cache);
 
-/// **A poisoned cache is recovered from rather than propagated.** What it holds is decoded
-/// containers and nothing else — no invariant a panicking thread could have left half-written —
-/// so the worst a poisoned lock can mean here is that one entry is stale, and a stale entry is
-/// keyed by an offset no lookup will match.
-fn lock_cache(
-    cache: &Mutex<DecodedContainerCache>,
-) -> std::sync::MutexGuard<'_, DecodedContainerCache> {
-    cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    match claim {
+        Claim::Ready(container) => Ok(Some(container)),
+        Claim::YoursToDecode => {
+            // **The lock is not held across the decode**, which is what the claim is for: a
+            // decode is milliseconds, and holding the lock through one would put the readers in
+            // a queue behind the prefetcher instead of letting them run past it.
+            let decoded = match decode_container_at(reader, header, resolution, offset, reference) {
+                Ok(Some(container)) => Some(Arc::new(container)),
+                Ok(None) => None,
+                Err(error) => {
+                    // Released before the error leaves, so no waiter is left promised a
+                    // container nobody is going to decode.
+                    shared.lock().finished(offset, None);
+                    shared.settled.notify_all();
+                    return Err(error);
+                }
+            };
+            shared.lock().finished(offset, decoded.as_ref());
+            shared.settled.notify_all();
+            Ok(decoded)
+        }
+    }
 }
 
 /// Seek to a container and decode it into a [`DecodedContainer`].
@@ -1168,74 +1274,180 @@ mod tests {
         Arc::new(container)
     }
 
-    /// **The hit the whole change is for**: the second reader asks for the container the first
+    /// Decode `offset` into the cache the way `container_at` does, without a file: claim it,
+    /// then report it finished.
+    fn decoded_into(cache: &mut DecodedContainerCache, offset: u64, marker: u64) {
+        assert!(
+            matches!(cache.claim(offset), Some(Claim::YoursToDecode)),
+            "nothing else should hold or be decoding {offset}",
+        );
+        cache.finished(offset, Some(&container_marked(marker)));
+    }
+
+    /// Whether `offset` has a slot at all.
+    ///
+    /// **Asked directly rather than through `claim`**, because claiming a missing offset is not
+    /// a read: it takes a slot for the decode that is about to follow, which on a full cache
+    /// gives up somebody else's. That is right in production — a miss is always followed by a
+    /// decode — and it makes `claim` useless for asking what is there.
+    fn held(cache: &DecodedContainerCache, offset: u64) -> bool {
+        cache.held.iter().any(|(at, _)| *at == offset)
+    }
+
+    /// Take `offset`, which must be there, and give back what marks it.
+    fn served(cache: &mut DecodedContainerCache, offset: u64) -> u64 {
+        match cache.claim(offset) {
+            Some(Claim::Ready(container)) => container.other_sample_records(),
+            _ => panic!("{offset} should have been held and ready"),
+        }
+    }
+
+    /// **The hit the whole cache is for**: the second reader asks for the container the first
     /// one has just decoded, and gets it rather than decoding it again.
     #[test]
     fn a_container_one_reader_decoded_is_served_to_the_next() {
         let mut cache = DecodedContainerCache::new();
-        cache.store(4_096, &container_marked(7));
+        decoded_into(&mut cache, 4_096, 7);
 
-        let served = cache
-            .take(4_096)
-            .expect("the container just stored is held");
-
-        assert_eq!(served.other_sample_records(), 7);
+        assert_eq!(served(&mut cache, 4_096), 7);
         assert!(
-            cache.take(8_192).is_none(),
-            "a container nothing stored cannot be served",
+            !held(&cache, 8_192),
+            "a container nothing decoded cannot be served",
         );
     }
 
-    /// **Two slots, so the two readers' containers both survive while their regions
-    /// interleave.** A one-slot cache would give up the first reader's container the moment the
-    /// second decoded its own, and every hit would be lost exactly when the readers are apart.
+    /// **Four slots: two for the readers to hold and two for the prefetcher to run ahead
+    /// into.** A cache of two would give up a reader's container the moment the prefetcher
+    /// decoded one, which turns running ahead from a saving into a second decode.
     #[test]
-    fn both_readers_containers_are_held_at_once_and_the_third_gives_up_the_oldest() {
+    fn four_containers_are_held_at_once_and_the_fifth_gives_up_the_oldest() {
         let mut cache = DecodedContainerCache::new();
-        cache.store(1, &container_marked(11));
-        cache.store(2, &container_marked(22));
+        for (offset, marker) in [(1, 11), (2, 22), (3, 33), (4, 44)] {
+            decoded_into(&mut cache, offset, marker);
+        }
 
-        assert_eq!(
-            cache.take(1).expect("still held").other_sample_records(),
-            11
-        );
-        assert_eq!(
-            cache.take(2).expect("still held").other_sample_records(),
-            22
-        );
+        // Read back in order, so 1 is the least recently used when the fifth arrives.
+        for (offset, marker) in [(1, 11), (2, 22), (3, 33), (4, 44)] {
+            assert_eq!(served(&mut cache, offset), marker);
+        }
 
-        // Taking 1 and then 2 above made 1 the least recently taken, so it is the one given up.
-        cache.store(3, &container_marked(33));
-        assert!(cache.take(1).is_none(), "the oldest slot was given up");
-        assert_eq!(
-            cache.take(2).expect("still held").other_sample_records(),
-            22
-        );
-        assert_eq!(
-            cache.take(3).expect("still held").other_sample_records(),
-            33
+        decoded_into(&mut cache, 5, 55);
+        assert!(!held(&cache, 1), "the oldest slot was given up");
+        for (offset, marker) in [(2, 22), (3, 33), (4, 44), (5, 55)] {
+            assert_eq!(served(&mut cache, offset), marker);
+        }
+    }
+
+    /// **A container being decoded is never given up to make room**, however many arrive while
+    /// it runs. Giving it up would strand the thread that claimed it and let a waiter start a
+    /// second decode of the same bytes — which is the doubling the cache exists to remove.
+    #[test]
+    fn a_container_being_decoded_survives_a_full_cache() {
+        let mut cache = DecodedContainerCache::new();
+        assert!(matches!(cache.claim(99), Some(Claim::YoursToDecode)));
+        for (offset, marker) in [(1, 11), (2, 22), (3, 33), (4, 44), (5, 55)] {
+            decoded_into(&mut cache, offset, marker);
+        }
+
+        assert!(
+            cache.claim(99).is_none(),
+            "the claim on 99 is still standing, so a second caller must wait rather than decode",
         );
     }
 
-    /// **Storing a container twice must not put it in both slots**, which would halve the cache
-    /// and lose the other reader's container. Nothing does it today — one reader decodes a
-    /// container and stores it before the other looks — but the lock is deliberately not held
-    /// across a decode, so two readers on two threads may both decode one container and both
-    /// store it.
+    /// **Two threads that want one container decode it once**, which is the property the
+    /// prefetcher makes load-bearing: it can be midway through a container the walk reaches, and
+    /// without the claim both would decode it — worst exactly when the prefetcher is behind.
+    ///
+    /// The second thread is made to arrive *during* the first one's decode by holding the claim
+    /// across a barrier, which is what a real decode's few milliseconds do.
     #[test]
-    fn storing_one_container_twice_still_leaves_room_for_the_other() {
-        let mut cache = DecodedContainerCache::new();
-        cache.store(1, &container_marked(11));
-        cache.store(1, &container_marked(11));
-        cache.store(2, &container_marked(22));
+    fn two_threads_wanting_one_container_decode_it_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
+        let shared = Arc::new(SharedContainers::new());
+        let decodes = Arc::new(AtomicUsize::new(0));
+        let waiter_is_waiting = Arc::new(std::sync::Barrier::new(2));
+
+        // The "decoder": claims 4_096, waits for the other thread to be blocked on it, and only
+        // then reports it finished.
+        let decoder = {
+            let (shared, decodes, barrier) = (
+                Arc::clone(&shared),
+                Arc::clone(&decodes),
+                Arc::clone(&waiter_is_waiting),
+            );
+            std::thread::spawn(move || {
+                let claimed = matches!(shared.lock().claim(4_096), Some(Claim::YoursToDecode));
+                assert!(claimed, "the first thread gets the claim");
+                decodes.fetch_add(1, Ordering::Relaxed);
+                barrier.wait();
+                // Long enough that a waiter which was going to decode instead would have.
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                shared.lock().finished(4_096, Some(&container_marked(7)));
+                shared.settled.notify_all();
+            })
+        };
+
+        waiter_is_waiting.wait();
+        // Now the claim is standing. This is what `container_at` does on a miss, minus the file.
+        let mut cache = shared.lock();
+        let claim = loop {
+            match cache.claim(4_096) {
+                Some(claim) => break claim,
+                None => {
+                    cache = shared
+                        .settled
+                        .wait(cache)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+            }
+        };
+        drop(cache);
+
+        match claim {
+            Claim::Ready(container) => assert_eq!(container.other_sample_records(), 7),
+            Claim::YoursToDecode => panic!("the waiter started a second decode of one container"),
+        }
+        decoder.join().expect("the decoding thread finishes");
         assert_eq!(
-            cache.take(1).expect("still held").other_sample_records(),
-            11
+            decodes.load(Ordering::Relaxed),
+            1,
+            "one container, one decode",
         );
-        assert_eq!(
-            cache.take(2).expect("still held").other_sample_records(),
-            22
+    }
+
+    /// **A decode that fails releases its claim**, or every waiter is promised a container
+    /// nobody is going to produce and the walk stops with no error and no progress.
+    #[test]
+    fn a_failed_decode_releases_its_claim_rather_than_stranding_a_waiter() {
+        let mut cache = DecodedContainerCache::new();
+        assert!(matches!(cache.claim(4_096), Some(Claim::YoursToDecode)));
+
+        // What `container_at` does on an `Err` and on end of stream alike.
+        cache.finished(4_096, None);
+
+        assert!(
+            matches!(cache.claim(4_096), Some(Claim::YoursToDecode)),
+            "the next caller may decode it, rather than waiting on a claim nobody holds",
         );
+    }
+
+    /// **`is_spoken_for` is what stops the prefetcher re-deriving what the cache already has**,
+    /// and it has to answer yes for a container being decoded as well as for one decoded — the
+    /// first is precisely the case where a second decode would be wasted.
+    #[test]
+    fn a_container_held_or_being_decoded_is_spoken_for() {
+        let shared = SharedContainers::new();
+        assert!(!shared.is_spoken_for(4_096));
+
+        assert!(matches!(
+            shared.lock().claim(4_096),
+            Some(Claim::YoursToDecode)
+        ));
+        assert!(shared.is_spoken_for(4_096), "being decoded counts");
+
+        shared.lock().finished(4_096, Some(&container_marked(7)));
+        assert!(shared.is_spoken_for(4_096), "and so does decoded");
     }
 }

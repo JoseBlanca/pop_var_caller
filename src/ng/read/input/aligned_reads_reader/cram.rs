@@ -4,15 +4,14 @@
 use std::fs::File;
 use std::io;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use noodles_cram as cram;
 use noodles_sam as sam;
 
 use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
-use crate::ng::read::input::aligned_reads_reader::container::{
-    DecodedContainer, DecodedContainerCache, container_at,
-};
+use crate::ng::read::input::aligned_reads_reader::container::{DecodedContainer, container_at};
+use crate::ng::read::input::aligned_reads_reader::prefetch::SharedDecode;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::types::GenomeRegion;
@@ -97,13 +96,14 @@ pub(crate) struct CramAlignedReadsReader {
     /// The next `.crai` entry to decode. Set by [`begin_region`](Self::begin_region) and
     /// advanced by reading; never reset by reading, so a walk carries on to the contig's end.
     next_entry: usize,
-    /// The decoded containers **this open file's readers share** — see
-    /// [`DecodedContainerCache`], which carries the count that made it worth having.
+    /// **The decoded containers this open file's readers share, and the thread that fills them
+    /// ahead of the walk** — see [`SharedDecode`].
     ///
-    /// It is the open file's rather than this reader's, which is the whole of the change: two
-    /// readers walking one file's interleaved regions take a container from here instead of
-    /// each inflating it.
-    cache: Arc<Mutex<DecodedContainerCache>>,
+    /// Both belong to the open file rather than to this reader, and that is the point of each:
+    /// two readers walking one file's interleaved regions take a container from the cache
+    /// instead of each inflating it, and the prefetcher puts the next one there before either
+    /// asks for it.
+    shared: SharedDecode,
     /// The container being served, and how far into it we have got.
     ///
     /// **One container, and this reader does not own it.** It is what is currently being read:
@@ -144,7 +144,7 @@ impl CramAlignedReadsReader {
         entries: Arc<[cram::crai::Record]>,
         resolution: ReadGroupResolution,
         path: Arc<Path>,
-        cache: Arc<Mutex<DecodedContainerCache>>,
+        shared: SharedDecode,
     ) -> Self {
         Self {
             reader,
@@ -153,7 +153,7 @@ impl CramAlignedReadsReader {
             entries,
             resolution,
             path,
-            cache,
+            shared,
             next_entry: 0,
             container: None,
             served: 0,
@@ -261,7 +261,7 @@ impl CramAlignedReadsReader {
             self.last_decoded_offset = Some(offset);
 
             let Some(container) = container_at(
-                &self.cache,
+                &self.shared.containers,
                 &mut self.reader,
                 &self.header,
                 &self.resolution,
@@ -277,6 +277,12 @@ impl CramAlignedReadsReader {
             // field): a reader that skipped the charge because the other one had already
             // decoded the container would silently report half the foreign records it met.
             self.other_sample_records += container.other_sample_records();
+            // **Said once the container is in hand, not before.** The walk is about to spend
+            // thousands of `next_locus` calls inside this container, which is the time the
+            // prefetch thread has to decode the one after it. Asked earlier — before this
+            // container was decoded — the hint would be overwritten by this reader's own claim
+            // and buy nothing.
+            self.ask_for_the_next_container();
             let has_records = container.len() > 0;
             self.container = Some(container);
             self.served = 0;
@@ -286,6 +292,36 @@ impl CramAlignedReadsReader {
             // A container of nothing but another sample's reads. Keep walking rather than
             // reporting end of input.
         }
+    }
+}
+
+impl CramAlignedReadsReader {
+    /// Tell the prefetcher which container this reader expects to want after the one it has.
+    ///
+    /// **The next *distinct* offset**, because a container holding several slices appears under
+    /// one `.crai` entry per slice and the reader steps over the repeats — hinting one of those
+    /// would name the container already in hand and waste the thread's turn.
+    ///
+    /// A hint is only ever a hint: it is dropped if the walk repositions elsewhere, and nothing
+    /// waits for it. What it must not do is send this reader's *current* container, which is why
+    /// the search starts at `next_entry` and skips `last_decoded_offset`.
+    fn ask_for_the_next_container(&self) {
+        let Some(prefetcher) = &self.shared.prefetcher else {
+            return;
+        };
+        let Some(next) = self.entries[self.next_entry.min(self.entries.len())..]
+            .iter()
+            .map(cram::crai::Record::offset)
+            .find(|offset| Some(*offset) != self.last_decoded_offset)
+        else {
+            return;
+        };
+        // Already decoded, or already being decoded by somebody — the thread's turn is better
+        // spent asleep than re-deriving what the cache will hand over anyway.
+        if self.shared.containers.is_spoken_for(next) {
+            return;
+        }
+        prefetcher.wants(next);
     }
 }
 

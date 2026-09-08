@@ -108,6 +108,7 @@ mod bam;
 mod container;
 mod cram;
 mod in_memory;
+mod prefetch;
 
 use std::io;
 
@@ -117,9 +118,10 @@ use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
 use crate::ng::types::GenomeRegion;
 
 pub(crate) use bam::BamAlignedReadsReader;
-pub(crate) use container::DecodedContainerCache;
+pub(crate) use container::SharedContainers;
 pub(crate) use cram::CramAlignedReadsReader;
 pub(crate) use in_memory::InMemoryAlignedReadsReader;
+pub(crate) use prefetch::{ContainerPrefetcher, SharedDecode};
 
 /// Finds reads and unpacks them, one variant per place they can come from.
 ///
