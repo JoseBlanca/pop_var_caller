@@ -105,21 +105,25 @@ impl LiveSet {
         self.ids.is_empty()
     }
 
-    /// Build a set straight from ids that are already ascending and distinct.
+    /// Build a set by copying ids that are already ascending and distinct.
     ///
-    /// **Tests only, and it used to have a caller.** The writer deciding which observation it can
-    /// derive built one of these out of the record's own identifiers, so that
-    /// [`residual_reads`] could take a `&LiveSet`. That function takes a slice now — the writer
-    /// holds those identifiers in a buffer it reuses, and handing the buffer away to build a set
-    /// out of it was an allocation a record for a type check the sortedness already carries. What
-    /// is left is the tests, which build a set to derive against directly.
-    #[cfg(test)]
-    pub(super) fn from_sorted_ids(ids: Vec<ChainId>) -> Self {
+    /// **It had no caller for a while, and the one it has now is the reverse of the one it
+    /// lost.** The writer deciding which observation it can derive used to build one of these
+    /// out of a record's own identifiers, so that [`residual_reads`] could take a `&LiveSet`;
+    /// that function takes a slice now, and handing the writer's reused buffer away to build a
+    /// set out of it was an allocation a record for a type check the sortedness already carries.
+    /// The caller today is the *reading* side, where a run over stored files keeps every held
+    /// record's ids in one arena and builds a set only for the record it is about to decode —
+    /// so the allocation is paid on the roughly one record in eight that gets built rather than
+    /// on every record walked
+    /// ([`PspSummarySource`](crate::ng::run::PspSummarySource)).
+    #[must_use]
+    pub fn from_sorted_slice(ids: &[ChainId]) -> Self {
         debug_assert!(
             ids.windows(2).all(|pair| pair[0] < pair[1]),
             "a live set is ascending and without duplicates"
         );
-        Self { ids }
+        Self { ids: ids.to_vec() }
     }
 
     /// Whether `id` is live. A binary search, because the set is sorted.

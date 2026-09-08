@@ -89,6 +89,35 @@ use pop_var_caller::pop_var_caller_exp::run_ground::{
 /// asked for deliberately with `NG_SAMPLES=63`.
 const SAMPLES_BY_DEFAULT: usize = 6;
 
+/// **The same walk, counted instead of timed** — build with
+/// `--no-default-features --features dhat-heap` and every line this probe prints stays, with
+/// the calling pass's allocation counts added.
+///
+/// **Why counts as well as a clock.** This machine's wall clock moves 20–25% between runs of one
+/// unchanged binary, which is more than most single changes are worth; an allocation count is
+/// identical every run, so it can settle a change the clock cannot see. The 2026-09-07 review
+/// gated two of its six adopted changes on this and neither moved the clock:
+/// 35,125,430 allocations over the calling pass on 8 tomato accessions before them and
+/// 4,993,031 after.
+///
+/// `--no-default-features` is what takes mimalloc out of the way; only one global allocator may
+/// exist, and the declaration below is gated so that asking for both still builds and dhat wins.
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+/// What the calling pass allocated, or nothing when this build has no dhat.
+#[cfg(feature = "dhat-heap")]
+fn allocations_now() -> Option<(u64, u64)> {
+    let stats = dhat::HeapStats::get();
+    Some((stats.total_blocks, stats.total_bytes))
+}
+
+#[cfg(not(feature = "dhat-heap"))]
+fn allocations_now() -> Option<(u64, u64)> {
+    None
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [fasta, catalog, psps] = args.as_slice() else {
@@ -241,17 +270,32 @@ fn run(
     let genotyper =
         SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior);
 
+    // **Opened here and not at the top of `main`**, so that reading the reference, opening the
+    // catalog and building the segments are outside the counts the way they are outside the
+    // calling clock beside them.
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
+    let allocated_before = allocations_now();
+
     let calling = Instant::now();
     // The records are dropped where they are handed over: this measures the calling path, and
     // writing a VCF would time the disk beside it. The counts come back in the answer.
     // **Two tallies since Milestone F1**: what the calling did, and what each stored sample
     // contributed. This probe reports the first; the second is what the subcommand's run
     // report states per sample, and nothing here needs it.
-    let (written, _per_sample) = caller.call_cohort_handing_each_record_over(
-        &genotyper,
-        &mut |_record| -> Result<(), std::io::Error> { Ok(()) },
-    )?;
+    let mut drop_the_record = |_record: &_, _windows: &_| -> Result<(), std::io::Error> { Ok(()) };
+    let (written, _per_sample) =
+        caller.call_cohort_handing_each_record_over(&genotyper, &mut drop_the_record)?;
     let calling_seconds = calling.elapsed().as_secs_f64();
+    if let (Some((blocks_before, bytes_before)), Some((blocks_after, bytes_after))) =
+        (allocated_before, allocations_now())
+    {
+        println!(
+            "# the calling pass allocated: {} times, {} bytes",
+            blocks_after - blocks_before,
+            bytes_after - bytes_before,
+        );
+    }
 
     println!(
         "# loci called: {} — {} written as records, {} establishing no variant",

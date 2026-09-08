@@ -2285,7 +2285,7 @@ mod tests {
             .flat_map(|observation| observation.chain_ids.iter().copied())
             .collect();
         as_a_read_set(&mut ids);
-        LiveSet::from_sorted_ids(ids)
+        LiveSet::from_sorted_slice(&ids)
     }
 
     /// Encode, decode, and hand back what came out together with the bytes that went in.
@@ -4822,7 +4822,7 @@ mod tests {
 
             let mut bytes = Vec::new();
             encode_record_body(&record, &mut bytes);
-            let live = LiveSet::from_sorted_ids({
+            let live = LiveSet::from_sorted_slice(&{
                 let mut every = wanted.clone();
                 every.extend_from_slice(&record.observations[1].chain_ids);
                 as_a_read_set(&mut every);
@@ -4947,7 +4947,7 @@ mod tests {
         encode_record_body(&record, &mut bytes);
 
         // What the writer meant: reads 10, 11 and 20 are live.
-        let honest = LiveSet::from_sorted_ids(vec![10, 11, 20]);
+        let honest = LiveSet::from_sorted_slice(&[10, 11, 20]);
         let decoded = decode_record_body(
             &bytes,
             record.region,
@@ -4958,7 +4958,7 @@ mod tests {
         assert_eq!(decoded.record.observations[0].chain_ids, [10, 11]);
 
         // And a live set with two reads nobody named: four derived where the record says two.
-        let phantom = LiveSet::from_sorted_ids(vec![10, 11, 12, 13, 20]);
+        let phantom = LiveSet::from_sorted_slice(&[10, 11, 12, 13, 20]);
         let refused = decode_record_body(
             &bytes,
             record.region,
