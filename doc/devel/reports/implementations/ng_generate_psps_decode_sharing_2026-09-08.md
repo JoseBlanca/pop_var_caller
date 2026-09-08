@@ -1,16 +1,18 @@
 # `generate-psps`: each CRAM container read once, decoded a step early, and the psp compressed off the walking thread
 
 **Date:** 2026-09-08
-**Branch:** `main`, commits `a2a77780`, `aa598441`, `c9018a70` and `a6457dbb` on `8203d218`
+**Branch:** `main`, commits `a2a77780`, `aa598441`, `c9018a70`, `a6457dbb` and `5548c5fb` on
+`8203d218`
 **Acting on:** the BAM/CRAM → psp performance review of 2026-09-08
 
 **One tomato accession over 10 Mb of `SL4.0ch01`, out of a 49 GB whole-genome CRAM, now takes
-36.75 s where it took 57.03 s** — **1.55× the throughput**, with the psp and the census
+35.59 s where it took 57.03 s** — **1.60× the throughput**, with the psp and the census
 byte-identical outside their own timestamp, and **28 MB more resident**, 292.4 MB against 264.6,
-which is the one number that went the wrong way. Three things carry it: the walk's two readers
+which is the one number that went the wrong way. Four things carry it: the walk's two readers
 were decoding every container of the file separately; the walk was compressing every psp block
-itself; and it was inflating each container in the middle of building a locus rather than a step
-ahead, on a thread of its own.
+itself; it was inflating each container in the middle of building a locus rather than a step
+ahead, on a thread of its own; and every admitted read was scanning the whole pending-mates map
+to find the stale entries in it.
 
 **The fixture is a 103.5× sample**, measured with `samtools coverage` on 100 kb at
 SL4.0ch01:1.0–1.1 Mb — the high end of the depth range this caller commits to, not the tomato
@@ -382,16 +384,83 @@ a reader that is seeking elsewhere — and up to three decodes in flight, which 
 refuses to evict. Against the 264.6 MB this command cost before any of today's work it is now
 292.4 MB, and that is the one number that has gone the wrong way.
 
+## 6c. Making the walk legible, and the scan that was hiding in it
+
+**The largest single leaf in the profile was a trait forwarder.** `generator.rs:1421` is
+`PileupGenerator::next_locus(self, reads)` — one call, no body — and it carried **44.6% of the
+walking thread**. Fat LTO with one codegen unit had inlined the whole generator into it, and
+`sample` aggregates that node across every address inside it, so 15 seconds of a 37-second run
+could not be attributed to anything.
+
+**Temporary `#[inline(never)] // PROFILING SCRATCH` markers on the walker's phases broke it
+open**, in the same build configuration so nothing else moved. The marked build ran at 36.69 s
+against the unmarked 37.47 s and 1.2% fewer instructions, so the barriers cost nothing and the
+profile is representative. They are a measuring instrument and are not in the tree.
+
+What it showed, as shares of the walking thread:
+
+| | before the fix below | after |
+|---|---:|---:|
+| `WalkerState::process_position` | 16.3% | **22.0%** |
+| `fast_column::try_ordinary_column` | 13.6% | 13.8% |
+| `ChainIdAllocator::allocate_for_read` | **11.8%** | below 0.5% |
+| sorting chain ids (`Vec<u64>`) | 11.2% | 11.5% |
+| `ssr::classify::delimit`, the tract aligner | 9.9% | 10.0% |
+| `apply_events_into` | 3.1% | 5.9% |
+| `finalise_recycling` | 3.8% | 4.2% |
+
+**`allocate_for_read` was the surprise, and a second round of markers said why**: 2,333 of its
+2,424 samples were in `evict_stale_pending` and 60 in its own body. That function ran an
+`AHashMap::retain` over the **whole** pending-mates map on every admitted read, to drop the first
+mates the walk had passed the 10 kb lookup window of. The map holds every first mate still inside
+that window — thousands of entries on a 104× sample — so it was a full scan of the map about
+twelve million times over 10 Mb.
+
+**The fix is a queue in registration order**, so eviction pops instead of scanning. Reads arrive
+sorted by alignment start (`admit_read` refuses one that does not) and an entry's `seen_at` *is*
+its read's alignment start, so the queue is non-decreasing by construction: everything stale is at
+the front, and the first entry inside the window ends the loop. The set it drops is exactly the
+set the scan dropped, which matters beyond tidiness — `mate_lookup_evictions` is asserted against
+production's walker in `parity.rs`.
+
+**A pending entry now carries a serial, and it is not bookkeeping.** The queue names entries by
+qname, and a file may register one qname twice — a completed pair, then another read with the same
+name. Without the serial the older slot would find the *newer* map entry under that name and drop
+it; its second mate would mint a fresh chain id instead of pairing, and the psp would differ, on
+input that is merely malformed rather than unreadable. The scan could not get this wrong, because
+it read each entry's own `seen_at`. `a_qname_registered_twice_keeps_the_second_registration` pins
+it, mutation-verified.
+
+| | | before | after |
+|---|---|---:|---:|
+| **10 Mb**, 3 pairs, pinned | wall | 36.95 s | **35.70 s** (−3.4%, won 3/3) |
+| | instructions | 1,030,041 G | **967,422 G** (−6.1%) |
+| | cycles | 208,908 G | 202,888 G (−2.9%) |
+| **10 Mb**, 3 pairs, pool left alone | wall | 37.30 s | **35.59 s** (−4.6%, won 3/3) |
+
+**Instructions fall twice as far as wall**, which is the shape a linear sweep of a few thousand map
+entries has — high instructions per cycle, few stalls. And what it removes is not only the 1.7 s
+but the *scaling*: the scan cost reads × pending entries, so it grew with read depth and with the
+mate-lookup window together. At 300× it would have been proportionally worse.
+
 ## 7. Where the wall goes now, and what is left
 
-**The walk's one thread is locus generation and little else.** Profiled after everything above:
+**The walk's one thread is locus generation and little else.** Profiled after everything above,
+with the inline barriers of §6c in place so the parts are separable:
 
-| | share of the walking thread |
-|---|---:|
-| locus generation | **79.5%** |
-| encoding psp records | 7.6% |
-| reading and filtering reads | 2.3% |
-| decoding containers, compressing psp blocks | on threads of their own |
+| | share of the walking thread | ~seconds |
+|---|---:|---:|
+| `WalkerState::process_position` | **22.0%** | 7.8 |
+| `fast_column::try_ordinary_column` | 13.8% | 4.9 |
+| sorting, all sites — chain ids are 11.5% of it | **14.9%** | 5.3 |
+| `ssr::classify::delimit`, the tract aligner | 10.0% | 3.6 |
+| `apply_events_into` | 5.9% | 2.1 |
+| encoding psp records | 7.3% | 2.6 |
+| `finalise_recycling` | 4.2% | 1.5 |
+| `memmove` | 4.6% | 1.6 |
+| the census | 1.3% | 0.5 |
+| reading and filtering reads | 2.3% | 0.8 |
+| decoding containers, compressing psp blocks | on threads of their own | |
 
 Splitting the walk across k workers (§11 question 3) is what is left, and **its cap is best stated
 in seconds, because a share moves when the thread it is a share of gets shorter**. A 10 Mb run of

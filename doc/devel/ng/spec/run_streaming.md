@@ -1244,8 +1244,8 @@ measured yet (§11, questions 2 and 7).
    **The second candidate is built in its cheap form, and its expensive form is refused on
    measurement (2026-09-08).** Every number below is in
    [the implementation report](../../reports/implementations/ng_generate_psps_decode_sharing_2026-09-08.md),
-   which carries the run's own cost over 10 Mb across five changes: **57.03 s and 264.6 MB to
-   36.75 s and 292.4 MB** — 1.55× the throughput, and 28 MB more resident, which is the one
+   which carries the run's own cost over 10 Mb across six changes: **57.03 s and 264.6 MB to
+   35.59 s and about 293 MB** — 1.60× the throughput, and 28 MB more resident, which is the one
    number that went the wrong way.
 
    **Its ceiling fell three times before anything was built**, which is why the cheap form was
@@ -1270,9 +1270,13 @@ measured yet (§11, questions 2 and 7).
    reading and filtering is **2.3% of the walking thread, about 0.85 s of a 37 s run**. The cheap
    form took essentially all of it.
 
-   **What the walk's one thread now holds**, profiled the same way: locus generation **79.5%**,
-   encoding psp records 7.6%, reading and filtering reads 2.3% — with the container decode and the
-   psp block compression on threads of their own. Every further core has to come from question 3.
+   **What the walk's one thread now holds**, split open with temporary inline barriers because
+   fat LTO folds the whole generator into one symbol: building each position **22.0%**, the
+   ordinary-column lane 13.8%, sorting 14.9% (chain ids 11.5% of it), the tract aligner 10.0%,
+   applying a read's events 5.9%, encoding psp records 7.3%, `memmove` 4.6%, recycling open
+   records 4.2%, the census 1.3%, reading and filtering reads 2.3% — with the container decode and
+   the psp block compression on threads of their own. Every further core has to come from
+   question 3.
 
    **What question 3's split is capped by, in seconds, because a share moves when the thread it
    is a share of gets shorter.** Its k workers feed one serial merger that owns the psp writer and
