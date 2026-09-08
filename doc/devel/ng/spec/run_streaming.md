@@ -1271,11 +1271,23 @@ measured yet (§11, questions 2 and 7).
    form took essentially all of it.
 
    **What the walk's one thread now holds**, split open with temporary inline barriers because
-   fat LTO folds the whole generator into one symbol: building each position **48.8%** — of which
-   the ordinary-column lane is 31.6% and the general fold 8.4% — the tract aligner 12.4%, all
-   remaining sorting 8.1%, `memmove` 7.8%, closing records 4.4%, expiring reads 4.2%, admitting
-   them 2.6%, with the container decode and the psp block compression on threads of their own.
-   Every further core has to come from question 3.
+   fat LTO folds the whole generator into one symbol: building each position **47.3%** — of which
+   the ordinary-column lane is 30.8% and the general fold 8.2% — **the psp record encoder 14.2%**,
+   the tract aligner 13.1%, all remaining sorting 8.3%, **the read pulled, filtered and built
+   7.0%**, `memmove` 5.8%, the allocator 5.0%, expiring reads 5.0%, closing records 4.3%,
+   admitting them 2.4% — with the container decode and the psp block compression on threads of
+   their own. The rows nest and do not sum to 100%. Every further core has to come from question
+   3.
+
+   ⚠ **Two of those are larger than this section used to say, and the boundary is why.** The psp
+   encoder at 14.2% and the read path at 7.0% are whole-function inclusive shares taken at real
+   symbol boundaries (`write_a_record` plus `encode_record_body_reusing`; `AlignmentCursor::
+   next_read`); the earlier "encoding psp records 7.3%" and "reading and filtering reads 2.3%"
+   were narrower cuts and have not been re-derived. In seconds against a 28.7-second run the
+   encoder is about **3.7 s** and the read path about **2.0 s**. **The read-preparation refusal
+   below was priced at 0.85 s and its ceiling on this measurement is 2.0 s** — still small, and
+   still including a reference-window fetch (1.2% of the thread) that would not move with it, but
+   it is twice what the refusal quoted.
 
    **Two of the things that table used to hold are gone, and they are the last two changes of
    2026-09-08** (report §7a, §7b). A deletion anywhere along a read sent every base that read
@@ -1296,15 +1308,16 @@ measured yet (§11, questions 2 and 7).
    | | seconds | threads |
    |---|---:|---|
    | reading and MD5-ing the reference, the catalog, the segmentation | **2.6** | serial, before the walk begins |
-   | locus generation, the read cursor and its filters | 22.6 | k ways |
-   | encoding psp records, and the census | **3.0** | serial, on the merger |
+   | locus generation, the read cursor and its filters | 21.9 | k ways |
+   | encoding psp records, and the census | **3.7** | serial, on the merger |
    | decoding containers, compressing psp blocks | — | already on threads of their own |
 
-   which is `2.6 + 22.6/k + 3.0`: **11.3 s at four workers, 8.4 s at eight, and 5.6 s however
-   many** — against 28.17 s today. The two serial terms are unchanged by the last two changes,
-   which touch only locus generation, so all of what they removed came out of the shareable
-   term; between them those terms are now **more than a fifth of the run**, which is why the
-   *ratio* the split can reach keeps falling while the seconds it can remove do not. **The two serial terms are nearly equal and neither is the
+   which is `2.6 + 21.9/k + 3.7`: **11.8 s at four workers, 9.0 s at eight, and 6.3 s however
+   many** — against 28.17 s today. The changes of 2026-09-08 touch only locus generation, so all
+   of what they removed came out of the shareable term; the merger's 3.7 s is the psp encoder
+   measured at its own symbol boundary, which is larger than the 3.0 s this table carried. Between
+   them the two serial terms are now **6.3 s of a 28.2-second run**, which is why the *ratio* the
+   split can reach keeps falling while the seconds it can remove do not. **The two serial terms are nearly equal and neither is the
    walk**, so past four workers the thing to attack is one of them, and they need different
    fixes: the setup is re-reading and re-digesting one unchanging reference on every invocation
    (×63 across a cohort), and the merger's 3.0 s is encoding records into block payloads, which

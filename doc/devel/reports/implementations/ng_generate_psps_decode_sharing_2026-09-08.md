@@ -664,12 +664,40 @@ general path's `finalise` (1.3%), and the tract aligner and psp encoder (1.9%).
 **The fast lane now takes the columns it was refusing.** `try_ordinary_column` is 31.6% of the
 thread and the general fold 8.4%, where before §7a the fold was 16.0% against the lane's 13.8%.
 
-**What is left, and it is question 3.** Neither commit touches the setup or the merger, so the
-decomposition of §7 stands with its shareable term shortened: **2.6 s of serial setup, 22.6 s that
-k workers can share, 3.0 s of encoding and census on one merger** — `2.6 + 22.6/k + 3.0`, so about
-11.3 s at four workers, 8.4 s at eight, and 5.6 s however many, against 28.17 s today. The two
-serial terms are now more than a fifth of the run between them, so the ratio the split can reach
-has fallen with every one of today's changes; the seconds it can remove have not.
+**What is left, and it is question 3 — with a larger serial floor than §7 assumed.** Neither
+commit touches the setup or the merger, so the shareable term is simply what they shortened. But
+the merger's own term is the psp encoder, and measured at its symbol boundary that is **3.7 s**,
+not the 3.0 s §7 carried. So the run decomposes as **2.6 s of serial setup, ~21.9 s that k workers
+can share, and ~3.7 s of encoding on one merger** — `2.6 + 21.9/k + 3.7`, about **11.8 s at four
+workers, 9.0 s at eight, and 6.3 s however many**, against 28.17 s today.
+
+**The two serial terms are now 6.3 s of a 28.2-second run — better than a fifth of it — and
+neither is the walk.** Every change made today shortened only the term workers can share, so the
+*ratio* the split can reach keeps falling while the seconds it can remove do not. Past four
+workers the thing to attack is one of the two, and the encoder's split now says where inside it
+to look: `write_a_record` 10.0% of the walking thread, `encode_record_body_reusing` 4.2%.
+
+## 7d. Two more, one kept and one refused
+
+- **The psp encoder no longer sorts a record's chain ids when they already ascend** (`ea595c66`).
+  Every record asks `sort_and_dedup` to order the union of its observations' lists, and each of
+  those lists is already ascending, so the union is a concatenation of ascending runs. Counted
+  over the same 10 Mb, of **11,534,336** records written **9,508,466 — 8,242 in 10,000 — already
+  ascend**, and **73** hold a duplicate at all, 6 in a million. Skipping the sort where the test
+  passes is **−0.31% of instructions** (841,697 G → 839,128 G, 4 pairs, spread 88 G and 36 G);
+  the wall moves 28.98 s → 28.85 s, which is inside this host's resolution and is **not** claimed.
+  Kept for what the comment now says rather than for the tenth of a percent: it used to say the
+  union is "neither sorted nor distinct", which is right about the general case and wrong about
+  four records in five.
+- **Reserving the fast lane's chain-id list to its exact final length — refused.** Each emitted
+  observation starts from an empty `Vec`, because the finished one is moved into the locus, so an
+  87-deep column's list is reallocated and copied about seven times; the allocator is 3.0% of the
+  walking thread under this lane. Reserving `num_obs` up front removes **0.65% of instructions**
+  and costs **4.1% of wall** (28.62 s → 29.79 s, 3 pairs, lost 3/3). Rounding the reservation up
+  to a power of two, in case the exact sizes were missing the allocator's size classes, gives the
+  same answer: −0.65% instructions, +3.9% wall. **A change that removes work and costs a second
+  and a half is one the instruction counter cannot judge.** The mechanism was not identified, so
+  the change was dropped rather than guessed at.
 
 ## 8. How it was checked
 
