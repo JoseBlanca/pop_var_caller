@@ -1244,8 +1244,8 @@ measured yet (§11, questions 2 and 7).
    **The second candidate is built in its cheap form, and its expensive form is refused on
    measurement (2026-09-08).** Every number below is in
    [the implementation report](../../reports/implementations/ng_generate_psps_decode_sharing_2026-09-08.md),
-   which carries the run's own cost over 10 Mb across eight changes: **57.03 s and 264.6 MB to
-   28.17 s and about 295 MB** — 2.02× the throughput, and 30 MB more resident, which is the one
+   which carries the run's own cost over 10 Mb across ten changes: **57.03 s and 264.6 MB to
+   25.34 s and about 295 MB** — 2.25× the throughput, and 30 MB more resident, which is the one
    number that went the wrong way.
 
    **Its ceiling fell three times before anything was built**, which is why the cheap form was
@@ -1279,15 +1279,21 @@ measured yet (§11, questions 2 and 7).
    their own. The rows nest and do not sum to 100%. Every further core has to come from question
    3.
 
-   ⚠ **Two of those are larger than this section used to say, and the boundary is why.** The psp
-   encoder at 14.2% and the read path at 7.0% are whole-function inclusive shares taken at real
-   symbol boundaries (`write_a_record` plus `encode_record_body_reusing`; `AlignmentCursor::
-   next_read`); the earlier "encoding psp records 7.3%" and "reading and filtering reads 2.3%"
-   were narrower cuts and have not been re-derived. In seconds against a 28.7-second run the
-   encoder is about **3.7 s** and the read path about **2.0 s**. **The read-preparation refusal
-   below was priced at 0.85 s and its ceiling on this measurement is 2.0 s** — still small, and
-   still including a reference-window fetch (1.2% of the thread) that would not move with it, but
-   it is twice what the refusal quoted.
+   ⚠ **Two of those were larger than this section used to say, and the boundary was why.** The
+   psp encoder at 14.2–14.8% and the read path at 7.0% are whole-function inclusive shares taken
+   at real symbol boundaries (`write_a_record` plus `encode_record_body_reusing`;
+   `AlignmentCursor::next_read`); the earlier "encoding psp records 7.3%" and "reading and
+   filtering reads 2.3%" were narrower cuts and have not been re-derived. In seconds against a
+   28.4-second run the encoder was about **4.2 s** and the read path about **2.0 s**.
+
+   **The encoder has since gone to a thread of its own** (report §7e): the walk yields a locus,
+   the census reads it, and the writer takes it whole over a batched queue. That is **−9.8% of
+   wall** on one sample and **−4.7% on eight concurrent invocations**, for +4.6% of user time and
+   +11 MB. What is left on the walking thread of the two rows above is the read path.
+
+   **The read-preparation refusal below was priced at 0.85 s and its ceiling on this measurement
+   is 2.0 s** — still small, and still including a reference-window fetch (1.2% of the thread)
+   that would not move with it, but it is twice what the refusal quoted.
 
    **Two of the things that table used to hold are gone, and they are the last two changes of
    2026-09-08** (report §7a, §7b). A deletion anywhere along a read sent every base that read
@@ -1308,16 +1314,15 @@ measured yet (§11, questions 2 and 7).
    | | seconds | threads |
    |---|---:|---|
    | reading and MD5-ing the reference, the catalog, the segmentation | **2.6** | serial, before the walk begins |
-   | locus generation, the read cursor and its filters | 21.9 | k ways |
-   | encoding psp records, and the census | **3.7** | serial, on the merger |
-   | decoding containers, compressing psp blocks | — | already on threads of their own |
+   | locus generation, the read cursor and its filters | 22.7 | k ways |
+   | encoding psp records | 4.2 | its own thread, **beside** the walk (report §7e) |
+   | decoding containers, compressing psp blocks | — | their own threads |
 
-   which is `2.6 + 21.9/k + 3.7`: **11.8 s at four workers, 9.0 s at eight, and 6.3 s however
-   many** — against 28.17 s today. The changes of 2026-09-08 touch only locus generation, so all
-   of what they removed came out of the shareable term; the merger's 3.7 s is the psp encoder
-   measured at its own symbol boundary, which is larger than the 3.0 s this table carried. Between
-   them the two serial terms are now **6.3 s of a 28.2-second run**, which is why the *ratio* the
-   split can reach keeps falling while the seconds it can remove do not. **The two serial terms are nearly equal and neither is the
+   **The encoder moving off the walking thread turned this from a sum into a maximum**:
+   `2.6 + max(22.7/k, 4.2)`, which is **8.3 s at four workers, 6.8 s at eight and 6.8 s however
+   many** — against 25.34 s today. **The encoder becomes the bound at about five workers.** Past
+   that the thing to attack is either it or the 2.6 s of setup, and the setup is the one that is
+   re-read and re-digested identically 63 times across a cohort. **The two serial terms are nearly equal and neither is the
    walk**, so past four workers the thing to attack is one of them, and they need different
    fixes: the setup is re-reading and re-digesting one unchanging reference on every invocation
    (×63 across a cohort), and the merger's 3.0 s is encoding records into block payloads, which

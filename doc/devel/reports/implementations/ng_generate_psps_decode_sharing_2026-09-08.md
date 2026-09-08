@@ -2,23 +2,24 @@
 
 **Date:** 2026-09-08
 **Branch:** `main`, commits `a2a77780`, `aa598441`, `c9018a70`, `a6457dbb`, `5548c5fb` and
-`9969cc65` on `8203d218`; then `2c582c68` and `02ffa51c` (§7a, §7b)
+`9969cc65` on `8203d218`; then `2c582c68` and `02ffa51c` (§7a, §7b), `ea595c66`, `bc2aef62`
+and `2e6d4cd3` (§7d, §7e)
 **Acting on:** the BAM/CRAM → psp performance review of 2026-09-08
 
 **One tomato accession over 10 Mb of `SL4.0ch01`, out of a 49 GB whole-genome CRAM, now takes
-28.17 s where it took 57.03 s** — **2.02× the throughput**, with the psp and the census
+25.34 s where it took 57.03 s** — **2.25× the throughput**, with the psp and the census
 byte-identical outside their own timestamp, and **30 MB more resident**, about 295 MB against
-264.6, which is the one number that went the wrong way. Six things carry it: the walk's two
+264.6, which is the one number that went the wrong way. Seven things carry it: the walk's two
 readers were decoding every container of the file separately; the walk was compressing every psp
 block itself; it was inflating each container in the middle of building a locus rather than a step
 ahead, on a thread of its own; every admitted read was scanning the whole pending-mates map to
 find the stale entries in it; a deletion anywhere along a read sent every base that read covered
-down the general path; and every covered base sorted its column's chain ids that the active set
-could have kept in order.
+down the general path; every covered base sorted its column's chain ids that the active set could
+have kept in order; and the walk was encoding every psp record itself.
 
-**The first four are §1 to §6c and take it to 35.59 s. The last two are §7a and §7b, and take it
-from 34.25 s to 28.17 s** — the two figures differ because the same binary was re-measured in a
-later sitting.
+**§1 to §6c take it to 35.59 s; §7a and §7b take it from 34.25 s to 28.17 s; §7d and §7e take it
+to 25.34 s** — the sittings' baselines differ by a few tenths because the same binary was
+re-measured in each.
 
 **The fixture is a 103.5× sample**, measured with `samtools coverage` on 100 kb at
 SL4.0ch01:1.0–1.1 Mb — the high end of the depth range this caller commits to, not the tomato
@@ -700,6 +701,77 @@ to look: `write_a_record` 10.0% of the walking thread, `encode_record_body_reusi
   same answer: −0.65% instructions, +3.9% wall. **A change that removes work and costs a second
   and a half is one the instruction counter cannot judge.** The mechanism was not identified, so
   the change was dropped rather than guessed at.
+
+## 7e. The psp's records encoded on a thread of their own
+
+§7c measured the record encoder at **14.8% of the walking thread** — `write_a_record` 10.3% and
+`encode_record_body_reusing` 4.5%, about **4.2 s of a 28.4-second run** — on a thread that was
+busy 99.8% of the time. So it was the run's own critical path, and nothing downstream of a record
+waits for it: the next locus comes from reads and reference, and the census has already read the
+locus before the writer sees it. The only thing tying the writer to the walk is the order records
+reach it in, which one thread and a FIFO queue keep by construction.
+
+[`PspWriterLine`](../../../../src/ng/run/psp_writer_line.rs) is that thread, and `writer.rs` is
+untouched: the same `PspWriter` does the same work in the same order, so which thread ran it
+cannot be read out of the file.
+
+**One locus per message was built first and was a bad trade.** A walk emits about 350,000 loci a
+second at this depth, and each message is an atomic pair plus, when the queue runs empty or full,
+a park and an unpark:
+
+| | wall | user | cycles |
+|---|---:|---:|---:|
+| one locus per message | 27.84 s (−2.3%) | **51.93 s (+33%)** | +35.6% |
+| **batched at 256** | **25.75 s (−9.8%)** | 40.98 s (+4.6%) | +4.1% |
+
+| | before | after |
+|---|---:|---:|
+| wall, 3 pairs pinned | 28.56 s | **25.75 s** (−9.8%, won 3/3 by 2.81–2.89 s) |
+| wall, 3 runs, pool left alone | 28.4 s | **25.34 s** |
+| instructions | 835,540 G | 837,932 G (+0.29%) |
+| peak resident | 284.8 MB | 296.0 MB (+11 MB) |
+
+**It wins on the saturated machine too, which the compression offload did not.** Eight concurrent
+invocations over disjoint 2 Mb windows, three pairs: **14.46 s → 13.78 s, −4.7%, ahead in all
+three**, and the sum of the eight peaks *falls*, 1,963 MB → 1,892 MB. So it gets no knob, for the
+reason §6a gives.
+
+### ⚠ Closing the queue is not the same as asking for the file
+
+**The first draft sealed the file whenever its queue closed**, and a walk that fails drops its
+line without finishing — so an interrupted run produced a psp with a footer over a chromosome
+missing its tail, which every reader accepts as whole. `write_psp_propagates_a_walk_failure`
+caught it on the first test run.
+
+The queue now carries a `Seal` message: `finish` sends it and then closes, `drop` only closes. A
+thread that reaches the end of its queue unasked returns the writer unsealed and drops it, which
+is what the walk did itself before the writer moved off its thread.
+
+**A record the store refuses now surfaces at `finish`** rather than at the `push` that caused it —
+the same shift §6a's compression made — and still names its locus, because the thread holds the
+locus it failed on. After a failure the thread keeps draining and stops writing, so the walk never
+blocks on a queue nobody is reading and the real error is what comes back.
+
+**Mutation-verified.** A `drop` that joins the thread before closing the queue hangs both
+abandonment tests and ninety seconds was not enough; a thread that seals on any close fails those
+and `write_psp_propagates_a_walk_failure`.
+
+### What it does to question 3
+
+The encoder is no longer *after* the walk, it is *beside* it, so the split's arithmetic changes
+shape — from a sum to a maximum:
+
+| | seconds | threads |
+|---|---:|---|
+| reading and MD5-ing the reference, the catalog, the segmentation | **2.6** | serial, before the walk begins |
+| locus generation, the read cursor and its filters | 22.7 | k ways |
+| encoding psp records | 4.2 | its own thread, beside the walk |
+| decoding containers, compressing psp blocks | — | their own threads |
+
+`2.6 + max(22.7/k, 4.2)`: **8.3 s at four workers, 6.8 s at eight and 6.8 s however many** —
+against 25.34 s today. **The encoder becomes the bound at about five workers**, so past that the
+thing to attack is either it or the 2.6 s of setup, and the setup is the one that is re-read
+identically 63 times across a cohort.
 
 ## 8. How it was checked
 
