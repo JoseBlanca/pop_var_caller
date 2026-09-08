@@ -485,6 +485,45 @@ file that did not change — and the merger's 3.0 s is encoding records into blo
 is order-dependent *within* a block and independent *between* blocks, so a whole block could be
 built off-thread the way its compression already is.
 
+### The largest thing left, measured rather than guessed
+
+`process_position`'s 22.0% splits, under a second round of inline barriers, into the **general
+fold at 16.0%**, its own body at 4.9% and `CigarCursor::events_at` at 3.4%;
+`may_have_mate_overlap_at` is below 0.45%. The fold is what runs at a column the ordinary-column
+lane hands back — and it handles **about two columns in ten while costing 16% of the thread**.
+Per column the general path is about **8.7×** the fast lane.
+
+So the lever is fast-lane coverage, and a counter probe over the whole 10 Mb walk says exactly
+what stops it. Of **10,641,693 columns**:
+
+| | columns | share |
+|---|---:|---:|
+| taken by the ordinary-column lane | 7,603,904 | **71.5%** |
+| handed back — **some active read's CIGAR contains an `I` or a `D`** | 2,031,990 | **19.1%** |
+| handed back — two contributors share a chain id (mate overlap) | 970,978 | 9.1% |
+| handed back — a record is already open over this base | 25,275 | 0.2% |
+| handed back — depth over the column cap, or no active read | 9,085 | 0.1% |
+| handed back — no contributor | 461 | 0.0% |
+
+**The dominant reason is a property of the read and not of the column.**
+`CigarCursor::matches_only` asks whether the read's *whole* CIGAR is free of indels, so one
+indel-carrying read poisons every column it covers — about a read length of them, for every
+column where it is active. Those 2.03 M columns are 67% of the general path's traffic and so
+roughly **18% of the walking thread, about 6.5 s**; taken by the fast lane instead they would
+cost about 3.4%, so the prize is around **5 s of a 35.6 s run**.
+
+**Whether the test can be per-position instead is a correctness question, not a performance one**,
+and it is not answered here. The predicate's own note gives the reason for the whole-CIGAR form —
+"every read answers with at most one `Match` at any position, so no event can open a wider record
+or reach in from an earlier anchor" — and the second half of that is what the *first* test
+(`find_overlapping`, which fires on 0.2% of columns) already covers. That is an argument for
+looking, not a proof; the gate is the psp and the census byte-identical, and `parity.rs` against
+production's walker.
+
+**Mate overlap at 9.1% is the second reason and it will grow with depth**, which the module's own
+note says: at 300× a pair is present at most columns and the skip stops firing. This fixture is
+104×.
+
 **What was measured and refused**, in one place:
 
 - **Moving the read preparation off the walking thread too** — two prefetchers, two queues of
