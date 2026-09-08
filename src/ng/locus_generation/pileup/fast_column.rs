@@ -26,10 +26,17 @@
 //!    one base wide, anchored at the walker, and can never be found again — the next
 //!    position's events start at `pos + 1` and half-open intervals that touch do not
 //!    overlap. So no widen, no re-fold, and no read folded into it twice.
-//! 2. **Every active read's CIGAR is free of `I` and `D` ops**
-//!    ([`matches_only`](super::cigar_cursor::CigarCursor::matches_only)). Then every read
-//!    answers with at most one `Match` at any position, so no event can open a wider record
-//!    or reach in from an earlier anchor.
+//! 2. **No active read carries a deletion, and none has an insertion anchored at this base.**
+//!    Until 2026-09-08 this was one test — every active read's CIGAR free of `I` and `D` ops
+//!    — which bought both halves of what is needed at once: no read answers with anything but
+//!    a `Match` here, *and* no event reaches in from an earlier anchor. A read with an
+//!    insertion at its far end fails that test at every one of the hundred bases it covers,
+//!    and **that alone sent 19.1% of the 10.6 M bases of a 10 Mb walk down the general path**.
+//!    The first half is now asked at this base
+//!    ([`plain_match_at`](super::cigar_cursor::CigarCursor::plain_match_at)); the second is
+//!    still asked of the whole read, because a deletion's footprint is the only one that
+//!    reaches past its own anchor and relaxing it *is* measurably wrong — see the guard's own
+//!    note, which carries the number.
 //! 3. **No two contributors share a chain id**, i.e. no mate-overlap reconciliation fires
 //!    here. **The active set answers this one before the pass, in O(1)**: a shared chain id
 //!    is a mate pair, and
@@ -69,6 +76,7 @@ use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId, SummedLogE
 use crate::pileup_record::ChainId;
 
 use super::active_read_set::ActiveReads;
+use super::cigar_cursor::BaseShown;
 use super::errors::WalkerError;
 use super::open_record::{OpenPileupRecordTable, minted_ln_read_error};
 
@@ -184,26 +192,68 @@ pub(super) fn try_ordinary_column(
 
     scratch.reads.clear();
     for active in active_reads.iter() {
-        if !active.cursor.matches_only() {
+        // **Two guards, and they are deliberately not symmetric.** A read carrying a
+        // *deletion* anywhere in its alignment is refused outright, as every read with any
+        // indel was until 2026-09-08. A read whose only indels are *insertions* is judged at
+        // this base instead: `plain_match_at` reports whether one is anchored here.
+        //
+        // # Why the two halves are not alike
+        //
+        // The whole-read test bought two different things. One is a fact about this base —
+        // no read here is doing anything but showing a letter — and that is exactly what
+        // `plain_match_at` asks, at this base, for the read it is asked about. The other is a
+        // fact about *history*: no event from an earlier base is still reaching in here. A
+        // deletion is the only event whose footprint extends past its own anchor
+        // ([`spans_only_its_anchors`](super::cigar_cursor::CigarCursor::spans_only_its_anchors)),
+        // so it is the only one that can — and the open-record test above, which asks whether
+        // anything is *already open* over this base, does not catch every way it happens.
+        //
+        // **That last sentence is a measurement and not a mechanism, and it is written that
+        // way on purpose.** Relaxing deletions per-base as well moved the psp from byte
+        // 33,403,518 of 157,822,123 on 10 Mb of tomato chromosome 1, where relaxing insertions
+        // alone leaves psp and census byte-identical. The case that diverges has not been
+        // identified, so nobody should assume the open-record test is nearly enough and add
+        // one more condition to close the gap. It is worth finding: the unsafe version ran the
+        // same 10 Mb in 30.67 s against this one's 34.66 s.
+        //
+        // # What refusing costs
+        //
+        // Nothing but this pass. Handing back re-runs the general path against untouched
+        // state, which is what makes a conservative guard here free to be conservative.
+        if !active.cursor.spans_only_its_anchors() {
+            return Ok(FastColumn::Fallback);
+        }
+        let shown = active.cursor.plain_match_at(walker_pos, &active.read);
+        if shown == BaseShown::NotOneLetter {
             return Ok(FastColumn::Fallback);
         }
         // **The two paths cross-checked where they genuinely duplicate a computation**, and
         // only there: everything after this loop is a sum over what it produced. Armed in
         // every debug walk in the suite — the parity census alone runs it over ~257,000 loci
         // — which is what makes a second path through the walk's hottest code defensible.
+        //
+        // **It checks the whole event list and not only its head, and that is what carries the
+        // per-base test.** Until 2026-09-08 the lane refused any read whose CIGAR held an indel
+        // *anywhere*, which made "one Match here" true by construction; now it refuses only a
+        // read with an indel anchored *here*, so the property that has to hold — this read
+        // raises exactly one event at this base and it is the Match this lane is about to
+        // record — is a claim rather than a consequence. This is where it is claimed.
         debug_assert_eq!(
-            active.cursor.match_at(walker_pos, &active.read),
-            match active.cursor.events_at(walker_pos, &active.read).first() {
-                Some(super::decompose::ReadEvent::Match { base, bq_baq, .. }) => {
+            match shown {
+                BaseShown::Letter(base, bq) => Some((base, bq)),
+                BaseShown::Nothing | BaseShown::NotOneLetter => None,
+            },
+            match active.cursor.events_at(walker_pos, &active.read).as_slice() {
+                [super::decompose::ReadEvent::Match { base, bq_baq, .. }] => {
                     Some((*base, *bq_baq))
                 }
-                Some(_) => None,
-                None => None,
+                [] => None,
+                _ => Some((b'?', u8::MAX)),
             },
-            "match_at and events_at disagree at {walker_pos} for read {}",
+            "plain_match_at and events_at disagree at {walker_pos} for read {}",
             active.read_id,
         );
-        let Some((base, bq)) = active.cursor.match_at(walker_pos, &active.read) else {
+        let BaseShown::Letter(base, bq) = shown else {
             continue;
         };
         // Set here rather than in the loop below, and for the same reason the general path

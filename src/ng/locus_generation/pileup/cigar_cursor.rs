@@ -139,6 +139,23 @@ impl CursorMode {
     }
 }
 
+/// What one read shows at one reference base, as far as the ordinary-column lane can express.
+///
+/// The lane's whole trade is that a base where every read simply shows a letter needs a handful
+/// of scalars rather than the general machine, so what it has to know per read is not "what
+/// events are here" but "is this one letter, nothing, or something the scalars cannot say".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BaseShown {
+    /// One letter and its quality, with nothing else anchored at this base.
+    Letter(u8, u8),
+    /// Nothing: the read is inside a deletion or an `N`-skip here, or its own base here is `N`
+    /// or past the adaptor boundary. It is not a contributor and the base is still ordinary.
+    Nothing,
+    /// An insertion or a deletion is anchored at this base, so what the read shows here is not
+    /// one letter and cannot be made into one.
+    NotOneLetter,
+}
+
 /// Reference and read offsets at the start of one CIGAR op. The
 /// table built from these is the cursor's only persistent state.
 #[derive(Debug, Clone, Copy)]
@@ -545,11 +562,7 @@ impl CigarCursor {
     /// It exists because the caller that wants it wants it 8 columns in 10 and does not want
     /// a `SmallVec` of 40-byte enums to hold one byte of sequence: see
     /// [`fast_column`](super::fast_column).
-    pub(super) fn match_at(&self, walker_pos: u32, read: &PreparedRead) -> Option<(u8, u8)> {
-        debug_assert!(
-            self.matches_only(),
-            "match_at is only equivalent to events_at for a CIGAR with no indel op",
-        );
+    pub(super) fn plain_match_at(&self, walker_pos: u32, read: &PreparedRead) -> BaseShown {
         let n_ops = read.cigar.len();
         // The op containing `walker_pos`, found the way this cursor's mode finds anything:
         // a scan with an early break, or a partition point. Only a Match op can contain a
@@ -559,11 +572,11 @@ impl CigarCursor {
             CursorMode::BinarySearch => {
                 let i_after = self.offsets.partition_point(|o| o.ref_pos <= walker_pos);
                 if i_after == 0 {
-                    return None;
+                    return BaseShown::Nothing;
                 }
                 let i_lo = i_after - 1;
                 if i_lo >= n_ops {
-                    return None;
+                    return BaseShown::Nothing;
                 }
                 Some(i_lo)
             }
@@ -578,26 +591,50 @@ impl CigarCursor {
                 found
             }
         };
-        let i = candidate?;
+        let Some(i) = candidate else {
+            return BaseShown::Nothing;
+        };
         let (CigarOp::Match(len) | CigarOp::SeqMatch(len) | CigarOp::SeqMismatch(len)) =
             read.cigar[i]
         else {
-            return None;
+            // Not inside a Match op, so this read shows no base here — and no indel is
+            // anchored here either, because an indel's anchor is the last reference base of
+            // the Match op before it and is therefore always inside one.
+            return BaseShown::Nothing;
         };
         let off = self.offsets[i];
         let op_lo = off.ref_pos;
         let op_hi = op_lo + len;
         if walker_pos < op_lo || walker_pos >= op_hi {
-            return None;
+            return BaseShown::Nothing;
+        }
+        // **Asked before the base is looked at, and that order is the point.** An insertion or
+        // a deletion is anchored at the *last* reference base of the Match op it follows, so
+        // this is where one would be. It has to be reported even when the base itself is
+        // dropped below as an `N` or as adaptor: the general path would still raise the indel
+        // event from this read, and a lane that skipped the read and emitted a one-base locus
+        // would be answering a different question.
+        //
+        // **Conservative where `events_at` is not.** That function drops an insertion on the
+        // first or last op and where the anchor sits at reference position 1 or below; this
+        // does not, so a handful of columns it would have accepted are handed back instead.
+        // Handing back is free, and the two rules are not worth duplicating here.
+        if walker_pos + 1 == op_hi
+            && matches!(
+                read.cigar.get(i + 1),
+                Some(CigarOp::Insertion(_) | CigarOp::Deletion(_))
+            )
+        {
+            return BaseShown::NotOneLetter;
         }
         let read_off = (off.read_pos + (walker_pos - op_lo)) as usize;
         let base = read.seq[read_off];
         // Read-N: skip per `pileup_walker.md` §"N-base handling".
         // G1 — drop bases past the adaptor boundary.
         if base == b'N' || base_in_adaptor(walker_pos, read) {
-            return None;
+            return BaseShown::Nothing;
         }
-        Some((base, read.bq_baq[read_off]))
+        BaseShown::Letter(base, read.bq_baq[read_off])
     }
 
     /// Events whose **anchor** is exactly `walker_pos`. The
@@ -826,6 +863,102 @@ mod tests {
     use crate::ng::locus_generation::pileup::decompose::decompose;
     use crate::ng::types::ReadGroupId;
     use crate::pileup::walker::CigarOp;
+
+    /// **What the ordinary-column lane is allowed to take, base by base.**
+    ///
+    /// The lane used to refuse a read whose alignment held an indel *anywhere*, which on a
+    /// 100-base read meant refusing a hundred bases for one event. It now asks about the base
+    /// in front of it, and this is that question's whole contract: an indel is anchored at the
+    /// last reference base of the match run before it, so exactly one base of this read is
+    /// `NotOneLetter` and every other covered base is a plain `Letter`.
+    ///
+    /// Read: 10 matches from reference position 100, then a 3-base insertion, then 10 matches.
+    /// So bases 100..=108 are plain, 109 carries the insertion's anchor, and 110..=119 are
+    /// plain again — and the read's letters after the insertion must come from *after* the
+    /// inserted run, which is what makes this more than an arithmetic test.
+    #[test]
+    fn only_the_base_an_indel_is_anchored_at_is_not_one_letter() {
+        let seq: Vec<u8> = b"AAAAAAAAAA"
+            .iter()
+            .copied() // 100..=109, the matched run
+            .chain(b"GGG".iter().copied()) // the inserted bases
+            .chain(b"CCCCCCCCCC".iter().copied()) // 110..=119
+            .collect();
+        let qual = vec![30u8; seq.len()];
+        let read = make_read(
+            vec![
+                CigarOp::Match(10),
+                CigarOp::Insertion(3),
+                CigarOp::Match(10),
+            ],
+            100,
+            &seq,
+            &qual,
+        );
+        let cursor = CigarCursor::new(&read.cigar, read.alignment_start);
+
+        for pos in 100..=108 {
+            assert_eq!(
+                cursor.plain_match_at(pos, &read),
+                BaseShown::Letter(b'A', 30),
+                "base {pos} is a plain match",
+            );
+        }
+        assert_eq!(
+            cursor.plain_match_at(109, &read),
+            BaseShown::NotOneLetter,
+            "the insertion is anchored at the last base of the match run before it",
+        );
+        for pos in 110..=119 {
+            assert_eq!(
+                cursor.plain_match_at(pos, &read),
+                BaseShown::Letter(b'C', 30),
+                "base {pos} is a plain match, and its letter comes from after the insertion",
+            );
+        }
+        assert_eq!(cursor.plain_match_at(99, &read), BaseShown::Nothing);
+        assert_eq!(cursor.plain_match_at(120, &read), BaseShown::Nothing);
+    }
+
+    /// **A deletion's anchor is refused too**, even though the lane's caller never asks: it
+    /// refuses any read carrying a deletion before it gets here. Pinned so the two stay
+    /// independent — if that caller-side guard is ever relaxed, this one is already right.
+    ///
+    /// Read: 10 matches from 100, 2 deleted reference bases, 10 matches. The deleted bases
+    /// are 110 and 111, which the read shows nothing at.
+    #[test]
+    fn a_deletions_anchor_is_not_one_letter_and_its_deleted_bases_show_nothing() {
+        let seq: Vec<u8> = b"AAAAAAAAAACCCCCCCCCC".to_vec();
+        let qual = vec![30u8; seq.len()];
+        let read = make_read(
+            vec![CigarOp::Match(10), CigarOp::Deletion(2), CigarOp::Match(10)],
+            100,
+            &seq,
+            &qual,
+        );
+        let cursor = CigarCursor::new(&read.cigar, read.alignment_start);
+
+        assert_eq!(
+            cursor.plain_match_at(108, &read),
+            BaseShown::Letter(b'A', 30)
+        );
+        assert_eq!(
+            cursor.plain_match_at(109, &read),
+            BaseShown::NotOneLetter,
+            "the deletion is anchored at the last matched base before it",
+        );
+        for deleted in 110..=111 {
+            assert_eq!(
+                cursor.plain_match_at(deleted, &read),
+                BaseShown::Nothing,
+                "the read shows nothing at a base it deleted",
+            );
+        }
+        assert_eq!(
+            cursor.plain_match_at(112, &read),
+            BaseShown::Letter(b'C', 30)
+        );
+    }
 
     fn make_read(
         cigar: Vec<CigarOp>,
