@@ -1161,6 +1161,7 @@ impl WalkerState {
                 &mut self.fast_column_buf,
                 self.config.max_snp_column_depth as usize,
                 may_have_mate_overlap,
+                self.junction,
             )?
         } else {
             super::fast_column::FastColumn::Fallback
@@ -2066,6 +2067,7 @@ fn column_depth_cap(contributors: &[ReadContribution], config: &WalkerConfig) ->
 mod tests {
     use super::super::cigar_cursor::EventsAt;
     use super::*;
+    use crate::ng::locus_generation::pileup::CigarOp;
     use crate::ng::locus_generation::pileup::tests::{Locus, MockFasta, snp_read};
     use crate::ng::types::{ContigId, Position};
 
@@ -2625,6 +2627,83 @@ mod tests {
                  from a fresh walker's",
             );
         }
+    }
+
+    /// **A read whose deletion stops one base short of a region beside repeat ground is
+    /// still poorer for it at that region's first base** — and the ordinary-column lane
+    /// must not answer that base, because it has no term for the deletion.
+    ///
+    /// # The case, and why one column of the walk is not like the others
+    ///
+    /// Where a generic region begins immediately after a repeat tract, the general path
+    /// builds every record on the region's **first** base from an event window that starts
+    /// one base *earlier*, so that an insertion anchored on the repeat's last base can be
+    /// claimed by this region ([`window_of_read`](super::open_record)). That widened window
+    /// keeps every deletion it finds whatever its anchor, so a read whose deleted run ends
+    /// on the repeat's last base contributes its deletion's quality proxy to
+    /// `min_bq_for_read` here — and nowhere else. One base along, the window is the
+    /// ordinary `[p, p + 1)` and the same read is worth its own base quality again.
+    ///
+    /// The fixture makes those two columns identical in every other way: the carrier shows
+    /// the same base at Phred 40 at both, and the two plain reads cover both. So a walk
+    /// that gives the same `q_sum` at 21 and at 22 has answered the junction base without
+    /// the deletion, which is exactly what the fast lane does when its junction test is
+    /// removed. **Measured on 10 Mb of tomato chromosome 1, that is the whole of the
+    /// difference between the two arms**: one locus in 10.6 million columns, and only its
+    /// `q_sum`.
+    #[test]
+    fn a_deletion_ending_on_the_repeats_last_base_still_reaches_the_regions_first_base() {
+        let reference = MockFasta::new(&"A".repeat(100));
+        let config = WalkerConfig::default();
+
+        // 11 matched bases, a 5-base deletion anchored at 15, then 10 matched bases from
+        // 21 — so the deletion's footprint ends exactly at the region's first base.
+        // The three read bases before the deletion carry Phred 12 and everything else 40,
+        // which is what makes the deletion's proxy (freebayes' `l + 2` window centred on
+        // the read cursor) worth 12 while the base at 21 is worth 40.
+        let mut carrier = snp_read("carrier", 5, &[b'A'; 21], &[40; 21]);
+        carrier.cigar = vec![CigarOp::Match(11), CigarOp::Deletion(5), CigarOp::Match(10)];
+        carrier.alignment_end = 30;
+        carrier.bq_baq[8..11].fill(12);
+        // Phred 40 is `ln(P_err) = -9.21` and Phred 12 is `-2.76`; the mint floors both by
+        // the read's mapping-quality log-error, so that has to sit below either.
+        carrier.mq_log_err = -30.0;
+        let mut plain_a = snp_read("plain_a", 15, &[b'A'; 16], &[40; 16]);
+        plain_a.mq_log_err = -30.0;
+        let mut plain_b = snp_read("plain_b", 16, &[b'A'; 16], &[40; 16]);
+        plain_b.mq_log_err = -30.0;
+
+        let mut walker = run(
+            ScriptedRegionSource::new(vec![carrier, plain_a, plain_b]),
+            &reference,
+            &config,
+        );
+        // The region runs 21..=30 and its first base abuts repeat ground, which is what
+        // `Some(21)` arms — the third argument the generator fills from
+        // `region_adjoins_repeat_ground`.
+        walker
+            .move_to_region(scripted_region(21, 60), 30, Some(21))
+            .expect("the scripted source cannot fail");
+        let loci: Vec<Locus> = walker
+            .by_ref()
+            .map(|item| item.expect("the walk succeeds"))
+            .collect();
+
+        let q_sum_at = |pos: u32| {
+            loci.iter()
+                .find(|locus| locus.anchor() == pos)
+                .unwrap_or_else(|| panic!("the walk emitted no locus at {pos}"))
+                .reference_observation()
+                .q_sum
+        };
+        assert_ne!(
+            q_sum_at(21),
+            q_sum_at(22),
+            "the same three reads show the same bases at the same qualities at both \
+             columns, so a difference can only come from the carrier's deletion — which \
+             the region's first base sees and the base after it does not. Equal means the \
+             junction base was answered without the deletion. Loci: {loci:?}",
+        );
     }
 
     /// **The chain-id allocator is the one thing that must *not* be restarted.**

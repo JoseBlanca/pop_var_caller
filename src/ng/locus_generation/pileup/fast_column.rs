@@ -26,18 +26,21 @@
 //!    one base wide, anchored at the walker, and can never be found again — the next
 //!    position's events start at `pos + 1` and half-open intervals that touch do not
 //!    overlap. So no widen, no re-fold, and no read folded into it twice.
-//! 2. **No active read carries a deletion, and none has an insertion anchored at this base.**
-//!    Until 2026-09-08 this was one test — every active read's CIGAR free of `I` and `D` ops
-//!    — which bought both halves of what is needed at once: no read answers with anything but
-//!    a `Match` here, *and* no event reaches in from an earlier anchor. A read with an
-//!    insertion at its far end fails that test at every one of the hundred bases it covers,
-//!    and **that alone sent 19.1% of the 10.6 M bases of a 10 Mb walk down the general path**.
-//!    The first half is now asked at this base
-//!    ([`plain_match_at`](super::cigar_cursor::CigarCursor::plain_match_at)); the second is
-//!    still asked of the whole read, because a deletion's footprint is the only one that
-//!    reaches past its own anchor and relaxing it *is* measurably wrong — see the guard's own
-//!    note, which carries the number.
-//! 3. **No two contributors share a chain id**, i.e. no mate-overlap reconciliation fires
+//! 2. **This base is not a region's first base beside repeat ground.** There, and nowhere
+//!    else in the walk, the general path builds its record from an event window that starts
+//!    one base earlier, so that an insertion anchored on the repeat's last base can be
+//!    claimed by this region ([`window_of_read`](super::open_record)). See the test's own
+//!    note for what that window returns that this lane cannot see.
+//! 3. **No active read shows anything but one letter at this base.**
+//!    Until 2026-09-08 this was a question about the whole read — every active read's CIGAR
+//!    free of `I` and `D` ops — which bought two things at once: no read answers with
+//!    anything but a `Match` here, *and* no event reaches in from an earlier anchor. A read
+//!    with an indel at its far end failed that test at every one of the hundred bases it
+//!    covers, and **that alone sent 19.1% of the 10.6 M bases of a 10 Mb walk down the
+//!    general path**. It is now asked at this base
+//!    ([`plain_match_at`](super::cigar_cursor::CigarCursor::plain_match_at)); the second
+//!    half, which is only ever about a deletion, is what test 2 above closes.
+//! 4. **No two contributors share a chain id**, i.e. no mate-overlap reconciliation fires
 //!    here. **The active set answers this one before the pass, in O(1)**: a shared chain id
 //!    is a mate pair, and
 //!    [`may_have_mate_overlap_at`](super::active_read_set::ActiveReads::may_have_mate_overlap_at)
@@ -46,7 +49,7 @@
 //!    in 10,000 at 130× — is the depth-sized sort over the contributors' chain ids run, and
 //!    a column that fails it is handed back with nothing lost but the pass itself.
 //!
-//! A fourth, the per-column depth cap, is checked against the active-set size, which bounds
+//! A fifth, the per-column depth cap, is checked against the active-set size, which bounds
 //! the contributor count from above.
 //!
 //! **Handing back is always safe.** The pass writes only into scratch buffers this module
@@ -78,7 +81,7 @@ use crate::pileup_record::ChainId;
 use super::active_read_set::ActiveReads;
 use super::cigar_cursor::BaseShown;
 use super::errors::WalkerError;
-use super::open_record::{OpenPileupRecordTable, minted_ln_read_error};
+use super::open_record::{JunctionAtRegionStart, OpenPileupRecordTable, minted_ln_read_error};
 
 /// What one read contributes to an ordinary column: everything the locus needs from it,
 /// with no reference to the read left behind.
@@ -100,11 +103,13 @@ struct PlainContribution {
     ///
     /// **This path reaches the same number by a shorter route, not over a narrower window.**
     /// It hands the mint one base's quality directly; the general fold reaches it through a
-    /// window that, in every column this path accepts, holds exactly that one event. The lane
-    /// refuses a read carrying any indel and refuses any column an open record overlaps, so
-    /// the record the general path would build there spans one base and its window collects
-    /// one match — which `cigar_cursor`'s own equivalence note states, and the
-    /// `debug_assert_eq!` below re-checks at every column in a debug walk.
+    /// window that, in every column this path accepts, holds exactly that one event — so
+    /// `min_bq_for_read` returns this base's own quality and the two mints agree. The three
+    /// column tests are what make that true: no record already open here, so the record the
+    /// general path builds spans one base; no indel anchored here, so no second event shares
+    /// the anchor; and not a region's first base beside repeat ground, so the window is
+    /// `[p, p + 1)` and a deletion ending on the base before is outside it. The
+    /// `debug_assert_eq!` below re-checks the event list at every column in a debug walk.
     ln_q: f64,
     /// Forward strand.
     fwd: bool,
@@ -175,6 +180,7 @@ pub(super) fn try_ordinary_column(
     scratch: &mut FastColumnScratch,
     max_snp_column_depth: usize,
     may_have_mate_overlap: bool,
+    junction: Option<JunctionAtRegionStart>,
 ) -> Result<FastColumn, WalkerError> {
     // The contributor count is at most the active-read count, so this bounds the column
     // cap from above without knowing which reads contribute.
@@ -189,40 +195,55 @@ pub(super) fn try_ordinary_column(
     {
         return Ok(FastColumn::Fallback);
     }
+    // **The one base of the walk whose record does not ask about its own base.** Where the
+    // region begins immediately after repeat ground, the general path builds every record on
+    // the region's first base from a window that starts one base *earlier*
+    // ([`window_of_read`](super::open_record)), so that an insertion anchored on the repeat's
+    // last base can be claimed by this region. That widened window returns two things this
+    // lane cannot see, and both change the emitted bytes:
+    //
+    // - **a deletion that ends on the repeat's last base.** `window_of_read` keeps every
+    //   deletion whatever its anchor, so a read whose deleted run stops one base short of
+    //   here still contributes its deletion's quality proxy to `min_bq_for_read`, and the
+    //   read's `ln ε` at this base is that proxy rather than the base's own quality.
+    // - **the claimed junction insertion itself**, which the fold spells before this base
+    //   and this lane has no allele for.
+    //
+    // Refusing the column costs one base per region and removes both.
+    if junction.is_some_and(|junction| junction.first_base == walker_pos) {
+        return Ok(FastColumn::Fallback);
+    }
 
     scratch.reads.clear();
     for active in active_reads.iter() {
-        // **Two guards, and they are deliberately not symmetric.** A read carrying a
-        // *deletion* anywhere in its alignment is refused outright, as every read with any
-        // indel was until 2026-09-08. A read whose only indels are *insertions* is judged at
-        // this base instead: `plain_match_at` reports whether one is anchored here.
+        // **Asked at this base, not of the whole read.** Until 2026-09-08 a read carrying
+        // any `I` or `D` op anywhere in its alignment was refused at every one of the
+        // hundred bases it covers, and that alone sent 19.1% of the 10.6 M bases of a 10 Mb
+        // walk down the general path. `plain_match_at` asks the question the lane actually
+        // needs — does this read show one letter *here* — and answers `NotOneLetter` for the
+        // single base an indel is anchored at.
         //
-        // # Why the two halves are not alike
+        // # Why nothing has to be asked of the read's history any more
         //
-        // The whole-read test bought two different things. One is a fact about this base —
-        // no read here is doing anything but showing a letter — and that is exactly what
-        // `plain_match_at` asks, at this base, for the read it is asked about. The other is a
-        // fact about *history*: no event from an earlier base is still reaching in here. A
-        // deletion is the only event whose footprint extends past its own anchor
-        // ([`spans_only_its_anchors`](super::cigar_cursor::CigarCursor::spans_only_its_anchors)),
-        // so it is the only one that can — and the open-record test above, which asks whether
-        // anything is *already open* over this base, does not catch every way it happens.
+        // The whole-read test also bought a second thing: that no event anchored at an
+        // earlier base is still reaching in here. A deletion's footprint is the only one
+        // that does, and every way it can reach a record on this base is now closed by a
+        // column test above rather than by a read test here:
         //
-        // **That last sentence is a measurement and not a mechanism, and it is written that
-        // way on purpose.** Relaxing deletions per-base as well moved the psp from byte
-        // 33,403,518 of 157,822,123 on 10 Mb of tomato chromosome 1, where relaxing insertions
-        // alone leaves psp and census byte-identical. The case that diverges has not been
-        // identified, so nobody should assume the open-record test is nearly enough and add
-        // one more condition to close the gap. It is worth finding: the unsafe version ran the
-        // same 10 Mb in 30.67 s against this one's 34.66 s.
+        // - **at the deletion's own anchor**, `plain_match_at` returns `NotOneLetter` — the
+        //   anchor is the last reference base of the match run before the `D` op;
+        // - **inside the deleted run**, the read shows no letter at all, and the record the
+        //   deletion opened covers this base, so `find_overlapping` above has already handed
+        //   the column back;
+        // - **one base past the deleted run**, the ordinary window `[p, p + 1)` excludes the
+        //   deletion — its footprint ends exactly at `p` — *except* on a region's first base
+        //   beside repeat ground, where the window starts a base early. That column is
+        //   refused above.
         //
         // # What refusing costs
         //
         // Nothing but this pass. Handing back re-runs the general path against untouched
         // state, which is what makes a conservative guard here free to be conservative.
-        if !active.cursor.spans_only_its_anchors() {
-            return Ok(FastColumn::Fallback);
-        }
         let shown = active.cursor.plain_match_at(walker_pos, &active.read);
         if shown == BaseShown::NotOneLetter {
             return Ok(FastColumn::Fallback);
