@@ -773,6 +773,51 @@ against 25.34 s today. **The encoder becomes the bound at about five workers**, 
 thing to attack is either it or the 2.6 s of setup, and the setup is the one that is re-read
 identically 63 times across a cohort.
 
+## 7f. The repeat-tract aligner, looked at and left alone
+
+After §7e the tract aligner is the largest single named block on the walking thread —
+`SsrUnitRobustAligner::delimit`, the dynamic-programming pass, at **16.7% of it** measured with
+that function marked, about **3.6 s of a 25.3-second run**. It was looked at and nothing was
+changed, and this is what the looking found.
+
+**Its cell is at its arithmetic floor.** Everything the shape of the problem allows to be hoisted
+already is: the gap-open cost, the in-tract test and the whole-unit-deletion window are resolved
+once per column into a `ColumnPlan`; the whole-unit slip emission is a per-row table indexed by
+motif phase; the per-base emission is one compare-and-select from a per-row `BaseScores`; and the
+five backpointers per cell are packed into one `u16`. Self time inside the DP splits across the
+cell body — the row and backpointer stores about 4.2% of the walking thread, the deletion
+recurrence 3.0%, the loop head and the match recurrence 2.8% — and the deletion recurrence is a
+loop-carried dependency along the row, which is latency and not throughput.
+
+**One change was built and refused.** `best_of` took its candidates as `&[(f64, State)]`, and the
+match recurrence passes five of them — eighty bytes that a slice forces the compiler to give an
+address. Taking them by value over a const-sized array removes **0.30% of instructions** and buys
+**no wall at all** (25.68 s → 25.82 s, lost 2 pairs of 3, cycles +0.34%). It joins the 2026-09-02
+review's DP row hoist, which earned −0.13%.
+
+**The levers that remain are about doing fewer cells, and all three are small or are not tuning
+changes.** Counted over 10 Mb, of 1,048,576 reads reaching the classifier:
+
+| | reads | share |
+|---|---:|---:|
+| skipped the aligner — the read copies the reference across the whole window | 313,901 | 29.9% |
+| aligned, and yielded an observation | 482,681 | 46.0% |
+| aligned, and yielded nothing | 251,994 | 24.0% |
+
+- **Widening the no-alignment skip** buys little: of the reads that do align, only **34,235 —
+  4.7%** even bracket the window with an indel-free CIGAR, because the mean read region inside the
+  window is 23.2 bases against a 41-base frame. Of those, 18,881 differ from the reference in
+  exactly one base, so a one-mismatch skip could reach **2.6% of alignments** at best, and it
+  would need an argument that the aligner agrees.
+- **Pre-filtering the reads that yield nothing** buys 1.8% of the walking thread. They are a
+  third of all alignments but only **12.4% of the cells** — 87.8 M of 710 M — because they are the
+  short ones that clip the window's edge.
+- **Banding the DP** is the only large one, and it is not a tuning change. An alignment averages
+  966 cells, 23.2 read rows by 41.6 reference columns; a band a few units wide around the diagonal
+  would cut that several-fold and take the DP to about 4% of the walking thread — **worth roughly
+  1.5 s of 25.3** — but it changes the answer for exactly the reads the aligner exists to rescue,
+  the long alleles a mapper collapsed into flank mismatches. That is the owner's to rule on.
+
 ## 8. How it was checked
 
 - **The psp and the census, with the command line held byte-identical.** The psp header records
