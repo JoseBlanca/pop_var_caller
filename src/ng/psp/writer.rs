@@ -16,7 +16,7 @@ use std::fs::File;
 use std::io::{BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
 
-use super::block::{BlockBuilder, BlockCompressor, BlockHead, BlockWriteError};
+use super::block::{BlockBuilder, BlockCompressError, BlockCompressor, BlockHead, BlockWriteError};
 use super::footer::{FOOTER_BYTES, Footer, encode_footer};
 use super::header::Header;
 use super::index::BlockIndexEntry;
@@ -58,6 +58,253 @@ pub struct WriteStats {
     pub header_digest: [u8; 16],
 }
 
+/// **How many closed blocks may be waiting to be compressed before the walk has to wait.**
+///
+/// Two, not more: a block is the walk's own record buffer copied out, so every slot costs a
+/// block payload of resident memory, and the walk closes one block per genomic block (100 kb by
+/// default) while compressing one costs a few per cent of the walk. One in the queue and one
+/// under the compressor is already enough for the compressor never to be the reason the walk
+/// stops; a deeper queue would buy nothing and cost payloads.
+const BLOCKS_AWAITING_COMPRESSION: usize = 2;
+
+/// One closed block, on its way to the compressor.
+struct BlockToCompress {
+    head: BlockHead,
+    /// The block payload — its head, then its records. A buffer recycled through
+    /// [`BlockCompressionLine::spare_payloads`], not a fresh allocation per block.
+    payload: Vec<u8>,
+    /// Where the compressed block is to be written. Recycled the same way.
+    frame: Vec<u8>,
+}
+
+/// One compressed block, on its way back to the writing thread.
+struct CompressedBlock {
+    head: BlockHead,
+    /// The payload buffer, to be filled again.
+    payload: Vec<u8>,
+    /// `Ok` holds the whole on-disk block — its four-byte length, then its zstd frame. `Err`
+    /// is why it could not be compressed, carried back rather than raised on the compressing
+    /// thread, so that the walk still owns every failure it reports.
+    frame: Result<Vec<u8>, BlockCompressError>,
+}
+
+/// **Compressing a psp's blocks on a thread of its own, while the walk carries on.**
+///
+/// A closed block is compressed and written and nothing waits for it: no record after it
+/// depends on its bytes, and its index entry is not built until it is written. So the only
+/// thing tying compression to the walk is *order* — the file's blocks and its index entries
+/// must land in the order the walk closed them — and one compressing thread with FIFO queues
+/// keeps that by construction. **The bytes are the same bytes**: [`BlockCompressor::compress`]
+/// is a pure function of one payload, holding no state between blocks, so which thread ran it
+/// cannot be read out of the file.
+///
+/// **What it costs in memory** is `BLOCKS_AWAITING_COMPRESSION` block payloads plus the frames
+/// they compress to, all recycled rather than reallocated — on the default 100 kb grid, a few
+/// megabytes at one sample. What it costs in threads is one, for as long as one psp is open.
+struct BlockCompressionLine {
+    to_compress: crossbeam_channel::Sender<BlockToCompress>,
+    /// **Unbounded on purpose, and it is what makes this deadlock-free.** The walk can block
+    /// handing a block over; the compressor must never block handing one back, or the two
+    /// would wait on each other. It is bounded in fact by the sending side, which never has
+    /// more than `BLOCKS_AWAITING_COMPRESSION` blocks in flight.
+    compressed: crossbeam_channel::Receiver<CompressedBlock>,
+    /// Joined when the writer is dropped, so no compressing thread outlives its psp.
+    worker: Option<std::thread::JoinHandle<()>>,
+    /// How many blocks the compressor has been handed and not yet given back.
+    in_flight: usize,
+    /// Payload and frame buffers that have come back, ready to be filled again.
+    spare_payloads: Vec<Vec<u8>>,
+    spare_frames: Vec<Vec<u8>>,
+}
+
+impl std::fmt::Debug for BlockCompressionLine {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BlockCompressionLine")
+            .field("in_flight", &self.in_flight)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BlockCompressionLine {
+    /// Start the compressing thread, which owns `compressor` from here on.
+    fn start(compressor: BlockCompressor) -> Self {
+        let (to_compress, jobs) = crossbeam_channel::bounded(BLOCKS_AWAITING_COMPRESSION);
+        let (done, compressed) = crossbeam_channel::unbounded();
+        let worker = std::thread::Builder::new()
+            .name("psp-block-compression".to_string())
+            .spawn(move || compress_blocks(compressor, &jobs, &done))
+            .expect("a thread for compressing psp blocks");
+        Self {
+            to_compress,
+            compressed,
+            worker: Some(worker),
+            in_flight: 0,
+            spare_payloads: Vec::new(),
+            spare_frames: Vec::new(),
+        }
+    }
+
+    /// Hand one closed block over, having first written every block that has come back.
+    ///
+    /// The `&'static str` in the error is what [`PspWriter::spent`] records: which of the two
+    /// unrecoverable things happened to a block whose records exist nowhere else.
+    fn hand_over(
+        &mut self,
+        head: BlockHead,
+        payload: &[u8],
+        path: &Path,
+        out: &mut BufWriter<File>,
+        written: &mut u64,
+        index: &mut Vec<BlockIndexEntry>,
+    ) -> Result<(), (&'static str, PspWriteError)> {
+        self.write_what_came_back(path, out, written, index)?;
+        while self.in_flight >= BLOCKS_AWAITING_COMPRESSION {
+            self.write_one(path, out, written, index)?;
+        }
+        let mut buffer = self.spare_payloads.pop().unwrap_or_default();
+        buffer.clear();
+        buffer.extend_from_slice(payload);
+        let frame = self.spare_frames.pop().unwrap_or_default();
+        self.to_compress
+            .send(BlockToCompress {
+                head,
+                payload: buffer,
+                frame,
+            })
+            .expect("the compressing thread outlives every block handed to it");
+        self.in_flight += 1;
+        Ok(())
+    }
+
+    /// Write every block already compressed, without waiting for any that is not.
+    fn write_what_came_back(
+        &mut self,
+        path: &Path,
+        out: &mut BufWriter<File>,
+        written: &mut u64,
+        index: &mut Vec<BlockIndexEntry>,
+    ) -> Result<(), (&'static str, PspWriteError)> {
+        while let Ok(block) = self.compressed.try_recv() {
+            self.in_flight -= 1;
+            self.write(block, path, out, written, index)?;
+        }
+        Ok(())
+    }
+
+    /// Wait for the next block to come back, and write it.
+    fn write_one(
+        &mut self,
+        path: &Path,
+        out: &mut BufWriter<File>,
+        written: &mut u64,
+        index: &mut Vec<BlockIndexEntry>,
+    ) -> Result<(), (&'static str, PspWriteError)> {
+        let block = self
+            .compressed
+            .recv()
+            .expect("a block handed over comes back");
+        self.in_flight -= 1;
+        self.write(block, path, out, written, index)
+    }
+
+    /// Wait for every block still in flight, and write them all in order.
+    fn write_all(
+        &mut self,
+        path: &Path,
+        out: &mut BufWriter<File>,
+        written: &mut u64,
+        index: &mut Vec<BlockIndexEntry>,
+    ) -> Result<(), (&'static str, PspWriteError)> {
+        while self.in_flight > 0 {
+            self.write_one(path, out, written, index)?;
+        }
+        Ok(())
+    }
+
+    fn write(
+        &mut self,
+        block: CompressedBlock,
+        path: &Path,
+        out: &mut BufWriter<File>,
+        written: &mut u64,
+        index: &mut Vec<BlockIndexEntry>,
+    ) -> Result<(), (&'static str, PspWriteError)> {
+        let CompressedBlock {
+            head,
+            payload,
+            frame,
+        } = block;
+        self.spare_payloads.push(payload);
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(source) => {
+                return Err((
+                    "a block could not be compressed",
+                    PspWriteError::BlockRefused {
+                        path: path.to_path_buf(),
+                        source,
+                    },
+                ));
+            }
+        };
+        let put = PspWriter::put_block(path, out, written, index, &head, &frame);
+        self.spare_frames.push(frame);
+        put.map_err(|error| ("a block could not be written", error))
+    }
+}
+
+/// **Joined, not detached.** A psp that is finished, or one whose writer was dropped
+/// half-written, must leave no thread behind — a cohort walked in one process would otherwise
+/// accumulate one per sample.
+impl Drop for BlockCompressionLine {
+    fn drop(&mut self) {
+        // Replacing the sender closes the one the worker is waiting on, which ends its loop.
+        let (closed, _) = crossbeam_channel::bounded(0);
+        self.to_compress = closed;
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// The compressing thread's whole life: take a block, compress it, hand both buffers back.
+///
+/// **A failure travels back down the channel rather than panicking here**, so that the walk
+/// still reports every failure of its own file — a compressing thread that died would leave
+/// the walk waiting on a block that never comes.
+fn compress_blocks(
+    mut compressor: BlockCompressor,
+    jobs: &crossbeam_channel::Receiver<BlockToCompress>,
+    done: &crossbeam_channel::Sender<CompressedBlock>,
+) {
+    while let Ok(job) = jobs.recv() {
+        let BlockToCompress {
+            head,
+            payload,
+            mut frame,
+        } = job;
+        let compressed = match compressor.compress(&payload) {
+            Ok(bytes) => {
+                frame.clear();
+                frame.extend_from_slice(bytes);
+                Ok(frame)
+            }
+            Err(source) => Err(source),
+        };
+        if done
+            .send(CompressedBlock {
+                head,
+                payload,
+                frame: compressed,
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
 /// Writes one psp, from its header to its footer.
 ///
 /// **The manifest is fixed at [`create`](Self::create) and cannot change afterwards** (spec
@@ -83,7 +330,8 @@ pub struct PspWriter {
     /// It is `Some` for the whole of this writer's life, because the only thing that takes it is
     /// [`PspWriter::finish`], which consumes the writer in the same breath.
     builder: Option<BlockBuilder>,
-    compressor: BlockCompressor,
+    /// **Compression, on a thread of its own.** See [`BlockCompressionLine`].
+    line: BlockCompressionLine,
     /// One entry per block closed so far, in the order they were written.
     index: Vec<BlockIndexEntry>,
     records: u64,
@@ -160,7 +408,7 @@ impl PspWriter {
             written: 0,
             header_digest,
             builder: Some(builder),
-            compressor,
+            line: BlockCompressionLine::start(compressor),
             index: Vec::new(),
             records: 0,
             spent: None,
@@ -272,7 +520,7 @@ impl PspWriter {
                 hasher.finalize().into()
             },
             builder: Some(builder),
-            compressor,
+            line: BlockCompressionLine::start(compressor),
             index,
             // **Not the records already in the file**, which nothing counts: `WriteStats` says
             // what this writer wrote, and the blocks it inherited are in the index it inherited.
@@ -381,34 +629,30 @@ impl PspWriter {
         let head = Self::decode_the_head_of(payload, &self.path).inspect_err(|_| {
             self.spent = Some("a block it had just built could not be read back");
         })?;
-        // **Destructured so the compressed block is written where it lies.** `compress` hands
-        // back a borrow of the compressor's own buffer, and copying it out was the price of
-        // borrowing `self` twice — one allocation the size of a compressed block, per block, for
-        // nothing. The fields it needs are disjoint from the compressor's, and naming them says
-        // so to the borrow checker.
+        // **Destructured because the block goes to the compressing thread and the blocks that
+        // have come back from it go to the file, and the two touch disjoint fields.** Naming
+        // them says so to the borrow checker.
+        //
+        // **Handing a block over is not writing it**, so a failure raised here can belong to a
+        // block closed several records ago. That costs nothing a reader can see — the file
+        // stops at the same place either way, and `finish` refuses to seal it — and it is why
+        // the line hands back the sentence [`spent`](Self::spent) records rather than the call
+        // site guessing which of the two things went wrong.
         let Self {
             path,
             out,
             written,
-            compressor,
+            line,
             index,
             ..
         } = self;
-        let block = match compressor.compress(payload) {
-            Ok(block) => block,
-            Err(source) => {
-                self.spent = Some("a block could not be compressed");
-                return Err(PspWriteError::BlockRefused {
-                    path: self.path.clone(),
-                    source,
-                });
+        match line.hand_over(head, payload, path, out, written, index) {
+            Ok(()) => Ok(()),
+            Err((why, error)) => {
+                self.spent = Some(why);
+                Err(error)
             }
-        };
-        let put = Self::put_block(path, out, written, index, &head, block);
-        if put.is_err() {
-            self.spent = Some("a block could not be written");
         }
-        put
     }
 
     /// Write the last block, the index, the trailer and the footer, then make the file durable.
@@ -444,25 +688,33 @@ impl PspWriter {
             .finish();
         if let Some(payload) = last_block {
             let head = Self::decode_the_head_of(&payload, &self.path)?;
-            // **Destructured for the reason `push` destructures**: the compressed block is a
-            // borrow of the compressor's own buffer, and naming the disjoint fields writes it
-            // where it lies instead of copying it out.
+            // **Destructured for the reason `push` destructures**: the compressing line and the
+            // file are disjoint fields, and naming them says so.
             let Self {
                 path,
                 out,
                 written,
-                compressor,
+                line,
                 index,
                 ..
             } = &mut self;
-            let block =
-                compressor
-                    .compress(&payload)
-                    .map_err(|source| PspWriteError::BlockRefused {
-                        path: path.clone(),
-                        source,
-                    })?;
-            Self::put_block(path, out, written, index, &head, block)?;
+            line.hand_over(head, &payload, path, out, written, index)
+                .map_err(|(_, error)| error)?;
+        }
+        // **Every block that is still in flight is written before the index is built**, because
+        // the index describes them and the footer describes the index. This is the one place
+        // the walk waits for the compressor, and by then there is nothing else left to do.
+        {
+            let Self {
+                path,
+                out,
+                written,
+                line,
+                index,
+                ..
+            } = &mut self;
+            line.write_all(path, out, written, index)
+                .map_err(|(_, error)| error)?;
         }
 
         let index_offset = self.written;
@@ -2109,6 +2361,45 @@ mod tests {
 
         let mut psp = PspReader::open(&path).expect("a finished psp opens");
         assert_eq!(psp.records().expect("the walk starts").count(), 41);
+    }
+
+    /// **A writer abandoned with blocks still being compressed must not hang, and must leave no
+    /// thread behind.**
+    ///
+    /// Since compression moved to a thread of its own, dropping a writer has to close the
+    /// channel that thread is waiting on and join it. Getting that wrong has two shapes and
+    /// neither shows up as a failing assertion elsewhere: a join on a thread whose channel was
+    /// never closed hangs the run at the drop, and a detached thread leaks — one per sample, in
+    /// a cohort walked in a single process, each holding a block payload.
+    ///
+    /// So this abandons twenty writers in turn, each with several blocks closed and unwritten,
+    /// in one process. A hang fails it by timing out; a leak is what the twenty are for. The
+    /// existing drop tests cannot reach either: they push one record, which closes no block, so
+    /// nothing is ever in flight.
+    #[test]
+    fn writers_abandoned_with_blocks_in_flight_neither_hang_nor_pile_up() {
+        let (_dir, path) = a_file();
+        for round in 0..20u64 {
+            let mut writer =
+                PspWriter::create(&path, a_header(1_000)).expect("a header for each round");
+            // Ten genomic blocks at a thousand bases each, so blocks are closed and handed over
+            // rather than only built.
+            for step in 0..10u64 {
+                writer
+                    .push(&a_record(0, 1 + step * 1_000 + round, 1))
+                    .expect("each record is past the last");
+            }
+            // No `finish`: this is what a killed run leaves, and it is the path that has to
+            // close the channel rather than wait on it.
+            drop(writer);
+        }
+
+        // The last file is what a killed run leaves — headed, unsealed, and refused for append.
+        let refused = PspWriter::append(&path).expect_err("nothing sealed the last one");
+        assert!(
+            matches!(refused, PspWriteError::Reopen { .. }),
+            "an unsealed file is refused for append, not opened: {refused:?}",
+        );
     }
 
     /// **A file with no footer cannot be appended to**, because nothing says where its blocks
