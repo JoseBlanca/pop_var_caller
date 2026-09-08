@@ -1,14 +1,16 @@
-# `generate-psps`: each CRAM container read once, and the psp compressed off the walking thread
+# `generate-psps`: each CRAM container read once, decoded a step early, and the psp compressed off the walking thread
 
 **Date:** 2026-09-08
-**Branch:** `main`, commits `a2a77780`, `aa598441` and `c9018a70` on `8203d218`
+**Branch:** `main`, commits `a2a77780`, `aa598441`, `c9018a70` and `a6457dbb` on `8203d218`
 **Acting on:** the BAM/CRAM → psp performance review of 2026-09-08
 
 **One tomato accession over 10 Mb of `SL4.0ch01`, out of a 49 GB whole-genome CRAM, now takes
-43.99 s and 249.0 MB where it took 57.03 s and 264.6 MB** — 1.30× the throughput for 16 MB less
-resident memory, with the psp and the census byte-identical outside their own timestamp. Two
-changes carry it: the walk's two readers were decoding every container of the file separately,
-and the walk was compressing every psp block itself.
+36.75 s where it took 57.03 s** — **1.55× the throughput**, with the psp and the census
+byte-identical outside their own timestamp, and **28 MB more resident**, 292.4 MB against 264.6,
+which is the one number that went the wrong way. Three things carry it: the walk's two readers
+were decoding every container of the file separately; the walk was compressing every psp block
+itself; and it was inflating each container in the middle of building a locus rather than a step
+ahead, on a thread of its own.
 
 **The fixture is a 103.5× sample**, measured with `samtools coverage` on 100 kb at
 SL4.0ch01:1.0–1.1 Mb — the high end of the depth range this caller commits to, not the tomato
@@ -109,9 +111,10 @@ The baseline's own instruction spread over four runs is 12.8 M on 309 G — one 
 the container-sharing effect is 1,800 times the noise.
 
 **And with the rayon pool left alone, which is how the command actually runs**, three interleaved
-pairs at 10 Mb: **57.03 s → 47.20 s** and **264.6 MB → 245.7 MB** for these two commits, and
-**43.99 s and 249.0 MB** with §6a's compression offload on top. The pinned figures above are what
-the arms are *compared* on; these are what the command costs.
+pairs at 10 Mb: **57.03 s → 47.20 s** and **264.6 MB → 245.7 MB** for these two commits, then
+**43.99 s and 249.0 MB** with §6a's compression offload, then **36.75 s and 292.4 MB** with §6b's
+container prefetcher. The pinned figures above are what the arms are *compared* on; these are what
+the command costs.
 
 The 10 Mb peak rises 7 MB between the second and third columns where the 2 Mb peak falls 5 MB.
 Both are mimalloc holding different segments for a different allocation mix, both reproduce across
@@ -260,10 +263,11 @@ design's serial floor:
 | **7.4% — encoding 6.4%, census 1.1%** | **3.3×** | **5.3×** | **13.5×** |
 
 **This roughly doubles what splitting the walk is worth**, which is the reason it went first
-rather than sitting with the other small wins. What is left on that thread is encoding records
-into block payloads — order-dependent *within* a block and independent *between* blocks — so if
-3.3× at four workers is not enough, building a whole block off-thread is the next place to look,
-and it is an encoding question rather than a scheduling one.
+rather than sitting with the other small wins. (§7 restates the same cap in seconds, which is the
+form that survives the walking thread getting shorter again.) What is left on that thread is
+encoding records into block payloads — order-dependent *within* a block and independent *between*
+blocks — so if four workers is not enough, building a whole block off-thread is the next place to
+look, and it is an encoding question rather than a scheduling one.
 
 ### Two invariants, and one behaviour that changed
 
@@ -279,40 +283,150 @@ because handing a block over is not writing it. Nothing a reader can see changes
 in the same place and `finish` still refuses to seal it — and the line hands back the sentence
 `spent` records, so the message still says which of the two things went wrong.
 
-## 7. What was measured and stopped
+## 6b. Decoding the containers a step ahead of the walk
 
-**The second candidate under §11 question 8 — a prefetcher moving the decode and the read
-preparation off the walking thread — is not recommended, and the reason is that its ceiling moved
-under it.** The review priced it from a profile taken before any of this: 20% decode plus 9% read
-preparation, so 29% and about 1.4×. Re-measured the same way after each change:
+The decode does not sit *beside* locus generation, it sits **inside** it. The generator asks for
+the next read; that call goes down through the cursor to the CRAM reader, and when the reader has
+run out of records it inflates and decodes a whole container — 3.6 MB, ten thousand records —
+before returning the one read that was asked for. The call tree, as samples on the walking thread:
 
-| | CRAM decode | reading and filtering the reads, and the reference bases the decode needs | together | ceiling |
-|---|---:|---:|---:|---:|
-| before | 20% | 9% | **29%** | 1.41× |
-| with the containers shared | 12.0% | 7.7% | **19.7%** | 1.25× |
-| and with the four smaller changes | 11.0% | 6.1% | **17.1%** | 1.21× |
-| and with the psp compression on its own thread | 11.9% | 6.6% | **18.5%** | 1.23× |
+```
+16,260  GeneratorSet::next_locus              "give me the next position"
+ └ 4,236  PreparedSampleReads::next             … which needs another read
+   └ 3,745  AlignmentCursor::next_read
+     └ 2,070  RegionRawAlignedReads::read_next
+       └ 2,048  Slice::decode_blocks_inner      ← a whole container, decoded here
+```
 
-macOS `sample`, 25–30 s into a 10 Mb walk, `RAYON_NUM_THREADS=1`, parked and waiting threads
-excluded so the denominator is the walking thread alone. **The last row goes back up because the
-walking thread got smaller, not because the decode got bigger**: the decode's own samples are flat
-at about 2,460 while the thread it sits on fell from 22,480 to 20,643.
+Nothing about building a position needs the *next* container, and which container is next is
+knowable — the `.crai` lists them in file order and the walk goes forward through it. So a thread
+now decodes it into the cache the two readers already share.
 
-**1.23× is the ceiling and not the gain**: a bounded queue never hides a stage completely, and the
-design adds a copy of every prepared read through a channel — the same review's compression
-offload, the one stage-offload anyone here has actually built, bought its wall at the cost of 1.1%
-more user time for exactly that reason.
+**A hint, not a queue.** The prefetcher holds one wanted offset. A reader that takes a container
+overwrites it with the next offset it expects to want, and a hint the thread never picked up is
+simply replaced. Work the walk has already passed is worthless, and one cell can hold nothing
+stale.
 
-What it costs is two prefetch threads, two bounded queues and a prefetcher that has to be
-stoppable and rewindable — two, because the two locus generators hold separate cursors whose
-regions interleave. And it wins nothing on a cohort run as one invocation a sample, where the
-machine is already saturated, so it needs a knob as well.
+**One decode per container even when two threads want it at once, which is the part that had to
+be right.** The prefetcher makes real a race that was only theoretical: the walk can reach a
+container the prefetch thread is midway through, and left alone both would decode it — §1's
+doubling arriving by a new route, worst exactly when the prefetcher is behind. So a slot is
+claimed before its decode starts, a second thread waits on a condition variable rather than
+starting its own, and a decode that fails clears its claim and wakes the waiters.
 
-**Question 3's split of the walk across segments is the axis worth building instead.** Emulated as
-concurrent processes over disjoint BEDs — an upper bound, since processes share nothing — it
-reached 2.97× at four ways and 3.88× at eight on this same 10 Mb fixture. It needs the same knob,
-and a sharded worker holds its own cursors and decodes on its own thread anyway, so **the 1.23× is
-largely inside the 2.97×**. §11 question 8 now says so.
+| | | before | after |
+|---|---|---:|---:|
+| **2 Mb**, 3 pairs, pinned | wall | 11.85 s | **10.46 s** (−11.7%, won 3/3) |
+| | instructions | 276,764 G | 275,561 G (−0.43%) |
+| | peak resident | 206.1 MB | 243.0 MB (+36.9 MB) |
+| **10 Mb**, 3 pairs, pinned | wall | 44.53 s | **37.47 s** (−15.9%, won 3/3 by 6.98–7.24 s) |
+| | instructions | 1,037,821 G | 1,030,059 G (−0.75%) |
+| | peak resident | 235.4 MB | 282.1 MB (+46.7 MB) |
+| **10 Mb**, 3 pairs, pool left alone | wall | 44.23 s | **36.75 s** (−16.9%, won 3/3 by 7.00–7.53 s) |
+| | peak resident | 249.0 MB | 292.4 MB (+43.4 MB) |
+
+**Instructions fall rather than rise, which is the evidence that the sharing survived.** A
+prefetcher that raced the readers would decode containers twice and the count would go up; it goes
+down 0.75%, because the thread also catches containers a reader would have re-decoded after a
+region jump.
+
+### The thread is the whole win, and the extra cache slots are none of it
+
+The change bundles two things — four cache slots instead of two, and the thread — so one binary
+settled the split by an env-var ablation rather than by argument:
+
+| | wall, 10 Mb | peak resident |
+|---|---:|---:|
+| two slots, no thread | 44.52 s | 235.4 MB |
+| **four slots, no thread** | **45.15 s** | **251.8 MB** |
+| four slots and the thread | 37.84 s | 283.0 MB |
+
+**Four slots on their own buy nothing and cost 16 MB.** They are not there to be faster; they are
+there so a prefetched container does not give up one a reader is about to want. Three slots was
+tried and is not cheaper: the same wall, 0.15% more instructions, and a peak that swings wider.
+
+### It wins on a saturated machine too, which the compression offload did not
+
+Eight concurrent invocations over disjoint 2 Mb windows, three pairs of one binary:
+
+| | wall for the whole set | sum of the eight peaks |
+|---|---|---:|
+| without the prefetcher | 15.45, 15.92, 16.10 s | 1,829 MB |
+| with it | 13.83, 14.11, 14.07 s | 1,982 MB |
+
+**−11.6%, ahead in all three pairs**, for about +20 MB a sample. The prefetch thread is mostly
+asleep, so eight of them do not cost eight cores.
+
+### How well it keeps up, and what that kills
+
+A profile taken 6 s into a 10 Mb walk, by thread:
+
+| thread | busy |
+|---|---:|
+| the walk | **99.8%** — it waits 47 samples of 20,502 |
+| `cram-container-prefetch` | 22.6% |
+| `psp-block-compression` | 10.2% |
+
+**The walking thread is essentially never blocked on the prefetcher**, which is the question the
+review said to ask and the answer that decides the rest. Because it is not, the expensive half of
+this candidate is dead: moving the read *preparation* off as well — two prefetchers, two queues of
+prepared reads, a prefetcher that must be stoppable and rewindable — is now worth **2.3% of the
+walking thread, about 0.85 s of a 37 s run**, because what was left of that share went with the
+decode.
+
+### What it costs
+
+**+43 MB on a single-sample run**: two more cache slots (7.2 MB), a third CRAM descriptor and a
+third reference reader — both are file positions rather than values, so neither can be shared with
+a reader that is seeking elsewhere — and up to three decodes in flight, which the claim rule
+refuses to evict. Against the 264.6 MB this command cost before any of today's work it is now
+292.4 MB, and that is the one number that has gone the wrong way.
+
+## 7. Where the wall goes now, and what is left
+
+**The walk's one thread is locus generation and little else.** Profiled after everything above:
+
+| | share of the walking thread |
+|---|---:|
+| locus generation | **79.5%** |
+| encoding psp records | 7.6% |
+| reading and filtering reads | 2.3% |
+| decoding containers, compressing psp blocks | on threads of their own |
+
+Splitting the walk across k workers (§11 question 3) is what is left, and **its cap is best stated
+in seconds, because a share moves when the thread it is a share of gets shorter**. A 10 Mb run of
+this sample decomposes as:
+
+| | seconds | threads |
+|---|---:|---|
+| reading and MD5-ing the reference, the catalog, the segmentation | **2.6** | serial, before the walk begins |
+| locus generation, the read cursor and its filters | 31.2 | k ways |
+| encoding psp records, and the census | **3.0** | serial, on the merger |
+| decoding containers, compressing psp blocks | — | already off the walking thread |
+
+which is `2.6 + 31.2/k + 3.0`: **13.4 s at four workers, 9.5 s at eight, and 5.6 s however many**
+— against 36.75 s today. The emulation of that split as concurrent processes over disjoint BEDs
+reached 2.97× at four ways and 3.88× at eight, before any of today's changes; it is an upper bound
+on the worker side, since processes share nothing and each wrote its own psp.
+
+**The two serial terms are nearly equal and neither of them is the walk.** Past four workers the
+thing to attack is one of them, and they need different fixes: the setup is re-reading and
+re-digesting one unchanging reference on every invocation — paid 63 times across a cohort for a
+file that did not change — and the merger's 3.0 s is encoding records into block payloads, which
+is order-dependent *within* a block and independent *between* blocks, so a whole block could be
+built off-thread the way its compression already is.
+
+**What was measured and refused**, in one place:
+
+- **Moving the read preparation off the walking thread too** — two prefetchers, two queues of
+  prepared reads, a prefetcher that must be stoppable and rewindable. Its ceiling fell three times
+  before anything was built: 29% of the walking thread when the review priced it, 19.7% once the
+  containers were shared, 17–18.5% after the smaller changes and the compression offload. Then
+  §6b took the containers off, and what is left is **2.3%, about 0.85 s of a 37 s run**. Not worth
+  its complexity.
+- **Four cache slots without the prefetch thread** — no gain and +16 MB (§6b).
+- **Three cache slots with it** — same wall, 0.15% more instructions, a wider peak.
+- **The DP row hoist and the census map rework** — §4.
 
 ## 8. How it was checked
 
@@ -325,14 +439,22 @@ largely inside the 2.97×**. §11 question 8 now says so.
   here sits on it.
 - **`examples/ng_cram_decode_layers`**, which hashes every field of every decoded record, still
   gives `c0bdbb0e464a920b966ad487fc3ca678` over 60 containers and 600,000 records.
-- **`cargo test --lib`: 6,658 passing**, six of them new. noodles-cram's own 223 and 75 pass.
+- **`cargo test --lib`: 6,662 passing**, eleven of them new. noodles-cram's own 223 and 75 pass.
   `diff -r` against the registry copy prints exactly FORK.md's list.
 - **Mutation-verified.** A `take` that ignores the offset fails
   `two_cram_cursors_over_one_file_each_see_every_read`; one cache slot instead of two fails the
-  policy test; the unclamped slice start fails the mismatch-loop comparison; and a drop that
-  joins the compressing thread without first closing its channel hangs
-  `writers_abandoned_with_blocks_in_flight_neither_hang_nor_pile_up`.
-- **The CRAM decode was not re-run for §6a**, which touches only the psp writer.
+  policy test; the unclamped slice start fails the mismatch-loop comparison; a drop that joins the
+  compressing thread without first closing its channel hangs
+  `writers_abandoned_with_blocks_in_flight_neither_hang_nor_pile_up`; and one that joins the
+  prefetch thread without telling it to stop hangs
+  `a_cram_file_that_is_closed_leaves_no_prefetch_thread_behind` — 100 seconds was not enough for
+  either to finish.
+- **The CRAM decode was not re-run for §6a**, which touches only the psp writer. It was for §6b,
+  and the digest is unmoved.
+- **Every CRAM cursor test now runs with a prefetcher**, since the first CRAM cursor on a file
+  starts one. `a_run_of_regions_through_one_cram_cursor_matches_a_linear_scan` and
+  `two_cram_cursors_over_one_file_each_see_every_read` therefore compare a walk *with a thread
+  running ahead of it* against a linear scan of the file.
 
 `cargo test` on its own still fails for three examples that have not compiled since before this
 work and one integration test that fails on `main` and did before — neither touched here.
