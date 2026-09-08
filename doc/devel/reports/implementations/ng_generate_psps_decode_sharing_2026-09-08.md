@@ -567,6 +567,20 @@ line of 15,786 differs, and only in `q_sum`**. Over the whole 10 Mb it is **one 
 reads carry a 10-base deletion ending on 2,185,560 and the general path's window is
 `[2,185,560, 2,185,562)`.
 
+**How often the general path does this at all, counted rather than inferred.** Of the 10,641,693
+columns walked, **8,685 are a region's first base beside repeat ground** — 8 in 10,000 — and they
+carry 796,886 read-into-record folds. **31** of those folds keep a deletion whose footprint stopped
+before the record, at three columns; in **21** of them it lowers the read's minted error, by 1 to
+10 Phred points. Only one of the three shows in the emitted psp when the lane's junction test is
+removed, because at the other two the lane refuses the column on one of its other tests regardless
+— checked by dumping every locus in a window around each and diffing the arms: 1 differing line of
+15,786, then 0 of 10,360 and 0 of 13,541.
+
+**The general path's behaviour there is left alone (owner, 2026-09-08)**, and `window_of_read`'s
+own note now states the case rather than resting on the ordinary window's promise, which does not
+cover it. Narrowing it would buy no speed: the lane must refuse that column regardless, because the
+same widened window can hand the fold a claimed junction insertion.
+
 So the lane refuses that column outright — one base per region — and asks about deletions per base
 everywhere else. Refusing it also closes the **claimed junction insertion**, which the per-base
 insertion test of `9969cc65` would otherwise have let through: a read carrying one shows a plain

@@ -2565,9 +2565,38 @@ fn claimed_junction_insertion(event: &ReadEvent, junction: Option<JunctionAtRegi
 ///
 /// The widened query starts one base early, so it also returns events that are **not**
 /// this record's: a `Match` on the repeat's last base, or an insertion there whose
-/// spelling belongs to the repeat. Those are filtered back out; a `Deletion` is kept
-/// whole whatever its anchor, which is the promise `events_overlapping` already makes
-/// for the ordinary window.
+/// spelling belongs to the repeat. Those are filtered back out. A `Deletion` is kept
+/// whatever its anchor — and **that keeps one class of deletion the ordinary window
+/// would not have returned**, which the rule below states rather than hides.
+///
+/// # What the widening admits, and what it is worth
+///
+/// [`events_overlapping`](super::cigar_cursor::CigarCursor::events_overlapping) returns a
+/// deletion when its *footprint* — the anchor plus the deleted bases — meets the queried
+/// range. Over the ordinary `[rec_pos, rec_end)` that is a deletion **covering** the
+/// record's own ground, which is why it must be kept: it is removing the base the record
+/// sits on. Over `[rec_pos - 1, rec_end)` the same test also admits a deletion whose
+/// footprint **stops at `rec_pos`** — it covers the base before this record and not this
+/// one. The ordinary window would have returned nothing for such a read but its `Match`.
+///
+/// Kept anyway, so the read's `ln ε` here is floored by that deletion's quality proxy
+/// rather than by its own base quality — at the region's first base, and at no other
+/// column of the walk. **Measured over 10 Mb of tomato chromosome 1 at 103.5×**: 8,685
+/// columns are a region's first base beside repeat ground, they carry 796,886 read-folds,
+/// **31** of those folds keep a deletion that stopped short, and in **21** of them it
+/// lowers the read's minted error — by 1 to 10 Phred points, at three columns. At the
+/// worst of the three the observation's `q_sum` is −626.5 where the base's own qualities
+/// alone give −638.7, 1.9% over 76 reads.
+///
+/// **Left as it is, on the owner's ruling of 2026-09-08**, and the reason is not that the
+/// case is small. Down-weighting a read that sits beside an indel is a defensible thing to
+/// do at a tract boundary, where placement is least certain; what is not defensible is
+/// leaving it looking like a consequence of the ordinary window's promise, which it is
+/// not. Narrowing it to `footprint reaches rec_pos` is one line and would change the
+/// emitted psp at those three columns per 10 Mb — and would buy nothing else, because
+/// [`fast_column`](super::fast_column) has to refuse this column regardless: the same
+/// widened window can hand the fold a claimed junction insertion, which that lane has no
+/// allele for.
 fn window_of_read(
     active: &super::active_read_set::ActiveRead,
     rec_pos: u32,
