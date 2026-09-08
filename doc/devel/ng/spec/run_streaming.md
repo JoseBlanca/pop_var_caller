@@ -397,9 +397,22 @@ improved on before they are known.
 
 **The two stages parallelise along different axes, because their work has different shapes.**
 
-**The walk: one worker per sample.** Samples are independent — nothing one sample's walk computes
-is read by another's — so the pool is over samples and each sample's walk is serial inside. §5.2
-gives the reasoning and what it costs.
+**The walk: one sample after another, finished before the next begins** (owner's ruling,
+2026-09-08). Samples are independent, so the walk *could* run several at once; it does not, and
+the reason is not throughput. **A stopped run must leave finished samples finished.** A walk is
+hours, and the recovery a psp exists to make cheap — re-run the one sample that failed — is only
+cheap if the others are on disk. k samples in flight turns one interrupted sample into k
+interrupted samples, and it multiplies the resident memory by k. §5.2 states both, and the
+owner's own words: *"I know that the parallelization result will be worse, but finishing one
+sample before starting the next one is more important."*
+
+**Walking every sample at one shared frontier is direct mode's, and only direct mode's.** That
+mode has no choice: a cohort locus needs the same stretch of genome from every sample at the same
+time, so every sample must be open and advancing together. Nothing in the walk stage needs that,
+so nothing in the walk stage pays for it.
+
+**Which leaves one axis for the walk's own cores, and it is inside one sample** — §11's questions
+3 and 8.
 
 **The two callers: a serial merge feeding a pool of loci.** The merge produces cohort loci one at
 a time in genome order on a single thread; each locus is handed to a free worker as it appears;
@@ -580,14 +593,13 @@ gatherer accumulated: concretely, `CensusWriter::finish()` returning the sample'
 `SampleCensusEvidence`
 ([`src/ng/parameter_estimation/joint/census.rs:1928,2378,1378`](../../../../src/ng/parameter_estimation/joint/census.rs)).
 
-**The walk stage is a loop over samples**, one gatherer each. **Several samples are walked at
-once, one worker each, and each sample's own walk is serial** (owner's decision). **And the
-first implementation runs that loop at concurrency one** (owner's ruling, 2026-09-03): samples
-are processed one at a time, in the order given, and a cohort is parallelised by running
-invocations — typically one sample each — because each sample's generation is independent of
-every other's. That independence is the critical difference from direct mode, which must hold
-every sample open at one shared frontier; the walk stage never has to. The in-process fan-out
-below remains what the arrangement permits, and its knob is §11 question 2's:
+**The walk stage is a loop over samples**, one gatherer each, and **the loop is serial: one
+sample is finished — psp and census both on disk — before the next is begun** (owner's ruling,
+2026-09-08, superseding the "several at once" arrangement this section carried until then).
+A cohort is parallelised by running invocations, typically one sample each, because each
+sample's generation is independent of every other's. That independence is the critical
+difference from direct mode, which must hold every sample open at one shared frontier; the walk
+stage never has to.
 
 ```
 for each sample:
@@ -596,28 +608,34 @@ for each sample:
     census file written from gatherer.finish()  # write_census — census_file.rs:200
 ```
 
-**Why across samples rather than within one.** One worker per sample buys three things that
-splitting a sample would cost back. Each psp is written from one deterministic stream, so the
-writer never has to reassemble out-of-order work and §12.1's worker-count invariance comes for free
-instead of being designed for. The census accumulator is fed from one thread. And the read-filter
-tallies cannot under-report by the worker count (§8). Against those: within-sample scaling in ng is
-unmeasured, and the only measurement anybody has is production's, which gets worse past four
-threads (goal 3).
+**Why one at a time, and the first reason is not performance.** A walk is hours, and what psp
+mode promises is that a failure costs one sample rather than a cohort. **That promise is only
+kept if the samples already walked are on disk when a run stops** — a machine rebooted, a
+timeout, a `^C`, a full disk. Samples finished one after another leave *n* finished psps and
+one interrupted sample; k in flight leave *n* finished and **k** interrupted, and every one of
+those k has to be walked again from its first base. **Measured, on eight tomato accessions over
+2 Mb: four in flight is 2.56× the throughput for 3.16× the resident memory** — so the trade is
+real in both directions, and the owner took the one that keeps the promise (2026-09-08).
 
-**Samples in flight is bounded and small, and it is not a thread per sample** — at a thousand
-samples that would be a thousand open alignment files. Each sample in flight costs one open file
-at 11–15 MiB plus its census accumulator at about 6 MB per read group. **At one read group a
-sample** — every sample of both benchmark cohorts — six at once is under 150 MB. **The read-group
-count is a real multiplier, not a formality**: the 300-reads-a-position end of the committed range
-is reached by sequencing one sample over many lanes, and each lane is a read group, so the same six
-samples at sixteen read groups each is closer to 700 MB. Whoever sets this knob must be told the
-read-group count, not only the sample count. **Peak memory is a function of samples *in flight*, not of cohort size**, which is
-the property psp mode exists for and which survives this change.
+Three further things one sample at a time buys, and each would have to be designed for
+otherwise. Each psp is written from one deterministic stream, so the writer never has to
+reassemble out-of-order work and §12.1's worker-count invariance comes for free. The census
+accumulator is fed from one thread. And the read-filter tallies cannot under-report by the
+worker count (§8).
 
-**A run of one sample gets one worker here, which is goal 3 unmet** — §11's question 8 owns it.
-The one consequence to carry meanwhile: **the psp writer must keep honouring §12.1's worker-count
-invariance**, because splitting one sample's walk is still on the table, and it is the only thing
-that would ever make a sample's observations arrive out of order.
+**Peak memory is one sample's, not the cohort's**, which is the property psp mode exists for.
+An in-flight bound would have made it *k* samples' — and the per-sample cost is not the open
+file and the census accumulator alone: **measured, each additional sample walked at once cost
+about 340 MB** on the eight-accession fixture, because a sample's whole walking set is its own.
+An earlier draft of this section priced it at "an open file at 11–15 MiB plus about 6 MB of
+census accumulator a read group"; that is the resident state of the *inputs*, not of the walk,
+and it was low by more than an order of magnitude.
+
+**A run of one sample uses one core, and that is goal 3 unmet** — §11's question 8 owns it, and
+after this ruling it is the *only* axis left for the walk: the cores have to be found inside one
+sample or not at all. The consequence to carry meanwhile: **the psp writer must keep honouring
+§12.1's worker-count invariance**, because splitting one sample's walk is still on the table, and
+it is the only thing that would ever make a sample's observations arrive out of order.
 
 **The census is fed from inside the gatherer, on the same stream it yields.** Every observation
 the gatherer yields passes the census accumulator (`CensusWriter::add_locus`,
@@ -643,15 +661,17 @@ positions depend on a per-run budget and a seed, so "rebuild it" must mean delet
 not rewriting a large one — decided 2026-08-13
 ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6.1).
 
-**A gatherer never sees more than one sample's files**, whichever way the stage is parallelised.
-The pool is outside it, over samples; the knob is inside it, over that sample's segments — its
-segments to workers, each with its own cursor, reference accessor and generators, observations
-drained in genome order. Read-filter tallies then live in each worker's cursor and are summed when
-the gatherer finishes, or drop rates under-report by the worker count (§8).
+**A gatherer never sees more than one sample's files**, and after the 2026-09-08 ruling that is
+the whole of it: there is no pool outside the gatherer, so any cores the walk uses are found
+inside one — its segments to workers, each with its own cursor, reference accessor and
+generators, observations drained in genome order (§11 question 3); or a stage of the sample's own
+pipeline moved off the walking thread, such as decoding the alignment file and building its reads
+while the previous batch is being piled up. Read-filter tallies then live in each worker's cursor
+and are summed when the gatherer finishes, or drop rates under-report by the worker count (§8).
 
-**What bounds one gatherer:** its own segment concurrency × one segment's observations and working
-set, plus the census accumulator. At the default that concurrency is one. Nothing crosses samples
-at any setting.
+**What bounds one gatherer:** its own internal concurrency × one segment's observations and
+working set, plus the census accumulator. At the default that concurrency is one, and one
+gatherer is what a run holds — never two.
 
 ### 5.3 `PspVariantCaller` — psp mode's calling
 
@@ -1124,11 +1144,15 @@ measured yet (§11, questions 2 and 7).
    segments and their length distribution over the existing catalog file at both floors, tomato
    and human — a filter over a stored file, not a genome scan.
 2. **The two concurrency defaults: samples in flight for the walk, callers in flight for the two
-   callers.** — the walk half is **ANSWERED** (owner, 2026-09-03): `generate-psps` processes its
-   samples one at a time, and a cohort is parallelised by running invocations — no in-process
-   fan-out and no default owed (§5.2). The callers-in-flight half stays OPEN; no value proposed —
-   a caller in flight costs one locus. **Settled by:** sweeping it on the tomato slices and on
-   HG002, wall time and peak resident, with the output required identical at every setting.
+   callers.** — the walk half is **CLOSED, not merely answered** (owner, 2026-09-03; reaffirmed
+   and given its reason 2026-09-08): `generate-psps` processes its samples one at a time and
+   **there is no samples-in-flight knob to set**, because a stopped run must leave its finished
+   samples finished and k in flight would leave k of them to walk again. A cohort is
+   parallelised by running invocations (§5.2). It was built once, measured at 2.56× for 3.16×
+   the memory on four in flight, and reverted on that ruling. The callers-in-flight half stays
+   OPEN; no value proposed — a caller in flight costs one locus. **Settled by:** sweeping it on
+   the tomato slices and on HG002, wall time and peak resident, with the output required
+   identical at every setting.
 3. **Does splitting one sample's walk across workers scale?** — OPEN. It is not on the default
    path, and it is the measurement question 8 turns on. **Settled by:** driving one gatherer at 1, 2, 4, 8, 16 workers on a tomato slice
    and HG002 — wall time, peak resident, observations identical to serial. Production's is 1.81×
@@ -1204,12 +1228,24 @@ measured yet (§11, questions 2 and 7).
      release frontier, with a published "covered to here" mark that builders never read past,
      removes the barrier entirely. It is the largest of the three and should not be attempted
      before the first two have said whether it is needed.
-8. **How does a run of one sample use the machine?** — OPEN, and it is goal 3 unmet. Walking
-   several samples at once gives a lone sample one worker. The only candidate anybody has is
-   question 3's — split that sample's walk across its segments — and if that does not scale there
-   is no second idea on the table, so the honest state is *goal accepted, mechanism unknown*.
-   **Settled by:** question 3's sweep, which decides between the candidate working and the
-   question being genuinely open.
+8. **How does a run of one sample use the machine?** — OPEN, and after 2026-09-08 it is **the
+   walk's only remaining axis**, not one of two: samples are walked one after another by
+   ruling, so every core past the first has to be found inside one sample. Measured on the
+   whole-genome tomato CRAM, one sample over 10 Mb of `SL4.0ch01` uses **1.01 cores of
+   eighteen** — 56.53 s of user time for 55.72 s of wall — which at that rate is about 75
+   minutes for a tomato genome and three hours for a human one, per sample.
+
+   **Two candidates, and the second was not on the table when this question was written.**
+   Question 3's — split the sample's walk across its segments, which needs §12.1's
+   worker-count invariance to keep holding. And **move a stage of the sample's own pipeline off
+   the walking thread** (owner, 2026-09-08): decoding the alignment file and building its read
+   objects is 29% of the walking thread by profile — 20% CRAM decode, 9% read preparation — and
+   nothing downstream of a prepared read is needed to prepare the next one. Its ceiling is what
+   the profile says, about 1.4×, and unlike question 3's it changes nothing about the order
+   observations are produced in, so the writer's invariance is not on the line.
+
+   **Settled by:** question 3's sweep for the first, and for the second, wall and peak resident
+   at 2 Mb and 10 Mb with the psp and census required identical outside the header.
 
    **Two things follow from the answer, which is why this is not idle.** If the split works, the
    psp writer must go on honouring §12.1's worker-count invariance, because observations then

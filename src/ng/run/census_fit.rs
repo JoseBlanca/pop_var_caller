@@ -386,7 +386,6 @@ mod tests {
             catalog: Some(cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),
             output_dir: psps.clone(),
-            samples_in_flight: 1,
             regions: None,
             force: false,
             build_index_if_missing: false,

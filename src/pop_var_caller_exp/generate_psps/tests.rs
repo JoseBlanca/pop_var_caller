@@ -522,7 +522,6 @@ fn a_cohort_on_disk() -> (
         catalog: Some(cohort.catalog),
         alignments: cohort.alignments,
         output_dir: cohort.directory.path().join("psps"),
-        samples_in_flight: 1,
         regions: None,
         force: false,
         build_index_if_missing: false,
@@ -555,75 +554,6 @@ fn the_command_writes_one_psp_per_sample_named_for_the_sample() {
             reader.header().sample,
             sample,
             "and it names the sample it holds",
-        );
-    }
-}
-
-/// **Walking two samples at once writes the same files as walking them one after another** —
-/// spec §12.1's worker-count invariance, at the level a person can see it.
-///
-/// **The writer already holds this against a sharded *sample*
-/// (`one_sample_gathered_at_any_worker_count_gives_byte_identical_files`), and that is a
-/// different claim.** That one says the block cut follows the coordinate grid rather than the
-/// shards; this one says the command's own fan-out — one worker per sample — carries nothing
-/// between samples. The two would both have to break for a wrong file to be written, and
-/// nothing in an output says which of them did.
-///
-/// **The command line is held identical**, because a psp's header records it: two runs that
-/// differed in `--output-dir` would differ from the header onward for a reason that is not the
-/// concurrency, which is the trap this comparison exists to avoid falling into. The count is
-/// spelled with the same width for the same reason.
-#[test]
-fn a_cohort_walked_two_at_a_time_gives_the_files_walking_one_at_a_time_gives() {
-    let (_reference_dir, _zeta_dir, _alpha_dir, mut args) = a_cohort_on_disk();
-
-    args.samples_in_flight = 1;
-    run_generate_psps(&args).expect("the cohort walks one at a time");
-    let one_at_a_time: Vec<(PathBuf, Vec<u8>)> = ["zeta", "alpha"]
-        .iter()
-        .flat_map(|sample| {
-            [
-                psp_path_for(&args.output_dir, sample),
-                census_path_for(&args.output_dir, sample),
-            ]
-        })
-        .map(|path| {
-            let bytes = std::fs::read(&path).expect("a finished file reads back");
-            (path, bytes)
-        })
-        .collect();
-
-    args.samples_in_flight = 2;
-    args.force = true;
-    run_generate_psps(&args).expect("the cohort walks two at a time");
-
-    for (path, before) in one_at_a_time {
-        let after = std::fs::read(&path).expect("the second walk wrote it too");
-        assert_eq!(
-            before.len(),
-            after.len(),
-            "{path:?} changed length when two samples were walked at once",
-        );
-        // **The header's timestamp is allowed to differ and nothing else is**, which is
-        // §12.1's exact wording. Both files carry one: the psp's own, and the census's copy of
-        // the psp header's digest, which follows it. So the comparison is *where* the bytes
-        // differ, not whether — and every differing byte must lie inside the header.
-        let differing: Vec<usize> = before
-            .iter()
-            .zip(&after)
-            .enumerate()
-            .filter(|(_, (before, after))| before != after)
-            .map(|(at, _)| at)
-            .collect();
-        let header_ends = 4_096.min(before.len());
-        assert!(
-            differing.iter().all(|at| *at < header_ends),
-            "{path:?} differs outside its header at {:?} when two samples are walked at once",
-            differing
-                .iter()
-                .filter(|at| **at >= header_ends)
-                .take(8)
-                .collect::<Vec<_>>(),
         );
     }
 }
