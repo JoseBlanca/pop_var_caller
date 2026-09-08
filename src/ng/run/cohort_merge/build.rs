@@ -1047,8 +1047,11 @@ fn no_locus_can_begin_in(builder_region: GenomeRegion, window: &WindowedCohort<'
     };
     // **Asked of the summaries, because a window may have no records at all.** A run whose
     // evidence is still compressed knows where every observation begins without decoding one.
-    !(0..window.samples())
-        .any(|sample| window.first_start(sample).is_some_and(|first| first <= last_base))
+    !(0..window.samples()).any(|sample| {
+        window
+            .first_start(sample)
+            .is_some_and(|first| first <= last_base)
+    })
 }
 
 /// One cohort locus, assembled: the ground, the alleles the cohort showed over it, and

@@ -260,7 +260,10 @@ pub trait ObservationSource {
     /// cheaply — a reader over a stored sample, which has the summary in the record's head and
     /// need not decode the body behind it — overrides this and keeps its evidence, at the cost
     /// of implementing [`build`](Self::build).
-    fn next_drawn(&mut self, spare: Option<SampleLocusObservations>) -> Option<Result<Drawn, Self::Error>> {
+    fn next_drawn(
+        &mut self,
+        spare: Option<SampleLocusObservations>,
+    ) -> Option<Result<Drawn, Self::Error>> {
         Some(self.next_observation(spare)?.map(Drawn::Built))
     }
 
@@ -1002,7 +1005,6 @@ impl<S> ObservationCache<S> {
         })
     }
 
-
     /// How many observations are held, summed across samples — the size of the window this
     /// cache is the memory of (spec §8).
     ///
@@ -1118,7 +1120,6 @@ impl<S, E> ObservationCache<S>
 where
     S: ObservationSource<Error = E>,
 {
-
     /// Build sample `sample`'s evidence at `index`, which its source kept.
     ///
     /// **Takes `&self`, so several builders may call it at once** — sound because a stored
@@ -1828,7 +1829,6 @@ fn summaries_on(held: &[LocusSummary], contig: ContigId) -> &[LocusSummary] {
 fn first_reaching_summary(held: &[LocusSummary], position: GenomePosition) -> usize {
     held.partition_point(|summary| summary.reach_position() < position)
 }
-
 
 #[cfg(test)]
 mod tests {

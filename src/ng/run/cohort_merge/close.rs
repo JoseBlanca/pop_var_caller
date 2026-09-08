@@ -811,7 +811,6 @@ impl<'a> LocusCloser<'a> {
         let next = self.head_summary(sample).map(LocusSummary::start_position);
         self.pending.replace_head(sample, next);
     }
-
 }
 
 impl<'a> Iterator for LocusCloser<'a> {
@@ -2288,11 +2287,7 @@ mod tests {
 
         let mut consumed = 0usize;
         while let Some(locus) = closer.next() {
-            consumed += locus
-                .members
-                .iter()
-                .map(MemberRange::len)
-                .sum::<usize>();
+            consumed += locus.members.iter().map(MemberRange::len).sum::<usize>();
             let unspent = (0..layouts.len())
                 .filter(|&sample| closer.cursors[sample] < layouts[sample].len())
                 .count();

@@ -52,6 +52,7 @@ use crate::ng::reference_info::{ContigInfo, ReferenceInfo};
 use crate::ng::region_typing::GenomeRegions;
 use crate::ng::region_typing::RegionKind;
 use crate::ng::repeat_catalog::{RepeatCatalog, StrRepeatCriteria};
+use crate::ng::run::psp_writer_line::PspWriterLine;
 use crate::ng::types::{Bp, ContigId, ReadGroupId};
 
 use super::walker::{WalkReference, generic_path_generators};
@@ -484,28 +485,25 @@ impl SampleObservationGatherer {
         path: &Path,
         census: Option<&Path>,
     ) -> Result<(WriteStats, LocusCounts), RunError> {
-        let mut writer = PspWriter::create(path, self.header.clone()).map_err(|source| {
+        let writer = PspWriter::create(path, self.header.clone()).map_err(|source| {
             RunError::PspNotWritten {
                 path: path.to_path_buf(),
                 source: Box::new(source),
             }
         })?;
+        // **The writer runs on a thread of its own** — see [`PspWriterLine`]. The census above
+        // has already read each locus, so the writer is the last thing that wants one and can
+        // take it whole.
+        let mut line = PspWriterLine::start(writer, path.to_path_buf());
         for observation in &mut self {
-            let observation = observation?;
-            writer
-                .push(&observation)
-                .map_err(|source| RunError::RecordNotWritten {
-                    locus: observation.region,
-                    source: Box::new(source),
-                })?;
+            // **The walk's own failure is raised here and the line is dropped**, which closes
+            // its queue and joins its thread. Whatever the writer would have said about the
+            // records already handed to it is discarded, because a walk that stopped has no
+            // whole file to report on either way.
+            line.push(observation?);
         }
         let counts = self.loci.counts().clone();
-        let stats = writer
-            .finish(&[])
-            .map_err(|source| RunError::PspNotWritten {
-                path: path.to_path_buf(),
-                source: Box::new(source),
-            })?;
+        let stats = line.finish()?;
         self.write_census_beside(census, &stats)?;
         Ok((stats, counts))
     }

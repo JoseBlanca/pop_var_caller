@@ -22,7 +22,6 @@
 use super::build::{
     CohortObservation, RegionOutcome, build_region, build_region_handing_over_windowed,
 };
-use crate::ng::locus_generation::SampleLocusObservations;
 use super::observation_cache::{
     ObservationCache, ObservationSource, ReferenceUnreadable, building_regions_of,
 };
@@ -31,6 +30,7 @@ use super::{
     CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads,
     refuse_malformed_analysed_regions,
 };
+use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::types::{GenomePosition, GenomeRegion};
 
 /// Merge the cohort over `analysed`, one region at a time, in the order given.
@@ -368,7 +368,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::super::build::build_region_windowed;
-    use crate::ng::locus_generation::SampleLocusObservations;
     use super::super::fixtures::{
         SourceFailed, in_flight, member, refuse_any_difference, region, region_on, render,
         source_of, three_samples_over_six_hundred_bases, width,
@@ -377,6 +376,7 @@ mod tests {
     use super::super::parallel::merge_cohort_in_parallel;
     use super::super::{MinAltObs, MinAltReadShare};
     use super::*;
+    use crate::ng::locus_generation::SampleLocusObservations;
     use crate::ng::locus_generation::{LocusKind, SequenceObservation};
     use crate::ng::types::{ContigId, Position};
 

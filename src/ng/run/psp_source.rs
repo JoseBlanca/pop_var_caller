@@ -48,8 +48,8 @@ use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use super::cohort_merge::observation_cache::ObservationSource;
 use super::cohort_merge::observation_cache::{Drawn, LocusSummary};
 use crate::ng::psp::RecordHead;
-use crate::ng::psp::record::{LocatedRecord, RecordLayout, decode_the_body_of};
 use crate::ng::psp::chain_ids::LiveSet;
+use crate::ng::psp::record::{LocatedRecord, RecordLayout, decode_the_body_of};
 
 /// **A stored record's head is a summary** — the claim the whole deferred-build design rests
 /// on, written down as a conversion so it can be tested rather than asserted.
@@ -623,7 +623,6 @@ impl<'a> PspObservationSource<RecordIter<'a>> {
     }
 }
 
-
 /// **Reading a stored sample the way a cohort run wants it read.**
 ///
 /// Every draw is a [`Drawn::Kept`]: the head's summary, and the body left in this source's
@@ -877,9 +876,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::locus_generation::{
-        LocusKind, ReadWitness, SsrDetail, WitnessedLocusPositions,
-    };
+    use crate::ng::locus_generation::{LocusKind, ReadWitness, SsrDetail, WitnessedLocusPositions};
     use crate::ng::psp::PspWriter;
     use crate::ng::psp::writer::tests_support::{a_header, a_record, a_sample};
     use crate::ng::types::{ContigId, Motif, Position};
@@ -1506,7 +1503,10 @@ mod tests {
         let mut differing_counts = 0usize;
         for found in psp.records().expect("the walk starts") {
             let found = found.expect("the fixture reads back");
-            let record = found.record.as_ref().expect("a full walk builds every body");
+            let record = found
+                .record
+                .as_ref()
+                .expect("a full walk builds every body");
             let from_the_head = LocusSummary::from(&found.head);
             assert_eq!(
                 from_the_head,
@@ -1545,7 +1545,6 @@ mod tests {
             "and the complete reads all matched the reference"
         );
     }
-
 
     /// **Reading a sample as summaries sees exactly what reading it as records sees**, and the
     /// kept bytes build the records that the building walk built.
@@ -1586,13 +1585,18 @@ mod tests {
         };
 
         let mut psp = PspReader::open(&path).expect("the file opens again");
-        let mut source = PspSummarySource::over(&mut psp, &as_walked()).expect("the summary walk starts");
+        let mut source =
+            PspSummarySource::over(&mut psp, &as_walked()).expect("the summary walk starts");
         let mut kept = Vec::new();
         while let Some(next) = source.next_summary() {
             kept.push(next.expect("the fixture reads back"));
         }
 
-        assert_eq!(kept.len(), built.len(), "the two walks met the same records");
+        assert_eq!(
+            kept.len(),
+            built.len(),
+            "the two walks met the same records"
+        );
         for (at, (summarised, record)) in kept.iter().zip(&built).enumerate() {
             assert_eq!(
                 summarised.summary,
@@ -1630,7 +1634,6 @@ mod tests {
         }
     }
 
-
     /// **The summary source, driven as the cache drives it, yields the records the building
     /// source yields** — every draw kept, every body built afterwards and out of order.
     ///
@@ -1663,7 +1666,11 @@ mod tests {
             }
         }
 
-        assert_eq!(drawn.len(), built.len(), "the two sources met the same records");
+        assert_eq!(
+            drawn.len(),
+            built.len(),
+            "the two sources met the same records"
+        );
         for (at, ((summary, _), record)) in drawn.iter().zip(&built).enumerate() {
             assert_eq!(
                 *summary,
@@ -1736,7 +1743,11 @@ mod tests {
             bodies.len()
         );
         let whole_arena = source.held_bytes();
-        assert_eq!(source.held_records(), bodies.len(), "one head a record drawn");
+        assert_eq!(
+            source.held_records(),
+            bodies.len(),
+            "one head a record drawn"
+        );
         // **The third arena is checked by its own count, not by the bytes'.** A record puts as
         // many bytes in one as its body has and as many identifiers in the other as it has
         // reads, so a release that used the bodies' cut on the identifiers would take the

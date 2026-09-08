@@ -189,19 +189,18 @@ where
             let build_the_round = || {
                 in_region_order(regions_in_round.par_iter().map(|building_region| {
                     let builder = timing::Stopwatch::start();
-                    let outcome =
-                        cache.with_observations(*building_region, |window| {
-                            build_region_windowed(
-                                *building_region,
-                                window,
-                                max_cohort_locus_span,
-                                min_alt_reads,
-                                // **Where a run over stored evidence decodes**, on whichever
-                                // worker got the region: a body is built from its own bytes,
-                                // so this shares nothing mutable with the others.
-                                &|sample, index| cache.build_at(sample, index),
-                            )
-                        });
+                    let outcome = cache.with_observations(*building_region, |window| {
+                        build_region_windowed(
+                            *building_region,
+                            window,
+                            max_cohort_locus_span,
+                            min_alt_reads,
+                            // **Where a run over stored evidence decodes**, on whichever
+                            // worker got the region: a body is built from its own bytes,
+                            // so this shares nothing mutable with the others.
+                            &|sample, index| cache.build_at(sample, index),
+                        )
+                    });
                     let busy = builder.elapsed_nanos();
                     timing::BUILDER_BUSY_NANOS.add(busy);
                     timing::SLOWEST_IN_THIS_ROUND_NANOS.raise_to(busy);

@@ -37,6 +37,7 @@ pub mod gatherer;
 pub mod paralog_filter;
 pub mod psp_caller;
 pub mod psp_source;
+pub mod psp_writer_line;
 pub mod records;
 pub mod report;
 pub mod segments;
