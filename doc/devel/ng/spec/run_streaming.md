@@ -1244,8 +1244,8 @@ measured yet (§11, questions 2 and 7).
    **The second candidate is built in its cheap form, and its expensive form is refused on
    measurement (2026-09-08).** Every number below is in
    [the implementation report](../../reports/implementations/ng_generate_psps_decode_sharing_2026-09-08.md),
-   which carries the run's own cost over 10 Mb across six changes: **57.03 s and 264.6 MB to
-   35.59 s and about 293 MB** — 1.60× the throughput, and 28 MB more resident, which is the one
+   which carries the run's own cost over 10 Mb across eight changes: **57.03 s and 264.6 MB to
+   28.17 s and about 295 MB** — 2.02× the throughput, and 30 MB more resident, which is the one
    number that went the wrong way.
 
    **Its ceiling fell three times before anything was built**, which is why the cheap form was
@@ -1271,12 +1271,21 @@ measured yet (§11, questions 2 and 7).
    form took essentially all of it.
 
    **What the walk's one thread now holds**, split open with temporary inline barriers because
-   fat LTO folds the whole generator into one symbol: building each position **22.0%**, the
-   ordinary-column lane 13.8%, sorting 14.9% (chain ids 11.5% of it), the tract aligner 10.0%,
-   applying a read's events 5.9%, encoding psp records 7.3%, `memmove` 4.6%, recycling open
-   records 4.2%, the census 1.3%, reading and filtering reads 2.3% — with the container decode and
-   the psp block compression on threads of their own. Every further core has to come from
-   question 3.
+   fat LTO folds the whole generator into one symbol: building each position **48.8%** — of which
+   the ordinary-column lane is 31.6% and the general fold 8.4% — the tract aligner 12.4%, all
+   remaining sorting 8.1%, `memmove` 7.8%, closing records 4.4%, expiring reads 4.2%, admitting
+   them 2.6%, with the container decode and the psp block compression on threads of their own.
+   Every further core has to come from question 3.
+
+   **Two of the things that table used to hold are gone, and they are the last two changes of
+   2026-09-08** (report §7a, §7b). A deletion anywhere along a read sent every base that read
+   covered down the general path; it now sends only the one base the deletion is anchored at, plus
+   the single column per region where the general path's event window starts a base early
+   (−8.03% of instructions, 34.25 s → 30.23 s). And every covered base sorted its column's ~87
+   chain ids to emit them ascending; the active set now keeps its reads in chain-id order and the
+   lane walks that order instead (−2.25% of instructions, 30.10 s → 28.17 s). **Sorting fell from
+   14.9% of the thread to 8.1% while the thread itself got shorter, and none of what is left is a
+   chain-id sort in the fast lane.**
 
    **What question 3's split is capped by, in seconds, because a share moves when the thread it
    is a share of gets shorter.** Its k workers feed one serial merger that owns the psp writer and
@@ -1287,12 +1296,15 @@ measured yet (§11, questions 2 and 7).
    | | seconds | threads |
    |---|---:|---|
    | reading and MD5-ing the reference, the catalog, the segmentation | **2.6** | serial, before the walk begins |
-   | locus generation, the read cursor and its filters | 31.2 | k ways |
+   | locus generation, the read cursor and its filters | 22.6 | k ways |
    | encoding psp records, and the census | **3.0** | serial, on the merger |
    | decoding containers, compressing psp blocks | — | already on threads of their own |
 
-   which is `2.6 + 31.2/k + 3.0`: **13.4 s at four workers, 9.5 s at eight, and 5.6 s however
-   many** — against 36.75 s today. **The two serial terms are nearly equal and neither is the
+   which is `2.6 + 22.6/k + 3.0`: **11.3 s at four workers, 8.4 s at eight, and 5.6 s however
+   many** — against 28.17 s today. The two serial terms are unchanged by the last two changes,
+   which touch only locus generation, so all of what they removed came out of the shareable
+   term; between them those terms are now **more than a fifth of the run**, which is why the
+   *ratio* the split can reach keeps falling while the seconds it can remove do not. **The two serial terms are nearly equal and neither is the
    walk**, so past four workers the thing to attack is one of them, and they need different
    fixes: the setup is re-reading and re-digesting one unchanging reference on every invocation
    (×63 across a cohort), and the merger's 3.0 s is encoding records into block payloads, which

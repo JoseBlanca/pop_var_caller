@@ -2,17 +2,23 @@
 
 **Date:** 2026-09-08
 **Branch:** `main`, commits `a2a77780`, `aa598441`, `c9018a70`, `a6457dbb`, `5548c5fb` and
-`9969cc65` on `8203d218`
+`9969cc65` on `8203d218`; then `2c582c68` and `02ffa51c` (§7a, §7b)
 **Acting on:** the BAM/CRAM → psp performance review of 2026-09-08
 
 **One tomato accession over 10 Mb of `SL4.0ch01`, out of a 49 GB whole-genome CRAM, now takes
-35.59 s where it took 57.03 s** — **1.60× the throughput**, with the psp and the census
-byte-identical outside their own timestamp, and **28 MB more resident**, 292.4 MB against 264.6,
-which is the one number that went the wrong way. Four things carry it: the walk's two readers
-were decoding every container of the file separately; the walk was compressing every psp block
-itself; it was inflating each container in the middle of building a locus rather than a step
-ahead, on a thread of its own; and every admitted read was scanning the whole pending-mates map
-to find the stale entries in it.
+28.17 s where it took 57.03 s** — **2.02× the throughput**, with the psp and the census
+byte-identical outside their own timestamp, and **30 MB more resident**, about 295 MB against
+264.6, which is the one number that went the wrong way. Six things carry it: the walk's two
+readers were decoding every container of the file separately; the walk was compressing every psp
+block itself; it was inflating each container in the middle of building a locus rather than a step
+ahead, on a thread of its own; every admitted read was scanning the whole pending-mates map to
+find the stale entries in it; a deletion anywhere along a read sent every base that read covered
+down the general path; and every covered base sorted its column's chain ids that the active set
+could have kept in order.
+
+**The first four are §1 to §6c and take it to 35.59 s. The last two are §7a and §7b, and take it
+from 34.25 s to 28.17 s** — the two figures differ because the same binary was re-measured in a
+later sitting.
 
 **The fixture is a 103.5× sample**, measured with `samtools coverage` on 100 kb at
 SL4.0ch01:1.0–1.1 Mb — the high end of the depth range this caller commits to, not the tomato
@@ -445,8 +451,13 @@ mate-lookup window together. At 300× it would have been proportionally worse.
 
 ## 7. Where the wall goes now, and what is left
 
-**The walk's one thread is locus generation and little else.** Profiled after everything above,
-with the inline barriers of §6c in place so the parts are separable:
+**Two more commits landed after this section was first written** — `2c582c68` and `02ffa51c`,
+§7a and §7b below — and they take the same 10 Mb run from 34.25 s to **28.17 s**. The table
+immediately below is the split *before* those two, and is kept because §7a and §7b are written
+against it; the split after them is in §7c.
+
+**The walk's one thread is locus generation and little else.** Profiled after §1 to §6c, with
+the inline barriers of §6c in place so the parts are separable:
 
 | | share of the walking thread | ~seconds |
 |---|---:|---:|
@@ -474,7 +485,7 @@ this sample decomposes as:
 | decoding containers, compressing psp blocks | — | already off the walking thread |
 
 which is `2.6 + 31.2/k + 3.0`: **13.4 s at four workers, 9.5 s at eight, and 5.6 s however many**
-— against 36.75 s today. The emulation of that split as concurrent processes over disjoint BEDs
+— against the 36.75 s the run cost at that point. (§7c restates it against 28.17 s.) The emulation of that split as concurrent processes over disjoint BEDs
 reached 2.97× at four ways and 3.88× at eight, before any of today's changes; it is an upper bound
 on the worker side, since processes share nothing and each wrote its own psp.
 
@@ -515,22 +526,9 @@ cost about 3.4%, so the prize is around **5 s of a 35.6 s run**.
 **Asked per-base instead, and the answer came back split (2026-09-08, `9969cc65`).** The
 whole-read test bought two things: a fact about this base — no read here is doing anything but
 showing a letter — and a fact about history — no event from an earlier base is still reaching in.
-The first is now asked at the base, through `CigarCursor::plain_match_at`: an indel is anchored at
-the last reference base of the match run before it, so exactly one base of a read is not one
-letter. The second stays a whole-read question, and **not by argument**:
-
-| | wall, 10 Mb | psp against the unchanged run |
-|---|---:|---|
-| the whole-read test, as it was | 36.13 s | — |
-| **insertions asked per base, deletions still whole-read** | **34.66 s** | **byte-identical** |
-| both asked per base | 30.67 s | **differs from byte 33,403,518 of 157,822,123** |
-
-So the insertion half was free and the deletion half was load-bearing. **The case that diverges
-is not identified.** A deletion's footprint is the only one that reaches past its own anchor, and
-the open-record test — which asks whether anything is *already open* over this base — evidently
-does not catch every way that happens; the code says exactly that rather than adding one more
-condition and hoping. **About 3.9 s are still there for whoever finds it**, and the way to find it
-is the psp diff above: byte 33,403,518 names the locus.
+The first is now asked at the base, through `CigarCursor::plain_match_at`. The second was left a
+whole-read question, because relaxing it too moved the psp from byte 33,403,518 of 157,822,123
+and the case that diverged had not been identified. **It has been, and §7a is what it was.**
 
 **Mate overlap at 9.1% is the second reason and it will grow with depth**, which the module's own
 note says: at 300× a pair is present at most columns and the skip stops firing. This fixture is
@@ -547,6 +545,117 @@ note says: at 300× a pair is present at most columns and the skip stops firing.
 - **Four cache slots without the prefetch thread** — no gain and +16 MB (§6b).
 - **Three cache slots with it** — same wall, 0.15% more instructions, a wider peak.
 - **The DP row hoist and the census map rework** — §4.
+
+## 7a. The column that made the deletion relaxation unsafe, and it is one in 10.6 million
+
+`9969cc65` shipped the insertion half of the fast lane's guard and left the deletion half alone,
+because relaxing it moved the psp and nobody could say why. **The case is the first base of a
+generic region that begins immediately after repeat ground**, and it is the only base of the walk
+whose record is built from a window that does not start at it.
+
+`window_of_read` widens that record's event query one base to the left, so that an insertion
+anchored on the repeat's last base can be claimed by this region — and it then keeps **every
+deletion the widened window returns, whatever its anchor**. So a read whose deleted run stops on
+the repeat's last base contributes its deletion's quality proxy to `min_bq_for_read` at the
+region's first base, and the ordinary-column lane, which asks only about this base, mints that
+read's `ln ε` from the base's own quality instead.
+
+**Found by diffing the loci the two arms emit, not the psp's bytes.** A temporary dump of every
+locus the walk yields, from one binary with the guard and one without, over the same 15 kb: **one
+line of 15,786 differs, and only in `q_sum`**. Over the whole 10 Mb it is **one locus of
+10,641,693 columns** — `SL4.0ch01:2,185,561`, the first base after a tract, where 22 of the 76
+reads carry a 10-base deletion ending on 2,185,560 and the general path's window is
+`[2,185,560, 2,185,562)`.
+
+So the lane refuses that column outright — one base per region — and asks about deletions per base
+everywhere else. Refusing it also closes the **claimed junction insertion**, which the per-base
+insertion test of `9969cc65` would otherwise have let through: a read carrying one shows a plain
+letter at the region's first base, and the lane has no allele for the inserted bases the fold
+spells before it.
+
+| | before | after |
+|---|---:|---:|
+| instructions, 4 pairs pinned | 936,326 G | **861,122 G** (−8.03%) |
+| its own spread | 95 G (0.010%) | 73 G (0.008%) |
+| wall, 4 pairs pinned | 34.79 s | **30.68 s** (−11.8%, won 4/4 by 3.78–4.29 s) |
+| wall, 3 pairs, pool left alone | 34.25 s | **30.23 s** (−11.7%, won 3/3) |
+| peak resident, pool left alone | 294.8 MB | 293.9 MB |
+
+## 7b. The chain ids come out ordered because the active set keeps them so
+
+Every covered base built a fresh vector of the column's ~87 chain ids and sorted and deduped it,
+because the emitted observation has to carry them ascending.
+
+**Priced before anything was changed, and the pricing needed a control.** Two arms, one running an
+*extra* copy-and-sort of the same list and one running the copy alone, both behind the same
+`black_box`: **the sort is +5.72% of the run's instructions and +2.83 s of its wall**. The control
+matters — the same barrier placed in `admit`/`expire_passed` was at first read as a 6% cost of the
+index below, and it was the barrier.
+
+**The gate the review set, because this could have cost more than it saved.** The 2026-09-02
+review measured one extra linear pass over the same 87-element column at +0.43% instructions and
++3.7% wall, which is the same order as the sort. So the chain-id-ordered index was built in
+`ActiveReads` **with the sort left in place and unused**, and measured against a control carrying
+the same barriers in the same places: **+0.67% of instructions**, against a 2% stop threshold. It
+cleared, so it was wired.
+
+`ActiveReads` now keeps a second view of its own reads — `(chain_id, read_id)` ascending, one
+entry per live read. `read_id` is in the key because two mates of a pair share one chain id; the
+entry is **inserted** rather than appended, because a second mate takes the id its first mate was
+given, minted up to a mate-lookup window earlier. The lane fills each observation's list by
+walking that order: a subsequence of an ascending sequence is ascending.
+
+Finding each read's observation without a search needs one dense table per column, indexed by
+`read_id` less the column's smallest. The live set's ids are all but contiguous — reads leave in
+very nearly the order they arrive — and on this fixture the span never reached twice the column's
+depth. A span past 4,096, or a live set larger than the table's `u16` sentinel, falls back to the
+sort; neither was reached.
+
+| | before | after |
+|---|---:|---:|
+| instructions, 3 pairs pinned | 861,000 G | **841,608 G** (−2.25%) |
+| its own spread | 120 G (0.014%) | 20 G (0.002%) |
+| wall, 3 pairs pinned | 30.71 s | **28.85 s** (−6.1%, won 3/3 by 1.80–1.86 s) |
+| wall, 3 pairs, pool left alone | 30.10 s | **28.17 s** (−6.4%, won 3/3 by 1.73–2.06 s) |
+| peak resident, pool left alone | 295.9 MB | 295.9 MB |
+
+**Instructions fall a quarter as far as wall**, which is the difference between a sort — data
+dependent branches, few of them predictable — and two linear passes.
+
+## 7c. What the walking thread holds after those two
+
+Re-profiled the same way, temporary inline barriers in the same configuration. The marked build
+ran 29.23 s against the unmarked 28.85 s and 2.5% more instructions, so the barriers are visible
+but small and the profile is representative.
+
+| | share of the walking thread |
+|---|---:|
+| `WalkerState::process_position`, whole | **48.8%** |
+| — of which `fast_column::try_ordinary_column` | 31.6% |
+| — of which `open_record::process_position`, the general fold | 8.4% |
+| `ssr::classify::delimit`, the tract aligner | 12.4% |
+| sorting, all remaining sites | 8.1% |
+| `memmove` | 7.8% |
+| `close_aged_records_into` (of which `finalise` 4.0%) | 4.4% |
+| `expire_passed` | 4.2% |
+| `admit_read` (of which `ActiveReads::admit` 2.3%) | 2.6% |
+
+**The shares are not comparable term by term with the table at the top of §7**, which was taken
+against a 35.6-second thread with different barriers; what is comparable is that sorting fell from
+14.9% to 8.1% *while the thread itself got shorter*, and that none of the 8.1% is a chain-id sort
+in the fast lane any more. What remains of it is the contributor and mate-overlap sorts under
+`process_position` (3.1%), the lane's own `read_id` sort of its contribution buffer (1.8%), the
+general path's `finalise` (1.3%), and the tract aligner and psp encoder (1.9%).
+
+**The fast lane now takes the columns it was refusing.** `try_ordinary_column` is 31.6% of the
+thread and the general fold 8.4%, where before §7a the fold was 16.0% against the lane's 13.8%.
+
+**What is left, and it is question 3.** Neither commit touches the setup or the merger, so the
+decomposition of §7 stands with its shareable term shortened: **2.6 s of serial setup, 22.6 s that
+k workers can share, 3.0 s of encoding and census on one merger** — `2.6 + 22.6/k + 3.0`, so about
+11.3 s at four workers, 8.4 s at eight, and 5.6 s however many, against 28.17 s today. The two
+serial terms are now more than a fifth of the run between them, so the ratio the split can reach
+has fallen with every one of today's changes; the seconds it can remove have not.
 
 ## 8. How it was checked
 
