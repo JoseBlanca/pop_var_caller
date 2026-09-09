@@ -48,7 +48,6 @@ use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use super::cohort_merge::observation_cache::ObservationSource;
 use super::cohort_merge::observation_cache::{Drawn, LocusSummary};
 use crate::ng::psp::RecordHead;
-use crate::ng::psp::chain_ids::LiveSet;
 use crate::ng::psp::record::{LocatedRecord, RecordLayout, decode_the_body_of};
 
 /// **A stored record's head is a summary** — the claim the whole deferred-build design rests
@@ -708,9 +707,13 @@ impl ObservationSource for PspSummarySource<'_> {
             body: self.body_bytes(&body),
             record_bytes: body.len(),
         };
+        // **The arena's own span is handed to the decoder, not a copy of it.** The decoder
+        // reads the live identifiers in order and nothing it does needs the owning `LiveSet`,
+        // so the span this source already holds is what it gets. Copying it into a fresh
+        // `LiveSet` per record built was 19% of the calling thread at 63 accessions.
         let at = (kept.live.start - self.live_released) as usize;
-        let live = LiveSet::from_sorted_slice(&self.live_ids[at..at + kept.live.len as usize]);
-        let mut record = decode_the_body_of(&found, &live, &self.layout)
+        let live = &self.live_ids[at..at + kept.live.len as usize];
+        let mut record = decode_the_body_of(&found, live, &self.layout)
             .map_err(|source| self.refuse(source))?
             .record;
         // **The same renumbering the building source makes, for the same reason**: every
@@ -1611,7 +1614,7 @@ mod tests {
             crate::ng::psp::record::RecordLayout::from_manifest(&reference.header().manifest)
                 .expect("the file's own manifest")
         };
-        let live = crate::ng::psp::chain_ids::LiveSet::default();
+        let live: Vec<u64> = Vec::new();
         for (at, kept_record) in kept.iter().enumerate().rev() {
             let head = crate::ng::psp::RecordHead {
                 region: kept_record.summary.region,
