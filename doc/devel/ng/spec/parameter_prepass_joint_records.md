@@ -749,9 +749,12 @@ both ways gives byte-identical files.
 
 **Staleness.** The records file names the pileup it was built from: a digest of that pileup's header —
 reference, analysed regions, read filters, command line — together with its record count. **Never
-modification time.** On a mismatch the parameters fit rebuilds silently when the pileup is available, and fails
-naming the field that differs when it is not. That is the same shape as §5's refusal, pointed at a
-different object.
+modification time.** On a mismatch the parameters fit **refuses, naming every sample whose census is
+stale and the command that regenerates it** — it does not rebuild on its own, because a rebuild is a
+full pass over the pileup and must be the user's decision
+([`psp_census_pair.md`](psp_census_pair.md) §4, owner's ruling 2026-09-09; an earlier revision of
+this paragraph had the fit rebuild silently, which was never built). That is the same shape as §5's
+refusal, pointed at a different object.
 
 **Size on disk.** About 6 MB per read group at a two-million-position census — some 380 MB across the
 sixty-three-accession tomato cohort. *An earlier revision priced a twenty-seven-million-position census
