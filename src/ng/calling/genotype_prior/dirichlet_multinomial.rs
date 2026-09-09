@@ -6,7 +6,9 @@
 //! branch for two copies that are the same one counted twice, is the inbreeding mixture that
 //! plan step B2 wraps around it (`doc/devel/ng/spec/calling_priors.md` §3.2).
 
-use crate::genetics::{PROBABILITY_FLOOR, lgamma};
+use crate::genetics::PROBABILITY_FLOOR;
+#[cfg(test)]
+use crate::genetics::lgamma;
 use crate::ng::calling::genotype_prior::{GenotypePriorModel, PriorRow};
 use crate::ng::types::{InbreedingF, LogProb};
 
@@ -70,11 +72,10 @@ pub fn fill_random_mating_log_priors(row: &mut PriorRow<'_>) {
     let log_multinomial_coeffs = row.log_multinomial_coeffs();
     let (lgamma_concentration, out) = row.scratch_and_out();
 
-    // lgamma(α_a) once per allele — the baseline every genotype's term subtracts. This is the
-    // whole reason the seam carries a per-allele scratch: recomputing it at each (genotype,
-    // allele) pair would nearly double the `lgamma` count.
+    // ln(α_a) once per allele — the first factor of every genotype's rising factorial, and
+    // the whole term for an allele the genotype carries one copy of.
     for (slot, &alpha) in lgamma_concentration.iter_mut().zip(concentration) {
-        *slot = lgamma(alpha);
+        *slot = alpha.ln();
     }
 
     for ((slot, copies_of), &log_coeff) in out
@@ -120,13 +121,22 @@ fn one_genotypes_log_prior(
         .iter()
         .zip(concentration)
         .zip(lgamma_concentration)
-        .fold(log_coeff, |acc, ((&copies, &alpha), &lgamma_alpha)| {
-            if copies == 0 {
-                acc
-            } else {
-                acc + lgamma(alpha + f64::from(copies)) - lgamma_alpha
-            }
-        })
+        .fold(
+            log_coeff,
+            |acc, ((&copies, &alpha), &log_alpha)| match copies {
+                0 => acc,
+                1 => acc + log_alpha,
+                copies => {
+                    // The rising factorial Π_{j=0}^{k−1} (α + j), whose logarithm is exactly
+                    // `lgamma(α + k) − lgamma(α)` and costs one `ln` rather than two `lgamma`.
+                    let mut rising = alpha;
+                    for step in 1..copies {
+                        rising *= alpha + f64::from(step);
+                    }
+                    acc + rising.ln()
+                }
+            },
+        )
 }
 
 /// The default answer at step 8's seam: §3.1's Dirichlet-multinomial under §3.2's two-branch
@@ -274,8 +284,13 @@ fn fill_inbreeding_mixture_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
     // back — on this branch rather than taken off the other, so that at `F = 0` the row is the
     // primitive's bit for bit and nothing downstream of an outbred sample shifts. See the
     // function's doc for why dropping it is safe in a row and not in a mixture.
-    let shared_normalising_term =
-        lgamma(concentration_total + f64::from(row.ploidy())) - lgamma(concentration_total);
+    let shared_normalising_term = {
+        let mut rising = concentration_total;
+        for step in 1..row.ploidy() {
+            rising *= concentration_total + f64::from(step);
+        }
+        rising.ln()
+    };
     // The two mixture weights, and they are floored differently on purpose.
     //
     // `1 − F` is floored because it is the one that can reach a *row entry*: at `F = 1` every
@@ -487,12 +502,26 @@ mod tests {
         );
     }
 
-    /// **The port agrees with what it was ported from, bit for bit.**
+    /// **The port agrees with what it was ported from, and where they differ this one is the
+    /// closer to the truth.**
     ///
-    /// The oracle above proves the mathematics; this proves the arithmetic is *performed the
-    /// same way*, which is a different claim and the one a port owes. Bit equality rather than a
-    /// tolerance, because the only route to it is the same operations in the same order — which
-    /// a re-associated fold quietly breaks by one unit in the last place.
+    /// **This was a bit-equality test until 2026-09-09 and is not one any more**, because the
+    /// primitive stopped spelling a genotype's term as `lgamma(α + k) − lgamma(α)` and started
+    /// spelling it as the logarithm of the rising product `Π_{j<k}(α + j)`, which is the same
+    /// quantity in exact arithmetic and one `ln` instead of two `lgamma`. The two spellings
+    /// disagree in their last bits, so bit equality could only have been kept by keeping the
+    /// slower and less accurate one.
+    ///
+    /// **Less accurate is a measured claim and the second half of this test is where it is
+    /// measured.** The difference form subtracts two nearly equal numbers of order `α·ln α`, and
+    /// `α` is the leave-one-out concentration — the run's seed plus the cohort's expected allele
+    /// copies (spec §6) — so the cancellation grows with the cohort. Where the rising product is
+    /// a whole number small enough to be exact in an `f64`, its logarithm is a correctly rounded
+    /// answer to compare both against, and that is what the second loop does.
+    ///
+    /// So this now pins two things: that the two implementations still agree to within a stated
+    /// distance, which is what says the port has not drifted in substance, and that ours is
+    /// never the further of the two from an exact reference.
     ///
     /// **The grid runs the reference entry from 1 to 6,001, and that is the load-bearing part.**
     /// What this primitive is handed is the leave-one-out concentration, the run's seed plus the
@@ -506,7 +535,7 @@ mod tests {
     /// Reading production here is an oracle and never a dependency: nothing ng ships imports
     /// from `src/genetics.rs` beyond `lgamma` and the alternative-concentration floor.
     #[test]
-    fn the_port_matches_production_bit_for_bit() {
+    fn the_port_agrees_with_production_and_is_never_the_further_from_exact() {
         for (copies, allele_count) in [
             (1_u8, 3_usize),
             (2, 1),
@@ -532,18 +561,105 @@ mod tests {
                     );
                     assert_eq!(production.len(), row.len());
                     for (genotype, (&ours, &theirs)) in row.iter().zip(&production).enumerate() {
-                        assert_eq!(
-                            ours.get().to_bits(),
-                            theirs.to_bits(),
+                        // **An absolute distance in nats, and that is the right measure
+                        // here.** The error being bounded is production's cancellation, whose
+                        // size is set by `α·ln α` and not by the row entry — at a reference
+                        // entry of 2,001 it is about 2e-12 nats on a row entry of 1.39, which
+                        // as a *relative* figure looks like nine thousand units in the last
+                        // place and as an absolute one is nothing. What a log-prior is used for
+                        // is differences of a few nats between genotypes, so a bound three
+                        // orders of magnitude below a millinat is already far below anything
+                        // that could move a call.
+                        let apart = (ours.get() - theirs).abs();
+                        assert!(
+                            apart < 1e-9,
                             "ploidy {copies}, {allele_count} alleles, reference {reference}, \
                              alternative total {alternative_total}, genotype {genotype}: ours {} \
-                             theirs {theirs}",
+                             theirs {theirs}, apart by {apart:e} nats",
                             ours.get()
                         );
                     }
                 }
             }
         }
+    }
+
+    /// **Where the exact answer is knowable, ours is never the further from it.**
+    ///
+    /// The second half of the claim above, and it needs no bignum: when every concentration
+    /// entry is a whole number and the rising product `α(α+1)…(α+k−1)` stays under 2^53, that
+    /// product is exact in an `f64` and its logarithm is a correctly rounded reference. Both
+    /// implementations are compared against it, so "ours is the more accurate spelling" is a
+    /// measurement here rather than an argument about cancellation.
+    ///
+    /// **The concentrations are the ones a real cohort produces.** A leave-one-out entry is the
+    /// seed plus the cohort's expected copies, so 3 is a tiny panel, 125 is the 63 diploid
+    /// tomato accessions, and 2,001 and 6,001 are a thousand and three thousand — the top of the
+    /// range `design_principles.md` §0 commits to. **This is where the two spellings separate**:
+    /// at 3 they are the same answer, and by 6,001 the difference form is thousands of units in
+    /// the last place adrift while the product form is at most one.
+    #[test]
+    fn the_rising_product_is_at_least_as_close_to_exact_as_the_difference_of_two_lgammas() {
+        let mut worst_ours_ulp = 0_i64;
+        let mut worst_theirs_ulp = 0_i64;
+        let mut cells = 0_u32;
+        for alpha in [3_u64, 125, 2_001, 6_001] {
+            for copies in 1_u32..=8 {
+                // The rising product as an integer, so that turning it into an `f64` is exact.
+                let exact_product: u128 = (0..u128::from(copies))
+                    .map(|step| u128::from(alpha) + step)
+                    .product();
+                // **Past 2^53 the product stops being exact and the reference stops being a
+                // reference**, so those cells are skipped rather than checked against a number
+                // that is itself rounded. At a concentration of 6,001 that leaves 4 copies;
+                // the count below is what says the grid did not quietly empty out.
+                if exact_product >= (1_u128 << 53) {
+                    continue;
+                }
+                cells += 1;
+                let exact = (exact_product as f64).ln();
+
+                let alpha = alpha as f64;
+                let ours = {
+                    let mut rising = alpha;
+                    for step in 1..copies {
+                        rising *= alpha + f64::from(step);
+                    }
+                    rising.ln()
+                };
+                let theirs = lgamma(alpha + f64::from(copies)) - lgamma(alpha);
+
+                let apart_in_ulp =
+                    |value: f64| -> i64 { (value.to_bits() as i64 - exact.to_bits() as i64).abs() };
+                let (ours_ulp, theirs_ulp) = (apart_in_ulp(ours), apart_in_ulp(theirs));
+                assert!(
+                    ours_ulp <= theirs_ulp,
+                    "at concentration {alpha} and {copies} copies the rising product is \
+                     {ours_ulp} units in the last place from exact and the lgamma difference is \
+                     {theirs_ulp}, so the change made this cell worse",
+                );
+                worst_ours_ulp = worst_ours_ulp.max(ours_ulp);
+                worst_theirs_ulp = worst_theirs_ulp.max(theirs_ulp);
+            }
+        }
+        // **Pinned so that the gap is visible rather than merely asserted.** Ours is within one
+        // unit in the last place everywhere on this grid; the difference of two `lgamma` is
+        // three orders of magnitude further out at the cohort sizes this caller commits to.
+        assert!(
+            worst_ours_ulp <= 1,
+            "the rising product should be within one unit in the last place; worst was \
+             {worst_ours_ulp}",
+        );
+        assert_eq!(
+            cells, 23,
+            "the exact-product grid should cover 23 cells; it covered {cells}",
+        );
+        assert!(
+            worst_theirs_ulp >= 100,
+            "the difference of two lgammas used to be hundreds of units in the last place adrift \
+             at these concentrations; it measured {worst_theirs_ulp}, so either libm improved or \
+             this grid stopped reaching the cohort sizes it was written for",
+        );
     }
 
     /// **An allele the genotype carries no copy of is skipped, and the skip is bit-exact.**
