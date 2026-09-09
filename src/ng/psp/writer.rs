@@ -45,6 +45,14 @@ pub struct WriteStats {
     pub blocks: u64,
     /// The finished file's length in bytes, header and footer included.
     pub bytes: u64,
+    /// How many of those bytes are the closing payload the caller supplied — the trailer.
+    ///
+    /// **Handed back because the caller has no other way to say what its own payload cost in
+    /// the file**, and reopening the finished psp to read the footer would be a second answer
+    /// to a question this call already knows. For a sample walk the payload is that sample's
+    /// census (`psp_census_pair.md` §3.1), so this is how much of a psp the parameters fit
+    /// reads and the rest is what it does not.
+    pub trailer_bytes: u64,
     /// **The md5 of the header exactly as it went into the file** — the first half of the
     /// identity a census names its pileup by
     /// ([`PileupIdentity`](crate::ng::parameter_estimation::joint::census_file::PileupIdentity)).
@@ -759,6 +767,7 @@ impl PspWriter {
             records: self.records,
             blocks: self.index.len() as u64,
             bytes: self.written,
+            trailer_bytes: footer.trailer_bytes,
             header_digest: self.header_digest,
         };
 

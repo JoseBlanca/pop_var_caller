@@ -35,7 +35,7 @@ use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::joint::census::{
     CensusWriter, DepthCap, NamedReadGroup, ReadCap, SampleCensusEvidence,
 };
-use crate::ng::parameter_estimation::joint::census_file::{PileupIdentity, write_census};
+use crate::ng::parameter_estimation::joint::census_file::write_census;
 use crate::ng::parameter_estimation::joint::loci::{
     CatalogBuildSettings, CensusLoci, ReferenceDigest, RegionSetDigest, SelectableRegions,
     SelectionError, SelectionTerms, select_kept_loci,
@@ -94,9 +94,9 @@ pub struct SampleWalkInputs<'a> {
 /// same ground twice.
 ///
 /// **The census is fed at the yield point** (arch §3.3, spec §5.2), where a locus is handed
-/// over — so the alignment files are read exactly once and produce both files. A gatherer
-/// opened without a [`CensusPlan`] feeds nothing and writes nothing, which is what every test
-/// that is about the psp alone wants.
+/// over — so the alignment files are read exactly once and the psp comes back with its census
+/// inside it. A gatherer opened without a [`CensusPlan`] feeds nothing and seals an empty
+/// trailer, which is what every test that is about the psp alone wants.
 pub struct SampleObservationGatherer {
     /// The header the sample's psp will carry — everything spec §6.1 asks for, fixed
     /// before the first record. The sample's name lives here (`header.sample`), not in a
@@ -109,7 +109,7 @@ pub struct SampleObservationGatherer {
     loci: SampleLocusObservationsIterator<RunSegments>,
 }
 
-/// **What a run needs to build a census beside each sample's psp**, shared by every sample of
+/// **What a run needs to build the census inside each sample's psp**, shared by every sample of
 /// the run.
 ///
 /// **The selection is the run's and not the sample's**, which is why this is one value handed to
@@ -245,8 +245,8 @@ impl CensusPlan {
     ///
     /// **Both producers build their writer here**, so that a census built while the reads are
     /// walked and a census built afterwards from the stored psp cannot differ by a constructor
-    /// argument. That is what makes comparing the two files byte for byte a statement about the
-    /// psp — whether it carries everything a census needs — rather than a statement about
+    /// argument. That is what makes comparing the two encodings byte for byte a statement about
+    /// the psp — whether it carries everything a census needs — rather than a statement about
     /// whether two call sites were kept in step
     /// (`parameter_prepass_joint_records.md` §7.12).
     ///
@@ -459,10 +459,10 @@ impl SampleObservationGatherer {
 
     /// Drain this walk into a psp at `path`: header, every observation as one record, then the
     /// seal — and **the seal carries this sample's census as the file's trailer**
-    /// (`psp_census_pair.md` §3.1), so one walk makes one file. A walk opened without a census
-    /// plan seals an empty trailer, which is what every psp in this tree carried before.
-    /// Returns the store's write totals and the walk's final tally, side by side — the two
-    /// halves of a per-sample report.
+    /// (`psp_census_pair.md` §3.1), so one walk makes one file and there is no second path to
+    /// name. A walk opened without a census plan seals an empty trailer, which is what every
+    /// psp in this tree carried before. Returns the store's write totals and the walk's final
+    /// tally, side by side — the two halves of a per-sample report.
     ///
     /// This is spec §5.2's "psp writer consumes the gatherer", whole. The walk is serial and
     /// the records leave in genome order, so the file is the walk — which is what lets
@@ -483,17 +483,9 @@ impl SampleObservationGatherer {
     /// any of these the file at `path` is not whole, and a reader will refuse it as
     /// interrupted rather than read it as complete (`psp_file_format.md` §10).
     ///
-    /// **Two census failures, and they leave opposite things behind**, which is the one thing a
-    /// caller decides from either: a census that will not encode
-    /// ([`RunError::CensusNotEncoded`]) fails *before* the seal, so there is no readable psp
-    /// and the sample has to be walked again; a census that will not write to the file beside
-    /// the psp ([`RunError::CensusNotWritten`]) fails *after* it, and the psp at `path` is
-    /// whole and already carries its census in the trailer.
-    pub fn write_psp(
-        mut self,
-        path: &Path,
-        census: Option<&Path>,
-    ) -> Result<(WriteStats, LocusCounts), RunError> {
+    /// A census that will not encode ([`RunError::CensusNotEncoded`]) fails before the seal, so
+    /// it too leaves no readable psp.
+    pub fn write_psp(mut self, path: &Path) -> Result<(WriteStats, LocusCounts), RunError> {
         let writer = PspWriter::create(path, self.header.clone()).map_err(|source| {
             RunError::PspNotWritten {
                 path: path.to_path_buf(),
@@ -521,7 +513,6 @@ impl SampleObservationGatherer {
         let evidence = self.census.take().map(CensusWriter::finish);
         let trailer = Self::census_as_a_trailer(evidence.as_ref(), &self.header.sample)?;
         let stats = line.finish(trailer)?;
-        Self::write_census_beside(census, evidence.as_ref(), &stats)?;
         Ok((stats, counts))
     }
 
@@ -554,80 +545,6 @@ impl SampleObservationGatherer {
             source: Box::new(source),
         })?;
         Ok(PspTrailer::Census(bytes))
-    }
-
-    /// **The census file, written once the psp is whole**, and named by that psp.
-    ///
-    /// **⚠ This is the second copy of a census the psp already carries, and it is on its way
-    /// out** (`psp_census_pair.md` §3, plan step A2). The census now travels in the psp's
-    /// trailer; the file beside it survives only so that this step leaves every reader of it —
-    /// `estimate-parameters`, `generate-census`, and their tests — working unchanged, and goes
-    /// with `generate-psps`'s census path in the next step. Nothing new should be written
-    /// against it.
-    ///
-    /// **⚠ And for this one step a failure here throws away a psp that is whole.** By the time
-    /// this runs the census is already in the trailer, so the sample would not need walking
-    /// again — but `generate-psps` deletes the part-written psp on any error out of `write_psp`
-    /// (`generate_psps.rs`'s walk arm), which was right while a psp without a census was
-    /// useless and is not right now. Teaching that arm
-    /// the difference would be work in a file this step does not touch, for a failure mode that
-    /// exists only until A2 deletes the copy. Recorded rather than fixed.
-    ///
-    /// **The order cannot be swapped to avoid it**: the identity below needs
-    /// `stats.header_digest`, which exists only once `finish` has returned.
-    ///
-    /// **The identity is built from the psp's own header and its record count**, which is this
-    /// value's first real construction site: `PileupIdentity::of_header` takes the count as its
-    /// own argument precisely because a header written before the first record cannot carry one
-    /// (spec §6.1's ruling of 2026-09-03). So it is built here, after `finish`, from the
-    /// [`WriteStats`] that call returns.
-    ///
-    /// **A census asked for and not written fails the sample's walk** (spec §2, plan step G2).
-    /// The two files are one product: a psp whose census is missing forces the sample to be
-    /// walked again, which is the one thing psp mode exists to avoid — so a run that could not
-    /// write it says so rather than leaving a psp that looks finished.
-    ///
-    /// **Asking for a census from a gatherer that was not given a plan is a defect and says
-    /// so.** The pair is settled at `open`: a command that names a census path has already
-    /// handed over the plan that fills it, and silently writing nothing there would leave an
-    /// absent file that reads exactly like a walk that was never asked.
-    fn write_census_beside(
-        path: Option<&Path>,
-        evidence: Option<&SampleCensusEvidence>,
-        stats: &WriteStats,
-    ) -> Result<(), RunError> {
-        let (Some(path), Some(evidence)) = (path, evidence) else {
-            assert!(
-                path.is_none(),
-                "a census was asked for at {} and this walk was opened without a plan to build \
-                 one. This is a defect in ng rather than anything about the data.",
-                path.map(Path::display)
-                    .map(|it| it.to_string())
-                    .unwrap_or_default(),
-            );
-            return Ok(());
-        };
-        // **The digest the writer handed back, not one taken from this gatherer's own header.**
-        // `PspWriter::create` records the compression level into the header before encoding it,
-        // so the header this object holds is not the header in the file — measured, and the
-        // difference is one line of TOML that changes every byte of the digest. A census naming
-        // a header no psp carries would make every freshness check say *rebuild* for ever, which
-        // is exactly the failure naming the pileup exists to prevent.
-        let identity = PileupIdentity {
-            header: stats.header_digest,
-            records: stats.records,
-        };
-        let mut file =
-            std::fs::File::create(path).map_err(|source| RunError::CensusNotWritten {
-                path: path.to_path_buf(),
-                source: Box::new(source),
-            })?;
-        write_census(evidence, Some(identity), &mut file).map_err(|source| {
-            RunError::CensusNotWritten {
-                path: path.to_path_buf(),
-                source: Box::new(source),
-            }
-        })
     }
 }
 
@@ -754,7 +671,8 @@ impl Iterator for SampleObservationGatherer {
                 // function of what was *stored* rather than of what the walk *saw*, and would
                 // leave a consumer that iterates a gatherer without writing a psp — which the
                 // suite does — building no census at all. This is also what makes spec §2's
-                // promise true: the alignment files are read once and produce both files.
+                // promise true: the alignment files are read once, and what the walk saw is
+                // what the psp's trailer holds.
                 if let Some(census) = self.census.as_mut() {
                     census.add_locus(&observation);
                 }
@@ -1207,7 +1125,7 @@ mod tests {
 
         let (stats, counts) = open_gatherer(&paths, &reference)
             .expect("opens")
-            .write_psp(&psp_path, None)
+            .write_psp(&psp_path)
             .expect("the walk writes");
 
         let expected: Vec<SampleLocusObservations> = open_gatherer(&paths, &reference)
@@ -1264,11 +1182,11 @@ mod tests {
         let second_psp = psp_dir.path().join("second.psp");
         let (first_stats, _) = open_gatherer(&paths, &reference)
             .expect("opens")
-            .write_psp(&first_psp, None)
+            .write_psp(&first_psp)
             .expect("the first gather writes");
         let (second_stats, _) = open_gatherer(&paths, &reference)
             .expect("opens again")
-            .write_psp(&second_psp, None)
+            .write_psp(&second_psp)
             .expect("the second gather writes");
 
         assert!(
@@ -1313,7 +1231,7 @@ mod tests {
 
         let psp_dir = TempDir::new().expect("a scratch dir");
         let psp_path = psp_dir.path().join("NA12878.psp");
-        let result = gatherer.write_psp(&psp_path, None);
+        let result = gatherer.write_psp(&psp_path);
         assert!(
             matches!(result, Err(RunError::SourceFailed { .. })),
             "{result:?}",
@@ -1334,7 +1252,7 @@ mod tests {
 
         let error = open_gatherer(&[bam_a], &reference)
             .expect("opens")
-            .write_psp(&unwritable, None)
+            .write_psp(&unwritable)
             .expect_err("a missing parent directory refuses the create");
         match error {
             RunError::PspNotWritten { path, .. } => assert_eq!(path, unwritable),
@@ -1439,7 +1357,7 @@ mod tests {
         let (stats, counts) =
             open_gatherer_over(std::slice::from_ref(&bam_a), &reference, chr2_only_ground)
                 .expect("opens")
-                .write_psp(&psp_path, None)
+                .write_psp(&psp_path)
                 .expect("an empty walk still writes a whole file");
 
         assert_eq!(stats.records, 0);
@@ -1532,7 +1450,7 @@ mod tests {
         let psp_dir = TempDir::new().expect("a scratch dir");
         let psp_path = psp_dir.path().join("NA12878.psp");
         let (stats, _counts) = open_over_tract_ground()
-            .write_psp(&psp_path, None)
+            .write_psp(&psp_path)
             .expect("the tract walk writes");
 
         let walked: Vec<SampleLocusObservations> = open_over_tract_ground()
@@ -1595,8 +1513,8 @@ mod tests {
 
 #[cfg(test)]
 mod census_tests {
-    //! **The census beside the psp** (plan step G1): fed at the yield point, written once the
-    //! psp is whole, and named by that psp.
+    //! **The census inside the psp** (`psp_census_pair.md` §3.1): fed at the yield point, then
+    //! encoded and handed to the seal, so a walk produces one file.
     //!
     //! **These use the binary namespace's on-disk cohort fixture**, which is the only one in the
     //! tree that builds a real catalog file — and a real catalog is what the selection needs.
@@ -1605,7 +1523,7 @@ mod census_tests {
 
     use super::*;
     use crate::ng::parameter_estimation::joint::census::DepthCode;
-    use crate::ng::parameter_estimation::joint::census_file::{decode_census, open_census};
+    use crate::ng::parameter_estimation::joint::census_file::decode_census;
     use crate::ng::psp::PspReader;
     use crate::ng::run::test_fixtures::gatherer_over;
     use crate::pop_var_caller_exp::test_fixtures::{ACohortOnDisk, a_cohort_on_disk};
@@ -1618,72 +1536,25 @@ mod census_tests {
         (cohort, segmentation, plan)
     }
 
-    /// **The walk writes both files, and the census names the psp it was built from.**
-    ///
-    /// The identity is the psp header's digest and its record count, which is what a later fit
-    /// compares before trusting a census: two censuses built from different reads are otherwise
-    /// indistinguishable, and that is the whole reason the pileup is named
-    /// (`census_file.rs`'s `Freshness`).
-    ///
-    /// **The expected value is rebuilt from the psp on disk**, which is the check that matters:
-    /// the writer amends the header before writing it, so a census built from the header the
-    /// gatherer *holds* names a file that does not exist. This test failed exactly that way
-    /// before `WriteStats` began carrying the digest of what was written.
-    #[test]
-    fn the_walk_writes_a_census_beside_the_psp_and_names_that_psp_in_it() {
-        let (cohort, segmentation, plan) = a_cohort_with_a_census_plan();
-        let psp = cohort.directory.path().join("zeta.psp");
-        let census = cohort.directory.path().join("zeta.census");
-
-        let (stats, _) = gatherer_over(
-            &cohort.alignments[0],
-            &cohort.reference,
-            &segmentation,
-            Some(&plan),
-        )
-        .write_psp(&psp, Some(&census))
-        .expect("the walk writes both files");
-
-        assert!(census.is_file(), "the census is at {census:?}");
-        let (_evidence, named) = open_census(&census).expect("this build's own census");
-        let named = named.expect("the census names the psp it was built from");
-        let expected = PileupIdentity::of_header(
-            &PspReader::open(&psp)
-                .expect("the psp opens")
-                .header()
-                .encode()
-                .expect("the header it was written with re-encodes"),
-            stats.records,
-        );
-        assert_eq!(
-            named, expected,
-            "the identity is the psp's own header and its own record count",
-        );
-    }
-
     /// **The psp's trailer is the sample's census** (`psp_census_pair.md` §3.1) — the same
     /// evidence the walk accumulated, and no pileup identity.
     ///
-    /// **What it is checked against is the census the walk itself produced**, read back from the
-    /// file beside the psp that this step still writes: one `CensusWriter::finish`, two
-    /// destinations, so a trailer holding anything else — an empty payload, a census of some
-    /// other sample — fails here. **What that comparison cannot separate is *when* the census
-    /// was closed**: both destinations encode the same value, so a census finished before the
-    /// walk fed it would be equally empty on both sides and compare equal. That is what the
-    /// last assertion is for. (`census_from_psp`'s own tests catch it too, from the other
-    /// direction — they rebuild the census from the psp's records.)
+    /// **What it is checked against is the census rebuilt from the psp's own records** — the
+    /// second producer, `census_from_psp`, reading back what the first one wrote. So a trailer
+    /// holding anything else fails here: an empty payload, another sample's census, or a census
+    /// the walk closed before it had fed it, which comes back short of the records the psp
+    /// holds.
+    ///
+    /// **This was compared against the census file beside the psp until step A2**, which is the
+    /// file that step deletes. The rebuild is the durable oracle and is what step A4 makes the
+    /// parity test at the command level.
     ///
     /// The identity is asserted absent because that is a decision and not a default: a census
     /// that *is* its psp's trailer has no pairing left to check (spec §3).
-    ///
-    /// **Its oracle is the file plan step A2 deletes.** When the census beside the psp goes,
-    /// what this compares against has to become the rebuild from the psp's own records, which
-    /// is the parity oracle step A4 builds.
     #[test]
     fn the_psps_trailer_is_the_census_the_walk_built() {
         let (cohort, segmentation, plan) = a_cohort_with_a_census_plan();
         let psp = cohort.directory.path().join("zeta.psp");
-        let beside = cohort.directory.path().join("zeta.census");
 
         let _ = gatherer_over(
             &cohort.alignments[0],
@@ -1691,7 +1562,7 @@ mod census_tests {
             &segmentation,
             Some(&plan),
         )
-        .write_psp(&psp, Some(&beside))
+        .write_psp(&psp)
         .expect("the walk writes its psp");
 
         let trailer = PspReader::open(&psp)
@@ -1699,13 +1570,11 @@ mod census_tests {
             .trailer()
             .expect("the trailer reads");
         let mut inside = decode_census(&trailer).expect("the trailer is a census this build reads");
-        // **Decoded whole rather than opened lazily**, because a file-backed census and a
-        // resident one are two different values of the same type and never compare equal.
-        let walked = decode_census(&std::fs::read(&beside).expect("the census file reads"))
-            .expect("the census the walk wrote");
+        let rebuilt = crate::ng::run::census_from_psp::census_from_psp(&psp, &plan, &segmentation)
+            .expect("the psp the walk just wrote reads back");
 
         assert_eq!(
-            inside.census, walked.census,
+            inside.census, rebuilt.evidence,
             "the trailer holds the census the walk accumulated",
         );
         assert!(
@@ -1714,16 +1583,16 @@ mod census_tests {
             inside.pileup,
         );
 
-        // **And it holds reads rather than the shape of a census.** A census closed before the
-        // walk fed it decodes cleanly and compares equal to the file beside it, because both
-        // sides encode the same value — so the comparisons above cannot see it and this can.
+        // **And it holds reads rather than the shape of a census**, which the comparison above
+        // now does catch — the rebuild reads the psp's records, so a census closed early differs
+        // from it. This stays because it says which way the two would differ, and because it is
+        // the one assertion here that does not depend on the second producer being right.
         //
         // **The test is depth above zero, and not "was this position walked".** Building the
         // writer marks every kept position of the analysed ground as walked — the `mark_walked`
         // call in `CensusPlan::writer_for` — so an unfed census comes back walked at every
-        // position with a depth of zero. Measured by
-        // running exactly that mutation, which this assertion catches and the walked bits do
-        // not.
+        // position with a depth of zero. Measured by running exactly that mutation, which this
+        // assertion catches and the walked bits do not.
         let groups = inside.census.read_groups();
         let with_reads = inside
             .census
@@ -1762,7 +1631,7 @@ mod census_tests {
             &segmentation,
             None,
         )
-        .write_psp(&psp, None)
+        .write_psp(&psp)
         .expect("the walk writes its psp");
 
         assert!(
@@ -1798,7 +1667,7 @@ mod census_tests {
         std::fs::remove_file(&cohort.reference).expect("the fixture reference is removed");
 
         let refused = gatherer
-            .write_psp(&psp, None)
+            .write_psp(&psp)
             .expect_err("the reference is gone, so the walk cannot draw its bases");
         assert!(
             matches!(refused, RunError::SourceFailed { .. }),
@@ -1823,7 +1692,7 @@ mod census_tests {
             &segmentation,
             None,
         )
-        .write_psp(&psp, None)
+        .write_psp(&psp)
         .expect("the walk writes its psp");
 
         assert!(psp.is_file());
@@ -1833,66 +1702,69 @@ mod census_tests {
         );
     }
 
-    /// **A census that cannot be written fails the sample's walk** (spec §2, plan step G2).
-    ///
-    /// The two files are one product: a psp whose census is missing forces the sample to be
-    /// walked again, which is what psp mode exists to avoid. A run that reported this and
-    /// carried on would be storing that re-walk for somebody to find later.
-    #[test]
-    fn a_census_that_cannot_be_written_fails_the_walk() {
-        let (cohort, segmentation, plan) = a_cohort_with_a_census_plan();
-        let psp = cohort.directory.path().join("zeta.psp");
-        let census = cohort
-            .directory
-            .path()
-            .join("no-such-directory")
-            .join("zeta.census");
-
-        let refused = gatherer_over(
-            &cohort.alignments[0],
-            &cohort.reference,
-            &segmentation,
-            Some(&plan),
-        )
-        .write_psp(&psp, Some(&census))
-        .expect_err("there is nowhere to write the census");
-
-        let rendered = crate::error_render::format_error_chain(&refused);
-        assert!(
-            rendered.contains("census") && rendered.contains("no-such-directory"),
-            "the refusal names the census and where it would have gone, and got: {rendered}",
-        );
-    }
-
     /// **The census is fed by the walk, not by the psp writer** — so what it holds is what the
     /// sample showed, and a sample that showed nothing over the ground is told apart from ground
     /// nobody walked.
     ///
-    /// `zeta` carries three reads and `alpha` none, over the same ground. Both censuses cover
-    /// the same positions — the selection is the run's — and they must differ in what those
-    /// positions say, or the accumulator is not being fed at all.
+    /// `zeta` carries three reads and `alpha` none, over the same ground, and both censuses
+    /// cover the same positions because the selection is the run's. **What is compared is how
+    /// many kept positions have a read at them, and not the two files' bytes.** Comparing bytes
+    /// was what this test did until step A2, and it proved less than it looked: every census
+    /// carries its own sample's name, so two censuses that both recorded nothing at all would
+    /// still differ.
     #[test]
     fn what_the_census_holds_is_what_the_sample_showed() {
         let (cohort, segmentation, plan) = a_cohort_with_a_census_plan();
-        let mut written = Vec::new();
+        let mut with_reads = Vec::new();
         for (which, sample) in ["zeta", "alpha"].iter().enumerate() {
             let psp = cohort.directory.path().join(format!("{sample}.psp"));
-            let census = cohort.directory.path().join(format!("{sample}.census"));
             let _ = gatherer_over(
                 &cohort.alignments[which],
                 &cohort.reference,
                 &segmentation,
                 Some(&plan),
             )
-            .write_psp(&psp, Some(&census))
-            .expect("the walk writes both files");
-            written.push(std::fs::read(&census).expect("the census reads"));
+            .write_psp(&psp)
+            .expect("the walk writes its psp");
+            with_reads.push(kept_positions_with_a_read(&psp));
         }
 
-        assert_ne!(
-            written[0], written[1],
-            "one sample carried reads and the other none, so their censuses cannot be the same \
-             bytes — if they are, nothing is being accumulated",
+        assert!(
+            with_reads[0] > 0,
+            "zeta carries three reads, so its census has to have a read at some kept position",
         );
+        assert_eq!(
+            with_reads[1], 0,
+            "alpha carries no reads, so no kept position of its census can have one — and the \
+             two samples' censuses would then be telling the same story about different data",
+        );
+    }
+
+    /// How many of a psp's kept ordinary positions have at least one read at them, read out of
+    /// the census in its trailer.
+    fn kept_positions_with_a_read(psp: &Path) -> usize {
+        let trailer = PspReader::open(psp)
+            .expect("the psp opens")
+            .trailer()
+            .expect("the trailer reads");
+        let mut census = decode_census(&trailer)
+            .expect("the trailer is a census")
+            .census;
+        let groups = census.read_groups();
+        census
+            .with_generic(&groups, |sections| {
+                sections
+                    .iter()
+                    .map(|section| {
+                        let depth = section.depth();
+                        (0..depth.len())
+                            .filter(|at| {
+                                matches!(depth.get(*at), DepthCode::Binned(bin) if bin.get() > 0)
+                            })
+                            .count()
+                    })
+                    .sum::<usize>()
+            })
+            .expect("a decoded census is resident")
     }
 }

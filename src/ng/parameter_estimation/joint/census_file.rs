@@ -1066,6 +1066,38 @@ mod tests {
         assert_eq!(read.pileup, None);
     }
 
+    /// **Decoding a census and encoding it again gives the bytes it was decoded from.**
+    ///
+    /// Every other round-trip test here compares decoded *values*, which is the right check for
+    /// a codec on its own. This one is a check on the codec's bytes, and it exists because a
+    /// caller now leans on it: `generate-census`'s parity test decodes the file it wrote and
+    /// re-encodes it without its pileup identity before comparing it with the psp's trailer
+    /// (`psp_census_pair.md` §3). A decode made lossy or normalising — a dropped empty section,
+    /// a reordered directory — would surface there as *the two census producers disagree*,
+    /// which is a whole module away from the change that caused it.
+    #[test]
+    fn write_census_after_decode_census_returns_the_bytes_it_was_given() {
+        for pileup in [
+            None,
+            Some(PileupIdentity {
+                header: [7; 16],
+                records: 41,
+            }),
+        ] {
+            let mut first = Vec::new();
+            write_census(&every_corner(), pileup, &mut first)
+                .expect("a vector accepts every write");
+            let read = decode_census(&first).expect("what this build wrote, this build reads");
+            let mut again = Vec::new();
+            write_census(&read.census, read.pileup, &mut again)
+                .expect("a vector accepts every write");
+            assert_eq!(
+                first, again,
+                "decoding a census and encoding it again is the identity on bytes",
+            );
+        }
+    }
+
     /// The same value written twice is the same bytes — what §7.12's byte-for-byte comparison
     /// between the two builders will rest on, and what a directory whose offsets depended on a
     /// map's iteration order would break.

@@ -116,7 +116,7 @@ without a plan writes an empty trailer. Test: a walked psp's trailer decodes as 
 the one `CensusWriter::finish` returned.
 *Depends:* —. *Source:* spec §3.1, §9 (first item).
 
-☐ **A2 — `generate-psps` writes one file.** The census path, its `.partial`, its rename and the
+✅ **A2 — `generate-psps` writes one file.** The census path, its `.partial`, its rename and the
 ordering comment go ([`generate_psps.rs:676-735`](../../../../src/pop_var_caller_exp/generate_psps.rs));
 the per-sample line and the report say the census's size inside the psp. Every test naming
 `<sample>.census` (l.479-487, 699, 975, 1029, the block at 1128) rewritten to look in the trailer.

@@ -133,3 +133,75 @@ unwrapped.
 - **`reader.rs:236` allocates the trailer in one go from a length the file supplies.** Harmless
   while every trailer is empty; A1 makes the field large by design and A3 reads censuses out of psps
   this process did not write. It belongs to A3's review.
+
+---
+
+## A2 — `generate-psps` writes one file
+
+**Reviewed against:** the working tree over `e1ae9d98`, 13 files. Same arrangement as A1: two
+read-only agents, grouped categories, mutations named rather than run. **Three were named and all
+three were run serially** — see the implementation report's table; each was reverted and the
+module's tests re-run on the restored tree.
+
+### Findings
+
+**M1 — `generate_psps.rs` — the read-back after the rename was reported as a stopped walk.**
+`census_bytes` was read by reopening the finished psp, and a failure of that open became
+`GeneratePspsCliError::Walk`, whose own documentation says the sample has no psp and that the psp
+it was replacing is untouched. On that path the walk had finished and the rename had already
+happened, so both were false, and the message told the reader to re-walk a sample that had
+succeeded.
+*Fixed differently from either suggestion, and it dissolves the finding:* `WriteStats` carries
+`trailer_bytes`, so the writer hands back the number it already had. The reopen, its error path,
+and the report's two numbers coming from two sources all go together.
+
+**M2 — the report's census clause was asserted nowhere.** Nothing in the tree looked for the
+strings the per-sample line and the run's totals print; `the_per_sample_line_prints_the_numbers_it_names`
+set `census_bytes: 812` and never looked for 812, and the report test compared the struct field
+against the same `footer().trailer_bytes` call the production code had used.
+*Fixed:* both strings are asserted, the trailer is read through `trailer()` and decoded rather than
+re-derived from the footer, and the totals line is asserted with a fixture check that the two
+totals differ. Two mutations that were green are now red.
+
+**M3 — the record count in a census file's identity was covered nowhere** once the command-level
+test that counted a psp's records went with the sidecar. The cohort opener compares only the header
+digest.
+*Fixed:* `the_census_it_writes_names_the_psp_it_read`. A `records: 0` mutation was green and is now
+red.
+
+**M4 — `each_census_it_writes_equals_the_one_the_walk_wrote` was weakened without saying so.** It
+decodes the file `generate-census` wrote and re-encodes it without its pileup identity, so the
+file's own layout survives only as far as `decode_census` preserves it, the identity is dropped
+unchecked, and the test newly leans on a byte-level round-trip law that `census_file.rs`'s tests do
+not pin — they compare decoded values.
+*Fixed:* the doc says what is compared; the round-trip law gets
+`write_census_after_decode_census_returns_the_bytes_it_was_given`; the identity gets M3's test.
+
+**M5 — two shipped scripts consume the file this step deletes.** `scripts/ng_census_route_cost.sh`
+and `scripts/ng_fit_stage_end_to_end.sh` both glob `*.census` and both now fail on every run, the
+second before it reaches step 3.
+*Recorded, not fixed.* The plan puts them in step E1, whose other half needs commands that do not
+exist yet. **The consequence is that the end-to-end harness cannot verify anything on real reads
+between here and Milestone E**, and that is stated in the implementation report rather than left
+for whoever runs it next to discover.
+
+**Minor, all fixed:** `a_stopped_walk_leaves_neither_file_at_the_samples_own_path` named a pair that
+no longer exists and never asserted the guarantee its doc stated — renamed, and it now walks the
+cohort once first; `force_replaces_a_census_that_is_already_there` compares `generate-census` with
+itself while its doc explained it as two producers agreeing — reworded, with a pointer to where the
+cross-producer guarantee now lives; five doc claims in `gatherer.rs` this change falsified, the
+module doc of `generate_psps.rs`, and `examples/ng_census_route_cost.rs`'s header, which said the
+two routes produce the same file beside the psp; a discarded `remove_file` result with no reason
+given; and the totals line's "bytes of it census", whose *it* had no referent and which phrased the
+same relation differently from the per-sample line.
+
+**`CENSUS_FILE_EXTENSION` and `census_path_for` in `generate_psps.rs` are left where they are.**
+Both are now test-only and their docs say "this command writes"; plan step E2 deletes them, and
+moving them a step early would touch four modules for no behaviour.
+
+**The fixture helper was reshaped rather than accepted.** `censuses_written_beside_the_psps` first
+took a reference, a catalog and a directory, and hardcoded the five repeat criteria as defaults —
+which every caller happens to use, so it would have agreed with all of them until one walked with
+anything else. It takes the `GeneratePspsArgs` the psps were walked under. `build_every_census`,
+widened to `pub(crate)` for it, is private again: `run_generate_census` was already public and does
+the same.

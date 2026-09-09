@@ -31,12 +31,12 @@
 //! **So the cores a walk uses have to be found inside one sample** — spec §11 question 8, and
 //! the walk's only remaining axis.
 //!
-//! **Two files a sample, and the walk is once** (spec §2). Beside each psp goes that sample's
-//! census — the smaller file a parameters fit reads, holding what the sample showed at a fixed
-//! set of positions chosen for the whole run. Both are built from the one pass over the
-//! alignment files, because that is the promise psp mode exists to keep: **a sample whose census
-//! were missing would have to be walked again**, so a census that cannot be written fails the
-//! sample's walk rather than being reported and passed over.
+//! **One file a sample, and the walk is once** (`psp_census_pair.md` §3). Inside each psp, as
+//! its closing payload, goes that sample's census — the much smaller object a parameters fit
+//! reads, holding what the sample showed at a fixed set of positions chosen for the whole run.
+//! It is built from the same single pass over the alignment files, because that is the promise
+//! psp mode exists to keep: **a sample whose census were missing would have to be walked
+//! again**, and a psp is not sealed until its census is in it.
 //!
 //! **The census's positions are the run's, not the sample's.** Which positions and which repeat
 //! tracts are kept is a function of the seed, the reference, the analysed ground and the
@@ -362,12 +362,11 @@ pub struct SampleWalkOutcome {
     pub stats: WriteStats,
     /// What the walk met: segments dispatched, handled, and the two kinds of refused.
     pub counts: LocusCounts,
-    /// The census now on disk beside the psp, and how big it is.
+    /// How many bytes of the psp are its census — the trailer's length.
     ///
-    /// **Both files or neither**: a walk whose census could not be written fails the sample
-    /// (spec §2), so a finished `SampleWalkOutcome` always names both.
-    pub census: PathBuf,
-    /// The census file's length in bytes.
+    /// **There is no second file to name** (`psp_census_pair.md` §3): the census is written
+    /// into the psp as it is sealed, so what a person wants to know about it is how much of
+    /// the file it is, and the file is already named above.
     pub census_bytes: u64,
 }
 
@@ -411,13 +410,12 @@ impl SampleWalkOutcome {
         let mut line = String::new();
         let _ = write!(
             line,
-            "{}: {} loci stored, {} bytes at {}, census {} bytes at {}",
+            "{}: {} loci stored, {} bytes at {}, of which {} bytes are its census",
             self.sample,
             self.stats.records,
             self.stats.bytes,
             self.psp.display(),
             self.census_bytes,
-            self.census.display(),
         );
         let _ = write!(
             line,
@@ -479,10 +477,11 @@ impl WalkReport {
             }
             lines.push(format!("  {}", outcome.line()));
         }
-        // **Both totals, because the run wrote both files.** A line naming the psps alone would
-        // under-report what the walk put on disk by the size of every census beside them.
+        // **The census's share of the total, not a second total.** The run writes one file a
+        // sample now, so the psp bytes are what it put on disk whole; what the census costs is
+        // still worth saying, because it is what step 2 will read and the rest is not.
         lines.push(format!(
-            "{} sample{}: {} bytes of psp and {} bytes of census",
+            "{} sample{}: {} bytes of psp, of which {} bytes are census",
             self.samples.len(),
             plural(self.samples.len() as u64),
             self.samples
@@ -673,13 +672,7 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
         // so the loser replaces the winner's psp with an equally whole one instead of a
         // shredded one. It is not a lock: the existence check below is advisory, and two
         // invocations racing on one sample is still a thing not to do.
-        let census_path = census_path_for(&args.output_dir, sample.sample.as_ref());
         let while_writing = psp_path.with_extension(format!("psp.{}.partial", std::process::id()));
-        // **The census gets the same treatment as the psp**, for the same reason: a stopped walk
-        // must leave neither a stump at a name a later run would open, nor a destroyed copy of
-        // the file it was replacing.
-        let census_while_writing =
-            census_path.with_extension(format!("census.{}.partial", std::process::id()));
         let walk = || -> Result<(WriteStats, LocusCounts), RunError> {
             let gatherer = SampleObservationGatherer::open(
                 SampleWalkInputs {
@@ -693,16 +686,17 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
                 provenance.clone(),
                 Some(&census),
             )?;
-            gatherer.write_psp(&while_writing, Some(&census_while_writing))
+            gatherer.write_psp(&while_writing)
         };
         let produced = match walk() {
             Ok(produced) => produced,
             Err(source) => {
-                // The stumps say nothing a reader wants and their names are not a psp's or a
-                // census's; leaving them would put files in the output directory no later run
-                // should ever open.
+                // The stump says nothing a reader wants and its name is not a psp's; leaving it
+                // would put a file in the output directory no later run should ever open. **A
+                // stump that will not delete is worth no second error**: the walk's own failure
+                // is the one the caller has to act on, and a `.partial` left behind is refused
+                // by every reader anyway.
                 let _ = std::fs::remove_file(&while_writing);
-                let _ = std::fs::remove_file(&census_while_writing);
                 return Err(GeneratePspsCliError::Walk {
                     sample: sample.sample.to_string(),
                     path: psp_path,
@@ -710,22 +704,10 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
                 });
             }
         };
-        // **The census is renamed into place first, and the pair is not atomic.** Two renames
-        // cannot be one, so a run that dies between them leaves this sample's *new* census
-        // beside its *old* psp — and the run says so, because the second rename's failure ends
-        // it. What makes that state safe rather than silent is the identity the census carries:
-        // it names the header and the record count of the psp it was built from, so a fit
-        // reaching this pair finds a census naming a file that is not the one beside it and
-        // refuses it (`census_file.rs`'s `Freshness`). **The order matters for the other
-        // direction**: renaming the psp first would leave a finished-looking psp beside a stale
-        // census, which is the same mismatch with the two files' roles reversed — and the psp,
-        // being what a calling run reads, would be trusted.
-        std::fs::rename(&census_while_writing, &census_path).map_err(|source| {
-            GeneratePspsCliError::OutputDir {
-                path: census_path.clone(),
-                source,
-            }
-        })?;
+        // **One rename, and nothing to order** (`psp_census_pair.md` §3.2). Until the census
+        // moved into the psp this was two renames that could not be one, and the comment here
+        // reasoned about which to do first and what a run dying between them left behind. With
+        // one file that state does not exist.
         std::fs::rename(&while_writing, &psp_path).map_err(|source| {
             GeneratePspsCliError::OutputDir {
                 path: psp_path.clone(),
@@ -733,19 +715,16 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
             }
         })?;
         let (stats, counts) = produced;
-        let census_bytes = std::fs::metadata(&census_path)
-            .map_err(|source| GeneratePspsCliError::OutputDir {
-                path: census_path.clone(),
-                source,
-            })?
-            .len();
         let outcome = SampleWalkOutcome {
             sample: sample.sample.to_string(),
             psp: psp_path,
+            // **The writer's own count of what it wrote**, not a reopen of the finished file:
+            // every sample here is walked with a census plan (above), so this is that sample's
+            // census, and `WriteStats` carries it beside the psp's own size so the report's two
+            // numbers come from one place.
+            census_bytes: stats.trailer_bytes,
             stats,
             counts,
-            census: census_path,
-            census_bytes,
         };
         // **Said as each sample finishes, not only at the end**: a cohort of sixty is an hour
         // or more, and a command that says nothing until it is done cannot be told from a
@@ -834,15 +813,14 @@ pub fn psp_path_for(output_dir: &Path, sample: &str) -> PathBuf {
     output_dir.join(format!("{sample}.{PSP_FILE_EXTENSION}"))
 }
 
-/// **The extension every census this command writes carries.**
+/// **⚠ This command writes no census file** (`psp_census_pair.md` §3) — the census is the psp's
+/// own trailer. The extension and the path rule below outlive it because `generate-census` still
+/// writes such files and `estimate-parameters` still reads them; plan step E2 deletes both from
+/// here, leaving `generate_census`'s own copy as the one owner.
 pub const CENSUS_FILE_EXTENSION: &str = "census";
 
-/// Where this command writes `sample`'s census — beside its psp, under the same stem.
-///
-/// **Two files rather than two parts of one, and the reason is what a rebuild costs.** A census
-/// is a rebuildable cache of the psp: which positions it holds depends on a per-run budget and a
-/// seed, so *rebuild it* has to mean deleting a small file rather than rewriting a large one
-/// (`parameter_prepass_joint_records.md` §6.1, spec §5.2).
+/// Where a census file for `sample` goes, if one is written — beside its psp, under the same
+/// stem. See the ⚠ above: this command does not write one.
 #[must_use]
 pub fn census_path_for(output_dir: &Path, sample: &str) -> PathBuf {
     output_dir.join(format!("{sample}.{CENSUS_FILE_EXTENSION}"))

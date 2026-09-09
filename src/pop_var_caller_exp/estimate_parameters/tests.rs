@@ -37,7 +37,7 @@ fn a_shortest_run() -> Vec<&'static str> {
 fn a_walked_cohort() -> (AVaryingCohort, PathBuf) {
     let cohort = a_varying_cohort_on_disk();
     let psps = cohort.directory.path().join("psps");
-    run_generate_psps(&GeneratePspsArgs {
+    let walk = GeneratePspsArgs {
         reference: cohort.reference.clone(),
         catalog: Some(cohort.catalog.clone()),
         alignments: cohort.alignments.clone(),
@@ -50,8 +50,13 @@ fn a_walked_cohort() -> (AVaryingCohort, PathBuf) {
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
         min_purity: DEFAULT_MIN_PURITY,
-    })
-    .expect("the cohort walks into psps");
+    };
+    run_generate_psps(&walk).expect("the cohort walks into psps");
+    // **The walk seals the census into each psp now** (`psp_census_pair.md` §3), and this
+    // command still takes census *files* — so they are built here, by `generate-census`, which
+    // is the producer that still writes them. Plan step C2 is what moves this command onto the
+    // psps themselves and deletes the pair.
+    crate::pop_var_caller_exp::test_fixtures::censuses_written_beside_the_psps(&walk, &psps);
     (cohort, psps)
 }
 

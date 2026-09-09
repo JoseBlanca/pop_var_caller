@@ -294,7 +294,7 @@ mod tests {
             &segmentation,
             Some(&plan),
         )
-        .write_psp(&psp, None)
+        .write_psp(&psp)
         .expect("the walk writes its psp");
 
         let built = census_from_psp(&psp, &plan, &segmentation).expect("the psp is readable");
@@ -326,7 +326,7 @@ mod tests {
             &segmentation,
             Some(&plan),
         )
-        .write_psp(&psp, None)
+        .write_psp(&psp)
         .expect("the walk writes its psp");
 
         let from_the_file = psp::header_digest(&psp).expect("the header reads");
@@ -357,7 +357,7 @@ mod tests {
             &segmentation,
             Some(&plan),
         )
-        .write_psp(&psp, None)
+        .write_psp(&psp)
         .expect("the walk writes its psp");
 
         let stored = PspReader::open(&psp).expect("the psp opens");
@@ -398,7 +398,7 @@ mod tests {
             &segmentation,
             Some(&plan),
         )
-        .write_psp(&psp, None)
+        .write_psp(&psp)
         .expect("the walk writes its psp");
 
         let stored = PspReader::open(&psp).expect("the psp opens");
@@ -464,19 +464,23 @@ mod the_two_producers_agree {
     use crate::ng::run::test_fixtures::{a_census_plan_over, gatherer_over};
     use crate::pop_var_caller_exp::test_fixtures::a_varying_cohort_on_disk;
 
-    /// Build both censuses for one sample and return the two files' bytes.
+    /// Build both censuses for one sample and return the two encodings' bytes.
     ///
-    /// The walk writes its own; this then re-reads the psp it left and writes the second
-    /// through the same `write_census`, so the comparison is of two census *files* rather than
-    /// of two in-memory values that a writing difference could still separate.
+    /// The walk writes its own into the psp's trailer (`psp_census_pair.md` §3.1); this then
+    /// re-reads the psp it left and writes the second through the same `write_census`, so the
+    /// comparison is of two *encodings* rather than of two in-memory values that a writing
+    /// difference could still separate.
+    ///
+    /// **The rebuild is encoded with no pileup identity, which is what the trailer carries.**
+    /// A census that is its psp's own trailer has no pairing left to check (spec §3), so the
+    /// field is absent there; encoding the rebuild with one would make the two differ in a
+    /// field neither producer disagrees about, and there would be nothing left to compare.
+    /// `census_from_psp` still computes an identity, because `generate-census` still writes
+    /// census files that need one.
     fn both_censuses_for(which: usize) -> (Vec<u8>, Vec<u8>) {
         let cohort = a_varying_cohort_on_disk();
         let (segmentation, plan) = a_census_plan_over(&cohort.reference, &cohort.catalog);
         let psp = cohort.directory.path().join(format!("sample{which}.psp"));
-        let walked = cohort
-            .directory
-            .path()
-            .join(format!("sample{which}.census"));
 
         let _ = gatherer_over(
             &cohort.alignments[which],
@@ -484,15 +488,18 @@ mod the_two_producers_agree {
             &segmentation,
             Some(&plan),
         )
-        .write_psp(&psp, Some(&walked))
-        .expect("the walk writes both files");
+        .write_psp(&psp)
+        .expect("the walk writes its psp");
 
         let rebuilt = census_from_psp(&psp, &plan, &segmentation).expect("the psp is readable");
         let mut from_the_psp = Vec::new();
-        write_census(&rebuilt.evidence, Some(rebuilt.identity), &mut from_the_psp)
+        write_census(&rebuilt.evidence, None, &mut from_the_psp)
             .expect("a vector accepts every write");
 
-        let from_the_walk = std::fs::read(&walked).expect("the walk's census is on disk");
+        let from_the_walk = crate::ng::psp::PspReader::open(&psp)
+            .expect("the psp opens")
+            .trailer()
+            .expect("its trailer reads");
         (from_the_walk, from_the_psp)
     }
 
@@ -543,7 +550,7 @@ mod the_two_producers_agree {
             &segmentation,
             Some(&plan),
         )
-        .write_psp(&psp, None)
+        .write_psp(&psp)
         .expect("the walk writes its psp");
 
         let built = census_from_psp(&psp, &plan, &segmentation).expect("the psp is readable");

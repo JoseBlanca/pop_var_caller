@@ -4258,7 +4258,8 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     plan's Checkpoint A note and spec §6.1 (`a1fdab11`).
 
 #### The census lives inside the psp — one file a sample
-- **Status:** `in-flight` — Milestone A step A1 committed; A2, A3, A4 to come, then Checkpoint A.
+- **Status:** `in-flight` — Milestone A steps A1 and A2 committed; A3 and A4 to come, then
+  Checkpoint A.
 - **Plan:** [psp_census_pair.md](doc/devel/ng/impl_plan/psp_census_pair.md); **Spec:** [psp_census_pair.md](doc/devel/ng/spec/psp_census_pair.md)
 - **Branch:** `census-vs-psp-perf`.
 - **What it closes:** a sample is two files today — `<sample>.psp` and `<sample>.census` beside it —
@@ -4280,6 +4281,17 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   (`a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele`). Recorded in full at the
   head of the impl report; the per-step gate is `--lib --bins --tests` plus a
   `check --all-targets --keep-going` that must fail on exactly those four examples.
+- **A2 done — one file a sample.** The census beside the psp is gone: one `.partial`, one rename,
+  and nothing left to order. `write_psp` loses its census-path argument, `write_census_beside` and
+  `RunError::CensusNotWritten` go with it, and `WriteStats` carries the trailer's length so the
+  report's psp size and census size come from one place. **The step was bigger than the plan
+  lists**: removing the writer orphaned 16 tests in four other modules, all about a world steps
+  C2/D1/E2 delete, so they are kept alive by one fixture that builds their censuses with
+  `generate-census`. Three mutations the suite would have passed now fail.
+- **⚠ Owed to step E1, and it costs something in the meantime:** `scripts/ng_fit_stage_end_to_end.sh`
+  and `scripts/ng_census_route_cost.sh` both glob the census files A2 deletes and now fail on every
+  run, so **the end-to-end harness cannot verify anything on real reads between here and Milestone
+  E**. E1 owns the fix and its other half needs commands that do not exist yet.
 - **Deviation absorbed at A1:** the plan has A1 delete `write_psp`'s census-path argument, which
   cannot be committed green — the tests that assert `<sample>.census` exists are A2's to rewrite.
   A1 adds the trailer beside the sidecar; A2 removes the sidecar, the argument and those tests

@@ -130,3 +130,98 @@ Two of the fixes changed the design of the code rather than its prose:
   variant rendered as *the census at …/zeta.psp could not be written*: the wrong operation, a path
   belonging to a different file, and at that moment the file there is a half-written psp. The new
   one names the sample and no path, because no file was touched.
+
+---
+
+## A2 — `generate-psps` writes one file
+
+**Committed:** see `git log` for `feat(ng): A2`.
+
+### What it does
+
+The census file beside the psp is gone. `generate-psps` writes one `.partial` and does one rename,
+and there is nothing left to order — until now it reasoned about which of two renames to do first
+and what a run dying between them left behind. `SampleObservationGatherer::write_psp` loses its
+census-path argument and `write_census_beside` with it, and `RunError::CensusNotWritten` goes with
+them both. The per-sample line and the run's totals say how much of each psp is its census.
+
+**`WriteStats` carries the trailer's length**, so the report's two numbers — the psp's size and its
+census's — come from one place. The first draft reopened the finished file to read its footer;
+the review found that the reopen's failure was being reported as a *stopped walk*, whose own
+documentation promises the sample has no psp and the one it was replacing is untouched. By then
+the walk has finished and the rename has already happened, so both promises were false. Carrying
+the number the writer already had removes the reopen, the error path and the mixed provenance
+together.
+
+### The step was bigger than the plan lists, and this is what it grew by
+
+The plan's A2 names `generate_psps.rs` and its own tests. **Removing the writer orphaned every
+test that read a `<sample>.census` file** — sixteen of them, across `census_cohort.rs`,
+`census_fit.rs`, `estimate_parameters/tests.rs` and `generate_census/tests.rs`. All four modules
+are about a world later steps delete (plan steps C2, D1, E2), and until then they have to keep
+guarding today's behaviour, so they are kept alive by one fixture helper,
+`censuses_written_beside_the_psps`, which builds the files with `generate-census` — the producer
+that still writes them — from **the arguments the psps were walked under**, not from the repeat
+criteria's defaults.
+
+Two tests were deleted rather than kept: `the_walk_writes_a_census_beside_the_psp_and_names_that_psp_in_it`,
+whose whole subject was the sidecar's pileup identity, and `a_census_that_cannot_be_written_fails_the_walk`,
+which has no failure left to provoke.
+
+### What was measured
+
+- **`cargo test --lib --bins --tests --all-features --no-fail-fast`: 6,677 lib tests pass and 20
+  of 21 test targets are green**, the one failure being the pre-existing
+  `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele`. Against the baseline's
+  6,672 that is A1's five, less this step's two deletions, plus the two tests the review asked
+  for.
+- **`cargo clippy --lib --bins --tests --all-features -- -D warnings`: the same 11 error locations
+  in the same 6 files as the baseline.**
+- **`cargo check --all-targets --keep-going`: the same 4 examples fail, with the same error
+  counts.**
+- **`cargo fmt --check`: the same 4 files as the baseline.**
+
+### Three mutations the suite would have passed, and now does not
+
+The review named them; each was run, then reverted, and the module's tests re-run on the restored
+tree.
+
+| mutation | before | after |
+|---|---|---|
+| delete the census clause from the per-sample line | green | 2 tests fail |
+| the run's totals sum the psps' bytes twice instead of the censuses' | green | 1 test fails |
+| `generate-census` writes `records: 0` in the identity | green | 1 test fails |
+
+The third is the coverage hole the deletions opened: the record count in a census *file*'s identity
+was asserted nowhere once the command-level test that counted a psp's records went. The cohort
+opener compares only the header digest.
+
+### What the review found, and what was done
+
+Two reviewers over the diff. Five Major and eight Minor; everything actionable was applied.
+Besides the two above:
+
+- **`each_census_it_writes_equals_the_one_the_walk_wrote` had been quietly weakened.** It now
+  decodes the file `generate-census` wrote and re-encodes it without its pileup identity before
+  comparing it with the trailer — so the file's own layout is checked only as far as
+  `decode_census` preserves it, and the identity is dropped unchecked. Both gaps now have a test:
+  `write_census_after_decode_census_returns_the_bytes_it_was_given` pins the byte-level round trip
+  the comparison leans on, and `the_census_it_writes_names_the_psp_it_read` covers the identity.
+  The doc says what is compared instead of claiming the file is.
+- **`a_stopped_walk_leaves_neither_file_at_the_samples_own_path` named a pair that no longer
+  exists**, and never asserted the guarantee its doc stated. Renamed, and it now walks the cohort
+  once first so the surviving psps can be checked.
+- Five doc claims in `gatherer.rs` that this change falsified, the module doc of `generate_psps.rs`,
+  and the header of `examples/ng_census_route_cost.rs`, which said the two routes produce the same
+  file beside the psp.
+- `build_every_census` was widened to `pub(crate)` for the fixture and is private again; the
+  fixture uses `run_generate_census`, which was already public.
+
+### Left undone, deliberately
+
+**Two shipped scripts consume the file this step deletes and now fail on every run**:
+`scripts/ng_census_route_cost.sh` globs `*.census` in the during-the-walk route's output
+directory, and `scripts/ng_fit_stage_end_to_end.sh` compares the walk's census files against the
+rebuild and stops before step 3. The plan puts both in step E1, whose other half needs commands
+that do not exist yet — so the end-to-end harness cannot verify anything on real reads between
+here and Milestone E. **That is a real loss and it is recorded rather than absorbed.**

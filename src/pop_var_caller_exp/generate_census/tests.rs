@@ -4,11 +4,14 @@
 use super::*;
 use clap::Parser;
 
+use crate::ng::psp::PspReader;
 use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
 use crate::pop_var_caller_exp::generate_psps::{
     GeneratePspsArgs, census_path_for, psp_path_for, run_generate_psps,
 };
-use crate::pop_var_caller_exp::test_fixtures::{ACohortOnDisk, a_cohort_on_disk};
+use crate::pop_var_caller_exp::test_fixtures::{
+    ACohortOnDisk, a_cohort_on_disk, censuses_written_beside_the_psps,
+};
 
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
 fn args_of(argv: &[&str]) -> GenerateCensusArgs {
@@ -32,11 +35,20 @@ fn a_shortest_run() -> Vec<&'static str> {
     ]
 }
 
-/// A walked cohort: two psps and their walk-time censuses, in a directory of their own.
+/// A walked cohort: two psps in a directory of their own, **and no census files** — the walk
+/// writes the census into each psp's trailer now (`psp_census_pair.md` §3). Tests that need a
+/// census beside a psp make one with `censuses_written_beside_the_psps`.
 fn a_walked_cohort() -> (ACohortOnDisk, PathBuf) {
+    let (cohort, psps, _) = a_walked_cohort_and_how_it_was_walked();
+    (cohort, psps)
+}
+
+/// The same, and the arguments it was walked under — which is what a census built afterwards
+/// has to be given, since a census is a function of the criteria the ground was cut with.
+fn a_walked_cohort_and_how_it_was_walked() -> (ACohortOnDisk, PathBuf, GeneratePspsArgs) {
     let cohort = a_cohort_on_disk();
     let psps = cohort.directory.path().join("psps");
-    run_generate_psps(&GeneratePspsArgs {
+    let walk = GeneratePspsArgs {
         reference: cohort.reference.clone(),
         catalog: Some(cohort.catalog.clone()),
         alignments: cohort.alignments.clone(),
@@ -49,8 +61,16 @@ fn a_walked_cohort() -> (ACohortOnDisk, PathBuf) {
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
         min_purity: DEFAULT_MIN_PURITY,
-    })
-    .expect("the cohort walks into psps");
+    };
+    run_generate_psps(&walk).expect("the cohort walks into psps");
+    (cohort, psps, walk)
+}
+
+/// A walked cohort **with a census file beside each psp**, which is the pair the commands that
+/// still take `--census` paths are meant to be handed.
+fn a_walked_cohort_with_its_censuses() -> (ACohortOnDisk, PathBuf) {
+    let (cohort, psps, walk) = a_walked_cohort_and_how_it_was_walked();
+    censuses_written_beside_the_psps(&walk, &psps);
     (cohort, psps)
 }
 
@@ -102,13 +122,24 @@ fn the_ground_cannot_be_narrowed_by_a_flag() {
     );
 }
 
-/// **The command's censuses are the walk's censuses, byte for byte.**
+/// **The evidence this command writes is the evidence the walk wrote, byte for byte.**
 ///
-/// This is the end-to-end form of the producer's own agreement test: `generate-psps` writes a
-/// census beside each psp as it walks, `generate-census` builds one from the psp afterwards, and
-/// the two files are the same. It is what says the second route can stand in for the first.
+/// This is the end-to-end form of the producer's own agreement test: `generate-psps` builds a
+/// census as it walks and seals it into the psp's trailer, `generate-census` builds one from
+/// that psp's records afterwards, and the two encode to the same bytes. It is what says the
+/// second route can stand in for the first.
+///
+/// **What is compared is not the file this command wrote.** That file is decoded and re-encoded
+/// with no pileup identity, because the trailer carries none — a census that *is* its psp's
+/// trailer has nothing left to pair wrongly with (`psp_census_pair.md` §3) — while a census in a
+/// file of its own does. So two things this comparison does *not* cover, and each is covered by
+/// a test of its own: the file's own layout, which survives here only as far as `decode_census`
+/// preserves it (`census_file.rs`'s `write_census_after_decode_census_returns_the_bytes_it_was_given`),
+/// and the identity that was dropped (`the_census_it_writes_names_the_psp_it_read`, below).
 #[test]
 fn each_census_it_writes_equals_the_one_the_walk_wrote() {
+    use crate::ng::parameter_estimation::joint::census_file::{decode_census, write_census};
+
     let (cohort, psps) = a_walked_cohort();
     let rebuilt = cohort.directory.path().join("rebuilt");
 
@@ -117,12 +148,56 @@ fn each_census_it_writes_equals_the_one_the_walk_wrote() {
 
     assert_eq!(report.samples.len(), 2, "one entry a sample");
     for sample in &report.samples {
-        let walked = std::fs::read(census_path_for(&psps, &sample.sample))
-            .expect("the walk wrote this sample's census");
-        let built = std::fs::read(&sample.census).expect("this run wrote one too");
+        let walked = PspReader::open(&psp_path_for(&psps, &sample.sample))
+            .expect("the psp opens")
+            .trailer()
+            .expect("its trailer reads");
+        let built = decode_census(&std::fs::read(&sample.census).expect("this run wrote one"))
+            .expect("this build's own census");
+        let mut without_its_identity = Vec::new();
+        write_census(&built.census, None, &mut without_its_identity)
+            .expect("a vector accepts every write");
         assert_eq!(
-            walked, built,
+            walked, without_its_identity,
             "{}'s census differs between the walk and the rebuild",
+            sample.sample,
+        );
+    }
+}
+
+/// **A census file this command writes names the psp it read — its header and its record
+/// count.**
+///
+/// The identity is what says a census file and the psp beside it are a pair; a census naming a
+/// psp that is not there is refused for ever by every freshness check.
+///
+/// **The record count is the half nothing else checks.** The cohort opener compares only the
+/// header digest (`freshness_by_header`), and the command-level test that counted a psp's
+/// records was deleted when `generate-psps` stopped writing census files
+/// (`psp_census_pair.md` §3) — so without this, a rebuild writing `records: 0` would pass the
+/// whole suite.
+#[test]
+fn the_census_it_writes_names_the_psp_it_read() {
+    use crate::ng::parameter_estimation::joint::census_file::{PileupIdentity, open_census};
+
+    let (cohort, psps) = a_walked_cohort();
+    let rebuilt = cohort.directory.path().join("rebuilt");
+
+    let report = build_every_census(&args_over(&cohort, &psps, rebuilt)).expect("the psps read");
+
+    for sample in &report.samples {
+        let (_evidence, named) = open_census(&sample.census).expect("this build wrote it");
+        let named = named.expect("a census file names the psp it was built from");
+        let mut psp = PspReader::open(&psp_path_for(&psps, &sample.sample)).expect("the psp opens");
+        let records = psp.records().expect("the walk starts").count() as u64;
+        let expected = PileupIdentity::of_header(
+            &psp.header().encode().expect("the header re-encodes"),
+            records,
+        );
+        assert_eq!(
+            named, expected,
+            "{}'s census names its own psp — the header in the file, and the records the file \
+             holds",
             sample.sample,
         );
     }
@@ -134,9 +209,9 @@ fn each_census_it_writes_equals_the_one_the_walk_wrote() {
 /// forty replaced files and twenty originals.
 #[test]
 fn a_census_already_there_is_refused_and_nothing_is_replaced() {
-    let (cohort, psps) = a_walked_cohort();
-    // The psps' own directory already holds the walk's censuses, so writing there collides.
-    let before = std::fs::read(census_path_for(&psps, "zeta")).expect("the walk wrote it");
+    // One run into the psps' own directory, so the run below collides with what it left.
+    let (cohort, psps) = a_walked_cohort_with_its_censuses();
+    let before = std::fs::read(census_path_for(&psps, "zeta")).expect("the first run wrote it");
 
     let error = build_every_census(&args_over(&cohort, &psps, psps.clone()))
         .expect_err("a census is already there");
@@ -149,12 +224,17 @@ fn a_census_already_there_is_refused_and_nothing_is_replaced() {
     assert_eq!(before, after, "the refused run replaced nothing");
 }
 
-/// **`--force` replaces them**, and what it writes is what was there — because both producers
-/// agree.
+/// **`--force` replaces them**, and what it writes is what was there — because this command is
+/// a function of the psp it reads and nothing else.
+///
+/// **Both files here are this command's**, since the walk stopped writing census files
+/// (`psp_census_pair.md` §3), so what this asserts is that two runs over one psp agree. The
+/// cross-producer guarantee — that the walk and the rebuild agree — is
+/// `each_census_it_writes_equals_the_one_the_walk_wrote` above, and only there.
 #[test]
 fn force_replaces_a_census_that_is_already_there() {
-    let (cohort, psps) = a_walked_cohort();
-    let before = std::fs::read(census_path_for(&psps, "zeta")).expect("the walk wrote it");
+    let (cohort, psps) = a_walked_cohort_with_its_censuses();
+    let before = std::fs::read(census_path_for(&psps, "zeta")).expect("the first run wrote it");
 
     let mut args = args_over(&cohort, &psps, psps.clone());
     args.force = true;

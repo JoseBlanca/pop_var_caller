@@ -1,16 +1,21 @@
 //! **What each route to a census costs** — plan step B3 of
 //! `doc/devel/ng/impl_plan/parameter_prepass_runs.md`.
 //!
-//! There are two ways to end up with a census beside every psp, and both ship:
+//! There are two ways to end up with every sample's census, and both ship:
 //!
-//! - **during the walk** — one pass over the alignment files writes the psp and the census
-//!   together, which is what `generate-psps` does;
+//! - **during the walk** — one pass over the alignment files builds the census as it goes and
+//!   seals it into the psp's trailer, which is what `generate-psps` does;
 //! - **afterwards** — the walk writes the psp alone, and a second pass reads it back and builds
-//!   the census, which is what `generate-census` does.
+//!   the census into a file of its own, which is what `generate-census` does.
 //!
-//! They produce the same file byte for byte (Milestone A), so the only thing that separates them
-//! is what they cost. This harness runs **one** route per process, so that a wrapper measuring
-//! peak resident memory measures one route rather than the larger of two.
+//! **They produce the same evidence, encoded to the same bytes**, so the only thing that
+//! separates them is what they cost. The two destinations differ in one field and one only: a
+//! census in a file of its own names the psp it was built from, and a census that *is* its psp's
+//! trailer has nothing left to pair wrongly with and names none (`psp_census_pair.md` §3).
+//! `each_census_it_writes_equals_the_one_the_walk_wrote` is what holds the two to that.
+//!
+//! This harness runs **one** route per process, so that a wrapper measuring peak resident memory
+//! measures one route rather than the larger of two.
 //!
 //! ```text
 //! ./scripts/dev.sh cargo run --release --example ng_census_route_cost -- \
@@ -45,7 +50,7 @@ use std::time::Instant;
 use pop_var_caller::ng::locus_generation::pileup::PileupGeneratorConfig;
 use pop_var_caller::ng::parameter_estimation::joint::census_file::write_census;
 use pop_var_caller::ng::parameter_estimation::joint::loci::UnambiguousRuns;
-use pop_var_caller::ng::psp::{ParameterValue, WriterProvenance};
+use pop_var_caller::ng::psp::{ParameterValue, PspReader, WriterProvenance};
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::reference_info::{
@@ -260,20 +265,25 @@ fn run(
         let psp_path = work_dir.join(format!("{sample}.psp"));
         let census_path = work_dir.join(format!("{sample}.census"));
 
-        let stats = match route {
+        // **The census goes into the psp's trailer on the first route and into a file of its own
+        // on the second**, which is what the two routes are: one walk that accumulates it, and
+        // one that reads the psp back afterwards. The sizes are comparable either way — the same
+        // `write_census` writes both — so what is timed is still the building and not the
+        // destination.
+        let (stats, census_size) = match route {
             Route::DuringTheWalk => {
-                let (stats, _) = gatherer.write_psp(&psp_path, Some(&census_path))?;
-                stats
+                let (stats, _) = gatherer.write_psp(&psp_path)?;
+                let inside = PspReader::open(&psp_path)?.footer().trailer_bytes;
+                (stats, inside)
             }
             Route::AfterTheWalk => {
-                let (stats, _) = gatherer.write_psp(&psp_path, None)?;
+                let (stats, _) = gatherer.write_psp(&psp_path)?;
                 let produced = census_from_psp(&psp_path, &plan, &segmentation)?;
                 let mut file = std::fs::File::create(&census_path)?;
                 write_census(&produced.evidence, Some(produced.identity), &mut file)?;
-                stats
+                (stats, std::fs::metadata(&census_path)?.len())
             }
         };
-        let census_size = std::fs::metadata(&census_path)?.len();
         println!(
             "{sample}: {} records, psp {} bytes, census {census_size} bytes",
             stats.records, stats.bytes,

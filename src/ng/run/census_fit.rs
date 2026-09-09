@@ -381,7 +381,7 @@ mod tests {
 
         let cohort = a_varying_cohort_on_disk();
         let psps = cohort.directory.path().join("psps");
-        run_generate_psps(&GeneratePspsArgs {
+        let walk = GeneratePspsArgs {
             reference: cohort.reference.clone(),
             catalog: Some(cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),
@@ -394,8 +394,13 @@ mod tests {
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-        })
-        .expect("the cohort walks into psps");
+        };
+        run_generate_psps(&walk).expect("the cohort walks into psps");
+        // **The walk seals the census into each psp now** (`psp_census_pair.md` §3), and this
+        // module fits a cohort of census *files* — so they are built here, by `generate-census`,
+        // which is the producer that still writes them. Plan step C2 moves this fit onto the
+        // psps themselves.
+        crate::pop_var_caller_exp::test_fixtures::censuses_written_beside_the_psps(&walk, &psps);
         let mut censuses: Vec<PathBuf> = std::fs::read_dir(&psps)
             .expect("the walk made the directory")
             .map(|entry| entry.expect("an entry").path())

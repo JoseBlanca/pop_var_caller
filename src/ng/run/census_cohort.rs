@@ -337,7 +337,9 @@ mod tests {
     use crate::pop_var_caller_exp::generate_psps::{
         GeneratePspsArgs, census_path_for, psp_path_for, run_generate_psps,
     };
-    use crate::pop_var_caller_exp::test_fixtures::a_cohort_on_disk;
+    use crate::pop_var_caller_exp::test_fixtures::{
+        a_cohort_on_disk, censuses_written_beside_the_psps,
+    };
 
     /// The fixture cohort walked into psps, with its censuses beside them — the pair a fit is
     /// meant to be handed.
@@ -353,7 +355,7 @@ mod tests {
 
         let cohort = a_cohort_on_disk();
         let psps = cohort.directory.path().join("psps");
-        run_generate_psps(&GeneratePspsArgs {
+        let walk = GeneratePspsArgs {
             reference: cohort.reference.clone(),
             catalog: Some(cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),
@@ -366,8 +368,12 @@ mod tests {
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-        })
-        .expect("the cohort walks into psps");
+        };
+        run_generate_psps(&walk).expect("the cohort walks into psps");
+        // **The walk writes the census into each psp now** (`psp_census_pair.md` §3), and this
+        // module is about census *files* beside psps — so the files are built here, by the
+        // command that still writes them. Plan step C2 is what deletes this module's subject.
+        censuses_written_beside_the_psps(&walk, &psps);
         let censuses = vec![
             census_path_for(&psps, "alpha"),
             census_path_for(&psps, "zeta"),
