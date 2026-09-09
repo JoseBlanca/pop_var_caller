@@ -682,6 +682,14 @@ walked in one region and in many produces byte-identical records.
 
 ### 6.1 Where the records live, and the two ways they are built — DECIDED 2026-08-13
 
+> **SUPERSEDED 2026-09-09 on the location** ([`psp_census_pair.md`](psp_census_pair.md) §3): the
+> census is written into the psp's trailer and there is no census file. The sidecar shipped as code
+> before the reversal, which is why this note stays. The reasons below for a separate file rest on
+> the census being rebuilt without the psp — a format change, or new selection constants — which the
+> owner judged uncommon once psps exist at scale; every other change that invalidates a census
+> invalidates the psp too. The rest of this section — the two builders, their byte-for-byte
+> agreement, the staleness check — stands, with the census's location read as *the trailer*.
+
 **Decision (owner): one file per sample, written beside that sample's pileup, never inside it.**
 
 **Why they are stored at all, given the pileup already holds the evidence.** They are a cache: every
@@ -749,9 +757,11 @@ both ways gives byte-identical files.
 
 **Staleness.** The records file names the pileup it was built from: a digest of that pileup's header —
 reference, analysed regions, read filters, command line — together with its record count. **Never
-modification time.** On a mismatch the parameters fit **refuses, naming every sample whose census is
-stale and the command that regenerates it** — it does not rebuild on its own, because a rebuild is a
-full pass over the pileup and must be the user's decision
+modification time.** *With the census inside the psp (the supersession above) the identity has
+nothing left to name and is written absent; what is checked is the census's format version and the
+digest of its kept loci.* On a mismatch the parameters fit **refuses, naming every sample whose
+census is stale and the command that regenerates it** — it does not rebuild on its own, because a
+rebuild is a full pass over the pileup and must be the user's decision
 ([`psp_census_pair.md`](psp_census_pair.md) §4, owner's ruling 2026-09-09; an earlier revision of
 this paragraph had the fit rebuild silently, which was never built). That is the same shape as §5's
 refusal, pointed at a different object.
