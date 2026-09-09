@@ -129,7 +129,7 @@ resident `read_census` over the trailer bytes is the parity oracle: every sectio
 equals the resident one, and `bytes_read()` shows only the sections asked for were read.
 *Depends:* A1. *Source:* spec §5.
 
-☐ **A4 — the two producers agree, byte for byte, over trailer bytes.**
+✅ **A4 — the two producers agree, byte for byte, over trailer bytes.**
 `each_census_it_writes_equals_the_one_the_walk_wrote` rewired: the trailer the walk wrote against
 `census_from_psp`'s output encoded the same way, on the fixture carrying a repeat tract and three
 read groups. `census_from_psp` loses its identity argument.

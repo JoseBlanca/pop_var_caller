@@ -4258,8 +4258,9 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     plan's Checkpoint A note and spec §6.1 (`a1fdab11`).
 
 #### The census lives inside the psp — one file a sample
-- **Status:** `in-flight` — Milestone A steps A1, A2 and A3 committed; A4 to come, then
-  Checkpoint A.
+- **Status:** `reviewed` — **Milestone A complete, at Checkpoint A: a psp carries its census, and
+  the fit can read it lazily from there.** A1-A4 committed, each implemented, reviewed and fixed.
+  Milestones B-E to come.
 - **Plan:** [psp_census_pair.md](doc/devel/ng/impl_plan/psp_census_pair.md); **Spec:** [psp_census_pair.md](doc/devel/ng/spec/psp_census_pair.md)
 - **Branch:** `census-vs-psp-perf`.
 - **What it closes:** a sample is two files today — `<sample>.psp` and `<sample>.census` beside it —
@@ -4295,6 +4296,13 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   mutations run and reverted, both now caught — forgetting the offset in a section read, and
   dropping it when a cohort relabels a sample, which is the path every sample takes and which no
   test could see before.
+- **A4 done — the two producers agree byte for byte, on a cohort that has a repeat tract.** The
+  command-level parity oracle ran on a cohort whose selection keeps **0** strata, so the half of a
+  census keyed by stratum was empty on both sides; it now runs on the cohort that keeps **1**
+  stratum and **3** read groups, with the plain cohort keeping a test for its sample that carries
+  no reads. **Measured, not assumed:** making the rebuild skip every repeat-tract locus fails it.
+  The plan's "`census_from_psp` loses its identity argument" moves to D1, where the one command
+  that reads the identity is replaced.
 - **⚠ Owed to step E1, and it costs something in the meantime:** `scripts/ng_fit_stage_end_to_end.sh`
   and `scripts/ng_census_route_cost.sh` both glob the census files A2 deletes and now fail on every
   run, so **the end-to-end harness cannot verify anything on real reads between here and Milestone

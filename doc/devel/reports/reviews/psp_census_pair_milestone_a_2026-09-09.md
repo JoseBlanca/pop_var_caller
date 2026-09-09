@@ -257,3 +257,60 @@ around the census, when the counter does not cover the head read at all.
 
 **Confirmed by the reviewer and not changed:** every match on `Sections::Backed` is correctly
 updated, and `Sections::backed` is the only other construction site.
+
+---
+
+## A4 — the two producers agree, byte for byte, over trailer bytes
+
+**Reviewed against:** the working tree over `b1ba84bc`, one test file. One read-only agent over four
+grouped categories. **It named three mutations and I ran two**; both changed the outcome.
+
+### Findings
+
+**M1 — `strata > 0` could not see the thing it was written to guard.** A census's stratum list is a
+property of the run's selection, not of the evidence: `CensusWriter::finish` mints a section key
+for every declared read group crossed with every kept stratum and fills it with never-walked
+entries when nothing was recorded. So the assertion stays true in exactly the state it exists to
+refuse — a fixture that stopped putting reads on kept tracts, in which both producers emit
+identical empty tract sections and the byte comparison passes over half a census. The sibling
+module already asserts all three of records, strata and reads-at-tracts; A4 had kept the weakest.
+*Fixed:* the guard is the command's own tally — **some sample must have a read at a kept tract**.
+
+**M2 — `the_two_producers_agree_on_a_sample_that_showed_nothing` asserted nothing about showing
+nothing**, and discarded the only measurement that could say so. Any producer emitting an all-zero
+census for the empty sample satisfied it, including one that read no records at all.
+*Fixed:* both shapes are required — one sample that contributes nothing, and one that does.
+
+**M3 — the doc's reason for the fixture swap was called inverted, and it is not.** The reviewer
+read the plain fixture's reference as one long homopolymer under a minimum period of 1, and
+concluded that cohort is nothing but tract — which would have made the step's justification
+backwards. *Measured instead of argued:* the varying cohort keeps **1 stratum and 3 read groups**,
+the plain cohort keeps **0 strata**. The justification stands, and the doc now carries the numbers
+rather than the claim.
+
+**The decisive mutation, run.** Making the rebuild skip every repeat-tract locus — one-sided, so a
+real defect rather than a no-op — fails this test *and* `census_from_psp`'s own three. That settles
+what the reviewer put as the review's central question: the tract half of this fixture is live, so
+the oracle can catch a tract-half defect rather than merely containing one. Reverted, and the
+module's tests re-run on the restored tree.
+
+**Minor, fixed:** the shared comparison returned a bare `(usize, usize)` whose two counts were
+aggregated by two different rules — one a sum, one a maximum — with nothing saying so; it now
+asserts and returns nothing, and each test checks what its own cohort makes non-vacuous. The two
+tests are named as the pair they are. `force_replaces_a_census_that_is_already_there` no longer
+claims the cross-producer guarantee lives in one test "and only there", which this diff made false.
+
+**Added at the reviewer's prompting, and it is the strongest thing this test does:** the doc now
+says that the selection is derived **twice** here — `generate-psps` and `generate-census` each
+build their own segmentation and plan — where `census_from_psp`'s tests hand one plan to both
+producers. A disagreement about how a plan is built is invisible there and fails here. The doc also
+now states what no parity oracle can catch: a defect both producers share, since they build their
+writer through one `CensusPlan::writer_for`.
+
+### Carried forward
+
+- **The plan's "`census_from_psp` loses its identity argument" moves to D1**, where the command
+  that reads the identity is replaced. See the implementation report.
+- The new test retypes two argument literals the helpers above already build, because the two
+  cohort fixtures are separate types with the same four relevant fields. Two occurrences; the fix
+  is to parameterise the helpers on the paths when a third appears.

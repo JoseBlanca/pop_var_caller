@@ -300,3 +300,84 @@ unbounded is a section's *content*** — `decode_section`'s exact-consumption ru
 misdirected read, not the directory's overlap check, which compares sections against each other and
 cannot see the census's end. On files this project wrote the live risk is corruption rather than
 attack, and the outcome is a refusal.
+
+---
+
+## A4 — the two producers agree, byte for byte, over trailer bytes
+
+**Committed:** see `git log` for `feat(ng): A4`.
+
+### What it does
+
+Spec §11 calls the two producers' agreement the parity oracle: `generate-psps` builds a census as
+it walks and seals it into the psp, `generate-census` rebuilds one afterwards from that psp's
+records alone, and the two encode to the same bytes. It is what says a psp carries everything a
+census needs — and therefore that a psp can be re-censused without the alignment files, which is
+the whole basis of the repair command Milestone D builds.
+
+**The command-level oracle ran on a cohort whose selection keeps no repeat tract.** It now runs on
+the cohort that has one, and keeps a second test on the plain cohort for the sample that carries
+no reads at all.
+
+### The numbers, measured
+
+| | strata the selection keeps | read groups |
+|---|---|---|
+| the varying cohort (now the oracle's) | **1** | **3** — two samples declaring 2 and 1 |
+| the plain cohort | **0** | 2 |
+
+Read by printing them out of both tests. That is the whole case for the move: with no stratum kept,
+the half of a census keyed by stratum as well as by read group is empty on both sides, and two
+empty halves agree.
+
+**And the tract half is live, not merely present.** Making the rebuild skip every repeat-tract
+locus — a one-sided defect — fails this test *and* `census_from_psp`'s own three. Run, then
+reverted, and the module's tests re-run on the restored tree. Without that run the step would have
+rested on a fixture assumption; the review asked for it precisely because "the plan keeps a
+stratum" and "reads reached it" are different claims.
+
+### What the review changed
+
+- **`strata > 0` was the wrong guard and is not the one that ships.** A census's stratum list is a
+  property of the run's selection, not of the evidence: `CensusWriter::finish` mints a section key
+  for every declared group crossed with every kept stratum, filled with never-walked entries when
+  nothing was recorded. So `strata > 0` stays true in exactly the state the guard is for — a
+  fixture that stopped putting reads on kept tracts. What ships is the command's own tally:
+  **some sample must have a read at a kept tract**.
+- **`the_two_producers_agree_on_a_sample_that_showed_nothing` asserted nothing about showing
+  nothing**, and threw away the only measurement that could. It now requires both shapes present:
+  one sample that contributes nothing, and one that does — the second being what stops it passing
+  on two producers that each read no records.
+- The shared comparison returns nothing rather than a bare `(usize, usize)` whose two counts were
+  aggregated by two different rules — one a sum, one a maximum — with nothing saying so.
+- Both tests are named as the pair they are, and `force_replaces_a_census_that_is_already_there`
+  no longer claims the cross-producer guarantee lives in one test "and only there".
+- The doc now says **what no parity oracle can catch**: a defect both producers share. They build
+  their writer through one `CensusPlan::writer_for` and feed it the same type, so a fault in
+  `CensusWriter` corrupts both sides identically. "Byte for byte" is a statement about the psp
+  being complete, not about the census being right.
+
+**One reviewer hypothesis was checked and refuted.** It read the plain fixture's reference as all
+`A`s with a minimum period of 1, and concluded the cohort is nothing but tract — which would have
+made this step's justification inverted. Measured: that cohort keeps **0** strata. The
+justification stands.
+
+### Deferred, with a reason
+
+**The plan's A4 also says "`census_from_psp` loses its identity argument". It moves to D1.** The
+identity has exactly one reader, `generate-census`, which writes census files that name the psp
+they were built from — and the spec's own reuse map ties the identity's removal to
+`regenerate-census`, which is what D1 builds. Dropping it here would break the command three
+milestones before the step that deletes it.
+
+**Not done, recorded:** the new test retypes a `GeneratePspsArgs` and a `GenerateCensusArgs`
+literal that two helpers directly above already build, because `ACohortOnDisk` and `AVaryingCohort`
+are separate types with the same four relevant fields. Two occurrences; parameterising the helpers
+on the four paths is the fix when a third appears.
+
+### What was measured
+
+- **`cargo test --lib --bins --tests --all-features --no-fail-fast`: 6,682 lib tests pass and 20 of
+  21 targets are green**, the one failure being the pre-existing
+  `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele`.
+- clippy, `check --all-targets` and `fmt --check`: unchanged against the baseline.

@@ -10,7 +10,7 @@ use crate::pop_var_caller_exp::generate_psps::{
     GeneratePspsArgs, census_path_for, psp_path_for, run_generate_psps,
 };
 use crate::pop_var_caller_exp::test_fixtures::{
-    ACohortOnDisk, a_cohort_on_disk, censuses_written_beside_the_psps,
+    ACohortOnDisk, a_cohort_on_disk, a_varying_cohort_on_disk, censuses_written_beside_the_psps,
 };
 
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
@@ -122,33 +122,147 @@ fn the_ground_cannot_be_narrowed_by_a_flag() {
     );
 }
 
-/// **The evidence this command writes is the evidence the walk wrote, byte for byte.**
+/// **The evidence this command writes is the evidence the walk wrote, byte for byte** — on the
+/// cohort that carries a repeat tract and three read groups.
 ///
 /// This is the end-to-end form of the producer's own agreement test: `generate-psps` builds a
-/// census as it walks and seals it into the psp's trailer, `generate-census` builds one from
-/// that psp's records afterwards, and the two encode to the same bytes. It is what says the
-/// second route can stand in for the first.
+/// census as it walks and seals it into the psp's trailer, `generate-census` builds one from that
+/// psp's records afterwards, and the two encode to the same bytes. It is what says the second
+/// route can stand in for the first (`psp_census_pair.md` §11).
 ///
-/// **What is compared is not the file this command wrote.** That file is decoded and re-encoded
-/// with no pileup identity, because the trailer carries none — a census that *is* its psp's
-/// trailer has nothing left to pair wrongly with (`psp_census_pair.md` §3) — while a census in a
-/// file of its own does. So two things this comparison does *not* cover, and each is covered by
-/// a test of its own: the file's own layout, which survives here only as far as `decode_census`
-/// preserves it (`census_file.rs`'s `write_census_after_decode_census_returns_the_bytes_it_was_given`),
-/// and the identity that was dropped (`the_census_it_writes_names_the_psp_it_read`, below).
+/// **What this covers that `census_from_psp`'s own parity tests cannot: the selection is derived
+/// twice.** Those hand one plan to both producers, so a disagreement about how a plan is *built*
+/// is invisible there. Here `generate-psps` and `generate-census` each assemble their own
+/// segmentation and their own `CensusPlan` from their own arguments, and a divergence changes
+/// which loci are kept and therefore the bytes.
+///
+/// **The fixture is the one with a tract in it**, because the half of a census keyed by stratum
+/// as well as by read group is empty on both sides in a cohort whose selection keeps no tract —
+/// and then a producer that dropped every tract read would pass. Measured on the two fixtures:
+/// this one keeps **1 stratum and 3 read groups**, and the plain cohort keeps **0 strata**, which
+/// is why the oracle moved. Measured too, by mutation: making the rebuild skip every repeat-tract
+/// locus fails this test.
+///
+/// **What no parity oracle can catch**, here or in the sibling: a defect both producers share.
+/// They build their writer through one `CensusPlan::writer_for` and feed it the same type, so a
+/// fault in `CensusWriter` or in `write_census` corrupts both sides identically. "Byte for byte"
+/// is a statement about the psp being complete, not about the census being right.
+///
+/// **And what is compared is not the file this command wrote.** That file is decoded and
+/// re-encoded with no pileup identity, because the trailer carries none — a census that *is* its
+/// psp's trailer has nothing left to pair wrongly with (`psp_census_pair.md` §3) — while a census
+/// in a file of its own does. So two things this does *not* cover, each with a test of its own:
+/// the file's own layout, which survives here only as far as `decode_census` preserves it
+/// (`census_file.rs`'s `write_census_after_decode_census_returns_the_bytes_it_was_given`), and the
+/// identity that was dropped (`the_census_it_writes_names_the_psp_it_read`, below).
 #[test]
-fn each_census_it_writes_equals_the_one_the_walk_wrote() {
-    use crate::ng::parameter_estimation::joint::census_file::{decode_census, write_census};
+fn the_two_producers_agree_on_a_cohort_with_a_repeat_tract() {
+    let cohort = a_varying_cohort_on_disk();
+    let psps = cohort.directory.path().join("psps");
+    let walk = GeneratePspsArgs {
+        reference: cohort.reference.clone(),
+        catalog: Some(cohort.catalog.clone()),
+        alignments: cohort.alignments.clone(),
+        output_dir: psps.clone(),
+        regions: None,
+        force: false,
+        build_index_if_missing: false,
+        min_copies: MinCopies::default(),
+        min_period: DEFAULT_MIN_PERIOD,
+        max_period: DEFAULT_MAX_PERIOD,
+        max_str_len: DEFAULT_MAX_STR_LEN,
+        min_purity: DEFAULT_MIN_PURITY,
+    };
+    run_generate_psps(&walk).expect("the cohort walks into psps");
 
+    let report = build_every_census(&GenerateCensusArgs {
+        reference: cohort.reference.clone(),
+        catalog: Some(cohort.catalog.clone()),
+        psps: vec![psps.clone()],
+        output_dir: cohort.directory.path().join("rebuilt"),
+        force: false,
+        min_copies: walk.min_copies,
+        min_period: walk.min_period,
+        max_period: walk.max_period,
+        max_str_len: walk.max_str_len,
+        min_purity: walk.min_purity,
+    })
+    .expect("the psps read");
+
+    assert_eq!(report.samples.len(), 2, "one entry a sample");
+    assert_the_two_producers_agree(&report, &psps);
+
+    // **What the comparison was actually over.** Both halves of a census can be present and
+    // empty, and two empty halves agree — so a fixture that stopped putting reads on kept tracts
+    // would leave the comparison above passing while covering nothing this step is for. The
+    // counts are the command's own, read off the censuses it wrote.
+    assert!(
+        report
+            .samples
+            .iter()
+            .any(|sample| sample.tally.tracts_with_reads > 0),
+        "no sample has a read at a kept repeat tract, so the tract half of the comparison is two \
+         never-walked section sets agreeing with each other: {:?}",
+        report.samples.iter().map(|it| it.tally).collect::<Vec<_>>(),
+    );
+    let declared: Vec<usize> = ["one", "two"]
+        .iter()
+        .map(|sample| {
+            PspReader::open(&psp_path_for(&psps, sample))
+                .expect("the psp opens")
+                .header()
+                .read_groups
+                .len()
+        })
+        .collect();
+    assert_eq!(
+        declared,
+        vec![2, 1],
+        "this fixture's two samples declare two read groups and one, and a census keys its \
+         sections by group — so the comparison spans more than one key a sample",
+    );
+}
+
+/// **And on the plain cohort, whose second sample carries no reads at all** — the case where
+/// every kept position of a census is a zero, which is a denominator the fit needs and the shape
+/// a producer that skipped empty sections would get wrong.
+#[test]
+fn the_two_producers_agree_on_a_sample_with_no_reads() {
     let (cohort, psps) = a_walked_cohort();
     let rebuilt = cohort.directory.path().join("rebuilt");
 
-    let report =
-        build_every_census(&args_over(&cohort, &psps, rebuilt.clone())).expect("the psps read");
+    let report = build_every_census(&args_over(&cohort, &psps, rebuilt)).expect("the psps read");
 
     assert_eq!(report.samples.len(), 2, "one entry a sample");
+    assert_the_two_producers_agree(&report, &psps);
+
+    // **Both shapes have to be present, or this is not the test it is named for.** One sample
+    // with nothing is what it covers; one sample with something is what stops it passing on two
+    // producers that both read no records at all.
+    let tallies: Vec<_> = report.samples.iter().map(|it| it.tally).collect();
+    assert!(
+        tallies.iter().any(|tally| tally.contributes_nothing()),
+        "the fixture's empty sample stopped being empty: {tallies:?}",
+    );
+    assert!(
+        tallies.iter().any(|tally| !tally.contributes_nothing()),
+        "every sample is empty, so the two producers agreed about nothing: {tallies:?}",
+    );
+}
+
+/// Compare each sample's psp trailer with the census this run rebuilt from that psp.
+///
+/// **The rebuild is re-encoded without its pileup identity**, which is the one field the two
+/// producers are meant to differ in: a census file names the psp it was built from, and a census
+/// that *is* that psp's trailer names nothing.
+///
+/// **It asserts and returns nothing.** What the comparison was over is the caller's to check, off
+/// the report's own tallies, because what makes a cohort non-vacuous differs between them.
+fn assert_the_two_producers_agree(report: &CensusReport, psps: &Path) {
+    use crate::ng::parameter_estimation::joint::census_file::{decode_census, write_census};
+
     for sample in &report.samples {
-        let walked = PspReader::open(&psp_path_for(&psps, &sample.sample))
+        let walked = PspReader::open(&psp_path_for(psps, &sample.sample))
             .expect("the psp opens")
             .trailer()
             .expect("its trailer reads");
@@ -229,8 +343,8 @@ fn a_census_already_there_is_refused_and_nothing_is_replaced() {
 ///
 /// **Both files here are this command's**, since the walk stopped writing census files
 /// (`psp_census_pair.md` §3), so what this asserts is that two runs over one psp agree. The
-/// cross-producer guarantee — that the walk and the rebuild agree — is
-/// `each_census_it_writes_equals_the_one_the_walk_wrote` above, and only there.
+/// cross-producer guarantee — that the walk and the rebuild agree — is the pair of
+/// `the_two_producers_agree_on_*` tests above, and `census_from_psp`'s own module.
 #[test]
 fn force_replaces_a_census_that_is_already_there() {
     let (cohort, psps) = a_walked_cohort_with_its_censuses();
