@@ -3,9 +3,11 @@
 //! Design: `doc/devel/ng/spec/parameter_prepass_joint_records.md` §6.1 and §6.2; types in
 //! `doc/devel/ng/arch/parameter_prepass_joint_records.md` §1.1a and §2.2.
 //!
-//! **One file per sample, beside that sample's pileup and never inside it** (spec §6.1). It is a
-//! cache: everything in it can be recomputed from the pileup, and what it saves is a full
-//! decompression pass over that pileup every time a cohort is fitted.
+//! **One census per sample, and since `psp_census_pair.md` §3 it lives *inside* that sample's
+//! psp**, as the file's closing payload. (It was a file of its own beside the psp until then, and
+//! `generate-census` still writes such files until plan step D1.) It is a cache: everything in it
+//! can be recomputed from the psp, and what it saves is a full decompression pass over that psp
+//! every time a cohort is fitted.
 //!
 //! # Why there is a directory
 //!
@@ -22,7 +24,10 @@
 //!
 //! # The layout
 //!
-//! Every integer is little-endian. Offsets are from the start of the file.
+//! Every integer is little-endian. **Offsets are from the census's own first byte**, not from the
+//! start of whatever file it sits in — the directory is written before anyone knows where the
+//! census will be put, so a reader that finds one at an offset adds that offset to every seek
+//! ([`open_census_within`]).
 //!
 //! ```text
 //!   magic     8 bytes   "NGCENSUS"
@@ -32,7 +37,7 @@
 //!   sections            the bytes each directory entry points at
 //! ```
 //!
-//! **The directory is written before the sections and holds absolute offsets**, so a reader
+//! **The directory is written before the sections and holds each one's offset**, so a reader
 //! seeks once per section. That means the writer has to know each section's length before it
 //! writes the directory, which it does by encoding the sections first and then placing them.
 //!
@@ -44,7 +49,7 @@
 
 use md5::{Digest, Md5};
 
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::Path;
 
 use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
@@ -240,7 +245,8 @@ pub fn write_census(
     out: &mut impl Write,
 ) -> Result<(), CensusError> {
     // **The sections are encoded before the directory is written**, because the directory holds
-    // each one's length and its absolute offset, and neither is known until the bytes exist.
+    // each one's length and its offset within the census, and neither is known until the bytes
+    // exist.
     let mut sections: Vec<(SectionKey, Vec<u8>)> = Vec::new();
     for (group, records) in census.generic_sections() {
         sections.push((SectionKey::Generic(group), encode_generic(records)));
@@ -494,11 +500,48 @@ pub fn decode_census(bytes: &[u8]) -> Result<CensusFile, CensusError> {
 pub fn open_census(
     path: &Path,
 ) -> Result<(SampleCensusEvidence, Option<PileupIdentity>), CensusError> {
-    // The header and the directory sit at the front, so only their bytes are read. How many that
-    // is is not known until they are decoded, so the front of the file is read in one go and the
-    // rest is never touched.
+    let whole = std::fs::metadata(path)?.len();
+    open_census_within(path, ByteExtent::new(0, whole))
+}
+
+/// **The same, for a census that is a stretch of a larger file** — a psp's trailer
+/// (`psp_census_pair.md` §5).
+///
+/// `census` says where in `path` the census's first byte is and how many bytes it occupies. Every
+/// section this value later reads seeks to that offset plus the section's own, because the
+/// directory's offsets are from the census's own front: it is written before anyone knows where
+/// the census will be put.
+///
+/// **This is what a cohort too large to hold is opened with**, so it reads the census's head and
+/// nothing more: a thousand samples' trailers read whole would be tens of gigabytes.
+///
+/// **The length is not there to make the read safe — it is there so the directory can be
+/// checked.** Reading a few bytes past a census's end would be harmless on its own (the header
+/// and the directory are decoded from the front of the buffer and whatever follows is never
+/// looked at, and a short read at the end of a file is not an error). What the length buys is the
+/// one check below: **every section has to end inside the census**, so a directory that points
+/// outside it is refused here rather than turning into a seek into someone else's bytes and a
+/// `resize` to a length the file supplied.
+///
+/// # Errors
+///
+/// [`CensusError::Io`] when the file will not open or read, [`CensusError::Malformed`] when the
+/// bytes at the extent's offset are not a census this build reads, or when the directory places a
+/// section outside the extent.
+pub fn open_census_within(
+    path: &Path,
+    census: ByteExtent,
+) -> Result<(SampleCensusEvidence, Option<PileupIdentity>), CensusError> {
+    // The header and the directory sit at the census's front, so only their bytes are read. How
+    // many that is is not known until they are decoded, so the front is read in one go and the
+    // rest is never touched. **Capped at the census's own length**, which matters only for a
+    // census smaller than the buffer — above it the two are the same read.
     let mut file = std::fs::File::open(path)?;
-    let mut head = vec![0_u8; HEAD_READ_BYTES];
+    if census.offset() > 0 {
+        file.seek(std::io::SeekFrom::Start(census.offset()))?;
+    }
+    let head_bytes = HEAD_READ_BYTES.min(usize::try_from(census.len()).unwrap_or(HEAD_READ_BYTES));
+    let mut head = vec![0_u8; head_bytes];
     let filled = read_as_much_as_there_is(&mut file, &mut head)?;
     head.truncate(filled);
 
@@ -509,6 +552,20 @@ pub fn open_census(
     let (sample, declared, minted, terms, pileup) = decode_header(&mut cursor)?;
     let directory = decode_directory(&mut cursor)?;
 
+    // **Every section ends inside the census, checked once here rather than at each read.** A
+    // section read is a seek and a `resize` to a length the file supplied, so a directory naming
+    // an extent the census does not hold would read another part of the file — or ask for an
+    // allocation that aborts the process rather than returning an error.
+    for (_, extent) in &directory {
+        let ends_at = extent
+            .offset()
+            .checked_add(extent.len())
+            .ok_or(CensusError::Malformed)?;
+        if ends_at > census.len() {
+            return Err(CensusError::Malformed);
+        }
+    }
+
     Ok((
         SampleCensusEvidence::backed(
             sample,
@@ -516,6 +573,7 @@ pub fn open_census(
             declared,
             minted,
             path.to_path_buf(),
+            census.offset(),
             directory.into_iter().collect(),
         ),
         pileup,
@@ -1388,6 +1446,198 @@ mod tests {
             bytes_read(),
             2 * both,
             "a second call reads them again, because the first kept nothing"
+        );
+    }
+
+    /// **A census read from the middle of a bigger file is the census it was written as**, and
+    /// each section read still costs that section's bytes and no others.
+    ///
+    /// This is the shape a psp's trailer has (`psp_census_pair.md` §5): the census sits at an
+    /// offset, with records before it and a footer after it, and its directory's offsets are
+    /// relative to its own front because they were written before anyone knew where it would go.
+    /// So every seek is the directory's offset plus where the census starts, and **a reader that
+    /// forgot to add the offset would seek into the records and decode whatever is there** — a
+    /// wrong section, or a malformed one, with nothing about the file being wrong.
+    ///
+    /// **The padding before the census is what does the work here**: without it a dropped offset
+    /// would still land on the right section and this would pass. The padding after it makes the
+    /// file the shape a psp is — something follows the census — and proves nothing on its own.
+    #[test]
+    fn a_census_at_an_offset_reads_the_same_as_one_at_the_front() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("census-inside-something-else");
+        let census = every_corner();
+
+        let mut encoded = Vec::new();
+        write_census(&census, None, &mut encoded).expect("a vector accepts every write");
+        let before = vec![0x5a_u8; 4_097];
+        let after = vec![0xa5_u8; 1_024];
+        let mut whole = before.clone();
+        whole.extend_from_slice(&encoded);
+        whole.extend_from_slice(&after);
+        std::fs::write(&path, &whole).expect("the scratch dir is ours");
+
+        let at = before.len() as u64;
+        let (mut backed, pileup) =
+            open_census_within(&path, ByteExtent::new(at, encoded.len() as u64))
+                .expect("this build wrote it");
+        assert_eq!(pileup, None);
+        assert_eq!(backed.sample, census.sample, "the header is read at `at`");
+        assert_eq!(backed.terms, census.terms);
+
+        let groups = census.read_groups();
+        let resident = decode_census(&encoded).expect("this build's own bytes");
+        let mut from_memory = resident.census;
+        assert_eq!(
+            backed
+                .with_generic(&groups, |sections| sections
+                    .iter()
+                    .map(|it| (*it).clone())
+                    .collect::<Vec<_>>())
+                .expect("this build wrote it"),
+            from_memory
+                .with_generic(&groups, |sections| sections
+                    .iter()
+                    .map(|it| (*it).clone())
+                    .collect::<Vec<_>>())
+                .expect("a resident census has no file to fail on"),
+            "every ordinary-position section, read at an offset",
+        );
+
+        let strata = census.strata();
+        assert_eq!(
+            backed
+                .with_strata(ReadGroupId(0), &strata, |sections| sections
+                    .iter()
+                    .map(|it| (*it).clone())
+                    .collect::<Vec<_>>())
+                .expect("this build wrote it"),
+            from_memory
+                .with_strata(ReadGroupId(0), &strata, |sections| sections
+                    .iter()
+                    .map(|it| (*it).clone())
+                    .collect::<Vec<_>>())
+                .expect("a resident census has no file to fail on"),
+            "and every tract section",
+        );
+
+        // **And still only what was asked for.** The offset changes where a section is, not how
+        // much of the file a call touches — which is the property that lets a cohort too large to
+        // hold be opened at all.
+        let directory = decode_directory_of(&encoded).expect("this build's own bytes");
+        let one = directory
+            .iter()
+            .find(|(key, _)| *key == SectionKey::Ssr(ReadGroupId(0), AT_SIX_REPEATS))
+            .map(|(_, extent)| extent.len())
+            .expect("the section is in the directory");
+        reset_bytes_read();
+        backed
+            .with_strata(ReadGroupId(0), &[AT_SIX_REPEATS], |sections| {
+                sections[0].len()
+            })
+            .expect("this build wrote it");
+        assert_eq!(
+            bytes_read(),
+            one,
+            "one stratum's read is that stratum's bytes and no more — the counter covers the \
+             section reads, not the head read that opening does",
+        );
+    }
+
+    /// **A directory that places a section outside the census is refused when it is opened**,
+    /// rather than seeking there when a fit asks for it.
+    ///
+    /// A section read is a seek and a `resize` to a length the file supplied. Left unchecked, a
+    /// census whose directory outgrew it would read a stretch of whatever it sits in — a psp's
+    /// records — and, for a large enough length, ask the allocator for it, which aborts the
+    /// process instead of returning an error. **The length the caller passes is what makes the
+    /// check possible**, and this is what it is for.
+    #[test]
+    fn a_section_that_ends_outside_the_census_is_refused_at_the_door() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("truncated.census");
+        let mut encoded = Vec::new();
+        write_census(&every_corner(), None, &mut encoded).expect("a vector accepts every write");
+        std::fs::write(&path, &encoded).expect("the scratch dir is ours");
+
+        // The same file, opened as though it were one byte shorter than it is — so the last
+        // section the directory names ends past the end.
+        let refused = open_census_within(&path, ByteExtent::new(0, encoded.len() as u64 - 1))
+            .expect_err("the last section ends outside a census this length");
+        assert!(
+            matches!(refused, CensusError::Malformed),
+            "and got: {refused:?}",
+        );
+
+        open_census_within(&path, ByteExtent::new(0, encoded.len() as u64))
+            .expect("at its real length it opens");
+    }
+
+    /// **A census assembled into a cohort keeps where it is in its file.**
+    ///
+    /// Every sample of a cohort goes through this: a census is written under its own walk's
+    /// read-group identifiers, and building a cohort relabels each one onto run-wide identifiers,
+    /// which rebuilds its directory. **An offset dropped there would send every seek to byte zero
+    /// of the psp** — into the header and the records, which decode as something or as nothing,
+    /// with no file being wrong.
+    ///
+    /// It is asserted by reading a section *after* the cohort is built, because that is the only
+    /// thing that touches the file. The other tests here read a census that was never relabelled,
+    /// so none of them can see this.
+    #[test]
+    fn a_census_in_a_cohort_keeps_where_it_is_in_its_file() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let samples = drawn_cohort();
+
+        // **Each sample at a different offset**, so a reader that dropped the offset could not
+        // pass by accident on a cohort that happened to agree at zero.
+        let mut backed = Vec::new();
+        for (which, sample) in samples.iter().enumerate() {
+            let path = dir.path().join(format!("{}.inside", sample.sample));
+            let mut encoded = Vec::new();
+            write_census(sample, None, &mut encoded).expect("a vector accepts every write");
+            let before = vec![0x5a_u8; 1_024 + which * 997];
+            let mut whole = before.clone();
+            whole.extend_from_slice(&encoded);
+            std::fs::write(&path, &whole).expect("the scratch dir is ours");
+            backed.push(
+                open_census_within(
+                    &path,
+                    ByteExtent::new(before.len() as u64, encoded.len() as u64),
+                )
+                .expect("this build wrote it")
+                .0,
+            );
+        }
+        let mut cohort = CohortCensusEvidence::new(backed).expect("every sample recorded one way");
+        let mut from_memory =
+            CohortCensusEvidence::new(samples).expect("and so did the same ones in memory");
+
+        let groups: Vec<ReadGroupId> = cohort.read_groups().to_vec();
+        assert!(!groups.is_empty(), "the fixture declares read groups");
+        // **The depth arrays, sample by sample** — the cohort lends its samples' sections rather
+        // than handing them over, so what is compared is what a fit reads through it.
+        let depths_of = |evidence: &mut CohortCensusEvidence| {
+            evidence
+                .with_generic(&groups, |samples| {
+                    samples
+                        .iter()
+                        .map(|sample| {
+                            sample
+                                .iter()
+                                .map(|(group, section)| {
+                                    (*group, section.depth().as_bytes().to_vec())
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .expect("this build wrote it")
+        };
+        assert_eq!(
+            depths_of(&mut cohort),
+            depths_of(&mut from_memory),
+            "a census read out of the middle of a file gives the cohort the sections it holds",
         );
     }
 

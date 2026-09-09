@@ -1617,6 +1617,85 @@ mod census_tests {
         );
     }
 
+    /// **The fit can read a psp's census out of the trailer without reading the psp**
+    /// (`psp_census_pair.md` §5) — opened at the trailer's offset, and each section seeked to
+    /// inside the psp when it is asked for.
+    ///
+    /// **This is the shape a cohort too large to hold is opened with**, and the reason the reader
+    /// takes an offset rather than the trailer's bytes: a thousand samples' trailers read whole
+    /// would be thirty gigabytes. What it costs here is asserted rather than described — the
+    /// bytes one section's read touches, against the whole psp.
+    #[test]
+    fn the_census_in_a_psp_reads_lazily_out_of_its_trailer() {
+        use crate::ng::parameter_estimation::joint::census::ByteExtent;
+        use crate::ng::parameter_estimation::joint::census_file::{
+            bytes_read, open_census_within, reset_bytes_read,
+        };
+
+        let (cohort, segmentation, plan) = a_cohort_with_a_census_plan();
+        let psp = cohort.directory.path().join("zeta.psp");
+        let _ = gatherer_over(
+            &cohort.alignments[0],
+            &cohort.reference,
+            &segmentation,
+            Some(&plan),
+        )
+        .write_psp(&psp)
+        .expect("the walk writes its psp");
+
+        let footer = *PspReader::open(&psp).expect("the psp opens").footer();
+        let (mut lazily, pileup) = open_census_within(
+            &psp,
+            ByteExtent::new(footer.trailer_offset, footer.trailer_bytes),
+        )
+        .expect("the trailer is a census this build reads");
+        assert!(pileup.is_none(), "and it names no pileup, as its trailer");
+
+        // The resident read of the same bytes is the oracle: two readers, one census.
+        let trailer = PspReader::open(&psp)
+            .expect("the psp opens")
+            .trailer()
+            .expect("its trailer reads");
+        let mut wholly = decode_census(&trailer)
+            .expect("the trailer is a census this build reads")
+            .census;
+
+        assert_eq!(lazily.sample, wholly.sample);
+        assert_eq!(lazily.terms, wholly.terms, "the terms are read at the door");
+        let groups = wholly.read_groups();
+        assert_eq!(
+            lazily
+                .with_generic(&groups, |sections| sections
+                    .iter()
+                    .map(|it| (*it).clone())
+                    .collect::<Vec<_>>())
+                .expect("the psp reads"),
+            wholly
+                .with_generic(&groups, |sections| sections
+                    .iter()
+                    .map(|it| (*it).clone())
+                    .collect::<Vec<_>>())
+                .expect("a resident census has no file to fail on"),
+            "every ordinary-position section, read out of the psp",
+        );
+
+        reset_bytes_read();
+        let _ = lazily
+            .with_generic(&groups[..1], |sections| sections[0].depth().len())
+            .expect("the psp reads");
+        let one_section = bytes_read();
+        let whole_psp = std::fs::metadata(&psp).expect("the psp is on disk").len();
+        assert!(
+            one_section > 0 && one_section < footer.trailer_bytes,
+            "one section is part of the trailer and not all of it: {one_section} of {} bytes",
+            footer.trailer_bytes,
+        );
+        assert!(
+            one_section < whole_psp,
+            "and a small part of the psp: {one_section} of {whole_psp} bytes",
+        );
+    }
+
     /// **A walk with no census plan seals its psp with an empty trailer** — which is what every
     /// psp in this tree carried before the census moved in, and what says the file is whole
     /// rather than that something failed to be written.

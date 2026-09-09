@@ -122,7 +122,7 @@ the per-sample line and the report say the census's size inside the psp. Every t
 `<sample>.census` (l.479-487, 699, 975, 1029, the block at 1128) rewritten to look in the trailer.
 *Depends:* A1. *Source:* spec §3.2.
 
-☐ **A3 — the lazy reader at an offset.** `open_census` and `SampleCensusEvidence::backed` take the
+✅ **A3 — the lazy reader at an offset.** `open_census` and `SampleCensusEvidence::backed` take the
 path and the trailer's extent; every section seek adds the offset
 ([`census.rs:1280`, `1326-1330`](../../../../src/ng/parameter_estimation/joint/census.rs)). The
 resident `read_census` over the trailer bytes is the parity oracle: every section read lazily

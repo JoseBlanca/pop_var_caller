@@ -4258,7 +4258,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     plan's Checkpoint A note and spec §6.1 (`a1fdab11`).
 
 #### The census lives inside the psp — one file a sample
-- **Status:** `in-flight` — Milestone A steps A1 and A2 committed; A3 and A4 to come, then
+- **Status:** `in-flight` — Milestone A steps A1, A2 and A3 committed; A4 to come, then
   Checkpoint A.
 - **Plan:** [psp_census_pair.md](doc/devel/ng/impl_plan/psp_census_pair.md); **Spec:** [psp_census_pair.md](doc/devel/ng/spec/psp_census_pair.md)
 - **Branch:** `census-vs-psp-perf`.
@@ -4288,6 +4288,13 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   lists**: removing the writer orphaned 16 tests in four other modules, all about a world steps
   C2/D1/E2 delete, so they are kept alive by one fixture that builds their censuses with
   `generate-census`. Three mutations the suite would have passed now fail.
+- **A3 done — the fit reads a census out of the middle of a file.** `open_census_within` takes
+  the census's extent, and every section seek is that offset plus the section's own. **The length
+  is what bounds the directory at open**: a section that ends outside the census is refused rather
+  than becoming a seek into the psp's records and a `resize` to a length the file supplied. Two
+  mutations run and reverted, both now caught — forgetting the offset in a section read, and
+  dropping it when a cohort relabels a sample, which is the path every sample takes and which no
+  test could see before.
 - **⚠ Owed to step E1, and it costs something in the meantime:** `scripts/ng_fit_stage_end_to_end.sh`
   and `scripts/ng_census_route_cost.sh` both glob the census files A2 deletes and now fail on every
   run, so **the end-to-end harness cannot verify anything on real reads between here and Milestone

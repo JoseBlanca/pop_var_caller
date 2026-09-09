@@ -225,3 +225,78 @@ directory, and `scripts/ng_fit_stage_end_to_end.sh` compares the walk's census f
 rebuild and stops before step 3. The plan puts both in step E1, whose other half needs commands
 that do not exist yet — so the end-to-end harness cannot verify anything on real reads between
 here and Milestone E. **That is a real loss and it is recorded rather than absorbed.**
+
+---
+
+## A3 — the fit reads a census out of the middle of a file
+
+**Committed:** see `git log` for `feat(ng): A3`.
+
+### What it does
+
+The fit's census reader is lazy: it reads a header and a directory of section offsets, and seeks
+to a section when a call asks for one, because a cohort of a thousand samples read whole would be
+tens of gigabytes. It assumed the census started at byte zero. **It now takes the census's extent
+in the file** — `open_census_within(path, ByteExtent)` — and every section seek is that offset plus
+the section's own. A census file of its own is that with the offset at zero, which is what
+`open_census` now passes.
+
+The directory's offsets stay relative to the census's own front, because it is written before
+anyone knows where the census will be put.
+
+### What was measured
+
+- **`cargo test --lib census_file`: 21 pass**, and `ng::run::gatherer::census_tests`: 6.
+- Full suite, clippy, `check --all-targets` and `fmt --check`: unchanged against the baseline —
+  see the table at the head of this report.
+
+### Two mutations, both run and reverted
+
+| mutation | outcome |
+|---|---|
+| `Sections::fill` seeks to the section's own offset, forgetting the base | `a_census_at_an_offset_reads_the_same_as_one_at_the_front` fails, nothing else |
+| relabelling a census onto run-wide read groups writes `at: 0` | `a_census_in_a_cohort_keeps_where_it_is_in_its_file` fails, nothing else |
+
+The second is the review's finding, and it is the one that matters: **every sample of a cohort is
+relabelled before it is fitted**, and the first two tests both read a census that was never
+relabelled, so neither could see an offset dropped there. Every psp-backed seek would have gone to
+byte zero of the psp — into its header and records, which decode as something or as nothing, with
+no file being wrong.
+
+### The length argument earns its place, and my first two accounts of why were wrong
+
+The reader takes an offset **and a length**, and I twice wrote down a reason that does not hold.
+The first said an uncapped head read would run past the census and hand a decoder unrelated bytes
+that it would call malformed — it would not: the header and the directory are decoded from the
+front of the buffer and whatever follows is never looked at. The second said the cap avoids pulling
+a megabyte of records past each census's end — **wrong in direction and in size**: in a psp the
+records come *before* the trailer, the footer after it is 48 bytes, and at the census size the same
+sentence quoted (about 30 MB) the cap does not bite at all, since it is a minimum against a 1 MiB
+buffer.
+
+**What the length is actually for, and it is now the thing that fails without it:** it is the bound
+the directory is checked against when the census is opened. A section read is a seek and a `resize`
+to a length the file supplied, so a directory naming an extent the census does not hold would read
+a stretch of the psp's records — or, for a large enough length, ask the allocator for it, which
+aborts the process rather than returning an error. `a_section_that_ends_outside_the_census_is_refused_at_the_door`
+is what says so.
+
+The head read is still capped at the census's length, and that is a size choice with no test: it
+changes nothing below a megabyte-sized census and nothing at all above one.
+
+### Other things the review corrected
+
+- The module header said a census is "beside that sample's pileup and never inside it" and that
+  its offsets are "from the start of the file"; the `Sections` type said "only the resident state
+  exists today". All three were written before this design and all three now say what is true.
+- The byte-count assertion claimed a section's read excluded "the padding around the census". The
+  counter covers section reads and not the head read that opening does, so the message says that
+  instead.
+
+### Not fixed, and named
+
+A section's extent is bounded at open against the census's length, which is new. **What is still
+unbounded is a section's *content*** — `decode_section`'s exact-consumption rule is what catches a
+misdirected read, not the directory's overlap check, which compares sections against each other and
+cannot see the census's end. On files this project wrote the live risk is corruption rather than
+attack, and the outcome is a refusal.

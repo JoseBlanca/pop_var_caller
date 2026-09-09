@@ -1189,13 +1189,13 @@ impl ByteExtent {
 
 /// Where a sample's sections are.
 ///
-/// **Two states and no more**: a genome walk produces the first, opening a census file produces
-/// the second, and a caller cannot tell which it has — that is what lets the fit be one code
-/// path over a cohort held in memory and a cohort read from disk.
+/// **Two states and no more**: a genome walk produces the first, opening a census produces the
+/// second, and a caller cannot tell which it has — that is what lets the fit be one code path
+/// over a cohort held in memory and a cohort read from disk.
 ///
-/// **Only the resident state exists today.** The file, its directory and the reader that seeks
-/// into it are the next unit of work; nothing here changes when they arrive, which is why this
-/// type is written now.
+/// **The second state names a stretch of a file rather than a file**, since the census became the
+/// psp's trailer (`psp_census_pair.md` §5): a path, where the census starts in it, and the
+/// directory. A census file of its own is that with the offset at zero.
 ///
 /// **This type's visibility is not what keeps a section from being retained.** What does that
 /// is the scoped access on the value that owns one: a section is lent for the length of a call
@@ -1220,6 +1220,13 @@ pub enum Sections {
     /// can also be cloned and compared, which the fit's own tests and examples need.
     Backed {
         path: PathBuf,
+        /// **Where the census starts inside that file**, added to every section's offset.
+        ///
+        /// **Zero for a census file of its own, and the psp's trailer offset for a census that
+        /// is a psp's trailer** (`psp_census_pair.md` §5). The directory's offsets are relative
+        /// to the census's own front, because they are written before anyone knows where the
+        /// census will be put — so the file's own offsets are these plus this.
+        at: u64,
         directory: BTreeMap<SectionKey, ByteExtent>,
     },
 }
@@ -1242,8 +1249,13 @@ impl Sections {
                     .map(|(key, section)| (moved(key), section))
                     .collect(),
             ),
-            Self::Backed { path, directory } => Self::Backed {
+            Self::Backed {
                 path,
+                at,
+                directory,
+            } => Self::Backed {
+                path,
+                at,
                 directory: directory
                     .into_iter()
                     .map(|(key, extent)| (moved(key), extent))
@@ -1276,9 +1288,16 @@ impl Sections {
         Self::Resident(sections)
     }
 
-    /// A census file, opened and its directory read — **and nothing else decoded**.
-    pub fn backed(path: PathBuf, directory: BTreeMap<SectionKey, ByteExtent>) -> Self {
-        Self::Backed { path, directory }
+    /// A census, opened and its directory read — **and nothing else decoded**.
+    ///
+    /// `at` is where the census starts inside `path`: zero for a census file of its own, and the
+    /// trailer's offset for a census that is a psp's trailer (`psp_census_pair.md` §5).
+    pub fn backed(path: PathBuf, at: u64, directory: BTreeMap<SectionKey, ByteExtent>) -> Self {
+        Self::Backed {
+            path,
+            at,
+            directory,
+        }
     }
 
     /// Every section this sample holds, in enumeration order.
@@ -1320,14 +1339,24 @@ impl Sections {
         into: &mut Vec<Section>,
     ) -> Result<(), CensusError> {
         into.clear();
-        let Self::Backed { path, directory } = self else {
+        let Self::Backed {
+            path,
+            at,
+            directory,
+        } = self
+        else {
             return Ok(());
         };
         let mut file = std::fs::File::open(path)?;
         let mut buffer = Vec::new();
         for key in keys {
             let extent = directory.get(key).ok_or(CensusError::Malformed)?;
-            file.seek(std::io::SeekFrom::Start(extent.offset()))?;
+            // **The census's own offset plus where the census starts** — the two are the same
+            // number only for a census that is a file of its own.
+            let seek_to = at
+                .checked_add(extent.offset())
+                .ok_or(CensusError::Malformed)?;
+            file.seek(std::io::SeekFrom::Start(seek_to))?;
             let len = usize::try_from(extent.len()).map_err(|_| CensusError::Malformed)?;
             buffer.resize(len, 0);
             file.read_exact(&mut buffer)?;
@@ -1500,14 +1529,19 @@ impl SampleCensusEvidence {
         }
     }
 
-    /// A sample whose sections are a file, opened and its directory read — **and nothing else
-    /// decoded**. What a scoped call asks for is filled then, and dropped when it returns.
+    /// A sample whose sections are a stretch of a file, opened and its directory read — **and
+    /// nothing else decoded**. What a scoped call asks for is filled then, and dropped when it
+    /// returns.
+    ///
+    /// `at` is where the census starts inside `path`: zero for a census file of its own, and the
+    /// trailer's offset for a census that is a psp's trailer (`psp_census_pair.md` §5).
     pub fn backed(
         sample: String,
         terms: RecordingTerms,
         declared: BTreeMap<ReadGroupId, NamedReadGroup>,
         minted: BTreeMap<ReadGroupId, MintedReadErrors>,
         path: PathBuf,
+        at: u64,
         directory: BTreeMap<SectionKey, ByteExtent>,
     ) -> Self {
         Self {
@@ -1515,7 +1549,7 @@ impl SampleCensusEvidence {
             terms,
             declared,
             minted,
-            sections: Sections::backed(path, directory),
+            sections: Sections::backed(path, at, directory),
         }
     }
 

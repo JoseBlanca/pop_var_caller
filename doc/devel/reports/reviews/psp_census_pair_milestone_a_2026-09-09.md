@@ -205,3 +205,55 @@ which every caller happens to use, so it would have agreed with all of them unti
 anything else. It takes the `GeneratePspsArgs` the psps were walked under. `build_every_census`,
 widened to `pub(crate)` for it, is private again: `run_generate_census` was already public and does
 the same.
+
+---
+
+## A3 — the fit reads a census out of the middle of a file
+
+**Reviewed against:** the working tree over `1906752c`, three files. One read-only agent over five
+grouped categories, given the mutation I had already run so it would not spend a round re-finding
+it.
+
+### Findings
+
+**M1 — the doc's account of what the length buys was wrong in direction and in size.** It said an
+uncapped head read "would pull a megabyte of records past each census's end". In a psp the records
+come *before* the trailer; `read_footer` refuses any file whose trailer does not end exactly where
+the footer begins, and the footer is 48 bytes — so an uncapped read runs at most 48 bytes past and
+then hits the end of the file. And at the size the same paragraph quoted, the cap is a minimum
+against a 1 MiB buffer and does not bite at all.
+**This was the second wrong account of that argument in one step** — the first, corrected before
+the review, said the cap prevented a malformed decode, which it does not either.
+*Fixed by giving the length a job it actually does* (M2), and by saying plainly that the head-read
+cap is a size choice with no test.
+
+**M2 — `len: Option<u64>` let the caller drop the argument the function exists for, silently.**
+Every caller that has the offset has the length beside it in the same footer, and the module
+already owns the type for that pair.
+*Fixed:* `open_census_within(path, census: ByteExtent)`. And the length now bounds the directory at
+open: **every section must end inside the census**, so a directory that outgrew it is refused
+rather than turning into a seek into the psp's records and a `resize` to a length the file
+supplied — which for a large enough value aborts the process instead of returning an error.
+`a_section_that_ends_outside_the_census_is_refused_at_the_door` is what fails without it.
+
+**M3 — nothing tested that relabelling a census carries its offset**, and relabelling is on the
+path every sample of every cohort takes. Both of the step's tests read an un-relabelled census, and
+every other cohort test opens at offset zero.
+*Ran the mutation the reviewer named* — writing `at: 0` in that arm — *and it was green.* Now
+`a_census_in_a_cohort_keeps_where_it_is_in_its_file` fails on it: three samples, each at a
+different offset, read through the cohort after it has renumbered them.
+
+**Minor — what is still not bounded, stated rather than fixed.** A section's extent is now checked
+against the census's length; a section's *content* is not, and what catches a misdirected read is
+`decode_section`'s exact-consumption rule rather than the directory's overlap check, which compares
+sections against each other and cannot see the census's end. On files this project wrote the live
+risk is corruption, not attack, and the outcome is a refusal. Recorded in the implementation
+report.
+
+**Minor, fixed:** the module header said a census lives "beside that sample's pileup and never
+inside it" and that offsets are "from the start of the file"; `Sections` said "only the resident
+state exists today"; and the byte-count assertion claimed a section's read excluded the padding
+around the census, when the counter does not cover the head read at all.
+
+**Confirmed by the reviewer and not changed:** every match on `Sections::Backed` is correctly
+updated, and `Sections::backed` is the only other construction site.
