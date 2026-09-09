@@ -217,3 +217,101 @@ the restored tree's 66 tests pass.
   the gate diffs the list of error *kinds* rather than counting the ones the baseline already had.
 - **`cargo check --all-targets --keep-going`: the same 4 examples, with the same error counts.**
 - **`cargo fmt --check`: the same 4 files.** The first run of this step had a fifth, this step's own.
+
+---
+
+## B3 — the cohort agrees on its settings
+
+**Committed:** see `git log` for `feat(ng): B3`.
+
+### What it does
+
+`OpenPspCohort::open` compared the analysed regions across a cohort's psps and nothing else. It now
+compares all three of the settings a segmentation is a function of — the catalog, the repeat-tract
+criteria and the ground — through `SegmentationInputs::first_difference`, and refuses a cohort that
+disagrees, naming both samples and the field. The ground keeps its own refusal, because its fix is
+its own: re-walk one of the two, or call each over the ground it has. The catalog and the criteria
+get a new one, `RunError::CohortWalkedUnderDifferentSettings`.
+
+Every command that opens a cohort this way gets it: `call-from-psps` and `generate-census` today,
+`estimate-parameters` at plan step C2, which is when it stops opening its cohort the other way.
+
+### What this buys, stated correctly — the review corrected me here
+
+**It is not the first check of these fields, and my first draft said it was.**
+`PspVariantCaller::open` has compared every psp's catalog and criteria against **the run's**
+segmentation since psp mode was built, and `call-from-psps` builds that segmentation from its own
+flags — so a calling run already refused a cohort like this. What B3 adds is a refusal that **names
+the pair** rather than one sample and the run, and a refusal for the commands that never build a run
+segmentation at all: `generate-census` today, and the parameters fit after C2, which is exactly the
+command that would otherwise take the criteria from the first psp and learn twenty seconds later
+from a digest that the others disagree.
+
+**The spec's own premise sentence is wrong on the same point.** `psp_census_pair.md` §6 says
+`first_difference` "is called only from its own tests"; it is called from `psp_caller.rs`'s caller
+check, and was before this branch. The decision the sentence supports is unaffected — the check
+still belongs in the shared opener — so the spec is left as it is and this is raised at the
+checkpoint.
+
+### One test had to change, and that is a real consequence
+
+`a_psp_walked_under_another_catalog_is_refused_naming_the_field` built a cohort whose *second* psp
+carried another catalog, let the opener pass it, and asserted the caller refused it naming that
+second sample. The opener now refuses that cohort, so the test cannot reach the caller. It is
+rewritten with **both** files carrying the other catalog: the cohort agrees with itself and
+disagrees with the run, which is what the caller's check is for now that a cohort reaching it always
+agrees internally. The property it used to carry — that a per-file check reaches every file — is
+still pinned, by the contig-table test, whose subject is not part of what the opener forces equal.
+
+### What the review found, and what was done
+
+- **Two doc claims of the form "nothing checked this until now" were false**, for the reason above.
+- **The new error's doc named commands that do not have the check**: `estimate-parameters`, which
+  opens its cohort through `open_census_cohort` and compares the regions alone, and
+  `regenerate-census`, which does not exist yet. It now says what is true today and names the step
+  that completes it.
+- **The `call-from-psps` test's account of its own fixture was wrong.** It said the second walk's
+  purity floor types no tract; the fixture's reference is one base repeated, so every tract on it is
+  perfectly pure and clears either floor. What differs is the criteria record in the header, which
+  is what the opener compares — which is a fine basis for the test and is now what it says.
+- **That test's assertions could not tell the two refusals apart.** Without the opener's check the
+  run reaches the caller's, which names the same field; only the pair of sample names separates
+  them. It asserts the whole sentence now.
+- **The precedence between the two refusals was unpinned.** A cohort differing in both the ground
+  and the catalog is refused about the catalog — a person cannot act on *different ground* between
+  files that are not about the same assembly. A test says so.
+- The field name the routing matches on is a constant, `SegmentationInputs::ANALYSED_REGIONS`, and
+  its own test now reads it rather than repeating the literal.
+- The architecture doc's list of refusal axes said eight and named them; it says nine.
+
+### Six mutations, and one that did not compile
+
+| mutation | outcome |
+|---|---|
+| the check reverted to the ground alone — what it did before this step | 4 tests fail |
+| the criteria comparison dropped, the catalog kept | 2 tests fail |
+| only the first psp examined | 5 tests fail, including the ground refusal that predates this step |
+| the routing swapped, so the catalog is refused as a ground disagreement | 3 tests fail |
+| the field-name constant given a different value | 1 test fails — its own, and no other, which is the point of the constant |
+| the caller's per-file loop compares the *first* psp every time | **all 74 pass** |
+
+The last is not a defect and was run to settle a claim: after this step the caller's segmentation
+check cannot differ per file, because the opener has already forced the three fields equal across
+the cohort. That is why the rewritten test above no longer claims to prove the caller's loop reaches
+every file.
+
+**The routing mutation the review named did not compile** — the two error variants have different
+fields, so exchanging their bodies is not a one-line edit. A mutation that does not compile proves
+nothing, so it was replaced by one that does: routing the catalog to the ground's refusal.
+
+Each was reverted from a backup and both files compared against it before the next; the restored
+tree's 53 tests pass.
+
+### What was measured
+
+- **`cargo test --lib --bins --tests --all-features --no-fail-fast`: 6,700 lib tests pass** against
+  the baseline's 6,682 — B1's four, B2's ten and this step's four — with 20 of 21 targets green and
+  the one pre-existing failure unchanged.
+- **clippy: the same 11 errors of the same 5 kinds in the same 6 files as the baseline.**
+- **`cargo check --all-targets --keep-going`: the same 4 examples.**
+- **`cargo fmt --check`: the same 4 files** — the first run of this step had two more, both its own.

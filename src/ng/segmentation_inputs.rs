@@ -40,6 +40,18 @@ pub struct SegmentationInputs {
 }
 
 impl SegmentationInputs {
+    /// What [`first_difference`](Self::first_difference) calls the regions a run was asked to
+    /// analyse.
+    ///
+    /// **A constant because one caller acts on which field it was.** A cohort whose files
+    /// disagree about the ground is refused in its own words — the samples were walked over
+    /// different ground, so they cannot be called as one
+    /// ([`RunError::AnalysedRegionsDiffer`](crate::ng::run::RunError::AnalysedRegionsDiffer)) —
+    /// and a cohort disagreeing about the catalog or the criteria is refused in others. Matching
+    /// on the string spelled out at the call site would put the two names a file apart, where
+    /// changing one of them is a silent change of behaviour rather than a compile error.
+    pub const ANALYSED_REGIONS: &'static str = "set of analysed regions";
+
     /// The name of the first field that differs, or `None` when the two agree.
     ///
     /// **A name rather than a `bool`**: a refusal that says only "these two segmentations
@@ -60,7 +72,7 @@ impl SegmentationInputs {
             return Some("set of repeat-tract criteria");
         }
         if self.analysed_regions != other.analysed_regions {
-            return Some("set of analysed regions");
+            return Some(Self::ANALYSED_REGIONS);
         }
         None
     }
@@ -148,11 +160,20 @@ mod tests {
         );
     }
 
+    /// **Through the constant, which is what a caller matches on.** A second spelling of the
+    /// name here would let the two drift apart, and a cohort opener that routes the analysed
+    /// regions to their own refusal would then route them to the general one instead — with
+    /// every test still green.
     #[test]
     fn different_analysed_regions_are_named() {
         assert_eq!(
             inputs().first_difference(&with_other_regions(inputs())),
-            Some("set of analysed regions"),
+            Some(SegmentationInputs::ANALYSED_REGIONS),
+        );
+        assert_eq!(
+            SegmentationInputs::ANALYSED_REGIONS,
+            "set of analysed regions",
+            "the words a refusal is read in",
         );
     }
 

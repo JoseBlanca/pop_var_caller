@@ -194,3 +194,74 @@ with no version word behind it, and a version above this build's. `trailer()` be
 before this change for all four of its callers. And the 9-byte fixture's reasoning holds: the psp
 format proves the footer begins where the trailer ends, so a reader that took ten bytes unclamped
 would compose a version word out of one census byte and one footer byte.
+
+---
+
+## B3 — the cohort agrees on its settings
+
+**Reviewed against:** the working tree over `89083b0b`, four files. One read-only agent over four
+grouped categories: correctness and blast radius, error design, test strength, and prose. It named
+six mutations; all were run, one of them in a rewritten form because the one named did not compile.
+
+### Findings
+
+**M1 — "nothing checked them until now", twice, and it is false.** `PspVariantCaller::open` has
+compared every psp's catalog and criteria against the run's segmentation since psp mode was built,
+so `call-from-psps` already refused a cohort typed two ways — naming one sample and the run rather
+than the pair. What this step adds is the pair, and a refusal for the commands that never build a
+run segmentation to compare against.
+*Fixed in both places*, and the correction is what the implementation report leads B3 with, because
+it changes what the step is worth.
+
+**And the spec says the same wrong thing.** `psp_census_pair.md` §6's argument for the decision
+opens with `first_difference` being "called only from its own tests"; it is called from
+`psp_caller.rs`. The decision itself is unaffected. Left for the checkpoint rather than edited here.
+
+**M2 — the new error's doc named commands that do not have the check.** `estimate-parameters` opens
+its cohort through `open_census_cohort`, which compares the analysed regions alone, and
+`regenerate-census` is not built. *Fixed:* it names `call-from-psps` and `generate-census`, and
+points at plan step C2 for the third.
+
+**M3 — the command-level test's account of its own fixture was wrong.** The second walk's purity
+floor of 0.99 types no tract differently, because the fixture's reference is one base repeated and
+every tract on it is perfectly pure. *Fixed:* the doc says what actually differs — the criteria
+record in the header, which is what the opener compares.
+
+**M4 — that test's assertions could not tell the new refusal from the old one.** Without the
+opener's check the run reaches the caller's, which names the same field; only the sample pair
+separates them, and the test asserted the two names separately.
+*Fixed:* it asserts the sentence, *samples zeta and alpha do not agree on the set of repeat-tract
+criteria*.
+
+**Minor, all fixed:** a sentence that said a weak check "would pass this test" where it means the
+test would fail, and pointed at a helper the test does not use; the module's opening summary still
+said the opener settles "the ground they agree on"; the catalog test's doc argued an ordering the
+test cannot see; the `MinCopies` fixture built a second segmentation to clone its inputs; the
+command test re-walked both samples to obtain one psp; and `first_difference`'s own test repeated
+the field-name literal that the routing constant exists to keep in one place.
+
+**Minor, fixed with a test rather than prose:** the precedence between the two refusals — a cohort
+differing in both the ground and the catalog is refused about the catalog — was inherited from
+`first_difference` and pinned nowhere in the opener.
+
+**Confirmed by the reviewer and not changed.** The three callers of `OpenPspCohort::open` are all
+places a refusal is right. The 16 tests that depend on the `censuses_written_beside_the_psps`
+fixture cannot build a disagreeing cohort: every one fills its directory from a single
+`run_generate_psps` call, so the three settings are equal by construction. And
+`PspVariantCaller::open`'s per-file loop still earns its place — the contig table it also checks is
+not part of what the opener forces equal.
+
+### The mutations
+
+| mutation | outcome |
+|---|---|
+| the check reverted to the ground alone | 4 tests fail |
+| the criteria dropped, the catalog kept | 2 fail |
+| only the first psp examined | 5 fail |
+| the catalog routed to the ground's refusal | 3 fail |
+| the field-name constant's value changed | 1 fails, and only its own — which is what the constant is for |
+| the caller's loop compares the first psp every time | **all 74 pass**, which settles that its segmentation check is now cohort-wide by construction |
+
+The routing mutation as the reviewer wrote it — exchanging the two arms' bodies — does not compile,
+since the variants carry different fields. A mutation that does not compile says nothing, so it was
+run in the form above.

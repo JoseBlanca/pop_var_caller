@@ -561,6 +561,41 @@ pub enum RunError {
         right: String,
     },
 
+    /// Two of the run's psps were walked under different catalogs, or under different
+    /// repeat-tract criteria.
+    ///
+    /// **The criteria decide where a segment ends and therefore which loci exist**, so two files
+    /// typed under different ones hold records that are not about the same places: a stretch that
+    /// is one repeat-tract locus in one sample is ordinary sequence in the next, and a cohort
+    /// mixing them compares evidence that was never gathered the same way
+    /// (`psp_census_pair.md` §6). The catalog is worse, because it also carries the reference's
+    /// identity.
+    ///
+    /// **Refused by every command that opens its cohort with
+    /// [`OpenPspCohort::open`](crate::ng::run::OpenPspCohort::open)** — `call-from-psps` and
+    /// `generate-census` today. The owner's ruling of 2026-09-09 is that a fit and a calling run
+    /// are equally unable to pool such files, so the check lives at the opener they share;
+    /// `estimate-parameters` opens its cohort a second way for now (`open_census_cohort`, which
+    /// compares the analysed regions alone), and plan step C2 moves it onto this one.
+    ///
+    /// `field` is [`SegmentationInputs::first_difference`]'s answer, written to read inside this
+    /// sentence. The analysed regions have their own refusal,
+    /// [`AnalysedRegionsDiffer`](Self::AnalysedRegionsDiffer), because the fix for them is
+    /// different.
+    #[error(
+        "samples {left} and {right} do not agree on the {field}, so their records are not about \
+         the same loci and they cannot be used as one cohort; walk them again under the same \
+         one, or use each with the psps it agrees with"
+    )]
+    CohortWalkedUnderDifferentSettings {
+        /// The sample whose settings the run took as the cohort's — the first psp given.
+        left: String,
+        /// The first sample that disagreed with it.
+        right: String,
+        /// The first field of the segmentation's inputs that differs.
+        field: &'static str,
+    },
+
     /// A psp was written under a different segmentation from the one this run loops over.
     ///
     /// **Why this is not pedantry**: the observations in a psp were minted inside the segments

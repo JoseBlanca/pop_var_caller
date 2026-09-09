@@ -151,7 +151,7 @@ can call it malformed. Fixtures for an empty trailer and a trailer whose version
 `VERSION − 1`.
 *Depends:* B1. *Source:* spec §4.2 rows 1-2, §9 (the `Malformed` trap).
 
-☐ **B3 — the cohort agrees on its settings, in the psp cohort opener.** `OpenPspCohort::open`
+✅ **B3 — the cohort agrees on its settings, in the psp cohort opener.** `OpenPspCohort::open`
 compares every psp's `SegmentationInputs` against the first's with `first_difference` beside its
 analysed-regions check ([`psp_caller.rs:677-690`](../../../../src/ng/run/psp_caller.rs)); a
 disagreement is refused naming the sample and the field. `call-from-psps` gets it for free. Tests:

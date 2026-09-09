@@ -14,8 +14,9 @@
 //! analysed regions come from the headers rather than from a flag. So:
 //!
 //! 1. [`OpenPspCohort::open`] opens every file, reads every header, and settles what the
-//!    cohort *is*: the ground they agree on, one run-wide read-group numbering, and the
-//!    refusals that need nothing but the headers (spec §6.2's cohort checks).
+//!    cohort *is*: the settings they agree on — the catalog, the repeat-tract criteria and the
+//!    ground (`psp_census_pair.md` §6) — one run-wide read-group numbering, and the refusals
+//!    that need nothing but the headers (spec §6.2's cohort checks).
 //! 2. Its caller builds the run's segmentation over that ground — through the same
 //!    `run_ground::segments_over` both other subcommands use, which is what makes the check in
 //!    move 3 mean anything.
@@ -63,7 +64,7 @@ use super::callers::{
 use super::cohort_merge::observation_cache::ObservationCache;
 use super::psp_source::{PspSummarySource, StoredSampleTallies};
 use super::walker::WalkReference;
-use super::{RunError, Segmentation};
+use super::{RunError, Segmentation, SegmentationInputs};
 
 /// Every psp of a cohort, open, with what its headers agree on.
 ///
@@ -106,8 +107,10 @@ impl OpenPspCohort {
     /// for a cohort this process may not hold open; [`RunError::PspNotRead`] naming the file
     /// for one that will not open — including a walk that was interrupted, which the cause says;
     /// [`RunError::SampleAppearsTwice`] for two files naming one individual;
-    /// [`RunError::AnalysedRegionsDiffer`] for two walked over different ground; and
-    /// [`RunError::PspReadGroupsCannotBeMerged`] for a table that cannot be renumbered.
+    /// [`RunError::AnalysedRegionsDiffer`] for two walked over different ground;
+    /// [`RunError::CohortWalkedUnderDifferentSettings`] for two walked under different catalogs
+    /// or different repeat-tract criteria; and [`RunError::PspReadGroupsCannotBeMerged`] for a
+    /// table that cannot be renumbered.
     pub fn open(paths: &[PathBuf]) -> Result<Self, RunError> {
         // `current` is the soft limit — what this process may open now.
         let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile).current;
@@ -144,7 +147,7 @@ impl OpenPspCohort {
 
         let headers: Vec<&Header> = psps.iter().map(PspReader::header).collect();
         refuse_a_sample_named_twice(&headers, paths)?;
-        let analysed_regions = the_ground_every_file_agrees_on(&headers)?;
+        let analysed_regions = the_settings_every_file_agrees_on(&headers)?;
         let read_groups = merge_the_read_group_tables(&headers, paths)?;
         // **The maximum, not the first file's**: a cohort reader sizes for the widest
         // observation it can meet, and the files were written by separate invocations that may
@@ -669,25 +672,52 @@ fn refuse_a_sample_named_twice(headers: &[&Header], paths: &[PathBuf]) -> Result
     Ok(())
 }
 
-/// The ground the cohort was walked over, or the refusal naming the first two files that
-/// disagree (spec §6.2).
+/// The settings the cohort was walked under, or the refusal naming the first two files that
+/// disagree — and the ground, which is the part a run needs afterwards (spec §6.2;
+/// `psp_census_pair.md` §6).
 ///
-/// **The first file's ground is the run's**, and every other file is required to match it. That
-/// makes the refusal name a pair rather than describe a set, which is what a person can act on
-/// — and it is why [`RunError::AnalysedRegionsDiffer`]'s two fields are named for their roles
+/// **Three settings are compared and not one.** The catalog and the repeat-tract criteria decide
+/// where every segment ends and therefore which loci exist at all, so two psps typed under
+/// different criteria hold records that are not about the same places.
+///
+/// **This opener compared the ground alone until `psp_census_pair.md` §6, and that is not the
+/// same as saying nothing checked the other two.** [`PspVariantCaller::open`] compares every
+/// file's catalog and criteria against **the run's** segmentation, so `call-from-psps` already
+/// refused a cohort like this — naming one sample and the run rather than the pair, and only
+/// because a calling run has a segmentation to compare against. What has none is a command that
+/// takes its settings *out of* the files: a fit that read the criteria from the first psp's
+/// header and never asked the rest would build a selection the other samples' censuses cannot
+/// match, and learn it twenty seconds later from a digest, reported as *another selection*.
+///
+/// **The first file's settings are the run's**, and every other file is required to match them.
+/// That makes each refusal name a pair rather than describe a set, which is what a person can act
+/// on — and it is why [`RunError::AnalysedRegionsDiffer`]'s two fields are named for their roles
 /// rather than symmetrically.
-fn the_ground_every_file_agrees_on(headers: &[&Header]) -> Result<GenomeRegions, RunError> {
+///
+/// **The ground keeps its own refusal**, because it is the one that says what to do about it: a
+/// sample has no records over ground it never walked, and that absence reads exactly like *no
+/// variant here*, so the fix is to re-walk one of the two or to call each over the ground it has.
+/// A catalog or criteria disagreement has a different fix and says so.
+fn the_settings_every_file_agrees_on(headers: &[&Header]) -> Result<GenomeRegions, RunError> {
     let first = headers.first().expect("the empty cohort was refused above");
-    let ground = &first.segmentation_inputs.analysed_regions;
+    let settings = &first.segmentation_inputs;
     for header in &headers[1..] {
-        if header.segmentation_inputs.analysed_regions != *ground {
-            return Err(RunError::AnalysedRegionsDiffer {
+        let Some(field) = settings.first_difference(&header.segmentation_inputs) else {
+            continue;
+        };
+        return Err(match field {
+            SegmentationInputs::ANALYSED_REGIONS => RunError::AnalysedRegionsDiffer {
                 left: first.sample.clone(),
                 right: header.sample.clone(),
-            });
-        }
+            },
+            field => RunError::CohortWalkedUnderDifferentSettings {
+                left: first.sample.clone(),
+                right: header.sample.clone(),
+                field,
+            },
+        });
     }
-    Ok(ground.clone())
+    Ok(settings.analysed_regions.clone())
 }
 
 /// Refuse a file written against a different reference from the run's (spec §6.2).
@@ -933,6 +963,7 @@ mod tests {
     use crate::ng::read::input::test_fixtures::{
         fixture_reference, fixture_reference_from_its_index,
     };
+    use crate::ng::region_typing::segment_criteria::MinCopies;
     use crate::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion};
     use crate::ng::run::test_fixtures::{
         build_segmentation_under, catalog_header, catalog_header_built_on,
@@ -1319,6 +1350,95 @@ mod tests {
         assert_eq!((left.as_str(), right.as_str()), ("alpha", "beta"));
     }
 
+    /// **A cohort walked under different repeat-tract criteria is refused, and the refusal names
+    /// the field** (`psp_census_pair.md` §6).
+    ///
+    /// **Why it is not pedantry:** the criteria decide where a segment ends, so a stretch that is
+    /// one repeat-tract locus in the first sample is ordinary sequence in the second. The two
+    /// files then hold records about different places, and everything downstream — a parameters
+    /// fit rebuilding a selection over them, a calling run scoring them together — compares
+    /// evidence that was never gathered the same way. **The opener compared the analysed regions
+    /// and nothing else** until this; a calling run's own check against its segmentation
+    /// (`PspVariantCaller::open`) caught the pair, but only for a command that has a segmentation
+    /// of its own to compare against.
+    ///
+    /// **The disagreement is put on the second file**, so a check that examined only the first
+    /// psp would find nothing, return `Ok`, and fail this test at its `expect_err`.
+    #[test]
+    fn two_psps_walked_under_different_repeat_criteria_are_refused_naming_the_field() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mine = a_segmentation(ground(false));
+        let mut other_criteria = mine.inputs().clone();
+        // A tract of five copies is a repeat tract to one walk and ordinary sequence to the
+        // other, which is the difference that matters and the plan's own example.
+        other_criteria
+            .repeat_tract_criteria
+            .classification
+            .min_copies = MinCopies::uniform(5);
+        let paths = vec![
+            a_psp(&dir, "alpha", &mine, |_| {}),
+            a_psp(&dir, "beta", &mine, |header| {
+                header.segmentation_inputs = other_criteria;
+            }),
+        ];
+
+        let refused = OpenPspCohort::open(&paths).expect_err("two typings, one cohort");
+        let RunError::CohortWalkedUnderDifferentSettings { left, right, field } = refused else {
+            panic!("both samples and the field must be named: {refused:?}");
+        };
+        assert_eq!((left.as_str(), right.as_str()), ("alpha", "beta"));
+        assert_eq!(field, "set of repeat-tract criteria");
+    }
+
+    /// **A cohort walked against different catalogs is refused too**, and the catalog is what the
+    /// refusal names. Which field is named when two of them differ is
+    /// [`SegmentationInputs::first_difference`]'s order, and its own tests are where that order
+    /// is pinned.
+    #[test]
+    fn two_psps_walked_against_different_catalogs_are_refused_naming_the_catalog() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mine = a_segmentation(ground(false));
+        let other = a_segmentation_under(ground(false), catalog_header_built_on([9; 16]));
+        let paths = vec![
+            a_psp(&dir, "alpha", &mine, |_| {}),
+            a_psp(&dir, "beta", &other, |_| {}),
+        ];
+
+        let refused = OpenPspCohort::open(&paths).expect_err("two catalogs, one cohort");
+        let RunError::CohortWalkedUnderDifferentSettings { left, right, field } = refused else {
+            panic!("both samples and the field must be named: {refused:?}");
+        };
+        assert_eq!((left.as_str(), right.as_str()), ("alpha", "beta"));
+        assert_eq!(field, "repeat catalog");
+    }
+
+    /// **Two files disagreeing about both the ground and the catalog are refused about the
+    /// catalog**, which is the one a person has to fix first: under a different catalog the two
+    /// files are not even about the same assembly, so *these were walked over different ground*
+    /// would be a true sentence about the wrong problem.
+    ///
+    /// The precedence comes from [`SegmentationInputs::first_difference`], and this is the
+    /// opener's own copy of that contract — the two refusals it routes between are different
+    /// error variants, so which one comes out is this function's behaviour and not only that
+    /// one's.
+    #[test]
+    fn two_psps_disagreeing_about_the_ground_and_the_catalog_are_refused_about_the_catalog() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mine = a_segmentation(ground(false));
+        let narrower_and_another_catalog =
+            a_segmentation_under(ground(true), catalog_header_built_on([9; 16]));
+        let paths = vec![
+            a_psp(&dir, "alpha", &mine, |_| {}),
+            a_psp(&dir, "beta", &narrower_and_another_catalog, |_| {}),
+        ];
+
+        let refused = OpenPspCohort::open(&paths).expect_err("two grounds and two catalogs");
+        let RunError::CohortWalkedUnderDifferentSettings { field, .. } = refused else {
+            panic!("the catalog outranks the ground: {refused:?}");
+        };
+        assert_eq!(field, "repeat catalog");
+    }
+
     /// A table with nothing in it cannot say which group a record's reads came from.
     ///
     /// **Provoked at the function rather than through a file, because no file this store wrote
@@ -1612,13 +1732,24 @@ mod tests {
     /// **The independence the calling loop rests on is what this protects.** Under a different
     /// catalog a stored repeat-tract observation can straddle a calling segment's edge, and
     /// *no observation crosses a segment's edge* stops being true.
+    ///
+    /// **Both files carry the other catalog, where this test used to give it to the second
+    /// alone.** Since `psp_census_pair.md` §6 the opener refuses a cohort whose files disagree
+    /// with *each other*, so a cohort that reaches the caller at all already agrees — which is
+    /// what makes this check the one it is, a comparison of the files against **the run**. That
+    /// a per-file check reaches every file and not only the first is still pinned, by
+    /// `a_psp_written_against_another_contig_table_is_refused_naming_the_contig`, whose subject
+    /// is the contig table and is not part of the settings the opener now forces equal.
     #[test]
-    fn a_psp_walked_under_another_catalog_is_refused_naming_the_field() {
-        let (_dir, _segmentation, paths) = a_cohort_whose_second_file(|header| {
-            header.segmentation_inputs.catalog.reference_md5 = [9; 16];
-        });
+    fn a_cohort_walked_under_another_catalog_than_the_runs_is_refused_naming_the_field() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let theirs = a_segmentation_under(ground(false), catalog_header_built_on([9; 16]));
+        let paths = vec![
+            a_psp(&dir, "alpha", &theirs, |_| {}),
+            a_psp(&dir, "beta", &theirs, |_| {}),
+        ];
         let (_reference_dir, reference) = fixture_reference_from_its_index();
-        let cohort = OpenPspCohort::open(&paths).expect("the two files agree about the ground");
+        let cohort = OpenPspCohort::open(&paths).expect("the two files agree with each other");
         let parameters = parameters_for(cohort.read_groups());
 
         let refused = open_the_caller(
@@ -1627,15 +1758,11 @@ mod tests {
             Arc::try_unwrap(a_segmentation(ground(false))).expect("one handle"),
             parameters,
         )
-        .expect_err("the catalog differs");
+        .expect_err("the catalog differs from the run's");
         let RunError::SegmentationInputsDiffer { sample, field } = refused else {
             panic!("the field must be named: {refused:?}");
         };
-        assert_eq!(
-            (sample.as_str(), field),
-            ("beta", "repeat catalog"),
-            "the check reaches the second file, not only the first",
-        );
+        assert_eq!((sample.as_str(), field), ("alpha", "repeat catalog"));
     }
 
     /// **Every record is written against the contig table its header carries**, in that order,

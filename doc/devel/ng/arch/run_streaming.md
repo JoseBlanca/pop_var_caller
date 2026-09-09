@@ -881,6 +881,13 @@ pub enum RunError {
     /// intersection-calling; until then it refuses.
     #[error("samples {left} and {right} were analysed over different segments")]
     AnalysedRegionsDiffer { left: String, right: String },
+    /// Two psps of the cohort were walked under different catalogs or different repeat-tract
+    /// criteria, so their records are not about the same loci — the cohort refusal every
+    /// command that opens a cohort makes (`psp_census_pair.md` §6). `field` is
+    /// `SegmentationInputs::first_difference`'s answer, and the analysed regions are routed to
+    /// `AnalysedRegionsDiffer` above, whose fix is a different one.
+    #[error("samples {left} and {right} do not agree on the {field}")]
+    CohortWalkedUnderDifferentSettings { left: String, right: String, field: &'static str },
     /// One psp's recorded catalog or routing criteria differ from the run's own, so the
     /// segments this run loops over are not the segments the file's observations were minted
     /// inside — the file-against-run refusal (spec §6.2). `field` is
@@ -953,15 +960,17 @@ the merge, and §8 below records them as still owed.
 - **The header carries no boundary digest and no writer version** — spec §6.3, ruled by the
   owner 2026-09-03: block alignment across files is a property a cohort may have, never one a
   run demands.
-- **Eight refusal variants, eight axes**, and each one compares a different pair of things.
+- **Nine refusal variants, nine axes**, and each one compares a different pair of things.
   `NoAlignmentFiles` asks whether the run has a cohort at all; `ParametersAreForAnotherCohort`
   compares the parameters to the run; `NotEnoughFileDescriptors` compares the run to the process;
   `SampleAlignedToAnotherReference` compares a sample's reads to the run's assembly;
   `CatalogIsForAnotherReference` compares the segments' catalog to it;
   `ReferenceCheckedAgainstAnotherGenome` compares the run's two views of its own reference;
-  `AnalysedRegionsDiffer` compares two psps' recorded ground to each other; and
-  `SegmentationInputsDiffer` compares a psp to the run — spec §6.2, §7.1a. **The first six are
-  direct mode's and are built (2026-08-31); the last two only psp mode can reach.**
+  `AnalysedRegionsDiffer` compares two psps' recorded ground to each other;
+  `CohortWalkedUnderDifferentSettings` compares two psps' catalog and repeat-tract criteria to
+  each other; and `SegmentationInputsDiffer` compares a psp to the run — spec §6.2, §7.1a;
+  `psp_census_pair.md` §6. **The first six are direct mode's and are built (2026-08-31); the last
+  three only psp mode can reach.**
 - **⚑ `CatalogIsForAnotherReference` exists because the layer that should hold it cannot, on the
   path that matters.** The catalog's own open guards every digest comparison on the reference
   having one, and the `.fai` path — the ordinary one — has none until its background read

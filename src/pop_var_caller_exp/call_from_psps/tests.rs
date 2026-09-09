@@ -272,6 +272,59 @@ fn the_report_a_person_sees() {
     run_call_from_psps(&args).expect("a cohort of stored samples calls");
 }
 
+/// **A cohort whose psps disagree with each other about the repeat criteria is refused by the
+/// command**, and not only by the library (`psp_census_pair.md` §6).
+///
+/// **The owner's ruling of 2026-09-09 is that this is a hard failure for every command that
+/// opens a cohort**, calling included: two psps typed under different criteria hold records that
+/// are not about the same loci, so scoring them together compares evidence gathered two ways.
+/// The check lives in the cohort opener, which is why calling gets it without a line of its own —
+/// and this test is what says calling actually goes through that opener.
+///
+/// The two psps come from two walks of the same reads under two purity floors. **On this
+/// fixture's reference no tract is typed differently by the change** — it is one base repeated,
+/// so every tract on it is perfectly pure and clears either floor. What differs is the criteria
+/// record in the psp's header, which is what the opener compares, and that is the whole of what
+/// this test is about.
+#[test]
+fn a_cohort_of_psps_that_disagree_about_the_criteria_is_refused_by_the_command() {
+    let (cohort, mut args) = a_cohort_of_psps();
+    let strictly_typed = cohort.directory.path().join("psps-strict");
+    run_generate_psps(&GeneratePspsArgs {
+        reference: cohort.reference.clone(),
+        catalog: Some(cohort.catalog.clone()),
+        // **`alpha` alone**, since that is the only psp of this walk the cohort below uses.
+        alignments: vec![cohort.alignments[1].clone()],
+        output_dir: strictly_typed.clone(),
+        regions: None,
+        force: false,
+        build_index_if_missing: false,
+        min_copies: MinCopies::default(),
+        min_period: DEFAULT_MIN_PERIOD,
+        max_period: DEFAULT_MAX_PERIOD,
+        max_str_len: DEFAULT_MAX_STR_LEN,
+        min_purity: 0.99,
+    })
+    .expect("the cohort walks into psps a second time");
+    // zeta from the first walk, alpha from the second: the disagreement is between the files.
+    args.psps = vec![args.psps[0].clone(), psp_path_for(&strictly_typed, "alpha")];
+
+    let refused = run_call_from_psps(&args).expect_err("two typings, one cohort");
+
+    // **The whole sentence, not two words of it.** Without the opener's check this run reaches
+    // the caller's own, which refuses the same cohort against *the run's* segmentation and names
+    // one sample and the same field — so an assertion on the field alone cannot tell the two
+    // refusals apart, and it is the pair of samples that says the check happened at the door.
+    let rendered = crate::error_render::format_error_chain(&refused);
+    assert!(
+        rendered.contains(
+            "samples zeta and alpha do not agree on the set of repeat-tract \
+                           criteria"
+        ),
+        "the refusal names the pair and the field, and got: {rendered}",
+    );
+}
+
 /// **A cohort walked under a different catalog is refused before a block is decoded**, naming
 /// what differs — the refusal that makes stored evidence safe to call at all.
 #[test]
