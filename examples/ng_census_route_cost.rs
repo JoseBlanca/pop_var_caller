@@ -8,11 +8,14 @@
 //! - **afterwards** — the walk writes the psp alone, and a second pass reads it back and builds
 //!   the census into a file of its own, which is what `generate-census` does.
 //!
-//! **They produce the same evidence, encoded to the same bytes**, so the only thing that
-//! separates them is what they cost. The two destinations differ in one field and one only: a
-//! census in a file of its own names the psp it was built from, and a census that *is* its psp's
-//! trailer has nothing left to pair wrongly with and names none (`psp_census_pair.md` §3).
-//! `each_census_it_writes_equals_the_one_the_walk_wrote` is what holds the two to that.
+//! **They produce the same census, byte for byte apart from one field** — the pileup identity,
+//! which a census sealed inside its psp does not carry (`psp_census_pair.md` §3) and which this
+//! harness therefore leaves off both sides. So the only thing that separates the routes is what
+//! they cost. `the_two_producers_agree_on_a_cohort_with_a_repeat_tract` holds them to that on
+//! fixtures; this harness is where it is checked on real reads, which is why **both routes leave
+//! a `<sample>.census` file for the wrapping script to compare** even though only the second
+//! route produces one in a real run. On the first route that file is the psp's trailer copied
+//! out, **after the clock stops**, so the route it would slow is not charged for it.
 //!
 //! This harness runs **one** route per process, so that a wrapper measuring peak resident memory
 //! measures one route rather than the larger of two.
@@ -40,6 +43,11 @@
 //! the two file sizes. Wall time here is the harness's own clock over the work; the peak
 //! resident memory is the wrapper's, since a process cannot see its own high-water mark
 //! portably.
+//!
+//! **`census_bytes` is 24 bytes a sample short of what `generate-census` writes**, because
+//! neither side carries the pileup identity — a 16-byte header digest and an 8-byte record
+//! count. Both routes also leave a `<sample>.census` in the work directory for the wrapping
+//! script's `cmp`; on the during-the-walk route a real run writes no such file.
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -241,6 +249,8 @@ fn run(
     let working = Instant::now();
     let mut psp_bytes = 0_u64;
     let mut census_bytes = 0_u64;
+    // The psps whose trailer is copied out for the wrapping script, once the clock has stopped.
+    let mut to_copy_out: Vec<(PathBuf, PathBuf)> = Vec::new();
     for path in &paths {
         let alignments = [path.clone()];
         let gatherer = SampleObservationGatherer::open(
@@ -265,22 +275,23 @@ fn run(
         let psp_path = work_dir.join(format!("{sample}.psp"));
         let census_path = work_dir.join(format!("{sample}.census"));
 
-        // **The census goes into the psp's trailer on the first route and into a file of its own
-        // on the second**, which is what the two routes are: one walk that accumulates it, and
-        // one that reads the psp back afterwards. The sizes are comparable either way — the same
-        // `write_census` writes both — so what is timed is still the building and not the
-        // destination.
+        // **The census goes into the psp's trailer on the first route and is built from the
+        // stored psp on the second**, which is what the two routes are: one walk that accumulates
+        // it, and one that reads the psp back afterwards. **This is all of the work either route
+        // does, and it is what the clock is around.**
         let (stats, census_size) = match route {
             Route::DuringTheWalk => {
                 let (stats, _) = gatherer.write_psp(&psp_path)?;
+                // The footer, not the payload: how big the census is, without reading it.
                 let inside = PspReader::open(&psp_path)?.footer().trailer_bytes;
+                to_copy_out.push((psp_path.clone(), census_path.clone()));
                 (stats, inside)
             }
             Route::AfterTheWalk => {
                 let (stats, _) = gatherer.write_psp(&psp_path)?;
                 let produced = census_from_psp(&psp_path, &plan, &segmentation)?;
                 let mut file = std::fs::File::create(&census_path)?;
-                write_census(&produced.evidence, Some(produced.identity), &mut file)?;
+                write_census(&produced.evidence, None, &mut file)?;
                 (stats, std::fs::metadata(&census_path)?.len())
             }
         };
@@ -292,6 +303,23 @@ fn run(
         census_bytes += census_size;
     }
     let seconds = working.elapsed().as_secs_f64();
+
+    // **After the clock, on purpose.** The wrapping script compares the two routes' censuses, so
+    // both have to leave a `<sample>.census` behind — but on this route a real run writes no such
+    // file, and reading the trailer back and writing it out again is a quarter of a megabyte a
+    // sample each way. Charged to the route, it would bias the one measurement this harness
+    // exists to make, against the route that is cheaper. The other route's write is work its real
+    // counterpart does, so it stays inside.
+    //
+    // **Neither side is encoded with a pileup identity**, which is the one field the two are
+    // otherwise allowed to differ in (`psp_census_pair.md` §3): a census that is its psp's
+    // trailer names no pileup, so comparing it against a rebuild that named one would fail on a
+    // field neither route is wrong about.
+    for (psp, census) in &to_copy_out {
+        let trailer = PspReader::open(psp)?.trailer()?;
+        std::fs::write(census, &trailer)
+            .map_err(|source| format!("writing {}: {source}", census.display()))?;
+    }
 
     println!(
         "route={} samples={} psp_bytes={psp_bytes} census_bytes={census_bytes} seconds={seconds:.2}",

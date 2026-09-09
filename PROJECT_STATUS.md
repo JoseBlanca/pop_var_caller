@@ -4303,10 +4303,15 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   no reads. **Measured, not assumed:** making the rebuild skip every repeat-tract locus fails it.
   The plan's "`census_from_psp` loses its identity argument" moves to D1, where the one command
   that reads the identity is replaced.
-- **⚠ Owed to step E1, and it costs something in the meantime:** `scripts/ng_fit_stage_end_to_end.sh`
-  and `scripts/ng_census_route_cost.sh` both glob the census files A2 deletes and now fail on every
-  run, so **the end-to-end harness cannot verify anything on real reads between here and Milestone
-  E**. E1 owns the fix and its other half needs commands that do not exist yet.
+- **B0 done — E1's script half brought forward (owner's call at Checkpoint A).** Both scripts A2
+  orphaned run again, and both were verified on the tomato CRAMs rather than by reading:
+  `ng_fit_stage_end_to_end.sh` runs all four commands on **six accessions over two 100 kb
+  intervals**, exit 0 — 6 psps of 8,465,826 bytes of which 1,545,479 are census, a 38,124-byte
+  parameters file, and calling twice gives **2,275 records with the defaults against 2,082 with
+  the fitted numbers**, 113 genotypes differing of 12,474 compared. `ng_census_route_cost.sh`
+  reports both routes' censuses identical. **The walk-versus-rebuild `cmp` could not be kept**:
+  no shipped subcommand writes a psp's trailer out, so that comparison lives on fixtures and in
+  the route-cost harness until E1 brings D4's whole-file oracle here.
 - **Deviation absorbed at A1:** the plan has A1 delete `write_psp`'s census-path argument, which
   cannot be committed green — the tests that assert `<sample>.census` exists are A2's to rewrite.
   A1 adds the trailer beside the sidecar; A2 removes the sidecar, the argument and those tests

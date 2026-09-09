@@ -381,3 +381,68 @@ on the four paths is the fix when a third appears.
   21 targets are green**, the one failure being the pre-existing
   `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele`.
 - clippy, `check --all-targets` and `fmt --check`: unchanged against the baseline.
+
+---
+
+## B0 — the two scripts A2 orphaned, repaired (brought forward from E1)
+
+**Committed:** see `git log` for `fix(ng): B0`. **Not a plan step**: the owner asked for E1's script
+half at Checkpoint A, because `ng_fit_stage_end_to_end.sh` is the only oracle that runs the whole
+four-command pipeline on real reads, and Milestones B, C and D all change what a user types.
+
+### What was broken
+
+Both scripts globbed `*.census` files the walk stopped writing at A2, so both failed on every run
+whatever they had measured.
+
+### What they do now, and it was found by running rather than reading
+
+- **`ng_fit_stage_end_to_end.sh`.** `generate-census` writes into the psps' **own** directory, and
+  `estimate-parameters` reads them from there. The first attempt pointed `--census` at a directory
+  of its own and was refused: *SRS3394606's census names a psp and there is none at
+  …/rebuilt/SRS3394606.psp* — the cohort opener checks each census against the psp beside it. The
+  walk-versus-rebuild `cmp` block is gone, because no shipped subcommand writes a psp's trailer
+  back out; the comparison lives on fixtures in
+  `the_two_producers_agree_on_a_cohort_with_a_repeat_tract`, and on real reads in the other script.
+- **`ng_census_route_cost.sh` and its probe.** Both routes now leave a `<sample>.census` for the
+  script's `cmp`; on the during-the-walk route it is the psp's trailer copied out, **after the
+  clock stops**. Both sides are encoded with no pileup identity, which is the one field the two
+  are otherwise allowed to differ in.
+
+### Measured, on the tomato CRAMs
+
+`ng_fit_stage_end_to_end.sh` on **six accessions over two 100 kb intervals of SL4.0**, exit **0**,
+all four commands:
+
+- 6 psps, 8,465,826 bytes, of which **1,545,479 are census**;
+- 6 censuses rebuilt from those psps;
+- a parameters file of 38,124 bytes fitted from 6 samples;
+- calling twice: **2,275 records with the compiled-in defaults against 2,082 with the fitted
+  numbers** — 196 called only by the defaults, 3 only by the fit, and of the 2,079 both called, 87
+  differ in at least one genotype: **113 genotypes of 12,474 compared**.
+
+`ng_census_route_cost.sh` at `NG_SAMPLES=2 NG_REGIONS=1`, exit **0**, both samples' censuses
+`identical`, at 0.28 s against 0.32 s.
+
+### What the review changed, and one of them is a measurement defect
+
+- **The copy-out was inside the timed section, on one arm only.** Reading the trailer back and
+  writing it out is about a quarter of a megabyte each way per sample, charged to the
+  during-the-walk route alone — against an effect this harness sizes at 1.28 s versus 1.40 s over
+  six accessions. The instrument was biasing the comparison it exists to make, against the cheaper
+  route. It now happens after the clock.
+- **The usage message stopped mid-sentence.** It printed a fixed line range that the grown header
+  had outrun; it prints the comment block now, so the range cannot drift again.
+- **Neither replacement check could fail.** `generate-census` is all-or-nothing and already exits
+  non-zero, and `generate-psps` always builds a census, so "one census per psp" and "no zero-byte
+  census" were reassurance. What ships is a **per-psp pairing by name** — which is exactly what the
+  first attempt at this repair got wrong — plus the run's own census total, parsed and required
+  non-zero, with an unparseable line treated as the wording having drifted.
+- **And my own second attempt at that check was wrong too, caught by running it**: it counted the
+  log lines matching "bytes are its census" and expected one a psp, getting **12 for 6** — the
+  per-sample line is printed twice, once as progress and once in the report.
+- Prose: "nothing on the command line can pull those bytes back out" overstated a checkable fact
+  (no *shipped subcommand* does, and a script has no business seeking into a psp's footer itself);
+  the comment claiming the reported size says a census reached the file, when it is the walk's own
+  count; "the two produce the same bytes" contradicted the sentence below it; and the credit for
+  the stronger check that returns here, which is E1's rather than D4's.

@@ -5,12 +5,20 @@
 #   scripts/ng_census_route_cost.sh <reference.fa> <catalog.parquet> <regions.bed> <cram-or-dir>
 #
 # A census can be built during the walk over the reads, which is what generate-psps
-# does, or afterwards from the stored psp, which is what generate-census does. The two
-# produce the same file byte for byte, so what separates them is what they cost. This
-# runs each route in a process of its own — peak resident memory of two routes in one
-# process is the larger of them and says nothing about either — and then checks that the
-# censuses the two wrote really are identical, because a timing comparison between two
-# different outputs would mean nothing.
+# does — sealing it into the psp's trailer — or afterwards from the stored psp, which is
+# what generate-census does. The two produce the same census, byte for byte apart from
+# one field: the pileup identity, which a census sealed inside its psp does not carry
+# (psp_census_pair.md §3) and which this harness therefore leaves off both sides. So what
+# separates the routes is what they cost. This runs each in a process of its own — peak
+# resident memory of two routes in one process is the larger of them and says nothing
+# about either — and then checks that the two really did produce the same census, because
+# a timing comparison between two different outputs would mean nothing.
+#
+# **Both routes leave a <sample>.census file for that comparison**, and on the
+# during-the-walk route it is the psp's trailer copied out: a real run of that route
+# writes one file a sample, the psp, and this is a transcript of the part of it that is
+# the census. That copy happens after the harness's clock stops, so it is not charged to
+# the route it would otherwise slow.
 #
 # NG_SAMPLES and NG_REGIONS pass through to the harness (how many alignment files and
 # how many BED intervals). Everything is written under the repository's own tmp/.

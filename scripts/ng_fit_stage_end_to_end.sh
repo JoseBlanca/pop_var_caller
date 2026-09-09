@@ -3,8 +3,8 @@
 # **The four commands of psp mode, run end to end on real reads** — plan steps D1 and D2 of
 # doc/devel/ng/impl_plan/parameter_prepass_runs.md.
 #
-#   generate-psps        alignments  ->  <sample>.psp and <sample>.census
-#   generate-census      psps        ->  <sample>.census, again, from the stored files
+#   generate-psps        alignments  ->  <sample>.psp, with its census inside
+#   generate-census      psps        ->  <sample>.census, from the stored files
 #   estimate-parameters  censuses    ->  cohort.parameters.toml
 #   call-from-psps       psps + that file  ->  the VCF
 #
@@ -20,13 +20,19 @@
 #
 #   ./scripts/dev.sh scripts/ng_fit_stage_end_to_end.sh ...
 #
-# It also checks, for free, that the two routes to a census still agree on real reads: the
-# censuses generate-psps wrote during the walk against the ones generate-census built from the
-# stored psps afterwards.
+# **It no longer checks the two routes against each other.** Since psp_census_pair.md §3 the walk
+# seals its census into the psp's trailer instead of writing a file, and no shipped subcommand
+# writes a psp's trailer back out — a script could carve it from the footer's offset and length,
+# but a script has no business seeking into a psp. The comparison has two homes instead: on
+# fixtures, the test `the_two_producers_agree_on_a_cohort_with_a_repeat_tract`; on real reads,
+# scripts/ng_census_route_cost.sh, whose harness writes both routes' census bytes out for exactly
+# that. **A stronger check reaches this script at plan step E1** — D4's oracle, a psp copied,
+# regenerated with regenerate-census, and identical to the original byte for byte, whole.
 set -uo pipefail
 
 if (( $# < 5 )); then
-    sed -n '2,24p' "$0"
+    # Every leading comment line, so the range cannot drift from the block it prints.
+    awk 'NR == 1 { next } /^#/ { print; next } { exit }' "$0"
     exit 2
 fi
 reference=$1; catalog=$2; regions=$3; out=$4
@@ -46,7 +52,7 @@ if [[ -z "$bin" ]]; then
 fi
 
 rm -rf "$out"
-mkdir -p "$out/psps" "$out/rebuilt"
+mkdir -p "$out/psps"
 
 alignments=()
 for cram in "$@"; do
@@ -63,26 +69,59 @@ say "1. generate-psps"
 tail -1 "$out/generate-psps.log"
 
 say "2. generate-census, from the stored psps"
+# **Into the psps' own directory**, because estimate-parameters opens each census against the psp
+# it names and refuses one that has none — measured: pointing it at a directory of its own failed
+# with "SRS3394606's census names a psp and there is none at .../rebuilt/SRS3394606.psp". The walk
+# itself no longer leaves a file here, so nothing is overwritten.
 "$bin" generate-census \
     --reference "$reference" --catalog "$catalog" \
-    --psp "$out/psps" --output-dir "$out/rebuilt" > "$out/generate-census.log" 2>&1 || {
+    --psp "$out/psps" --output-dir "$out/psps" > "$out/generate-census.log" 2>&1 || {
     echo "generate-census failed:" >&2; cat "$out/generate-census.log" >&2; exit 1; }
 tail -1 "$out/generate-census.log"
 
-say "do the two routes still agree on real reads?"
-same=1
-for walked in "$out/psps"/*.census; do
-    rebuilt="$out/rebuilt/$(basename "$walked")"
-    if cmp -s "$walked" "$rebuilt"; then
-        echo "  $(basename "$walked"): identical"
-    else
-        echo "  $(basename "$walked"): DIFFERENT"
-        same=0
+say "every psp got a census rebuilt beside it"
+# **Per psp and by name, not two totals.** The next step opens each census against the psp beside
+# it and refuses one that has none, so what matters is the pairing rather than the count — and a
+# count would pass on six psps and six censuses whose stems did not match, which is the shape the
+# first attempt at this repair actually produced.
+psps=0
+missing=0
+for psp in "$out/psps"/*.psp; do
+    psps=$(( psps + 1 ))
+    if [[ ! -e "${psp%.psp}.census" ]]; then
+        echo "  no census beside $(basename "$psp")" >&2
+        missing=1
     fi
 done
-(( same == 1 )) || { echo "the two producers disagree; nothing below is worth reading" >&2; exit 1; }
+if (( psps == 0 )); then
+    echo "the walk left no psp; nothing below is worth reading" >&2
+    exit 1
+fi
+if (( missing != 0 )); then
+    echo "nothing below is worth reading" >&2
+    exit 1
+fi
+# **And the walk built a census, not an empty one.** The run's own total, off its report line —
+# "N samples: X bytes of psp, of which Y bytes are census". It is the walk's own count rather than
+# a reopen of the files, so it says a census that big was built; whether those bytes reached the
+# psps is what E1's whole-file oracle will answer. A total of zero, or a line this cannot parse,
+# stops the run: the second means the wording drifted and this check has stopped checking.
+inside=$(sed -n 's/.*of which \([0-9][0-9]*\) bytes are census.*/\1/p' "$out/generate-psps.log")
+if [[ -z "$inside" ]]; then
+    echo "generate-psps' report line has changed shape; this check no longer reads it" >&2
+    exit 1
+fi
+if (( inside == 0 )); then
+    echo "the walk sealed every psp with an empty trailer" >&2
+    exit 1
+fi
+echo "  $psps psps, each with a census beside it, and $inside bytes of census inside them"
+grep -m 1 "bytes of psp" "$out/generate-psps.log" || true
 
 say "3. estimate-parameters"
+# **From the censuses step 2 rebuilt**, which are beside the psps they were built from — the
+# walk no longer leaves any there. Plan step C2 is what moves this command onto the psps
+# themselves, and step 2 goes with it.
 "$bin" estimate-parameters \
     --reference "$reference" --catalog "$catalog" \
     --census "$out/psps" --output "$out/cohort.parameters.toml" \
