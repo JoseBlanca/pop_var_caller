@@ -73,11 +73,17 @@ const MAGIC: &[u8; 8] = b"NGCENSUS";
 /// **A version and not a feature flag.** A census is a cache with a pileup behind it, so the
 /// answer to a version this build does not know is to rebuild rather than to interpret.
 ///
-/// **2 since 2026-08-16**, when the depth code went from five bits on a widening ladder to
-/// eight on one with a bin for every depth to the cap. A version-1 file's depth array is a
-/// different number of bytes for the same position count and its codes index a different
-/// ladder, so nothing about it can be salvaged by reading it more carefully.
-const VERSION: u16 = 4;
+/// **Three bumps so far, each one a census this build cannot read at all.** 2 on 2026-08-16,
+/// when the depth code went from five bits on a widening ladder to eight on one with a bin for
+/// every depth to the cap — a version-1 file's depth array is a different number of bytes for
+/// the same position count and its codes index a different ladder, so nothing about it can be
+/// salvaged by reading it more carefully. 3 on 2026-09-05, when the census began recording who
+/// its read groups are; 4 the same day, when it began carrying what the base qualities claimed.
+///
+/// **Public because a psp's census is judged before it is decoded** (`psp_census_pair.md` §4.2):
+/// [`CensusVerdict`](crate::ng::run::CensusVerdict) compares the version word at a trailer's
+/// front against this, and names both numbers when they differ.
+pub const VERSION: u16 = 4;
 
 /// Which pileup a census was built from.
 ///

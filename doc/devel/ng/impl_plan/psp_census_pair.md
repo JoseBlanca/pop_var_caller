@@ -140,7 +140,7 @@ read groups. `census_from_psp` loses its identity argument.
 
 ### Milestone B — one judgement, and a cohort that agrees on its settings
 
-☐ **B1 — the verdict type.** An enum: fresh; no census (empty trailer); an older format, naming
+✅ **B1 — the verdict type.** An enum: fresh; no census (empty trailer); an older format, naming
 the version found and the one this build reads; another selection. A noun with its own `Display`
 in spec §4.2's words. No logic.
 *Depends:* —. *Source:* spec §4.2.
