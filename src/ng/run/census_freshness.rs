@@ -1,5 +1,5 @@
-//! **What a psp's census is, judged before a fit trusts it** — the verdict, and the two cheap
-//! reads that reach two of its causes.
+//! **What a psp's census is, judged before a fit trusts it** — the verdict, the two cheap reads
+//! that reach two of its causes, and a cohort judged whole.
 //!
 //! A psp carries its sample's census as the file's closing payload
 //! (`doc/devel/ng/spec/psp_census_pair.md` §3). A census is a cache, so a psp can carry one that
@@ -8,11 +8,21 @@
 //! (spec §4, §4.1, plan step C3); `regenerate-census` will rebuild exactly those (spec §8, plan
 //! step D1). Both ask the same question, and [`CensusVerdict`] is the answer. Neither command
 //! reads it yet.
+//!
+//! **A cohort is judged in one pass and every sample in it is named**
+//! ([`what_the_heads_say_about_every_census_in_a_cohort`]), because the wait a refusal saves is
+//! per sample: regenerating one census is a quarter of an hour (spec §4), so a run that reported
+//! the first stale psp and stopped would cost that wait once a stale sample, one after another,
+//! to learn a job that fits in one message.
+
+use std::path::{Path, PathBuf};
 
 use crate::ng::parameter_estimation::joint::census_file::{
     BYTES_THAT_NAME_THE_VERSION, VERSION, version_word_of,
 };
 use crate::ng::psp::{PspReadError, PspReader};
+
+use super::psp_caller::OpenPspCohort;
 
 /// **What a run should do with the census in one psp**, in the words spec §4.2 uses.
 ///
@@ -181,11 +191,78 @@ pub fn what_the_footer_and_the_trailers_head_say_about_a_census(
     Ok(CensusVerdict::of_a_version_word(version).unwrap_or(CensusVerdict::Fresh))
 }
 
+/// **What one sample's psp says about its census, and which sample and which file said it** —
+/// one row of the report `estimate-parameters` refuses a cohort with (spec §4.3).
+///
+/// **The individual and the file are both here because neither names the other.** A psp's header
+/// carries the sample it holds and not where it was stored, and a file's name is whatever the walk
+/// was told to write — the two agree only by convention. What the user acts on is the path, which
+/// is what they copy into `regenerate-census`; what tells them which of their accessions it is, is
+/// the name in the header.
+#[derive(Debug)]
+pub struct JudgedPsp {
+    /// The individual whose psp this is, out of the file's own header.
+    pub sample: String,
+    /// The file, as the run was given it.
+    pub psp: PathBuf,
+    /// What its census turned out to be — or the failure that means it has no verdict.
+    ///
+    /// **A psp that cannot be *read* is not a psp with a stale census**, and the two must not
+    /// arrive as one: regenerating the census of a truncated or vanished file would not fix it,
+    /// and the report that tells a user which samples to regenerate would be sending them at a
+    /// file whose fault is elsewhere (spec §4.2's causes are all about what the trailer holds).
+    pub verdict: Result<CensusVerdict, PspReadError>,
+}
+
+/// **Every psp of an opened cohort judged, one verdict a sample, in the run's sample order** —
+/// spec §4.1.
+///
+/// **Nothing here stops early, and that is the whole of it.** The cohort opener this replaces
+/// returns at the first census it cannot check
+/// ([`open_census_cohort`](super::census_cohort::open_census_cohort)), so a run over a cohort
+/// with three stale censuses reports one, the user regenerates it, and the next run reports the
+/// second. Regenerating a census is a quarter of an hour a sample (spec §4), so what that costs
+/// is three rounds of that wait to learn a job that could have been named in one. **A file that
+/// will not read does not stop it either**: its row carries the read failure and the psps after
+/// it are still judged.
+///
+/// **Two of spec §4.2's three causes**, because that is what
+/// [`what_the_footer_and_the_trailers_head_say_about_a_census`] reaches: a verdict of
+/// [`Fresh`](CensusVerdict::Fresh) here means nothing the footer and the trailer's front can see
+/// is wrong, and a census built under another selection looks exactly like a fresh one until the
+/// run's reference is read and its selection rebuilt. That is what lets this be taken before the
+/// reference is opened, which is what makes a missing census an immediate refusal rather than one
+/// that arrives after minutes of work (spec §4.2).
+///
+/// **The cost is at most one seek and ten bytes a sample, and nothing at all for a psp with no
+/// census**, and no census is decoded — see
+/// [`trailer_bytes_read`](crate::ng::psp::trailer_bytes_read). A thousand-sample cohort's
+/// censuses are tens of gigabytes (spec §5) and this reads ten kilobytes of them.
+#[must_use]
+pub fn what_the_heads_say_about_every_census_in_a_cohort(
+    cohort: &mut OpenPspCohort,
+) -> Vec<JudgedPsp> {
+    cohort
+        .each_psp_with_its_path()
+        .map(|(path, psp)| what_one_psps_head_says_about_its_census(path, psp))
+        .collect()
+}
+
+/// One psp judged, named by the individual in its header and by `path`.
+fn what_one_psps_head_says_about_its_census(path: &Path, psp: &mut PspReader) -> JudgedPsp {
+    // **Cloned before the judgement, not after**: reading the trailer's front takes the reader
+    // mutably, so the name has to be out of the header first.
+    let sample = psp.header().sample.clone();
+    JudgedPsp {
+        sample,
+        psp: path.to_path_buf(),
+        verdict: what_the_footer_and_the_trailers_head_say_about_a_census(psp),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use std::path::{Path, PathBuf};
 
     use tempfile::TempDir;
 
@@ -198,13 +275,33 @@ mod tests {
     /// **Sealed through the writer**, so the footer this judgement reads is the one a walk would
     /// have written rather than a hand-built one.
     ///
-    /// `sample` is the individual the file names and the stem it is written under. Every test
-    /// here judges one psp and passes the same name; B4 judges a cohort, where the name is what
-    /// a verdict is reported against.
+    /// `sample` is the individual the header names, and the file is written to
+    /// `<sample>.psp` — the ordinary case, and what a test judging one psp wants.
     fn a_psp_sealed_with(dir: &TempDir, sample: &str, trailer: &[u8]) -> PathBuf {
+        a_psp_of_sample_written_to(dir, sample, sample, trailer)
+    }
+
+    /// The same, with the individual the header names and the file's stem given separately.
+    ///
+    /// **The two are separated because nothing outside a convention ties them.** A walk writes
+    /// whatever file it was told to; a cohort's psps can as easily be `psp-1.psp` as
+    /// `SRR7279481.psp`, and a report that read the individual off the path would be right on
+    /// every fixture that names them alike and wrong on real files.
+    fn a_psp_of_sample_written_to(
+        dir: &TempDir,
+        sample: &str,
+        stem: &str,
+        trailer: &[u8],
+    ) -> PathBuf {
         let mut header = a_header(1_000);
         header.sample = sample.to_string();
-        let path = dir.path().join(format!("{sample}.psp"));
+        // **Each sample's lanes are named after it**, for the cohort fixture's sake: an
+        // `@RG ID` is unique across a whole cohort, and the shared header fixture names every
+        // sample's lanes alike, so a cohort built from it is refused before a census is judged.
+        for lane in &mut header.read_groups {
+            lane.id = format!("{sample}-{}", lane.id);
+        }
+        let path = dir.path().join(format!("{stem}.psp"));
         let writer = PspWriter::create(&path, header).expect("the header writes");
         let _ = writer.finish(trailer).expect("the file seals");
         path
@@ -258,9 +355,7 @@ mod tests {
     fn a_census_written_by_another_build_names_its_version() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         for version in [VERSION - 1, VERSION + 1] {
-            let mut census = a_census_this_build_wrote();
-            let word_at = BYTES_THAT_NAME_THE_VERSION - size_of::<u16>();
-            census[word_at..BYTES_THAT_NAME_THE_VERSION].copy_from_slice(&version.to_le_bytes());
+            let census = a_census_of_version(version);
             let psp = a_psp_sealed_with(&dir, &format!("of-version-{version}"), &census);
 
             assert_eq!(
@@ -413,5 +508,254 @@ mod tests {
                 version_in_the_psp: VERSION + 1,
             })
         );
+    }
+
+    /// A cohort of psps, each sealed with the trailer named beside its sample, opened together
+    /// in the order given.
+    ///
+    /// The headers are otherwise the one fixture, so the cohort agrees about its ground, its
+    /// catalog and its repeat-tract criteria and reaches the judgement rather than a refusal.
+    ///
+    /// **No file here is named after the sample in it** — psp *i* of the list is written to
+    /// `psp-<i>.psp`. A cohort whose stems were its sample names could not tell a report that
+    /// reads the individual out of the header from one that reads it off the path, and those are
+    /// two different answers on any cohort a walk named by run accession or by lane.
+    fn a_cohort_sealed_with(dir: &TempDir, psps: &[(&str, &[u8])]) -> OpenPspCohort {
+        let paths: Vec<PathBuf> = psps
+            .iter()
+            .enumerate()
+            .map(|(index, (sample, trailer))| {
+                a_psp_of_sample_written_to(dir, sample, &format!("psp-{index}"), trailer)
+            })
+            .collect();
+        OpenPspCohort::open(&paths).expect("the fixtures agree about everything but their censuses")
+    }
+
+    /// The file psp `index` of a cohort fixture was written to.
+    fn the_cohorts_file(dir: &TempDir, index: usize) -> PathBuf {
+        dir.path().join(format!("psp-{index}.psp"))
+    }
+
+    /// A census of this build with its version word overwritten — a psp another build wrote.
+    fn a_census_of_version(version: u16) -> Vec<u8> {
+        let mut census = a_census_this_build_wrote();
+        let word_at = BYTES_THAT_NAME_THE_VERSION - size_of::<u16>();
+        census[word_at..BYTES_THAT_NAME_THE_VERSION].copy_from_slice(&version.to_le_bytes());
+        census
+    }
+
+    /// The individual, the file and the verdict of each row, for a cohort every psp of which
+    /// could be read.
+    fn each_sample_file_and_verdict(rows: &[JudgedPsp]) -> Vec<(&str, &Path, CensusVerdict)> {
+        rows.iter()
+            .map(|row| {
+                let verdict = *row
+                    .verdict
+                    .as_ref()
+                    .unwrap_or_else(|error| panic!("{} reads: {error}", row.sample));
+                (row.sample.as_str(), row.psp.as_path(), verdict)
+            })
+            .collect()
+    }
+
+    /// **Three stale psps in a cohort of five are all named, and in the order the run was given
+    /// them** — spec §4.1, and the whole reason this is a pass over the cohort rather than the
+    /// search the census cohort opener does today.
+    ///
+    /// **The first psp is fresh and the last is not**, so a judgement that stopped at the first
+    /// stale one would come back with two rows where five are asserted, and one that judged only
+    /// the first psp would come back with one.
+    ///
+    /// **The three are stale for three different causes**, because grouping the report by cause
+    /// (spec §4.3) is worth nothing if the pass reports whatever the first stale psp was.
+    ///
+    /// **The samples are not in alphabetical order**, so a pass that sorted them — or that
+    /// walked a map keyed by name — gives a different sequence from the one asserted.
+    ///
+    /// **Each row's individual and file are asserted together**, and no file here is named after
+    /// the sample in it, so a pass that read the individual off the path fails on every row.
+    #[test]
+    fn every_stale_psp_of_a_cohort_is_named_and_not_only_the_first() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let census = a_census_this_build_wrote();
+        let older = a_census_of_version(VERSION - 1);
+        let mut cohort = a_cohort_sealed_with(
+            &dir,
+            &[
+                ("delta", &census),
+                ("alpha", b""),
+                ("echo", &census),
+                ("bravo", &older),
+                ("charlie", b"a per-sample summary"),
+            ],
+        );
+
+        let rows = what_the_heads_say_about_every_census_in_a_cohort(&mut cohort);
+
+        assert_eq!(
+            each_sample_file_and_verdict(&rows),
+            vec![
+                (
+                    "delta",
+                    the_cohorts_file(&dir, 0).as_path(),
+                    CensusVerdict::Fresh
+                ),
+                (
+                    "alpha",
+                    the_cohorts_file(&dir, 1).as_path(),
+                    CensusVerdict::NoCensus
+                ),
+                (
+                    "echo",
+                    the_cohorts_file(&dir, 2).as_path(),
+                    CensusVerdict::Fresh
+                ),
+                (
+                    "bravo",
+                    the_cohorts_file(&dir, 3).as_path(),
+                    CensusVerdict::AnotherFormat {
+                        version_in_the_psp: VERSION - 1,
+                    }
+                ),
+                (
+                    "charlie",
+                    the_cohorts_file(&dir, 4).as_path(),
+                    CensusVerdict::NotACensus
+                ),
+            ],
+        );
+    }
+
+    /// **A cohort of one stale psp is one row** — not none, and not a refusal.
+    ///
+    /// One sample is the low end of the range this caller is built for (`CLAUDE.md`), and a pass
+    /// written as *report the samples after the first* or *report nothing when there is nothing
+    /// to compare* is a pass that says a single-sample run has no work to do when it has all of
+    /// it.
+    #[test]
+    fn a_cohort_of_one_stale_psp_is_one_row() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mut cohort = a_cohort_sealed_with(&dir, &[("alpha", b"")]);
+
+        let rows = what_the_heads_say_about_every_census_in_a_cohort(&mut cohort);
+
+        assert_eq!(
+            each_sample_file_and_verdict(&rows),
+            vec![(
+                "alpha",
+                the_cohorts_file(&dir, 0).as_path(),
+                CensusVerdict::NoCensus
+            )],
+        );
+    }
+
+    /// **Each row names the file the run was given**, which is what a user copies into
+    /// `regenerate-census` (spec §4.3) — and two psps of one cohort are two files, so a row that
+    /// carried the cohort's first path, or none, would still name the right samples.
+    #[test]
+    fn each_row_names_the_psp_the_run_was_given() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let census = a_census_this_build_wrote();
+        let mut cohort = a_cohort_sealed_with(&dir, &[("alpha", b""), ("bravo", &census)]);
+
+        let rows = what_the_heads_say_about_every_census_in_a_cohort(&mut cohort);
+
+        assert_eq!(
+            rows.iter().map(|row| row.psp.clone()).collect::<Vec<_>>(),
+            vec![the_cohorts_file(&dir, 0), the_cohorts_file(&dir, 1)],
+        );
+    }
+
+    /// **A psp that cannot be read is not a stale psp, and it does not stop the rest being
+    /// judged.**
+    ///
+    /// Regenerating the census of a file that will not read would not fix it, so its row carries
+    /// the read failure rather than a verdict — and the psps after it in the cohort are judged
+    /// all the same, which is what a pass written with `?` would not do: it would come back with
+    /// one error where five rows are asserted, reproducing for a truncated file exactly the
+    /// early return spec §4.1 exists to remove.
+    ///
+    /// **The file is emptied after the cohort is open**, which is when a psp becomes unreadable
+    /// in a run: opening read its header and footer, and the trailer those point at is gone by
+    /// the time the judgement seeks to it.
+    #[test]
+    fn a_psp_that_will_not_read_has_no_verdict_and_does_not_stop_the_cohort() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let census = a_census_this_build_wrote();
+        let newer = a_census_of_version(VERSION + 1);
+        let mut cohort = a_cohort_sealed_with(
+            &dir,
+            &[
+                ("alpha", &census),
+                ("bravo", &census),
+                ("charlie", b""),
+                ("delta", &census),
+                ("echo", &newer),
+            ],
+        );
+        std::fs::File::create(the_cohorts_file(&dir, 1)).expect("the file empties");
+
+        let rows = what_the_heads_say_about_every_census_in_a_cohort(&mut cohort);
+
+        let names: Vec<&str> = rows.iter().map(|row| row.sample.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "bravo", "charlie", "delta", "echo"]);
+        assert!(
+            rows[1].verdict.is_err(),
+            "an emptied psp has nothing at the trailer offset its footer named, and the \
+             judgement came back as {:?}",
+            rows[1].verdict,
+        );
+        assert_eq!(
+            *rows[2].verdict.as_ref().expect("charlie reads"),
+            CensusVerdict::NoCensus,
+            "the psps after the one that would not read are judged all the same",
+        );
+        assert_eq!(
+            *rows[4].verdict.as_ref().expect("echo reads"),
+            CensusVerdict::AnotherFormat {
+                version_in_the_psp: VERSION + 1,
+            },
+        );
+    }
+
+    /// **A cohort is judged for one seek and ten bytes a sample, and no census is decoded** —
+    /// the property that makes a refusal cheap enough to take before the reference is read
+    /// (spec §4.2), and the only thing that tells this pass from one that took each trailer
+    /// whole.
+    ///
+    /// Of the four samples here, three carry a census and one carries none, so the whole pass
+    /// costs 30 bytes against those three censuses' own size, which the message names; at a
+    /// thousand whole-genome samples it is ten kilobytes against tens of gigabytes (spec §5).
+    ///
+    /// **The psp with no census is the first, and the two assertions catch different faults.**
+    /// The byte count catches a pass that reads whole trailers, and also one that never reaches
+    /// the last psp: measured, a pass ending one psp early reads 20 bytes where 30 are asserted,
+    /// which it would not if the census-less psp were the one it skipped. The row count is what
+    /// catches a pass that judges every psp and then drops one — measured at 3 rows against 4,
+    /// with the byte count still 30.
+    #[test]
+    fn judging_a_cohort_reads_the_front_of_each_census_and_no_census() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let census = a_census_this_build_wrote();
+        let mut cohort = a_cohort_sealed_with(
+            &dir,
+            &[
+                ("alpha", b""),
+                ("bravo", &census),
+                ("charlie", &census),
+                ("delta", &census),
+            ],
+        );
+
+        crate::ng::psp::reset_trailer_bytes_read();
+        let rows = what_the_heads_say_about_every_census_in_a_cohort(&mut cohort);
+
+        assert_eq!(
+            crate::ng::psp::trailer_bytes_read(),
+            3 * BYTES_THAT_NAME_THE_VERSION as u64,
+            "one psp carries no census and three carry one of {} bytes each",
+            census.len(),
+        );
+        assert_eq!(rows.len(), 4);
     }
 }

@@ -60,7 +60,8 @@ pub use census_fit::{
     parameters_from_the_fit,
 };
 pub use census_freshness::{
-    CensusVerdict, what_the_footer_and_the_trailers_head_say_about_a_census,
+    CensusVerdict, JudgedPsp, what_the_footer_and_the_trailers_head_say_about_a_census,
+    what_the_heads_say_about_every_census_in_a_cohort,
 };
 pub use census_from_psp::{CensusFromPspError, CensusOfStoredPileup, CensusTally, census_from_psp};
 pub use gatherer::{CensusPlan, CensusSelection, SampleObservationGatherer, SampleWalkInputs};

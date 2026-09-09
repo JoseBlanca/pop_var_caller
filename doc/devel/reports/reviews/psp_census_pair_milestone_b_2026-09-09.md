@@ -265,3 +265,93 @@ not part of what the opener forces equal.
 The routing mutation as the reviewer wrote it — exchanging the two arms' bodies — does not compile,
 since the variants carry different fields. A mutation that does not compile says nothing, so it was
 run in the form above.
+
+---
+
+## B4 — a cohort judged whole
+
+**Reviewed against:** the working tree over `a6819246`, three files. One read-only agent over four
+grouped categories: reliability and errors, idiom and smells, naming and module structure, and
+refactor safety — plus the diff's own quantitative claims. It found no correctness defect in the
+pass itself and named nine mutations; ten were run, the tenth to settle a claim the review's own
+finding S4 had left half-answered.
+
+### Findings
+
+**M1 — one of the four properties the tests claim was pinned by nothing.** Every fixture psp was
+written to `<sample>.psp` with its header naming that same sample, so *the row names the right
+individual* and *the row names the file's stem* were one assertion wearing two hats. The mutation
+that reads the name off the path — wrong on any real cohort whose files are named by run accession
+or by lane — changed no assertion in the diff. This is the property `JudgedPsp` exists for: it
+carries both fields because neither names the other.
+*Fixed in the fixture:* a cohort's psps are written to `psp-0.psp`, `psp-1.psp`, … while their
+headers name `delta`, `alpha`, `echo`, `bravo`, `charlie`; the tests assert the pair. Three tests
+now fail under that mutation.
+
+**M2 — the stated reason for carrying the path is a cohort the opener refuses.** Two doc comments
+justified the path field with *two directories of the same accession, walked twice, are one sample
+name and two files*. `refuse_a_sample_named_twice` rejects exactly that cohort, and one of the two
+sentences sits about 460 lines above the refusal that contradicts it, in the same file. The
+conclusion is right and only the reason was wrong.
+*Fixed in both places:* a sample name does not say which file it came out of, and the path is what
+the user copies into `regenerate-census`.
+
+**M3 — "the difference is 40 bytes" where the test asserts 30.** Four samples, of which one carries
+no census and costs nothing. *Fixed*, and the sentence now says which three psps the 30 comes from.
+
+**M4 — a claim about which mutation an assertion catches, and it was the wrong assertion.** The
+byte test said its census-less psp was placed last so that *a pass that read every trailer but the
+last still fails*. It does not: the byte count is 30 either way. *Fixed by moving the census-less
+psp to the front and measuring both halves*: a pass that never reaches the last psp now reads 20
+bytes against the 30 asserted, and a pass that judges every psp and then drops a row leaves the byte
+count at 30 and is caught by the row count, 3 against 4. Both numbers are from a run, and the
+second is why the tenth mutation exists.
+
+**Smaller, all fixed:** `#[must_use]` missing on a function that returns the whole judgement, so a
+caller that dropped it would refuse nothing silently; the accessor's `zip` truncating without
+complaint if the two vectors ever disagreed, now a `debug_assert_eq!`, since what it would drop is
+one sample's row; *one seek and ten bytes a sample* stated as a cost where it is an upper bound —
+a psp with no census costs neither; `fn judged`, a bare participle that also shadowed three test
+bindings; the version-word fixture inlined in the older test that the new helper replaces; the
+cohort fixture taking `Vec<u8>` where `&[u8]` does; and an import duplicated between the file and
+its test module.
+
+**Added rather than fixed:** a cohort of one, on the project's range rule — one stale psp is one
+row, not zero and not a refusal.
+
+### Recorded, not fixed
+
+- **`OpenPspCohort` now has four consumers outside the module that defines it**, and plan step C2
+  adds a fifth. The reviewer's suggestion is to lift the opened cohort out of `psp_caller.rs`, which
+  is described as psp mode's *calling* stage, into a module of its own — at C2, not here.
+- **The fixture's read-group libraries are not made unique**, only its `@RG ID`s: every fixture
+  sample still claims `tomato-pe-1` and `tomato-pe-2`, which no real cohort looks like. A future
+  cohort-wide library check would break these tests with a message about libraries.
+- `JudgedPsp` is public and not `#[non_exhaustive]`, consistently with `CensusVerdict` and the rest
+  of `ng::run`.
+
+### Confirmed by the reviewer and not changed
+
+The byte counter is thread-local, so the two tests that reset it cannot interfere under the parallel
+harness. A psp left seeked at its trailer offset by a failed judgement is harmless: every later read
+seeks absolutely. And the claim made about the census cohort opener — that it returns at the first
+census it cannot check — was verified against its four `return Err` arms.
+
+### The mutations
+
+| mutation | outcome |
+|---|---|
+| stop at the first psp whose census is not fresh | 4 tests fail |
+| a psp that will not read reported as carrying no census | 2 fail |
+| a psp that will not read dropped instead of named | 1 fails |
+| the rows sorted by sample | 2 fail |
+| every row given the cohort's first path | 4 fail |
+| each psp paired with another psp's path and name | 3 fail |
+| the individual read off the file's name | 3 fail — and nothing at all before M1 was fixed |
+| every psp judged and the last row then dropped | 5 fail |
+| the last psp never read at all | the byte count fails, 20 against 30 |
+| the whole trailer read where its front is enough | 3 fail, B2's own among them |
+
+The empty-trailer short circuit the reviewer's ninth mutation removes was not run as a separate
+edit: it is B2's property, B2's own tests pin it, and the two cohort fixtures that carry an empty
+trailer assert `NoCensus` rather than *something is wrong*.

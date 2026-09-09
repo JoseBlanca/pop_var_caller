@@ -315,3 +315,146 @@ tree's 53 tests pass.
 - **clippy: the same 11 errors of the same 5 kinds in the same 6 files as the baseline.**
 - **`cargo check --all-targets --keep-going`: the same 4 examples.**
 - **`cargo fmt --check`: the same 4 files** — the first run of this step had two more, both its own.
+
+---
+
+## B4 — a cohort judged whole
+
+**Committed:** see `git log` for `feat(ng): B4`.
+
+### What it does
+
+`what_the_heads_say_about_every_census_in_a_cohort` takes an opened cohort and returns one row a
+sample, in the order the paths were given: the individual out of the psp's header, the file the run
+was given, and what B2's two cheap reads say about that psp's census. **Nothing stops it.** A stale
+census does not, a psp that will not read does not, and that is the whole of the step: the cohort
+opener it replaces returns at the first census it cannot check, so a cohort with three stale ones
+reports one, the user regenerates that one, and the next run reports the second. Regenerating a
+census is a quarter of an hour a sample (spec §4), so what the early return costs is that wait once
+a stale sample, in series, to learn a job that fits in one message.
+
+A psp that cannot be *read* is not a psp whose census is stale. Its row carries the read failure
+instead of a verdict — `Result<CensusVerdict, PspReadError>` — because regenerating the census of a
+truncated file would not fix it, and a report that sent the user at it would be pointing at the
+wrong fault. **The step's trap was writing that loop with `?`**, which reproduces for read failures
+exactly the early return §4.1 exists to remove; B2's review named it in advance.
+
+Nothing calls this yet. `estimate-parameters` takes its verdicts at plan step C3 and
+`regenerate-census` at D2.
+
+### Two choices the plan left open, both small
+
+- **The row is a type and not a tuple.** `JudgedPsp` carries the sample, the path and the verdict,
+  because spec §4.3's report is a line a sample with all three on it and because neither of the
+  first two names the other: a psp's header carries the individual, its filename is whatever the
+  walk was told to write, and the two agree only by convention.
+- **The loop reads the cohort through a new accessor.** `OpenPspCohort::each_psp_with_its_path`
+  hands out each open reader beside its path — the readers are private and a trailer read needs
+  them mutably. The judgement itself stays in `census_freshness.rs` beside the verdict it produces,
+  rather than moving into the module that owns the cohort.
+
+### What the review found, and what was done
+
+**The one that mattered: a property four tests claimed and none could see.** Every fixture psp was
+written to `<sample>.psp` with its header naming that same sample, so *the row names the right
+individual* and *the row names the file's stem* were the same assertion. A pass that read the
+individual off the path — which is wrong on any cohort whose files are named by run accession or by
+lane — would have passed all of them. **Fixed in the fixture**: a cohort's psps are now written to
+`psp-0.psp`, `psp-1.psp`, … while their headers name `delta`, `alpha`, `echo`, `bravo`, `charlie`,
+and the tests assert the individual and the file together. Under the mutation that takes the name
+from the stem, three tests now fail.
+
+**Two doc claims that were wrong about my own fixture**, both corrected against a run rather than
+against the sentence:
+
+- *"the difference is 40 bytes"* where the test asserts 30 — the fourth psp carries no census and
+  costs nothing.
+- *"the psp with no census is the fourth, so a pass that read every trailer but the last still
+  fails"*. It does not: the byte count is 30 either way and only the row count notices. The
+  census-less psp is now the **first**, which makes the two assertions catch different faults, and
+  both numbers in the doc are measured: a pass that never reaches the last psp reads **20 bytes
+  against the 30 asserted**, and a pass that judges every psp and then drops one leaves the byte
+  count at 30 and is caught by the row count, **3 against 4**.
+
+**And the reason given for carrying the path was a cohort the opener refuses.** Both doc comments
+said *two directories of the same accession are one sample name and two files* — which
+`refuse_a_sample_named_twice` rejects, about 460 lines below the second copy of that sentence. The
+conclusion holds and the reason is now the true one: a sample name does not say which file it came
+out of, and the path is what the user copies into `regenerate-census`.
+
+**Smaller, all fixed:** `#[must_use]` on the pass, which returns the whole judgement and refuses
+nothing if dropped; a `debug_assert_eq!` on the two vectors the accessor zips, since `zip` truncates
+silently and what it would drop is one sample's row; *"one seek and ten bytes a sample"* softened to
+*at most*, since a psp with no census costs neither; `fn judged` renamed to a clause, as it shadowed
+three test bindings; the version-word fixture reused by the older test that still inlined it; the
+cohort fixture taking `&[u8]` rather than `Vec<u8>`; and a duplicated import.
+
+**Added on the range rule** (`CLAUDE.md`): a cohort of one. One stale psp is one row — not zero, and
+not a refusal — which is the case a pass written as *report the samples after the first* would get
+wrong.
+
+### Ten mutations, all run, all caught
+
+Each was applied to non-test code from a backup of the file, the module's tests run, and the file
+restored and compared against the backup before the next.
+
+| mutation | outcome |
+|---|---|
+| stop at the first psp whose census is not fresh | 4 tests fail |
+| a psp that will not read reported as carrying no census | 2 fail |
+| a psp that will not read dropped from the report instead of named | 1 fails |
+| the rows sorted by sample rather than left in the order given | 2 fail |
+| every row given the cohort's first path | 4 fail |
+| each psp paired with another psp's path and name | 3 fail |
+| the individual read off the file's name instead of out of the header | 3 fail — and **no assertion at all before the fixture was fixed**, every psp having been written to `<sample>.psp` |
+| every psp judged and the last row then dropped | 5 fail |
+| the last psp never read at all | the byte count fails, 20 against 30 |
+| the whole trailer read where its front is enough | 3 fail, B2's own among them |
+
+### What was measured
+
+- **`cargo test --lib --bins --tests --all-features --no-fail-fast`: 6,705 lib tests pass** against
+  the baseline's 6,682 — B1's four, B2's ten, B3's four and this step's five — with 20 of 21 targets
+  green and the one pre-existing failure unchanged.
+- **clippy: the same 11 errors of the same 5 kinds in the same 6 files as the baseline.**
+- **`cargo check --all-targets --keep-going`: the same 4 examples.**
+- **`cargo fmt --check`: the same 4 files.**
+
+---
+
+## Checkpoint B — what a run can now say about a cohort's censuses, and what it still cannot
+
+**Milestone B is four steps and no behaviour a user can see yet.** What it builds is the judgement
+the next two milestones spend: given a cohort of psps, *which samples need their census
+regenerated, and why*. `estimate-parameters` starts asking at plan step C3; `regenerate-census`
+at D2.
+
+What holds after B4:
+
+- **A psp's census is judged from the file's head**, for one seek and ten bytes — no census is
+  decoded, so the answer is available before the run's reference is opened. It reaches two of the
+  three causes spec §4.2 lists: no census at all, and a census of a format this build does not read.
+  The third — a census built against a different set of loci — needs the reference read and the
+  selection rebuilt, and stays where it is.
+- **A cohort is judged whole**: one row a sample, in the order the run was given them, whatever any
+  earlier psp turned out to be. A psp that will not read is a read failure in its own row, not a
+  stale census.
+- **A cohort whose psps were walked under different settings is refused when it is opened**, by
+  whichever command opened it, naming both samples and the field that differs.
+
+**Three things for the owner, none of them acted on.**
+
+1. **The spec has a factual error in the sentence that argues for B3.** `psp_census_pair.md` §6 says
+   `SegmentationInputs::first_difference` "is called only from its own tests". It is called from
+   `PspVariantCaller::open`, and was before this branch — so a calling run already refused a cohort
+   typed two ways, naming one sample and the run rather than the pair. The decision is unaffected:
+   the check still belongs in the shared opener, which is what gives the fit and `regenerate-census`
+   a refusal they had no way to make. The spec was left as it is.
+2. **A census that decodes badly past its version word has no verdict.** Magic and version right,
+   sections truncated: no cheap read tells it from a whole one, so it reaches the user as the census
+   reader's own error rather than as *regenerate this*. Recorded in `CensusVerdict`'s own doc.
+3. **`OpenPspCohort` lives in `psp_caller.rs`, which the module doc calls psp mode's *calling*
+   stage**, and it now has four consumers outside that module — a fifth arrives at plan step C2,
+   when `estimate-parameters` starts opening its cohort this way. The reviewer's suggestion is to
+   lift the opened cohort into a module of its own at C2. It is a move, not a design change, and it
+   is the owner's to time.

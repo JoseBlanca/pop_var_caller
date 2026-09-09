@@ -204,6 +204,37 @@ impl OpenPspCohort {
         &self.paths
     }
 
+    /// Every sample's open psp beside the file it was read from, in the run's sample order.
+    ///
+    /// **What a check that has to read past the header uses.** Opening a cohort reads each
+    /// file's header, index and footer and nothing else; a question whose answer is further
+    /// into the file — what the trailer holds, and so what the sample's census is
+    /// ([`census_freshness`](super::census_freshness)) — needs the reader itself, and needs it
+    /// mutably, because a [`PspReader`] seeks the one descriptor it holds.
+    ///
+    /// **The path is handed out beside the reader because a reader does not carry one**, and
+    /// what a user acts on is the file: an individual's name does not say which of their files
+    /// it came out of, and a psp's name is whatever the walk was told to write.
+    pub(crate) fn each_psp_with_its_path(
+        &mut self,
+    ) -> impl Iterator<Item = (&Path, &mut PspReader)> {
+        // **The zip would truncate rather than complain**, and what it would drop is one
+        // sample's whole row in whatever the caller is building — a psp judged for its census,
+        // say, silently absent from the report. `open` fills both from one list, so this is an
+        // invariant and not a check.
+        debug_assert_eq!(
+            self.paths.len(),
+            self.psps.len(),
+            "one path a psp, as `open` built them",
+        );
+        // Two fields of one struct, borrowed one way each — which the compiler allows here and
+        // would not through two accessors.
+        self.paths
+            .iter()
+            .map(PathBuf::as_path)
+            .zip(self.psps.iter_mut())
+    }
+
     /// One sample's map from the numbers its own walk gave its read groups to the numbers this
     /// run gives them, by the sample's position in the run's order.
     ///

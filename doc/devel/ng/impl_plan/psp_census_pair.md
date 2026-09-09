@@ -158,7 +158,7 @@ disagreement is refused naming the sample and the field. `call-from-psps` gets i
 two psps under different `min_copies` refused by the opener, and refused at `call-from-psps`.
 *Depends:* —. *Source:* spec §6, the decision paragraph.
 
-☐ **B4 — a cohort judged whole.** Every psp of an opened cohort judged with B2, no early return;
+✅ **B4 — a cohort judged whole.** Every psp of an opened cohort judged with B2, no early return;
 one verdict a sample, in the order given. A test with three stale psps in five asserts all three
 are named.
 *Depends:* B2, B3. *Source:* spec §4.1.
