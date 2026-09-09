@@ -306,11 +306,14 @@ fn score_through_both(
 /// tolerance — pass on a real divergence. (The scorer's *own* refusal is not a `NaN`:
 /// `ParalogScore::neutral` sets every float to `0.0`. Spec §6 trap 4's `NaN` is the
 /// unscored-record sentinel the run wiring carries, and that arrives at step B1.)
-fn assert_bit_identical(
+/// **Hands back the widest gap it saw**, so a sweep can pin what the departure actually costs
+/// rather than only that it stayed under a bound. Zero for every field that is still bit-equal,
+/// which is most of them.
+fn assert_the_same_score(
     case: &str,
     production_score: &production::ParalogScore,
     ng_score: &ng::ParalogScore,
-) {
+) -> f64 {
     // **Destructured, not field-accessed**, so that a value added to `ParalogScore` is a
     // compile error here rather than a value the differential quietly stops comparing.
     let production::ParalogScore {
@@ -328,6 +331,7 @@ fn assert_bit_identical(
         log_likelihood_hidden_paralog: our_hidden_paralog,
     } = *ng_score;
 
+    let mut widest = 0.0f64;
     for (field, theirs, ours) in [
         ("paralog_log_likelihood_ratio", their_ratio, our_ratio),
         (
@@ -341,15 +345,21 @@ fn assert_bit_identical(
             our_hidden_paralog,
         ),
     ] {
-        assert_eq!(
-            ours.to_bits(),
-            theirs.to_bits(),
-            "{case}: {field} differs — ng {ours} ({:#018x}), src/paralog/ {theirs} \
-             ({:#018x}). The copied scorer must agree with production's bit for bit; a \
-             difference here means the port computes something else",
-            ours.to_bits(),
-            theirs.to_bits(),
+        // **A tolerance, and it stopped being bit equality on 2026-09-09.** ng's
+        // `log_add_exp` skips `log1p` where its own cubic series is exact in the sum, which
+        // is this port's one departure from production's arithmetic and is why the textual
+        // guard on the file was released (`copy_fidelity.rs`'s release table). The bound is
+        // absolute because these are log-likelihoods running to hundreds of nats, and the
+        // question the filter asks of them is whether a ratio sits above a cut of about 2.65
+        // — so what has to be small is nats, not units in the last place.
+        let apart = (ours - theirs).abs();
+        assert!(
+            apart <= NATS_THE_TWO_TREES_MAY_DIFFER_BY,
+            "{case}: {field} differs by {apart:e} nats — ng {ours}, src/paralog/ {theirs}. \
+             The two implementations may round differently and may not disagree; a gap this \
+             wide means the port computes something else",
         );
+        widest = widest.max(apart);
     }
     assert_eq!(
         our_samples_used, their_samples_used,
@@ -359,7 +369,26 @@ fn assert_bit_identical(
         our_carriers, their_carriers,
         "{case}: confident_homalt_carriers differs — the hom-alt veto counted differently"
     );
+    widest
 }
+
+/// **How far ng's scorer and production's may sit apart, in nats.**
+///
+/// **This was bit equality until 2026-09-09**, when ng's `log_add_exp` began skipping `log1p`
+/// where its cubic series is exact in the sum — the one place the two trees now round
+/// differently, and the reason `locus_score.rs` was released from the textual guard.
+///
+/// **The bound is what the departure cannot exceed, not what it measures.** The series
+/// truncates at under 1e-16 per call and the errors of a locus's calls neither share a sign nor
+/// accumulate in the same place, so a locus at 63 samples makes about 46,000 of them and the
+/// measured worst over 800 randomised loci is orders of magnitude inside this. The sweep pins
+/// that measured figure separately, which is the number worth reading; this is the wall.
+///
+/// **Why nats and not units in the last place.** These are log-likelihoods running to hundreds,
+/// and the only question asked of them is whether a ratio clears a cut of about 2.65
+/// (`ParalogFdr`'s fitted default on the tomato cohort). A gap of 1e-9 nats cannot move a
+/// record across that; a gap that could would be visible here as a number, not as a rounding.
+const NATS_THE_TWO_TREES_MAY_DIFFER_BY: f64 = 1e-9;
 
 /// Cohort sizes the differential runs at. **One is deliberate** — see the module header.
 const COHORT_SIZES: [usize; 4] = [1, 2, 10, 63];
@@ -370,19 +399,20 @@ const LOCI_PER_COHORT_SIZE: usize = 200;
 
 /// **The differential: 800 randomised loci, every number bit-identical.**
 #[test]
-fn the_copied_scorer_agrees_with_productions_bit_for_bit() {
+fn the_copied_scorer_agrees_with_productions() {
     let mut loci_scored = 0usize;
+    let mut widest_gap = 0.0f64;
     let mut loci_that_reached_the_arithmetic = [0usize; COHORT_SIZES.len()];
     for (size_index, cohort_size) in COHORT_SIZES.into_iter().enumerate() {
         let mut rng = stream_for(cohort_size);
         for locus in 0..LOCI_PER_COHORT_SIZE {
             let drawn = draw_locus(&mut rng, cohort_size);
             let (theirs, ours) = score_through_both(&HandedToBothScorers::agreeing(&drawn));
-            assert_bit_identical(
+            widest_gap = widest_gap.max(assert_the_same_score(
                 &format!("cohort size {cohort_size}, locus {locus}"),
                 &theirs,
                 &ours,
-            );
+            ));
             loci_scored += 1;
             // `samples_used > 0`, not `ratio.is_finite()`: the neutral verdict a locus with
             // nothing usable gets is `0.0`, which *is* finite, so counting finite ratios
@@ -416,6 +446,23 @@ fn the_copied_scorer_agrees_with_productions_bit_for_bit() {
         "the drawn stream must reach the arithmetic as often as it did when this was \
          written — at cohort sizes {COHORT_SIZES:?}, out of {LOCI_PER_COHORT_SIZE} loci each"
     );
+
+    // **What the departure actually costs, rather than what it is allowed to — and it is
+    // nothing.** `assert_the_same_score`'s 1e-9 is a wall derived from the series' truncation
+    // term; this is the measurement, and over these 800 loci the two trees return **the same
+    // `f64`, bit for bit, on every field**. So the series shortcut is not observably an
+    // approximation on anything this differential draws: it is below the rounding of the sum it
+    // goes into, which is what its threshold was chosen to guarantee.
+    //
+    // **Pinned at one part in 1e15 rather than at zero**, six orders inside the wall. `exp` and
+    // `log1p` are the platform's, so a last-bit difference on another libm is a reason to be
+    // told and not a reason to fail a build; a change that actually moved the arithmetic would
+    // clear this by orders of magnitude.
+    assert!(
+        widest_gap <= 1e-15,
+        "the widest gap between the two trees over {loci_scored} randomised loci was \
+         {widest_gap:e} nats, where it has been exactly zero; the port's arithmetic has moved"
+    );
 }
 
 /// Loci admitting at least one sample, per cohort size, in `COHORT_SIZES` order.
@@ -444,7 +491,7 @@ fn one_sample_scores_finitely_and_identically() {
             && drawn[0].single_copy_depth_sd.is_finite()
             && drawn[0].single_copy_depth_sd > 0.0;
         let (theirs, ours) = score_through_both(&HandedToBothScorers::agreeing(&drawn));
-        assert_bit_identical(&format!("one sample, locus {locus}"), &theirs, &ours);
+        assert_the_same_score(&format!("one sample, locus {locus}"), &theirs, &ours);
         assert!(
             ours.paralog_log_likelihood_ratio.is_finite(),
             "one sample, locus {locus}: the ratio is not finite"
@@ -491,7 +538,7 @@ fn a_negative_copy_number_is_winsorised_at_zero_on_both_sides() {
     )
     .collect();
     let (theirs, ours) = score_through_both(&HandedToBothScorers::agreeing(&drawn));
-    assert_bit_identical("a negative copy number", &theirs, &ours);
+    assert_the_same_score("a negative copy number", &theirs, &ours);
     assert_eq!(ours.samples_used, 4, "every sample here is usable");
 }
 
@@ -519,7 +566,7 @@ fn a_mismatched_sigma_slice_is_neutral_on_both_sides() {
                 ..HandedToBothScorers::agreeing(&drawn)
             });
             let case = format!("cohort size {cohort_size}, sigma slice of {slice_length}");
-            assert_bit_identical(&case, &theirs, &ours);
+            assert_the_same_score(&case, &theirs, &ours);
             assert_eq!(
                 ours.samples_used, 0,
                 "{case}: a mismatched slice must score nothing, not a truncated cohort"
@@ -546,7 +593,7 @@ fn tables_built_for_another_cohort_are_neutral_on_both_sides() {
             ..HandedToBothScorers::agreeing(&drawn)
         });
         let case = format!("a locus of {locus_size}, tables built for {table_size}");
-        assert_bit_identical(&case, &theirs, &ours);
+        assert_the_same_score(&case, &theirs, &ours);
         assert_eq!(
             ours.samples_used, 0,
             "{case}: tables for another cohort must score nothing"
@@ -572,7 +619,7 @@ fn an_empty_carrier_set_is_neutral_on_both_sides() {
             ..HandedToBothScorers::agreeing(&drawn)
         });
         let case = format!("no carrier configurations, cohort size {cohort_size}");
-        assert_bit_identical(&case, &theirs, &ours);
+        assert_the_same_score(&case, &theirs, &ours);
         assert_eq!(
             ours.paralog_log_likelihood_ratio.to_bits(),
             0.0f64.to_bits(),
@@ -601,7 +648,7 @@ fn a_locus_with_no_usable_sample_is_neutral_on_both_sides() {
             })
             .collect();
         let (theirs, ours) = score_through_both(&HandedToBothScorers::agreeing(&drawn));
-        assert_bit_identical(
+        assert_the_same_score(
             &format!("all absent, cohort size {cohort_size}"),
             &theirs,
             &ours,
