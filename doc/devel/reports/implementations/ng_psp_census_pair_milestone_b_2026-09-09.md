@@ -118,3 +118,102 @@ tree's four tests pass.
   same 5 kinds in the same 6 files as the baseline.**
 - **`cargo check --all-targets --keep-going`: the same 4 examples, with the same error counts.**
 - **`cargo fmt --check`: the same 4 files.**
+
+---
+
+## B2 — the cheap half of the judgement
+
+**Committed:** see `git log` for `feat(ng): B2`.
+
+### What it does
+
+`what_the_footer_and_the_trailers_head_say_about_a_census` takes an open psp and answers two of
+spec §4.2's three causes for one short read or none. The footer says how long the trailer is and
+was read when the file was opened, so an empty trailer is *no census* without touching the file.
+Otherwise the first ten bytes of the trailer are read — a census's magic and the version word
+behind it — and they are either not a census at all, a census of a version this build does not
+read, or this build's own.
+
+Two pieces underneath it. `PspReader::trailer_head(at_most)` gives the front of the writer's
+closing payload, and `trailer()` is now that with no limit. `census_file::version_word_of(head)`
+says which version a stretch of bytes claims, or that it is not a census — which is what lets an
+old census be named as old rather than as damage, since `decode_census` refuses both with the same
+`Malformed`.
+
+**A cheap read is only cheap if something measures it**, so `PspReader` gains a per-thread count of
+the trailer bytes it has handed out — the instrument the census's own reader already carries for
+the same argument (`census_file::bytes_read`). See the mutation table: without it, the step's whole
+property was unpinned.
+
+### What the review found, and what was done
+
+One read-only agent over five grouped categories; the report is
+[psp_census_pair_milestone_b_2026-09-09.md](../reviews/psp_census_pair_milestone_b_2026-09-09.md).
+It walked every input a psp can present — an empty trailer, one of 1 to 9 bytes, a wrong version, a
+version above this build's, a whole census — and found no wrong verdict. What it found was one
+missing measurement, two false doc claims, and a cast.
+
+- **Nothing failed if the judgement read the whole trailer.** Measured: with
+  `trailer_head(BYTES_THAT_NAME_THE_VERSION)` replaced by `trailer()`, all 64 tests passed. The
+  property the step exists for — a thousand-psp cohort does not pull a thousand censuses into
+  memory — was asserted in three doc comments and measured nowhere. The trailer-byte counter and
+  two tests close it.
+- **The `# Errors` section named a failure that cannot reach the function**: *a footer that points
+  past its own end*. `PspReader::open` refuses any psp whose trailer does not end exactly where the
+  footer begins, so such a file never becomes an argument. The doc now says what is left — a file
+  truncated or replaced after it was opened, or an I/O fault — and says that `open` is what rules
+  the other out.
+- **The container module claimed to know what is in a trailer**, two lines under its own sentence
+  saying it must not. `psp_file_format.md` §3.4 keeps the payload the writer's business precisely
+  so that adding to it is not a container version bump. The size argument stays, as an example of
+  what ng's walk puts there; the ownership claim is gone.
+- **`trailer_bytes as usize` wraps on a 32-bit target**, turning a trailer wider than a `usize`
+  into a few bytes reported as the whole of it. `usize::try_from(…).unwrap_or(usize::MAX)`.
+- **The module summary said "the verdict and nothing that reaches it"**, which B2 falsifies.
+- **The shared fixture went in the wrong door.** `census_file`'s `mod tests` had been made
+  `pub(crate)` so another module's tests could reach one function; the project's own answer is a
+  `tests_support` module beside it, which `psp::writer` has and which this step's own tests already
+  import from. The fixtures moved there and `mod tests` is private again.
+- Renamed: the judgement was `what_the_psps_head_says_about_its_census`, and *the psp's head* reads
+  as the psp's **header** to anyone holding the format spec — which is the one part it does not
+  touch. It reads the footer and the front of the trailer, both at the file's tail.
+- Smaller: `trailer_head`'s parameter is `at_most` rather than `bytes`; the constant sits beside the
+  magic and the version it is made of rather than 530 lines away; the fixture helper's `sample`
+  argument says what it will be for in B4; and a census of a version *newer* than this build's now
+  goes through the judgement as well as through the message.
+
+### Six mutations, all run
+
+| mutation | before the fixes | after |
+|---|---|---|
+| the judgement reads the whole trailer, not its front | **green, 64 passed** | 1 test fails |
+| the head read ignores how long the trailer is | — | 13 tests fail |
+| the empty trailer is not answered out of the footer | — | 2 tests fail |
+| the two damage verdicts are swapped | — | 4 tests fail |
+| this build's own version word is not read as fresh | — | 2 tests fail |
+| the version word is always read as this build's | 1 test failed, and **not the one in the module that owns the function** | 2 tests fail |
+
+The last row is why `census_file` now has its own assertion on a word that is not this build's: its
+test wrote and read a census of the current version only, so a `version_word_of` that answered
+`VERSION` whenever the magic matched passed it, and only the psp-side test caught it.
+
+**One mutation stayed green and the claim was changed instead of the test.** Removing the
+empty-payload short-circuit inside `PspReader::trailer_head` leaves every test passing, because a
+zero-length read reads zero bytes and the counter counts bytes. What the code avoids there is a
+seek and a syscall, not a byte, so the doc now says *no byte of trailer is read* — which is what
+the test measures — rather than *no read at all*, which nothing here measures.
+
+Each mutation was reverted from a backup and all three files compared against it before the next;
+the restored tree's 66 tests pass.
+
+### What was measured
+
+- **`cargo test --lib --bins --tests --all-features --no-fail-fast`: 6,696 lib tests pass** against
+  the baseline's 6,682 — B1's four and this step's ten — with 20 of 21 targets green and the one
+  pre-existing failure unchanged.
+- **`cargo clippy --lib --bins --tests --all-features -- -D warnings`: the same 11 errors of the
+  same 5 kinds in the same 6 files as the baseline.** The first run of this step was **not**:
+  it had a twelfth, `writing &PathBuf instead of &Path`, in a test helper of mine — caught because
+  the gate diffs the list of error *kinds* rather than counting the ones the baseline already had.
+- **`cargo check --all-targets --keep-going`: the same 4 examples, with the same error counts.**
+- **`cargo fmt --check`: the same 4 files.** The first run of this step had a fifth, this step's own.

@@ -59,7 +59,9 @@ pub use census_fit::{
     CohortFit, CohortFitError, every_read_group_pooled, fit_a_cohort, parameters_file_of,
     parameters_from_the_fit,
 };
-pub use census_freshness::CensusVerdict;
+pub use census_freshness::{
+    CensusVerdict, what_the_footer_and_the_trailers_head_say_about_a_census,
+};
 pub use census_from_psp::{CensusFromPspError, CensusOfStoredPileup, CensusTally, census_from_psp};
 pub use gatherer::{CensusPlan, CensusSelection, SampleObservationGatherer, SampleWalkInputs};
 pub use psp_caller::{

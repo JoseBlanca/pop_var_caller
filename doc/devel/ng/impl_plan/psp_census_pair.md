@@ -145,7 +145,7 @@ the version found and the one this build reads; another selection. A noun with i
 in spec §4.2's words. No logic.
 *Depends:* —. *Source:* spec §4.2.
 
-☐ **B2 — the cheap half of the judgement.** From an open `PspReader`: the footer's trailer length,
+✅ **B2 — the cheap half of the judgement.** From an open `PspReader`: the footer's trailer length,
 then the version word at the trailer's front, read before `decode_census`'s magic-and-version check
 can call it malformed. Fixtures for an empty trailer and a trailer whose version word is
 `VERSION − 1`.

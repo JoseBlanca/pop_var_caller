@@ -85,6 +85,13 @@ const MAGIC: &[u8; 8] = b"NGCENSUS";
 /// front against this, and names both numbers when they differ.
 pub const VERSION: u16 = 4;
 
+/// **How many bytes of a census say which format it is** — the magic above and the version word
+/// behind it, which is all [`version_word_of`] reads.
+///
+/// **Beside the two values it is made of**, so that widening either is a line away from the
+/// number that says how far a reader must read to find them.
+pub const BYTES_THAT_NAME_THE_VERSION: usize = MAGIC.len() + size_of::<u16>();
+
 /// Which pileup a census was built from.
 ///
 /// **A digest and a count, never a modification time** (spec §6.1). A modification time changes
@@ -607,6 +614,28 @@ fn read_as_much_as_there_is(from: &mut impl Read, into: &mut [u8]) -> Result<usi
     Ok(filled)
 }
 
+/// **The version word of the census `head` begins with**, or `None` when those bytes are not a
+/// census: they do not start with its magic, or they end before the word.
+///
+/// **This is what lets a census of another format be named as one rather than as damage**
+/// (`psp_census_pair.md` §4.2). [`decode_census`] refuses both with the same
+/// [`CensusError::Malformed`], which sends a user looking for a corrupted file when what happened
+/// is that this build changed what a census holds. A judgement that reads the word first can tell
+/// the two apart, and it costs [`BYTES_THAT_NAME_THE_VERSION`] bytes rather than a decode.
+///
+/// **It does not say the census is whole.** Everything past the version word — the header, the
+/// directory, the sections — is unread here, so a truncated census of this version answers with
+/// this build's own version, and the failure surfaces wherever something decodes it.
+#[must_use]
+pub fn version_word_of(head: &[u8]) -> Option<u16> {
+    let (magic, rest) = head.split_at_checked(MAGIC.len())?;
+    if magic != MAGIC {
+        return None;
+    }
+    let word = rest.get(..size_of::<u16>())?;
+    Some(u16::from_le_bytes([word[0], word[1]]))
+}
+
 /// Where each section sits, without decoding one — what the seeking reader will open with.
 ///
 /// # Errors
@@ -959,30 +988,35 @@ impl<'a> Cursor<'a> {
     }
 }
 
+/// Fixtures shared by this module's tests and by those of the judgement that reads a psp's
+/// trailer ([`ng::run::census_freshness`](crate::ng::run::census_freshness)).
+///
+/// **Here rather than duplicated**, for the reason `psp::writer`'s own `tests_support` gives:
+/// a test that hand-wrote what a census begins with would keep passing after the magic or the
+/// version word moved, and a moved version word is exactly what the judgement exists to
+/// report.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests_support {
     use super::*;
-    use crate::ng::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;
 
     use std::collections::BTreeMap;
 
     use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
-    use crate::ng::parameter_estimation::joint::census::{
-        CohortCensusEvidence, DepthCode, SsrLocusState,
-    };
+    use crate::ng::parameter_estimation::joint::census::{DepthCode, RECORDED_OFFSET_RANGE};
     use crate::ng::parameter_estimation::joint::loci::CensusLociDigester;
     use crate::ng::types::{GenomePosition, Position};
 
-    const AT_SIX_REPEATS: Stratum = Stratum {
+    pub(super) const AT_SIX_REPEATS: Stratum = Stratum {
         period: 2,
         reference_repeats: 6,
     };
-    const ATG_FOUR_REPEATS: Stratum = Stratum {
+    pub(super) const ATG_FOUR_REPEATS: Stratum = Stratum {
         period: 3,
         reference_repeats: 4,
     };
 
-    fn selection_terms() -> crate::ng::parameter_estimation::joint::loci::SelectionTerms {
+    pub(super) fn selection_terms() -> crate::ng::parameter_estimation::joint::loci::SelectionTerms
+    {
         use crate::ng::parameter_estimation::joint::loci::{
             CatalogBuildSettings, ReferenceDigest, RegionSetDigest, SelectionTerms,
         };
@@ -1005,7 +1039,7 @@ mod tests {
 
     /// Terms whose kept-loci digest witnesses two real positions in two different megabases, so
     /// the block list is not empty and its round trip is asserted rather than assumed.
-    fn terms() -> RecordingTerms {
+    pub(super) fn terms() -> RecordingTerms {
         let mut digester = CensusLociDigester::new();
         for (index, position) in [7_u64, 4_000_003].into_iter().enumerate() {
             digester.observe(
@@ -1034,7 +1068,7 @@ mod tests {
     /// walked at zero depth, reads with none non-reference, one non-reference allele, and two at
     /// one position — plus two strata of tracts carrying a saturating offset, a guard entry, a
     /// difference, and a locus the walk never reached.
-    fn every_corner() -> SampleCensusEvidence {
+    pub(super) fn every_corner() -> SampleCensusEvidence {
         let edges = DepthBinEdges::for_census();
         let mut depth = PackedDepthCodes::never_walked(5);
         depth.set(1, DepthCode::Binned(edges.bin_for(0)));
@@ -1114,10 +1148,74 @@ mod tests {
         )
     }
 
+    /// **The bytes of a census this build writes**, for a test elsewhere that needs a psp trailer
+    /// this build would accept.
+    ///
+    /// **Written by [`write_census`] rather than spelled out**, because a test that hand-wrote a
+    /// census's first bytes would keep passing after the magic or the version moved, and it is
+    /// exactly a moved version word that the judgement it feeds
+    /// ([`ng::run::census_freshness`](crate::ng::run::census_freshness)) exists to report.
+    ///
+    /// It is `every_corner`'s census, so it is also far longer than the ten bytes that judgement
+    /// reads — which is the point of a trailer fixture for it.
+    pub(crate) fn a_census_this_build_wrote() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        write_census(&every_corner(), None, &mut bytes).expect("a vector accepts every write");
+        bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_support::*;
+    use super::*;
+    use crate::ng::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;
+
+    use std::collections::BTreeMap;
+
+    use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+    use crate::ng::parameter_estimation::joint::census::{
+        CohortCensusEvidence, DepthCode, SsrLocusState,
+    };
+
     fn round_trip(census: &SampleCensusEvidence, pileup: Option<PileupIdentity>) -> CensusFile {
         let mut bytes = Vec::new();
         write_census(census, pileup, &mut bytes).expect("a vector accepts every write");
         decode_census(&bytes).expect("what this build wrote, this build reads")
+    }
+
+    /// **The version word is read out of a census's first bytes, and out of nothing else.**
+    /// Whether a psp's trailer is a census of this build's format, of another, or not a census
+    /// at all is a judgement made on ten bytes (`psp_census_pair.md` §4.2), and each of the
+    /// three answers is reachable.
+    #[test]
+    fn the_version_word_is_read_from_a_censuss_first_bytes_and_from_nothing_else() {
+        let census = a_census_this_build_wrote();
+        assert_eq!(version_word_of(&census), Some(VERSION));
+        assert_eq!(
+            version_word_of(&census[..BYTES_THAT_NAME_THE_VERSION]),
+            Some(VERSION),
+            "the word is inside the first {BYTES_THAT_NAME_THE_VERSION} bytes",
+        );
+        assert_eq!(
+            version_word_of(&census[..BYTES_THAT_NAME_THE_VERSION - 1]),
+            None,
+            "bytes that end inside the version word do not name a version",
+        );
+        assert_eq!(
+            version_word_of(b"a per-sample summary"),
+            None,
+            "a trailer holding something else is not a census",
+        );
+        assert_eq!(version_word_of(&[]), None);
+
+        // **A word that is not this build's, read as the number it is.** Every assertion above
+        // is satisfied by a function that answers `VERSION` whenever the magic matches, and
+        // what a run does with an old census depends on which old version it names.
+        let mut of_version_seven = census.clone();
+        of_version_seven[MAGIC.len()..BYTES_THAT_NAME_THE_VERSION]
+            .copy_from_slice(&7_u16.to_le_bytes());
+        assert_eq!(version_word_of(&of_version_seven), Some(7));
     }
 
     /// **The assertion the whole step rests on**, and the reason B1 is its own commit: a codec

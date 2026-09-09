@@ -94,3 +94,103 @@ memory: 1 at creation on 2026-08-14, 2 on 2026-08-16, 3 and 4 both on 2026-09-05
 verdict.** No cheap read can tell it from a whole one; it reaches the user as the census reader's
 own `CensusError` when something decodes it. The type doc says so rather than leaving the next
 reader to find the gap.
+
+---
+
+## B2 — the cheap half of the judgement
+
+**Reviewed against:** the working tree over `66427170`, three files — the psp reader, the census
+file's own module, and the judgement. One read-only agent over five grouped categories:
+correctness, reliability and errors, test strength, layering and API, and prose. **It named seven
+mutations; six were run** (the seventh was superseded by a fix that changed what the code claims).
+
+### Verification given to the reviewer
+
+`cargo test --lib census_freshness` 9 passed, `--lib psp::reader` 59, `--lib census_file` 22. The
+tree's pre-existing red is tabulated at the head of the
+[implementation report](../implementations/ng_psp_census_pair_milestone_b_2026-09-09.md).
+
+### Findings
+
+**M1 — nothing in the suite failed if the judgement read the whole trailer**, which is the one
+property the step exists to have. The reviewer worked it out by hand: every one of the five new
+tests passes with `trailer()` in place of `trailer_head`, because the verdict is the same either
+way and the verdict was all anything looked at.
+*Ran it: 64 passed, no failure.*
+*Fixed with the instrument the census's own reader already carries for the same argument.*
+`census_file.rs`'s counting reader says it plainly — *an implementation that decoded a whole file
+and handed back a slice would match every value a section-by-section reader gives and deliver none
+of the memory the by-section design exists for; only the byte count tells them apart.* `PspReader`
+now counts the trailer bytes it hands out, and two tests read the counter: ten bytes to judge a psp
+carrying a census of a few thousand, and zero to judge one carrying none.
+
+**M2 — the `# Errors` section named a failure that cannot reach this function.** It said a psp
+*whose footer points past its own end*; `PspReader::open` proves the trailer ends exactly where the
+footer begins (`reader.rs`'s footer check), so such a file is refused before it can be judged. The
+sentence was load-bearing, because it is the argument for a read failure being an error rather than
+a verdict.
+*Fixed:* the two failures that can happen are named, and `open` is credited with ruling out the
+third.
+
+**M3 — the container module asserted what is in a trailer**, two lines below its own sentence
+saying it must not. `psp_file_format.md` §3.4 keeps the payload opaque *so that* adding to it is a
+writer-side change and not a container version bump, and calls that property worth more than any
+list of payloads would be.
+*Fixed:* the size argument stays — a payload can be tens of megabytes, ng's walk puts a census in
+one — and the claim that the trailer *is* the census, and the census-shaped "first ten bytes", are
+gone.
+
+**M4 — `trailer_bytes as usize` wraps on a 32-bit target.** Pre-existing in `trailer()`, and this
+step is where it now lives.
+*Fixed:* `usize::try_from(…).unwrap_or(usize::MAX)`, a no-op on 64-bit.
+
+**M5 — the shared fixture was reached through a `pub(crate) mod tests`.** The project's own answer
+to *another module's tests need this fixture* is a `tests_support` module beside the tests —
+`psp::writer` has one, six modules import from it, and this step's own tests already take
+`a_header` from it. Exposing the whole tests module leaves a door open for anything later added
+inside it.
+*Fixed:* `tests_support` holds the census fixtures, `mod tests` glob-imports them and is private
+again.
+
+**M6 — "the psp's head" names the part of the file the function does not touch.** The format calls
+the front of a psp its *header*; this function reads the footer and the front of the trailer, both
+at the tail.
+*Fixed:* `what_the_footer_and_the_trailers_head_say_about_a_census`.
+
+**Minor, all fixed:** the module summary still said "the verdict and nothing that reaches it", which
+this step falsifies; the function's own summary said *two short reads* where it performs one or
+none, and left `NotACensus` out of the answers it lists; `trailer_head`'s parameter was `bytes`
+where it is a count, and is `at_most`; `BYTES_THAT_NAME_THE_VERSION` sat 530 lines from the magic
+and the version it is made of; the fixture helper's `sample` argument does no work until B4 and now
+says so; and a version *newer* than this build's goes through the judgement and not only through
+the message.
+
+**Carried to B4, at the reviewer's prompting.** The judgement returns
+`Result<CensusVerdict, PspReadError>`, and B4's contract is *every psp judged, no early return*. A
+B4 written with `?` reproduces for read failures exactly the bug spec §4.1 exists to fix — one
+unreadable psp in five and the user is told about one sample. B4 holds a result a sample rather
+than propagating the first.
+
+### The mutations, and what each showed
+
+| mutation | outcome |
+|---|---|
+| the judgement reads the whole trailer | **green before the fix, 64 passed**; 1 test fails after |
+| the head read ignores the trailer's length | 13 tests fail |
+| the empty trailer is not answered out of the footer | 2 tests fail |
+| the two damage verdicts are swapped | 4 tests fail |
+| this build's own version word is not read as fresh | 2 tests fail |
+| the version word is always read as this build's | before: 1 test failed, in the *other* module; after: 2, including `census_file`'s own |
+
+**One the reviewer named stayed green, and the claim moved rather than the test.** Deleting the
+empty-payload short-circuit in `trailer_head` fails nothing, because a zero-length read reads zero
+bytes and the counter counts bytes. What that branch saves is a seek and a syscall; the doc now
+claims *no byte of trailer is read*, which is measured, instead of *no read at all*, which is not.
+
+### Confirmed by the reviewer and not changed
+
+Every verdict is right for every input a psp can present, including a trailer of exactly the magic
+with no version word behind it, and a version above this build's. `trailer()` behaves as it did
+before this change for all four of its callers. And the 9-byte fixture's reasoning holds: the psp
+format proves the footer begins where the trailer ends, so a reader that took ten bytes unclamped
+would compose a version word out of one census byte and one footer byte.

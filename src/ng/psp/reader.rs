@@ -30,6 +30,37 @@ use super::walk::{self, RecordIter, SelectiveRecordIter};
 use super::{PspReadError, RecordHead, index, read_header_from};
 use crate::ng::types::GenomePosition;
 
+thread_local! {
+    /// Bytes of trailer this thread has taken out of psps.
+    static TRAILER_BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Count `bytes` against this thread's total — called once a trailer read that returns anything.
+fn count_trailer_bytes_read(bytes: u64) {
+    TRAILER_BYTES_READ.with(|counter| counter.set(counter.get() + bytes));
+}
+
+/// How many bytes of psp trailer this thread has read since [`reset_trailer_bytes_read`].
+///
+/// **The only thing that tells a reader of a payload's front from a reader of the whole
+/// payload.** Both answer every question about what a trailer holds identically, and they differ
+/// only in what they pulled off the disk to do it — so a caller whose whole reason to exist is
+/// reading ten bytes of a thirty-megabyte census (`psp_census_pair.md` §4.2, §5) has no other way
+/// to show it did. The census's own reader carries the same instrument for the same argument
+/// ([`bytes_read`](crate::ng::parameter_estimation::joint::census_file::bytes_read)).
+///
+/// **Per thread, because a read happens on the thread that asked for it**, so a test measuring
+/// its own calls is not measuring another test's.
+#[must_use]
+pub fn trailer_bytes_read() -> u64 {
+    TRAILER_BYTES_READ.with(std::cell::Cell::get)
+}
+
+/// Start counting again from zero.
+pub fn reset_trailer_bytes_read() {
+    TRAILER_BYTES_READ.with(|counter| counter.set(0));
+}
+
 /// How large a compressor look-back window this reader will hold, unless told otherwise.
 ///
 /// **256 kB, derived from the spec's own figures rather than chosen.** The budget is 500 kB an
@@ -228,12 +259,36 @@ impl PspReader {
         self.window_budget_bytes
     }
 
-    /// The writer's closing payload: one seek and one read, and it may be empty.
+    /// The writer's closing payload: at most one seek and one read, and it may be empty.
     ///
     /// **Opaque here.** The container stores bytes and hands them back; what is in them is the
     /// writer's business (spec §3.4).
+    ///
+    /// **The whole payload, which is a size the caller should mean to pay.** A trailer can be
+    /// large — ng's walk puts the sample's census in one, and at whole-genome scale that is tens
+    /// of megabytes a sample (`psp_census_pair.md` §3.1) — so a caller that only needs to know
+    /// what kind of thing is in there asks [`trailer_head`](Self::trailer_head) instead.
     pub fn trailer(&mut self) -> Result<Vec<u8>, PspReadError> {
-        let mut payload = vec![0u8; self.footer.trailer_bytes as usize];
+        self.trailer_head(usize::MAX)
+    }
+
+    /// The first `at_most` bytes of the writer's closing payload, or all of it when it is
+    /// shorter.
+    ///
+    /// **What a caller that has to identify the payload uses**, rather than take it whole: a
+    /// payload that names its own format in a fixed prefix can be told apart from that prefix
+    /// alone, and a cohort is thousands of these files.
+    ///
+    /// **A short answer is not an error.** A trailer of four bytes asked for ten gives four, and
+    /// what that means — a payload too short to be what the caller was looking for — is the
+    /// caller's to decide.
+    ///
+    /// Every byte it returns is counted against [`trailer_bytes_read`].
+    pub fn trailer_head(&mut self, at_most: usize) -> Result<Vec<u8>, PspReadError> {
+        // **`try_from` and not `as`**, which would wrap on a 32-bit target and turn a trailer
+        // wider than a `usize` into a few bytes reported as the whole of it.
+        let held = usize::try_from(self.footer.trailer_bytes).unwrap_or(usize::MAX);
+        let mut payload = vec![0u8; at_most.min(held)];
         if payload.is_empty() {
             return Ok(payload);
         }
@@ -245,6 +300,7 @@ impl PspReader {
                 while_doing: "reading the trailer",
                 source,
             })?;
+        count_trailer_bytes_read(payload.len() as u64);
         Ok(payload)
     }
 
@@ -630,6 +686,39 @@ mod tests {
         let mut sorted = psp.block_index().to_vec();
         sorted.sort();
         assert_eq!(sorted, psp.block_index());
+    }
+
+    /// **The head of a trailer is the bytes asked for and no more**, which is the whole reason
+    /// it exists: a payload can be tens of megabytes — ng's walk puts a census in one — and a
+    /// caller that only has to identify it reads its first bytes.
+    #[test]
+    fn the_head_of_a_trailer_is_the_bytes_asked_for_and_no_more() {
+        let (_dir, path) = a_finished_psp();
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+
+        assert_eq!(psp.trailer_head(4).expect("the head reads"), b"a pe");
+        assert_eq!(
+            psp.trailer_head(4).expect("the head reads again"),
+            b"a pe",
+            "each call seeks to the trailer, so a second gives the same bytes as the first",
+        );
+    }
+
+    /// **A trailer shorter than the head asked for gives what there is**, rather than failing:
+    /// what a short payload means is the caller's to decide, and a reader that returned an error
+    /// would make *this trailer is too short to be a census* indistinguishable from *this file
+    /// will not read*.
+    #[test]
+    fn a_trailer_shorter_than_the_head_asked_for_gives_what_there_is() {
+        let (_dir, path) = a_finished_psp();
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        let whole = psp.trailer().expect("the trailer reads");
+
+        assert_eq!(
+            psp.trailer_head(whole.len() + 1_000)
+                .expect("the head reads"),
+            whole,
+        );
     }
 
     /// **Opening decompresses no block**, shown rather than asserted: every byte of the blocks

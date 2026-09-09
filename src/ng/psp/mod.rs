@@ -101,7 +101,9 @@ pub use header::{
 pub use index::{
     BlockIndexEntry, IndexDecodeError, IndexEntryField, checksum_index, decode_index, encode_index,
 };
-pub use reader::{DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES, PspReader};
+pub use reader::{
+    DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES, PspReader, reset_trailer_bytes_read, trailer_bytes_read,
+};
 pub use record::{
     BodyByteCount, DecodedRecord, DecodedRecordBody, LocatedRecord, OffsetBase, RecordDecodeError,
     RecordEncodeError, RecordEncoder, RecordHead, RecordLayout, RecordLayoutError, decode_record,
