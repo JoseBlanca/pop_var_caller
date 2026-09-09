@@ -226,9 +226,17 @@ of the three fields that differs, in the order a person should fix them — cata
 regions ([`segmentation_inputs.rs:42-55`](../../../../src/ng/segmentation_inputs.rs)) — **and is
 called only from its own tests.** A step 2 that took the criteria from the first psp's header and
 never asked the rest would build a selection the other samples' censuses cannot match, and learn
-it twenty seconds later from the fit's digest check, reported as *another selection*. So both
-commands compare every psp's `SegmentationInputs` against the first's and refuse with the field
-named, before anything else is read.
+it twenty seconds later from the fit's digest check, reported as *another selection*.
+
+**Decision (owner, 2026-09-09): a cohort whose psps disagree on the catalog or the criteria is a
+hard failure for every command that opens one** — `estimate-parameters`, `regenerate-census`, and
+`call-from-psps` alike, since two psps typed under different criteria cannot be called together
+either. The check goes where the analysed-regions check already is, `OpenPspCohort::open`
+([`psp_caller.rs:677-690`](../../../../src/ng/run/psp_caller.rs)), which `call-from-psps` and
+today's `generate-census` already call ([`call_from_psps.rs:494`](../../../../src/pop_var_caller_exp/call_from_psps.rs),
+[`generate_census.rs:413`](../../../../src/pop_var_caller_exp/generate_census.rs)); step 2 opens
+its cohort the same way. Written once, refusing with the sample and the field named, before
+anything else is read.
 
 **Flags removed from `estimate-parameters`:** `--census`, `--min-copies`, `--min-period`,
 `--max-period`, `--max-str-len`, `--min-purity`. **Kept:** `--reference` (the FASTA's path is not in
@@ -407,9 +415,9 @@ in place and whole, and the one that failed absent, never a stump (§3.2).
   and no `--force`, and skips fresh pairs unless `--all` — §8.
 - Appending to a psp has no user case and stays out of the command surface — §5.
 
-**Open.**
+- A cohort whose psps disagree on the catalog or the repeat criteria is refused by every command
+  that opens one, `call-from-psps` included — §6.
+- The refusal at step 2 does **not** estimate how long regeneration will take — owner, 2026-09-09:
+  it depends too much on the hardware. It names the samples and the command, nothing more.
 
-- **Should the refusal estimate how long the regeneration will take?** Leaning: yes, one line —
-  the psp sizes are in hand and §2 gives 45 MB a second a thread — because the whole reason for
-  refusing is that the cost is otherwise invisible. Confirm before code; it is a sentence in
-  §4.3's report either way.
+**Open.** None.

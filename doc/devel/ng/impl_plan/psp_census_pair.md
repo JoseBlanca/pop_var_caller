@@ -29,6 +29,8 @@ No command takes a census path. No command takes a repeat criterion the psp head
 
 - one judgement of whether a psp's census is fresh, made from the two files' headers, shared by
   step 2 and the repair command (spec §4.2, §8);
+- a cohort whose psps disagree on the catalog or the repeat criteria refused by every command that
+  opens one, `call-from-psps` included (spec §6);
 - `estimate-parameters` over `--psp`, with the six duplicated flags removed and every stale pair
   reported before the reference is read (spec §4, §6);
 - `regenerate-census` in place of `generate-census`: beside the psp, no `--output-dir`, no
@@ -48,8 +50,6 @@ No command takes a census path. No command takes a repeat criterion the psp head
   Checkpoint C's knobs question; spec §7 records why it would be cheap.
 - **the census's per-position rule under a widened record** — spec §12, owned by
   [`parameter_prepass_census_sites.md`](../spec/parameter_prepass_census_sites.md) §2.
-- **the refusal's time estimate** — spec §13's one open question; confirm at Checkpoint B before
-  adding the sentence.
 
 ---
 
@@ -115,10 +115,13 @@ header digest, and calls `freshness_by_header`. Unit tests on fixtures for every
 a census file whose version word is `VERSION − 1` and one whose psp has been rewritten.
 *Depends:* A1. *Source:* spec §4.2, §5, §9 (the *older format is `Malformed`* trap).
 
-☐ **A3 — the cohort agrees on its settings.** Every psp's `SegmentationInputs` compared against the
-first's with `first_difference`, which has no caller outside its own tests today; a disagreement is
-refused naming the sample and the field. A test with two psps walked under different `min_copies`.
-*Depends:* —. *Source:* spec §6, second paragraph.
+☐ **A3 — the cohort agrees on its settings, in the psp cohort opener.** `OpenPspCohort::open`
+compares every psp's `SegmentationInputs` against the first's with `first_difference` — which has no
+caller outside its own tests today — beside its existing analysed-regions check
+([`psp_caller.rs:677-690`](../../../../src/ng/run/psp_caller.rs)); a disagreement is refused
+naming the sample and the field. `call-from-psps` gets the refusal for free. Tests: two psps walked
+under different `min_copies` refused by the opener, and refused at `call-from-psps`.
+*Depends:* —. *Source:* spec §6, the decision paragraph.
 
 ☐ **A4 — a cohort judged whole.** Every psp of a list judged, no early return; the result is one
 verdict a sample, in the order given, plus a directory expansion identical to today's `--psp`
@@ -161,8 +164,7 @@ staleness the header cannot show and `--all` is what forces it.
 *Depends:* B3. *Source:* spec §4.2's fourth row, §8.
 
 > **Checkpoint B: step 2 takes psps, reads nothing it could be told wrongly, and refuses a stale
-> cohort whole.** Decide spec §13's open question here — whether the refusal estimates the
-> regeneration's duration. Pause for review.
+> cohort whole.** Pause for review.
 
 ### Milestone C — `regenerate-census`
 
