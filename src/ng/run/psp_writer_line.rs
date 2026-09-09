@@ -46,6 +46,21 @@
 //! that reaches the end of its queue without having been asked returns the writer unsealed and
 //! drops it, which is what the walk did itself before the writer moved off its thread.
 //!
+//! # The seal carries the trailer, because the trailer is known only when the walk is over
+//!
+//! [`PspWriter::finish`] takes the closing payload the file will carry, and for a sample walk
+//! that payload is its census — accumulated from every locus as it goes past and encoded once
+//! the last one has (`psp_census_pair.md` §3.1). So the bytes have to reach the writing thread,
+//! and the seal is the one message that can carry them: they cross the seam **once**, moved
+//! rather than copied, at the end of a walk that has already handed over millions of loci.
+//! (The census is still *encoded* twice for now — once for the trailer and once for the file
+//! beside the psp that plan step A2 deletes. Only the seam is crossed once.)
+//!
+//! A walk that builds no census closes with [`PspTrailer::Nothing`], which is what every psp in
+//! this tree carried before. **That is a named choice rather than an empty `Vec`** — see the
+//! type — because a psp sealed with no census reads back as a whole file, and the parameters fit
+//! is where the mistake would be found, a stage and a re-walk later.
+//!
 //! # Loci travel in batches, and that is not a tuning knob
 //!
 //! **Handing one locus at a time cost more than it saved.** A walk emits about 350,000 loci a
@@ -86,7 +101,35 @@ const BATCHES_AWAITING_ENCODING: usize = 16;
 /// **The seal is a message and not the end of the queue** — see the module note's ⚠.
 enum ToWriter {
     Records(Vec<SampleLocusObservations>),
-    Seal,
+    /// Seal the file, closing it with this payload.
+    Seal(PspTrailer),
+}
+
+/// **What a psp closes with**: the sample's census, or a deliberate nothing.
+///
+/// **A named type rather than a bare `Vec<u8>`, and the reason is what the mistake costs.** An
+/// empty payload is a legal trailer and a psp that carries one is a whole psp — it opens, it
+/// indexes, it reads back every record and reports the right count. So a caller that *meant* to
+/// pass a census and passed `Vec::new()` produces a file nothing downstream refuses, and the
+/// omission surfaces at the parameters fit, which is a stage and a whole re-walk away from the
+/// line that caused it (`psp_census_pair.md` §3.3 names that state as the one the design exists
+/// to remove). With this type, closing with nothing is a sentence the author had to write.
+#[derive(Debug)]
+pub enum PspTrailer {
+    /// The sample's census, encoded (`psp_census_pair.md` §3.1).
+    Census(Vec<u8>),
+    /// No census was built, so the file closes with nothing.
+    Nothing,
+}
+
+impl PspTrailer {
+    /// What [`PspWriter::finish`] is handed.
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Census(bytes) => bytes,
+            Self::Nothing => &[],
+        }
+    }
 }
 
 /// The psp writer, running on a thread of its own.
@@ -158,16 +201,23 @@ impl PspWriterLine {
         }
     }
 
-    /// Ask for the file, wait for the last record to be written, and seal it.
+    /// Ask for the file, wait for the last record to be written, and seal it with `trailer`.
     ///
     /// **The seal is asked for and then the queue is closed**, in that order and both before the
     /// join: a join before the close would wait for a thread that is waiting for a locus, and a
     /// close before the request would be indistinguishable from the walk giving up (the module
     /// note's ⚠).
-    pub fn finish(mut self) -> Result<WriteStats, RunError> {
+    ///
+    /// **`trailer` is the file's closing payload**, handed straight to [`PspWriter::finish`] —
+    /// the sample's census for a walk that built one, and [`PspTrailer::Nothing`] for one that
+    /// did not. It is taken by value because it crosses the thread seam (the module note).
+    pub fn finish(mut self, trailer: PspTrailer) -> Result<WriteStats, RunError> {
         self.hand_the_batch_over();
         if let Some(to_write) = self.to_write.as_ref() {
-            let _ = to_write.send(ToWriter::Seal);
+            // **A send that fails means the thread panicked** — nothing else drops the receiver
+            // while this sender is alive — and the `join` below re-raises that panic. So the
+            // census travelling in the message is not a loss that can pass for a success.
+            let _ = to_write.send(ToWriter::Seal(trailer));
         }
         self.to_write = None;
         let worker = self
@@ -212,11 +262,29 @@ fn write_loci(
     emptied: &crossbeam_channel::Sender<Vec<SampleLocusObservations>>,
 ) -> Result<Option<WriteStats>, RunError> {
     let mut failure: Option<RunError> = None;
-    let mut sealing = false;
+    let mut sealing: Option<PspTrailer> = None;
     for message in queue {
         match message {
-            ToWriter::Seal => sealing = true,
+            ToWriter::Seal(trailer) => {
+                // **One sender asks once.** `finish` is the only place a seal is sent, it
+                // consumes the line, and the sender is never cloned — so a second seal would
+                // mean a change elsewhere, and it would silently replace this payload with
+                // another rather than fail.
+                debug_assert!(
+                    sealing.is_none(),
+                    "the file was asked to seal twice, and the second census would win",
+                );
+                sealing = Some(trailer);
+            }
             ToWriter::Records(mut batch) => {
+                // **And nothing arrives after it**: `finish` hands the last batch over before
+                // it asks for the seal. A locus arriving later would be written into the block
+                // stream and sealed over, giving a whole-looking psp holding a record its own
+                // census never saw.
+                debug_assert!(
+                    sealing.is_none(),
+                    "a locus arrived after the seal was asked for",
+                );
                 for locus in batch.drain(..) {
                     if failure.is_some() {
                         continue;
@@ -237,11 +305,11 @@ fn write_loci(
     if let Some(failure) = failure {
         return Err(failure);
     }
-    if !sealing {
+    let Some(trailer) = sealing else {
         return Ok(None);
-    }
+    };
     writer
-        .finish(&[])
+        .finish(trailer.bytes())
         .map(Some)
         .map_err(|source| RunError::PspNotWritten {
             path,
@@ -327,7 +395,9 @@ mod tests {
         // Backwards, which the block builder refuses — and the walk is told nothing here.
         line.push(a_record(0, 900, 1));
         line.push(a_record(0, 1_100, 1));
-        let failure = line.finish().expect_err("the second record goes backwards");
+        let failure = line
+            .finish(PspTrailer::Nothing)
+            .expect_err("the second record goes backwards");
         match failure {
             RunError::RecordNotWritten { locus, .. } => {
                 assert_eq!(
@@ -352,11 +422,80 @@ mod tests {
         for step in 0..loci {
             line.push(a_record(0, 1 + step * 10, 1));
         }
-        let stats = line.finish().expect("it seals");
+        let stats = line.finish(PspTrailer::Nothing).expect("it seals");
         assert_eq!(
             stats.records, loci,
             "every locus handed over is in the file"
         );
         PspWriter::append(&path).expect("a sealed file reopens");
+    }
+
+    /// **The bytes handed to `finish` are the bytes the sealed file carries.**
+    ///
+    /// This is the seam the census crosses (`psp_census_pair.md` §3.1): the payload is built on
+    /// the walking thread and written by the writing one, and nothing else in the pipeline would
+    /// notice if it arrived empty — a psp with an empty trailer is a well-formed psp, and every
+    /// one this tree wrote before carried exactly that. So the round trip is asserted here,
+    /// where the handover is, rather than only end to end in the gatherer.
+    #[test]
+    fn the_file_carries_the_trailer_the_line_was_asked_to_seal_with() {
+        let (_dir, path) = a_file();
+        let writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        let mut line = PspWriterLine::start(writer, path.clone());
+        line.push(a_record(0, 1, 1));
+        let payload = b"a sample's census would be here".to_vec();
+        let stats = line
+            .finish(PspTrailer::Census(payload.clone()))
+            .expect("it seals");
+        assert_eq!(stats.records, 1, "the record is still in the file");
+
+        let mut reader = crate::ng::psp::PspReader::open(&path).expect("the psp opens");
+        assert_eq!(
+            reader.trailer().expect("the trailer reads"),
+            payload,
+            "the payload the line was given is the one the file holds",
+        );
+    }
+
+    /// **A trailer the size a real census is.** The round trip above is 31 bytes, and until this
+    /// change 31 bytes was the largest trailer anything in this tree had ever written — every
+    /// other `finish` under test passes an empty slice or a short literal. A whole genome's
+    /// census is a few megabytes of positions plus tens of megabytes of tracts
+    /// (`psp_census_pair.md` §3.1), so **the size class this change moves the trailer to is the
+    /// only one production will ever see, and it was the one class with no test**.
+    ///
+    /// What it would catch is silent: a truncation or an offset that only shows once the
+    /// payload outgrows the writer's buffer leaves a psp that opens, indexes and reads back
+    /// every record, and hands the fit a census that stops early — reported as a malformed
+    /// census a whole pipeline stage from its cause. The bytes vary rather than repeat, because
+    /// a constant payload would survive a defect that wrote one page twice.
+    #[test]
+    fn a_trailer_of_megabytes_round_trips_through_the_line() {
+        let (_dir, path) = a_file();
+        let writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        let mut line = PspWriterLine::start(writer, path.clone());
+        line.push(a_record(0, 1, 1));
+        let payload: Vec<u8> = (0..4_000_000u32).map(|at| (at % 251) as u8).collect();
+        let stats = line
+            .finish(PspTrailer::Census(payload.clone()))
+            .expect("it seals");
+        assert_eq!(stats.records, 1, "the record is still in the file");
+
+        let mut reader = crate::ng::psp::PspReader::open(&path).expect("the psp opens");
+        let read_back = reader.trailer().expect("the trailer reads");
+        assert_eq!(
+            read_back.len(),
+            payload.len(),
+            "the trailer came back a different length than it went in",
+        );
+        assert!(
+            read_back == payload,
+            "the trailer first differs at byte {}",
+            read_back
+                .iter()
+                .zip(&payload)
+                .position(|(back, sent)| back != sent)
+                .expect("the lengths match, so a difference has a position"),
+        );
     }
 }

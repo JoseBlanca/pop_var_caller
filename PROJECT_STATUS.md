@@ -4257,6 +4257,37 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - ~~For Checkpoint A (review Mi9): record the no-version-bump ruling~~ — recorded in the
     plan's Checkpoint A note and spec §6.1 (`a1fdab11`).
 
+#### The census lives inside the psp — one file a sample
+- **Status:** `in-flight` — Milestone A step A1 committed; A2, A3, A4 to come, then Checkpoint A.
+- **Plan:** [psp_census_pair.md](doc/devel/ng/impl_plan/psp_census_pair.md); **Spec:** [psp_census_pair.md](doc/devel/ng/spec/psp_census_pair.md)
+- **Branch:** `census-vs-psp-perf`.
+- **What it closes:** a sample is two files today — `<sample>.psp` and `<sample>.census` beside it —
+  and `estimate-parameters` takes census paths plus six flags that must equal what the psps were
+  walked under. After this plan the census is the psp's trailer, there is no census file, the
+  settings come from the psp header, and a cohort whose psps disagree on the catalog or the repeat
+  criteria is refused by every command that opens one. `generate-census` becomes
+  `regenerate-census`, the repair `estimate-parameters` tells a user to run.
+- **Impl report:** [Milestone A](doc/devel/reports/implementations/ng_psp_census_pair_milestone_a_2026-09-09.md)
+- **Latest review:** [Milestone A](doc/devel/reports/reviews/psp_census_pair_milestone_a_2026-09-09.md)
+- **A1 done — the walk hands the census to `finish`.** `PspWriterLine::finish` takes the file's
+  closing payload; the walk finishes and encodes its census before sealing, and the bytes cross
+  the writing thread's queue once. The census is written with **no pileup identity** (spec §3: a
+  census that *is* its psp's trailer has no pairing left to check). 6,677 lib tests pass against
+  the baseline's 6,672.
+- **⚠ The baseline this milestone is judged against is red in four ways and none of them are this
+  plan's**: `cargo fmt --check` in 4 files, `check --all-targets` in 4 examples that no longer
+  compile, `clippy -D warnings` with 14 errors, and one integration test
+  (`a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele`). Recorded in full at the
+  head of the impl report; the per-step gate is `--lib --bins --tests` plus a
+  `check --all-targets --keep-going` that must fail on exactly those four examples.
+- **Deviation absorbed at A1:** the plan has A1 delete `write_psp`'s census-path argument, which
+  cannot be committed green — the tests that assert `<sample>.census` exists are A2's to rewrite.
+  A1 adds the trailer beside the sidecar; A2 removes the sidecar, the argument and those tests
+  together. While it stands the census is encoded twice, and a failure writing the sidecar throws
+  away a psp that is whole; both are recorded at the site.
+- **Open:** nothing needing a decision. Carried to A2: `write_census_beside`'s paired `Option`s and
+  the second encode go with the sidecar.
+
 #### Step 5/6 — STR observations through a run: routing, the tract slot, and the kind at the merge
 - **Status:** `implemented` — **✅ THE WHOLE PLAN COMPLETE: milestones A, B and C, all twelve
   steps, merged to `main`** (owner's ruling, 2026-09-02). **A run now produces repeat-tract

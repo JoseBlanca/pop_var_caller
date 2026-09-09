@@ -459,17 +459,6 @@ pub enum RunError {
         source: Box<crate::ng::psp::PspWriteError>,
     },
 
-    /// The sample's census file could not be produced, though its psp was.
-    ///
-    /// **This fails the sample's walk rather than being reported and passed over** (spec §2,
-    /// plan step G2). The two files are one product: the census is what a parameters fit reads,
-    /// and a psp without one forces the sample to be walked again — which is the single thing
-    /// psp mode exists to avoid. A run that left a finished-looking psp beside a missing census
-    /// would be storing that re-walk for somebody to discover later.
-    ///
-    /// **Three different failures reach it and the source says which**: the psp's header would
-    /// not encode, the file would not be created, or the census encoder refused. The path is
-    /// what locates all three.
     /// This run's census positions could not be chosen, so no sample can build one.
     ///
     /// **Refused before the first sample is walked**, because the selection is the run's and not
@@ -481,6 +470,20 @@ pub enum RunError {
         source: Box<crate::ng::parameter_estimation::joint::loci::SelectionError>,
     },
 
+    /// The sample's census file could not be produced, though its psp was.
+    ///
+    /// **This fails the sample's walk rather than being reported and passed over** (spec §2,
+    /// plan step G2). The two files were one product: the census is what a parameters fit
+    /// reads, and a psp without one forced the sample to be walked again — which is the single
+    /// thing psp mode exists to avoid.
+    ///
+    /// **⚠ That reasoning is spent, and the variant goes with the file it is about.** Since the
+    /// census became the psp's own trailer (`psp_census_pair.md` §3) a psp whose second copy
+    /// failed to write is a finished sample, not a lost one — so failing the walk here now
+    /// costs a re-walk it does not owe. Plan step A2 deletes the copy and this variant with it.
+    ///
+    /// **Two failures reach it and the source says which**: the file would not be created, or
+    /// the census encoder refused while writing to it. The path locates both.
     #[error("the census at {} could not be written", path.display())]
     CensusNotWritten {
         /// The file that could not be produced.
@@ -488,6 +491,21 @@ pub enum RunError {
         /// What refused it.
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// The sample's census could not be encoded, so nothing could be sealed into its psp.
+    ///
+    /// **It names the sample and no path, because no file was touched**: the census is encoded
+    /// into memory to become the psp's trailer (`psp_census_pair.md` §3.1), and this fails
+    /// before the file is sealed — so the psp at whatever path the run was writing to is a
+    /// stump every reader refuses, and pointing at it would send someone to the wrong file.
+    #[error("the census for {sample} could not be encoded")]
+    CensusNotEncoded {
+        /// Whose census it was.
+        sample: String,
+        /// What the encoder refused.
+        #[source]
+        source: Box<crate::ng::parameter_estimation::joint::census::CensusError>,
     },
 
     // ---------------------------------------------------------------------

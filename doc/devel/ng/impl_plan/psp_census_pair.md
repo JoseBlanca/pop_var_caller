@@ -108,7 +108,7 @@ Confirm each before step A1.
 
 ### Milestone A — the census in the trailer, written and read back
 
-☐ **A1 — the walk hands the census to `finish`.** `PspWriterLine::finish` takes the trailer's bytes
+✅ **A1 — the walk hands the census to `finish`.** `PspWriterLine::finish` takes the trailer's bytes
 and passes them to `PspWriter::finish`; `write_psp` finishes and encodes its census *before*
 finishing the line, and hands the bytes across; the census is written with its pileup identity
 absent (`None`, already an `Option`); `write_psp`'s census-path argument goes. A gatherer opened
