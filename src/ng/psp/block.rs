@@ -1637,7 +1637,8 @@ impl<R: std::io::Read> BlockStream<R> {
                     self.live_reads.apply_the_changes_just_parsed();
                     let mut body = None;
                     let record = if wanted {
-                        match decode_the_body_of(&found, self.live_reads.live().ids(), &self.layout) {
+                        match decode_the_body_of(&found, self.live_reads.live().ids(), &self.layout)
+                        {
                             Ok(decoded) => Some(decoded.record),
                             Err(refused) => {
                                 return Some(Err(self.fail(BlockReadError::from_record(refused))));
@@ -5819,7 +5820,11 @@ mod tests {
             let body = met.body.clone().expect("a declined body is kept");
             heads.push((met.head, body));
         }
-        assert_eq!(heads.len(), forward.len(), "the two walks met the same records");
+        assert_eq!(
+            heads.len(),
+            forward.len(),
+            "the two walks met the same records"
+        );
 
         let layout = RecordLayout::from_manifest(&manifest).expect("a valid manifest");
         let live: Vec<u64> = Vec::new();
@@ -5838,5 +5843,4 @@ mod tests {
             );
         }
     }
-
 }

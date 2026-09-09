@@ -23,7 +23,7 @@
 //! `#[error(transparent)]` at the commands, so one mistake reads the same however it was
 //! reached.
 
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -43,7 +43,8 @@ use crate::ng::read::input::read_groups::ReadGroups;
 use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::repeat_catalog::StrRepeatCriteria;
 use crate::ng::run::cohort_merge::{
-    CohortLocusBuilderRegionsLen, DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN, MaxCohortLocusSpan,
+    CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen,
+    DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN, MaxCohortLocusSpan,
 };
 use crate::ng::run::{MergeParameters, RunReport};
 use crate::ng::types::{DomainError, InbreedingF, Ploidy};
@@ -408,6 +409,64 @@ pub fn round_width_for(samples: usize) -> CohortLocusBuilderRegionsLen {
     )
 }
 
+/// **How a round is cut up so that it holds what one region holds today** — the width of each
+/// building region and how many of them are worked at once.
+///
+/// # Why the two numbers are one decision
+///
+/// A round holds every sample's observations over `regions_in_flight × width` bases, where the
+/// one-region-at-a-time driver holds them over `width`. So asking for more regions in flight
+/// without narrowing them multiplies the memory that [`round_width_for`] was written to bound —
+/// silently, and by the number of cores the machine happens to have. **The rule here is that
+/// the round holds the ground one region holds today**: `ground` is that width — the flag's if
+/// one was typed, [`round_width_for`]'s otherwise — and this divides it.
+///
+/// How far it can be divided is set by the merge's own floor
+/// ([`DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN`], 500 bases), below which a region is too
+/// narrow to be worth a fan-out and a barrier, and by the pool: there is nothing to gain from
+/// more regions in flight than there are threads to work them.
+///
+/// # What it gives, and where it gives nothing
+///
+/// | samples | ground | regions in flight | width |
+/// |---|---|---|---|
+/// | 8 | 16,000 | 18 | 888 |
+/// | 63 | 7,936 | 15 | 529 |
+/// | 1,000 | 500 | 1 | 500 |
+///
+/// **Above about a thousand samples it hands back one region and today's behaviour**, because
+/// `round_width_for` is already at its floor there and there is no ground left to divide. That
+/// is the honest degradation and it is the one this rule chooses: a large cohort keeps the
+/// memory it has and gives up the parallelism, rather than keeping the parallelism and
+/// multiplying the memory by the core count. Nothing at that end of the range has been
+/// measured; what has been is 1 through 63 accessions on the tomato benchmark, where peak
+/// resident rises between 4% and 13% and the calling pass falls by up to 5.5×.
+#[must_use]
+pub fn round_shape_for(
+    ground: CohortLocusBuilderRegionsLen,
+) -> (
+    CohortLocusBuilderRegionsLen,
+    CohortLocusBuilderRegionsInFlight,
+) {
+    let ground = ground.get();
+    let floor = DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN;
+    let workers = rayon::current_num_threads().max(1);
+    // PANIC-FREE: `ground >= floor` because `round_width_for` clamps to it, so the division is
+    // at least one, and `workers` is at least one.
+    let in_flight = usize::try_from(ground / floor)
+        .unwrap_or(usize::MAX)
+        .clamp(1, workers);
+    let width = (ground / u32::try_from(in_flight).unwrap_or(u32::MAX)).max(floor);
+    (
+        CohortLocusBuilderRegionsLen(
+            NonZeroU32::new(width).expect("the max above is a non-zero constant"),
+        ),
+        CohortLocusBuilderRegionsInFlight(
+            NonZeroUsize::new(in_flight).expect("the clamp's floor is one"),
+        ),
+    )
+}
+
 /// **The ploidy this run was asked for, judged against what the caller can score.**
 ///
 /// Two refusals, and the second is the one that used to be a panic. `Ploidy::try_new` turns
@@ -664,14 +723,25 @@ pub fn merge_parameters_for(
                 asked: max_cohort_locus_span,
             },
         )?),
-        cohort_locus_builder_regions_len: match cohort_locus_builder_regions_len {
-            Some(asked) => CohortLocusBuilderRegionsLen(
-                NonZeroU32::new(asked)
-                    .ok_or(CallingRunError::CohortLocusBuilderRegionsLenIsZero { asked })?,
-            ),
-            None => round_width_for(samples),
-        },
-        ..MergeParameters::DEFAULT
+        // **One decision, two numbers.** The ground a round holds is the width the flag names
+        // or the one the cohort's size gives; `round_shape_for` then divides that ground
+        // between the regions worked at once, so asking for a round costs the memory one
+        // region already cost rather than that memory times the core count.
+        ..{
+            let ground = match cohort_locus_builder_regions_len {
+                Some(asked) => CohortLocusBuilderRegionsLen(
+                    NonZeroU32::new(asked)
+                        .ok_or(CallingRunError::CohortLocusBuilderRegionsLenIsZero { asked })?,
+                ),
+                None => round_width_for(samples),
+            };
+            let (width, in_flight) = round_shape_for(ground);
+            MergeParameters {
+                cohort_locus_builder_regions_len: width,
+                cohort_locus_builder_regions_in_flight: in_flight,
+                ..MergeParameters::DEFAULT
+            }
+        }
     })
 }
 

@@ -62,7 +62,10 @@ use crate::ng::run::cohort_merge::serial::{
     merge_cohort_handing_each_locus_over,
     merge_cohort_handing_each_locus_over_covering_samples_in_parallel, merge_cohort_through_cache,
 };
-use crate::ng::run::cohort_merge::{CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads};
+use crate::ng::run::cohort_merge::{
+    CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
+    MinAltReads,
+};
 use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::ng::vcf::VcfRecord;
 use crate::ng::vcf::assemble::assemble_record;
@@ -149,6 +152,21 @@ pub struct AlignmentInputs<'a> {
 pub struct MergeParameters {
     /// How many reference bases one builder's region covers.
     pub cohort_locus_builder_regions_len: CohortLocusBuilderRegionsLen,
+    /// How many of those regions are built and called at once.
+    ///
+    /// **One means the streaming driver**, which is what direct mode uses and what psp mode
+    /// used before the round driver: a region is built, its loci are called and written, and
+    /// only then is the next region covered. More than one means
+    /// [`rounds::merge_and_call_in_rounds`](super::cohort_merge::rounds::merge_and_call_in_rounds),
+    /// where a round's regions are built and genotyped on the pool and the records fold back
+    /// in genome order.
+    ///
+    /// **It is the second half of one memory decision, not a thread count.** A round holds
+    /// every sample's observations over `regions_in_flight × cohort_locus_builder_regions_len`
+    /// bases, so this and the width are chosen together —
+    /// `crate::pop_var_caller_exp::calling_run::round_shape_for` is where, and it divides the
+    /// ground rather than multiplying it.
+    pub cohort_locus_builder_regions_in_flight: CohortLocusBuilderRegionsInFlight,
     /// The widest a cohort locus may be, in reference bases, before it is refused rather than
     /// built.
     pub max_cohort_locus_span: MaxCohortLocusSpan,
@@ -160,6 +178,9 @@ impl MergeParameters {
     /// The shipped defaults, each taken from its own type rather than restated here.
     pub const DEFAULT: Self = Self {
         cohort_locus_builder_regions_len: CohortLocusBuilderRegionsLen::DEFAULT,
+        // **One region: the streaming driver, and the answer every other default gives.** A
+        // caller that wants a round asks for one, and asks for its width in the same breath.
+        cohort_locus_builder_regions_in_flight: CohortLocusBuilderRegionsInFlight::ONE,
         max_cohort_locus_span: MaxCohortLocusSpan::DEFAULT,
         min_alt_reads: MinAltReads::DEFAULT,
     };
@@ -6786,4 +6807,248 @@ mod records_handed_over_as_the_run_finishes_them {
             }
         }
     }
+}
+
+// ============================================================================================
+// PROTOTYPE (2026-09-09 concurrency review) — the round-of-regions calling driver.
+//
+// Everything below this line is scaffolding for a measurement, not a shipping shape. It is
+// reached only when `NG_ROUND_CALL` is set in the environment.
+// ============================================================================================
+
+/// One worker's mutable state for a round of regions. Rayon builds one per task split.
+///
+/// **The tract counts leave on `Drop`**, into the run's shared total: `map_init` gives no way to
+/// read a worker's state back, and a round's scratch is dropped when its `par_iter` finishes.
+struct RoundCallScratch<'a, S> {
+    shaping: GenericEvidenceScratch,
+    tract_shaping: SsrEvidenceScratch,
+    scratch: CallingScratch<S>,
+    padding_scratch: Vec<u8>,
+    window_coverage: Vec<WindowCoverage>,
+    tracts: TractOutcomes,
+    totals: &'a std::sync::Mutex<TractOutcomes>,
+}
+
+impl<S> Drop for RoundCallScratch<'_, S> {
+    fn drop(&mut self) {
+        let mut total = self
+            .totals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        total.called += self.tracts.called;
+        total.not_periodic += self.tracts.not_periodic;
+        total.too_many_alleles += self.tracts.too_many_alleles;
+        total.without_whole_repeats += self.tracts.without_whole_repeats;
+        total.bundles_set_aside += self.tracts.bundles_set_aside;
+    }
+}
+
+/// What a worker made of one locus — everything the calling thread has to do with it.
+enum RoundLocusOutcome {
+    /// No sample of the run can be called here; the span goes in the run's list.
+    NobodyToCall(GenomeRegion),
+    /// Counted inside the dispatch, nothing for the calling thread to do.
+    CountedInside,
+    /// Called, and no written genotype carried an alternative.
+    CalledNotWritten,
+    /// The padding fetch refused.
+    CalledFailed(RunError),
+    /// A record, its per-sample windows, and the locus it came from.
+    CalledRecord(Box<VcfRecord>, Vec<WindowCoverage>, GenomeRegion),
+}
+
+/// [`call_cohort_from_sources_handing_each_record_over`], with **each round of building regions
+/// built and genotyped on the pool** and the records folded back in genome order.
+///
+/// The sink stays on the calling thread and sees genome order, which is what makes the VCF
+/// identical to the streaming driver's.
+///
+/// # Errors
+///
+/// The streaming driver's.
+pub(crate) fn call_cohort_from_sources_in_rounds<Source, S, G, E>(
+    mut cache: ObservationCache<Source>,
+    inputs: CohortCallingInputs<'_>,
+    genotyper: &G,
+    hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
+) -> Result<CohortCallingOutcome<Source>, RunError>
+where
+    Source: ObservationSource<Error = RunError> + Send + Sync,
+    G: LocusGenotyper<S> + Sync,
+    S: Default + Send,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let CohortCallingInputs {
+        segmentation,
+        merge_parameters,
+        parameters,
+        calling_loop_config,
+        candidate_selection,
+        padding_reference,
+    } = inputs;
+    let run_sample_count = cache.sample_count();
+    let frozen = parameters.view();
+    let tract_selection = SsrSelectionConfig {
+        discovery: calling_loop_config.discovery.pre_pass_bar(),
+        ..SsrSelectionConfig::at_ploidy(frozen.ploidy())
+    };
+    let mut records_written = 0_u64;
+    let mut loci_called_but_not_written = 0_u64;
+    let mut loci_too_wide_to_assemble = Vec::new();
+    let mut loci_with_nobody_to_call = Vec::new();
+    let tract_totals = std::sync::Mutex::new(TractOutcomes::default());
+    let mut stopped: Option<RunError> = None;
+
+    let padding_reference = &padding_reference;
+    let frozen = &frozen;
+    let tract_selection = &tract_selection;
+    let tract_totals_ref = &tract_totals;
+
+    let merged = crate::ng::run::cohort_merge::rounds::merge_and_call_in_rounds(
+        segmentation.analysed_regions(),
+        &mut cache,
+        merge_parameters.cohort_locus_builder_regions_len,
+        merge_parameters.cohort_locus_builder_regions_in_flight,
+        merge_parameters.max_cohort_locus_span,
+        merge_parameters.min_alt_reads,
+        || RoundCallScratch::<S> {
+            shaping: GenericEvidenceScratch::default(),
+            tract_shaping: SsrEvidenceScratch::default(),
+            scratch: CallingScratch::default(),
+            padding_scratch: Vec::new(),
+            window_coverage: Vec::with_capacity(run_sample_count),
+            tracts: TractOutcomes::default(),
+            totals: tract_totals_ref,
+        },
+        |worker: &mut RoundCallScratch<'_, S>, observation: CohortObservation| {
+            let region = observation.region;
+            let RoundCallScratch {
+                shaping,
+                tract_shaping,
+                scratch,
+                padding_scratch,
+                window_coverage,
+                tracts,
+                totals: _,
+            } = worker;
+            let built = call_one_cohort_locus(
+                genotyper,
+                &observation,
+                frozen,
+                candidate_selection,
+                tract_selection,
+                calling_loop_config,
+                run_sample_count,
+                shaping,
+                tract_shaping,
+                tracts,
+                scratch,
+                |inference, remap, unmatched, verdict| {
+                    if !a_written_genotype_carries_an_alternative(&inference) {
+                        return Ok(None);
+                    }
+                    let alleles = inference.alleles();
+                    let padding = padding_base_beside(
+                        padding_reference,
+                        inference.region,
+                        alleles,
+                        padding_scratch,
+                    )
+                    .map_err(|source| RunError::PaddingBaseUnreadable {
+                        locus: inference.region,
+                        source,
+                    })?;
+                    let evidence = evidence_for_output(
+                        &inference,
+                        &observation,
+                        remap,
+                        unmatched,
+                        verdict,
+                        padding,
+                    );
+                    window_coverage.clear();
+                    window_coverage
+                        .extend(evidence.samples.iter().map(|sample| sample.window_coverage));
+                    Ok(Some(assemble_record(&inference, evidence)))
+                },
+            );
+            match built {
+                LocusOutcome::NobodyToCall => RoundLocusOutcome::NobodyToCall(region),
+                LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {
+                    RoundLocusOutcome::CountedInside
+                }
+                LocusOutcome::Called(Err(error)) => RoundLocusOutcome::CalledFailed(error),
+                LocusOutcome::Called(Ok(None)) => RoundLocusOutcome::CalledNotWritten,
+                LocusOutcome::Called(Ok(Some(record))) => RoundLocusOutcome::CalledRecord(
+                    Box::new(record),
+                    std::mem::take(window_coverage),
+                    region,
+                ),
+            }
+        },
+        &mut |outcome| match outcome {
+            RoundLocusOutcome::NobodyToCall(region) => loci_with_nobody_to_call.push(region),
+            RoundLocusOutcome::CountedInside => {}
+            RoundLocusOutcome::CalledNotWritten => loci_called_but_not_written += 1,
+            RoundLocusOutcome::CalledFailed(error) => {
+                if stopped.is_none() {
+                    stopped = Some(error);
+                }
+            }
+            RoundLocusOutcome::CalledRecord(record, windows, region) => {
+                if stopped.is_some() {
+                    return;
+                }
+                record_the_windows_at(
+                    GenomePosition {
+                        contig: region.contig,
+                        position: region.start,
+                    },
+                    &windows,
+                );
+                match hand_over(&record, &windows) {
+                    Ok(()) => records_written += 1,
+                    Err(source) => {
+                        stopped = Some(RunError::RecordNotWritten {
+                            locus: region,
+                            source: Box::new(source),
+                        });
+                    }
+                }
+            }
+        },
+        &mut loci_too_wide_to_assemble,
+    );
+    if let Some(stopped) = stopped {
+        return Err(stopped);
+    }
+    let displaced = merged?;
+    // **Spec §6.1's frontier rule says this cannot happen and the count is how a run would say
+    // it had**, which is `Organiser::displaced_locus_count`'s own stance. It is checked rather
+    // than reported because no field of the run report carries it yet, and a silent drop is the
+    // one outcome that would leave the VCF short with nothing saying so.
+    assert_eq!(
+        displaced, 0,
+        "{displaced} locus/loci were built on ground an earlier locus already owned, so the \
+         round driver's regions disagree about who owns what. This is a defect in ng rather \
+         than anything about the data.",
+    );
+
+    let tracts = tract_totals
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (sources, window_coverage_histograms) = cache.into_sources_and_histograms();
+    record_the_histograms(&window_coverage_histograms);
+    Ok(CohortCallingOutcome {
+        calling: CohortCallingTallies {
+            records_written,
+            loci_called_but_not_written,
+            loci_too_wide_to_assemble,
+            loci_with_nobody_to_call,
+            tracts,
+        },
+        sources,
+        window_coverage_histograms,
+    })
 }

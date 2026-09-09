@@ -469,7 +469,7 @@ impl Organiser {
 /// [`ObservationCache::cover`] order theirs and for the same reason: `GenomeRegion` has public
 /// fields and no constructor putting them in order, and an inverted span would otherwise walk
 /// the frontier backwards — past its own first base, releasing the locus behind it.
-fn first_base_of(locus_span: GenomeRegion) -> GenomePosition {
+pub(super) fn first_base_of(locus_span: GenomeRegion) -> GenomePosition {
     GenomePosition {
         contig: locus_span.contig,
         position: locus_span.start.min(locus_span.end),
@@ -478,7 +478,7 @@ fn first_base_of(locus_span: GenomeRegion) -> GenomePosition {
 
 /// A locus span's last base, genome-wide — where the frontier stands once the span is claimed.
 /// Ordered for [`first_base_of`]'s reason, and never before it.
-fn last_base_of(locus_span: GenomeRegion) -> GenomePosition {
+pub(super) fn last_base_of(locus_span: GenomeRegion) -> GenomePosition {
     GenomePosition {
         contig: locus_span.contig,
         position: locus_span.end.max(locus_span.start),

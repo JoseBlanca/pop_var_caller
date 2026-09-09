@@ -167,9 +167,14 @@ pub struct CallFromPspsArgs {
 
     /// How many threads to use. Zero means every core.
     ///
-    /// The output does not depend on this number: what the threads parallelise is the reading,
-    /// and everything after — building the loci, calling them, writing the VCF — stays on one
-    /// thread in genome order.
+    /// **The output does not depend on this number.** What the threads parallelise is the
+    /// reading of each sample's stored records, and then the building and calling of a round
+    /// of regions at once; the records fold back into genome order before anything is written,
+    /// so the VCF is the same at one thread and at every core.
+    ///
+    /// It also sets how many regions a round holds, and so the run's memory: the ground a round
+    /// covers is divided between them rather than multiplied by them, so a wider pool costs
+    /// narrower regions and not more resident memory.
     #[arg(long, default_value_t = 0)]
     pub threads: usize,
 
