@@ -87,7 +87,7 @@ pub use likelihood::{
 
 use crate::ng::calling::genotype_prior::SpectrumSeed;
 use crate::ng::calling::likelihood::ssr::RepeatTractOutlierWeight;
-use crate::ng::calling::quality::{ArtifactTestCounts, SiteQualityBuffers};
+use crate::ng::calling::quality::{ArtifactTestCounts, CountPriorMemo, SiteQualityBuffers};
 use crate::ng::locus_generation::{LocusKind, SsrDetail};
 use crate::ng::parameter_estimation::Estimate;
 use crate::ng::parameter_estimation::Provenance;
@@ -1328,6 +1328,9 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// `samples × ploidy + 1`: the fold's result back in the log domain, then the
     /// unnormalised log-posterior over the cohort's allele count once the prior is applied.
     log_allele_count_distribution: Vec<f64>,
+    /// The site quality's Beta-Binomial count prior, kept between loci because it is the same
+    /// vector at every locus of a run ([`CountPriorMemo`]).
+    count_prior: CountPriorMemo,
     /// One entry per allele: how many reads that allele drew, pooled over the samples the
     /// locus was called on — the walk the artifact summary picks its **primary
     /// alternative** from (`doc/devel/ng/spec/calling_quality.md` §6.3).
@@ -2484,6 +2487,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
             allele_count_distribution: &mut self.allele_count_distribution,
             allele_count_distribution_next: &mut self.allele_count_distribution_next,
             log_allele_count_distribution: &mut self.log_allele_count_distribution,
+            count_prior: &mut self.count_prior,
         }
     }
 
