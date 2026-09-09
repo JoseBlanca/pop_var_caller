@@ -231,6 +231,7 @@ fn run(
     let mut every_body = WhatItCost::new();
     let mut needed_bodies = WhatItCost::new();
     let mut no_bodies = WhatItCost::new();
+    let mut reads_a_position = 0.0_f64;
 
     // The kept tracts as regions, so a head can be judged against them the way the census
     // writer judges a locus — replicated from `CensusWriter::new`, which does not expose it.
@@ -277,9 +278,11 @@ fn run(
         };
 
         let at = Instant::now();
-        let counted = heads_only(psp_path)?;
+        let (counted, depth) = heads_only(psp_path)?;
         no_bodies.seconds.push(at.elapsed().as_secs_f64());
         no_bodies.records = counted;
+        no_bodies.bytes = depth.round() as u64;
+        reads_a_position = depth;
     }
 
     let report = |name: &str, cost: &WhatItCost| {
@@ -301,6 +304,17 @@ fn run(
     report("psp-every-body     ", &every_body);
     report("psp-needed-bodies  ", &needed_bodies);
     report("psp-no-bodies      ", &no_bodies);
+    println!("# reads compared with the reference, a position: {reads_a_position:.1}");
+    println!(
+        "# psp bytes a base of analysed ground: {:.2}",
+        psp_bytes as f64 / analysed_bases as f64
+    );
+    println!(
+        "# seconds a megabase of analysed ground: every-body {:.4}, needed-bodies {:.4}, no-bodies {:.4}",
+        every_body.best() * 1e6 / analysed_bases as f64,
+        needed_bodies.best() * 1e6 / analysed_bases as f64,
+        no_bodies.best() * 1e6 / analysed_bases as f64,
+    );
 
     println!(
         "ratio psp-every-body / census-file = {:.0}",
@@ -464,12 +478,22 @@ fn selective_census(
 }
 
 /// Every head, no body — the floor a psp route cannot go below.
-fn heads_only(path: &Path) -> Result<u64, Box<dyn Error>> {
+///
+/// **It also measures the depth this psp was written at**, from the heads it is reading anyway:
+/// reads compared with the reference, summed over records and divided by the bases they cover.
+/// That is the number every figure here has to be quoted beside, and taking it from the file
+/// removes any chance of labelling a measurement with a depth somebody remembered.
+fn heads_only(path: &Path) -> Result<(u64, f64), Box<dyn Error>> {
     let mut reader = PspReader::open(path)?;
     let mut records = 0_u64;
+    let mut reads = 0_u64;
+    let mut bases = 0_u64;
     for streamed in reader.records_where(|_| false)? {
-        let _ = streamed?;
+        let streamed = streamed?;
         records += 1;
+        let span = streamed.head.region.len();
+        reads += u64::from(streamed.head.reads_compared_with_reference) * span;
+        bases += span;
     }
-    Ok(records)
+    Ok((records, reads as f64 / bases.max(1) as f64))
 }
