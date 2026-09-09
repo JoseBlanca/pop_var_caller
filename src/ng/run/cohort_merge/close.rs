@@ -106,21 +106,31 @@ impl ClosedLocusRanges {
     ) -> Result<ClosedLocus<'s>, E> {
         scratch.clear();
         // Filled first and sliced after, because a slice of a vector cannot be taken while it
-        // is still being pushed into. The ranges are recorded on the way through.
-        let mut spans = Vec::with_capacity(self.members.len());
+        // is still being pushed into.
         for member in &self.members {
-            let from = scratch.len();
             for index in member.from..member.to {
                 scratch.push(build(member.sample, index)?);
             }
-            spans.push((member.sample, from..scratch.len()));
         }
         let kind = &scratch[0].kind;
-        let members = spans
+        // **The spans are walked again rather than recorded on the way through.** A member
+        // contributes exactly [`MemberRange::len`] records and they go in back to back, so
+        // where each one's run starts is a running sum of what came before — the same numbers
+        // the fill produced, arrived at without a vector to hold them. Keeping them cost one
+        // heap vector per built locus: 127,847 of the calling pass's allocations and 23.6 MB
+        // over 8 tomato accessions and 8 Mb of ground.
+        let mut from = 0;
+        let members = self
+            .members
             .iter()
-            .map(|(sample, span)| SampleMembers {
-                sample: *sample,
-                observations: &scratch[span.clone()],
+            .map(|member| {
+                let to = from + member.len();
+                let observations = &scratch[from..to];
+                from = to;
+                SampleMembers {
+                    sample: member.sample,
+                    observations,
+                }
             })
             .collect();
         Ok(ClosedLocus {
@@ -138,8 +148,14 @@ impl ClosedLocusRanges {
     /// caller's to get right, and the reason both come from one place
     /// (`observation_cache::WindowedCohort`).
     #[must_use]
+    /// **Borrows the locus rather than consuming it**, which is what it always did in
+    /// substance: everything it reads out is either `Copy` or read through an iterator, and
+    /// the [`ClosedLocus`] it returns borrows the *records*, never this. Taking `self` by
+    /// value cost the one caller on the merge's hot path its member vector — it had nothing
+    /// left to hand back to [`LocusCloser::recycle`] — and cost four test call sites a
+    /// `clone` apiece.
     pub fn resolved_against<'a>(
-        self,
+        &self,
         observations_per_sample: &[&'a [SampleLocusObservations]],
     ) -> ClosedLocus<'a> {
         let members = self
@@ -671,6 +687,21 @@ pub struct LocusCloser<'a> {
     /// The denominator beside [`alt_reads_per_sample`](Self::alt_reads_per_sample), and
     /// reset with it.
     compared_reads_per_sample: Vec<u32>,
+    /// **One member vector, lent to a closed locus and taken back when the caller is done
+    /// with it** ([`recycle`](Self::recycle)).
+    ///
+    /// A locus's members are the one thing the walk cannot keep in scratch: they leave with
+    /// the locus. Allocating them per locus charges the whole ground for the one position in
+    /// a hundred that survives — over 8 tomato accessions and 8 Mb, 7,871,163 of the calling
+    /// pass's 21,573,752 allocations and 1.44 GB of its 3.06 GB, for loci 98 in 100 of which
+    /// are dropped unbuilt. So the vector is lent rather than minted, and a caller that
+    /// hands it back keeps the walk at one allocation instead of one per locus.
+    ///
+    /// **A caller that does not hand it back is still correct**, which is why this is a
+    /// spare and not a required loan: `take` leaves an empty vector behind, so the next
+    /// locus allocates exactly as it did before. Tests and probes that collect every locus
+    /// keep every vector, and pay what they always paid.
+    spare_members: Vec<MemberRange>,
 }
 
 impl<'a> LocusCloser<'a> {
@@ -768,6 +799,19 @@ impl<'a> LocusCloser<'a> {
             pending,
             max_cohort_locus_span,
             min_alt_reads,
+            spare_members: Vec::new(),
+        }
+    }
+
+    /// Take a closed locus's member vector back, so the next locus reuses its buffer.
+    ///
+    /// **Only the buffer comes back, never the contents** — the vector is cleared before it
+    /// is filled again, and a caller that keeps a locus keeps its members with it. The
+    /// larger of the two capacities is what survives, so a cohort whose widest locus covers
+    /// every sample settles on one allocation for the whole walk.
+    pub fn recycle(&mut self, members: Vec<MemberRange>) {
+        if members.capacity() > self.spare_members.capacity() {
+            self.spare_members = members;
         }
     }
 
@@ -965,7 +1009,12 @@ impl<'a> Iterator for LocusCloser<'a> {
         // returns that contributor's scratch to zero for the next locus. Three scans
         // would cost three times the cohort size at every locus, and at a record per
         // covered base that is three times the cohort size per genome position.
-        let mut members = Vec::with_capacity(covering_samples);
+        // **Lent from the walk, not minted here** — see
+        // [`spare_members`](Self::spare_members). Empty when the last caller kept its locus,
+        // in which case `reserve` allocates exactly what `with_capacity` did.
+        let mut members = std::mem::take(&mut self.spare_members);
+        members.clear();
+        members.reserve(covering_samples);
         let mut some_sample_reached_the_threshold = false;
         for sample in 0..self.cursors_at_open.len() {
             let from = self.cursors_at_open[sample];
@@ -1605,7 +1654,7 @@ mod tests {
             LocusCloser::over(&[&tract], max_span(100), keep_at(2)).collect();
         assert_eq!(over_a_tract.len(), 1);
         assert_eq!(
-            over_a_tract[0].clone().resolved_against(&[&tract]).kind,
+            over_a_tract[0].resolved_against(&[&tract]).kind,
             &tract[0].kind
         );
 
@@ -1613,7 +1662,7 @@ mod tests {
             LocusCloser::over(&[&generic], max_span(100), keep_at(2)).collect();
         assert_eq!(over_generic.len(), 1);
         assert_eq!(
-            over_generic[0].clone().resolved_against(&[&generic]).kind,
+            over_generic[0].resolved_against(&[&generic]).kind,
             &LocusKind::Generic
         );
     }
@@ -2201,7 +2250,7 @@ mod tests {
                 MaxCohortLocusSpan::DEFAULT,
                 MinAltReads::DEFAULT,
             ) {
-                let resolved = locus.clone().resolved_against(&per_sample);
+                let resolved = locus.resolved_against(&per_sample);
                 for held in &resolved.members {
                     assert!(
                         !held.observations.is_empty(),
