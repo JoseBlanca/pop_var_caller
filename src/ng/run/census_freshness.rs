@@ -259,6 +259,205 @@ fn what_one_psps_head_says_about_its_census(path: &Path, psp: &mut PspReader) ->
     }
 }
 
+/// **What a run says when it will not fit a cohort until some of its censuses are rebuilt** —
+/// spec §4.3's report.
+///
+/// **One line a sample that is not fresh, and a count for the rest.** A cohort of sixty with three
+/// stale psps is a message about three samples; listing the fifty-seven that are fine would bury
+/// them. What each line carries is what a person needs to act: the individual, the file, and the
+/// cause in [`CensusVerdict`]'s words.
+///
+/// **The stale lines are grouped by cause** (spec §4.1), keeping the run's sample order inside
+/// each group — so *these four were written by an older build* reads as one job rather than four
+/// scattered lines.
+///
+/// **Then the command, spelled out with the arguments the run was given**, so it can be copied
+/// rather than reconstructed. It is the only place a user is told what to do about any of this.
+///
+/// **A psp that will not read is reported apart from the stale ones**, because regenerating its
+/// census would not fix it — the file itself is the problem, and the command line says so. If
+/// nothing is stale there is nothing to regenerate and no command is offered.
+///
+/// **Where an unreadable psp comes from, and what it is not.** A psp that will not *open* never
+/// reaches here: [`OpenPspCohort::open`](super::OpenPspCohort::open) refuses the cohort at the
+/// first one it cannot read, naming that file alone. What lands in this report is a psp that
+/// opened and then changed — truncated or replaced under the run.
+#[derive(Debug)]
+pub struct CensusesToRegenerate {
+    /// The samples whose censuses have to be rebuilt, grouped by cause.
+    stale: Vec<StalePsp>,
+    /// The samples whose psps would not read, with what the reader said.
+    unreadable: Vec<UnreadablePsp>,
+    /// How many samples were fresh — counted, not listed.
+    fresh: usize,
+    /// The command that rebuilds the stale ones, with this run's own arguments — and `None`
+    /// when nothing here is stale, so that the report cannot tell someone to rebuild a file that
+    /// rebuilding will not mend.
+    command: Option<String>,
+}
+
+/// One sample whose census has to be rebuilt.
+#[derive(Debug)]
+struct StalePsp {
+    /// The individual, out of the psp's header.
+    sample: String,
+    /// The file, as the run was given it.
+    psp: PathBuf,
+    /// What is wrong with the census in it.
+    cause: CensusVerdict,
+}
+
+/// One sample whose psp could not be read, so it has no verdict.
+#[derive(Debug)]
+struct UnreadablePsp {
+    /// The individual, out of the psp's header — which opening the file did read.
+    sample: String,
+    /// The file, as the run was given it.
+    psp: PathBuf,
+    /// What the reader said, cause chain and all.
+    why: String,
+}
+
+impl CensusesToRegenerate {
+    /// The report for a cohort's verdicts, or `None` when every psp carries a census this build
+    /// reads.
+    ///
+    /// `command` is asked for **only when something in this cohort is stale** — it is what the
+    /// user should run, and only the caller knows what they typed. A cohort whose only fault is a
+    /// psp that will not read has nothing to rebuild, and the closure is never called.
+    ///
+    /// **`None` means there is nothing to report**, so that no caller can render an empty report
+    /// as a refusal.
+    #[must_use]
+    pub fn of(judged: Vec<JudgedPsp>, command: impl FnOnce() -> String) -> Option<Self> {
+        let mut stale = Vec::new();
+        let mut unreadable = Vec::new();
+        let mut fresh = 0;
+        for row in judged {
+            match row.verdict {
+                Ok(CensusVerdict::Fresh) => fresh += 1,
+                Ok(cause) => stale.push(StalePsp {
+                    sample: row.sample,
+                    psp: row.psp,
+                    cause,
+                }),
+                Err(source) => unreadable.push(UnreadablePsp {
+                    sample: row.sample,
+                    psp: row.psp,
+                    // **The whole chain, not the outermost message.** A truncated file's
+                    // outermost error says which file and what was being done; what says *why*
+                    // is its source, and a report that dropped it would send a person to look at
+                    // a file with nothing to look for.
+                    why: crate::error_render::format_error_chain(&source),
+                }),
+            }
+        }
+        // **Stable, so the run's sample order survives inside each cause** (spec §4.1).
+        stale.sort_by_key(|row| row.cause);
+        match stale.is_empty() && unreadable.is_empty() {
+            true => None,
+            false => Some(Self {
+                command: match stale.is_empty() {
+                    true => None,
+                    false => Some(command()),
+                },
+                stale,
+                unreadable,
+                fresh,
+            }),
+        }
+    }
+
+    /// How many samples need their census rebuilt.
+    #[must_use]
+    pub fn stale_count(&self) -> usize {
+        self.stale.len()
+    }
+
+    /// How many of the cohort's psps would not read.
+    #[must_use]
+    pub fn unreadable_count(&self) -> usize {
+        self.unreadable.len()
+    }
+}
+
+impl std::fmt::Display for CensusesToRegenerate {
+    /// **Written to be read at the end of a run that has just stopped**, which is why it is
+    /// several lines where an error message is usually one: what a person does next is in here
+    /// and nowhere else.
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let cannot = self.stale.len() + self.unreadable.len();
+        let whole = cannot + self.fresh;
+        writeln!(
+            out,
+            "{cannot} of this cohort's {whole} sample{} cannot be fitted as {}:",
+            plural(whole),
+            match cannot == 1 {
+                true => "it stands",
+                false => "they stand",
+            },
+        )?;
+        for row in &self.stale {
+            writeln!(
+                out,
+                "  {} ({}) {}",
+                row.sample,
+                row.psp.display(),
+                row.cause,
+            )?;
+        }
+        for row in &self.unreadable {
+            writeln!(out, "  {} ({}) {}", row.sample, row.psp.display(), row.why)?;
+        }
+        if self.fresh > 0 {
+            writeln!(
+                out,
+                "{} other sample{} carr{} a census this build reads.",
+                self.fresh,
+                plural(self.fresh),
+                match self.fresh == 1 {
+                    true => "ies",
+                    false => "y",
+                },
+            )?;
+        }
+        if !self.unreadable.is_empty() {
+            writeln!(
+                out,
+                "{} psp{} above could not be read at all, and rebuilding a census will not mend \
+                 {}.",
+                self.unreadable.len(),
+                plural(self.unreadable.len()),
+                match self.unreadable.len() == 1 {
+                    true => "it",
+                    false => "them",
+                },
+            )?;
+        }
+        match &self.command {
+            None => write!(
+                out,
+                "There is no census here to rebuild; those files need looking at."
+            ),
+            Some(command) => write!(
+                out,
+                "Rebuild the {} sample{} whose census is named above, then run this fit \
+                 again:\n  {command}",
+                self.stale.len(),
+                plural(self.stale.len()),
+            ),
+        }
+    }
+}
+
+/// `""` for one and `"s"` for any other count — the plural of the noun it follows.
+fn plural(count: usize) -> &'static str {
+    match count == 1 {
+        true => "",
+        false => "s",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -756,5 +955,211 @@ mod tests {
             census.len(),
         );
         assert_eq!(rows.len(), 4);
+    }
+
+    /// A judged row, for the report's own tests.
+    fn a_row(sample: &str, verdict: Result<CensusVerdict, PspReadError>) -> JudgedPsp {
+        JudgedPsp {
+            sample: sample.to_string(),
+            psp: PathBuf::from(format!("/psps/{sample}.psp")),
+            verdict,
+        }
+    }
+
+    /// A read failure on `sample`'s own psp, for a row that has no verdict.
+    fn a_read_failure(sample: &str) -> PspReadError {
+        PspReadError::Io {
+            path: PathBuf::from(format!("/psps/{sample}.psp")),
+            while_doing: "reading the trailer",
+            source: std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
+        }
+    }
+
+    /// **A cohort with nothing wrong with it has no report**, so a caller cannot tell someone who
+    /// asked for a fit that nothing needs regenerating.
+    #[test]
+    fn a_fresh_cohort_has_no_report() {
+        let judged = vec![
+            a_row("alpha", Ok(CensusVerdict::Fresh)),
+            a_row("bravo", Ok(CensusVerdict::Fresh)),
+        ];
+
+        assert!(CensusesToRegenerate::of(judged, || panic!("no command is needed")).is_none());
+    }
+
+    /// **The report names every stale sample with its file and its cause, counts the rest, and
+    /// ends with the command** — spec §4.3, the whole of what a person acts on.
+    ///
+    /// **The first line is asserted whole**, because the count in it is the one thing a reader
+    /// acts on before anything else: how many of their samples are bad, out of how many.
+    #[test]
+    fn the_report_names_each_stale_sample_and_the_command_to_run() {
+        let judged = vec![
+            a_row("alpha", Ok(CensusVerdict::Fresh)),
+            a_row("bravo", Ok(CensusVerdict::NoCensus)),
+            a_row("charlie", Ok(CensusVerdict::Fresh)),
+            a_row(
+                "delta",
+                Ok(CensusVerdict::AnotherFormat {
+                    version_in_the_psp: VERSION - 1,
+                }),
+            ),
+        ];
+
+        let report =
+            CensusesToRegenerate::of(judged, || "regenerate-census --psp /psps".to_string())
+                .expect("two of them are stale");
+
+        assert_eq!(report.stale_count(), 2);
+        let said = report.to_string();
+        assert!(
+            said.starts_with("2 of this cohort's 4 samples cannot be fitted as they stand:\n"),
+            "the count a reader acts on first: {said}",
+        );
+        assert!(
+            said.contains("  bravo (/psps/bravo.psp) carries no census\n"),
+            "a line a sample, with its file and its cause: {said}",
+        );
+        assert!(
+            said.contains("  delta (/psps/delta.psp) carries a census built by an older version"),
+            "and the second, with its own cause: {said}",
+        );
+        assert!(
+            !said.contains("alpha") && !said.contains("charlie"),
+            "the fresh samples are counted, not listed: {said}",
+        );
+        assert!(
+            said.contains("2 other samples carry a census this build reads."),
+            "and the count is there: {said}",
+        );
+        assert!(
+            said.ends_with(
+                "Rebuild the 2 samples whose census is named above, then run this fit \
+                 again:\n  regenerate-census --psp /psps"
+            ),
+            "the command is the last thing, so it can be copied: {said}",
+        );
+    }
+
+    /// **The stale lines are grouped by cause** (spec §4.1), keeping sample order inside a group.
+    ///
+    /// A cohort where every other sample is stale for a different reason reads as two jobs when
+    /// it is grouped and as an alternating list when it is not — and *these three were written by
+    /// an older build* is one thing a person does, where three scattered lines are three.
+    #[test]
+    fn the_stale_lines_are_grouped_by_cause() {
+        let older = CensusVerdict::AnotherFormat {
+            version_in_the_psp: VERSION - 1,
+        };
+        let judged = vec![
+            a_row("alpha", Ok(CensusVerdict::NoCensus)),
+            a_row("bravo", Ok(older)),
+            a_row("charlie", Ok(CensusVerdict::NoCensus)),
+            a_row("delta", Ok(older)),
+        ];
+
+        let report = CensusesToRegenerate::of(judged, || "regenerate-census".to_string())
+            .expect("all stale");
+
+        let said = report.to_string();
+        let lines: Vec<&str> = said
+            .lines()
+            .filter(|line| line.starts_with("  ") && line.contains(".psp"))
+            .collect();
+        assert_eq!(lines.len(), 4, "{said}");
+        assert!(
+            lines[0].starts_with("  alpha") && lines[1].starts_with("  charlie"),
+            "the two with no census come together, in sample order: {said}",
+        );
+        assert!(
+            lines[2].starts_with("  bravo") && lines[3].starts_with("  delta"),
+            "and the two of another format after them, in sample order: {said}",
+        );
+    }
+
+    /// **A cohort of one stale psp reads as English**, which is the case a person is likeliest to
+    /// meet by hand and the low end of the range this caller is built for (`CLAUDE.md`).
+    #[test]
+    fn a_cohort_of_one_stale_psp_is_reported_in_the_singular() {
+        let judged = vec![a_row("alpha", Ok(CensusVerdict::NoCensus))];
+
+        let report =
+            CensusesToRegenerate::of(judged, || "regenerate-census".to_string()).expect("stale");
+
+        let said = report.to_string();
+        assert!(
+            said.starts_with("1 of this cohort's 1 sample cannot be fitted as it stands:\n"),
+            "{said}",
+        );
+        assert!(
+            said.contains("Rebuild the 1 sample whose census is named above"),
+            "{said}",
+        );
+        assert!(
+            !said.contains("other sample"),
+            "there is no other sample to count: {said}",
+        );
+    }
+
+    /// **A psp that will not read is reported apart from the stale ones, and there is nothing to
+    /// regenerate.**
+    ///
+    /// Rebuilding the census of a file that will not read would not fix it, so offering the
+    /// command would send a person at the wrong thing — and this run has no stale census at all.
+    ///
+    /// **The row carries the whole cause chain**: the outermost message says which file and what
+    /// was being done, and what says *why* is its source.
+    #[test]
+    fn a_cohort_whose_only_fault_is_an_unreadable_psp_is_told_not_to_rebuild() {
+        let judged = vec![
+            a_row("alpha", Ok(CensusVerdict::Fresh)),
+            a_row("bravo", Err(a_read_failure("bravo"))),
+        ];
+
+        let report = CensusesToRegenerate::of(judged, || {
+            panic!("nothing here can be rebuilt, so no command is needed")
+        })
+        .expect("one of them will not read");
+
+        assert_eq!(report.stale_count(), 0, "nothing here is a stale census");
+        assert_eq!(report.unreadable_count(), 1);
+        let said = report.to_string();
+        assert!(
+            said.contains("  bravo (/psps/bravo.psp) ") && said.contains("unexpected end of file"),
+            "the row says which file and what went wrong with it: {said}",
+        );
+        assert!(
+            !said.contains("regenerate"),
+            "and no command is offered, because rebuilding would not fix it: {said}",
+        );
+    }
+
+    /// **A cohort with both faults says which of the two the command is for.**
+    ///
+    /// *Rebuild them* under a list that holds two psps nothing can rebuild is how a person spends
+    /// a quarter of an hour a sample and finds the same message waiting.
+    #[test]
+    fn a_cohort_with_both_faults_says_which_rows_the_command_is_for() {
+        let judged = vec![
+            a_row("alpha", Ok(CensusVerdict::NoCensus)),
+            a_row("bravo", Err(a_read_failure("bravo"))),
+        ];
+
+        let report =
+            CensusesToRegenerate::of(judged, || "regenerate-census".to_string()).expect("both");
+
+        let said = report.to_string();
+        assert_eq!((report.stale_count(), report.unreadable_count()), (1, 1));
+        assert!(
+            said.contains(
+                "1 psp above could not be read at all, and rebuilding a census will \
+                 not mend it."
+            ),
+            "the files nothing can rebuild are named as such: {said}",
+        );
+        assert!(
+            said.contains("Rebuild the 1 sample whose census is named above"),
+            "and the command is for the other one: {said}",
+        );
     }
 }

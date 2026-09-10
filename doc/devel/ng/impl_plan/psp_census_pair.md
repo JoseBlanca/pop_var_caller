@@ -182,7 +182,7 @@ that build argument lists (`args_over`, `a_shortest_run`) rewritten; C1's byte-i
 `open_census_cohort` and `CensusInCohort` go.
 *Depends:* A3, B4, C1. *Source:* spec §5, §6.
 
-☐ **C3 — the refusal, before the reference.** B4's verdicts are taken first; if any sample is not
+✅ **C3 — the refusal, before the reference.** B4's verdicts are taken first; if any sample is not
 fresh, the run stops with spec §4.3's report — every stale sample, its psp path, its cause, and one
 `regenerate-census --psp …` line built from the arguments given — and the reference has not been
 opened. `a_census_without_its_psp_is_refused` becomes *a psp without a census is refused and the

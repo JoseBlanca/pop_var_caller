@@ -310,3 +310,117 @@ naming the wrong file is worse than one naming none.
 - **`cargo doc` is red on this tree**: 40 unresolved intra-doc links, none from this branch.
 - The end-to-end script's step 3 now passes `--psp`; the rest of that script — the
   `generate-census` step it no longer feeds — is plan step E1's.
+
+---
+
+## C3 — the refusal, before the reference
+
+**Committed:** see `git log` for `feat(ng): C3`.
+
+### What it does
+
+A run whose psps do not all carry a census this build reads now stops with a message that names
+every one of them, and ends with the command that rebuilds them:
+
+```
+2 of this cohort's 4 samples cannot be fitted as they stand:
+  bravo (/psps/bravo.psp) carries no census
+  delta (/psps/delta.psp) carries a census built by an older version of this program: it is
+    version 1 and this build reads version 2
+2 other samples carry a census this build reads.
+Rebuild the 2 samples whose census is named above, then run this fit again:
+  regenerate-census --reference ref.fa --catalog ref.fa.repeats.parquet --psp /psps
+```
+
+**Every psp is judged first, and the run stops after all of them, not at the first.** Rebuilding
+one census is a quarter of an hour a sample (spec §2, §4), so a refusal that named them one at a
+time would cost that wait once a stale sample, in series, to learn a job that fits in one message.
+
+**And the judgement happens before the reference is opened**, which is what makes the refusal
+immediate: judging a psp is one seek and ten bytes a sample, where reading a human reference is
+minutes. A test pins it by pointing `--reference` at a path that does not exist and asserting the
+run still answers with the report.
+
+**The stale lines are grouped by cause** (spec §4.1), keeping the run's sample order inside each
+group, so *these three were written by an older build* reads as one job.
+
+**A psp that cannot be read is reported apart, and the command is not offered for it.** Rebuilding
+the census of a truncated file would not mend it. The type carries the command as an `Option`, set
+only when something is actually stale, so a report cannot tell someone to rebuild what rebuilding
+will not fix.
+
+### The command it names does not exist yet
+
+The report says `regenerate-census`, which arrives at plan step D1. **Naming today's
+`generate-census` instead would be worse**: that writes a census *file* beside the psp, which this
+fit no longer reads, so a person who followed it would spend the wait and find their psp exactly as
+stale. The name is a constant with one place to point at D1's real subcommand, and a test asserts
+it is not the old command's name. At D1 that test becomes what it should be — a parse of the name
+against clap, which cannot be written today because it would fail.
+
+### What the review found, and what was done
+
+No blockers. **The message was the review's subject, judged as what a person reads at 2am when a
+60-sample fit stops**, and three of its findings were about that:
+
+- **It inflected one of its three number-bearing phrases.** At one stale sample it said *cannot be
+  fitted as they stand* and *Rebuild them*; at a cohort of one — the low end of the range this
+  caller is built for — *1 of this cohort's 1 samples*. Every phrase inflects now, and a test reads
+  the singular case whole.
+- **"Rebuild them" included the psps that cannot be rebuilt.** In a cohort with both faults, the
+  unreadable rows printed directly above that line. It names the set now — *rebuild the 3 samples
+  whose census is named above* — and says in its own line that the unreadable ones will not be
+  mended by rebuilding. A test covers the mixed case, which had none.
+- **The unreadable row printed its path twice and dropped the real cause.** It stored the
+  outermost message where the fault — *unexpected end of file* — hangs off the source. It walks the
+  chain now, and the fixture's error carries the row's own path so the duplication would show.
+
+**The only arithmetic in the message was asserted by nothing**: the first line, which is what a
+reader acts on before anything else. Changing *of this cohort's N samples* to something else broke
+no test. It is asserted whole now, and the mutation fails three.
+
+**Smaller:** three-field tuples where two row structs belong; an error variant named
+`CensusesNeedRegenerating` for a report that also covers files nothing can regenerate, now
+`CohortCannotBeFitted`; the command line built on every run including the successful one, now a
+closure called only on the refusal path; a printed path with a space in it, now quoted, because the
+whole value of that line is that it is pasted; and two doc comments that still described a census
+file beside its psp.
+
+**And one claim of mine that was false**: *every psp is judged before anything else is read*. By
+that point the cohort opener has read every header, every footer and every block index — a few
+hundred megabytes at a thousand samples. What is true, and load-bearing, is that it happens before
+the **reference** is opened.
+
+### Eleven mutations, all run
+
+| mutation | outcome |
+|---|---|
+| the run stops at the first stale psp | 2 report tests and 2 command tests fail |
+| the reference read before the judgement | 1 fails — the ordering test |
+| the header's arithmetic changed | 3 fail |
+| the sample-name column dropped | 3 and 3 fail |
+| the cause dropped from each line | 2 and 3 fail |
+| a psp that will not read reported as one to regenerate | 2 fail |
+| the stale lines left ungrouped | 2 fail |
+| the cause chain not walked for an unreadable psp | 2 fail |
+| `--psp` dropped from the printed command | 2 fail |
+| `--catalog` dropped from the printed command | 2 fail |
+| the old command name printed | 1 fails — the test added for exactly it |
+
+The last was the review's predicted survivor: the other assertions compare against the constant, so
+changing the constant changes both sides. What can be pinned today is that the name is **not**
+`generate-census`, and that is what the new test says.
+
+### Recorded, not fixed
+
+- **A psp that will not *open* never reaches the report.** `OpenPspCohort::open` refuses the cohort
+  at the first file it cannot read, naming that one, so spec §4.1's *every sample is examined* does
+  not hold for that fault — only for censuses. Making the opener collect its refusals the way B4
+  collects verdicts is a change to the opener every psp-taking command shares, so it is the owner's
+  call rather than this step's. The report's own doc says which fault it covers.
+- **`CensusVerdict`'s doc promised grouping by cause and the first draft did not group.** It groups
+  now, so the promise holds — but spec §4.1's wording and that paragraph should be read together at
+  the checkpoint, because *grouped by cause* and *in the run's sample order* are two different
+  reports and the code now does both, one inside the other.
+- **Plan step D1's task list does not mention the constant** this step introduces, and `grep
+  generate-census` will not find it, because it spells the new name.

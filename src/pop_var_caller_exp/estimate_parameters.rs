@@ -9,11 +9,10 @@
 //!
 //! # What it reads, and what it only checks
 //!
-//! It reads the **censuses**. It does not read the psps — but each census's psp has to be beside
-//! it, because a census names the psp it was built from and evidence from other reads is
-//! otherwise indistinguishable from this run's. What is taken from each psp is its header: one
-//! short read, for the digest the census names it by, for the ground the walk covered, and for
-//! the repeat-tract criteria it cut that ground with (`psp_census_pair.md` §6).
+//! It reads each psp's **census** — the small object in the file's tail — and none of its
+//! records. From each header it takes the ground the walk covered and the repeat-tract criteria it
+//! cut that ground with (`psp_census_pair.md` §5, §6); the census itself is read from the trailer
+//! the same header's footer points at, so nothing has to be paired with anything.
 //!
 //! # Why the reference and the catalog
 //!
@@ -47,9 +46,10 @@ use crate::ng::reference_info::{
 };
 use crate::ng::repeat_catalog::RepeatCatalog;
 use crate::ng::run::{
-    CensusCohortError, CensusPlan, CensusSelection, CohortFitError, OpenPspCohort, RunError,
-    every_census_in_the_cohorts_psps, every_read_group_pooled, fit_a_cohort, parameters_file_of,
-    parameters_from_the_fit, read_groups_of,
+    CensusCohortError, CensusPlan, CensusSelection, CensusesToRegenerate, CohortFitError,
+    OpenPspCohort, RunError, every_census_in_the_cohorts_psps, every_read_group_pooled,
+    fit_a_cohort, parameters_file_of, parameters_from_the_fit, read_groups_of,
+    what_the_heads_say_about_every_census_in_a_cohort,
 };
 use crate::ng::types::{ContigId, InbreedingF, Ploidy};
 use crate::pop_var_caller_exp::generate_psps::PSP_FILE_EXTENSION;
@@ -166,6 +166,21 @@ pub enum EstimateParametersCliError {
         source: Box<RunError>,
     },
 
+    /// Some of the cohort's psps carry no census this build can fit from.
+    ///
+    /// **The message is the whole of what the user acts on**, so it is the error's own
+    /// (`psp_census_pair.md` §4.3): a line a sample, and the command that rebuilds them.
+    ///
+    /// **Several lines, and no `#[source]`, where an error in this tree is usually one lowercase
+    /// clause over a cause.** That is deliberate: this message is the product rather than a frame
+    /// around a fault, and there is no underlying error to carry — the psps were read
+    /// successfully and what they hold is the news.
+    #[error("{report}")]
+    CohortCannotBeFitted {
+        /// The samples to regenerate, those whose psps would not read, and the command line.
+        report: Box<CensusesToRegenerate>,
+    },
+
     /// The cohort's censuses could not be read.
     #[error("reading the censuses in the psps")]
     Cohort {
@@ -209,7 +224,7 @@ pub enum EstimateParametersCliError {
     },
 }
 
-/// Fit `--census`'s cohort and write `--output`.
+/// Fit `--psp`'s cohort and write `--output`.
 ///
 /// # Errors
 ///
@@ -264,10 +279,28 @@ fn fit_and_assemble(
     // reads each header and refuses a set that was not walked as one — two files naming one
     // sample, or walked over different ground, or under a different catalog or different
     // repeat-tract criteria (`psp_census_pair.md` §6). No block is decoded by any of it.
-    let cohort =
+    let mut cohort =
         OpenPspCohort::open(&paths).map_err(|source| EstimateParametersCliError::PspCohort {
             source: Box::new(source),
         })?;
+    // **Every psp of the cohort is judged, and only then does the run stop** (spec §4.1, §4.3).
+    // A cohort with three stale censuses is a message about three samples and not about the first
+    // one: rebuilding one census is a quarter of an hour, so a refusal that named them one at a
+    // time would cost that wait once a stale sample, in series, to learn a job that fits in one
+    // message.
+    //
+    // **And before the reference is opened**, which is what makes it immediate: judging a psp is
+    // one seek and ten bytes, where reading a human reference is minutes. The third cause a
+    // census can be stale for — built against a different set of loci — is the one this cannot
+    // see, and it is caught later, by the fit's own digest.
+    if let Some(report) = CensusesToRegenerate::of(
+        what_the_heads_say_about_every_census_in_a_cohort(&mut cohort),
+        || the_command_that_regenerates(args),
+    ) {
+        return Err(EstimateParametersCliError::CohortCannotBeFitted {
+            report: Box::new(report),
+        });
+    }
     // **The censuses come out of the psps' trailers**, read lazily: their headers and directories
     // now, a section when the fit asks for it (spec §5).
     let mut evidence = every_census_in_the_cohorts_psps(&cohort).map_err(|source| {
@@ -401,6 +434,52 @@ fn fit_and_assemble(
         &segmentation.inputs().repeat_tract_criteria,
     );
     Ok((file, samples))
+}
+
+/// **The command that rebuilds a psp's census**, named here until it exists.
+///
+/// Plan step D1 turns today's `generate-census` — which writes a census *file* beside a psp,
+/// which nothing reads any more — into `regenerate-census`, which replaces the psp's trailer.
+/// Until then this report names a command a person cannot yet run. **That is the right name to
+/// print rather than the old one**: `generate-census` would leave them with a file this fit does
+/// not read and a psp still stale. The constant is here so that D1 has one place to point it at
+/// the real subcommand's own name.
+const THE_COMMAND_THAT_REBUILDS_A_CENSUS: &str = "regenerate-census";
+
+/// **The command that rebuilds this run's stale censuses, in the words it was given** — spec
+/// §4.3's last line, written so it can be copied rather than reconstructed.
+///
+/// **The `--psp` arguments are the user's own, not the expanded list.** A run over a directory of
+/// sixty psps typed one path, and a report that answered with sixty is a report nobody copies.
+///
+/// **`--reference` and `--catalog` come too, because rebuilding a census needs them**: the census
+/// stores a repeat tract by its index within its stratum, so the selection has to be built again,
+/// and that reads the reference and the catalog (spec §8). `--catalog` is left out when this run
+/// was not given one, since the command finds the same file beside the reference the same way.
+fn the_command_that_regenerates(args: &EstimateParametersArgs) -> String {
+    use std::fmt::Write as _;
+
+    let mut line = String::from(THE_COMMAND_THAT_REBUILDS_A_CENSUS);
+    let _ = write!(line, " --reference {}", as_typed(&args.reference));
+    if let Some(catalog) = &args.catalog {
+        let _ = write!(line, " --catalog {}", as_typed(catalog));
+    }
+    for psp in &args.psps {
+        let _ = write!(line, " --psp {}", as_typed(psp));
+    }
+    line
+}
+
+/// A path as it has to appear on a command line that will be pasted into a shell.
+///
+/// **Quoted when it holds a space**, because the whole value of that line is that it is copied,
+/// and a directory called `tomato run 3` pasted bare is three arguments and a different meaning.
+fn as_typed(path: &std::path::Path) -> String {
+    let shown = path.display().to_string();
+    match shown.contains(char::is_whitespace) {
+        true => format!("'{shown}'"),
+        false => shown,
+    }
 }
 
 /// **The psps this run fits, with every directory expanded** — the rule every psp-taking command

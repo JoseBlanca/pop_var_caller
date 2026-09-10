@@ -191,3 +191,87 @@ Two of the reviewer's five were predicted to survive. The first was B2 and is no
 second — the file column — was predicted to survive because nothing read it, which is also why the
 byte-identity oracle could not see it: the path never reaches the parameters file. One assertion
 pins it.
+
+---
+
+## C3 — the refusal, before the reference
+
+**Reviewed against:** the working tree over `a43ced4d`, four files. One read-only agent over the
+usual grouped categories, and asked in addition to read the message itself as the person who meets
+it when a 60-sample fit stops. **No blockers**, twelve should-fix and minor findings, and twelve
+mutations with predictions.
+
+**A process note the reviewer raised, and it is a real one.** The working tree changed under the
+review: a mutation of mine was applied to `census_freshness.rs` while it was reading the file, so
+its report is against the diff as first captured. It handled it by giving every mutation as an exact
+`old → new` text pair rather than a line number. **Running mutations in the same worktree a review
+is reading is a mistake to stop making** — the two must not overlap in time, or the review must be
+given a copy.
+
+### Findings
+
+**S1 — the message inflected one of its three number-bearing phrases.** *"1 of this cohort's 1
+samples cannot be fitted as they stand"* at a cohort of one, which is the low end of the range this
+caller is built for and the case a person is likeliest to meet by hand. *Fixed everywhere, with a
+test that reads the singular case whole.*
+
+**S2 — the only arithmetic in the message was asserted by nothing.** The first line is what a
+reader acts on before any other, and the mutation that changes *of this cohort's N samples* to
+something else broke no test. *Fixed:* the line is asserted whole, and that mutation now fails
+three tests.
+
+**S3 — "Rebuild them" pointed at the psps that cannot be rebuilt.** In a cohort with both faults
+the unreadable rows printed directly above it. *Fixed:* the command names the set it is for, a
+separate line says the unreadable psps will not be mended by rebuilding, and the command is an
+`Option` that exists only when something is stale — so the type cannot say *rebuild* without one.
+The mixed case had no test and has one.
+
+**S4 — the unreadable row printed its path twice and dropped the cause.** It stored the outermost
+message; the fault hangs off `#[source]`. *Fixed* with `format_error_chain`, and the fixture's error
+now carries the row's own path so the duplication would show.
+
+**S5 — "before anything else is read" was false**: the cohort opener has already read every header,
+footer and block index. *Fixed* to the claim that is true and load-bearing — before the reference.
+
+**S6 — two doc comments still described a census file beside its psp**, one of them two lines above
+the new code. *Fixed.*
+
+**S7 — the constant naming a command that does not exist yet is the right carrier**, and printing
+`regenerate-census` rather than today's `generate-census` is right. Two gaps the reviewer named:
+nothing checks the printed name is a subcommand clap accepts, and plan step D1's task list does not
+mention the constant. *A test now pins what can be pinned today* — that the name is not the command
+which writes a census file — and D1 turns it into a parse. The plan gap is recorded for the
+checkpoint rather than edited in.
+
+**Minor, all fixed:** three-field tuples where row structs belong; an error variant whose name was
+false in one of its two cases; a command line built eagerly on every run; `push_str(&format!(…))`
+per argument; an unquoted path in a line whose whole value is that it is pasted; the report tests
+splitting the cohort tests in two; and a doc sentence that did not parse.
+
+### Recorded, not fixed
+
+- **A psp that will not open never reaches this report**: the cohort opener refuses at the first
+  one, so spec §4.1's *every sample is examined* holds for censuses and not for that fault.
+- **The version-word surgery is now written in two test modules.** The reviewer asked for one
+  fixture beside `a_census_this_build_wrote`; it is left where it is, and named here so the next
+  step can move it rather than add a third.
+
+### The mutations
+
+| mutation | outcome |
+|---|---|
+| the run stops at the first stale psp | 4 tests fail |
+| the reference read before the judgement | 1 fails |
+| the header's arithmetic changed | 3 fail |
+| the sample-name column dropped | 6 fail |
+| the cause dropped from each line | 5 fail |
+| an unreadable psp reported as one to regenerate | 2 fail |
+| the stale lines left ungrouped | 2 fail |
+| the cause chain not walked | 2 fail |
+| `--psp` dropped from the command | 2 fail |
+| `--catalog` dropped from the command | 2 fail |
+| the old command name printed | 1 fails |
+
+Two of the reviewer's predicted survivors — the header arithmetic and the sample column — are now
+caught. The third, the constant's own value, is caught only against the old command's name, which
+is the most that can be asserted before the new command exists.

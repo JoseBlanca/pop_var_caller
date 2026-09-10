@@ -414,16 +414,13 @@ fn a_directory_contributes_every_psp_inside_it() {
     );
 }
 
-/// **A psp carrying no census stops the run**, rather than being fitted over whatever the other
-/// samples hold.
+/// **A psp carrying no census stops the run, and the report names it and says what to run**
+/// (spec §4.3).
 ///
 /// This is every psp written before the census moved into the trailer, and every psp an `append`
-/// has discarded the trailer of (spec §3.4). **What it says is not yet what it should say**: the
-/// message is about bytes that would not decode, where the person needs to be told which samples
-/// to regenerate and with what command. Plan step C3 puts that report in front of this, and this
-/// test is what will then assert it.
+/// has discarded the trailer of (spec §3.4).
 #[test]
-fn a_psp_carrying_no_census_is_refused() {
+fn a_psp_carrying_no_census_is_refused_and_the_report_names_it() {
     let (cohort, psps) = a_walked_cohort();
     let paths = psps_named_by(&args_over(
         &cohort,
@@ -440,11 +437,162 @@ fn a_psp_carrying_no_census_is_refused() {
     ))
     .expect_err("that psp carries no census");
 
-    let EstimateParametersCliError::Cohort { source } = &error else {
-        panic!("a psp with no census is the cohort's refusal, not the fit's: {error:?}");
+    let EstimateParametersCliError::CohortCannotBeFitted { report } = &error else {
+        panic!("a psp with no census is a regeneration report, not this: {error:?}");
     };
+    let said = report.to_string();
     assert!(
-        matches!(&**source, CensusCohortError::CensusNotRead { path, .. } if path == &paths[1]),
-        "and it names the psp whose census is missing: {source:?}",
+        said.contains(&format!(
+            "  two ({}) carries no census\n",
+            paths[1].display()
+        )),
+        "one line naming the individual, its file and the cause: {said}",
+    );
+    assert!(
+        said.contains(&format!(
+            "{THE_COMMAND_THAT_REBUILDS_A_CENSUS} --reference {} --catalog {} --psp {}",
+            cohort.reference.display(),
+            cohort.catalog.display(),
+            psps.display(),
+        )),
+        "and the command, with the arguments this run was given: {said}",
+    );
+    assert!(
+        !said.contains("one ("),
+        "the sample that is fine is counted, not listed: {said}",
+    );
+}
+
+/// **The command the report names is not the one that writes a census file.**
+///
+/// Until plan step D1 the rebuild command does not exist, so this report names something a person
+/// cannot yet run — deliberately. What it must never name is today's `generate-census`: that
+/// writes a census *file* beside the psp, which this fit no longer reads, so following it would
+/// cost the wait and leave the psp exactly as stale. At D1 this becomes what it should be, a parse
+/// of the name against clap.
+#[test]
+fn the_report_does_not_name_the_command_that_writes_a_census_file() {
+    assert_ne!(
+        THE_COMMAND_THAT_REBUILDS_A_CENSUS,
+        crate::pop_var_caller_exp::generate_census::SUBCOMMAND,
+        "that command writes a file beside the psp, and the psp would still be stale",
+    );
+}
+
+/// **The command names no catalog when the run was not given one**, because the command it names
+/// finds the same file beside the reference by the same rule.
+#[test]
+fn the_report_names_no_catalog_when_the_run_named_none() {
+    let (cohort, psps) = a_walked_cohort();
+    let paths = psps_named_by(&args_over(
+        &cohort,
+        &psps,
+        cohort.directory.path().join("out.toml"),
+    ))
+    .expect("the directory lists");
+    crate::ng::psp::replace_trailer(&paths[1], b"").expect("the tail rewrites");
+    let mut args = args_over(&cohort, &psps, cohort.directory.path().join("out.toml"));
+    // The fixture's catalog is where a run looks when it is told nothing, so dropping the flag
+    // changes what is printed and not what would be read.
+    args.catalog = None;
+
+    let error = fit_and_assemble(&args).expect_err("that psp carries no census");
+
+    let EstimateParametersCliError::CohortCannotBeFitted { report } = &error else {
+        panic!("a psp with no census is a regeneration report: {error:?}");
+    };
+    let said = report.to_string();
+    assert!(!said.contains("--catalog"), "{said}");
+    assert!(
+        said.contains(&format!(
+            "{THE_COMMAND_THAT_REBUILDS_A_CENSUS} --reference {} --psp {}",
+            cohort.reference.display(),
+            psps.display(),
+        )),
+        "and the rest of the line is as it was typed: {said}",
+    );
+}
+
+/// **Two stale psps in a cohort are both named, in one message** — spec §4.1, and the whole point
+/// of judging the cohort before refusing it.
+///
+/// **Rebuilding one census is a quarter of an hour** (spec §2, §4), so a refusal that named one
+/// sample at a time would cost that wait once a stale sample, one after another, to learn a job
+/// that fits in one message. The two here are stale for different reasons — one carries no census,
+/// the other a census of a version this build does not read — because the report groups by cause
+/// and a run that reported whatever the first stale psp was would pass a test with one.
+#[test]
+fn two_stale_psps_are_both_named_in_one_report() {
+    let (cohort, psps) = a_walked_cohort();
+    let paths = psps_named_by(&args_over(
+        &cohort,
+        &psps,
+        cohort.directory.path().join("out.toml"),
+    ))
+    .expect("the directory lists");
+    crate::ng::psp::replace_trailer(&paths[0], b"").expect("the tail rewrites");
+    let of_another_version = {
+        use crate::ng::parameter_estimation::joint::census_file::{
+            BYTES_THAT_NAME_THE_VERSION, VERSION,
+        };
+        let mut census = {
+            let mut psp = crate::ng::psp::PspReader::open(&paths[1]).expect("the psp opens");
+            psp.trailer().expect("its census reads")
+        };
+        let word_at = BYTES_THAT_NAME_THE_VERSION - size_of::<u16>();
+        census[word_at..BYTES_THAT_NAME_THE_VERSION].copy_from_slice(&(VERSION - 1).to_le_bytes());
+        census
+    };
+    crate::ng::psp::replace_trailer(&paths[1], &of_another_version).expect("the tail rewrites");
+
+    let error = fit_and_assemble(&args_over(
+        &cohort,
+        &psps,
+        cohort.directory.path().join("out.toml"),
+    ))
+    .expect_err("neither psp carries a census this build reads");
+
+    let EstimateParametersCliError::CohortCannotBeFitted { report } = &error else {
+        panic!("two stale psps are a regeneration report: {error:?}");
+    };
+    let said = report.to_string();
+    assert_eq!(report.stale_count(), 2, "both samples are in it: {said}");
+    assert!(
+        said.contains("one (") && said.contains("two ("),
+        "and both are named: {said}",
+    );
+    assert!(
+        said.contains("carries no census") && said.contains("older version"),
+        "each with its own cause: {said}",
+    );
+}
+
+/// **The refusal comes before the reference is opened** (spec §4.2), which is what makes a missing
+/// census immediate rather than something a person waits for.
+///
+/// **How it is shown: the reference is a path that does not exist.** A run that read it first
+/// would fail on that instead, and reading a human reference is minutes where judging a psp is one
+/// seek and ten bytes.
+#[test]
+fn a_stale_cohort_is_refused_before_the_reference_is_read() {
+    let (cohort, psps) = a_walked_cohort();
+    let paths = psps_named_by(&args_over(
+        &cohort,
+        &psps,
+        cohort.directory.path().join("out.toml"),
+    ))
+    .expect("the directory lists");
+    crate::ng::psp::replace_trailer(&paths[1], b"").expect("the tail rewrites");
+    let mut args = args_over(&cohort, &psps, cohort.directory.path().join("out.toml"));
+    args.reference = cohort.directory.path().join("no-such-reference.fa");
+
+    let error = fit_and_assemble(&args).expect_err("that psp carries no census");
+
+    assert!(
+        matches!(
+            &error,
+            EstimateParametersCliError::CohortCannotBeFitted { .. }
+        ),
+        "the psps were judged before the reference was opened, and got: {error:?}",
     );
 }
