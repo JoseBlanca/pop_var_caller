@@ -194,7 +194,7 @@ report names it*; a second test has two stale samples and asserts both are in th
 built under another selection; run `regenerate-census`*.
 *Depends:* C3. *Source:* spec §4.2 row 3.
 
-☐ **C5 — a census built under other settings is refused, naming the setting.** *Added at
+✅ **C5 — a census built under other settings is refused, naming the setting.** *Added at
 Checkpoint C by the owner's ruling of 2026-09-10: "stop and report the problem".* Each census
 records the seven settings its positions were chosen under (`SelectionTermsDigest`, census.rs
 `SELECTION_FIELDS`: selection seed, reference digest, analysed region set, repeat catalog build

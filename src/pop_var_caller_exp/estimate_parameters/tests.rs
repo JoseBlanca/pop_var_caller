@@ -262,18 +262,22 @@ fn the_selection_is_rebuilt_over_the_ground_the_psps_were_walked_on() {
     );
 }
 
-/// **A catalog that cannot answer the psps' criteria is refused without naming a flag to move.**
+/// **A catalog the psps were not walked with is refused as that, before a segment is cut** (plan
+/// step C5, which makes spec §6's check exist).
 ///
-/// The refusal for *the reader asks for tracts below what this file holds* names the flag that
-/// asked — `--min-copies`, say — because on a walk that is what the person typed and what they
-/// have to change (`run_ground::catalog_error_naming_the_flag`). On this command nobody typed it:
-/// the criteria came out of the psps, and no flag here can move them. What the person can move is
-/// which catalog they pointed at, which the general refusal names.
+/// The catalog built here is on the cohort's own reference and holds tracts of twenty copies and
+/// up, where the psps' was built at the default floors — the same assembly, another file.
 ///
-/// The catalog built here holds tracts of twenty copies and up; the walk's own calling floors ask
-/// for six at period 2, so the file cannot serve them — the rows are not in it.
+/// **How the order is shown.** Cut with the psps' criteria, which ask for six copies at period 2,
+/// this catalog cannot serve them — the rows are not in it — so a run that cut segments before
+/// comparing headers is refused as a catalog too coarse for its criteria: true, and no help to a
+/// person whose fault is which file they named.
+///
+/// **And no flag to move is named, nor a census to regenerate.** The criteria came out of the
+/// psps, so what this command line can change is which catalog it points at; and a census
+/// regenerated against this catalog would be refused again by the next fit with the right one.
 #[test]
-fn a_catalog_that_cannot_serve_the_psps_criteria_is_refused_without_naming_a_flag() {
+fn a_catalog_the_psps_were_not_walked_with_is_refused_before_segments_are_cut() {
     use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
     use crate::ng::region_typing::segment_criteria::SsrSegmentCriteria;
     use crate::ng::repeat_catalog::RepeatCatalogBuilder;
@@ -313,18 +317,93 @@ fn a_catalog_that_cannot_serve_the_psps_criteria_is_refused_without_naming_a_fla
 
     let output = cohort.directory.path().join("cohort.parameters.toml");
     let mut args = args_over(&cohort, &psps, output);
-    args.catalog = Some(coarse);
+    args.catalog = Some(coarse.clone());
 
-    let error = fit_and_assemble(&args).expect_err("that catalog does not hold what the psps ask");
+    let error = fit_and_assemble(&args).expect_err("the psps were walked with another catalog");
 
+    assert!(
+        matches!(
+            &error,
+            EstimateParametersCliError::WalkedWithAnotherCatalog { path, .. } if path == &coarse
+        ),
+        "the catalog is compared with the psps' before it is cut, and got: {error:?}",
+    );
     let rendered = crate::error_render::format_error_chain(&error);
     assert!(
-        !rendered.contains("--min-copies"),
-        "no flag on this command line can move the criteria, and got: {rendered}",
+        rendered.contains("it was built under other repeat criteria"),
+        "and what about it is not theirs: {rendered}",
     );
     assert!(
-        rendered.contains("twenty-copies.repeats.parquet"),
-        "the catalog the run was pointed at is what the reader can change, and got: {rendered}",
+        rendered.contains("run this fit again with --catalog naming the one they were"),
+        "and what to do: {rendered}",
+    );
+    assert!(
+        !rendered.contains("--min-copies")
+            && !rendered.contains(THE_COMMAND_THAT_REBUILDS_A_CENSUS),
+        "no flag on this command line can move the criteria, and regenerating fixes nothing: \
+         {rendered}",
+    );
+}
+
+/// **A reference the psps were not walked against is refused as that, before the selection is
+/// rebuilt** (plan step C5).
+///
+/// The reference here is the cohort's own with its first base changed, so its one contig has the
+/// psps' name and length and only its bases differ — what a person meets when two builds of an
+/// assembly share their contig names.
+///
+/// **How the order is shown: the catalog is the psps' own**, built on the right reference. A run
+/// that opened the catalog before comparing the reference with the psps would be refused as a
+/// catalog built on another reference, blaming the one file that is right; one that reached the
+/// comparison of recorded settings would name every census as stale and tell the person to
+/// regenerate them against the wrong reference.
+#[test]
+fn a_reference_the_psps_were_not_walked_against_is_refused_before_the_selection_is_rebuilt() {
+    use crate::pop_var_caller_exp::test_fixtures::{VARYING_CONTIG, the_varying_cohorts_reference};
+
+    let (cohort, psps) = a_walked_cohort();
+    let mut bases = the_varying_cohorts_reference();
+    bases[0] = match bases[0] {
+        b'A' => b'C',
+        _ => b'A',
+    };
+    let another = cohort.directory.path().join("another-build.fa");
+    std::fs::write(
+        &another,
+        format!(
+            ">{}\n{}\n",
+            VARYING_CONTIG.0,
+            std::str::from_utf8(&bases).expect("ACGT is text")
+        ),
+    )
+    .expect("the scratch dir is ours");
+    let mut args = args_over(&cohort, &psps, cohort.directory.path().join("out.toml"));
+    args.reference = another.clone();
+
+    let error =
+        fit_and_assemble(&args).expect_err("the psps were walked against another reference");
+
+    assert!(
+        matches!(
+            &error,
+            EstimateParametersCliError::WalkedAgainstAnotherReference { path, .. } if path == &another
+        ),
+        "the reference is compared with the psps before the catalog is opened, and got: {error:?}",
+    );
+    let rendered = crate::error_render::format_error_chain(&error);
+    assert!(
+        rendered.contains(
+            "they name ref.fa, so run this fit again with that one, which regenerates nothing"
+        ),
+        "what to do, and which file to do it with — the psps' headers name it: {rendered}",
+    );
+    assert!(
+        rendered.contains("the psp for sample one was written against a different reference"),
+        "and which psp says so, and how: {rendered}",
+    );
+    assert!(
+        !rendered.contains(THE_COMMAND_THAT_REBUILDS_A_CENSUS),
+        "regenerating against the wrong reference fixes nothing: {rendered}",
     );
 }
 
@@ -463,65 +542,108 @@ fn a_psp_carrying_no_census_is_refused_and_the_report_names_it() {
     );
 }
 
-/// **A cohort whose censuses were written against another selection reaches the fit's own refusal,
-/// and the command passes on what it says to do** (spec §4.2, third row).
-///
-/// This is the one cause of a stale census that no cheap read can see: every census here carries
-/// this build's format and they all agree with each other, so the freshness judgement calls every
-/// psp fresh and the cohort opens. What differs is the set of positions — each census is rebuilt
-/// from its own psp under a selection keeping half as many — and only the fit, having rebuilt the
-/// run's own, can tell.
-///
-/// **Asserted at the command, not at the library**, because what matters is the message the
-/// person running `estimate-parameters` reads; a command that turned the refusal into another
-/// error would pass every test of the refusal's own text.
-#[test]
-fn a_cohort_written_against_another_selection_is_told_both_ways_out() {
+/// Replace the census in each of `paths` with one rebuilt from that psp under a selection keeping
+/// `generic_target` positions — the census a build with another position budget would have
+/// written, in this build's format.
+fn recensus_under_a_budget_of(cohort: &AVaryingCohort, paths: &[PathBuf], generic_target: u64) {
     use crate::ng::parameter_estimation::joint::census_file::write_census;
+    use crate::ng::run::census_from_psp;
     use crate::ng::run::test_fixtures::a_census_plan_over_selecting;
-    use crate::ng::run::{CohortFitError, census_from_psp};
 
-    let (cohort, psps) = a_walked_cohort();
-    // **A handful, not half the shipped budget.** This contig holds fewer ordinary positions
-    // than half of it, so a selection asking for half keeps every one of them — the same set —
-    // and censuses recorded under that other budget fit without a word, because what the fit
-    // compares is the set of positions kept and not the terms they were chosen under. Three is
-    // below what the contig holds, so the set really differs.
-    let (segmentation, fewer) = a_census_plan_over_selecting(&cohort.reference, &cohort.catalog, 3);
-    let paths = psps_named_by(&args_over(
-        &cohort,
-        &psps,
-        cohort.directory.path().join("out.toml"),
-    ))
-    .expect("the directory lists");
-    for path in &paths {
-        let rebuilt = census_from_psp(path, &fewer, &segmentation).expect("the psp reads");
+    let (segmentation, plan) =
+        a_census_plan_over_selecting(&cohort.reference, &cohort.catalog, generic_target);
+    for path in paths {
+        let rebuilt = census_from_psp(path, &plan, &segmentation).expect("the psp reads");
         let mut bytes = Vec::new();
         write_census(&rebuilt.evidence, None, &mut bytes).expect("the census encodes");
         crate::ng::psp::replace_trailer(path, &bytes).expect("the tail rewrites");
     }
+}
 
-    let error = fit_and_assemble(&args_over(
-        &cohort,
-        &psps,
-        cohort.directory.path().join("out.toml"),
-    ))
-    .expect_err("those censuses keep other positions than this run chooses");
+/// The line the report gives a sample whose census records a different position budget.
+fn recorded_under_another_budget(sample: &str, psp: &Path) -> String {
+    format!(
+        "  {sample} ({}) carries a census recorded under settings this run does not use (the \
+         first that differs: generic target position count)\n",
+        psp.display()
+    )
+}
 
+/// **A cohort whose censuses were recorded under another position budget is refused, naming every
+/// sample, the setting and the command** (plan step C5; spec §4.2, third row).
+///
+/// **Half the shipped budget is the case that used to fit without a word.** This contig holds
+/// fewer ordinary positions than either budget, so both selections keep every one of them, and the
+/// fit — which compares the positions kept — had nothing to refuse, while every census's recorded
+/// settings said the budget differed. **A budget of three changes the kept set as well**, and is
+/// named the same way, because the budget comes before the kept positions in the order the
+/// settings are compared.
+///
+/// **Every census here agrees with every other**, so a check that compared the samples only with
+/// each other sees nothing to refuse; what is stale is the whole cohort against the run.
+#[test]
+fn a_cohort_recorded_under_another_position_budget_is_refused_naming_the_budget() {
+    for budget in [CensusSelection::SHIPPED.generic_target / 2, 3] {
+        let (cohort, psps) = a_walked_cohort();
+        let args = args_over(&cohort, &psps, cohort.directory.path().join("out.toml"));
+        let paths = psps_named_by(&args).expect("the directory lists");
+        recensus_under_a_budget_of(&cohort, &paths, budget);
+
+        let error =
+            fit_and_assemble(&args).expect_err("those censuses were recorded under another budget");
+
+        let EstimateParametersCliError::CohortCannotBeFitted { report } = &error else {
+            panic!(
+                "at a budget of {budget}, censuses recorded under other settings are a \
+                 regeneration report, not this: {error:?}"
+            );
+        };
+        let said = report.to_string();
+        assert_eq!(report.stale_count(), 2, "at a budget of {budget}: {said}");
+        for (sample, path) in [("one", &paths[0]), ("two", &paths[1])] {
+            assert!(
+                said.contains(&recorded_under_another_budget(sample, path)),
+                "at a budget of {budget}, a line a sample naming the setting: {said}",
+            );
+        }
+        assert!(
+            said.ends_with(&the_command_that_regenerates(&args)),
+            "at a budget of {budget}, and the command, last: {said}",
+        );
+    }
+}
+
+/// **A census that disagrees with the rest of its cohort is named alone, with the fix** (plan
+/// step C5).
+///
+/// Before C5 this cohort was refused as *samples one and two disagree on generic target position
+/// count; they did not record the same thing* — both samples named, and nothing to do.
+///
+/// **The stale census is the first sample's**, so a refusal naming the pair names the fresh
+/// sample too, and one that took the first census as the standard names the fresh sample instead
+/// of the stale one.
+#[test]
+fn a_census_that_disagrees_with_the_rest_of_its_cohort_is_named_alone() {
+    let (cohort, psps) = a_walked_cohort();
+    let args = args_over(&cohort, &psps, cohort.directory.path().join("out.toml"));
+    let paths = psps_named_by(&args).expect("the directory lists");
+    recensus_under_a_budget_of(&cohort, &paths[..1], 3);
+
+    let error = fit_and_assemble(&args).expect_err("one census was recorded under another budget");
+
+    let EstimateParametersCliError::CohortCannotBeFitted { report } = &error else {
+        panic!("one stale census is a regeneration report, not this: {error:?}");
+    };
+    let said = report.to_string();
+    assert_eq!(report.stale_count(), 1, "{said}");
     assert!(
-        matches!(
-            &error,
-            EstimateParametersCliError::Fit { source } if matches!(**source, CohortFitError::AnotherSelection)
-        ),
-        "the freshness judgement cannot see this, so it is the fit's refusal: {error:?}",
+        said.contains(&recorded_under_another_budget("one", &paths[0])),
+        "the stale sample, its file and the setting: {said}",
     );
-    let said = crate::error_render::format_error_chain(&error);
     assert!(
-        said.contains("fit with those, which regenerates nothing")
-            && said.contains(&format!(
-                "so regenerate them with {THE_COMMAND_THAT_REBUILDS_A_CENSUS} and fit again"
-            )),
-        "and the person running the command reads both ways out: {said}",
+        !said.contains("two (")
+            && said.contains("1 other sample carries a census this build reads."),
+        "the fresh sample is counted, not listed: {said}",
     );
 }
 

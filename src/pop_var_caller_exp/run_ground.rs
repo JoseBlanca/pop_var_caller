@@ -346,12 +346,60 @@ pub fn segments_cut_with(
     analysed: &GenomeRegions,
     with_checksums: &ReferenceInfo,
 ) -> Result<Segmentation, GroundError> {
+    let catalog = open_catalog(catalog_path, reference, with_checksums)?;
+    segments_cut_from(&catalog, catalog_path, criteria, criteria_from, analysed)
+}
+
+/// **The catalog at `catalog_path`, opened and checked against the reference** — the first half
+/// of [`segments_cut_with`], for a command that has something to ask the catalog's header before
+/// any segment is cut.
+///
+/// `estimate-parameters` is that command: it compares the header with the catalog its psps were
+/// walked with, and a catalog that is not theirs would otherwise be met while cutting, as one that
+/// cannot serve the criteria — a message about the file's contents where the fault is which file
+/// was named.
+///
+/// # Errors
+///
+/// [`GroundError::MissingCatalog`] when there is no catalog to read, and [`GroundError::Catalog`]
+/// when it will not read, was written by another build of this program, or was built on another
+/// reference.
+pub fn open_catalog(
+    catalog_path: &Path,
+    reference: &Path,
+    with_checksums: &ReferenceInfo,
+) -> Result<RepeatCatalog, GroundError> {
     refuse_a_catalog_that_is_not_there(catalog_path, reference)?;
-    let catalog = RepeatCatalog::open_checking_against_reference(catalog_path, with_checksums)
-        .map_err(|source| GroundError::Catalog {
+    RepeatCatalog::open_checking_against_reference(catalog_path, with_checksums).map_err(|source| {
+        GroundError::Catalog {
             path: catalog_path.to_path_buf(),
             source,
-        })?;
+        }
+    })
+}
+
+/// **The segments cut from a catalog already open** — the second half of [`segments_cut_with`].
+///
+/// `catalog_path` is the file `catalog` was opened from, recorded in the segmentation and named by
+/// a refusal; an open catalog does not hand its path out.
+///
+/// **`CriteriaSource::ThePspHeaders` is now defensive for `estimate-parameters`**, which proves
+/// the catalog's header is the one its psps were walked with before it cuts anything: the criteria
+/// it cuts with are those psps' own, and a catalog that cut them once cuts them again. What is
+/// left for that arm is a file whose header matches and whose rows do not.
+///
+/// # Errors
+///
+/// As [`segments_cut_with`], less [`GroundError::MissingCatalog`]. [`GroundError::Catalog`] still
+/// arrives, for a catalog too coarse for criteria that came from a psp header, and
+/// [`GroundError::RoutingBelowCatalog`] for the same asked by this command line's own flags.
+pub fn segments_cut_from(
+    catalog: &RepeatCatalog,
+    catalog_path: &Path,
+    criteria: &StrRepeatCriteria,
+    criteria_from: CriteriaSource,
+    analysed: &GenomeRegions,
+) -> Result<Segmentation, GroundError> {
     let spans: Vec<_> = analysed.iter().collect();
     let segments = catalog
         .genome_segments(criteria, ReadScope::Regions(&spans))

@@ -76,9 +76,11 @@ pub enum CohortFitError {
     /// The selection rebuilt here is not the one the censuses were written against.
     ///
     /// **The third of spec §4.2's three causes, and the only one a cheap read cannot reach**: it
-    /// needs the run's reference read and its selection rebuilt, which is why it arrives here
-    /// rather than in the report `estimate-parameters` refuses a stale cohort with
-    /// ([`CensusesToRegenerate`](super::CensusesToRegenerate)).
+    /// needs the run's reference read and its selection rebuilt. **`estimate-parameters` makes
+    /// that comparison itself and reports it as rows of
+    /// [`CensusesToRegenerate`](super::CensusesToRegenerate)** (plan step C5), so what reaches
+    /// here from a command is nothing, and what reaches here at all is a caller that fitted
+    /// without comparing.
     ///
     /// **Two different faults end here, and they have opposite fixes**, so the message offers
     /// both — in the order of what they cost:
@@ -91,9 +93,15 @@ pub enum CohortFitError {
     /// - **this build chooses census positions differently** from the one that wrote them — its
     ///   selection seed, budget or cap changed. Only regenerating fixes that.
     ///
-    /// **Which of the two it is, this variant cannot say**: what is compared is a digest of the
-    /// kept positions, and it records no reason. Checkpoint C of `psp_census_pair.md`'s plan
-    /// raises making it say.
+    /// **Which of the two it is, this variant cannot say** — what is compared is a digest of the
+    /// kept positions, and it records no reason — **and `estimate-parameters` no longer reaches
+    /// it.** Before fitting, that command compares its reference and its catalog with the psp
+    /// headers, refusing either in its own words, and then each census's twelve recorded settings
+    /// with the ones its own plan records under, naming every stale sample and the first setting
+    /// that differs (plan step C5 of `psp_census_pair.md`). This is the backstop behind those, and
+    /// it is reached today only by this module's own tests — `estimate-parameters` is the one
+    /// caller there is. For a caller that fits without comparing, both faults remain possible,
+    /// which is why the message keeps both ways out.
     #[error(
         "the census positions chosen from this reference and catalog are not the ones these \
          censuses were written against, and fitting them anyway would read one stratum's tracts \
@@ -581,11 +589,11 @@ mod tests {
             matches!(error, CohortFitError::AnotherSelection),
             "{error:?}"
         );
-        // **And it says what to do about it** (spec §4.2, third row). This is the one cause of a
-        // stale census that no cheap read can reach, so it arrives here rather than in the report
-        // `estimate-parameters` refuses a stale cohort with — and a person meeting it has the
-        // same job in front of them, after a fit that has already read the reference and rebuilt
-        // the selection.
+        // **And it says what to do about it** (spec §4.2, third row). No command reaches this
+        // message: `estimate-parameters` compares the recorded settings itself and reports them as
+        // rows of its regeneration report (plan step C5). What it serves is a caller that fits
+        // without comparing, which is why it still offers both ways out — such a caller has ruled
+        // out neither.
         let said = error.to_string();
         let free = said
             .find("if the psps were walked against another reference or catalog, fit with those")

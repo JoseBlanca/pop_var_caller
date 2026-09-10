@@ -33,12 +33,13 @@ use crate::ng::locus_generation::{
 };
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::joint::census::{
-    CensusWriter, DepthCap, NamedReadGroup, ReadCap, SampleCensusEvidence,
+    CensusWriter, DepthCap, DepthLadderDigest, NamedReadGroup, ReadCap, RecordingTerms,
+    SampleCensusEvidence, SelectionTermsDigest,
 };
 use crate::ng::parameter_estimation::joint::census_file::write_census;
 use crate::ng::parameter_estimation::joint::loci::{
-    CatalogBuildSettings, CensusLoci, ReferenceDigest, RegionSetDigest, SelectableRegions,
-    SelectionError, SelectionTerms, select_kept_loci,
+    CatalogBuildSettings, CensusLoci, CensusLociDigester, ReferenceDigest, RegionSetDigest,
+    SelectableRegions, SelectionError, SelectionTerms, select_kept_loci,
 };
 use crate::ng::psp::{
     ContigIdentity, FORMAT_VERSION, Header, Manifest, PspWriter, ReadGroupIdentity,
@@ -295,6 +296,34 @@ impl CensusPlan {
             }
         }
         writer
+    }
+
+    /// **The settings every census written under this plan records** — the twelve values of
+    /// [`RecordingTerms`], without a census being written.
+    ///
+    /// **Built from what [`writer_for`](Self::writer_for) hands the writer**: the selection's
+    /// terms, the census's own depth ladder, the two caps, the plan's per-stratum counts, and the
+    /// kept positions digested in the order the writer holds them, straight from the selection.
+    /// So a census this plan's writer finished records exactly these, and one that records
+    /// anything else was written under something this plan is not.
+    ///
+    /// **What it is for: judging a census against the run before fitting it** (plan step C5 of
+    /// `psp_census_pair.md`). Samples are compared with each other when a cohort is assembled;
+    /// this is the other half, the one that can say which sample is the stale one.
+    #[must_use]
+    pub fn recording_terms(&self) -> RecordingTerms {
+        let mut kept = CensusLociDigester::new();
+        for (index, position) in self.loci.generic().iter().enumerate() {
+            kept.observe(index, *position);
+        }
+        RecordingTerms {
+            selection: SelectionTermsDigest::of(&self.terms),
+            kept_loci: kept.finish(),
+            ssr_stratum_counts: self.loci.ssr_stratum_counts().clone(),
+            read_cap: self.read_cap,
+            depth_ladder: DepthLadderDigest::of(&DepthBinEdges::for_census()),
+            depth_cap: self.depth_cap,
+        }
     }
 }
 

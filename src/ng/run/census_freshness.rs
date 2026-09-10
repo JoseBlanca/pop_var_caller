@@ -1,22 +1,26 @@
 //! **What a psp's census is, judged before a fit trusts it** — the verdict, the two cheap reads
-//! that reach two of its causes, and a cohort judged whole.
+//! that reach two of its causes, the comparison with the run's own settings that reaches the
+//! third, and a cohort judged whole.
 //!
 //! A psp carries its sample's census as the file's closing payload
 //! (`doc/devel/ng/spec/psp_census_pair.md` §3). A census is a cache, so a psp can carry one that
-//! this build cannot read, or one written against a different set of loci from the one the run in
-//! hand rebuilds. `estimate-parameters` will refuse such a cohort and name every sample in it
-//! (spec §4, §4.1, plan step C3); `regenerate-census` will rebuild exactly those (spec §8, plan
-//! step D1). Both ask the same question, and [`CensusVerdict`] is the answer; `estimate-parameters`
-//! reads it, and `regenerate-census` will.
+//! this build cannot read, or one recorded under settings other than the ones the run in hand
+//! records under. `estimate-parameters` refuses such a cohort and names every sample in it
+//! (spec §4, §4.1, plan steps C3 and C5); `regenerate-census` will rebuild exactly those (spec §8,
+//! plan step D1). Both ask the same question, and [`CensusVerdict`] is the answer;
+//! `estimate-parameters` reads it, and `regenerate-census` will.
 //!
-//! **A cohort is judged in one pass and every sample in it is named**
-//! ([`what_the_heads_say_about_every_census_in_a_cohort`]), because the wait a refusal saves is
+//! **A cohort is judged whole and every sample in it is named** — from the psps' heads
+//! ([`what_the_heads_say_about_every_census_in_a_cohort`]) and, once the run's selection is
+//! rebuilt, against the run's own settings
+//! ([`what_the_run_says_about_every_census_in_a_cohort`]) — because the wait a refusal saves is
 //! per sample: regenerating one census is a quarter of an hour (spec §4), so a run that reported
 //! the first stale psp and stopped would cost that wait once a stale sample, one after another,
 //! to learn a job that fits in one message.
 
 use std::path::{Path, PathBuf};
 
+use crate::ng::parameter_estimation::joint::census::{RecordingTerms, SampleCensusEvidence};
 use crate::ng::parameter_estimation::joint::census_file::{
     BYTES_THAT_NAME_THE_VERSION, VERSION, version_word_of,
 };
@@ -52,8 +56,8 @@ pub const THE_COMMAND_THAT_REBUILDS_A_CENSUS: &str = "regenerate-census";
 /// the psp's footer, which was read when the file was opened. [`AnotherFormat`](Self::AnotherFormat)
 /// and [`NotACensus`](Self::NotACensus) are one short read at the trailer's front.
 /// [`AnotherSelection`](Self::AnotherSelection) needs the run's reference read and its selection
-/// rebuilt — once a run, and then one digest compared a sample. A command that has read only the
-/// footer and the trailer's front reports what those two can see and stops there.
+/// rebuilt — once a run, and then twelve recorded settings compared a sample. A command that has
+/// read only the footer and the trailer's front reports what those two can see and stops there.
 ///
 /// **An older census is named as an older census, never as damage.** A version word this build
 /// does not know reaches the user as *malformed* today
@@ -116,12 +120,26 @@ pub enum CensusVerdict {
     /// ([`replace_trailer`](crate::ng::psp::replace_trailer)), so it is still the repair to try.
     NotACensus,
 
-    /// The psp carries a census this build reads, written against a different set of loci from
-    /// the one this run rebuilds (spec §4.2, third row).
+    /// The psp carries a census this build reads, recorded under settings other than the ones
+    /// this run records under (spec §4.2, third row).
     ///
-    /// A build whose selection constants changed, or a run under a different reference or
-    /// catalog. It is the one cause that cannot be reached without building the selection.
-    AnotherSelection,
+    /// **`setting` names the first of the twelve that differs**, in the words
+    /// [`RecordingTerms::first_disagreement`] uses — the selection seed, the position budget, the
+    /// reference, and so on. Two settings are two jobs, and a report grouped by cause keeps them
+    /// apart.
+    ///
+    /// **The one cause that cannot be reached without building the selection**: the run's own
+    /// settings include a digest of its reference's bases and of the positions it keeps.
+    ///
+    /// **Its fix is to regenerate the census, and that holds only where the run's reference and
+    /// catalog were first checked against the psp headers.** A run pointed at another reference or
+    /// catalog differs from every census too, and for it the fix is the right files, which
+    /// rebuilds nothing; `estimate-parameters` refuses that case in its own words before any
+    /// census is judged here (plan step C5).
+    AnotherSelection {
+        /// The first recorded setting that differs from the run's.
+        setting: &'static str,
+    },
 }
 
 impl std::fmt::Display for CensusVerdict {
@@ -141,9 +159,11 @@ impl std::fmt::Display for CensusVerdict {
                 }
             ),
             Self::NotACensus => write!(out, "carries a trailer that is not a census"),
-            Self::AnotherSelection => {
-                write!(out, "carries a census built under another selection")
-            }
+            Self::AnotherSelection { setting } => write!(
+                out,
+                "carries a census recorded under settings this run does not use (the first that \
+                 differs: {setting})"
+            ),
         }
     }
 }
@@ -162,6 +182,18 @@ impl CensusVerdict {
             true => None,
             false => Some(Self::AnotherFormat { version_in_the_psp }),
         }
+    }
+
+    /// The verdict for a census that recorded `recorded`, judged against the settings this run
+    /// records under, or `None` when the two are the same.
+    ///
+    /// **`None` and not [`Fresh`](Self::Fresh)**, for the reason
+    /// [`of_a_version_word`](Self::of_a_version_word) gives: this is one of spec §4.2's three
+    /// causes, and freshness is all three.
+    #[must_use]
+    pub fn of_recorded_settings(run: &RecordingTerms, recorded: &RecordingTerms) -> Option<Self> {
+        run.first_disagreement(recorded)
+            .map(|setting| Self::AnotherSelection { setting })
     }
 }
 
@@ -276,6 +308,64 @@ fn what_one_psps_head_says_about_its_census(path: &Path, psp: &mut PspReader) ->
     }
 }
 
+/// **Every census of a cohort judged against the settings this run records under** — spec
+/// §4.2's third cause, one verdict a sample, in the run's sample order.
+///
+/// `censuses` are the cohort's own, one a psp and in its order
+/// ([`each_census_in_the_cohorts_psps`](super::each_census_in_the_cohorts_psps)); `run` is what a
+/// census written under this run's plan records
+/// ([`CensusPlan::recording_terms`](super::CensusPlan::recording_terms)).
+///
+/// **Against the run and not against each other**, which is the whole difference from the
+/// comparison a cohort's assembly makes. Two samples that disagree say that one of them is stale
+/// and not which. Each compared with the run says exactly which — and a cohort whose samples all
+/// agree with each other and not with the run, every census written by a build that keeps
+/// positions under another budget, is named whole where the assembly sees nothing to refuse.
+///
+/// **Nothing is read**: a census's settings were decoded with its directory when it was opened.
+/// **Nothing stops early either**, for spec §4.1's reason.
+///
+/// # Panics
+///
+/// When `censuses` does not hold one census a psp of `cohort`, in its order — a count that does
+/// not match, or a census whose sample is not that psp's, either of which would pair verdicts
+/// with the wrong files.
+#[must_use]
+pub fn what_the_run_says_about_every_census_in_a_cohort(
+    cohort: &OpenPspCohort,
+    censuses: &[SampleCensusEvidence],
+    run: &RecordingTerms,
+) -> Vec<JudgedPsp> {
+    assert_eq!(
+        censuses.len(),
+        cohort.sample_count(),
+        "one census a psp of the cohort, in its order",
+    );
+    cohort
+        .each_psp_with_its_path_read_only()
+        .zip(censuses)
+        .map(|((path, psp), census)| {
+            // **The pairing itself, and not only how many there are.** A list of the right length
+            // in the wrong order passes a count and then reports one sample's staleness against
+            // another's file — which is the whole of what a row is for. Both names are in hand
+            // here, so it costs one comparison a sample.
+            assert_eq!(
+                census.sample,
+                psp.header().sample,
+                "the census of {} was paired with the psp of {}",
+                census.sample,
+                psp.header().sample,
+            );
+            JudgedPsp {
+                sample: psp.header().sample.clone(),
+                psp: path.to_path_buf(),
+                verdict: Ok(CensusVerdict::of_recorded_settings(run, &census.terms)
+                    .unwrap_or(CensusVerdict::Fresh)),
+            }
+        })
+        .collect()
+}
+
 /// **What a run says when it will not fit a cohort until some of its censuses are rebuilt** —
 /// spec §4.3's report.
 ///
@@ -289,8 +379,14 @@ fn what_one_psps_head_says_about_its_census(path: &Path, psp: &mut PspReader) ->
 /// scattered lines.
 ///
 /// **Then the command, spelled out with the arguments the run was given**, so it can be copied
-/// rather than reconstructed. The fit's own refusal, for the one cause this report cannot see,
-/// names the same command ([`CohortFitError::AnotherSelection`](super::CohortFitError::AnotherSelection)).
+/// rather than reconstructed.
+///
+/// **One report for both moments a command refuses at**: before the reference is read, from what
+/// the psps' heads say ([`what_the_heads_say_about_every_census_in_a_cohort`]), and after the
+/// selection is rebuilt, from what each census recorded against the run
+/// ([`what_the_run_says_about_every_census_in_a_cohort`]). The fit's own refusal is a backstop
+/// behind both and names the same command
+/// ([`CohortFitError::AnotherSelection`](super::CohortFitError::AnotherSelection)).
 ///
 /// **A psp that will not read is reported apart from the stale ones**, because regenerating its
 /// census would not fix it — the file itself is the problem, and the command line says so. If
@@ -664,8 +760,12 @@ mod tests {
             "carries a trailer that is not a census"
         );
         assert_eq!(
-            CensusVerdict::AnotherSelection.to_string(),
-            "carries a census built under another selection"
+            CensusVerdict::AnotherSelection {
+                setting: "generic target position count"
+            }
+            .to_string(),
+            "carries a census recorded under settings this run does not use (the first that \
+             differs: generic target position count)"
         );
     }
 
@@ -973,6 +1073,123 @@ mod tests {
             census.len(),
         );
         assert_eq!(rows.len(), 4);
+    }
+
+    /// A census this build wrote, decoded — for the tests that judge what a census recorded.
+    fn a_decoded_census() -> SampleCensusEvidence {
+        crate::ng::parameter_estimation::joint::census_file::decode_census(
+            &a_census_this_build_wrote(),
+        )
+        .expect("the fixture decodes")
+        .census
+    }
+
+    /// **A census recording the run's own settings is nothing to report, and one recording
+    /// another names the setting.**
+    #[test]
+    fn a_census_recorded_under_the_runs_settings_is_nothing_to_report() {
+        use crate::ng::parameter_estimation::joint::census::ReadCap;
+
+        let run = a_decoded_census().terms;
+        assert_eq!(CensusVerdict::of_recorded_settings(&run, &run), None);
+
+        let mut recorded = run.clone();
+        recorded.read_cap = ReadCap(run.read_cap.0 + 1);
+        assert_eq!(
+            CensusVerdict::of_recorded_settings(&run, &recorded),
+            Some(CensusVerdict::AnotherSelection {
+                setting: "per-locus read cap"
+            }),
+        );
+    }
+
+    /// **Every census of a cohort is judged against the run, each naming its own setting, in the
+    /// run's order** — spec §4.1 for the third cause.
+    ///
+    /// **The first census is stale and so is the last, for different settings**, with a fresh one
+    /// between: a judgement that stopped at the first stale census comes back with one row where
+    /// three are asserted, and one that named whatever the first stale census differed on names
+    /// the read cap twice.
+    ///
+    /// **Each census is named for the psp it came out of**, which the judgement requires — a
+    /// census bearing another sample's name is a panic and not a row
+    /// ([`a_census_paired_with_another_samples_psp_is_refused`]). **The samples are not in
+    /// alphabetical order**, so a pass that sorted them, or walked a map keyed by name, gives a
+    /// different sequence from the one asserted.
+    #[test]
+    fn every_census_of_a_cohort_is_judged_against_the_run_and_not_only_the_first() {
+        use crate::ng::parameter_estimation::joint::census::{DepthLadderDigest, ReadCap};
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let census = a_census_this_build_wrote();
+        let cohort = a_cohort_sealed_with(
+            &dir,
+            &[("delta", &census), ("alpha", &census), ("charlie", &census)],
+        );
+        let run = a_decoded_census().terms;
+        let of_sample = |sample: &str| {
+            let mut census = a_decoded_census();
+            census.sample = sample.to_string();
+            census
+        };
+        let mut another_read_cap = of_sample("delta");
+        another_read_cap.terms.read_cap = ReadCap(run.read_cap.0 + 1);
+        let mut another_ladder = of_sample("charlie");
+        another_ladder.terms.depth_ladder = DepthLadderDigest([0; 16]);
+
+        let rows = what_the_run_says_about_every_census_in_a_cohort(
+            &cohort,
+            &[another_read_cap, of_sample("alpha"), another_ladder],
+            &run,
+        );
+
+        assert_eq!(
+            each_sample_file_and_verdict(&rows),
+            vec![
+                (
+                    "delta",
+                    the_cohorts_file(&dir, 0).as_path(),
+                    CensusVerdict::AnotherSelection {
+                        setting: "per-locus read cap"
+                    }
+                ),
+                (
+                    "alpha",
+                    the_cohorts_file(&dir, 1).as_path(),
+                    CensusVerdict::Fresh
+                ),
+                (
+                    "charlie",
+                    the_cohorts_file(&dir, 2).as_path(),
+                    CensusVerdict::AnotherSelection {
+                        setting: "depth ladder edges"
+                    }
+                ),
+            ],
+        );
+    }
+
+    /// **A census paired with another sample's psp is a panic and not a row.**
+    ///
+    /// The two lists are built from one cohort in one order today
+    /// (`each_census_in_the_cohorts_psps`), so what this pins is the next caller: a row carrying
+    /// one sample's name and file against another's verdict sends a person to regenerate a psp
+    /// that is fine, and leaves the stale one unnamed. **A count cannot see it** — these two
+    /// lists are the same length.
+    #[test]
+    #[should_panic(expected = "was paired with the psp of")]
+    fn a_census_paired_with_another_samples_psp_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let census = a_census_this_build_wrote();
+        let cohort = a_cohort_sealed_with(&dir, &[("alpha", &census), ("bravo", &census)]);
+        let run = a_decoded_census().terms;
+        let mut of_alpha = a_decoded_census();
+        of_alpha.sample = "alpha".to_string();
+        let mut of_bravo = a_decoded_census();
+        of_bravo.sample = "bravo".to_string();
+
+        let _ =
+            what_the_run_says_about_every_census_in_a_cohort(&cohort, &[of_bravo, of_alpha], &run);
     }
 
     /// A judged row, for the report's own tests.

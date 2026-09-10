@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::ng::parameter_estimation::joint::census::{
-    ByteExtent, CensusError, CohortCensusEvidence, CohortRefusal,
+    ByteExtent, CensusError, CohortCensusEvidence, CohortRefusal, SampleCensusEvidence,
 };
 use crate::ng::parameter_estimation::joint::census_file::open_census_within;
 use crate::ng::read::input::read_groups::{
@@ -90,6 +90,11 @@ pub enum CensusCohortError {
 /// head read the census reader does — at most a megabyte a sample, transient, one buffer at a time
 /// — against a thousand samples' trailers taken whole, which would be tens of gigabytes held.
 ///
+/// **The two halves composed, and what production calls is the halves.**
+/// `estimate-parameters` reads the censuses, judges each against its own run's settings, and
+/// assembles afterwards ([`each_census_in_the_cohorts_psps`], [`the_censuses_as_one_cohort`]);
+/// this is the convenience a test or a caller with nothing to judge wants.
+///
 /// # Errors
 ///
 /// [`CensusCohortError::CensusNotRead`] naming the psp whose trailer will not decode, and
@@ -97,6 +102,25 @@ pub enum CensusCohortError {
 pub fn every_census_in_the_cohorts_psps(
     cohort: &OpenPspCohort,
 ) -> Result<CohortCensusEvidence, CensusCohortError> {
+    the_censuses_as_one_cohort(each_census_in_the_cohorts_psps(cohort)?)
+}
+
+/// **Each census of an opened cohort, read out of its psp and not yet assembled into a cohort** —
+/// one sample a psp, in the cohort's own order, read exactly as
+/// [`every_census_in_the_cohorts_psps`] reads them.
+///
+/// **Apart from the assembly because a command may have to judge each census before refusing the
+/// cohort.** Assembling refuses two samples that recorded different settings, naming the pair
+/// and nothing to do; a command that compares each one with the settings its own run records
+/// under can instead name every stale sample and the fix (plan step C5), and assembles
+/// afterwards with [`the_censuses_as_one_cohort`].
+///
+/// # Errors
+///
+/// [`CensusCohortError::CensusNotRead`] naming the psp whose trailer will not decode.
+pub fn each_census_in_the_cohorts_psps(
+    cohort: &OpenPspCohort,
+) -> Result<Vec<SampleCensusEvidence>, CensusCohortError> {
     let mut opened = Vec::with_capacity(cohort.sample_count());
     for (path, psp) in cohort.each_psp_with_its_path_read_only() {
         // **The footer says where the census is**, and it was read when the psp was opened, so
@@ -115,8 +139,19 @@ pub fn every_census_in_the_cohorts_psps(
         // second file to compare it against.
         opened.push(evidence);
     }
+    Ok(opened)
+}
 
-    CohortCensusEvidence::new(opened).map_err(|source| CensusCohortError::NotOneCohort {
+/// **A cohort's censuses assembled into one**, refusing samples that cannot be fitted together.
+///
+/// # Errors
+///
+/// [`CensusCohortError::NotOneCohort`] for samples that recorded different settings or that claim
+/// one read group.
+pub fn the_censuses_as_one_cohort(
+    censuses: Vec<SampleCensusEvidence>,
+) -> Result<CohortCensusEvidence, CensusCohortError> {
+    CohortCensusEvidence::new(censuses).map_err(|source| CensusCohortError::NotOneCohort {
         source: Box::new(source),
     })
 }

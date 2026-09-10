@@ -18,10 +18,16 @@
 //!
 //! **A census stores a repeat tract by its index within its stratum and nothing else** — no
 //! coordinate, no stratum — so the order has to be rebuilt by choosing the selection again, which
-//! is a function of the seed, the reference, the analysed ground and the catalog. The rebuild is
-//! checked against a digest every census carries before a tract is read: a selection rebuilt from
-//! another reference or another catalog would index one stratum's tracts as another's, which is a
-//! wrong answer rather than a failure.
+//! is a function of the seed, the reference, the analysed ground and the catalog. A selection
+//! rebuilt from another reference or another catalog would index one stratum's tracts as
+//! another's, which is a wrong answer rather than a failure, so nothing about the rebuild is
+//! trusted:
+//!
+//! - **the reference and the catalog are compared with the psp headers first**, and refused as
+//!   the wrong file, because that fix is to name the right one and it rebuilds nothing;
+//! - **then every census's recorded settings are compared with the ones this run's selection
+//!   records under**, and every sample that differs is named with the first setting that does and
+//!   the command that regenerates it (`psp_census_pair.md` plan step C5).
 //!
 //! # What it leaves declared
 //!
@@ -29,7 +35,7 @@
 //! — the other pre-pass route, not this one. `--inbreeding` states one for the whole cohort and
 //! the file records it as supplied.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 use thiserror::Error;
@@ -44,12 +50,13 @@ use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::reference_info::{
     ReferenceCheck, ReferenceInfoError, read_reference_observing_or_creating_fai,
 };
-use crate::ng::repeat_catalog::RepeatCatalog;
+use crate::ng::repeat_catalog::RepeatCatalogHeader;
 use crate::ng::run::{
     CensusCohortError, CensusPlan, CensusSelection, CensusesToRegenerate, CohortFitError,
-    OpenPspCohort, RunError, THE_COMMAND_THAT_REBUILDS_A_CENSUS, every_census_in_the_cohorts_psps,
+    OpenPspCohort, RunError, THE_COMMAND_THAT_REBUILDS_A_CENSUS, each_census_in_the_cohorts_psps,
     every_read_group_pooled, fit_a_cohort, parameters_file_of, parameters_from_the_fit,
-    read_groups_of, what_the_heads_say_about_every_census_in_a_cohort,
+    read_groups_of, the_censuses_as_one_cohort, what_the_heads_say_about_every_census_in_a_cohort,
+    what_the_run_says_about_every_census_in_a_cohort,
 };
 use crate::ng::types::{ContigId, InbreedingF, Ploidy};
 use crate::pop_var_caller_exp::generate_psps::PSP_FILE_EXTENSION;
@@ -166,7 +173,49 @@ pub enum EstimateParametersCliError {
         source: Box<RunError>,
     },
 
-    /// Some of the cohort's psps carry no census this build can fit from.
+    /// `--reference` is not the reference the cohort's psps were walked against.
+    ///
+    /// **Refused before the census selection is rebuilt, and in words that blame the reference.**
+    /// Left to the comparison of recorded settings, every census would be named as stale and the
+    /// person told to regenerate — against this reference, which costs a quarter of an hour a
+    /// sample at whole-genome scale and leaves every census refused again by the next fit with the
+    /// right one.
+    #[error(
+        "{} is not the reference these psps were walked against; they name {walked_against}, so \
+         run this fit again with that one, which regenerates nothing",
+        path.display()
+    )]
+    WalkedAgainstAnotherReference {
+        /// The FASTA this run was given.
+        path: PathBuf,
+        /// What the psps call the reference they were walked against — a file name and no
+        /// directory, which is all a psp header holds.
+        walked_against: String,
+        /// The first psp that disagrees with it, and how.
+        #[source]
+        source: Box<RunError>,
+    },
+
+    /// The catalog this run reads is not the one the cohort's psps were walked with.
+    ///
+    /// **Refused before a segment is cut, for the reason a wrong reference is**: a census judged
+    /// against a selection rebuilt from another catalog is named as stale, and regenerating it
+    /// against that catalog fixes nothing. `difference` says which part of the catalog's header
+    /// is not theirs.
+    #[error(
+        "the repeat catalog {} is not the one these psps were walked with: {difference}; run \
+         this fit again with --catalog naming the one they were, which regenerates nothing",
+        path.display()
+    )]
+    WalkedWithAnotherCatalog {
+        /// The catalog this run read — the one `--catalog` named, or the one beside the reference.
+        path: PathBuf,
+        /// How it differs from the psps' own, as a clause.
+        difference: String,
+    },
+
+    /// Some of the cohort's psps carry no census this build can fit from, or carry one recorded
+    /// under settings this run does not use.
     ///
     /// **The message is the whole of what the user acts on**, so it is the error's own
     /// (`psp_census_pair.md` §4.3): a line a sample, and the command that rebuilds them.
@@ -291,8 +340,9 @@ fn fit_and_assemble(
     //
     // **And before the reference is opened**, which is what makes it immediate: judging a psp is
     // one seek and ten bytes, where reading a human reference is minutes. The third cause a
-    // census can be stale for — built against a different set of loci — is the one this cannot
-    // see, and it is caught later, by the fit's own digest.
+    // census can be stale for — recorded under other settings than this run's — is the one this
+    // cannot see, and it is caught below, once the reference has been read and the selection
+    // rebuilt.
     if let Some(report) = CensusesToRegenerate::of(
         what_the_heads_say_about_every_census_in_a_cohort(&mut cohort),
         || the_command_that_regenerates(args),
@@ -303,7 +353,12 @@ fn fit_and_assemble(
     }
     // **The censuses come out of the psps' trailers**, read lazily: their headers and directories
     // now, a section when the fit asks for it (spec §5).
-    let mut evidence = every_census_in_the_cohorts_psps(&cohort).map_err(|source| {
+    //
+    // **Each one apart, and not yet a cohort.** Assembling them compares the samples with each
+    // other, and a refusal from that names two samples and nothing to do. Judged against this
+    // run's own settings once the selection is rebuilt, below, every stale sample is named and so
+    // is the fix (plan step C5).
+    let censuses = each_census_in_the_cohorts_psps(&cohort).map_err(|source| {
         EstimateParametersCliError::Cohort {
             source: Box::new(source),
         }
@@ -326,6 +381,23 @@ fn fit_and_assemble(
     let unambiguous = callable
         .into_selectable()
         .map_err(|source| EstimateParametersCliError::CensusGround { source })?;
+    // **The reference against the psps, before anything is built from it.** A selection rebuilt
+    // from another reference differs from every census, and the comparison below would name each
+    // one as stale with the fix *regenerate* — the wrong fix, since rebuilt against this reference
+    // every census would be refused again by the next fit with the right one. The catalog is
+    // opened after this for the same reason: a catalog built on the right reference would be
+    // refused against a wrong one, blaming the one file that is correct.
+    cohort
+        .refuse_a_reference_it_was_not_walked_against(&with_checksums)
+        .map_err(
+            |source| EstimateParametersCliError::WalkedAgainstAnotherReference {
+                path: args.reference.clone(),
+                walked_against: cohort
+                    .the_reference_the_psps_were_walked_against()
+                    .to_string(),
+                source: Box::new(source),
+            },
+        )?;
 
     // **The ground and what it is cut with come out of the cohort's psps**, not off this
     // command line (spec §6). The five flags that used to supply the criteria were values a
@@ -337,30 +409,30 @@ fn fit_and_assemble(
     // the two samples and the field (step B3). Take that away and this line is the hazard spec §6
     // describes — a selection built from the first psp's settings that the rest cannot match.
     //
-    // **What happens if they are wrong anyway is weaker than it sounds.** The fit compares a
-    // digest of the *kept generic positions* against the censuses' own (`fit_a_cohort`), so a
-    // difference is caught only where it moves one of them — and on tomato about 1 position in
-    // 400 is kept (spec §2), so a criterion that retypes a single short tract can pass that
-    // digest and be re-indexed in silence. That is the argument for taking the criteria from the
-    // psps rather than a reason to trust the net below.
+    // **And a census written under other criteria is still named**, below: its recorded settings
+    // include the criteria its positions were chosen under, and they are compared with this
+    // run's. The fit's own comparison of the positions kept catches a difference only where it
+    // moves one of them — on tomato about 1 position in 400 is kept (spec §2) — so it is the
+    // backstop and not the check.
     let analysed = cohort.analysed_regions().clone();
     let criteria = cohort.segmentation_inputs().repeat_tract_criteria.clone();
     let catalog_path = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
-    let segmentation = run_ground::segments_cut_with(
+    let catalog = run_ground::open_catalog(&catalog_path, &args.reference, &with_checksums)?;
+    // **The catalog against the psps, before a segment is cut** (spec §6). Cut with the psps'
+    // criteria, a catalog that is not theirs can fail as one too coarse to serve them — true, and
+    // a message about the file's contents where the fault is which file was named.
+    refuse_a_catalog_the_psps_were_not_walked_with(
         &catalog_path,
-        &args.reference,
+        catalog.header(),
+        &cohort.segmentation_inputs().catalog,
+    )?;
+    let segmentation = run_ground::segments_cut_from(
+        &catalog,
+        &catalog_path,
         &criteria,
         run_ground::CriteriaSource::ThePspHeaders,
         &analysed,
-        &with_checksums,
     )?;
-    let catalog = RepeatCatalog::open_checking_against_reference(&catalog_path, &with_checksums)
-        .map_err(|source| {
-            EstimateParametersCliError::Ground(GroundError::Catalog {
-                path: catalog_path.clone(),
-                source,
-            })
-        })?;
     let plan = CensusPlan::of_run(
         CensusSelection::SHIPPED,
         &catalog,
@@ -373,6 +445,39 @@ fn fit_and_assemble(
         source: Box::new(source),
     })?;
     drop(catalog);
+
+    // **Every census against the settings this run records under, and every stale one named**
+    // (spec §4.1, §4.2's third row). The reference and the catalog were just proven to be the
+    // psps' own, so a census that differs from the run differs from its own psp or was written by
+    // a build that chooses positions differently — and regenerating is the fix for both.
+    //
+    // **After the reference is read, where the head's refusal comes before it**, because the run's
+    // settings include a digest of the reference's bases and of the positions it keeps. So a
+    // cohort with one psp carrying no census and another recorded under a different budget is
+    // refused for the first alone, before the reference is opened — and that costs the person
+    // nothing, because the command that refusal prints covers every psp given and
+    // `regenerate-census` rebuilds both: its own skip rule is all three causes, the selection
+    // included, since it rebuilds the selection anyway (spec §8).
+    if let Some(report) = CensusesToRegenerate::of(
+        what_the_run_says_about_every_census_in_a_cohort(
+            &cohort,
+            &censuses,
+            &plan.recording_terms(),
+        ),
+        || the_command_that_regenerates(args),
+    ) {
+        return Err(EstimateParametersCliError::CohortCannotBeFitted {
+            report: Box::new(report),
+        });
+    }
+    // **What assembling can still refuse is damage**: every census now records this run's
+    // settings, so two cannot disagree on them, and two psps declaring one read group were refused
+    // when the cohort was opened, from their headers.
+    let mut evidence = the_censuses_as_one_cohort(censuses).map_err(|source| {
+        EstimateParametersCliError::Cohort {
+            source: Box::new(source),
+        }
+    })?;
 
     let contigs = std::sync::Arc::clone(&plan.contigs);
     let contig_of = move |name: &str| {
@@ -458,6 +563,71 @@ fn the_command_that_regenerates(args: &EstimateParametersArgs) -> String {
         let _ = write!(line, " --psp {}", as_typed(psp));
     }
     line
+}
+
+/// **Refuse a catalog the psps were not walked with**, saying how it differs from theirs (spec §6).
+///
+/// **The whole header is compared, as `call-from-psps` compares it**
+/// ([`SegmentationInputs::first_difference`](crate::ng::run::SegmentationInputs::first_difference)
+/// names it only as *the repeat catalog*). Here the part that differs is named as well, because a
+/// catalog is one file with several ways to be another, and the person has to find the right one:
+/// under other criteria or weights, by another version of this program, or over another contig
+/// table.
+///
+/// **What cannot differ here is the whole-reference digest**, and that is why no clause names it.
+/// Three checks make it so: this run's catalog was checked against this run's reference as it
+/// opened, the psps' catalog was checked against the walk's reference when the walk opened it
+/// ([`RepeatCatalog::open_checking_against_reference`](crate::ng::repeat_catalog::RepeatCatalog::open_checking_against_reference)),
+/// and the check above proved this run's reference is the one the psps were walked against. The
+/// contig *table* can still differ, because that check compares each contig's name, length and
+/// digest where the header also records the FASTA's line geometry — the same bases wrapped at
+/// another width.
+///
+/// **The last clause is a guard against a damaged file rather than a case a person meets**: two
+/// catalogs over one reference, built under the same criteria and weights by the same version of
+/// this program, hold the same tracts.
+///
+/// **Destructured without `..`**, so a field added to the header stops this compiling rather than
+/// dropping out of the comparison.
+fn refuse_a_catalog_the_psps_were_not_walked_with(
+    path: &Path,
+    given: &RepeatCatalogHeader,
+    walked_with: &RepeatCatalogHeader,
+) -> Result<(), EstimateParametersCliError> {
+    let RepeatCatalogHeader {
+        contigs,
+        reference_md5,
+        built_under,
+        scan,
+        tool_version,
+        longest_tract_bp,
+    } = given;
+    debug_assert_eq!(
+        reference_md5, &walked_with.reference_md5,
+        "each catalog was checked against the reference of the run that opened it, and those two \
+         references were just proven to be one, so a difference here would mean one of those \
+         three checks did not run",
+    );
+    let difference = if contigs != &walked_with.contigs {
+        "its contig table is not theirs".to_string()
+    } else if built_under != &walked_with.built_under {
+        "it was built under other repeat criteria".to_string()
+    } else if scan != &walked_with.scan {
+        "it was scanned with other scoring weights".to_string()
+    } else if tool_version != &walked_with.tool_version {
+        format!(
+            "it was built by version {tool_version} of this program, and theirs by version {}",
+            walked_with.tool_version
+        )
+    } else if longest_tract_bp != &walked_with.longest_tract_bp {
+        "it holds other repeat tracts".to_string()
+    } else {
+        return Ok(());
+    };
+    Err(EstimateParametersCliError::WalkedWithAnotherCatalog {
+        path: path.to_path_buf(),
+        difference,
+    })
 }
 
 /// A path as it has to appear on a command line that will be pasted into a shell.

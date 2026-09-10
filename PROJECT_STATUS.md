@@ -4258,9 +4258,15 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     plan's Checkpoint A note and spec §6.1 (`a1fdab11`).
 
 #### The census lives inside the psp — one file a sample
-- **Status:** `reviewed` — **Milestone A complete, at Checkpoint A: a psp carries its census, and
-  the fit can read it lazily from there.** A1-A4 committed, each implemented, reviewed and fixed.
-  Milestones B-E to come.
+- **Status:** `reviewed` — **Milestone C complete, at Checkpoint C: `estimate-parameters` takes
+  psps, reads nothing it could be told wrongly, and refuses a stale cohort whole.** A1-A4, B1-B4
+  and C1-C5 committed, each implemented, reviewed and fixed. Milestones D and E to come: the
+  repair command `regenerate-census`, then the sidecar's machinery deleted.
+  - **C5 (2026-09-10)** was added at Checkpoint C by the owner's ruling: a census recorded under
+    settings other than the run's is refused naming the setting that differs, and the two file
+    checks that make that message unconditional — `--reference` and the catalog against the psp
+    headers — run before the selection is rebuilt. The cohort's censuses are assembled only after
+    that, which is what makes *samples A and B disagree* unreachable from this command.
 - **Plan:** [psp_census_pair.md](doc/devel/ng/impl_plan/psp_census_pair.md); **Spec:** [psp_census_pair.md](doc/devel/ng/spec/psp_census_pair.md)
 - **Branch:** `census-vs-psp-perf`.
 - **What it closes:** a sample is two files today — `<sample>.psp` and `<sample>.census` beside it —
@@ -4269,8 +4275,10 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   settings come from the psp header, and a cohort whose psps disagree on the catalog or the repeat
   criteria is refused by every command that opens one. `generate-census` becomes
   `regenerate-census`, the repair `estimate-parameters` tells a user to run.
-- **Impl report:** [Milestone A](doc/devel/reports/implementations/ng_psp_census_pair_milestone_a_2026-09-09.md)
-- **Latest review:** [Milestone A](doc/devel/reports/reviews/psp_census_pair_milestone_a_2026-09-09.md)
+- **Impl report:** [Milestone C](doc/devel/reports/implementations/ng_psp_census_pair_milestone_c_2026-09-10.md),
+  [Milestone B](doc/devel/reports/implementations/ng_psp_census_pair_milestone_b_2026-09-09.md),
+  [Milestone A](doc/devel/reports/implementations/ng_psp_census_pair_milestone_a_2026-09-09.md)
+- **Latest review:** [Milestone C](doc/devel/reports/reviews/psp_census_pair_milestone_c_2026-09-10.md)
 - **A1 done — the walk hands the census to `finish`.** `PspWriterLine::finish` takes the file's
   closing payload; the walk finishes and encodes its census before sealing, and the bytes cross
   the writing thread's queue once. The census is written with **no pileup identity** (spec §3: a

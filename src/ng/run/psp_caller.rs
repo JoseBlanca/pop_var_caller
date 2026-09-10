@@ -222,6 +222,61 @@ impl OpenPspCohort {
         &self.paths
     }
 
+    /// **Refuse a reference these psps were not walked against**, naming the first file that
+    /// disagrees with it and how.
+    ///
+    /// The comparison [`PspVariantCaller::open`] makes for every file of a calling run (spec
+    /// §6.2), for a command that builds no calling run. `estimate-parameters` reads its reference
+    /// to rebuild the census selection, and a selection rebuilt from another reference is refused
+    /// further on in words that cannot say the reference was the fault — as a census recorded
+    /// under other settings, whose fix is to regenerate, which against the wrong reference costs a
+    /// quarter of an hour a sample and is refused again by the next fit
+    /// (`psp_census_pair.md` plan step C5).
+    ///
+    /// **The first psp answers for the cohort, and the loop is there anyway.** Every psp of an
+    /// opened cohort was walked against one assembly: [`open`](Self::open) requires them to agree
+    /// on the repeat catalog, and a catalog's header carries the whole-reference digest and the
+    /// contig table it was built on
+    /// ([`RepeatCatalogHeader`](crate::ng::repeat_catalog::RepeatCatalogHeader)). So this
+    /// comparison cannot come out differently for the second psp than for the first — while that
+    /// holds through two other checks, and one comparison a sample is what it costs to stop
+    /// depending on it.
+    ///
+    /// # Errors
+    ///
+    /// [`RunError::PspAgainstAnotherReference`] for the first psp, in the run's sample order,
+    /// whose header is not this reference's.
+    pub fn refuse_a_reference_it_was_not_walked_against(
+        &self,
+        reference: &ReferenceInfo,
+    ) -> Result<(), RunError> {
+        self.psps
+            .iter()
+            .try_for_each(|psp| refuse_a_file_against_another_reference(psp.header(), reference))
+    }
+
+    /// **What the psps call the reference they were walked against** — the FASTA's basename, as
+    /// their headers record it ([`ReferenceIdentity`](crate::ng::psp::ReferenceIdentity)).
+    ///
+    /// **What it is for: a refusal that tells someone to run again with another reference has to
+    /// say which.** The header holds no directory, so this names a file to look for rather than a
+    /// path to type.
+    ///
+    /// **The first psp's, which answers for the cohort** for the reason
+    /// [`refuse_a_reference_it_was_not_walked_against`](Self::refuse_a_reference_it_was_not_walked_against)
+    /// gives — one assembly across the cohort. What can still differ between two psps is what each
+    /// walk *called* its copy of that assembly, and either name sends a person to the same bases.
+    #[must_use]
+    pub fn the_reference_the_psps_were_walked_against(&self) -> &str {
+        self.psps
+            .first()
+            .expect("a cohort of no psps was refused when it was opened")
+            .header()
+            .reference
+            .name
+            .as_str()
+    }
+
     /// Every sample's open psp beside the file it was read from, in the run's sample order.
     ///
     /// **What a check that has to read past the header uses.** Opening a cohort reads each

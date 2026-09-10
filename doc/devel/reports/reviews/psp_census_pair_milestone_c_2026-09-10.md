@@ -344,3 +344,120 @@ item of Checkpoint C.
 The review predicted the third and fourth would survive, and both did against the first draft of the
 tests: nothing reached the refusal through the command, and the assertion checked the command's name
 was present rather than what the message told the reader to do with it.
+
+---
+
+## C5 — a census recorded under other settings is refused, naming the setting
+
+**Reviewed against:** the working tree over `1f4f7c4d`, nine files. One read-only agent over the
+grouped categories, forbidden to edit any file or run `cargo` — the four gates were building the
+same tree at the time, which is why the ban mattered here rather than being a formality.
+**No blockers.**
+
+### What the review confirmed, which was the point of asking
+
+Two structural claims carry this step, and both were checked link by link rather than accepted.
+
+**The step deviates from the plan's text on purpose, and the deviation holds.** The plan asks the
+comparison of recorded settings to name the fix each setting calls for — *rerun with the right
+files* for a reference or catalog difference, *regenerate* for anything else. As built it always
+says regenerate, because the file checks run first and prove the run's reference and catalog are
+the psps' own. The review reconstructed that chain in the code — a run that reaches the comparison
+always has a reference digest, so does any psp carrying a census, the header check compares them
+exactly, the catalog's whole header is compared and the census records three of its fields, and the
+remaining four selection values come from the psps or are this build's constants — and then found
+the case the plan worried about **and showed it wants the other answer**: today's `generate-census`
+can write a census against one reference into a psp walked against another, and there regenerating
+is the fix, because the rebuild takes the psp's.
+
+**`CensusPlan::recording_terms` reproduces what a census records, value for value.** The review
+tabulated the twelve against `CensusWriter::new` and `finish`, and made the stronger point that it
+is *pinned by the ordinary case*: any divergence makes every fresh cohort stale, so the five tests
+that fit the walked fixture hold it. Two mutations measured that, at 7 failures each.
+
+### Findings
+
+**S1 — the reference refusal told the user to switch references without saying to which.** The psp
+header records the reference FASTA's basename for exactly this use. *Fixed*: the message names it
+(*"they name ref.fa, so run this fit again with that one"*), the cohort hands it out through a new
+accessor, and the command-level test asserts the sentence whole. The asymmetry with the catalog is
+recorded in the code: a catalog's header holds no path or name, so that refusal names the file this
+run read instead.
+
+**S2 — the catalog comparison's first clause could not fire, and the half of it that could was
+wrong.** Both catalogs are checked against the run's reference as they are opened, and the run's
+reference was just proven to be the psps', so a differing reference digest is unreachable there.
+The clause also covered the contig table, which *can* differ while the bases do not — the header
+records the FASTA's line geometry, which the reference check does not compare — and it would have
+reported the same bases wrapped at another width as *built on another reference*. *Fixed*: the dead
+half is a `debug_assert` that records why it cannot differ, and the live half says *its contig
+table is not theirs*. The last clause, on the longest tract stored per contig, is documented as a
+guard against a damaged file rather than a case a person meets.
+
+**S3 — `CohortFitError::AnotherSelection`'s doc contradicted itself inside one comment.** Its first
+paragraph said the cause arrives at the fit *rather than* in the report the command refuses with;
+eighteen lines below, the paragraph this step added said the command compares the settings and
+reports them there. *Fixed* in the variant's doc and in the same claim's copy in a test comment.
+
+**S4 — a comment priced the check order wrongly, against spec §8.** It said a cohort with one psp
+carrying no census and another recorded under a different budget is *"refused twice, once for
+each"*. `regenerate-census` skips a psp only when all three causes are ruled out, so the single
+command line the first refusal prints rebuilds both and the next fit succeeds. *Fixed*: the comment
+now says the order costs the person nothing, and why.
+
+**S5 — the documented panic was stricter than the assertion.** The judgement's doc said a census
+paired with the wrong psp panics; the code compared only the two list lengths, which a reordered
+list of the right length passes — and then every row carries one sample's name and file against
+another's verdict. *Fixed*: the pairing is asserted by sample name, with a `should_panic` test on a
+reversed list. **It earned its place before it was committed**, by failing a sibling test whose
+fixture censuses all carry the fixture's own sample name where its psps are named delta, alpha and
+charlie; that test now names each census for its psp.
+
+**Minor, fixed:** four sentences the diff left describing the code it replaced — the C3 comment
+saying the third cause "is caught later, by the fit's own digest", the freshness module's header
+describing that cause as a difference in *which loci were kept* where the comparison is over twelve
+settings, five of which say nothing about loci, its claim of one judging pass where there are two,
+and the fit's claim that a caller exists who fits without comparing; the `# Errors` lists on both
+halves of the `run_ground` split, one of which read as though `GroundError::Catalog` had moved
+entirely; a note that `CriteriaSource::ThePspHeaders` is now defensive for this command, since the
+criteria it cuts with are the psps' own and their own catalog serves them; a note that the composed
+census reader has no non-test caller left; and one line over the file's width.
+
+**Not taken, routed to the owner:** spec §4.2's third row and the plan's C5 text now describe the
+code this step demoted to a backstop, and the plan says *seven* recorded settings where the code
+compares *twelve*. Comparing twelve is what makes the cross-sample refusal unreachable, so the
+documents should record the widening; editing a spec inside an implementation step is what this
+plan's rules forbid.
+
+### The mutations
+
+Sixteen, each applied from a backup with its match count asserted, tested, and restored with the
+restore proved by `diff`. **Fourteen were caught; the two survivors are the two the review predicted
+would survive, and both are recorded rather than closed.**
+
+| mutation | outcome |
+|---|---|
+| the reference checked after the catalog is opened | 1 test fails |
+| the cohort assembled before the settings are judged | 1 fails |
+| the reference check looks at no psp | 1 fails |
+| the reference check looks at the first psp only | **survives** |
+| the reference refusal offers no fix | 1 fails |
+| the catalog compared with itself | 1 fails |
+| the catalog difference always named as the scan weights | 1 fails |
+| the catalog refusal offers no fix | 1 fails |
+| every setting named as the seed | 4 fail |
+| only the first census judged | 3 fail |
+| the settings compared the other way round | **survives** |
+| the pairing assertion removed | 1 fails |
+| fresh samples listed rather than counted | 14 fail |
+| the report ends without the command | 1 fails |
+| the run's depth ladder is not the census's | 7 fail |
+| the kept positions digested in reverse | 7 fail |
+
+**The first survivor is a property of the cohort opener, not a hole.** Every psp of an opened
+cohort was walked against one assembly: the opener requires them to agree on the repeat catalog,
+and a catalog's header carries the whole-reference digest and the contig table it was built on. So
+the first psp answers for the cohort, and the loop is what stops that argument having to hold — one
+comparison a sample. **The second is a symmetry**: the comparison returns the same field name
+whichever set is asked first, so the parameter names `run` and `recorded` are documentation. Both
+are stated in the code where they could otherwise be mistaken for coverage.

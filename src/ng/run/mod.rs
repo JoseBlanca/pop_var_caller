@@ -52,7 +52,10 @@ pub use callers::{
     AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, CalledCohort,
     CohortWalkTallies, MergeParameters, SampleWalkTallies, WrittenCohort,
 };
-pub use census_cohort::{CensusCohortError, every_census_in_the_cohorts_psps, read_groups_of};
+pub use census_cohort::{
+    CensusCohortError, each_census_in_the_cohorts_psps, every_census_in_the_cohorts_psps,
+    read_groups_of, the_censuses_as_one_cohort,
+};
 pub use census_fit::{
     CohortFit, CohortFitError, every_read_group_pooled, fit_a_cohort, parameters_file_of,
     parameters_from_the_fit,
@@ -61,6 +64,7 @@ pub use census_freshness::{
     CensusVerdict, CensusesToRegenerate, JudgedPsp, THE_COMMAND_THAT_REBUILDS_A_CENSUS,
     what_the_footer_and_the_trailers_head_say_about_a_census,
     what_the_heads_say_about_every_census_in_a_cohort,
+    what_the_run_says_about_every_census_in_a_cohort,
 };
 pub use census_from_psp::{CensusFromPspError, CensusOfStoredPileup, CensusTally, census_from_psp};
 pub use gatherer::{CensusPlan, CensusSelection, SampleObservationGatherer, SampleWalkInputs};

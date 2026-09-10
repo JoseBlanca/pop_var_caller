@@ -541,3 +541,209 @@ command takes `--reference`, `--catalog`, `--psp`, `--output`, `--force`, `--plo
   `regenerate-census`, from one constant. Plan step D1's task list does not mention it; D1 has to
   point it at the new subcommand's own name and replace the test that pins it with a parse against
   the command line.
+
+---
+
+## C5 — a census recorded under other settings is refused, naming the setting
+
+**Committed:** see `git log` for `feat(ng): C5`. **Added to the plan at Checkpoint C by the owner's
+ruling of 2026-09-10** — *"that's what we should do, stop and report the problem"* — and it closes
+the first two of Checkpoint C's four items.
+
+### What it does
+
+`estimate-parameters` now makes five checks before it fits, and the order is the design:
+
+1. **the psps' heads**, before the reference is read — a missing census, an older format, a trailer
+   that is not a census (C3, unchanged);
+2. **each census read out of its psp**, and **not yet assembled into a cohort**;
+3. **`--reference` against every psp header** — the comparison `call-from-psps` has always made
+   (`refuse_a_file_against_another_reference`), which this command never made;
+4. **the catalog's header against the header the psps recorded**, before a segment is cut — spec
+   §6 claimed this check existed and it did not;
+5. **the selection rebuilt, and each census's twelve recorded settings against the run's own** —
+   one verdict a sample, every stale one named, as rows of C3's report.
+
+Only then are the censuses assembled into one cohort, and the fit's comparison of the kept
+positions is left behind all of it as a backstop.
+
+### The two faults have opposite fixes, and the order is what lets each message be unconditional
+
+C4's refusal had to offer both ways out — *fit with the other files* and *regenerate* — because it
+could not tell which fault it had met. Each is wrong for the other fault: a census regenerated
+against the wrong reference costs a quarter of an hour a sample at whole-genome scale (spec §8) and
+is refused again by the next fit with the right one.
+
+Checks 3 and 4 catch the wrong-file fault, name the file, and say to run again with the psps' own —
+which rebuilds nothing. What survives them is a census that does not match its own psp, or one
+written by a build that chooses positions differently, and regenerating is the fix for both. So
+each refusal now names one fix and does not hedge.
+
+### The deviation from the plan's text, and the chain that justifies it
+
+The plan asks check 5 to name the fix each setting calls for: a different reference or catalog
+means *rerun with the files the psps were walked against*, anything else means *regenerate*. **As
+built, check 5 always says regenerate**, because by the time it runs the run's reference and
+catalog are provably the psps' own. The chain, each link read in the code and confirmed by the
+step's review:
+
+1. this command reads its reference from a FASTA, so the run's whole-assembly digest is always
+   present; a `.fai`-only read cannot reach check 5 at all, because `ReferenceDigest::of` fails
+   first;
+2. a psp that carries a census was walked by a run that got past that same call, so its header's
+   digest is present too;
+3. with both present, check 3 compares them exactly — so after it, the run's reference has the
+   psps' bases;
+4. `open_catalog` proves the run's catalog carries the run's reference digest, and check 4 proves
+   its whole header equals the psps'. `CatalogBuildSettings` — what the census records about the
+   catalog — draws on three of those header fields, all compared;
+5. the remaining four selection values come from the psps (the analysed ground and the routing
+   criteria, both forced equal across the cohort when it was opened) or are this build's constants
+   (the seed, the position budget, the per-stratum cap).
+
+**And the case the plan worried about does occur, with the other answer.** Today's
+`generate-census` makes no reference check, so it can write a census recording reference X into a
+psp whose header says Y. Pointed at Y, check 5 names *reference digest* and says regenerate — which
+is right, because regenerating rebuilds that census from the psp against Y. Pointed at X, check 3
+refuses first.
+
+### What a person reads
+
+A cohort whose censuses were rebuilt under half the shipped position budget, which fitted without a
+word at C4:
+
+```
+2 of this cohort's 2 samples cannot be fitted as they stand:
+  one (…/psps/one.psp) carries a census recorded under settings this run does not use (the first that differs: generic target position count)
+  two (…/psps/two.psp) carries a census recorded under settings this run does not use (the first that differs: generic target position count)
+Rebuild the 2 samples whose census is named above, then run this fit again:
+  regenerate-census --reference …/ref.fa --catalog …/ref.fa.repeats.parquet --psp …/psps
+```
+
+A wrong `--reference`, which used to be reported as a catalog built on another reference — blaming
+the one file that was right:
+
+```
+…/another-build.fa is not the reference these psps were walked against; they name ref.fa, so run
+this fit again with that one, which regenerates nothing: the psp for sample one was written
+against a different reference from this run's: it was walked against the assembly whose checksum
+is … and this run's reference is …
+```
+
+The psps' own name for the reference comes out of their headers, which record the FASTA's basename
+for exactly this purpose. The catalog refusal cannot do the same, and says why in its doc: a
+catalog's header holds no path and no name, so that message names the file this run read and what
+about it is not theirs.
+
+### What C5 makes unreachable, and what it delays
+
+**Unreachable, and that was the point.** A cohort walked by two builds used to be refused as
+*samples one and two disagree on selection seed; they did not record the same thing* — two samples
+named and nothing to do. It cannot be reached from this command any more: if check 5 finds nothing,
+every census records the run's settings, so no two of them can disagree. The plan asked for that
+refusal to say what to do, preferably as rows of C3's report; it is now those rows.
+
+**Delayed.** Assembling the cohort moved from before the reference read to after it, so the three
+refusals that are about damage inside a census — two samples claiming one read group, two declaring
+one `@RG ID`, a section for a read group the census does not declare — now arrive after the
+reference, the catalog and the selection rebuild, which spec §4.2 measures at 4 to 19 s on the
+tomato fixture and is minutes on a human reference. None of them is a mistyped command: the
+ordinary shared-`@RG ID` case is still refused from the headers when the cohort is opened, before
+anything is read.
+
+### The run's own copy of what a census records, and how it is held in place
+
+Check 5 needs the run to say what a census written under its own plan would record.
+`CensusPlan::recording_terms` builds exactly that — the selection digest, the kept-position digest
+in the writer's own order, the per-stratum counts, the two caps and the census's depth ladder —
+from the same pieces `writer_for` hands the writer.
+
+**It is not merely inspected, it is pinned by the ordinary case**: any divergence in any of the
+twelve makes *every* fresh cohort stale. Two mutations measured that — a different depth ladder,
+and the kept positions digested in reverse — and each failed 7 tests, including every test that
+fits the walked fixture.
+
+### What the review found, and what was done
+
+One read-only agent over the grouped categories, forbidden to edit or build. **No blockers.** It
+confirmed both structural claims above — the fix-split chain and `recording_terms` value by value —
+and found five should-fix items, all fixed here:
+
+- **the reference refusal told the user to switch references without saying to which.** The psp
+  header records the FASTA's basename for this; it is now in the message, and asserted;
+- **the catalog comparison's first clause could not fire** — both catalogs are checked against the
+  run's reference as they open — **while the half of it that could said something false**: a
+  catalog built from the same bases wrapped at another line width would have been reported as built
+  on another reference. The dead half is now a `debug_assert` recording why it cannot differ, and
+  the live half says *its contig table is not theirs*;
+- **`CohortFitError::AnotherSelection`'s doc contradicted itself** — one paragraph said the cause
+  arrives at the fit *rather than* in the report, eighteen lines above the new paragraph saying the
+  command reports it. Rewritten, in the variant's doc and in its test's comment;
+- **a comment claimed such a cohort is "refused twice, once for each"**, which spec §8 forbids:
+  `regenerate-census` skips a psp only when all three causes are ruled out, so the one command line
+  the first refusal prints rebuilds both psps and the next fit succeeds. Corrected;
+- **the documented panic was stricter than the assertion**: the doc said a census paired with the
+  wrong psp panics, and the code checked only the count. The pairing is now asserted by sample
+  name, with a test that panics on a reversed list — and it earned its place immediately, by
+  failing its own sibling test, whose fixture censuses all carry the fixture's sample name where
+  the psps are named delta, alpha and charlie.
+
+Ten minor items were taken too: four sentences of prose the diff had left describing the code it
+replaced, the `# Errors` lists on the two halves of the `run_ground` split, a note that the
+catalog's flag-naming path is now defensive for this command, and a note that the composed
+census reader has no non-test caller left.
+
+**Not taken, and recorded for the owner:** spec §4.2's third row and the plan's C5 text describe
+what the code now treats as the backstop, and the plan says *seven* settings where the code
+compares twelve. Widening to twelve is what makes the cross-sample refusal unreachable, so the
+documents should record the widening rather than the code narrow to match — a spec edit, which this
+plan's own rules keep out of an implementation step.
+
+### Sixteen mutations, all run, all restored
+
+Each applied from a backup with its match count asserted, tested on the affected modules, then
+restored with the restore proved by `diff`.
+
+| mutation | outcome |
+|---|---|
+| the reference checked after the catalog is opened | 1 test fails |
+| the cohort assembled before the settings are judged (the pre-C5 order) | 1 fails |
+| the reference check looks at no psp | 1 fails |
+| the reference check looks at the first psp only | **survives**, and should — see below |
+| the reference refusal offers no fix | 1 fails |
+| the catalog compared with itself | 1 fails |
+| the catalog difference always named as the scan weights | 1 fails |
+| the catalog refusal offers no fix | 1 fails |
+| every setting named as the seed | 4 fail |
+| only the first census judged | 3 fail |
+| the settings compared the other way round | **survives**, and should — the comparison is symmetric in the name it returns, so `run` and `recorded` are documentation and not behaviour |
+| the pairing assertion removed | 1 fails |
+| fresh samples listed rather than counted | 14 fail |
+| the report ends without the command | 1 fails |
+| the run's depth ladder is not the census's | 7 fail |
+| the kept positions digested in reverse | 7 fail |
+
+**Why the first survivor is not a gap.** Every psp of an opened cohort was walked against one
+assembly, because the opener requires them to agree on the repeat catalog and a catalog's header
+carries the whole-reference digest and the contig table it was built on. So the first psp answers
+for the cohort; the loop over all of them costs one comparison a sample and stops that argument
+having to hold. The method's doc says so.
+
+### What was measured
+
+- **The parameters file fitted over the walked fixture is byte-identical to the one from before
+  C1** — 20,741 bytes, `cmp` clean against `tmp/c1_before.toml` — so nothing about a cohort that is
+  not stale changed. Measured with a temporary test that wrote `file.to_toml()` to a scratch path,
+  run, then deleted.
+- **The affected modules' tests: 213 pass**, six of them new (three at the command, three on the
+  judgement itself), one rewritten, and C4's command-level test replaced by the two that now refuse
+  the same cohorts earlier.
+- Gates on the final tree are in the commit message, compared as sets against the milestone's
+  baseline.
+
+**One measurement that did not happen, and how it was caught.** The first gate run of this step
+produced nothing: `nohup tmp/b/gate.sh c5` failed with *permission denied*, because the script is
+not executable and every previous run had invoked it through `bash`. The launcher exited 0 and its
+notification said the command had completed, so the only sign was one line in the log. **A gate is
+worth nothing unless the log is read**; the numbers in the commit message come from a second run,
+launched with `bash`.
