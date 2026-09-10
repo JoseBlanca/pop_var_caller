@@ -210,3 +210,89 @@ The rule that a census's staleness must never key on a modification time (spec �
 test with the two functions. The reviewer checked that nothing in `census_freshness.rs`,
 `regenerate_census.rs` or `psp_caller.rs` reads a timestamp, so the property holds structurally —
 but it holds by nobody having written the code, not by a test. Noted at Checkpoint E.
+
+---
+
+## E3 and E4 — the probes checked, and the words
+
+**Reviewed against:** the working tree over `7036a0af`, four files. **Three blockers, all of them
+prose.** The two steps share one review, one loop iteration and one commit, under the plan-driven
+skill's rule for tightly-coupled adjacent steps: E3 is verification whose only change is prose, E4
+is prose, and neither has a test to mutate. The reviewer was asked to challenge that pairing and
+did not, on the condition that the commit carry both steps' ticks and both report sections.
+
+**No mutations.** In their place the reviewer was asked for the three claims it would most want
+checked by running something. Two of the three named the blockers below — which is how they were
+found — and the third asked for the gate, which is in the implementation report.
+
+### Blocker — the fit does open the reference before one of its two refusals
+
+The whole-plan report said the twelve recorded settings are compared "before it fits anything…
+and the reference is never opened". The opposite: `estimate_parameters.rs` judges every psp's head
+first and says so in its own comment — *"**And before the reference is opened**… The third cause a
+census can be stale for … is caught below, once the reference has been read and the selection
+rebuilt"*. The settings comparison is a digest over a selection of positions, and there is nothing
+to compare until that selection exists. The report had collapsed two refusals with different costs
+into one.
+
+### Blocker — no cohort opener compares the read filters
+
+The report listed the read filters among what `OpenPspCohort::open` refuses a cohort over.
+`SegmentationInputs::first_difference` compares three things: the catalog, the repeat-tract
+criteria and the analysed regions. The filters are recorded in every psp's header and read by one
+thing — the calling run's report, which names the files that disagree and calls them anyway.
+
+**This one had already reached committed code.** Milestone E's own review fix rewrote
+`ReadFilterConfig::provenance_parameters`'s doc, replacing a reason that had gone stale with the
+claim that a cohort is refused unless its headers agree. That is false, and it is false four lines
+after the same comment says the filters are *"recorded, never compared"*. Fixed forward in E3+E4's
+commit rather than by amending E2's, per the plan-driven skill.
+
+### Blocker — the story of which work moved was wrong
+
+The report said `generate-census` used to rebuild a census file beside each psp and that the same
+work is now done by the walk. Checked against the plan's base commit: the walk already built the
+census in the pass it was making, and wrote both files in one call. `generate-census` built a
+*second* copy from the stored psp, and the end-to-end script ran it to compare the two. What this
+plan removed is the second copy. The report contradicted itself on this forty-six lines later,
+where it correctly said the plan did not change which route a run takes.
+
+### Should-fix and minor, all applied
+
+A measurement quoted as six characters where five were measured; the headline figures given
+without saying which run they reproduce; `doc/devel/ng/spec/run_streaming.md` named as stale in
+§6.1 when it is stale in four sections; the twelve settings split seven-and-five where the code
+splits them nine-and-three; "no reader left" for a function one test still calls; milestone
+letters and step ids doing argumentative work in a document written for a reader who has never
+seen them; and the gate table's two fours read as one set when they are two, overlapping in one
+file.
+
+**In `PROJECT_STATUS`'s new entry**: it said a pair coming apart was invisible and in the next
+sentence that there was a check for it; it pointed at "the last recorded run" when the last run
+recorded in that file is a different one on the same cohort with different figures; and it claimed
+nothing a run produces moved while omitting the psps' 36 bytes.
+
+**In E3's probe**: the module doc's first repair said the harness writes the psp's trailer bytes
+out, which it does not — it rebuilds the census with the shipped producer. Neither reason it gave
+for writing a scratch file was the real one, and the real one is load-bearing: at any census budget
+but one-in-one the census this program must time is not the one in the trailer. Two smaller ones:
+the "decode it whole" arm is the upper end of the census route rather than what a large fit pays,
+and the selective walk's predicate has three conditions where the doc named two.
+
+**In the CLI**: `generate-psps`'s new help used markdown emphasis, which clap prints verbatim, and
+`regenerate-census`'s list of what it repairs was one cause short of the four its verdict type has.
+
+### Two things the review confirmed
+
+**`generate-psps`'s help is true as written**, claim by claim, against `generate_psps.rs`; and the
+other three subcommand docs carry nothing that describes a census beside a psp.
+
+**`ng_census_locus_spans.rs` genuinely needed no change** — no mention of a census file, a sidecar,
+an identity or a freshness check anywhere in it.
+
+### One finding not taken here
+
+The plan's own spec still described the deleted command in the present tense in two places
+(*"today's `generate-census`"*); those are corrected. The reviewer also noted that the two
+documents outside this plan are stale in more places than the open item says, and the open item
+now says so — but they are not edited here, because they belong to another plan.

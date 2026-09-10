@@ -27,7 +27,38 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-08):** **calling a cohort from stored psps is twice as fast on
+> - **Last completed task (2026-09-10):** **a sample is one file — the census a parameters fit
+> reads is inside its psp** (branch `census-vs-psp-perf`, Checkpoint E of
+> [psp_census_pair.md](doc/devel/ng/impl_plan/psp_census_pair.md);
+> [report](doc/devel/reports/implementations/ng_psp_census_pair_2026-09-10.md)).
+>
+> The pipeline is three commands and a repair, and no step of it writes a census file:
+>
+>     generate-psps        alignments        ->  <sample>.psp, census sealed inside
+>     estimate-parameters  psps              ->  cohort.parameters.toml, or a refusal naming every stale sample
+>     call-from-psps       psps + that file  ->  the VCF
+>     regenerate-census    psps              ->  each psp's trailer replaced, for the samples the fit refused
+>
+> **A census used to be a second file beside each psp, and it could be copied alone, deleted, or
+> paired with a psp it was not built from.** Each one carried a digest of its psp's header and that
+> psp's record count so the mismatch could be caught. A census that *is* the psp's tail cannot come
+> apart from it, so the naming is deleted: there is nothing left to check.
+>
+> **Nothing the caller produces moved.** On the first six tomato accessions of
+> `benchmarks/tomato1/crams` over the first two 100 kb intervals of its `regions.bed`, at about
+> three reads a position, the whole pipeline gives the same census total to the byte (1,545,479),
+> the same parameters file size (38,124 bytes) and the same VCFs as the run of 2026-09-09 recorded
+> in [Milestone A's report](doc/devel/reports/implementations/ng_psp_census_pair_milestone_a_2026-09-09.md)
+> — 2,275 records with the compiled-in defaults against 2,082 with the fitted numbers, 113
+> genotypes differing of 12,474 compared. That comparison spans the change that matters: that run's
+> fit read census files and this one's reads psp trailers. **And a psp whose census is rebuilt is
+> the walked file byte for byte, whole**: header, blocks, index, trailer, footer, on all six.
+>
+> **The psps themselves came back 36 bytes larger over the six**, which is not the caller: a psp's
+> header stores the run's command line verbatim, so the total depends on how long the arguments
+> were.
+>
+> - **Earlier (2026-09-08):** **calling a cohort from stored psps is twice as fast on
 > a sixtieth of the memory, and writes the same VCF** (branch `ng-psp-vcf-perf`;
 > [review](doc/devel/reports/reviews/perf_ng-psp-to-vcf_2026-09-07.md)).
 >
@@ -65,7 +96,9 @@ Skills and agents are instructed to leave it untouched.
 >
 > `generate-psps` → `generate-census` → `estimate-parameters` → `call-from-psps` runs end to end
 > on six tomato accessions over the two 100 kb intervals, and the two routes to a census still
-> agree byte for byte on real reads.
+> agree byte for byte on real reads. _(The pipeline of that day; `generate-census` became
+> `regenerate-census` and the census moved inside the psp — see the entry at the head of this
+> block.)_
 >
 > **Calling with numbers fitted from the cohort's own data rather than the compiled-in constants
 > removes 82 of 599 records and changes 115 genotypes in 3,102.** The 82 are the marginal ones —

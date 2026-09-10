@@ -302,15 +302,34 @@ the reason in its own doc comment. **Three things went newly unused and were not
 `psp::header_digest`, `psp::header_and_its_digest` and `WriteStats::header_digest` — because they
 live in the psp writer rather than in the sidecar; they are at Checkpoint E for a ruling.
 
-☐ **E3 — the probes landed.** `examples/ng_census_read_vs_psp.rs` and
+✅ **E3 — the probes landed.** `examples/ng_census_read_vs_psp.rs` and
 `examples/ng_census_locus_spans.rs` from branch `census-vs-psp-perf`; the first writes its census
 to a scratch file of its own and is unaffected by E2.
 *Depends:* —.
+*As built, 2026-09-10:* **both were already in `examples/`** — they landed on this branch before
+its first commit — so this step is verification, not landing. Both build after E2, both run on a
+real psp, and the first writes its census under `tmp/ng_census_read_vs_psp/` and leaves the psp
+alone. **Its module doc was wrong twice and is repaired**: it called the census a file beside the
+psp, and the first fix then said the harness copies the trailer out, which it does not — it
+rebuilds the census with the shipped producer, because at any census budget but one-in-one the
+census it must time is one no file on disk holds. `ng_census_locus_spans.rs` needed no change and
+was left alone, including its formatting, which keeps `cargo fmt --check` at the baseline's four
+files.
 
-☐ **E4 — words.** The subcommand docs in `cli.rs` for the three commands and the repair;
+✅ **E4 — words.** The subcommand docs in `cli.rs` for the three commands and the repair;
 `generate-psps`'s help, which describes a census beside the psp; `PROJECT_STATUS.md`'s pipeline
 line; the report for this plan under `doc/devel/reports/implementations/`.
 *Depends:* E1, E2.
+*As built, 2026-09-10:* **`PROJECT_STATUS.md`'s pipeline line was marked, not rewritten.** It sits
+inside a dated entry of 2026-09-05 describing a run that really did invoke `generate-census`, so
+rewriting it would falsify the record; a new entry went at the head of the block and the old line
+carries a parenthetical pointing at it, in the file's own house style for a superseded entry. Two
+present-tense mentions of the deleted command in this plan's **own spec** are corrected to the
+past. The whole-plan report is
+[`ng_psp_census_pair_2026-09-10.md`](../../reports/implementations/ng_psp_census_pair_2026-09-10.md).
+**Three of its claims were wrong and the review caught them** — when the fit opens the reference,
+what a cohort opener refuses over, and which work `generate-census` used to do — and the second of
+those had reached committed code at E2, fixed forward here.
 
 > **Checkpoint E: one file per sample, three commands and a repair, and the oracles unchanged.**
 > Pause for review.

@@ -1150,6 +1150,9 @@ fn refit_from_files(
     };
 
     println!("\n--- the same cohort, fitted from files ---");
+    // **Scratch files of this harness's own, and no shipped command writes one.** A census lives
+    // in its psp's trailer (`psp_census_pair.md` §3); these exist so that the fit can be timed
+    // reading from a file rather than from memory, which is the comparison this section makes.
     std::fs::create_dir_all(dir).expect("the census directory is writable");
     let at = Instant::now();
     let mut written = 0_u64;

@@ -1,9 +1,17 @@
-//! **What does a fit save by reading a census file instead of re-reading the psp?**
+//! **What does a fit save by reading a psp's census instead of rebuilding it from that psp's
+//! records?**
 //!
-//! The census beside each psp is a cache: everything in it can be recomputed from the psp
+//! A census is a cache: everything in it can be recomputed from the psp it lives in
 //! ([`parameter_prepass_joint_records.md`](../doc/devel/ng/spec/parameter_prepass_joint_records.md)
 //! §6.1). That document argues the cache is worth keeping — *"rebuilding is a full pass, not a
 //! seek"* — but never priced it. This does.
+//!
+//! **The cache lives in the psp's trailer** since `psp_census_pair.md` §3, and this harness does
+//! not read it from there. It rebuilds the census with the producer that ships (`census_from_psp`)
+//! and writes it to a scratch file of its own, **because `--keep-one-in K` means the census this
+//! run has to time is usually not the one in the trailer**: at any K but 1 the budget is this
+//! run's, and no file on disk holds that census. The two are the same bytes at K = 1, which is
+//! what the walk-versus-rebuild oracle guarantees.
 //!
 //! ```text
 //! cargo run --release --example ng_census_read_vs_psp -- \
@@ -14,13 +22,15 @@
 //!
 //! All four end with the same object a fit consumes, or with a stated part of it.
 //!
-//! - **census file** — decode the census file whole, which is what a fit that holds a cohort in
-//!   memory pays per sample.
+//! - **the census** — decode it **whole**, which is what a fit that holds a cohort in memory
+//!   pays per sample. A fit over a cohort too large to hold reads it lazily instead, a section at
+//!   a time, and pays less; this arm is the upper end of the census route, not the shipped one.
 //! - **psp, every body** — `census_from_psp`, the producer that ships. It decodes every record's
 //!   body, because the read-error calibration totals are summed over *every* generic locus and
 //!   the per-read-group base-quality sums they need live in the body.
 //! - **psp, only the bodies a census needs** — the same walk, declining every body whose head
-//!   says the record is neither at a kept census position nor carries a non-reference read. This
+//!   says the record is at no kept census position, overlaps no kept repeat tract, and carries no
+//!   read disagreeing with the reference. This
 //!   is the skip the format's record head exists for, and the ceiling on what a psp route could
 //!   cost if the calibration totals came from somewhere else.
 //! - **psp, no bodies at all** — the floor: decompress every block, parse every head, build
@@ -31,7 +41,7 @@
 //! `--keep-one-in K` sets the census budget to one position in `K` of the analysed ground. **The
 //! whole-genome run keeps about 1 in 400** — two million positions over 800 Mb of tomato — while a
 //! run over a few megabases keeps nearly everything, because the budget is a count and not a
-//! rate. The census file grows with `1/K`; the psp walk does not shrink with it. So a ratio
+//! rate. The census grows with `1/K`; the psp walk does not shrink with it. So a ratio
 //! quoted without its `K` says nothing.
 
 use std::error::Error;
@@ -197,8 +207,11 @@ fn run(
     )?;
     drop(catalog);
 
-    // The census file this comparison reads, built from the psp by the producer that ships, so
-    // the two routes are two ways to the same bytes and not two different objects.
+    // The census this comparison reads, built from the psp by the producer that ships, so the
+    // two routes are two ways to the same bytes and not two different objects. **It goes to a
+    // scratch file of its own** because at any `--keep-one-in` but 1 it is not the census in the
+    // psp's trailer — the budget is this run's — and because a harness must leave every psp it is
+    // given exactly as it found it.
     let work = PathBuf::from(
         std::env::var("NG_WORK").unwrap_or_else(|_| "tmp/ng_census_read_vs_psp".to_string()),
     );
@@ -299,8 +312,8 @@ fn run(
             cost.bodies_built,
         );
     };
-    report("census-file        ", &census);
-    println!("# values read out of the census file: {}", census.records);
+    report("census             ", &census);
+    println!("# values read out of the census: {}", census.records);
     report("psp-every-body     ", &every_body);
     report("psp-needed-bodies  ", &needed_bodies);
     report("psp-no-bodies      ", &no_bodies);
@@ -317,15 +330,15 @@ fn run(
     );
 
     println!(
-        "ratio psp-every-body / census-file = {:.0}",
+        "ratio psp-every-body / census = {:.0}",
         every_body.best() / census.best()
     );
     println!(
-        "ratio psp-needed-bodies / census-file = {:.0}",
+        "ratio psp-needed-bodies / census = {:.0}",
         needed_bodies.best() / census.best()
     );
     println!(
-        "ratio psp-no-bodies / census-file = {:.0}",
+        "ratio psp-no-bodies / census = {:.0}",
         no_bodies.best() / census.best()
     );
     println!(

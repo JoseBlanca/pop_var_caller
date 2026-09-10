@@ -310,3 +310,137 @@ is what kept it from being recorded as a defect nothing catches.
 
 **The one lib test fewer is arithmetic, not a loss**: three deleted with the type they exercised,
 two added by the review's fixes.
+
+---
+
+## E3 — the two measuring programs checked
+
+**Committed:** see `git log` for `docs(ng): E3+E4`, which carries E4 as well.
+
+### What this step is, and is not
+
+Both programs were already in `examples/` — they landed on this branch before the plan's first
+commit — so E3 is **verification**, not landing. What it had to establish: that they still build
+after E2's deletions, that they still run, and that the one which writes a census writes it
+somewhere of its own and leaves the psp it was given alone.
+
+### What was measured
+
+**Both build**, and `cargo check --all-targets` lists the same four examples that did not compile
+before this branch and no fifth.
+
+**`ng_census_read_vs_psp` answers its question on a real psp.** On `SRS3394712.psp` — one tomato
+accession over the two 100 kb intervals, 1,190,325 bytes holding 193,603 records — at a census
+budget of one position in one:
+
+| what was timed | one round |
+|---|---|
+| decode the census whole | **0.0003 s** |
+| rebuild it from the psp, every record's body | 0.0440 s |
+| rebuild it, declining the bodies a census does not need | 0.0494 s |
+| every head, no body — the floor a psp route cannot go below | 0.0073 s |
+
+**One round, so read the ratio loosely**: a second run of the same command gave 0.0440 against
+0.0436 for the full-body walk, and the ratio it prints moved from 152 to 127. What the numbers
+support is *two orders of magnitude*, not a figure.
+
+**Declining bodies did not save anything here, and the program says why**: at this budget the
+selection keeps 198,182 of 200,000 positions, so every record is at a kept position and the
+selective walk built all 193,603 bodies — 1 in 1. The saving that arm exists to measure needs a
+budget that keeps a small share of the ground, which is what a whole-genome run has and a 200 kb
+run does not.
+
+**It wrote its census to `tmp/ng_census_read_vs_psp/SRS3394712.k1.census`, 240,827 bytes** — the
+same size `regenerate-census` wrote into that psp's trailer in E1's run — and the psp it was given
+was not touched.
+
+**`ng_census_locus_spans` answers its own.** Of the same psp's 193,603 records, **198 are wider
+than one base** (1 in 1,000, the widest 42 bases), and of the 5,978 kept positions carrying
+evidence that disagrees with the reference, **146 have that evidence dropped** because the record
+covering them spans more than the base it is recorded at. That is the price of the census's
+per-position rule, on this ground: about 1 kept position in 40 of those that carry non-reference
+evidence.
+
+### What changed, and what deliberately did not
+
+**`ng_census_read_vs_psp`'s module doc opened on a false sentence** — *"The census beside each psp
+is a cache"* — and its first repair was false in a subtler way: it said the harness writes the
+psp's trailer bytes out, which it does not. It rebuilds the census with the shipped producer and
+writes that. The two are the same bytes only at a budget of one in one, which is what the
+walk-versus-rebuild oracle guarantees; at any other budget the census this program must time is
+one no file on disk holds. That, and not tidiness, is why it writes a file of its own, and the doc
+now says so.
+
+**`ng_census_locus_spans` was not touched.** Nothing in it names a census file, a sidecar, an
+identity or a freshness check, so E2 falsified nothing in it — and it is one of the four files
+`cargo fmt --check` listed before this branch, so leaving it alone keeps that set at four.
+
+---
+
+## E4 — the words
+
+**Committed:** with E3, above.
+
+### What changed
+
+**`generate-psps`'s help said a census goes beside each psp.** It now says a sample is one file and
+the census is sealed into that psp's tail. The other three subcommand docs were already current
+from D1; `regenerate-census`'s list of what it repairs was one cause short of the four the verdict
+type has, and now names all four.
+
+**`PROJECT_STATUS.md` has a new entry at the head of its current-focus block** — the pipeline as it
+stands, what the plan makes impossible, and the figures E1 measured.
+
+**The report for the plan as a whole** is
+[`ng_psp_census_pair_2026-09-10.md`](ng_psp_census_pair_2026-09-10.md). It is written for someone
+who did not follow the plan: what changed for a person running the caller, what it cost, what was
+decided along the way, and what is left open.
+
+### The judgement the plan asked for and this did not do
+
+**`PROJECT_STATUS.md`'s stale pipeline line was not rewritten.** The plan's E4 names it, but it
+sits inside a dated entry of 2026-09-05 describing a run that really did go
+`generate-psps → generate-census → estimate-parameters → call-from-psps`. Rewriting it would
+falsify a record of what happened. What went in instead is a parenthetical in the file's own house
+style — it has two other entries marked as superseded the same way — pointing at the entry at the
+head of the block. The review agreed the entry should stand and asked for exactly that marker,
+because an arrow diagram is the most copyable thing on the page and carries no date inside itself.
+
+### What the review changed
+
+Three blockers, all of them claims in the whole-plan report that the code contradicts, and all
+three were things I had reasoned rather than read:
+
+- **"the reference is never opened" was inverted.** Two refusals happen at different moments: a psp
+  with no census, or one of a format this build does not read, is caught on ten bytes and a seek
+  **before** the reference is opened; a census recorded under other settings cannot be caught that
+  cheaply, because the settings are a digest over a selection that has to be rebuilt from the
+  reference first. The report had merged them into one refusal that costs nothing.
+- **The read filters are not compared by any cohort opener.** `SegmentationInputs::first_difference`
+  compares the catalog, the repeat-tract criteria and the analysed regions, and nothing else. The
+  filters are recorded in every psp's header and the calling run's report names the ones that
+  disagree — no command refuses over them. **This one had reached committed code**: E2's own review
+  fix replaced a stale reason in `ReadFilterConfig`'s doc with a false one. It is corrected in this
+  commit rather than by amending E2's.
+- **The four-commands-to-three story was wrong about which work moved.** The walk already built the
+  census in the pass it was making anyway; `generate-census` built a *second* copy from the stored
+  psp, and an end-to-end run compared the two. What this plan removed is that second copy, not the
+  work — which is also why the two-producer agreement survives as this plan's parity oracle rather
+  than being something it had to invent.
+
+And six smaller ones: a measurement quoted as six characters when five were measured, headline
+figures with no source, a spec section named as stale in one place when it is stale in four, the
+twelve settings split seven-and-five when the code says nine-and-three, "no reader left" where one
+test still reads, and milestone letters doing work in a document written for someone who has never
+seen them.
+
+**`PROJECT_STATUS`'s new entry had three of its own**: it said a pair coming apart was invisible
+*and* that there was a check for it, it pointed at "the last recorded run" when the last run
+recorded in that file is a different one, and it said nothing a run produces moved while omitting
+the 36 bytes of psp that did.
+
+### The gate
+
+E3 and E4 change no behaviour. The gate is the baseline's, item for item, with the same lib-test
+count as E2's — 6,737 — and `cargo fmt --check` still listing the same four files, which is what
+leaving `ng_census_locus_spans.rs` alone preserves.

@@ -107,10 +107,13 @@ const OFF: &str = "off";
 
 impl ReadFilterConfig {
     /// This policy as psp-header provenance parameters — recorded, never compared
-    /// (spec `run_streaming.md` §6.1). **Recorded because a cohort's psps are refused
-    /// unless their headers agree** (`OpenPspCohort::open`): a header that omitted the
-    /// filters would let two samples walked under different ones be fitted and called
-    /// together as though they had seen the same reads.
+    /// (spec `run_streaming.md` §6.1). **Recorded so that a run can say when a cohort's
+    /// files were walked under different filters**, which is the one thing done with
+    /// them: `OpenPspCohort::open` does not compare them and does not refuse over them,
+    /// and the calling run's report prints a line naming the ones that disagree
+    /// ([`StoredSample::read_filters_the_walk_applied`](crate::ng::run::StoredSample)).
+    /// A header that omitted them would let a cohort assembled from files walked under
+    /// different filters be called without a word about it.
     ///
     /// One key per **configurable** filter, each readable by eye; an off filter is the
     /// string `"off"`. The one absent-when-meaningless key is the mismatch base-quality

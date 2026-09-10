@@ -64,10 +64,11 @@ pub enum PopVarCallerExpCommand {
     /// each sample's walk is independent, so a cohort is spread by running this command
     /// once per sample rather than by threading one invocation.
     ///
-    /// Each psp is named for the sample its reads declare, inside --output-dir, and beside
-    /// it goes that sample's census — the smaller file a parameters fit reads — from the
-    /// same single pass over the reads. A psp already in --output-dir is refused before
-    /// anything is walked; --force replaces it.
+    /// Each psp is named for the sample its reads declare, inside --output-dir. A sample is
+    /// one file: the census a parameters fit reads is sealed into that psp's tail, from the
+    /// same single pass over the reads, so there is nothing to keep beside it and nothing to
+    /// lose. A psp already in --output-dir is refused before anything is walked; --force
+    /// replaces it.
     GeneratePsps(GeneratePspsArgs),
 
     /// Rebuild each psp's census from the records it already holds, without re-reading a
@@ -79,8 +80,8 @@ pub enum PopVarCallerExpCommand {
     /// written there by the walk.
     ///
     /// This is the repair for the psps a fit refuses — one written before the census moved
-    /// into the psp, one written by another build, one recorded under settings the run does
-    /// not use.
+    /// into the psp, one whose tail is not a census at all, one written by another build, and
+    /// one recorded under settings the run does not use.
     /// estimate-parameters names those samples and tells you to run this. Each named psp's
     /// trailer is replaced; its header, blocks and index are the bytes they were.
     ///

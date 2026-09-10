@@ -66,7 +66,7 @@ file but the psp; accept a census path from anyone.
 ## 2. Why the census is kept at all — the cost of not having one
 
 **The census is a cache, and rebuilding it means reading the whole psp.** It can be rebuilt with no
-alignment file — that is what today's `generate-census` does — but the rebuild decodes every record
+alignment file — that is what `generate-census` did — but the rebuild decodes every record
 ([`census_from_psp.rs:241-252`](../../../../src/ng/run/census_from_psp.rs)). It cannot skip records
 by their head, because the read-error calibration totals it accumulates are summed over every
 generic locus, and the per-read quality sums they need are in the record body
@@ -253,7 +253,7 @@ and learn it twenty seconds later from the fit's digest check, reported as *anot
 hard failure for every command that opens one** — `estimate-parameters`, `regenerate-census`, and
 `call-from-psps` alike, since two psps typed under different criteria cannot be called together
 either. The check goes where the analysed-regions check already is, `OpenPspCohort::open`, which
-`call-from-psps` and today's `generate-census` already call
+`call-from-psps` and the command that became `regenerate-census` already called
 ([`call_from_psps.rs:494`](../../../../src/pop_var_caller_exp/call_from_psps.rs),
 [`generate_census.rs:413`](../../../../src/pop_var_caller_exp/generate_census.rs)); step 2 opens its
 cohort the same way. Written once, refusing with the sample and the field named, before anything
