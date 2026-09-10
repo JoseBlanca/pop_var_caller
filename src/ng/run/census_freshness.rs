@@ -6,8 +6,8 @@
 //! this build cannot read, or one written against a different set of loci from the one the run in
 //! hand rebuilds. `estimate-parameters` will refuse such a cohort and name every sample in it
 //! (spec §4, §4.1, plan step C3); `regenerate-census` will rebuild exactly those (spec §8, plan
-//! step D1). Both ask the same question, and [`CensusVerdict`] is the answer. Neither command
-//! reads it yet.
+//! step D1). Both ask the same question, and [`CensusVerdict`] is the answer; `estimate-parameters`
+//! reads it, and `regenerate-census` will.
 //!
 //! **A cohort is judged in one pass and every sample in it is named**
 //! ([`what_the_heads_say_about_every_census_in_a_cohort`]), because the wait a refusal saves is
@@ -23,6 +23,23 @@ use crate::ng::parameter_estimation::joint::census_file::{
 use crate::ng::psp::{PspReadError, PspReader};
 
 use super::psp_caller::OpenPspCohort;
+
+/// **The command that rebuilds a psp's census**, named in the two places a run tells someone to
+/// run it: this module's report (spec §4.3) and the fit's own refusal when the selection does not
+/// match (spec §4.2, third row).
+///
+/// **It does not exist yet.** Plan step D1 turns today's `generate-census` — which writes a census
+/// *file* beside a psp, and nothing reads those any more — into `regenerate-census`, which
+/// replaces the psp's trailer. Naming the old one instead would be worse than naming one that is
+/// not there: a person who ran it would spend the rebuild and find their psp exactly as stale.
+///
+/// **One constant, so the two messages cannot drift apart** — the refusal `estimate-parameters`
+/// builds its report's command line from, and [`CohortFitError::AnotherSelection`](super::CohortFitError::AnotherSelection).
+///
+/// **At D1 the new subcommand's own name is defined as this constant, never the reverse.** `ng`
+/// does not import from the command-line module outside its tests, and pointing this at
+/// `regenerate_census::SUBCOMMAND` would be the first place it did.
+pub const THE_COMMAND_THAT_REBUILDS_A_CENSUS: &str = "regenerate-census";
 
 /// **What a run should do with the census in one psp**, in the words spec §4.2 uses.
 ///
@@ -272,7 +289,8 @@ fn what_one_psps_head_says_about_its_census(path: &Path, psp: &mut PspReader) ->
 /// scattered lines.
 ///
 /// **Then the command, spelled out with the arguments the run was given**, so it can be copied
-/// rather than reconstructed. It is the only place a user is told what to do about any of this.
+/// rather than reconstructed. The fit's own refusal, for the one cause this report cannot see,
+/// names the same command ([`CohortFitError::AnotherSelection`](super::CohortFitError::AnotherSelection)).
 ///
 /// **A psp that will not read is reported apart from the stale ones**, because regenerating its
 /// census would not fix it — the file itself is the problem, and the command line says so. If

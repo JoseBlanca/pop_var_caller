@@ -189,7 +189,7 @@ opened. `a_census_without_its_psp_is_refused` becomes *a psp without a census is
 report names it*; a second test has two stale samples and asserts both are in the message.
 *Depends:* C2. *Source:* spec §4, §4.1, §4.3.
 
-☐ **C4 — the fit's own refusal says what to run.** `CohortFitError::AnotherSelection`
+✅ **C4 — the fit's own refusal says what to run.** `CohortFitError::AnotherSelection`
 ([`census_fit.rs:139`](../../../../src/ng/run/census_fit.rs)) is rendered as *these censuses were
 built under another selection; run `regenerate-census`*.
 *Depends:* C3. *Source:* spec §4.2 row 3.

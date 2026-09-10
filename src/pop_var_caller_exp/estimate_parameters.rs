@@ -47,9 +47,9 @@ use crate::ng::reference_info::{
 use crate::ng::repeat_catalog::RepeatCatalog;
 use crate::ng::run::{
     CensusCohortError, CensusPlan, CensusSelection, CensusesToRegenerate, CohortFitError,
-    OpenPspCohort, RunError, every_census_in_the_cohorts_psps, every_read_group_pooled,
-    fit_a_cohort, parameters_file_of, parameters_from_the_fit, read_groups_of,
-    what_the_heads_say_about_every_census_in_a_cohort,
+    OpenPspCohort, RunError, THE_COMMAND_THAT_REBUILDS_A_CENSUS, every_census_in_the_cohorts_psps,
+    every_read_group_pooled, fit_a_cohort, parameters_file_of, parameters_from_the_fit,
+    read_groups_of, what_the_heads_say_about_every_census_in_a_cohort,
 };
 use crate::ng::types::{ContigId, InbreedingF, Ploidy};
 use crate::pop_var_caller_exp::generate_psps::PSP_FILE_EXTENSION;
@@ -435,16 +435,6 @@ fn fit_and_assemble(
     );
     Ok((file, samples))
 }
-
-/// **The command that rebuilds a psp's census**, named here until it exists.
-///
-/// Plan step D1 turns today's `generate-census` — which writes a census *file* beside a psp,
-/// which nothing reads any more — into `regenerate-census`, which replaces the psp's trailer.
-/// Until then this report names a command a person cannot yet run. **That is the right name to
-/// print rather than the old one**: `generate-census` would leave them with a file this fit does
-/// not read and a psp still stale. The constant is here so that D1 has one place to point it at
-/// the real subcommand's own name.
-const THE_COMMAND_THAT_REBUILDS_A_CENSUS: &str = "regenerate-census";
 
 /// **The command that rebuilds this run's stale censuses, in the words it was given** — spec
 /// §4.3's last line, written so it can be copied rather than reconstructed.

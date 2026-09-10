@@ -424,3 +424,120 @@ changing the constant changes both sides. What can be pinned today is that the n
   reports and the code now does both, one inside the other.
 - **Plan step D1's task list does not mention the constant** this step introduces, and `grep
   generate-census` will not find it, because it spells the new name.
+
+---
+
+## C4 — the fit's own refusal says what to run
+
+**Committed:** see `git log` for `feat(ng): C4`.
+
+### What it does
+
+A census can be stale for three reasons (spec §4.2). Two are visible from the psp's head and are
+C3's report. **The third — a census written against a different set of positions from the one this
+run rebuilds — cannot be seen without reading the reference and rebuilding the selection**, so it
+arrives at the end of that work, from the fit, as `CohortFitError::AnotherSelection`. Its message
+explained what had happened and stopped. It now ends with what to do:
+
+> …if the psps were walked against another reference or catalog, fit with those, which regenerates
+> nothing; if not, this build chooses census positions differently from the one that wrote them, so
+> regenerate them with regenerate-census and fit again
+
+**Two faults end in this refusal, with opposite fixes, and the free one comes first.** A run
+pointed at the wrong reference or catalog needs the right files; regenerating would rebuild every
+census against the wrong reference — a quarter of an hour a sample at whole-genome scale — and the
+next fit would be refused again. A build that chooses positions differently needs its censuses
+regenerated, and no reference helps. The first draft offered both and led with the costly one; the
+review caught it, and a test now asserts the order.
+
+**The command's name is one constant**, beside the freshness judgement, read by both places that
+tell a user to regenerate: this refusal and C3's report.
+
+### What the command-level test found
+
+**No test reached this refusal through the command**, so a command that turned it into any other
+error passed everything. The test that now does rebuilds each psp's census under a selection with a
+different position budget and runs `estimate-parameters`.
+
+**Its first version asked for half the shipped budget, and the fit accepted the cohort without a
+word.** The fixture's contig holds fewer ordinary positions than either budget, so both selections
+kept the same set; the fit compares the kept set and not the terms it was chosen under, and every
+census's recorded terms said the budget differed. The test uses a budget of three, which changes the
+set. **The silent acceptance is Checkpoint C's first item.**
+
+### Mutations
+
+| mutation | outcome |
+|---|---|
+| the constant set to the old command's name | 2 tests fail |
+| the fit's refusal swallowed into another error at the command | 2 fail |
+| the instruction negated | 4 fail |
+| the costly fix offered first | 2 fail |
+
+### What was measured
+
+Gates on the final tree are in the commit message: the lib suite gains the one command-level test,
+and clippy, `cargo check` and `cargo fmt --check` are compared as sets against the baseline.
+
+---
+
+## Checkpoint C — step 2 takes psps, and what it can still be told wrongly
+
+**Milestone C is four steps, and after it a user runs the parameters fit by naming psps.** The
+command takes `--reference`, `--catalog`, `--psp`, `--output`, `--force`, `--ploidy` and
+`--inbreeding`; nothing about what a repeat is, and no census file. What holds:
+
+- **The repeat criteria and the ground come out of the psp headers**, and a cohort whose files
+  disagree about either is refused when it is opened, naming the two samples and the field.
+- **A cohort with stale censuses is refused before the reference is read**, in one message that
+  names every stale sample, its file and its cause, and ends with the command that rebuilds them.
+- **The fit's own refusal for a census built against another selection says what to run.**
+- **The parameters file fitted over the fixture cohort is byte-identical to the one fitted before
+  this milestone — 20,741 bytes** — now read out of psp trailers where it was read from census
+  files.
+
+### Four things for the owner
+
+1. **`--reference` and `--catalog` are still values a person can type wrongly and get numbers
+   back.** Each census records a digest of the reference it was built against and of the catalog's
+   build settings, among seven selection terms. Those are compared sample against sample, and never
+   against the selection this run rebuilds. What the fit does compare is a digest of the kept
+   *generic* positions, which catches a difference only where it moves one of them — and on tomato
+   about 1 position in 400 is kept (spec §2), so a catalog that retypes a few short tracts can pass
+   it. **Spec §6 says `--catalog` is "checked against the header's catalog digest as today"; no such
+   check exists, today or before this branch.** And it is not hypothetical: writing C4's test, a
+   cohort whose censuses were rebuilt under **half the shipped position budget** fitted without a
+   word on the fixture, because its contig holds fewer ordinary positions than either budget, so
+   both selections kept the same set — while each census's recorded terms said the budget
+   differed. Nor does `--reference` get compared with the psp headers, which `call-from-psps`
+   already does with an existing function. The fix is small and the pieces are in hand: the
+   rebuilt plan carries its selection terms, each census carries their digest, and a comparison that
+   names the first differing field already exists. **Recommendation: add it as one more step before
+   Milestone D**, refusing with the field's name before anything is fitted, with the positions
+   digest kept as a backstop.
+2. **One more stale-census refusal names no action.** A cohort walked by two builds with different
+   selection constants passes the freshness judgement — every census has this build's format — and
+   is then refused as *samples A and B disagree on selection seed; they did not record the same
+   thing*: two samples named, nothing to do. Spec §1's goal is that a stale census stops step 2
+   with every such sample, the reason and the command. **Recommendation: fold it into the same
+   step as item 1** — it is the same comparison of recorded selection terms, run across samples
+   instead of against the run, and its answer belongs in C3's report.
+3. **A psp that will not open stops the cohort at the first one.** Spec §4.1's *every sample is
+   examined before anything is refused* holds for stale censuses — C3's report — and not for a file
+   that is truncated or missing, which the shared cohort opener refuses one at a time.
+   **Recommendation: leave it.** An unopenable psp is damage rather than a regeneration job, the
+   refusal names the file, and changing it means changing the opener three commands share.
+4. **`cargo doc` is red on this tree, and it is not in any baseline.** Forty unresolved intra-doc
+   links, none from this branch; C2's review found it because broken links are denied and C2 had
+   just added a forty-first. **Recommendation: a separate clean-up, outside this plan**, and adding
+   `cargo doc` to the gate set from then on.
+
+### Two things to know
+
+- **The fit now holds every psp open for the whole run.** An open psp keeps its block index — about
+  336 kB a sample at whole-genome scale by the format's own arithmetic, roughly 340 MB at a thousand
+  samples — where the fit used to read one header a sample and drop it. Spec §5 asks for that shape.
+- **The command the refusals name does not exist until Milestone D.** Both messages say
+  `regenerate-census`, from one constant. Plan step D1's task list does not mention it; D1 has to
+  point it at the new subcommand's own name and replace the test that pins it with a parse against
+  the command line.

@@ -48,6 +48,7 @@ use crate::ng::parameter_estimation::ssr::{RepeatCount, Stratum as SsrStratum, S
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::read::input::read_groups::ReadGroups;
 use crate::ng::repeat_catalog::StrRepeatCriteria;
+use crate::ng::run::census_freshness::THE_COMMAND_THAT_REBUILDS_A_CENSUS;
 use crate::ng::types::{ContigId, ErrorRate, InbreedingF, Ploidy, ReadGroupId, SsrPeriod};
 
 /// What a fit over a cohort of censuses produced.
@@ -73,10 +74,33 @@ pub struct CohortFit {
 #[derive(Debug, thiserror::Error)]
 pub enum CohortFitError {
     /// The selection rebuilt here is not the one the censuses were written against.
+    ///
+    /// **The third of spec §4.2's three causes, and the only one a cheap read cannot reach**: it
+    /// needs the run's reference read and its selection rebuilt, which is why it arrives here
+    /// rather than in the report `estimate-parameters` refuses a stale cohort with
+    /// ([`CensusesToRegenerate`](super::CensusesToRegenerate)).
+    ///
+    /// **Two different faults end here, and they have opposite fixes**, so the message offers
+    /// both — in the order of what they cost:
+    ///
+    /// - **the run was pointed at another reference or catalog** from the ones the psps were
+    ///   walked against. Fitting with the right ones regenerates nothing. Regenerating instead
+    ///   would rebuild every census against the wrong reference — a quarter of an hour a sample at
+    ///   whole-genome scale (spec §8) — and the next fit, with the right reference, would be
+    ///   refused again;
+    /// - **this build chooses census positions differently** from the one that wrote them — its
+    ///   selection seed, budget or cap changed. Only regenerating fixes that.
+    ///
+    /// **Which of the two it is, this variant cannot say**: what is compared is a digest of the
+    /// kept positions, and it records no reason. Checkpoint C of `psp_census_pair.md`'s plan
+    /// raises making it say.
     #[error(
-        "the census positions rebuilt from this reference and catalog are not the ones these \
-         censuses were written against; a tract is stored by its index within its stratum, so \
-         fitting them against another selection would read one stratum's tracts as another's"
+        "the census positions chosen from this reference and catalog are not the ones these \
+         censuses were written against, and fitting them anyway would read one stratum's tracts \
+         as another's; if the psps were walked against another reference or catalog, fit with \
+         those, which regenerates nothing; if not, this build chooses census positions \
+         differently from the one that wrote them, so regenerate them with \
+         {THE_COMMAND_THAT_REBUILDS_A_CENSUS} and fit again"
     )]
     AnotherSelection,
 
@@ -354,8 +378,8 @@ pub fn parameters_file_of(
 
 #[cfg(test)]
 mod tests {
-    //! **Plan step C4**: a cohort of censuses is fitted, both halves, and the selection it is
-    //! fitted against is the one it was written against.
+    //! **`parameter_prepass_runs.md` plan step C4**: a cohort of censuses is fitted, both halves,
+    //! and the selection it is fitted against is the one it was written against.
 
     use super::*;
     use crate::ng::run::census_cohort::every_census_in_the_cohorts_psps;
@@ -556,6 +580,27 @@ mod tests {
         assert!(
             matches!(error, CohortFitError::AnotherSelection),
             "{error:?}"
+        );
+        // **And it says what to do about it** (spec §4.2, third row). This is the one cause of a
+        // stale census that no cheap read can reach, so it arrives here rather than in the report
+        // `estimate-parameters` refuses a stale cohort with — and a person meeting it has the
+        // same job in front of them, after a fit that has already read the reference and rebuilt
+        // the selection.
+        let said = error.to_string();
+        let free = said
+            .find("if the psps were walked against another reference or catalog, fit with those")
+            .unwrap_or_else(|| panic!("the fix that regenerates nothing is offered: {said}"));
+        let costly = said
+            .find(&format!(
+                "so regenerate them with {THE_COMMAND_THAT_REBUILDS_A_CENSUS} and fit again"
+            ))
+            .unwrap_or_else(|| panic!("and the command, as an instruction: {said}"));
+        // **The free check first.** A wrong reference ends here as surely as a changed build, and
+        // a person who regenerated in that case would spend a quarter of an hour a sample and be
+        // refused again by the next fit.
+        assert!(
+            free < costly,
+            "the fix that regenerates nothing comes before the one that costs hours: {said}",
         );
     }
 }

@@ -275,3 +275,72 @@ splitting the cohort tests in two; and a doc sentence that did not parse.
 Two of the reviewer's predicted survivors — the header arithmetic and the sample column — are now
 caught. The third, the constant's own value, is caught only against the old command's name, which
 is the most that can be asserted before the new command exists.
+
+---
+
+## C4 — the fit's own refusal says what to run
+
+**Reviewed against:** the working tree over `559920ab`, four files. One read-only agent, asked
+especially to read the message as the person who meets it. **No blockers**, and one finding that
+changed what the message says.
+
+### Findings
+
+**S1 — the message offered two ways out without saying which one applies, and led with the one
+that costs hours.** Two different faults end in this refusal and they have opposite fixes. If this
+build chooses census positions differently from the one that wrote them, only regenerating fixes
+it. If the run was pointed at another reference or catalog, regenerating is wrong: it rebuilds
+every census against the wrong reference — a quarter of an hour a sample at whole-genome scale —
+and the next fit, with the right reference, is refused again; fitting with the right files is free.
+**Both faults reach this refusal, because `estimate-parameters` never compares `--reference` or
+`--catalog` with the psp headers**, where `call-from-psps` does both.
+*Fixed in the message*: the free check comes first and the regeneration is conditional on it, in
+one lower-case clause chain rather than a capitalised sentence in the middle of an error chain. A
+test asserts the order. *Not fixed here, raised at Checkpoint C:* making the refusal name which
+fault it is — the census records the terms it was chosen under, and the fit compares only the kept
+positions.
+
+**S2 — a second stale-census refusal exists and names no action.** A cohort walked by two builds
+with different selection constants passes the freshness judgement — every census has this build's
+format — and is then refused as *samples A and B disagree on selection seed; they did not record
+the same thing*, which names two samples and nothing to do. Outside C4's files; raised at
+Checkpoint C.
+
+**Minor, fixed:** three places the new prose contradicted the code — the report's doc claiming to be
+the only place a user is told what to do, the variant's doc saying the fix "is the same" as the
+report's, and a test comment calling the second way out free when it costs a second reference read;
+a C3 leftover saying no command reads the verdict yet; the constant's doc naming the wrong consumer
+and not recording that at D1 the new subcommand's name must be defined *from* this constant, never
+the reverse, since `ng` imports nothing from the command-line module outside its tests; and one
+file carrying two different plans' "C4" in its test-module headers.
+
+**Not taken:** building the full command line into this refusal, as C3's report does. The line needs
+the arguments the command was given, and the variant is the library's; doing it means the command
+catching this variant and dressing it, which is worth doing with Checkpoint C's decision rather than
+before it.
+
+### What writing the command-level test found
+
+**The review's first predicted survivor was right, and closing it found the gap S1 describes.** No
+test reached the fit's refusal through the command. The test that now does rebuilds each psp's
+census under a selection with a different position budget and runs `estimate-parameters` over the
+cohort. **Its first version asked for half the shipped budget, and the fit accepted the cohort
+without a word**: the fixture's contig holds fewer ordinary positions than either budget, so both
+selections kept the same set, and the fit — which compares the kept set and not the terms it was
+chosen under — had nothing to refuse, while every census's recorded terms said the budget differed.
+The test uses a budget of three now, which does change the set; the silent acceptance is the lead
+item of Checkpoint C.
+
+### The mutations
+
+| mutation | outcome |
+|---|---|
+| the command dropped from the message (first draft) | 2 tests fail |
+| the constant set to the old command's name | 2 fail, in the command's module |
+| the fit's refusal swallowed into another error at the command | 2 fail — neither existed before the command-level test |
+| the instruction negated — *do not regenerate them* | 4 fail |
+| the costly fix offered before the free one | 2 fail — the order assertion |
+
+The review predicted the third and fourth would survive, and both did against the first draft of the
+tests: nothing reached the refusal through the command, and the assertion checked the command's name
+was present rather than what the message told the reader to do with it.

@@ -463,6 +463,68 @@ fn a_psp_carrying_no_census_is_refused_and_the_report_names_it() {
     );
 }
 
+/// **A cohort whose censuses were written against another selection reaches the fit's own refusal,
+/// and the command passes on what it says to do** (spec §4.2, third row).
+///
+/// This is the one cause of a stale census that no cheap read can see: every census here carries
+/// this build's format and they all agree with each other, so the freshness judgement calls every
+/// psp fresh and the cohort opens. What differs is the set of positions — each census is rebuilt
+/// from its own psp under a selection keeping half as many — and only the fit, having rebuilt the
+/// run's own, can tell.
+///
+/// **Asserted at the command, not at the library**, because what matters is the message the
+/// person running `estimate-parameters` reads; a command that turned the refusal into another
+/// error would pass every test of the refusal's own text.
+#[test]
+fn a_cohort_written_against_another_selection_is_told_both_ways_out() {
+    use crate::ng::parameter_estimation::joint::census_file::write_census;
+    use crate::ng::run::test_fixtures::a_census_plan_over_selecting;
+    use crate::ng::run::{CohortFitError, census_from_psp};
+
+    let (cohort, psps) = a_walked_cohort();
+    // **A handful, not half the shipped budget.** This contig holds fewer ordinary positions
+    // than half of it, so a selection asking for half keeps every one of them — the same set —
+    // and censuses recorded under that other budget fit without a word, because what the fit
+    // compares is the set of positions kept and not the terms they were chosen under. Three is
+    // below what the contig holds, so the set really differs.
+    let (segmentation, fewer) = a_census_plan_over_selecting(&cohort.reference, &cohort.catalog, 3);
+    let paths = psps_named_by(&args_over(
+        &cohort,
+        &psps,
+        cohort.directory.path().join("out.toml"),
+    ))
+    .expect("the directory lists");
+    for path in &paths {
+        let rebuilt = census_from_psp(path, &fewer, &segmentation).expect("the psp reads");
+        let mut bytes = Vec::new();
+        write_census(&rebuilt.evidence, None, &mut bytes).expect("the census encodes");
+        crate::ng::psp::replace_trailer(path, &bytes).expect("the tail rewrites");
+    }
+
+    let error = fit_and_assemble(&args_over(
+        &cohort,
+        &psps,
+        cohort.directory.path().join("out.toml"),
+    ))
+    .expect_err("those censuses keep other positions than this run chooses");
+
+    assert!(
+        matches!(
+            &error,
+            EstimateParametersCliError::Fit { source } if matches!(**source, CohortFitError::AnotherSelection)
+        ),
+        "the freshness judgement cannot see this, so it is the fit's refusal: {error:?}",
+    );
+    let said = crate::error_render::format_error_chain(&error);
+    assert!(
+        said.contains("fit with those, which regenerates nothing")
+            && said.contains(&format!(
+                "so regenerate them with {THE_COMMAND_THAT_REBUILDS_A_CENSUS} and fit again"
+            )),
+        "and the person running the command reads both ways out: {said}",
+    );
+}
+
 /// **The command the report names is not the one that writes a census file.**
 ///
 /// Until plan step D1 the rebuild command does not exist, so this report names something a person
