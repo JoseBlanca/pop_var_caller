@@ -1,7 +1,7 @@
 //! A clean-room, use-agnostic short-period **tandem-repeat scanner** — a sequence
 //! primitive shared by the STR catalog and (later) the ng snp/str caller. Design:
-//! spec [`doc/devel/ng/spec/ssr_repeat_scanner.md`], arch
-//! [`doc/devel/ng/arch/ssr_repeat_scanner.md`].
+//! spec `doc/devel/ng/spec/ssr_repeat_scanner.md`, arch
+//! `doc/devel/ng/arch/ssr_repeat_scanner.md`.
 //!
 //! It exposes **three interfaces** over one detection core (a lag-`p` self-comparison
 //! plus a Ruzzo–Tompa maximal-scoring-segment pass):

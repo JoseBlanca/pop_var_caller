@@ -1320,7 +1320,7 @@ pub struct GenericObservation {
     /// **Counted against each record's own position, not the cohort locus's first base**, by
     /// the mint that produced it; nothing re-anchors it, so where a locus spans several of a
     /// sample's records this mixes as many questions as it has records. Carried forward from
-    /// [`AlleleSupport::placed_left`](crate::ng::run::cohort_merge::AlleleSupport::placed_left),
+    /// [`AlleleSupport::placed_left`](crate::ng::run::cohort_merge::build::AlleleSupport::placed_left),
     /// whose own comment is the one to read before drawing a conclusion from it.
     pub placed_left_reads: u32,
 }

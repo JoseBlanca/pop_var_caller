@@ -266,8 +266,8 @@ pub enum AlignmentFileError {
     ///
     /// **Its own variant rather than [`Self::Open`], because the file that
     /// cannot be read is not an alignment file.** Reported as `Open` — as it
-    /// was for one commit — the top line reads *"opening alignment file
-    /// '<reference>.fa' failed"*, which names the wrong kind of file and points
+    /// was for one commit — the top line reads `opening alignment file
+    /// '<reference>.fa' failed`, which names the wrong kind of file and points
     /// the operator at the FASTA when the missing thing is its index.
     #[error(
         "'{path}' is a CRAM, and the reference it decodes against has no readable \
@@ -422,7 +422,7 @@ pub fn check_assembly(
 /// *across* files, merge k ordered streams into one, and present an entry point
 /// whose one-file and k-file arms are indistinguishable. It contains **no
 /// reader logic**: opening, validating, seeking and filtering are
-/// [`AlignmentFile`](open_bam::AlignmentFile)'s.
+/// [`AlignmentFile`]'s.
 ///
 /// Not `Clone` — cloning it would hand out two views onto one set of reader
 /// pools and one set of tallies. The files themselves are shared by `Arc`, so

@@ -17,7 +17,7 @@
 //!
 //! - [`HipstrModel`] (Model A): the production model — explicit in-frame + out-of-frame
 //!   geometric stutter.
-//! - [`ClassicStutterModel`] (Model B): the prior `Σ_Δ S_θ(Δ)·align_subst` code, now the
+//! - `ClassicStutterModel` (Model B): the prior `Σ_Δ S_θ(Δ)·align_subst` code, now the
 //!   test-only baseline the harness still scores A against.
 
 mod classic;

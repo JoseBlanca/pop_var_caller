@@ -1,5 +1,5 @@
 //! Freebayes-style joint marginal-likelihood emission test for `ssr-call`
-//! (spec [`doc/devel/specs/ssr_freebayes_marginal_emission.md`]).
+//! (spec `doc/devel/specs/ssr_freebayes_marginal_emission.md`).
 //!
 //! Instead of the heuristic emit gate (`is_variable` + `apply_fp_control`), decide
 //! polymorphism at the **cohort level**: is the whole cohort's read evidence better
@@ -10,7 +10,7 @@
 //! (`em::compute_data_ll`); the only new machinery is the SFS prior and the marginal.
 //!
 //! Because each sample's genotype prior is conditioned on the population allele
-//! frequency `p` ([`em::genotype_prior`], the Wright form with inbreeding `F`), the
+//! frequency `p` (`em::genotype_prior`, the Wright form with inbreeding `F`), the
 //! samples are **conditionally independent given `p`**. So the site marginal is an
 //! exact sum over integer allele-count vectors `n` (with `Σ n_a = 2N` cohort
 //! chromosomes) — no coupled combo enumeration, no banded search:

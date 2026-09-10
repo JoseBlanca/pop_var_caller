@@ -6,7 +6,7 @@
 //! the **length-keyed rung ladder** (the cross-sample coordinate system §5 reads), and
 //! [`resolve_confident_genotype`] runs the **model-based** confident-genotype gate on
 //! one sample — the 1-vs-2-allele **BIC resolution test** (D1b, spec
-//! [`ssr_bic_confident_genotype.md`]): it scores the reads under the best one-allele
+//! `ssr_bic_confident_genotype.md`): it scores the reads under the best one-allele
 //! (homozygote) vs best two-allele (het) model with the C2 read likelihood `Qᵣ` and
 //! admits the second allele only when it earns a purity-tuned complexity penalty,
 //! guarded by a depth floor, a length-separation clean-seed rule, and cohort

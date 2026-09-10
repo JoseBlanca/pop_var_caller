@@ -189,7 +189,9 @@ mod checked {
         }
     }
 
-    /// Everything one call to a [`GenotypePriorModel`] reads and writes at one locus for one
+    /// Everything one call to a
+    /// [`GenotypePriorModel`](crate::ng::calling::genotype_prior::GenotypePriorModel) reads and
+    /// writes at one locus for one
     /// sample, with every shape check already run.
     ///
     /// **The checks cannot be skipped, and that is the whole reason this type exists.**
@@ -624,7 +626,7 @@ pub enum SeedRegime {
     ///
     /// Solving for the total gives zero and every entry of the pair with it, so the alternative
     /// concentration is floored at
-    /// [`MIN_ALT_CONCENTRATION`](crate::genetics::MIN_ALT_CONCENTRATION) and the reference
+    /// [`MIN_ALT_CONCENTRATION`] and the reference
     /// concentration stays at the neutral 1. **A run here must say the diversity was zero**: the
     /// pair it gets is a legal one and says nothing about how it was arrived at.
     ///

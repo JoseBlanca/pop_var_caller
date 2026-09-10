@@ -710,7 +710,7 @@ impl<'a> FrozenParameters<'a> {
     /// in, with what can be checked between them checked.
     ///
     /// - `calibration_by_read_group` — one entry per read group, indexed by
-    ///   [`ReadGroupId`](crate::ng::types::ReadGroupId).
+    ///   [`ReadGroupId`].
     /// - `contamination_by_read_group` — one entry per read group as well.
     /// - `batching` — who was sequenced beside whom, as the run was told. **It arrives with
     ///   the contamination views rather than beside them**, because it has exactly one
@@ -926,7 +926,7 @@ impl<'a> FrozenParameters<'a> {
     }
 
     /// One calibration per read group, indexed by
-    /// [`ReadGroupId`](crate::ng::types::ReadGroupId).
+    /// [`ReadGroupId`].
     #[inline]
     #[must_use]
     pub fn calibration_by_read_group(&self) -> &'a [ReadGroupCalibration] {
@@ -989,7 +989,7 @@ impl<'a> FrozenParameters<'a> {
     /// slice type and means something else: the two agree in length at one library per sample,
     /// which is every sample of every benchmark cohort here, so a transposition passes every
     /// shape check and comes back as a wrong contaminant frequency
-    /// ([`BatchOfEachReadGroup`](crate::ng::types::BatchOfEachReadGroup)).
+    /// ([`BatchOfEachReadGroup`]).
     #[inline]
     #[must_use]
     pub fn batch_of_each_read_group(&self) -> BatchOfEachReadGroup<'a> {

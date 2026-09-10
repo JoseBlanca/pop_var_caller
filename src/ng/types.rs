@@ -1264,7 +1264,8 @@ pub enum MotifError {
 /// 'reuse where it costs production nothing' case exactly."* The first half is
 /// true; **the conclusion was wrong**, and the compiler said so.
 ///
-/// `ssr::types::Motif` is `pub(crate)`. ng's [`SsrSegment`] is `pub` (the ng-sibling
+/// `ssr::types::Motif` is `pub(crate)`. ng's
+/// [`SsrSegment`](crate::ng::region_typing::segment_criteria::SsrSegment) is `pub` (the ng-sibling
 /// convention) and returns a motif, so reusing it trips rustc's
 /// `private_interfaces` lint — a `pub` item leaking a `pub(crate)` type. The
 /// three ways out: widen `Motif` in `src/ssr/types.rs` (**touching production —

@@ -178,7 +178,7 @@ pub struct TypedRegionsArgs {
 /// `#[non_exhaustive]` `thiserror` enum, `#[from]` where a single source type
 /// identifies the failure. `main_exp` walks the source chain to render it (spec
 /// §6). **Not** a `--max-str-len`/`--flank-bp` variant — the walk's
-/// [`TypedRegionError`] already carries both numbers (spec T3).
+/// `TypedRegionError` already carries both numbers (spec T3).
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum TypedRegionsCliError {

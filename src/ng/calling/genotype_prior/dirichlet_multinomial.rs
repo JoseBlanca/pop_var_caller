@@ -199,7 +199,7 @@ fn one_genotypes_log_prior(
 /// biallelic, ploidy 2 and 8, `F` up to 0.95: **1.5e-11 at `Σα = 7.2e3`** — about 3,600 diploid
 /// samples, past the top of the committed cohort range — rising to 9.1e-11 at 1.2e5, **1.1e-9 at
 /// 1.2e6** and 2.8e-7 at 1.2e8. Nothing in the caller's range is affected; the figure at 1.2e6 is
-/// worth knowing because [`the_concentrated_limit_matches_the_wright_formulas`] drives `Σα` there
+/// worth knowing because `the_concentrated_limit_matches_the_wright_formulas` drives `Σα` there
 /// deliberately, which is why the normalisation identity is not also run at that total.
 ///
 /// **The correction is added to the identical-by-descent branch rather than subtracted from the

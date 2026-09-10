@@ -19,7 +19,7 @@
 //!   fitted. Tomato holds 462,701 kept tracts in 141 strata.
 //! - **Offset** — a read's tract length minus the reference tract's, in whole repeat units.
 //!   The records store `-4 … +4` with the ends saturating
-//!   ([`RECORDED_OFFSET_RANGE`](super::census::RECORDED_OFFSET_RANGE)).
+//!   ([`RECORDED_OFFSET_RANGE`]).
 //! - **Length spectrum** — how the stratum's chromosomes are spread over the tract lengths.
 //! - **Concentration** — how monomorphic the stratum's tracts are. Small means most tracts are
 //!   fixed at one length while the stratum as a whole spans many.

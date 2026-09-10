@@ -5,7 +5,7 @@
 //! stored file per sample instead of one alignment file per sample, and every stage above the
 //! observations — the merge, the candidate selection, the genotyping, the VCF — is the body
 //! both modes drive. The numbers each run scores with come from one place too
-//! ([`calling_run`](super::calling_run)), because two copies of that decision would be two
+//! ([`calling_run`]), because two copies of that decision would be two
 //! places for the modes to drift apart while both kept running.
 //!
 //! # The ground is the files', not a flag's

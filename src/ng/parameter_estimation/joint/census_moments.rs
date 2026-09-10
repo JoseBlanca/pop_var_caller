@@ -557,7 +557,7 @@ pub enum InbreedingSource {
     ///
     /// `windows` is how many the model was fitted over, which spec §7 asks a run to print because
     /// the estimator's own floor is
-    /// [`MIN_WINDOWS_TO_FIT_INBREEDING`](crate::ng::parameter_estimation::generic::runs::MIN_WINDOWS_TO_FIT_INBREEDING)
+    /// [`MIN_WINDOWS_TO_FIT_INBREEDING`]
     /// — 3,000 — below which what it returns is its own noise.
     ///
     /// **⚠ The below-the-floor warning this report carries cannot fire on a coefficient that came

@@ -35,7 +35,7 @@
 //!   when those frequencies are built.
 //!
 //! They are two wrapper types over one slice shape for the reason
-//! [`BatchOfEachReadGroup`](crate::ng::types::BatchOfEachReadGroup) records: at one library per
+//! [`BatchOfEachReadGroup`] records: at one library per
 //! sample the two agree in length, so a transposition passes every shape check and comes back as
 //! a wrong contaminant frequency.
 //!

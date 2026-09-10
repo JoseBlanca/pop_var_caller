@@ -8,7 +8,7 @@
 //! genotyped for it. Selection cannot find it by construction: **a sample nominates at most
 //! `ploidy` lengths** — its best-supported ones — so a third length in that sample is not put
 //! forward however many reads it has
-//! ([`promote_rungs_for_sample`](crate::ng::calling::allele_candidates::ssr::promote_rungs_for_sample)
+//! (`promote_rungs_for_sample`
 //! truncates to `ploidy`). A heterozygote carrying a long allele and a short one is exactly the
 //! case: the long allele's own contraction slips can outnumber the short allele's reads, so the
 //! sample's two peaks are the long allele and its slip, and the short allele is third.
@@ -61,7 +61,7 @@
 //! **And it is why the wiring did not land here.** A decision that reads no posterior has
 //! nothing to wait for, so discovery runs as a **pre-pass inside candidate selection** —
 //! [`select_ssr`](crate::ng::calling::allele_candidates::ssr::select_ssr)'s
-//! [`nominate_discovered_sequences`](crate::ng::calling::allele_candidates::ssr::nominate_discovered_sequences),
+//! `nominate_discovered_sequences`,
 //! over the merge's rows, whose spellings are these same realigned observations — and the
 //! second convergence the spec's cost argument priced in is never paid: the loop runs once,
 //! over a table already widened (`doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md`
@@ -137,7 +137,7 @@ impl DiscoveryScratch {
 /// **It does not touch the candidate table**, and it does not read a posterior. This function
 /// is the decision alone, so that its own tests can reach it without a loop; the shipped
 /// wiring applies the same decision to the merge's rows inside candidate selection
-/// ([`nominate_discovered_sequences`](crate::ng::calling::allele_candidates::ssr::nominate_discovered_sequences)),
+/// (`nominate_discovered_sequences`),
 /// where admission, the cap and the per-sample leftover already live.
 ///
 /// # Panics

@@ -636,7 +636,7 @@ pub struct StratumFitSummary {
     /// How many loci stood behind the **thinnest** fit this read group produced.
     ///
     /// Two named fields rather than the `(u64, u64)` the architecture sketches, for the reason
-    /// [`AllelePairFrequency`] is not a tuple either: nothing in a pair of `u64`s says which
+    /// `AllelePairFrequency` is not a tuple either: nothing in a pair of `u64`s says which
     /// end is which, and a transposition would report the thinnest fit as the thickest with
     /// every type still matching.
     pub loci_behind_thinnest_fit: u64,

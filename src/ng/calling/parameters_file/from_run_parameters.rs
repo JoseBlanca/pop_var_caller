@@ -207,7 +207,7 @@ impl ParametersFile {
     /// parameters alone would produce a plausible file that is wrong about both:
     ///
     /// - **the base-quality calibration's evidence count.**
-    ///   [`ReadGroupCalibration`](crate::ng::calling::likelihood::ReadGroupCalibration) is a
+    ///   [`ReadGroupCalibration`] is a
     ///   multiplier and a warrant with no count on it, and spec §3.3 asks for the count by name.
     ///   Where it lives depends on the source, which is what [`ReadsBehindEachCalibration`] is
     ///   for: on the fit's `Estimate<ErrorRate>`, in the supplied file's own rows, or nowhere at

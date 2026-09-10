@@ -29,7 +29,9 @@ use crate::ng::types::{GenomePosition, GenomeRegion};
 /// **It is the run's numbering, not a coordinate**, and that is the point: the organiser
 /// releases on a gapless run of indexes, so it can tell "region 7 has not arrived yet" from
 /// "region 7 found nothing", which two genome positions cannot say. The regions themselves
-/// are [`building_regions_of`]'s, taken in the order that iterator yields them.
+/// are
+/// [`building_regions_of`](crate::ng::run::cohort_merge::observation_cache::building_regions_of)'s,
+/// taken in the order that iterator yields them.
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct RegionIndex(pub u64);
 
@@ -135,7 +137,7 @@ pub struct MergeTally {
 ///
 /// - a builder is handed every observation overlapping its own ground, including those that
 ///   opened earlier. **This is a discipline of whoever draws the cache forward, not a property
-///   of the cache**: [`ObservationCache::evict_before`] drops what ends before whatever
+///   of the cache**: `ObservationCache`'s eviction drops what ends before whatever
 ///   position it is handed, and the driver chooses that position to be the building region's
 ///   own first base (`super::serial::merge_cohort_through_cache`), so everything reaching into
 ///   the region survives. Hand it the region's *last* base instead and the argument fails at

@@ -592,7 +592,7 @@ impl<S> LocusGenerator<S> for NoLoci {
 /// `#[non_exhaustive]`; every variant wraps an upstream error — this step mints none of its
 /// own. A read that yields no observation is a tallied per-read outcome, never an error; an
 /// error means the run is broken (spec §6). A reference fetch can surface two ways — through
-/// the upstream walk ([`TypedRegion`](Self::TypedRegion)) or a generator's own fetch
+/// the upstream walk (a typed region) or a generator's own fetch
 /// ([`Reference`](Self::Reference)) — and they stay distinct because they fail in different
 /// places.
 ///

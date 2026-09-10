@@ -13,7 +13,7 @@
 //!
 //! **The shifting is not implemented here.** It is production's `left_align_indels` (itself a port
 //! of GATK's `AlignmentUtils.leftAlignIndels`), reached through the
-//! [`AlignmentNormalizer`](crate::ng::alignment::AlignmentNormalizer) trait in
+//! [`AlignmentNormalizer`] trait in
 //! [`alignment`](crate::ng::alignment) — this module supplies the reference window, the round-trip
 //! into and out of an `Alignment`, and the policy of when to fetch at all.
 //!
@@ -50,7 +50,7 @@ fn cigar_has_indel(cigar: &[CigarOp]) -> bool {
 /// Reused buffers for [`LeftAlignPreparer`] — allocated once per worker, never per read.
 ///
 /// It holds one thing, and holding it is the whole reason the scratch exists:
-/// [`ReadPreparer::prepare_read`](super::ReadPreparer::prepare_read) takes `&self`, and
+/// [`ReadPreparer::prepare_read`] takes `&self`, and
 /// [`RefSeq::fetch_into`] writes the window into a buffer the *caller* owns — so without a
 /// scratch every indel-bearing read would allocate one. **Reads with no indel never touch it**:
 /// they need no reference at all.

@@ -360,7 +360,7 @@ pub enum CallFromAlignmentsCliError {
     /// BED, the catalog, or what this run counts as a repeat.
     ///
     /// **Transparent**, so the sentence a person reads is the one
-    /// [`run_ground`](crate::pop_var_caller_exp::run_ground) writes: these refusals belong to
+    /// [`run_ground`] writes: these refusals belong to
     /// every mode and are shared with `generate-psps`, and a wrapper of its own here would
     /// make the same mistake render differently depending on which command was typed.
     #[error(transparent)]

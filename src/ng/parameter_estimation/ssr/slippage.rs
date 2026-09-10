@@ -266,7 +266,7 @@ impl SlippageModel {
 ///
 /// **It is not the same width as anything else in this module and must not be confused with
 /// them.** [`OFFSET_HALF_RANGE`](super::OFFSET_HALF_RANGE) is how far from the reference an
-/// entry *records* a read (4); [`ALLELE_OFFSET_LIMIT`](super::ALLELE_OFFSET_LIMIT) is how far
+/// entry *records* a read (4); [`ALLELE_OFFSET_LIMIT`] is how far
 /// from the reference the fit may place an *allele* (6); this is how far a read may slip from
 /// **its own allele**, which is a distance between two different pairs of things.
 pub const MAX_SLIP_STEP: i32 = 8;

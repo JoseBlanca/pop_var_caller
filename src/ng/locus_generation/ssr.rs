@@ -1,8 +1,8 @@
 //! The STR locus generator — one microsatellite tract → one locus.
 //!
-//! The first [`LocusGenerator`](super::LocusGenerator): it consumes an `SsrSegment`,
+//! The first [`LocusGenerator`]: it consumes an `SsrSegment`,
 //! fetches the reads over the tract, aligns each to read off its repeat, and tallies the
-//! answers into a [`SampleLocusObservations`](super::SampleLocusObservations). A port of
+//! answers into a [`SampleLocusObservations`]. A port of
 //! production `src/ssr/pileup/`, adapted at two seams (the split of coordinates from bases,
 //! and a widened admission gate). See `doc/devel/ng/spec/locus_generation_ssr.md` (design)
 //! and `doc/devel/ng/arch/locus_generation_ssr.md` (types & interfaces).
@@ -12,7 +12,7 @@
 //! fetch, the read-region CIGAR mapping, the per-read classify pipeline (delimited by a chosen
 //! [`RepeatDelimiter`] — algorithm 4, the unit-slip aligner, by default; algorithm 3, the
 //! flat-gap production-parity port, for the bake-off and the parity oracle), the tally, and — the
-//! public surface — [`SsrGenerator`], the [`LocusGenerator`](super::LocusGenerator) that turns one
+//! public surface — [`SsrGenerator`], the [`LocusGenerator`] that turns one
 //! `SsrSegment` into one locus.
 
 use std::collections::BTreeMap;
@@ -144,7 +144,8 @@ impl SsrGeneratorConfig {
     /// A wider flank than the radius region typing guarantees repeat-free would let the read
     /// query hit a neighbouring repeat, leaving the aligner's anchor no longer clean (spec
     /// §4). It is a relation between two configs, so no newtype can hold it — the generator's
-    /// constructor calls this. `bundle_threshold` is [`SsrSegmentCriteria::bundle_threshold`]
+    /// constructor calls this. `bundle_threshold` is
+    /// [`SsrSegmentCriteria::bundle_threshold`](crate::ng::region_typing::segment_criteria::SsrSegmentCriteria::bundle_threshold)
     /// ([`crate::ng::region_typing::segment_criteria`]).
     pub fn check_flank_within(&self, bundle_threshold: Bp) -> Result<(), SsrGeneratorConfigError> {
         if self.flank_bp.get() > bundle_threshold.get() {
@@ -2182,7 +2183,7 @@ impl<A> RepeatDelimiter for A where
 /// The STR locus generator: turns one microsatellite tract into one locus.
 ///
 /// Holds its own accessors and reusable scratch, the "a generator holds its own accessors"
-/// convention ([`LocusGenerator`](super::LocusGenerator); spec §2). The delimiter `A` is a **type
+/// convention ([`LocusGenerator`]; spec §2). The delimiter `A` is a **type
 /// parameter** ([`RepeatDelimiter`]) so the algorithm is chosen per generator and dispatched
 /// statically — [`with_default_aligner`](Self::with_default_aligner) builds the recommended
 /// algorithm 4u (the unit-robust aligner — algorithm 4 hardened by the delimiter bake-off), while

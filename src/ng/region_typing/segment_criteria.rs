@@ -1351,7 +1351,7 @@ fn joins_cluster(reach: u64, next: &RepeatInterval, thresh: u64) -> bool {
 /// **one region per cluster**, so it needs the grouping back. Re-deriving it is
 /// exact rather than approximate: `bundled` is the concatenation of the clusters
 /// in coordinate order, and two *adjacent* clusters are by definition not close
-/// (or they would be one cluster) — so re-running the same [`is_close`] chaining
+/// (or they would be one cluster) — so re-running the same `is_close` chaining
 /// reproduces exactly the grouping [`split_bundles`] found.
 ///
 /// It lives here, beside the flank test, rather than in the walk: **the cluster

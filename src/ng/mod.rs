@@ -31,8 +31,8 @@
 //! what costs production nothing. Winning steps are ported back only after the
 //! experiments ng exists to run have decided something.
 //!
-//! **A test may read production as an oracle, and a handful do** — [`scanner_parity`]
-//! against `src/ssr/` and [`calling::genotype_table_parity`] against `src/var_calling/`
+//! **A test may read production as an oracle, and a handful do** — `scanner_parity`
+//! against `src/ssr/` and `calling::genotype_table_parity` against `src/var_calling/`
 //! were the first two; there are now several more, and the way to find them is
 //! `grep -rnE 'use crate::|include_str!\("\.\./\.\.' src/ng | grep -v 'crate::ng'` rather
 //! than a list here that goes stale. **The second alternative matters**: the copy guards

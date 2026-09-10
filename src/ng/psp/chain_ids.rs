@@ -116,7 +116,7 @@ impl LiveSet {
     /// record's ids in one arena and builds a set only for the record it is about to decode —
     /// so the allocation is paid on the roughly one record in eight that gets built rather than
     /// on every record walked
-    /// ([`PspSummarySource`](crate::ng::run::PspSummarySource)).
+    /// ([`PspSummarySource`](crate::ng::run::psp_source::PspSummarySource)).
     #[must_use]
     pub fn from_sorted_slice(ids: &[ChainId]) -> Self {
         debug_assert!(

@@ -342,7 +342,7 @@ pub fn seed_from_population_moments(
 /// heterozygosity below about `2e-12`, which is one difference per 500 thousand million bases. It
 /// is there because [`SpectrumSeed::new`] admits any strictly positive
 /// reference concentration, so a seed built by hand can sit below it, and
-/// [`Concentration`](super::Concentration)'s invariant is that **every** entry clears the floor,
+/// [`Concentration`]'s invariant is that **every** entry clears the floor,
 /// not only the alternatives. Production never had to check it: its `α_ref` was the constant 1.
 ///
 /// **A monomorphic locus is an answer, not an error**: a buffer of length one gets the reference

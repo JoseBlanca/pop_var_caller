@@ -20,7 +20,7 @@
 //!   cohort's expected allele copies, summed over the samples.
 //!
 //! **Nothing here allocates.** Every buffer belongs to the worker's
-//! [`CallingScratch`](crate::ng::calling::CallingScratch) and is reused at every locus and
+//! [`CallingScratch`] and is reused at every locus and
 //! on every pass, which is why the arithmetic below takes a
 //! [`SampleScoringBuffers`] rather than returning anything.
 

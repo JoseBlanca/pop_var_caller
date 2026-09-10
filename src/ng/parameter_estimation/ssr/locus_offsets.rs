@@ -111,7 +111,7 @@ pub fn stratum_of(locus: &SampleLocusObservations) -> LocusStratum {
 /// One read group's reads at one locus, counted into the offset buckets — **before the read cap
 /// thins them**.
 ///
-/// It is what a [`LocusShape`](super::stratum_table::LocusShape) is made from, and it is a
+/// It is what a [`LocusShape`] is made from, and it is a
 /// separate object because a locus can carry hundreds of reads while a shape holds at most
 /// `MAX_LOCUS_READS`: the thinning is a draw, and a draw needs the whole tally to draw from.
 ///

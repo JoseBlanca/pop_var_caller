@@ -649,7 +649,7 @@ impl AlignedFilesVariantCaller {
     /// that function's and are documented there.
     ///
     /// **Direct mode's output is pinned at every thread count** by
-    /// [`the_record_path_is_byte_identical_at_every_thread_count`], spec §12.2's end-to-end
+    /// `the_record_path_is_byte_identical_at_every_thread_count`, spec §12.2's end-to-end
     /// oracle, which compares this method's VCF bytes at pools of 1, 2, 4, 8 and 16. The
     /// layer under it — that the parallel cover reaches the same fixpoint as the serial one —
     /// is pinned at the merge instead, by `the_parallel_cover_gives_the_serial_drivers_answer`

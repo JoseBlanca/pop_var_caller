@@ -337,7 +337,7 @@ fn differ_by_one_substitution(left: &[u8], right: &[u8]) -> bool {
 /// and comparing the read's bases against the allele's bases is comparing like with like. What
 /// is *not* like with like is the witness: it counts **locus positions**, while the bases are
 /// **read content**, and the two differ by whatever indel the read carried over the stretch
-/// ([`PartialObservation::bases`]). So the witness may never be used to index the bases.
+/// (`PartialObservation`'s bases). So the witness may never be used to index the bases.
 ///
 /// What it may be used for is the one thing it settles: **which end of the allele the read is
 /// anchored to.** A read flush to the locus's left border showed the start of its carrier's
@@ -463,7 +463,7 @@ fn splits_into_a_prefix_and_a_suffix(bases: &[u8], allele: &[u8]) -> bool {
 ///
 /// # There is no `c == 0` branch, and that is a decision rather than an omission
 ///
-/// With [`ContaminationMixture::none`] the mixture is `1 · own(o | g) + 0`, which is
+/// With a `ContaminationMixture` of none the mixture is `1 · own(o | g) + 0`, which is
 /// `own(o | g)` bit for bit, and the row computes spec §3.3. It does not compute it *bitwise*:
 /// §3.3 charges a wrong read `q_sum + n·(log scale − log m)` in log space where this takes one
 /// logarithm of `ε̄/m` in probability space, and `ε̄` is `exp(q_sum/n)` by construction — so the
@@ -521,7 +521,8 @@ fn splits_into_a_prefix_and_a_suffix(bases: &[u8], allele: &[u8]) -> bool {
 /// contributes `Σ k_a/P` over them; one none of them can is charged as an error **with no
 /// spread**, because a read disagreeing over several positions has no finite set of wrong
 /// outcomes to divide by. [`allele_is_compatible_with_partial`] carries the rule and what it declines to
-/// decide; the verdicts are cached in the caller's [`GenericRowScratch`], once per
+/// decide; the verdicts are cached in the caller's
+/// [`GenericRowScratch`](crate::ng::calling::likelihood::GenericRowScratch), once per
 /// `(partial, allele)` rather than once per genotype.
 ///
 /// # What is not here
@@ -540,7 +541,6 @@ fn splits_into_a_prefix_and_a_suffix(bases: &[u8], allele: &[u8]) -> bool {
 /// table's. Production holds the analogous assertion in release because a scratch array too
 /// short for the allele count would otherwise be indexed out of bounds silently.
 ///
-/// [`ContaminationMixture::none`]: super::ContaminationMixture::none
 /// [`GenericSampleEvidence::partials`]: super::GenericSampleEvidence::partials
 pub fn genotype_log_likelihood_row(
     evidence: &super::GenericSampleEvidence<'_>,

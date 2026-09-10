@@ -3506,7 +3506,8 @@ pub mod bench_fixtures {
     ///
     /// A cohort whose libraries all misread at one rate cannot tell a fit that keeps them apart
     /// from one that pooled them — and pooling them is exactly the defect
-    /// [`CohortCensusEvidence::new`](super::census::CohortCensusEvidence::new)'s read-group
+    /// [`CohortCensusEvidence::new`](crate::ng::parameter_estimation::joint::census::CohortCensusEvidence::new)'s
+    /// read-group
     /// check exists to refuse. On the 63-accession tomato panel the libraries' own rates span
     /// 15.6-fold, so a spread is the ordinary case rather than an awkward one.
     #[allow(

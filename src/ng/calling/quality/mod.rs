@@ -50,7 +50,7 @@ pub const MAX_GENOTYPE_QUALITY: f32 = 99.0;
 /// The most a site quality is allowed to reach — and the answer to [`Phred`]'s refusal of
 /// an infinite value.
 ///
-/// [`Phred::from_log_prob`] returns [`DomainError::PhredInfinite`](crate::ng::types::DomainError::PhredInfinite)
+/// [`Phred::from_log_prob`] returns [`DomainError::PhredInfinite`]
 /// for a log-probability of `−∞`, deliberately, and its own documentation says the
 /// consumer's answer is *"cap at its own ceiling and carry on"*. **This module is that
 /// consumer and this is the ceiling** — production's `QUAL_MAX`, inherited and soft
@@ -275,7 +275,7 @@ pub struct SiteQualityBuffers<'a> {
 /// constants cannot know that.
 ///
 /// **The alternative concentration is floored at
-/// [`MIN_ALT_CONCENTRATION`](crate::genetics::MIN_ALT_CONCENTRATION).** [`SpectrumSeed`]
+/// [`MIN_ALT_CONCENTRATION`].** [`SpectrumSeed`]
 /// admits exactly zero — a fully invariant cohort is a real answer — and `ln Γ(0)` is `+∞`,
 /// which would make every term of the prior `NaN`. The floor sits far below any real
 /// diversity, so it never moves a fitted estimate.

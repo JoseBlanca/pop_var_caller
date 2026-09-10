@@ -45,7 +45,8 @@ use crate::ng::types::{GenomePosition, GenomeRegion};
 /// **The output is the serial drivers' and that is the whole claim of this step**: same cohort
 /// observations, same failed spans, at any number of regions in flight and any region width
 /// (spec §15). Nothing here decides anything about the answer — the builders are
-/// [`build_region`], the ordering is the organiser's, and both are already the serial path's.
+/// [`build_region`](crate::ng::run::cohort_merge::build::build_region), the ordering is the
+/// organiser's, and both are already the serial path's.
 ///
 /// **`regions_in_flight` is how many regions are worked at once, not how many threads work
 /// them** ([`CohortLocusBuilderRegionsInFlight`]). Threads come from rayon's pool; what this
@@ -72,7 +73,8 @@ use crate::ng::types::{GenomePosition, GenomeRegion};
 /// **The failed spans are gathered here and the organiser's count is the cross-check.** The
 /// organiser resolves overlaps and counts the failures that survived (spec §6.1, §3.3) but does
 /// not hand the spans back, so this keeps the spans of every outcome it submitted. The two agree
-/// unless a failed locus was displaced, which cannot happen under [`build_region`]'s input
+/// unless a failed locus was displaced, which cannot happen under
+/// [`build_region`](crate::ng::run::cohort_merge::build::build_region)'s input
 /// contract — the argument is on [`Organiser`].
 ///
 /// **The two assertions at the end are safety nets that no test makes fire**, which is worth
@@ -88,7 +90,8 @@ use crate::ng::types::{GenomePosition, GenomeRegion};
 /// leaves the cache advanced**, so the same cache cannot be used to try the same ground again —
 /// also that driver's caveat, and still owed.
 ///
-/// **A panicking builder is the same caveat, and it is reachable.** [`build_region`]'s
+/// **A panicking builder is the same caveat, and it is reachable.**
+/// [`build_region`](crate::ng::run::cohort_merge::build::build_region)'s
 /// producer-guarantee assertions fire on a rayon worker: two overlapping records of one sample
 /// pass the cache, which checks only that starts do not go backwards, and trip `build.rs`'s
 /// disjointness check. Rayon joins every builder in the round before it re-raises the panic, so

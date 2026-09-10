@@ -456,7 +456,7 @@ pub struct SsrLocusParameters<'a> {
     pub outlier_weight: f64,
     /// The tract lengths the outlier weight is spread over — **a property of the candidate set
     /// and the two cutoffs, with no cohort in it** (spec §4.5), built by
-    /// [`fill_reachable_lengths`].
+    /// [`fill_reachable_lengths`](crate::ng::calling::likelihood::ssr_emission::fill_reachable_lengths).
     ///
     /// It is the support the contamination seed is keyed to as well, so the two terms of the
     /// mixture that are not about this individual's own copies are spread over one agreed set of

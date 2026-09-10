@@ -21,7 +21,7 @@
 //! # What is here, and what is not
 //!
 //! Everything in this module is a function of the nine pooled counts
-//! ([`ArtifactTestCounts`](super::ArtifactTestCounts)) the worker gathered while the evidence and
+//! ([`ArtifactTestCounts`]) the worker gathered while the evidence and
 //! the genotypes were both in hand. **The stage that calls them is not here.** Which stage runs
 //! the correction, the in-place overwrite of the called locus's one quality field, and the
 //! emission threshold that reads it all belong to the output stream's own document (§3.4), which

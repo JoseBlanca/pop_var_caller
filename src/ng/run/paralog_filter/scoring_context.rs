@@ -13,7 +13,7 @@
 //! [`CoverageModelError`] names — no usable tiles at all, a single-copy peak in the bottom bin,
 //! a mode on the wrong copy-number peak, too much of the sample in the overflow bin, no GC bin
 //! dense enough to anchor the curve, or a configuration that is not a configuration. The first
-//! three come from [`SampleHistogram`](crate::ng::window_coverage::SampleHistogram) and the
+//! three come from [`SampleHistogram`] and the
 //! fourth carries the fit's own reason, whichever of the six it was. The run report says how many samples fell to each, because "the
 //! coverage model rested on 61 of 63 samples" is a different statement from "on 61 of 63, and
 //! the two that dropped out were nearly uncovered".

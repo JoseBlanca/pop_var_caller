@@ -12,9 +12,9 @@
 //! **This is ng's file, not a copy, and it is not guarded** — production keeps its counterpart
 //! (`calibrate_from_histogram`) in `src/var_calling/paralog_filter/calibrate.rs`, below four items
 //! ng deliberately does not port, so it falls outside the span
-//! [`copy_fidelity`](super::copy_fidelity) compares. It is checked against production all the
+//! `copy_fidelity` compares. It is checked against production all the
 //! same: `the_fallback_and_the_cut_agree_with_productions_bit_for_bit` in
-//! [`production_parity`](super::production_parity) is the oracle, beside the nine other
+//! `production_parity` is the oracle, beside the nine other
 //! differentials.
 //!
 //! It lives in this module rather than beside its caller because it is statistics: it reads a

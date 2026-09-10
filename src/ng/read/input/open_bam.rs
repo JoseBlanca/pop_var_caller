@@ -410,7 +410,7 @@ impl AlignmentFile {
     /// cursor needs two, because its decode reads reference bases as well — and a reference
     /// reader is an open file position and a resident window, which this project gives to every
     /// consumer separately rather than sharing (`run_streaming.md` §9;
-    /// `alignment_cursor.md` §10 point 1). [`SampleReads::cursor`] holds the factory and cannot
+    /// `alignment_cursor.md` §10 point 1). `SampleReads`'s cursor holds the factory and cannot
     /// answer that question, so it forwards it here rather than calling it.
     pub fn cursor<R: RawRefSeq + ContigTable + Send + 'static>(
         self: &Arc<Self>,

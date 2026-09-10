@@ -491,7 +491,7 @@ impl<R: BufRead> SpillReader<R> {
     /// # Errors
     ///
     /// If the stream fails, ends inside an entry, holds a value no entry can carry, or — where
-    /// [`Self::expecting`] was told how many were written — ends after fewer than that. **A
+    /// `expecting` was told how many were written — ends after fewer than that. **A
     /// stream that ends *inside* an entry is an error, not an end**, and so is one that ends
     /// on a boundary too early.
     pub fn next_entry(&mut self) -> Option<Result<SpillEntry, SpillError>> {

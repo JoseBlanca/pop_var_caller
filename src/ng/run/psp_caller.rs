@@ -5,7 +5,7 @@
 //! ([`gatherer`](super::gatherer)) reads a sample's alignment files once and stores what it
 //! saw; this is what reads a cohort of those files back and calls them. Everything between —
 //! the merge, the genotyping, the records — is the body direct mode drives
-//! ([`call_cohort_from_sources_handing_each_record_over`](super::callers::call_cohort_from_sources_handing_each_record_over)),
+//! ([`call_cohort_from_sources_handing_each_record_over`]),
 //! and the only thing that differs is where an observation comes from (spec §3.1).
 //!
 //! **Opening is two moves, not one, because the run's ground comes out of the files.** A
@@ -536,7 +536,7 @@ impl PspVariantCaller {
     /// same body direct mode drives, over sources that decode rather than walk (spec §3.1).
     ///
     /// What this adds to
-    /// [`call_cohort_from_sources_handing_each_record_over`](super::callers::call_cohort_from_sources_handing_each_record_over)
+    /// [`call_cohort_from_sources_handing_each_record_over`]
     /// is psp mode's one end: a source per open file, each carrying the map from its own
     /// walk-local read groups into this run's numbering. Everything after that — the merge, the
     /// genotyping, the records — cannot tell it is reading files rather than walking them.

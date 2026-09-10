@@ -1072,7 +1072,7 @@ pub struct CohortObservation {
     /// architecture's sketch says "indexed by the run's sample order", which reads two ways;
     /// this is the reading that keeps the distinction structural rather than resting on a
     /// zeroed row, and it is the shape the walk hands over
-    /// ([`SampleMembers`](super::close::SampleMembers)). Each entry names its own sample.
+    /// ([`SampleMembers`]). Each entry names its own sample.
     pub per_sample: Vec<SampleSupport>,
     /// What kind of stretch this is — a SNP/indel site ([`LocusKind::Generic`]) or a
     /// repeat tract ([`LocusKind::Ssr`]), which carries the motif the tract's read model

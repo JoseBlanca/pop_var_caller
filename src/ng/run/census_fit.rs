@@ -2,7 +2,9 @@
 //!
 //! # Two halves, one after the other
 //!
-//! The **generic half** ([`fit_jointly`]) reads the ordinary positions: the per-read-group noise
+//! The **generic half**
+//! ([`fit_jointly`](crate::ng::parameter_estimation::joint::fit::fit_jointly)) reads the
+//! ordinary positions: the per-read-group noise
 //! rates, the population's allele-frequency density, each sample's departure from Hardy–Weinberg
 //! proportions, and each library's contamination.
 //!
@@ -16,7 +18,7 @@
 //!
 //! **A census stores a tract by its index within its stratum and nothing else** — no coordinate,
 //! no stratum — so the order has to be rebuilt from the same kept-loci object the writer was
-//! given ([`strata_of_kept_loci`](super::super::parameter_estimation::joint::ssr_fit::strata_of_kept_loci)).
+//! given ([`strata_of_kept_loci`]).
 //! Rebuilding it means choosing the selection again, which is a function of the seed, the
 //! reference, the analysed ground and the catalog.
 //!

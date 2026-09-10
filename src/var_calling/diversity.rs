@@ -3,8 +3,8 @@
 //! sample summary — computed *before* the calling phase so it can seed the
 //! SFS genotype prior's hyperparameters.
 //!
-//! See the spec [`doc/devel/specs/sfs_genotype_prior.md`] §5 and the
-//! architecture doc [`doc/devel/architecture/sfs_genotype_prior.md`] §3. This
+//! See the spec `doc/devel/specs/sfs_genotype_prior.md` §5 and the
+//! architecture doc `doc/devel/architecture/sfs_genotype_prior.md` §3. This
 //! module is the pure estimator only: it reads the per-sample summaries and
 //! returns the numbers; wiring it into the driver and the posterior engine is a
 //! later step.
