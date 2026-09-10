@@ -423,11 +423,12 @@ entirely; a note that `CriteriaSource::ThePspHeaders` is now defensive for this 
 criteria it cuts with are the psps' own and their own catalog serves them; a note that the composed
 census reader has no non-test caller left; and one line over the file's width.
 
-**Not taken, routed to the owner:** spec §4.2's third row and the plan's C5 text now describe the
-code this step demoted to a backstop, and the plan says *seven* recorded settings where the code
-compares *twelve*. Comparing twelve is what makes the cross-sample refusal unreachable, so the
-documents should record the widening; editing a spec inside an implementation step is what this
-plan's rules forbid.
+**Routed to the owner, then taken apart from this step:** spec §4.2's third row and the plan's C5
+text described the code this step demoted to a backstop, and the plan said *seven* recorded
+settings where the code compares *twelve*. Comparing twelve is what makes the cross-sample refusal
+unreachable, so the documents record the widening. The owner ruled on 2026-09-10 — *"Yes, edit the
+documents"* — and both were corrected in their own commit, since editing a spec inside an
+implementation step is what this plan's rules forbid.
 
 ### The mutations
 

@@ -186,11 +186,17 @@ cause, so one run tells the user the whole regeneration job.
 |---|---|---|
 | no census | the footer's trailer length is zero ([`reader.rs:228-247`](../../../../src/ng/psp/reader.rs)) | the footer, already read at open |
 | a census of an older format | the version word at the trailer's front against `VERSION` ([`census_file.rs:75`](../../../../src/ng/parameter_estimation/joint/census_file.rs)) | one short read at the trailer offset |
-| built under another selection | the digest of the kept loci the census carries against the loci the run rebuilds ([`fit_a_cohort`, `census_fit.rs:116-139`](../../../../src/ng/run/census_fit.rs)) | the reference read and the selection rebuilt — 4 to 19 s in §2's measurements |
+| recorded under other settings | the twelve settings the census records against the ones this run records under, naming the first that differs ([`what_the_run_says_about_every_census_in_a_cohort`](../../../../src/ng/run/census_freshness.rs) against [`CensusPlan::recording_terms`](../../../../src/ng/run/gatherer.rs)): seven say which positions were chosen, five say in what units the evidence was written down. The digest of the kept positions is the backstop behind it ([`fit_a_cohort`](../../../../src/ng/run/census_fit.rs)) | the reference read and the selection rebuilt — 4 to 19 s in §2's measurements |
 
 The first two are judged before the reference is read, so a refusal for a missing census is
-immediate. The third needs the rebuilt selection and stays where it is; its message changes to say
-what to run. **An older format is named as such, not as damage**: today a version word this build
+immediate. The third needs the reference read and the selection rebuilt, so it is taken after
+those and before anything is fitted: one verdict a sample, naming the setting that differs and the
+command that regenerates it. **Its instruction needs no hedge because §6's two file checks come
+first** — a run pointed at another reference or catalog is refused as having named the wrong file,
+so a census that still differs from the run does not match its own psp, or was written by a build
+that chooses positions differently, and regenerating is the fix for both.
+
+**An older format is named as such, not as damage**: today a version word this build
 does not know is reported as *malformed* ([`decode_census`, `census_file.rs:456-461`](../../../../src/ng/parameter_estimation/joint/census_file.rs)),
 which sends the user looking for corruption when the truth is that this build changed what a census
 holds. The version is read first and reported as *built by an older version; regenerate*.

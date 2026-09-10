@@ -196,14 +196,17 @@ built under another selection; run `regenerate-census`*.
 
 ✅ **C5 — a census built under other settings is refused, naming the setting.** *Added at
 Checkpoint C by the owner's ruling of 2026-09-10: "stop and report the problem".* Each census
-records the seven settings its positions were chosen under (`SelectionTermsDigest`, census.rs
-`SELECTION_FIELDS`: selection seed, reference digest, analysed region set, repeat catalog build
-settings, STR routing criteria, generic target position count, STR per-stratum cap). Today they are
+records twelve settings: seven that say which positions were chosen
+(`SelectionTermsDigest`, census.rs `SELECTION_FIELDS`: selection seed, reference digest, analysed
+region set, repeat catalog build settings, STR routing criteria, generic target position count,
+STR per-stratum cap), and five that say in what units the evidence was written down
+(`RecordingTerms`: the positions actually kept, the per-stratum locus counts, the per-locus read
+cap, the depth-ladder edges, the per-position depth cap). Today they are
 compared only sample against sample (`CohortCensusEvidence::new`); against the run, the fit compares
 only the digest of the kept positions (`fit_a_cohort`), which lets a census built under other settings
 through whenever both happen to keep the same positions — measured at C4 on the fixture cohort with
-half the shipped position budget. **Compare the run's rebuilt selection terms against the censuses'
-before fitting, and refuse naming the first setting that differs**, with the fix that setting calls
+half the shipped position budget. **Compare the twelve settings this run records under against the
+censuses' own before fitting, and refuse naming the first that differs**, with the fix that setting calls
 for: a different reference or catalog means *rerun with the files the psps were walked against*;
 anything else means *regenerate*. Also give `estimate-parameters` the reference-against-header check
 `call-from-psps` makes (`refuse_a_file_against_another_reference`), so a wrong `--reference` is caught
@@ -214,6 +217,10 @@ names no action — says what to do too, preferably as rows of C3's report. Test
 half-budget cohort is refused naming the generic target position count; a wrong `--reference` is
 refused naming the reference before the selection is rebuilt.
 *Depends:* C4. *Source:* spec §4.2, §6; Checkpoint C.
+*As built, 2026-09-10:* the comparison covers all twelve, which is what makes the cross-sample
+refusal unreachable rather than reworded, and it always says *regenerate* — the two file checks
+above land first, so by the time it runs the run's reference and catalog are provably the psps'
+own. The chain is in this milestone's implementation report.
 
 > **Checkpoint C: step 2 takes psps, reads nothing it could be told wrongly, and refuses a stale
 > cohort whole.** Pause for review.

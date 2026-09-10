@@ -693,11 +693,14 @@ replaced, the `# Errors` lists on the two halves of the `run_ground` split, a no
 catalog's flag-naming path is now defensive for this command, and a note that the composed
 census reader has no non-test caller left.
 
-**Not taken, and recorded for the owner:** spec §4.2's third row and the plan's C5 text describe
-what the code now treats as the backstop, and the plan says *seven* settings where the code
-compares twelve. Widening to twelve is what makes the cross-sample refusal unreachable, so the
-documents should record the widening rather than the code narrow to match — a spec edit, which this
-plan's own rules keep out of an implementation step.
+**Raised for the owner, then taken in a commit of its own:** spec §4.2's third row and the plan's
+C5 text described what the code now treats as the backstop, and the plan said *seven* settings
+where the code compares twelve. Widening to twelve is what makes the cross-sample refusal
+unreachable, so the documents record the widening rather than the code narrowing to match. The
+owner ruled on 2026-09-10 — *"Yes, edit the documents"* — and §4.2's third row now names the
+comparison of recorded settings with the kept-positions digest behind it, the plan's step says
+twelve and carries an *as built* note, and both changes are apart from C5's own commit because a
+spec edit inside an implementation step is what this plan's rules forbid.
 
 ### Sixteen mutations, all run, all restored
 
