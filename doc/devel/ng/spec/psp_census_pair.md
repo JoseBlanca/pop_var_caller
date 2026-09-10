@@ -229,15 +229,19 @@ carries the catalog's own header, the repeat criteria the walk routed under, and
 regions ([`segmentation_inputs.rs:25-40`](../../../../src/ng/segmentation_inputs.rs)). Step 2 and
 `regenerate-census` read them from there.
 
-**And they must check that the cohort agrees on them, which nothing does today.** The cohort
+**And they must check that the cohort agrees on them, which no cohort *opener* does today.** The
 openers compare the analysed regions only ([`psp_caller.rs:677-690`](../../../../src/ng/run/psp_caller.rs);
 [`census_cohort.rs:222-236`](../../../../src/ng/run/census_cohort.rs)).
 `SegmentationInputs::first_difference` names the first of the three fields that differs, in the
 order a person should fix them — catalog, criteria, regions
-([`segmentation_inputs.rs:42-55`](../../../../src/ng/segmentation_inputs.rs)) — **and is called only
-from its own tests.** A step 2 that took the criteria from the first psp's header and never asked
-the rest would build a selection the other samples' censuses cannot match, and learn it twenty
-seconds later from the fit's digest check, reported as *another selection*.
+([`segmentation_inputs.rs:42-55`](../../../../src/ng/segmentation_inputs.rs)) — **and outside its own
+tests it is called from one place: `PspVariantCaller::open`, which compares each psp against the
+segmentation the run built** ([`psp_caller.rs:336-346`](../../../../src/ng/run/psp_caller.rs)). So a
+calling run already refuses a cohort typed two ways; what it names is one sample and the run, rather
+than the two samples that disagree, and the commands that build no run segmentation — the fit and
+the repair — have no such refusal at all. A step 2 that took the criteria from the first psp's
+header and never asked the rest would build a selection the other samples' censuses cannot match,
+and learn it twenty seconds later from the fit's digest check, reported as *another selection*.
 
 **Decision (owner, 2026-09-09): a cohort whose psps disagree on the catalog or the criteria is a
 hard failure for every command that opens one** — `estimate-parameters`, `regenerate-census`, and

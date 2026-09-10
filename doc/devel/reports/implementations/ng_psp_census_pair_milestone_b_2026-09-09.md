@@ -449,7 +449,9 @@ What holds after B4:
    `PspVariantCaller::open`, and was before this branch — so a calling run already refused a cohort
    typed two ways, naming one sample and the run rather than the pair. The decision is unaffected:
    the check still belongs in the shared opener, which is what gives the fit and `regenerate-census`
-   a refusal they had no way to make. The spec was left as it is.
+   a refusal they had no way to make. **Corrected at the checkpoint**, in the `docs(ng)` commit
+   after B4: §6 now names `PspVariantCaller::open` as the one place outside the tests that calls
+   it, and says what that refusal can and cannot name.
 2. **A census that decodes badly past its version word has no verdict.** Magic and version right,
    sections truncated: no cheap read tells it from a whole one, so it reaches the user as the census
    reader's own error rather than as *regenerate this*. Recorded in `CensusVerdict`'s own doc.
