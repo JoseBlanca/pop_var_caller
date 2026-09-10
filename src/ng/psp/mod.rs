@@ -53,7 +53,6 @@
 //! `doc/devel/ng/spec/psp_chain_id_encoding.md` (the chain ids), and
 //! `doc/devel/ng/arch/psp_file_format.md` (the code shape).
 
-use md5::{Digest, Md5};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -162,56 +161,11 @@ pub(crate) fn read_header_from(file: File, path: &Path) -> Result<(Header, usize
     Header::decode(&whole_header, path)
 }
 
-/// **The md5 of a psp's header exactly as it stands in the file.**
-///
-/// ⚠ **Nothing in the shipped commands calls this.** It was how a census kept in a file of its
-/// own named the psp it was built from, and a census has been its psp's own trailer since
-/// `psp_census_pair.md` §3, so there is no longer a pair to check. It is kept because a digest
-/// of a psp's header is a reasonable thing for a caller to want; see the note on
-/// [`WriteStats::header_digest`](crate::ng::psp::WriteStats::header_digest).
-///
-/// **It must be taken from the bytes on disk rather than from a `Header` value held in memory.**
-/// `PspWriter::create` amends the header before encoding it — it records the compression level
-/// it chose — so a digest of the header a walk *holds* names a file that does not exist. A
-/// caller with the writer's own report takes the digest from there; one reading a stored psp
-/// takes it here, from the file.
-///
-/// # Errors
-///
-/// The same refusals [`read_header`] makes: a file that is not a psp, one whose header is
-/// malformed or truncated, or an I/O failure — the header's bytes are read the same way and only
-/// the decoding is skipped.
-pub fn header_digest(path: &Path) -> Result<[u8; 16], PspReadError> {
-    header_and_its_digest(path).map(|(_, digest)| digest)
-}
-
-/// **The header and its digest, from one read.**
-///
-/// A fit over stored censuses wants both of a psp: what its walk covered, and the digest its
-/// census names it by. Reading the file twice for them would be a second `open(2)` per sample in
-/// a cohort of thousands.
-///
-/// # Errors
-///
-/// The same refusals [`read_header`] makes.
-pub fn header_and_its_digest(path: &Path) -> Result<(Header, [u8; 16]), PspReadError> {
-    let file = File::open(path).map_err(|source| PspReadError::Io {
-        path: path.to_path_buf(),
-        while_doing: "opening the file",
-        source,
-    })?;
-    let whole_header = read_header_bytes_from(file, path)?;
-    let mut hasher = Md5::new();
-    hasher.update(&whole_header);
-    let digest = hasher.finalize().into();
-    Header::decode(&whole_header, path).map(|(header, _)| (header, digest))
-}
-
 /// The header's bytes, framing included, exactly as they stand in the file.
 ///
-/// Split out from [`read_header_from`] so that [`header_digest`] hashes the same bytes the
-/// decoder parses. **Every bound is applied here**, before a buffer sized by the file's own
-/// claim exists.
+/// Split out from [`read_header_from`] so that a caller wanting the bytes rather than the
+/// decoded value reads them the same way the decoder does. **Every bound is applied here**,
+/// before a buffer sized by the file's own claim exists.
 fn read_header_bytes_from(mut file: File, path: &Path) -> Result<Vec<u8>, PspReadError> {
     use std::io::Seek;
     file.rewind().map_err(|source| PspReadError::Io {

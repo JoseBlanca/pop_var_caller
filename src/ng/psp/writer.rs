@@ -53,20 +53,6 @@ pub struct WriteStats {
     /// census (`psp_census_pair.md` §3.1), so this is how much of a psp the parameters fit
     /// reads and the rest is what it does not.
     pub trailer_bytes: u64,
-    /// **The md5 of the header exactly as it went into the file.**
-    ///
-    /// ⚠ **Nothing reads this any more.** It was the first half of the identity by which a census
-    /// kept in a file of its own named the psp it came from, and a census has been its psp's own
-    /// trailer since `psp_census_pair.md` §3, so there is nothing left to pair. Removing it would
-    /// also save the walk one md5 of the header a sample; that is a change to this writer's
-    /// reported statistics and is left for a step that owns them.
-    ///
-    /// **Handed back because the writer amends the header and nobody else can know what it
-    /// wrote.** [`create`](PspWriter::create) records the compression level into
-    /// [`ZSTD_COMPRESSION_LEVEL_KEY`] before encoding, so a caller digesting the header it
-    /// *supplied* gets a value no file will ever carry. Sixteen bytes rather than the header
-    /// itself, which runs to 16 MB at the format's ceiling.
-    pub header_digest: [u8; 16],
 }
 
 /// **How many closed blocks may be waiting to be compressed before the walk has to wait.**
@@ -333,9 +319,6 @@ pub struct PspWriter {
     /// Where the next byte will land — the file's length so far. Advanced only by a write that
     /// returned, so it always describes bytes this writer has handed to the buffer.
     written: u64,
-    /// The md5 of the header this writer put in the file — see
-    /// [`WriteStats::header_digest`], which is where it goes.
-    header_digest: [u8; 16],
     /// **An `Option` because [`BlockBuilder::finish`] consumes the builder**, which is its own
     /// guard: a builder that could be closed twice would put the last block in the file twice.
     /// It is `Some` for the whole of this writer's life, because the only thing that takes it is
@@ -387,14 +370,6 @@ impl PspWriter {
             )),
         );
         let header_bytes = header.encode()?;
-        // **Digested here, from the bytes that are about to be written**, which is the only
-        // place the amended header exists.
-        let header_digest: [u8; 16] = {
-            use md5::{Digest, Md5};
-            let mut hasher = Md5::new();
-            hasher.update(&header_bytes);
-            hasher.finalize().into()
-        };
         let builder = BlockBuilder::from_manifest(&header.manifest).map_err(|source| {
             PspWriteError::UnsupportedHeader {
                 path: path.to_path_buf(),
@@ -417,7 +392,6 @@ impl PspWriter {
             path: path.to_path_buf(),
             out: BufWriter::new(file),
             written: 0,
-            header_digest,
             builder: Some(builder),
             line: BlockCompressionLine::start(compressor),
             index: Vec::new(),
@@ -521,15 +495,6 @@ impl PspWriter {
             // new index and footer carry is measured from this, so a zero here would put every
             // appended block at an address inside the file that was already there.
             written: blocks_end,
-            // **The header this append inherited, digested from the file's own bytes.** An
-            // append does not rewrite the header, so the identity of the file it produces is
-            // still the identity of the header already in it.
-            header_digest: {
-                use md5::{Digest, Md5};
-                let mut hasher = Md5::new();
-                hasher.update(header.encode()?);
-                hasher.finalize().into()
-            },
             builder: Some(builder),
             line: BlockCompressionLine::start(compressor),
             index,
@@ -771,7 +736,6 @@ impl PspWriter {
             blocks: self.index.len() as u64,
             bytes: self.written,
             trailer_bytes: footer.trailer_bytes,
-            header_digest: self.header_digest,
         };
 
         // **The durability steps, in the one order that surfaces every failure** (spec §6.3).

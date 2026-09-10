@@ -16,7 +16,9 @@
 //! # What makes the two agree
 //!
 //! **Both build their writer through [`CensusPlan::writer_for`](super::CensusPlan::writer_for)
-//! and feed it the same type** — [`SampleLocusObservations`], which is what the walk yields and
+//! and feed it the same type** —
+//! [`SampleLocusObservations`](crate::ng::locus_generation::SampleLocusObservations), which is
+//! what the walk yields and
 //! what a psp decodes back to. So the two producers differ in where the loci come from and in
 //! nothing else, which is what makes comparing their two files byte for byte a statement about
 //! the psp: whether it carries everything a census needs (§7.12). A field the psp drops shows up
@@ -264,7 +266,7 @@ mod tests {
     //! read.
 
     use super::*;
-    use crate::ng::psp::{self, PspReader};
+    use crate::ng::psp::PspReader;
     use crate::ng::run::test_fixtures::{a_census_plan_over, gatherer_over};
     use crate::pop_var_caller_exp::test_fixtures::a_cohort_on_disk;
 
@@ -294,44 +296,6 @@ mod tests {
             built.records, stats.records,
             "the record count is the one the walk stored",
         );
-    }
-
-    /// **The digest taken from the file's bytes equals the one taken from its decoded header.**
-    ///
-    /// ⚠ **This test is the only thing left exercising [`psp::header_digest`]**, whose reader —
-    /// the identity by which a census named its psp — went at plan step E2. It stays because the
-    /// property is the one that would break silently: `PspWriter::create` amends the header
-    /// before encoding it, so a digest of the header a walk *holds* names a file that does not
-    /// exist, and a caller reaching for either route has to get the same number.
-    #[test]
-    fn the_digest_off_the_file_is_the_digest_of_its_own_header() {
-        let cohort = a_cohort_on_disk();
-        let (segmentation, plan) = a_census_plan_over(&cohort.reference, &cohort.catalog);
-        let psp = cohort.directory.path().join("zeta.psp");
-        let _ = gatherer_over(
-            &cohort.alignments[0],
-            &cohort.reference,
-            &segmentation,
-            Some(&plan),
-        )
-        .write_psp(&psp)
-        .expect("the walk writes its psp");
-
-        let from_the_file = psp::header_digest(&psp).expect("the header reads");
-        let re_encoded: [u8; 16] = {
-            use md5::Digest as _;
-            let mut hasher = md5::Md5::default();
-            hasher.update(
-                PspReader::open(&psp)
-                    .expect("the psp opens")
-                    .header()
-                    .encode()
-                    .expect("the header it was written with re-encodes"),
-            );
-            hasher.finalize().into()
-        };
-
-        assert_eq!(from_the_file, re_encoded);
     }
 
     /// **The sample and its read groups come from the psp, not from anything handed in.**

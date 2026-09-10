@@ -971,7 +971,6 @@ fn the_per_sample_line_prints_the_numbers_it_names() {
             blocks: 3,
             bytes: 6007,
             trailer_bytes: 812,
-            header_digest: [0; 16],
         },
         counts: crate::ng::locus_generation::LocusCounts {
             regions_in: 17,
@@ -1030,7 +1029,6 @@ fn a_walk_that_covered_its_whole_ground_carries_no_uncovered_clause() {
             blocks: 3,
             bytes: 6007,
             trailer_bytes: 812,
-            header_digest: [0; 16],
         },
         counts: crate::ng::locus_generation::LocusCounts {
             regions_in: 11,
