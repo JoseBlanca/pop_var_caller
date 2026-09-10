@@ -111,3 +111,83 @@ against a line the review's own fix had rewritten, so it matched nothing and the
 mutated — indistinguishable, in the log, from a mutation no test catches. The harness asserts its
 match count; sending its output to `/dev/null` in the same command as the test run is what hid the
 assertion.
+
+---
+
+## C2 — `--psp` in; `--census` and the five criteria flags out
+
+**Reviewed against:** the working tree over `07fe0e91`, seven files. One read-only agent over the
+same four grouped categories, plus the diff's own claims. **Two blockers**, eight should-fix, and
+an accounting of every refusal the deleted opener made.
+
+### Findings
+
+**B1 — a rustdoc link to the function the step deleted**, in `census_freshness.rs`. Broken
+intra-doc links are denied in `Cargo.toml`, so `cargo doc` fails on it, and the lib suite cannot
+see that: rustdoc lints only fire under rustdoc. *Fixed*, along with a second, non-linking stale
+mention in `RunError`'s own documentation. **And a finding beyond the step:** `cargo doc` is
+already red on this tree — 40 unresolved links, none from this branch — so it is a gate the
+milestone baselines have never included.
+
+**B2 — the new laziness test could not fail.** It compared the census reader's byte counter
+against the trailers' size; that counter counts *section* reads, and reading a cohort's censuses
+reads no section, so the number was zero under every implementation — including one that took each
+trailer whole. The assertion reduced to *the psps have a non-empty trailer*, and the test's own doc
+claimed the opposite.
+*Fixed* with three assertions over two instruments: the psp's own `trailer_bytes_read` must stay at
+zero (no trailer taken whole), the census reader's must stay at zero (no section decoded), and then
+asking for a section must move it off zero (the evidence is backed by the file, not resident). The
+mutation that reads each trailer whole and decodes it resident fails it.
+
+**M1 — `&mut OpenPspCohort` for a function that seeks nothing.** It read each psp's footer, which
+opening already read, and then opened the file again by path. *Fixed:* a read-only sibling accessor,
+and the census reader takes `&OpenPspCohort` — which is what lets a cohort be read while something
+else holds it, the shape a thousand-sample run wants.
+
+**M2 — the `--psp` listing rule written out twice**, with a third copy due at `regenerate-census`,
+and the new doc asserting the equality in prose. *Fixed:* one `psp_inputs` module with five tests,
+and each command dresses its refusal in its own words. The sibling's more helpful empty-directory
+message is now both commands'.
+
+**M3 — four prose statements the code contradicted:** "six tests went" (five did, three of them
+about the pairing); "a few hundred bytes" for a head read of up to a megabyte a sample; "the flags
+are still on the command line, and plan step C2 removes them", in C2; and `CohortRefusal`'s three
+causes described as two. *All fixed.*
+
+**M4 — two names that said the wrong thing:** `censuses` holding psp paths, `open` holding census
+evidence — the second a leftover of the deleted `OpenCensusCohort`. *Fixed at all seven sites.*
+
+**M5 — a refusal test asserting only the outer variant.** *Fixed:* it names the psp whose census is
+missing, so C3 has something to tighten rather than replace.
+
+### What the reviewer accounted for, and it is the useful half
+
+Every one of the deleted opener's seven refusals was traced to where it lives now: four moved and
+three of those got stronger, and the three census-versus-psp identity refusals are structurally
+gone. **One input is newly unrefused and unreachable today** — a trailer holding another sample's
+census — and the reviewer traced what would happen if it ever arose: not wrong numbers, but a
+sample-name mismatch at call time, because the parameters file is bound to a run by name.
+
+**Laziness was traced hop by hop** rather than assumed: `backed` → `renumbered`, which rewrites the
+directory's keys and keeps the backed variant → `keys`/`holds`/`len` answering from the directory →
+the first disk byte only in `fill`. That is what made B2 findable.
+
+**And the cost that is not in any test:** the fit now holds every psp open for the run, each
+keeping its block index — about 336 kB a sample at whole-genome scale, roughly 340 MB at a
+thousand. Spec §5 asks for that shape; it is named in the implementation report because it is the
+fit's first per-sample resident cost that grows with the genome.
+
+### The mutations
+
+| mutation | outcome |
+|---|---|
+| each trailer taken whole and decoded resident | 1 test fails — the rewritten laziness test |
+| a census that will not read skipped instead of refused | 2 fail |
+| each psp paired with another psp's path | 6 fail |
+| the evidence's sample order reversed | 1 fails |
+| the read-group table's file column taking the wrong path | 3 fail |
+
+Two of the reviewer's five were predicted to survive. The first was B2 and is now caught; the
+second — the file column — was predicted to survive because nothing read it, which is also why the
+byte-identity oracle could not see it: the path never reaches the parameters file. One assertion
+pins it.

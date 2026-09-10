@@ -87,16 +87,16 @@ pub enum PopVarCallerExpCommand {
     /// ground would produce censuses the cohort cannot be fitted from.
     GenerateCensus(GenerateCensusArgs),
 
-    /// Fit a cohort's parameters from its censuses and write them as a parameters file.
+    /// Fit a cohort's parameters from its psps and write them as a parameters file.
     ///
     /// This is the file a calling run scores with. Without one a run has two choices and
     /// neither is a fit: the constants compiled into the binary, or a file somebody hands
     /// it.
     ///
-    /// It reads the censuses. It does not read the psps — but each census's psp must be
-    /// beside it, because a census names the psp it was built from and evidence from other
-    /// reads is otherwise indistinguishable from this run's. What is taken from each psp is
-    /// its header: one short read.
+    /// It reads each psp's census — the small object in the file's tail — and none of its
+    /// records. From each header it takes the ground the walk covered and the repeat
+    /// criteria it cut that ground with, so there is no flag here that says what a repeat
+    /// is: the psps do. A cohort whose files disagree about either is refused.
     ///
     /// The reference and the catalog are needed because a census stores a repeat tract by
     /// its index within its stratum and nothing else, so the selection has to be rebuilt —

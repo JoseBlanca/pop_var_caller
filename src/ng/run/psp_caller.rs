@@ -84,9 +84,15 @@ pub struct OpenPspCohort {
     /// Where each came from, kept beside the readers because a refusal names the file and a
     /// [`PspReader`] does not hand its path out.
     paths: Vec<PathBuf>,
-    /// The ground every file agrees it was walked over. **Taken from the first file and then
-    /// required of the rest** — the cohort refusal (spec §6.2).
-    analysed_regions: GenomeRegions,
+    /// The settings every file agrees it was walked under — the catalog, the repeat-tract
+    /// criteria and the ground. **Taken from the first file and then required of the rest**
+    /// (spec §6.2; `psp_census_pair.md` §6).
+    ///
+    /// **The whole record and not only its ground, because a command that reads its settings out
+    /// of the files needs the other two.** `estimate-parameters` rebuilds the run's selection of
+    /// loci with the criteria the walk cut its ground under, and a selection built under any
+    /// others is one the cohort's censuses cannot match.
+    segmentation_inputs: SegmentationInputs,
     /// Every read group of every sample, numbered run-wide. **This is also the remap** — see
     /// [`read_group_remap`](Self::read_group_remap).
     read_groups: ReadGroups,
@@ -147,7 +153,7 @@ impl OpenPspCohort {
 
         let headers: Vec<&Header> = psps.iter().map(PspReader::header).collect();
         refuse_a_sample_named_twice(&headers, paths)?;
-        let analysed_regions = the_settings_every_file_agrees_on(&headers)?;
+        let segmentation_inputs = the_settings_every_file_agrees_on(&headers)?;
         let read_groups = merge_the_read_group_tables(&headers, paths)?;
         // **The maximum, not the first file's**: a cohort reader sizes for the widest
         // observation it can meet, and the files were written by separate invocations that may
@@ -161,7 +167,7 @@ impl OpenPspCohort {
         Ok(Self {
             psps,
             paths: paths.to_vec(),
-            analysed_regions,
+            segmentation_inputs,
             read_groups,
             observation_reach_ceiling,
         })
@@ -182,7 +188,19 @@ impl OpenPspCohort {
     /// §5.3), and the same in every one of them because a cohort that disagreed was refused.
     #[must_use]
     pub fn analysed_regions(&self) -> &GenomeRegions {
-        &self.analysed_regions
+        &self.segmentation_inputs.analysed_regions
+    }
+
+    /// **The settings the cohort was walked under**: the catalog, the repeat-tract criteria and
+    /// the ground, as every file of it agrees they were.
+    ///
+    /// **What a command that takes its settings from the files reads.** The fit rebuilds the
+    /// run's selection of loci with these criteria rather than with flags of its own
+    /// (`psp_census_pair.md` §6), which is what makes the selection the one the cohort's censuses
+    /// were written against.
+    #[must_use]
+    pub fn segmentation_inputs(&self) -> &SegmentationInputs {
+        &self.segmentation_inputs
     }
 
     /// Every read group of every sample, numbered run-wide.
@@ -233,6 +251,27 @@ impl OpenPspCohort {
             .iter()
             .map(PathBuf::as_path)
             .zip(self.psps.iter_mut())
+    }
+
+    /// The same, for a caller that asks each psp only what opening it already read.
+    ///
+    /// **A psp's header and its footer are in hand the moment the file is open**, so a question
+    /// answered from either — where the sample's census is, say
+    /// ([`census_cohort`](super::census_cohort)) — needs no seek and no mutable reader. The
+    /// seeking sibling is [`each_psp_with_its_path`](Self::each_psp_with_its_path), and taking
+    /// the weaker borrow is what lets a cohort be read while something else holds it.
+    pub(crate) fn each_psp_with_its_path_read_only(
+        &self,
+    ) -> impl Iterator<Item = (&Path, &PspReader)> {
+        debug_assert_eq!(
+            self.paths.len(),
+            self.psps.len(),
+            "one path a psp, as `open` built them",
+        );
+        self.paths
+            .iter()
+            .map(PathBuf::as_path)
+            .zip(self.psps.iter())
     }
 
     /// One sample's map from the numbers its own walk gave its read groups to the numbers this
@@ -704,8 +743,7 @@ fn refuse_a_sample_named_twice(headers: &[&Header], paths: &[PathBuf]) -> Result
 }
 
 /// The settings the cohort was walked under, or the refusal naming the first two files that
-/// disagree — and the ground, which is the part a run needs afterwards (spec §6.2;
-/// `psp_census_pair.md` §6).
+/// disagree (spec §6.2; `psp_census_pair.md` §6).
 ///
 /// **Three settings are compared and not one.** The catalog and the repeat-tract criteria decide
 /// where every segment ends and therefore which loci exist at all, so two psps typed under
@@ -729,7 +767,7 @@ fn refuse_a_sample_named_twice(headers: &[&Header], paths: &[PathBuf]) -> Result
 /// sample has no records over ground it never walked, and that absence reads exactly like *no
 /// variant here*, so the fix is to re-walk one of the two or to call each over the ground it has.
 /// A catalog or criteria disagreement has a different fix and says so.
-fn the_settings_every_file_agrees_on(headers: &[&Header]) -> Result<GenomeRegions, RunError> {
+fn the_settings_every_file_agrees_on(headers: &[&Header]) -> Result<SegmentationInputs, RunError> {
     let first = headers.first().expect("the empty cohort was refused above");
     let settings = &first.segmentation_inputs;
     for header in &headers[1..] {
@@ -748,7 +786,7 @@ fn the_settings_every_file_agrees_on(headers: &[&Header]) -> Result<GenomeRegion
             },
         });
     }
-    Ok(settings.analysed_regions.clone())
+    Ok(settings.clone())
 }
 
 /// Refuse a file written against a different reference from the run's (spec §6.2).

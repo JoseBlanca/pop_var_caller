@@ -358,13 +358,14 @@ mod tests {
     //! fitted against is the one it was written against.
 
     use super::*;
-    use crate::ng::run::census_cohort::open_census_cohort;
+    use crate::ng::run::census_cohort::every_census_in_the_cohorts_psps;
+    use crate::ng::run::psp_caller::OpenPspCohort;
     use crate::ng::run::test_fixtures::a_census_plan_over_selecting;
     use crate::pop_var_caller_exp::generate_psps::{GeneratePspsArgs, run_generate_psps};
     use crate::pop_var_caller_exp::test_fixtures::a_varying_cohort_on_disk;
     use std::path::PathBuf;
 
-    /// **The varying fixture cohort**, walked, with its censuses beside its psps.
+    /// **The varying fixture cohort**, walked, each psp carrying its own census.
     ///
     /// **Not the plain on-disk cohort**: that one's reference is all `A`, so every base is a
     /// homopolymer, the whole genome routes to the repeat path, and the selection keeps no tract
@@ -396,19 +397,29 @@ mod tests {
             min_purity: DEFAULT_MIN_PURITY,
         };
         run_generate_psps(&walk).expect("the cohort walks into psps");
-        // **The walk seals the census into each psp now** (`psp_census_pair.md` §3), and this
-        // module fits a cohort of census *files* — so they are built here, by `generate-census`,
-        // which is the producer that still writes them. Plan step C2 moves this fit onto the
-        // psps themselves.
-        crate::pop_var_caller_exp::test_fixtures::censuses_written_beside_the_psps(&walk, &psps);
-        let mut censuses: Vec<PathBuf> = std::fs::read_dir(&psps)
+        let mut walked: Vec<PathBuf> = std::fs::read_dir(&psps)
             .expect("the walk made the directory")
             .map(|entry| entry.expect("an entry").path())
-            .filter(|path| path.extension().is_some_and(|it| it == "census"))
+            .filter(|path| path.extension().is_some_and(|it| it == "psp"))
             .collect();
-        censuses.sort();
-        assert_eq!(censuses.len(), 2, "one census a sample");
-        (cohort, censuses)
+        walked.sort();
+        assert_eq!(
+            walked.len(),
+            2,
+            "one psp a sample, each carrying its census"
+        );
+        (cohort, walked)
+    }
+
+    /// The cohort's censuses, read out of its psps the way the command reads them.
+    ///
+    /// **The cohort is dropped here and the fit below still reads**, because a census read this
+    /// way holds a path and an offset rather than the psp's descriptor
+    /// (`SampleCensusEvidence::backed`). The command keeps its cohort alive because it wants the
+    /// paths and the settings, not because the evidence needs it.
+    pub(super) fn the_censuses_in(psps: &[PathBuf]) -> CohortCensusEvidence {
+        let cohort = OpenPspCohort::open(psps).expect("the walk wrote one cohort");
+        every_census_in_the_cohorts_psps(&cohort).expect("each psp carries its census")
     }
 
     fn a_generic_config() -> JointFitConfig {
@@ -425,13 +436,13 @@ mod tests {
     /// which is the property a run depends on and the one an unstable fit would break.
     #[test]
     fn a_cohort_of_censuses_is_fitted_both_halves() {
-        let (cohort, censuses) = a_fitted_cohorts_inputs();
+        let (cohort, psps) = a_fitted_cohorts_inputs();
         let (_segmentation, plan) = a_census_plan_over_selecting(
             &cohort.reference,
             &cohort.catalog,
             crate::ng::run::CensusSelection::SHIPPED.generic_target,
         );
-        let mut open = open_census_cohort(&censuses).expect("the censuses are this cohort's");
+        let mut open = the_censuses_in(&psps);
 
         let contigs = std::sync::Arc::clone(&plan.contigs);
         let contig_of = move |name: &str| {
@@ -441,10 +452,10 @@ mod tests {
                 .position(|entry| entry.name == name)
                 .map(|index| crate::ng::types::ContigId(index as u32))
         };
-        let pooled = every_read_group_pooled(&open.evidence);
+        let pooled = every_read_group_pooled(&open);
 
         let fitted = fit_a_cohort(
-            &mut open.evidence,
+            &mut open,
             &plan.loci,
             &contig_of,
             &pooled,
@@ -468,7 +479,7 @@ mod tests {
         );
 
         // The same cohort, fitted again from the same files.
-        let mut again = open_census_cohort(&censuses).expect("the censuses are still there");
+        let mut again = the_censuses_in(&psps);
         let contigs = std::sync::Arc::clone(&plan.contigs);
         let contig_of = move |name: &str| {
             contigs
@@ -477,9 +488,9 @@ mod tests {
                 .position(|entry| entry.name == name)
                 .map(|index| crate::ng::types::ContigId(index as u32))
         };
-        let pooled = every_read_group_pooled(&again.evidence);
+        let pooled = every_read_group_pooled(&again);
         let twice = fit_a_cohort(
-            &mut again.evidence,
+            &mut again,
             &plan.loci,
             &contig_of,
             &pooled,
@@ -501,13 +512,13 @@ mod tests {
     /// another seed indexes one stratum's tracts as another's — numbers rather than a failure.
     #[test]
     fn a_cohort_fitted_against_another_selection_is_refused() {
-        let (cohort, censuses) = a_fitted_cohorts_inputs();
+        let (cohort, psps) = a_fitted_cohorts_inputs();
         let (_segmentation, plan) = a_census_plan_over_selecting(
             &cohort.reference,
             &cohort.catalog,
             crate::ng::run::CensusSelection::SHIPPED.generic_target,
         );
-        let mut open = open_census_cohort(&censuses).expect("the censuses are this cohort's");
+        let mut open = the_censuses_in(&psps);
 
         let contigs = std::sync::Arc::clone(&plan.contigs);
         let contig_of = move |name: &str| {
@@ -517,7 +528,7 @@ mod tests {
                 .position(|entry| entry.name == name)
                 .map(|index| crate::ng::types::ContigId(index as u32))
         };
-        let pooled = every_read_group_pooled(&open.evidence);
+        let pooled = every_read_group_pooled(&open);
 
         // A selection holding one position the census's does not is enough: the digest is over
         // the kept positions in order.
@@ -533,7 +544,7 @@ mod tests {
         );
 
         let error = fit_a_cohort(
-            &mut open.evidence,
+            &mut open,
             &shifted,
             &contig_of,
             &pooled,
@@ -563,9 +574,10 @@ mod writing_the_parameters_file {
     //! bring Milestone E forward**: the census now accumulates the totals as its loci go past, so
     //! both halves are present and the calibration is fitted rather than defaulted.
 
+    use super::tests::the_censuses_in;
     use super::*;
     use crate::ng::calling::parameters_file::Warrant;
-    use crate::ng::run::census_cohort::{open_census_cohort, read_groups_of};
+    use crate::ng::run::census_cohort::read_groups_of;
     use crate::ng::run::census_fit::tests::a_fitted_cohorts_inputs;
 
     /// **The first parameters file this tree produces from data**, and what it may and may not
@@ -649,13 +661,13 @@ mod writing_the_parameters_file {
     fn a_fitted_cohorts_parameters() -> (RunParameters, ParametersFile) {
         use crate::ng::types::InbreedingF;
 
-        let (cohort, censuses) = a_fitted_cohorts_inputs();
+        let (cohort, psps) = a_fitted_cohorts_inputs();
         let (_segmentation, plan) = crate::ng::run::test_fixtures::a_census_plan_over_selecting(
             &cohort.reference,
             &cohort.catalog,
             crate::ng::run::CensusSelection::SHIPPED.generic_target,
         );
-        let mut open = open_census_cohort(&censuses).expect("the censuses are this cohort's");
+        let mut open = the_censuses_in(&psps);
         let contigs = std::sync::Arc::clone(&plan.contigs);
         let contig_of = move |name: &str| {
             contigs
@@ -664,9 +676,9 @@ mod writing_the_parameters_file {
                 .position(|entry| entry.name == name)
                 .map(|index| ContigId(index as u32))
         };
-        let pooled = every_read_group_pooled(&open.evidence);
+        let pooled = every_read_group_pooled(&open);
         let fit = fit_a_cohort(
-            &mut open.evidence,
+            &mut open,
             &plan.loci,
             &contig_of,
             &pooled,
@@ -675,11 +687,22 @@ mod writing_the_parameters_file {
         )
         .expect("the cohort fits");
 
-        let read_groups = read_groups_of(&open.evidence, &open.samples);
+        let read_groups = read_groups_of(&open, &psps);
+        // **Each sample's read groups name that sample's psp** — the column exists only so a
+        // message can name a file, and it is indexed by position, so a table built against
+        // another order would name the wrong file in every message about it.
+        assert_eq!(
+            read_groups
+                .get(read_groups.read_groups_per_sample()[0].read_groups[0])
+                .file
+                .as_ref(),
+            psps[0].as_path(),
+            "the first sample's read groups name the first sample's psp",
+        );
         // **Declared, not fitted, on this route** — the coefficient comes from a sample's own
         // windowed genome histogram, which is the other pre-pass route.
         let declared = InbreedingF::try_new(0.0).expect("zero is a coefficient");
-        let inbreeding: Vec<InbreedingF> = (0..open.evidence.len()).map(|_| declared).collect();
+        let inbreeding: Vec<InbreedingF> = (0..open.len()).map(|_| declared).collect();
         let stated: Vec<Estimate<InbreedingF>> = inbreeding
             .iter()
             .map(|value| Estimate {
@@ -691,13 +714,12 @@ mod writing_the_parameters_file {
 
         let parameters = parameters_from_the_fit(
             &fit,
-            &open.evidence,
+            &open,
             &pooled,
             inbreeding,
             crate::ng::types::Ploidy::try_new(2).expect("diploid"),
         );
         let terms = open
-            .evidence
             .terms()
             .expect("a cohort of one or more samples records terms")
             .clone();

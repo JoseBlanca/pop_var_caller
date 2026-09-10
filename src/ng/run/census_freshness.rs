@@ -217,10 +217,9 @@ pub struct JudgedPsp {
 /// **Every psp of an opened cohort judged, one verdict a sample, in the run's sample order** —
 /// spec §4.1.
 ///
-/// **Nothing here stops early, and that is the whole of it.** The cohort opener this replaces
-/// returns at the first census it cannot check
-/// ([`open_census_cohort`](super::census_cohort::open_census_cohort)), so a run over a cohort
-/// with three stale censuses reports one, the user regenerates it, and the next run reports the
+/// **Nothing here stops early, and that is the whole of it.** Before the census moved into the
+/// psp, the cohort opener returned at the first census it could not check, so a run over a cohort
+/// with three stale ones reported one, the user regenerated it, and the next run reported the
 /// second. Regenerating a census is a quarter of an hour a sample (spec §4), so what that costs
 /// is three rounds of that wait to learn a job that could have been named in one. **A file that
 /// will not read does not stop it either**: its row carries the read failure and the psps after

@@ -184,3 +184,129 @@ is `call-from-alignments` and `generate-psps`, whose runs do use the segments.
 - **`cargo fmt --check`: the same 4 files.**
 - **The fitted file on the fixture cohort: 20,741 bytes, byte-identical to the pre-C1 run**, checked
   again on the finished tree after every review fix.
+
+---
+
+## C2 — `--psp` in; `--census` and the five criteria flags out
+
+**Committed:** see `git log` for `feat(ng): C2`.
+
+### What it does
+
+`estimate-parameters` takes psps. `--census` is gone, and so are `--min-copies`, `--min-period`,
+`--max-period`, `--max-str-len` and `--min-purity`: there is nothing left on this command line that
+a person could type differently from the walk that wrote the files. What a run says now is the
+reference, the catalog, the psps and where to write.
+
+Three pieces:
+
+- **The cohort is opened by the opener every psp-taking command shares.** `OpenPspCohort::open`
+  reads each header and refuses a set that was not walked as one — two files naming one sample,
+  different ground, a different catalog, different repeat-tract criteria (step B3) — and no block
+  is decoded by any of it.
+- **The censuses come out of the psps' trailers**, through A3's reader, which takes a path and an
+  extent. Each census's header and directory are decoded at open; a section is read when the fit
+  asks for it.
+- **`open_census_cohort` and `CensusInCohort` are gone**, and with them the class of refusal that
+  existed because a census was a separate file.
+
+### What the old opener refused, and where each refusal lives now
+
+| the old refusal | now |
+|---|---|
+| nothing named | `RunError::NoPsps` in the psp opener, and clap's own `required` |
+| a file that is not a census | the same variant, keyed on the psp that carries it |
+| a psp that will not read | `PspReader::open`, which validates the footer, the index bounds and the header, where the old check read the header alone |
+| two samples walked over different ground | `the_settings_every_file_agrees_on`, which compares the catalog and the criteria as well, and names both samples and the field |
+| a census with no psp beside it | gone: a trailer cannot be separated from its file |
+| a census that names no psp | gone, same reason |
+| a census built from another psp | gone, same reason |
+
+**One input is newly unrefused, and it cannot arise today**: a psp whose trailer holds *another
+sample's* census. Only the walk writes a trailer, and it writes each sample's own. `regenerate-census`
+(plan step D1) will be the second writer, and that is where the check belongs — the review raised it
+and it is recorded below rather than added here, because a guard with no reachable failure is a
+guard nothing can test.
+
+### What it costs, which is not nothing
+
+**The fit now holds every psp open for the whole run.** Before, it read one header per sample and
+dropped it. An open psp keeps its block index — 24 bytes an entry and about 14,000 entries for a
+whole genome, so **about 336 kB a sample** by the format's own arithmetic
+(`psp/reader.rs:82-86`), which is roughly 340 MB at a thousand samples. That is the shape spec §5
+asks for and the same shape `call-from-psps` already has; it is named here because it is the fit's
+first per-sample resident cost that grows with the *genome* rather than with the census, and
+because a fit-side budget is explicitly out of this plan's scope.
+
+Bytes read a sample are otherwise as before: the census reader's head read, at most a megabyte,
+out of which a few hundred bytes of header and directory are decoded.
+
+### The oracle
+
+**The parameters file fitted over the fixture cohort is byte-identical to the one fitted before
+C1: 20,741 bytes.** It is now fitted from censuses read out of psp trailers where it was fitted
+from census files, so this is A1–A4's byte-for-byte parity carried through the whole fit — the
+walk's census, the census `generate-census` wrote, and the file the fit produces from either.
+
+### What the review found, and what was done
+
+**Two blockers, and the second is the one worth reading.**
+
+1. **A rustdoc link to the function this step deleted**, and broken intra-doc links are denied, so
+   `cargo doc` would have failed on it. (While fixing it: `cargo doc` **is already red on this
+   tree** — 40 unresolved links, none of them from this branch. It is a fifth gate nobody has been
+   running, and it is not this plan's to fix. Raised at Checkpoint C.)
+2. **The new laziness test could not fail.** It asserted that reading a cohort's censuses costs
+   fewer bytes than the trailers carry, using the census reader's own counter — which counts
+   *section* reads and not the head read that opening does. So the number was zero under every
+   implementation, including one that took each trailer whole, and the assertion reduced to *the
+   psps have a non-empty trailer*. **The instrument that does discriminate is the psp's own**
+   (`trailer_bytes_read`), and the replacement asserts three things: no trailer taken whole, no
+   section decoded, and then — asking for a section afterwards — that the read reached the disk,
+   which is the only way to tell a lazy census from one already in memory. The mutation that reads
+   each trailer whole and decodes it resident now fails it.
+
+**Then eight smaller things, four of them prose the code contradicted**: "six tests went" where
+five did and only three were about the pairing; "a few hundred bytes" for a head read of up to a
+megabyte; "the five flags are still on the command line, and C2 removes them" in the step that
+removes them; and a stale error doc naming the deleted opener. Also: `&mut OpenPspCohort` where the
+function seeks nothing, now a shared borrow with its own accessor; two variables called `censuses`
+and `open` holding psps and evidence; `CohortRefusal`'s three causes described as two; and a
+refusal test that asserted only the outer error variant, now naming the psp.
+
+**And the `--psp` listing rule, written out twice.** `call-from-psps` and `estimate-parameters` had
+the same thirty lines — expand a directory, keep the psps directly inside it, sort by name, refuse
+an empty one — differing only in which error type they built, with a third copy due at
+`regenerate-census`. It is one module now (`psp_inputs`), with five tests of its own, and each
+command dresses the refusal in its own words. The rule is not obvious enough to be safely written
+three times: the sort **is** the run's sample order, and it reaches the VCF's columns.
+
+### Five mutations, all run, all caught
+
+| mutation | outcome |
+|---|---|
+| each trailer taken whole and decoded resident | 1 test fails — the rewritten laziness test |
+| a census that will not read skipped instead of refused | 2 fail |
+| each psp paired with another psp's path | 6 fail |
+| the evidence's sample order reversed | 1 fails |
+| the read-group table's file column taking the wrong path | 3 fail |
+
+The last was the review's prediction of a survivor — nothing read that column — and it is now
+pinned by one assertion, because the column exists so that a message can name a file and a message
+naming the wrong file is worse than one naming none.
+
+### What was measured
+
+- **6,712 lib tests pass** against the milestone baseline's 6,705: C1's six, less the four tests
+  whose subject this step deleted, plus the shared listing module's five.
+- **clippy, `cargo check`, `cargo fmt --check`: the same sets as the baseline.**
+- **The fitted file: 20,741 bytes, byte-identical to the pre-C1 run**, re-checked after the review
+  fixes.
+
+### Recorded, not fixed
+
+- **A trailer holding another sample's census is not refused.** Free to check — both names are in
+  hand — but unreachable until `regenerate-census` exists, so it belongs with that command (D1).
+- **`cargo doc` is red on this tree**: 40 unresolved intra-doc links, none from this branch.
+- The end-to-end script's step 3 now passes `--psp`; the rest of that script — the
+  `generate-census` step it no longer feeds — is plan step E1's.

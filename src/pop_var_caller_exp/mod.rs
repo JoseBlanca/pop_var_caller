@@ -17,6 +17,7 @@ pub mod estimate_parameters;
 pub mod generate_census;
 pub mod generate_psps;
 pub mod mode_equivalence;
+pub mod psp_inputs;
 pub mod repeat_catalog;
 pub mod run_ground;
 #[cfg(test)]

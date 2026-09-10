@@ -176,7 +176,7 @@ from its flags, **with the flags still present and ignored**. Oracle: the parame
 on the tomato fixture is byte-identical before and after. **Own commit, do not bundle.**
 *Depends:* —. *Source:* spec §6 and its trap.
 
-☐ **C2 — `--psp` in; `--census` and the five criteria flags out.** The cohort opened with
+✅ **C2 — `--psp` in; `--census` and the five criteria flags out.** The cohort opened with
 `OpenPspCohort::open`; the censuses read from the trailers with A3; the six deletions. The tests
 that build argument lists (`args_over`, `a_shortest_run`) rewritten; C1's byte-identity re-asserted.
 `open_census_cohort` and `CensusInCohort` go.

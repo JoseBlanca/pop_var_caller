@@ -5,7 +5,7 @@
 #
 #   generate-psps        alignments  ->  <sample>.psp, with its census inside
 #   generate-census      psps        ->  <sample>.census, from the stored files
-#   estimate-parameters  censuses    ->  cohort.parameters.toml
+#   estimate-parameters  psps        ->  cohort.parameters.toml
 #   call-from-psps       psps + that file  ->  the VCF
 #
 # and then the question the last stage exists to answer: **what do the fitted numbers change?**
@@ -119,12 +119,13 @@ echo "  $psps psps, each with a census beside it, and $inside bytes of census in
 grep -m 1 "bytes of psp" "$out/generate-psps.log" || true
 
 say "3. estimate-parameters"
-# **From the censuses step 2 rebuilt**, which are beside the psps they were built from — the
-# walk no longer leaves any there. Plan step C2 is what moves this command onto the psps
-# themselves, and step 2 goes with it.
+# **From the psps themselves** (plan step C2): the census it reads is the one in each file's
+# trailer, and the ground and the repeat criteria come from the headers, so none of the walk's
+# settings is retyped here. Step 2's census files are no longer read by anything below; the
+# command that writes them is replaced at Milestone D, and this script's step 2 goes with it.
 "$bin" estimate-parameters \
     --reference "$reference" --catalog "$catalog" \
-    --census "$out/psps" --output "$out/cohort.parameters.toml" \
+    --psp "$out/psps" --output "$out/cohort.parameters.toml" \
     > "$out/estimate-parameters.log" 2>&1 || {
     echo "estimate-parameters failed:" >&2; cat "$out/estimate-parameters.log" >&2; exit 1; }
 tail -1 "$out/estimate-parameters.log"

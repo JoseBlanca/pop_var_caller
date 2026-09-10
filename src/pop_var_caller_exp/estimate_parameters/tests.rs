@@ -5,6 +5,10 @@ use super::*;
 use clap::Parser;
 use std::path::Path;
 
+use crate::ng::region_typing::DEFAULT_MAX_STR_LEN;
+use crate::ng::region_typing::segment_criteria::{
+    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
+};
 use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
 use crate::pop_var_caller_exp::generate_psps::{GeneratePspsArgs, run_generate_psps};
 use crate::pop_var_caller_exp::test_fixtures::{AVaryingCohort, a_varying_cohort_on_disk};
@@ -24,8 +28,8 @@ fn a_shortest_run() -> Vec<&'static str> {
         "estimate-parameters",
         "--reference",
         "ref.fa",
-        "--census",
-        "zeta.census",
+        "--psp",
+        "zeta.psp",
         "--output",
         "cohort.parameters.toml",
     ]
@@ -77,11 +81,6 @@ fn a_cohort_walked(min_copies: MinCopies, regions: Option<&str>) -> (AVaryingCoh
         min_purity: DEFAULT_MIN_PURITY,
     };
     run_generate_psps(&walk).expect("the cohort walks into psps");
-    // **The walk seals the census into each psp now** (`psp_census_pair.md` §3), and this
-    // command still takes census *files* — so they are built here, by `generate-census`, which
-    // is the producer that still writes them. Plan step C2 is what moves this command onto the
-    // psps themselves and deletes the pair.
-    crate::pop_var_caller_exp::test_fixtures::censuses_written_beside_the_psps(&walk, &psps);
     (cohort, psps)
 }
 
@@ -89,16 +88,11 @@ fn args_over(cohort: &AVaryingCohort, psps: &Path, output: PathBuf) -> EstimateP
     EstimateParametersArgs {
         reference: cohort.reference.clone(),
         catalog: Some(cohort.catalog.clone()),
-        censuses: vec![psps.to_path_buf()],
+        psps: vec![psps.to_path_buf()],
         output,
         force: false,
         ploidy: 2,
         inbreeding: 0.0,
-        min_copies: MinCopies::default(),
-        min_period: DEFAULT_MIN_PERIOD,
-        max_period: DEFAULT_MAX_PERIOD,
-        max_str_len: DEFAULT_MAX_STR_LEN,
-        min_purity: DEFAULT_MIN_PURITY,
     }
 }
 
@@ -106,7 +100,7 @@ fn args_over(cohort: &AVaryingCohort, psps: &Path, output: PathBuf) -> EstimateP
 fn the_subcommand_is_spelled_estimate_parameters() {
     let args = args_of(&a_shortest_run());
     assert_eq!(args.reference, PathBuf::from("ref.fa"));
-    assert_eq!(args.censuses, vec![PathBuf::from("zeta.census")]);
+    assert_eq!(args.psps, vec![PathBuf::from("zeta.psp")]);
     assert_eq!(args.output, PathBuf::from("cohort.parameters.toml"));
     assert!(
         Cli::try_parse_from(["pop_var_caller_exp", SUBCOMMAND, "--help"])
@@ -162,45 +156,13 @@ fn one_cohort_fitted_twice_writes_the_same_file() {
     );
 }
 
-/// **The repeat-tract criteria come out of the psps, and the flags that used to supply them are
-/// not read** (spec §6).
+/// **A cohort walked under criteria this command cannot be told is fitted all the same** (spec
+/// §6).
 ///
-/// One cohort, fitted twice with the copy floor set two different ways on the command line, and
-/// the two files are the same bytes. Before this step the flags built the run's segmentation, so
-/// the second fit rebuilt its selection over a different set of stretches from the one the
-/// censuses were written against — eleven copies where the fixture's tract has ten leaves that
-/// tract ordinary sequence, so the selection keeps positions inside it that the censuses hold
-/// nothing at — and the fit refused the cohort as *built under another selection*.
-///
-/// **Why the flags cannot simply be believed.** They are values a person retypes from a walk that
-/// already recorded them, and a mistyped one does not fail — it fits a plausible file over a
-/// different set of loci from the one the censuses hold, and is caught, if at all, by the fit's
-/// digest check reporting *another selection* twenty seconds later.
-#[test]
-fn the_criteria_flags_do_not_change_the_file_that_is_fitted() {
-    let (cohort, psps) = a_walked_cohort();
-    let output = cohort.directory.path().join("cohort.parameters.toml");
-
-    let (as_walked, _) = fit_and_assemble(&args_over(&cohort, &psps, output.clone()))
-        .expect("the cohort fits with the flags left at their defaults");
-    let mut asking_for_eleven = args_over(&cohort, &psps, output);
-    asking_for_eleven.min_copies = MinCopies::uniform(11);
-    let (whatever_the_flags_said, _) =
-        fit_and_assemble(&asking_for_eleven).expect("and fits with them set to anything else");
-
-    assert_eq!(
-        as_walked.to_toml(),
-        whatever_the_flags_said.to_toml(),
-        "the psps say what a repeat is; the flags are not read",
-    );
-}
-
-/// **A cohort walked under criteria this command was never told is fitted all the same.**
-///
-/// The other half of the same rule: the psps here were walked asking for eleven copies, and the
-/// fit is run with the flags at their defaults — the shape of every real run once the flags are
-/// gone (plan step C2), and the one a person hits today by walking with `--min-copies` and
-/// forgetting to repeat it here.
+/// The psps here were walked asking for eleven motif copies where the default is six at period 2,
+/// and this command has no flag that says so — there is nothing to type and nothing to get wrong.
+/// Before plan step C1 the same run needed `--min-copies 11,11,11,11,11,11` and refused the
+/// cohort without it.
 ///
 /// **It asserts the file differs from the default walk's**, because *it fitted something* is
 /// satisfied by a fit that quietly used the defaults: the two walks type the fixture's tract two
@@ -430,45 +392,59 @@ fn a_ploidy_of_zero_is_refused() {
     );
 }
 
-/// **A directory of censuses is expanded in name order.**
+/// **A directory of psps is expanded in name order**, so two runs naming one directory read the
+/// same cohort in the same order however the filesystem answers.
 #[test]
-fn a_directory_contributes_every_census_inside_it() {
+fn a_directory_contributes_every_psp_inside_it() {
     let (cohort, psps) = a_walked_cohort();
     let args = args_over(&cohort, &psps, cohort.directory.path().join("out.toml"));
 
-    let expanded = censuses_named_by(&args).expect("the directory lists");
+    let expanded = psps_named_by(&args).expect("the directory lists");
 
-    assert_eq!(expanded.len(), 2, "one census a sample, and nothing else");
+    assert_eq!(expanded.len(), 2, "one psp a sample, and nothing else");
+    assert!(
+        expanded
+            .iter()
+            .all(|path| path.extension().is_some_and(|it| it == "psp")),
+        "and nothing that is not a psp: {expanded:?}",
+    );
     assert!(
         expanded.windows(2).all(|pair| pair[0] <= pair[1]),
-        "sorted by name, so two runs read the same cohort in the same order: {expanded:?}",
+        "sorted by name: {expanded:?}",
     );
 }
 
-/// **A census whose psp is not beside it is refused**, and the refusal comes from the cohort's
-/// own door rather than from the fit.
+/// **A psp carrying no census stops the run**, rather than being fitted over whatever the other
+/// samples hold.
+///
+/// This is every psp written before the census moved into the trailer, and every psp an `append`
+/// has discarded the trailer of (spec §3.4). **What it says is not yet what it should say**: the
+/// message is about bytes that would not decode, where the person needs to be told which samples
+/// to regenerate and with what command. Plan step C3 puts that report in front of this, and this
+/// test is what will then assert it.
 #[test]
-fn a_census_without_its_psp_is_refused() {
+fn a_psp_carrying_no_census_is_refused() {
     let (cohort, psps) = a_walked_cohort();
-    let alone = cohort.directory.path().join("alone");
-    std::fs::create_dir_all(&alone).expect("the scratch dir is ours");
-    let orphan = alone.join("orphan.census");
-    let first = censuses_named_by(&args_over(
+    let paths = psps_named_by(&args_over(
         &cohort,
         &psps,
         cohort.directory.path().join("out.toml"),
     ))
-    .expect("the directory lists")[0]
-        .clone();
-    std::fs::copy(first, &orphan).expect("a copy");
+    .expect("the directory lists");
+    crate::ng::psp::replace_trailer(&paths[1], b"").expect("the tail rewrites");
 
-    let mut args = args_over(&cohort, &psps, cohort.directory.path().join("out.toml"));
-    args.censuses = vec![orphan];
+    let error = fit_and_assemble(&args_over(
+        &cohort,
+        &psps,
+        cohort.directory.path().join("out.toml"),
+    ))
+    .expect_err("that psp carries no census");
 
-    let error = fit_and_assemble(&args).expect_err("nothing can check it");
-
+    let EstimateParametersCliError::Cohort { source } = &error else {
+        panic!("a psp with no census is the cohort's refusal, not the fit's: {error:?}");
+    };
     assert!(
-        matches!(&error, EstimateParametersCliError::Cohort { .. }),
-        "{error:?}",
+        matches!(&**source, CensusCohortError::CensusNotRead { path, .. } if path == &paths[1]),
+        "and it names the psp whose census is missing: {source:?}",
     );
 }

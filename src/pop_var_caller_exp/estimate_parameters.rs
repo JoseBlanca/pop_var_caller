@@ -45,18 +45,15 @@ use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::reference_info::{
     ReferenceCheck, ReferenceInfoError, read_reference_observing_or_creating_fai,
 };
-use crate::ng::region_typing::DEFAULT_MAX_STR_LEN;
-use crate::ng::region_typing::segment_criteria::{
-    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
-};
 use crate::ng::repeat_catalog::RepeatCatalog;
 use crate::ng::run::{
-    CensusCohortError, CensusPlan, CensusSelection, CohortFitError, RunError,
-    every_read_group_pooled, fit_a_cohort, open_census_cohort, parameters_file_of,
+    CensusCohortError, CensusPlan, CensusSelection, CohortFitError, OpenPspCohort, RunError,
+    every_census_in_the_cohorts_psps, every_read_group_pooled, fit_a_cohort, parameters_file_of,
     parameters_from_the_fit, read_groups_of,
 };
 use crate::ng::types::{ContigId, InbreedingF, Ploidy};
-use crate::pop_var_caller_exp::generate_census::CENSUS_FILE_EXTENSION;
+use crate::pop_var_caller_exp::generate_psps::PSP_FILE_EXTENSION;
+use crate::pop_var_caller_exp::psp_inputs::{PspArgumentRefusal, psps_named};
 use crate::pop_var_caller_exp::run_ground::{self, GroundError};
 
 #[cfg(test)]
@@ -77,12 +74,13 @@ pub struct EstimateParametersArgs {
     #[arg(long)]
     pub catalog: Option<PathBuf>,
 
-    /// One census per sample, or a directory holding them. Repeat the flag.
+    /// One psp per sample, or a directory holding them. Repeat the flag.
     ///
-    /// **Each census's psp must be beside it**, under the same stem. It is not read: its header
-    /// is, for the digest the census names it by and for the ground its walk covered.
-    #[arg(long = "census", required = true, num_args = 1..)]
-    pub censuses: Vec<PathBuf>,
+    /// **Its records are not read.** What the fit reads is the census in each file's trailer, and
+    /// what it reads from each header is the ground the walk covered and the criteria it cut that
+    /// ground with (`psp_census_pair.md` §5, §6).
+    #[arg(long = "psp", required = true, num_args = 1..)]
+    pub psps: Vec<PathBuf>,
 
     /// Where to write the parameters file.
     #[arg(long)]
@@ -103,43 +101,6 @@ pub struct EstimateParametersArgs {
     /// supplied, so a reader can tell it from a measurement.
     #[arg(long, default_value_t = 0.0)]
     pub inbreeding: f64,
-
-    /// **Not read.** What counts as a repeat comes from the psps' own headers, where their walk
-    /// recorded it (`psp_census_pair.md` §6). Kept so that command lines written for the previous
-    /// release still parse; removed at plan step C2, with the other four.
-    #[arg(
-        long,
-        value_parser = crate::pop_var_caller_exp::cli::parsers::parse_min_copies,
-        default_value = "8,6,6,6,5,4",
-        help_heading = "What counts as a repeat"
-    )]
-    pub min_copies: MinCopies,
-
-    /// **Not read** — see `--min-copies`.
-    #[arg(
-        long,
-        default_value_t = DEFAULT_MIN_PERIOD,
-        value_parser = clap::value_parser!(u8).range(1..=crate::ng::types::MAX_MOTIF_LEN as i64),
-        help_heading = "What counts as a repeat"
-    )]
-    pub min_period: u8,
-
-    /// **Not read** — see `--min-copies`.
-    #[arg(
-        long,
-        default_value_t = DEFAULT_MAX_PERIOD,
-        value_parser = clap::value_parser!(u8).range(1..=crate::ng::types::MAX_MOTIF_LEN as i64),
-        help_heading = "What counts as a repeat"
-    )]
-    pub max_period: u8,
-
-    /// **Not read** — see `--min-copies`.
-    #[arg(long, default_value_t = DEFAULT_MAX_STR_LEN, help_heading = "What counts as a repeat")]
-    pub max_str_len: u64,
-
-    /// **Not read** — see `--min-copies`.
-    #[arg(long, default_value_t = DEFAULT_MIN_PURITY, help_heading = "What counts as a repeat")]
-    pub min_purity: f32,
 }
 
 /// Everything that can stop an `estimate-parameters` run.
@@ -176,9 +137,9 @@ pub enum EstimateParametersCliError {
         source: Box<RunError>,
     },
 
-    /// A `--census` naming a directory could not be listed.
-    #[error("listing the censuses in {}", path.display())]
-    CensusDirectory {
+    /// A `--psp` naming a directory could not be listed.
+    #[error("listing the psps in {}", path.display())]
+    PspDirectory {
         /// The directory.
         path: PathBuf,
         /// What the filesystem said.
@@ -186,15 +147,27 @@ pub enum EstimateParametersCliError {
         source: std::io::Error,
     },
 
-    /// A `--census` directory holds no census.
-    #[error("{} holds no .census file", path.display())]
-    NoCensusesInDirectory {
+    /// A `--psp` directory holds no psp.
+    #[error(
+        "--psp {} holds no .{PSP_FILE_EXTENSION} file; name the files themselves, or point at \
+         the --output-dir a generate-psps run wrote",
+        path.display()
+    )]
+    NoPspsInDirectory {
         /// The directory.
         path: PathBuf,
     },
 
-    /// The cohort could not be opened.
-    #[error("opening the cohort of censuses")]
+    /// The cohort's psps could not be opened as one cohort.
+    #[error("opening the cohort of psps")]
+    PspCohort {
+        /// What the opener said.
+        #[source]
+        source: Box<RunError>,
+    },
+
+    /// The cohort's censuses could not be read.
+    #[error("reading the censuses in the psps")]
     Cohort {
         /// What the cohort said.
         #[source]
@@ -286,11 +259,22 @@ fn fit_and_assemble(
         });
     }
 
-    let paths = censuses_named_by(args)?;
-    let mut open =
-        open_census_cohort(&paths).map_err(|source| EstimateParametersCliError::Cohort {
+    let paths = psps_named_by(args)?;
+    // **The psps are opened as a cohort, by the opener every psp-taking command shares**: it
+    // reads each header and refuses a set that was not walked as one — two files naming one
+    // sample, or walked over different ground, or under a different catalog or different
+    // repeat-tract criteria (`psp_census_pair.md` §6). No block is decoded by any of it.
+    let cohort =
+        OpenPspCohort::open(&paths).map_err(|source| EstimateParametersCliError::PspCohort {
             source: Box::new(source),
         })?;
+    // **The censuses come out of the psps' trailers**, read lazily: their headers and directories
+    // now, a section when the fit asks for it (spec §5).
+    let mut evidence = every_census_in_the_cohorts_psps(&cohort).map_err(|source| {
+        EstimateParametersCliError::Cohort {
+            source: Box::new(source),
+        }
+    })?;
 
     // **Read with an observer**, because the selection has to know where the reference is
     // sequence at all: a position inside a run of `N` has no base to compare a read against.
@@ -311,16 +295,14 @@ fn fit_and_assemble(
         .map_err(|source| EstimateParametersCliError::CensusGround { source })?;
 
     // **The ground and what it is cut with come out of the cohort's psps**, not off this
-    // command line (spec §6). The five flags that used to supply the criteria are values a
-    // person had to retype from a walk that had already recorded them; they are still on the
-    // command line, nothing reads them, and plan step C2 removes them.
+    // command line (spec §6). The five flags that used to supply the criteria were values a
+    // person had to retype from a walk that had already recorded them; they are gone, and there
+    // is nothing here to type wrongly.
     //
-    // **Both are read from one psp — the first — and what makes one enough is not this code.**
-    // `open_census_cohort` compares the analysed regions across the cohort, and
-    // `CohortCensusEvidence::new` refuses a cohort whose censuses disagree on their recording
-    // terms, the repeat criteria among them; at plan step C2 the cohort opener does it directly
-    // (`OpenPspCohort::open`, step B3). Take that away and this line is the hazard spec §6
-    // describes: a selection built from the first psp's settings that the rest cannot match.
+    // **They are the first psp's, and what makes one psp enough is the cohort opener**: it
+    // compares all three settings across every file and refuses a cohort that disagrees, naming
+    // the two samples and the field (step B3). Take that away and this line is the hazard spec §6
+    // describes — a selection built from the first psp's settings that the rest cannot match.
     //
     // **What happens if they are wrong anyway is weaker than it sounds.** The fit compares a
     // digest of the *kept generic positions* against the censuses' own (`fit_a_cohort`), so a
@@ -328,8 +310,8 @@ fn fit_and_assemble(
     // 400 is kept (spec §2), so a criterion that retypes a single short tract can pass that
     // digest and be re-indexed in silence. That is the argument for taking the criteria from the
     // psps rather than a reason to trust the net below.
-    let analysed = open.analysed_regions.clone();
-    let criteria = open.segmentation_inputs.repeat_tract_criteria.clone();
+    let analysed = cohort.analysed_regions().clone();
+    let criteria = cohort.segmentation_inputs().repeat_tract_criteria.clone();
     let catalog_path = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
     let segmentation = run_ground::segments_cut_with(
         &catalog_path,
@@ -367,9 +349,9 @@ fn fit_and_assemble(
             .position(|entry| entry.name == name)
             .map(|index| ContigId(index as u32))
     };
-    let pooled = every_read_group_pooled(&open.evidence);
+    let pooled = every_read_group_pooled(&evidence);
     let fit = fit_a_cohort(
-        &mut open.evidence,
+        &mut evidence,
         &plan.loci,
         &contig_of,
         &pooled,
@@ -383,8 +365,8 @@ fn fit_and_assemble(
         source: Box::new(source),
     })?;
 
-    let samples = open.evidence.len();
-    let read_groups = read_groups_of(&open.evidence, &open.samples);
+    let samples = evidence.len();
+    let read_groups = read_groups_of(&evidence, cohort.paths());
     let stated: Vec<Estimate<InbreedingF>> = (0..samples)
         .map(|_| Estimate {
             value: inbreeding,
@@ -394,13 +376,12 @@ fn fit_and_assemble(
         .collect();
     let parameters = parameters_from_the_fit(
         &fit,
-        &open.evidence,
+        &evidence,
         &pooled,
         (0..samples).map(|_| inbreeding).collect(),
         ploidy,
     );
-    let terms = open
-        .evidence
+    let terms = evidence
         .terms()
         .expect("a cohort of one or more samples records terms")
         .clone();
@@ -422,45 +403,17 @@ fn fit_and_assemble(
     Ok((file, samples))
 }
 
-/// **The censuses this run fits, with every directory expanded** — one entry a sample, in the
-/// order they were given, and a directory's contents sorted by name so two runs naming one
-/// directory read the same cohort in the same order.
-fn censuses_named_by(
+/// **The psps this run fits, with every directory expanded** — the rule every psp-taking command
+/// shares ([`psps_named`]), with its refusals dressed in this command's words.
+fn psps_named_by(
     args: &EstimateParametersArgs,
 ) -> Result<Vec<PathBuf>, EstimateParametersCliError> {
-    let mut paths = Vec::with_capacity(args.censuses.len());
-    for named in &args.censuses {
-        if !named.is_dir() {
-            paths.push(named.clone());
-            continue;
+    psps_named(&args.psps).map_err(|refusal| match refusal {
+        PspArgumentRefusal::Unlistable { path, source } => {
+            EstimateParametersCliError::PspDirectory { path, source }
         }
-        let mut inside = Vec::new();
-        for entry in std::fs::read_dir(named).map_err(|source| {
-            EstimateParametersCliError::CensusDirectory {
-                path: named.clone(),
-                source,
-            }
-        })? {
-            let entry = entry.map_err(|source| EstimateParametersCliError::CensusDirectory {
-                path: named.clone(),
-                source,
-            })?;
-            let path = entry.path();
-            if path
-                .extension()
-                .is_some_and(|it| it == CENSUS_FILE_EXTENSION)
-                && path.is_file()
-            {
-                inside.push(path);
-            }
+        PspArgumentRefusal::Empty { path } => {
+            EstimateParametersCliError::NoPspsInDirectory { path }
         }
-        if inside.is_empty() {
-            return Err(EstimateParametersCliError::NoCensusesInDirectory {
-                path: named.clone(),
-            });
-        }
-        inside.sort();
-        paths.extend(inside);
-    }
-    Ok(paths)
+    })
 }

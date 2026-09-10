@@ -55,6 +55,7 @@ use crate::ng::types::{InbreedingF, MAX_MOTIF_LEN};
 use crate::ng::vcf::writer::{VcfWriteError, VcfWriter};
 use crate::pop_var_caller_exp::calling_run::{self, CallingRunError};
 use crate::pop_var_caller_exp::generate_psps::PSP_FILE_EXTENSION;
+use crate::pop_var_caller_exp::psp_inputs::{PspArgumentRefusal, psps_named};
 use crate::pop_var_caller_exp::run_ground::{self, GroundError};
 
 #[cfg(test)]
@@ -370,50 +371,15 @@ fn ground_request(args: &CallFromPspsArgs) -> run_ground::GroundRequest<'_> {
     }
 }
 
-/// **The psps this run calls, with every directory expanded** — one entry a sample, in the
-/// order they were given.
-///
-/// A directory contributes the `.psp` files directly inside it, **sorted by name**, so that two
-/// runs naming one directory open the same cohort in the same order however the filesystem
-/// answers. Sub-directories are not descended into: a psp's home is a `generate-psps`
-/// `--output-dir`, which is flat.
-///
-/// # Errors
-///
-/// [`CallFromPspsCliError::PspDirectory`] for a directory that will not list, and
-/// [`CallFromPspsCliError::NoPspsInDirectory`] for one holding no psp.
+/// **The psps this run calls, with every directory expanded** — the rule every psp-taking command
+/// shares ([`psps_named`]), with its refusals dressed in this command's words.
 fn psps_named_by(args: &CallFromPspsArgs) -> Result<Vec<PathBuf>, CallFromPspsCliError> {
-    let mut paths = Vec::with_capacity(args.psps.len());
-    for named in &args.psps {
-        if !named.is_dir() {
-            paths.push(named.clone());
-            continue;
+    psps_named(&args.psps).map_err(|refusal| match refusal {
+        PspArgumentRefusal::Unlistable { path, source } => {
+            CallFromPspsCliError::PspDirectory { path, source }
         }
-        let mut inside = Vec::new();
-        for entry in
-            std::fs::read_dir(named).map_err(|source| CallFromPspsCliError::PspDirectory {
-                path: named.clone(),
-                source,
-            })?
-        {
-            let entry = entry.map_err(|source| CallFromPspsCliError::PspDirectory {
-                path: named.clone(),
-                source,
-            })?;
-            let path = entry.path();
-            if path.extension().is_some_and(|it| it == PSP_FILE_EXTENSION) && path.is_file() {
-                inside.push(path);
-            }
-        }
-        if inside.is_empty() {
-            return Err(CallFromPspsCliError::NoPspsInDirectory {
-                path: named.clone(),
-            });
-        }
-        inside.sort();
-        paths.extend(inside);
-    }
-    Ok(paths)
+        PspArgumentRefusal::Empty { path } => CallFromPspsCliError::NoPspsInDirectory { path },
+    })
 }
 
 /// Call `--psp`'s cohort and write `--output`. Prints a summary when it finishes.

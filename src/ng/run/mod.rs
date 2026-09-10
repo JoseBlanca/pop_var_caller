@@ -52,9 +52,7 @@ pub use callers::{
     AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, CalledCohort,
     CohortWalkTallies, MergeParameters, SampleWalkTallies, WrittenCohort,
 };
-pub use census_cohort::{
-    CensusCohortError, CensusInCohort, OpenCensusCohort, open_census_cohort, read_groups_of,
-};
+pub use census_cohort::{CensusCohortError, every_census_in_the_cohorts_psps, read_groups_of};
 pub use census_fit::{
     CohortFit, CohortFitError, every_read_group_pooled, fit_a_cohort, parameters_file_of,
     parameters_from_the_fit,
@@ -573,11 +571,10 @@ pub enum RunError {
     /// identity.
     ///
     /// **Refused by every command that opens its cohort with
-    /// [`OpenPspCohort::open`](crate::ng::run::OpenPspCohort::open)** — `call-from-psps` and
-    /// `generate-census` today. The owner's ruling of 2026-09-09 is that a fit and a calling run
-    /// are equally unable to pool such files, so the check lives at the opener they share;
-    /// `estimate-parameters` opens its cohort a second way for now (`open_census_cohort`, which
-    /// compares the analysed regions alone), and plan step C2 moves it onto this one.
+    /// [`OpenPspCohort::open`](crate::ng::run::OpenPspCohort::open)** — `call-from-psps`,
+    /// `estimate-parameters` and `generate-census`. The owner's ruling of 2026-09-09 is that a fit
+    /// and a calling run are equally unable to pool such files, so the check lives at the opener
+    /// they share.
     ///
     /// `field` is [`SegmentationInputs::first_difference`]'s answer, written to read inside this
     /// sentence. The analysed regions have their own refusal,
