@@ -1,8 +1,9 @@
 # Handoff — the census lives inside the psp: D1 is committed, D2 to D4 remain
 
 **Written 2026-09-10**, on branch `census-vs-psp-perf`, in the worktree
-`/Users/jose/devel/pop_var_caller-census-vs-psp`. **The tree is clean at `34359259`.** This exists
-so a fresh session can pick the plan up without re-deriving anything.
+`/Users/jose/devel/pop_var_caller-census-vs-psp`. **The tree is clean at `03e5e52f`, and D1 is
+complete through the loop** — implemented, reviewed, fixed, mutated, committed. This exists so a
+fresh session can pick the plan up without re-deriving anything.
 
 ---
 
@@ -17,16 +18,19 @@ so a fresh session can pick the plan up without re-deriving anything.
 | `4522a3e0` | C5 — a census recorded under other settings is refused, naming the setting |
 | `93fb1ac3` | the spec's §4.2 row and the plan's C5 text say what the fit compares (owner ruled: *"Yes, edit the documents"*) |
 | `34359259` | D1 — `generate-census` becomes `regenerate-census`, which replaces each psp's trailer |
+| `03e5e52f` | D1's review: the blocker, two more tests that could not fail, nine falsified doc claims |
 
-**Two things are owed on D1 before D2 starts**, and neither is a code change so far as anyone
-knows:
+**Nothing is owed on D1.** Its review found one blocker — every test that could have observed the
+write compared a psp's trailer with the trailer the walk had already put there, so all fourteen
+passed with the write removed — and that is closed by a test that empties a psp's trailer first.
+Nine mutations were run and all nine caught. The findings and the two mutations deliberately not
+run are in
+[`psp_census_pair_milestone_d_2026-09-10.md`](../reviews/psp_census_pair_milestone_d_2026-09-10.md).
 
-1. **The step's review was never applied.** One read-only agent was launched over D1's diff and the
-   session ended before it reported, so its findings are lost. The brief it was given is
-   [`tmp/b/d1_review_agent.md`](../../../../tmp/b/d1_review_agent.md) — re-run one agent with it,
-   against `git show 34359259` rather than the working tree, and fix forward in its own commit.
-2. **D1's mutations were not run.** The harness is `tmp/b/c5_mutate.py` plus
-   `tmp/b/c5_mutations.sh`; copy them for D1's own list, which the review is asked to name.
+**One finding is carried into D2 on purpose.** Spec §8 asks for the cohort's agreement to be checked
+first, and `regenerate-census` reads the reference before it opens the cohort, so a mistyped `--psp`
+path costs a reference read and the two psp-taking commands refuse in different orders. The reorder
+costs no test by the review's own measurement, and D2 reworks that preamble anyway.
 
 ---
 
@@ -77,7 +81,11 @@ to edit any file, to write scratch files, or to run `cargo`**, and asked to *nam
 exact old→new text. The orchestrator runs them, one at a time, from a backup, proving each restore
 with `diff`.
 
-**Six traps this plan has hit, all avoidable:**
+**Seven traps this plan has hit, all avoidable:**
+
+- **A test that compares a file with itself proves nothing.** D1's whole suite passed with the write
+  removed. When a step's contract is *this byte reaches disk*, one test has to destroy that byte
+  first — `replace_trailer(path, b"")` empties a psp's trailer, and the rebuild has to put it back.
 
 - **Never edit the tree while a gate or a mutation run is building it.** Twice in this session a
   doc-comment edit landed mid-gate and the gate had to be discarded and re-run.
@@ -103,9 +111,9 @@ ls` shows them and `container stop <id>` clears them (the owner has approved sto
 `bash tmp/b/gate.sh <label>` runs the four gates and prints each as a list to compare, never a
 count. It takes 8-12 minutes; launch it with `nohup … &` and poll for `== fmt: files ==`.
 
-| gate | at `34359259` |
+| gate | at `03e5e52f` |
 |---|---|
-| `cargo test --lib --bins --tests --all-features --no-fail-fast` | **6,731 lib tests pass**, 0 failed, 15 ignored; 20 of 21 targets green, the one failure the baseline's `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele` |
+| `cargo test --lib --bins --tests --all-features --no-fail-fast` | **6,732 lib tests pass**, 0 failed, 15 ignored; 20 of 21 targets green, the one failure the baseline's `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele` |
 | `cargo clippy --lib --bins --tests --all-features -- -D warnings` | **11 errors of 5 kinds in 6 files** — `bam/alignment_input.rs`, `window_coverage/accumulator.rs` ×5, `cohort_merge/build.rs` ×2, `cohort_merge/serial.rs`, `psp_writer_line.rs`, `window_coverage/production_parity.rs` |
 | `cargo check --all-targets --keep-going` | **4 examples** do not compile: `ng_call_cohort_end_to_end`, `ng_candidate_selection_probe`, `ng_cohort_merge_parallel_cost`, `ng_cohort_merge_real_cost` |
 | `cargo fmt --check` | the **4 files** above |
@@ -146,9 +154,9 @@ absolute paths. Scratch goes under the worktree's `tmp/`, never the harness's ow
 
 Milestone D's report is
 [`ng_psp_census_pair_milestone_d_2026-09-10.md`](ng_psp_census_pair_milestone_d_2026-09-10.md); its
-D1 section is the context for D2. **The milestone has no review report yet** — D1's review never
-landed — so the next session creates
-`doc/devel/reports/reviews/psp_census_pair_milestone_d_2026-09-10.md`.
+D1 section is the context for D2, and its review report is
+[`psp_census_pair_milestone_d_2026-09-10.md`](../reviews/psp_census_pair_milestone_d_2026-09-10.md);
+append D2's section to both.
 
 Commit as `feat(ng): D2 — <title>`, ending with
 `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`. Flip the step's `☐` to `✅` in the plan in
