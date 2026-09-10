@@ -1007,6 +1007,32 @@ again.
 
 ---
 
+### 2026-09-06 — a caveat on the owner's proposal, framed as a heading that read as a rejection
+
+The owner proposed one thing (use the psp record head's `reads_compared_with_reference` as the
+paralog filter's depth). The reply recommended exactly that, and also flagged one caveat about it.
+The caveat was written as a bold heading in the negative, and the owner read the caveat as an
+objection to the proposal:
+
+> ❌ "**The head's count is not depth.** If you were thinking of `reads_compared_with_reference`
+> — the field in the record head — it sums only *whole*-witness observations…"
+>
+> Owner, two replies later: *"But this is what I was proposing and you objected to it, right? Have
+> you changed your mind or am I not understanding something?"*
+
+> ✅ "**Use the head's count, with one thing to know about it:** it sums only whole-witness
+> observations, so at a locus spanning more than one base it sits below the depth."
+
+The recommendation to use the field was in the same reply, four paragraphs down, and the owner had
+already read past the heading by then. One rule:
+
+**A caveat about a thing you are recommending must be introduced as a caveat, not as a negation of
+the thing.** A heading is read as the paragraph's verdict, so a heading in the form *"X is not Y"*
+over a paragraph whose conclusion is *"use X anyway"* inverts what the paragraph says. Put the
+verdict in the heading and the qualification in the body — never the other way round. The cost is
+not a wasted paragraph: it is that the owner then cannot tell a later agreement from a reversal,
+and has to spend a message asking which it was.
+
 ### 2026-09-07 — a decision handed over with none of what it needed
 
 Reporting the end of a plan milestone, a decision paragraph was written as:
