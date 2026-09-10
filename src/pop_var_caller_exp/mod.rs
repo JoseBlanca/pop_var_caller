@@ -37,7 +37,7 @@ pub use estimate_parameters::{
 };
 pub use generate_psps::{GeneratePspsArgs, GeneratePspsCliError, run_generate_psps};
 pub use regenerate_census::{
-    CensusReport, RegenerateCensusArgs, RegenerateCensusCliError, SampleCensusOutcome,
+    CensusReport, RegenerateCensusArgs, RegenerateCensusCliError, SampleCensusOutcome, SkippedPsp,
     run_regenerate_census,
 };
 pub use repeat_catalog::{RepeatCatalogArgs, RepeatCatalogCliError, run_repeat_catalog};

@@ -167,3 +167,107 @@ would survive and prove nothing; and holding the cohort open across the writes c
 from a test on Unix, where an open descriptor does not stop a truncation. Both are recorded here
 instead: the second means *closed before the first write* is a design property with no test behind
 it, and spec §5's descriptor and memory ground is what argues for it.
+
+---
+
+## D2 — fresh psps skipped
+
+**Reviewed against:** the working tree over `8f3485eb`, four files. One read-only agent over the
+grouped categories. **No blockers**, and it confirmed the three things the brief asked it to
+challenge: the skip rule reaches all of §4.2's causes and maps each to the right action, the new
+order keeps the reference check ahead of the catalog open, and *its records are not read* is true —
+nothing between opening the cohort and the decision touches a block.
+
+### Should-fix, all fixed
+
+**S1 — the head judgement changes no outcome.** An empty trailer and a census of another format
+both come back from the census read as well, since it checks the same magic and the same version
+word, and both arrive as an error that already means *owed a rebuild*. The review's own mutation
+confirmed it: with the head's verdict forced to *fresh*, the whole suite passes. *Kept, with the
+reason rewritten*: what the head buys is that those two causes are reached in ten bytes rather than
+after a read of up to a mebibyte. It changes what a cohort of stale psps costs to judge, not what
+the run decides — and the comment says exactly that now.
+
+**S2 — a size claim wrong by about 3,000×, in three places.** "A few hundred bytes" is what gets
+*decoded* out of a census's head; the read itself is `HEAD_READ_BYTES`, a mebibyte, so about a
+gibibyte over a thousand samples. The file's own older sentence had it right — "at most a megabyte,
+and less for a census shorter than that — out of which the census's header and its directory are
+decoded, a few hundred bytes of them" — and the new comments had kept the second half and dropped
+the first. *Fixed*, and each now says both numbers and that it is a rounding error against the
+record pass it avoids.
+
+**S3 — the error type's doc described the order this step replaced**, and still said plan step D2
+was what would make the re-run cheap, in the commit that makes it so. *Fixed.*
+
+**S4 — both `Err(_) => true` arms swallow an i/o failure**, where the module that produced the
+verdict draws the line the other way: a psp that cannot be read is not a stale psp, because
+regenerating it fixes nothing. *Recorded rather than branched on*: here that distinction dissolves,
+because this command's own work is to read the psp, so an i/o fault reaches the rebuild, which reads
+the file and names it. The comment says so, for both arms.
+
+**S5 — a test claimed to be the only one that observes the write**, which stopped being true when
+seven others began emptying their trailers. *Reduced to what it still covers*: the pair — one psp
+rebuilt and one skipped in the same run.
+
+**S6 — the selection test used the easy budget.** At three positions the kept set differs too, so it
+passed against a check comparing the kept positions alone; the review's mutation proved it. *Fixed*
+by looping over half the shipped budget and three, which is what the sibling test at the fit does
+and for the same reason.
+
+**S7 — the report's singulars and its no-skips line were never rendered.** *Fixed*: the mixed run
+asserts "regenerated 1 census … and skipped 1 psp that needed nothing", and the all-rebuilt run
+asserts the first line says nothing about skipping.
+
+**S8 — the milestone bookkeeping.** *Done in the commit*: the plan's tick and both report sections.
+
+**S9 — plan step D4's oracle is now a no-op**, because the copy it compares is skipped. *Recorded in
+the plan's own D4 line*: the copy's trailer has to be emptied first.
+
+**S10 — a doc sentence with no verb.** *Fixed.*
+
+### Minor, fixed
+
+The "put nothing into the fit" line divides by the rebuilt count, and now says so. The skip list
+needed the argument for why this report lists what the refusal report only counts — that one is
+about what a person must go and do, this one is the record of what a run did — including that a
+re-run of sixty samples prints sixty lines. "All three of §4.2's causes" left out trailer damage,
+which the code also handles. "The third cause costs nothing" was wrong about what is free: the
+reference read and the selection rebuild are, the comparison is one open and one read a psp. The
+verdicts and the readers are now paired under a `debug_assert`, and a trailer holding another
+sample's census is owed a rebuild — one string comparison, and the only thing that would catch a
+spliced file.
+
+### Recorded, not fixed
+
+- **Closing the cohort before the writes has no test behind it**, and cannot have one on Unix, where
+  an open descriptor does not stop a truncation. Its argument is memory: a thousand descriptors and
+  a thousand block indexes held while the psps are rewritten (spec §5).
+- **The progress stream and the report order their lines differently** — skips are printed as they
+  are decided, before the first rebuild, and the report lists rebuilds first.
+
+### The mutations
+
+Thirteen, each applied from a backup with its match count asserted and restored with the restore
+proved by `diff`. **Eleven caught, two survivors, both predicted.**
+
+| mutation | outcome |
+|---|---|
+| the head's verdict is always fresh | **survives** — S1's own measurement |
+| a census that will not decode is treated as fresh | 1 test fails |
+| a psp whose head will not read is treated as fresh | **survives** — no head-read failure is producible |
+| the recorded settings are not compared | 1 fails |
+| only the kept positions are compared | 1 fails |
+| every stale head is treated as fresh | 9 fail |
+| the verdicts are paired with the wrong psps | 11 fail |
+| a run that skipped nothing says it skipped none | 1 fails |
+| the skipped count is always plural | 1 fails |
+| the rebuilt count is always plural | 1 fails |
+| the corruption lands on the block index | 1 fails |
+| the reference is checked after the catalog is opened | 1 fails |
+| the cohort is opened after the reference is read | 1 fails |
+
+**Two of them were faulty on their first run and produced no measurement**: one did not compile, and
+one moved a block back to where it already was. Both were fixed and re-run. **A mutation that does
+not apply, does not compile, or changes nothing is indistinguishable from one nothing catches**, and
+the only reason it was visible here is that the driver prints the apply step and the compiler's
+output beside each test result.

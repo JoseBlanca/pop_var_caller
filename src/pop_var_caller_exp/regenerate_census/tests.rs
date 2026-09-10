@@ -95,6 +95,19 @@ fn the_trailers_in(psps: &Path, samples: &[&str]) -> Vec<(PathBuf, Vec<u8>)> {
         .collect()
 }
 
+/// Empty every psp's trailer, after `walked` has captured what the walk had written there.
+///
+/// **What it is for: making the bytes a comparison asserts come from the run under test.** Since
+/// plan step D2 a psp whose census is the one this run would write is skipped and its records are
+/// never read, so a test that walks a cohort and regenerates it compares the walk's own bytes with
+/// themselves and passes whatever this command does — which is the defect D1's review found in
+/// every test in this file. Emptying the trailers first makes each psp owed a rebuild.
+fn empty_every_trailer(walked: &[(PathBuf, Vec<u8>)]) {
+    for (path, _) in walked {
+        crate::ng::psp::replace_trailer(path, b"").expect("the tail rewrites");
+    }
+}
+
 /// **The command is spelled by the constant the library's refusals name.**
 ///
 /// The refusals in `ng::run` tell a person to run this command, and until this step they named one
@@ -194,11 +207,17 @@ fn the_census_it_writes_is_the_one_the_walk_wrote_on_a_cohort_with_a_repeat_trac
         &cohort.alignments,
     );
     let walked = the_trailers_in(&psps, &["one", "two"]);
+    empty_every_trailer(&walked);
 
     let report = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
         .expect("the psps read");
 
     assert_eq!(report.samples.len(), 2, "one entry a sample");
+    assert!(
+        report.skipped.is_empty(),
+        "both psps were emptied, so neither can have needed nothing: {:?}",
+        report.skipped,
+    );
     for (path, before) in &walked {
         let after = PspReader::open(path)
             .expect("the psp still opens")
@@ -249,10 +268,16 @@ fn the_census_it_writes_is_the_one_the_walk_wrote_on_a_cohort_with_a_repeat_trac
 fn the_census_it_writes_is_the_one_the_walk_wrote_for_a_sample_with_no_reads() {
     let (cohort, psps) = a_walked_cohort();
     let walked = the_trailers_in(&psps, &["alpha", "zeta"]);
+    empty_every_trailer(&walked);
 
     let report = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
         .expect("the psps read");
 
+    assert_eq!(
+        report.samples.len(),
+        2,
+        "both psps were emptied, so both are owed a rebuild"
+    );
     for (path, before) in &walked {
         let after = PspReader::open(path)
             .expect("the psp still opens")
@@ -275,19 +300,16 @@ fn the_census_it_writes_is_the_one_the_walk_wrote_for_a_sample_with_no_reads() {
     );
 }
 
-/// **The census is written, and this is the only test here that can see that it is.**
+/// **One psp owed a rebuild, one that needs nothing: the first is written and the second is
+/// skipped** — plan step D2's own case, and the test that says the write happens at all.
 ///
-/// Every other comparison in this file reads a trailer the walk had already put there, so each one
-/// holds just as well for a command that reads every psp, builds every census and writes none of
-/// them — measured by this step's review: with the `replace_trailer` call removed, the other
-/// fourteen tests pass. Plan step D4's whole-file comparison passes on that same no-op too.
-///
-/// This one empties one psp's trailer before the run, so the bytes it asserts can only have come
-/// from this run. **The other psp is left as the walk sealed it**, and both are asserted: the
-/// emptied one comes back carrying the census the walk had written, and the untouched one still
-/// carries its own.
+/// **Why it is both at once.** Emptying one trailer makes that psp's new bytes provably this run's,
+/// which is what D1's review found nothing asserted: every comparison read a trailer the walk had
+/// already put there, so all fourteen tests passed with the write removed. Seven of them empty
+/// their trailers now and would catch that too; **what only this one covers is the pair** — one psp
+/// rebuilt and one skipped in the same run, which is the case spec §8 asks for.
 #[test]
-fn the_census_is_written_into_a_psp_that_has_none() {
+fn a_psp_with_no_census_is_rebuilt_and_the_fresh_one_is_skipped() {
     let (cohort, psps) = a_walked_cohort();
     let walked = the_trailers_in(&psps, &["alpha", "zeta"]);
     let emptied = psp_path_for(&psps, "alpha");
@@ -301,9 +323,27 @@ fn the_census_is_written_into_a_psp_that_has_none() {
         "this fixture starts with one psp carrying no census at all",
     );
 
-    regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
+    let report = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
         .expect("the psps read");
 
+    assert_eq!(
+        report
+            .samples
+            .iter()
+            .map(|sample| sample.sample.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha"],
+        "the emptied psp is the one rebuilt",
+    );
+    assert_eq!(
+        report
+            .skipped
+            .iter()
+            .map(|it| it.sample.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zeta"],
+        "and the other needed nothing",
+    );
     for (path, before) in &walked {
         let after = PspReader::open(path)
             .expect("the psp opens")
@@ -316,6 +356,15 @@ fn the_census_is_written_into_a_psp_that_has_none() {
             path.display(),
         );
     }
+    // **The one run that renders every singular the first line has**, since it is the only shape
+    // with exactly one of each — and each of those three pieces is a `match` a test can otherwise
+    // leave to whichever arm the fixtures happen to take.
+    let said = report.lines();
+    assert!(
+        said[0].contains("regenerated 1 census over")
+            && said[0].contains("and skipped 1 psp that needed nothing"),
+        "one of each, in the singular: {said:?}",
+    );
 }
 
 /// **The census written into a trailer names no psp**, where a census in a file of its own names
@@ -330,10 +379,16 @@ fn the_census_it_writes_into_the_trailer_names_no_psp() {
     use crate::ng::parameter_estimation::joint::census_file::decode_census;
 
     let (cohort, psps) = a_walked_cohort();
+    empty_every_trailer(&the_trailers_in(&psps, &["alpha", "zeta"]));
 
     let report = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
         .expect("the psps read");
 
+    assert_eq!(
+        report.samples.len(),
+        2,
+        "the censuses asserted below are this run's"
+    );
     for sample in &report.samples {
         let trailer = PspReader::open(&sample.psp)
             .expect("the psp opens")
@@ -357,6 +412,7 @@ fn the_census_it_writes_into_the_trailer_names_no_psp() {
 #[test]
 fn the_psps_header_and_records_are_untouched() {
     let (cohort, psps) = a_walked_cohort();
+    empty_every_trailer(&the_trailers_in(&psps, &["alpha", "zeta"]));
     let before: Vec<(String, u64)> = ["alpha", "zeta"]
         .iter()
         .map(|sample| {
@@ -367,8 +423,13 @@ fn the_psps_header_and_records_are_untouched() {
         })
         .collect();
 
-    regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
+    let report = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
         .expect("the psps read");
+    assert_eq!(
+        report.samples.len(),
+        2,
+        "a psp this run skipped would be untouched for a reason this test is not about",
+    );
 
     let after: Vec<(String, u64)> = ["alpha", "zeta"]
         .iter()
@@ -391,6 +452,7 @@ fn the_psps_header_and_records_are_untouched() {
 #[test]
 fn a_sample_with_no_reads_is_named_as_contributing_nothing() {
     let (cohort, psps) = a_walked_cohort();
+    empty_every_trailer(&the_trailers_in(&psps, &["alpha", "zeta"]));
 
     let report = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
         .expect("the psps read");
@@ -425,6 +487,7 @@ fn a_sample_with_no_reads_is_named_as_contributing_nothing() {
 #[test]
 fn each_line_names_the_psp_and_what_went_into_its_census() {
     let (cohort, psps) = a_walked_cohort();
+    empty_every_trailer(&the_trailers_in(&psps, &["alpha", "zeta"]));
 
     let report = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
         .expect("the psps read");
@@ -450,6 +513,12 @@ fn each_line_names_the_psp_and_what_went_into_its_census() {
     assert!(
         !line.contains(".census"),
         "no census file is written any more, so no line may name one: {line}",
+    );
+    assert!(
+        !report.lines()[0].contains("skipped"),
+        "every psp here was owed a rebuild, so the first line has nothing to say about \
+         skipping: {:?}",
+        report.lines(),
     );
     assert_eq!(
         zeta.psp,
@@ -515,7 +584,13 @@ fn the_censuses_it_writes_assemble_into_a_cohort() {
     let (cohort, psps) = a_walked_cohort();
     let args = args_over(&cohort.reference, &cohort.catalog, &psps);
     let paths = psps_named_by(&args).expect("the directory lists");
-    regenerate_every_census(&args).expect("the psps read");
+    empty_every_trailer(&the_trailers_in(&psps, &["alpha", "zeta"]));
+    let report = regenerate_every_census(&args).expect("the psps read");
+    assert_eq!(
+        report.samples.len(),
+        2,
+        "the censuses assembled below are the ones this run wrote",
+    );
 
     let open = OpenPspCohort::open(&paths).expect("the rebuilt psps are one cohort");
     let evidence = every_census_in_the_cohorts_psps(&open)
@@ -528,6 +603,250 @@ fn the_censuses_it_writes_assemble_into_a_cohort() {
         "this fixture's two samples declare one library each, and the two end up under different \
          identifiers — which is what keeps their sequencing-error rates apart, and what every \
          census numbering its own groups from zero would otherwise lose",
+    );
+}
+
+/// **A cohort that needs nothing is skipped whole, and its records are never read** (spec §8).
+///
+/// Freshness here is all three of spec §4.2's causes: the two the psps' heads answer, and — since
+/// this command rebuilds the selection anyway — whether each census recorded the settings this run
+/// records under. A freshly walked cohort passes all three, so there is nothing to do.
+///
+/// **How "its records are never read" is shown, and it needs a control.** One psp's *blocks* are
+/// corrupted before the run: 32 bytes overwritten just below where the index begins, which is
+/// inside the last block. A run that read that psp's records to rebuild its census would fail;
+/// this one succeeds and skips it. **The control is the second half**: with that psp's trailer
+/// emptied, the same corrupted file is owed a rebuild, and then the run does fail on it — which is
+/// what says the corruption was fatal to a record pass rather than harmless.
+#[test]
+fn a_cohort_that_needs_nothing_is_skipped_whole_and_its_records_are_not_read() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let (cohort, psps) = a_walked_cohort();
+    let corrupted = psp_path_for(&psps, "zeta");
+    let index_begins_at = PspReader::open(&corrupted)
+        .expect("the psp opens")
+        .footer()
+        .index_offset;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&corrupted)
+        .expect("the scratch dir is ours");
+    file.seek(SeekFrom::Start(index_begins_at - 32))
+        .expect("the blocks end at the index");
+    file.write_all(&[0xFF; 32]).expect("32 bytes of nonsense");
+    file.sync_all().expect("the bytes land");
+    drop(file);
+
+    let report = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
+        .expect("every census is the one this run would write, so no psp is read past its census");
+
+    assert!(
+        report.samples.is_empty(),
+        "nothing was rebuilt: {:?}",
+        report
+            .samples
+            .iter()
+            .map(|it| &it.sample)
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        report
+            .skipped
+            .iter()
+            .map(|it| it.sample.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "zeta"],
+        "both psps needed nothing, in the order they were read",
+    );
+    let said = report.lines();
+    assert!(
+        said[0].contains("regenerated 0 censuses")
+            && said[0].contains("skipped 2 psps that needed nothing"),
+        "and the run says so: {said:?}",
+    );
+    assert!(
+        said.iter()
+            .any(|line| line.contains("zeta: skipped, its census is the one this run would write")),
+        "a line a sample, either way: {said:?}",
+    );
+
+    // **The control.** With its census gone, the same corrupted psp is owed a rebuild — and now
+    // the run fails on it, which is what makes the pass above a statement about records not read
+    // rather than about a psp that would have read cleanly anyway.
+    crate::ng::psp::replace_trailer(&corrupted, b"").expect("the tail rewrites");
+
+    let error = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
+        .expect_err("this psp's records are nonsense, and now they have to be read");
+
+    assert!(
+        matches!(
+            &error,
+            RegenerateCensusCliError::Build { sample, psp, .. } if sample == "zeta" && psp == &corrupted
+        ),
+        "and it names the sample and the file: {error:?}",
+    );
+}
+
+/// **A cohort whose censuses were recorded under another selection is rebuilt whole, without being
+/// told to** (spec §8).
+///
+/// This is the case a changed build makes: the selection's constants move, every census on disk
+/// records the old ones, and no flag says so. The fixture reaches it the way C5's tests do — each
+/// census rebuilt from its own psp under a selection keeping a handful of positions instead of the
+/// shipped budget — and what the command must do is rebuild every one and leave the trailers as
+/// the walk had them.
+/// **Both budgets are run, and the first is the one that matters.** At half the shipped budget
+/// this fixture's short contig keeps every ordinary position either way, so the set of positions is
+/// the same and only the recorded settings differ — which is the case a check comparing the kept
+/// positions alone would skip, and the case C5 measured on the fit. At three the set differs too.
+#[test]
+fn a_cohort_recorded_under_another_selection_is_rebuilt_whole() {
+    use crate::ng::parameter_estimation::joint::census_file::write_census;
+    use crate::ng::run::census_from_psp;
+    use crate::ng::run::test_fixtures::a_census_plan_over_selecting;
+
+    for budget in [CensusSelection::SHIPPED.generic_target / 2, 3] {
+        let (cohort, psps) = a_walked_cohort();
+        let walked = the_trailers_in(&psps, &["alpha", "zeta"]);
+        let (segmentation, under_another_budget) =
+            a_census_plan_over_selecting(&cohort.reference, &cohort.catalog, budget);
+        for (path, _) in &walked {
+            let rebuilt =
+                census_from_psp(path, &under_another_budget, &segmentation).expect("the psp reads");
+            let mut bytes = Vec::new();
+            write_census(&rebuilt.evidence, None, &mut bytes).expect("the census encodes");
+            crate::ng::psp::replace_trailer(path, &bytes).expect("the tail rewrites");
+        }
+
+        let report = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
+            .expect("the psps read");
+
+        assert_eq!(
+            report.samples.len(),
+            2,
+            "at a budget of {budget}, every census recorded another selection, so every one is \
+             owed a rebuild",
+        );
+        assert!(
+            report.skipped.is_empty(),
+            "at a budget of {budget}, none needed nothing: {:?}",
+            report.skipped,
+        );
+        for (path, before) in &walked {
+            let after = PspReader::open(path)
+                .expect("the psp opens")
+                .trailer()
+                .expect("its trailer reads");
+            assert_eq!(
+                before,
+                &after,
+                "at a budget of {budget}, {} did not come back to the census its walk wrote",
+                path.display(),
+            );
+        }
+    }
+}
+
+/// **A census damaged past its version word is rebuilt, not skipped and not refused.**
+///
+/// The head's two reads cannot tell it from a whole census — the magic and the version word are
+/// this build's — and no cheap read can. What settles it is the census reader, and regenerating
+/// rewrites exactly the bytes that are damaged, so this command's answer is to rebuild rather than
+/// to stop (`CensusVerdict`'s own note on what is not a verdict).
+///
+/// **The premise is asserted rather than assumed**: the head still says fresh, and the census still
+/// will not read. Without both, a test that saw the sample rebuilt would not know which of the two
+/// judgements had done it.
+#[test]
+fn a_census_damaged_past_its_version_word_is_rebuilt() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    use crate::ng::parameter_estimation::joint::census_file::BYTES_THAT_NAME_THE_VERSION;
+    use crate::ng::run::{
+        the_census_in_a_psp, what_the_footer_and_the_trailers_head_say_about_a_census,
+    };
+
+    let (cohort, psps) = a_walked_cohort();
+    let walked = the_trailers_in(&psps, &["alpha", "zeta"]);
+    let damaged = psp_path_for(&psps, "zeta");
+    let census_begins_at = PspReader::open(&damaged)
+        .expect("the psp opens")
+        .footer()
+        .trailer_offset;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&damaged)
+        .expect("the scratch dir is ours");
+    file.seek(SeekFrom::Start(
+        census_begins_at + BYTES_THAT_NAME_THE_VERSION as u64,
+    ))
+    .expect("past the magic and the version word");
+    file.write_all(&[0xFF; 16]).expect("16 bytes of nonsense");
+    file.sync_all().expect("the bytes land");
+    drop(file);
+
+    let mut psp = PspReader::open(&damaged).expect("the psp opens");
+    assert_eq!(
+        what_the_footer_and_the_trailers_head_say_about_a_census(&mut psp).expect("its head reads"),
+        crate::ng::run::CensusVerdict::Fresh,
+        "the damage is past the version word, so the head cannot see it",
+    );
+    assert!(
+        the_census_in_a_psp(&damaged, &psp).is_err(),
+        "and the census reader can",
+    );
+    drop(psp);
+
+    let report = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
+        .expect("a damaged census is rebuilt rather than refused");
+
+    assert_eq!(
+        report
+            .samples
+            .iter()
+            .map(|sample| sample.sample.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zeta"],
+        "the damaged psp is the one rebuilt",
+    );
+    for (path, before) in &walked {
+        let after = PspReader::open(path)
+            .expect("the psp opens")
+            .trailer()
+            .expect("its trailer reads");
+        assert_eq!(
+            before,
+            &after,
+            "{} does not carry the census its walk wrote",
+            path.display(),
+        );
+    }
+}
+
+/// **The cohort is opened before the reference is read** — spec §8's own order, and the finding
+/// carried out of D1's review.
+///
+/// **How it is shown: both are wrong at once.** The `--psp` names a file that is not a psp and the
+/// `--reference` names a file that is not there, so whichever is read first is the one that
+/// refuses. Before this step it was the reference, and a person who mistyped a psp path paid a
+/// full reference read — minutes on a human FASTA — to be told about it.
+#[test]
+fn a_cohort_that_will_not_open_is_refused_before_the_reference_is_read() {
+    let (cohort, _psps) = a_walked_cohort();
+    let not_a_psp = cohort.directory.path().join("notes.psp");
+    std::fs::write(&not_a_psp, b"not a psp").expect("the scratch dir is ours");
+
+    let error = regenerate_every_census(&RegenerateCensusArgs {
+        reference: cohort.directory.path().join("no-such-reference.fa"),
+        catalog: Some(cohort.catalog.clone()),
+        psps: vec![not_a_psp],
+    })
+    .expect_err("neither the psp nor the reference is usable");
+
+    assert!(
+        matches!(&error, RegenerateCensusCliError::Cohort { .. }),
+        "the cohort is opened first, so it is the cohort that refuses: {error:?}",
     );
 }
 

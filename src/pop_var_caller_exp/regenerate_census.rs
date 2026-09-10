@@ -14,6 +14,14 @@
 //! alignment file, and replaces the psp's trailer with it. **Nothing else in the file is
 //! rewritten**: the header, the blocks and the index are the bytes they were.
 //!
+//! **A psp that needs nothing is skipped, and the run says so** (spec §8). What counts as needing
+//! nothing is every reason a census cannot be used — spec §4.2's three causes, and damage of the
+//! trailer with them — because this command reads the reference and rebuilds the selection anyway,
+//! so comparing each census against them costs one open and one read a psp rather than a second
+//! pass over the genome. **A psp needing nothing keeps its records unread.** So a run stopped
+//! part-way and started again does only the samples still owed, and a build whose selection
+//! constants changed rebuilds every one without being told to.
+//!
 //! **⚠ A repair interrupted mid-write costs a re-walk of that one sample.** The tail is truncated
 //! before the new census is written ([`replace_trailer`]), so between those two moments the psp has
 //! no footer and no reader accepts it — and a psp that cannot be read cannot have its census
@@ -56,8 +64,9 @@ use crate::ng::reference_info::{
 use crate::ng::repeat_catalog::RepeatCatalogHeader;
 use crate::ng::run::report::{describe, plural};
 use crate::ng::run::{
-    CensusFromPspError, CensusPlan, CensusSelection, CensusTally, OpenPspCohort, RunError,
-    Segmentation, THE_COMMAND_THAT_REBUILDS_A_CENSUS, census_from_psp,
+    CensusFromPspError, CensusPlan, CensusSelection, CensusTally, CensusVerdict, OpenPspCohort,
+    RunError, Segmentation, THE_COMMAND_THAT_REBUILDS_A_CENSUS, census_from_psp,
+    the_census_in_a_psp, what_the_heads_say_about_every_census_in_a_cohort,
 };
 use crate::pop_var_caller_exp::psp_inputs::{PspArgumentRefusal, psps_named};
 use crate::pop_var_caller_exp::run_ground::{self, GroundError};
@@ -103,8 +112,8 @@ pub struct RegenerateCensusArgs {
 
 /// Everything that can stop a `regenerate-census` run.
 ///
-/// **Most of them come before any psp is rewritten**, in the order they are met: the reference,
-/// the ground it offers to select from, the psp paths, the cohort's own agreement, the reference
+/// **Most of them come before any psp is rewritten**, in the order they are met: the psp paths,
+/// the cohort's own agreement, the reference, the ground it offers to select from, the reference
 /// and the catalog against the psps, and the selection.
 ///
 /// **Three arrive inside the loop, and by then earlier psps have been rewritten**
@@ -113,9 +122,9 @@ pub struct RegenerateCensusArgs {
 /// leaves thirty-nine rebuilt, and the run prints no report — what says which those were is the
 /// per-sample progress each one printed as it finished. **The command this replaced had the
 /// property this does not**, and could: it judged every output path before doing any work, because
-/// what it wrote was a separate file. Here the psp is the output. **Plan step D2 is what makes the
-/// re-run cheap** — it skips the psps that need nothing, so a second run does only what is still
-/// owed; until then it rebuilds all sixty.
+/// what it wrote was a separate file. Here the psp is the output. **What makes the re-run cheap is
+/// that a psp needing nothing is skipped**: the thirty-nine already rebuilt are skipped by the
+/// second run, which does the twenty-one still owed.
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum RegenerateCensusCliError {
@@ -304,6 +313,30 @@ impl SampleCensusOutcome {
     }
 }
 
+/// **A psp that needed nothing** — its census is the one this run would have written, so its
+/// records were never read (spec §8).
+#[derive(Debug, Clone)]
+pub struct SkippedPsp {
+    /// The individual, as its psp's header names it.
+    pub sample: String,
+    /// The psp that was left alone.
+    pub psp: PathBuf,
+}
+
+impl SkippedPsp {
+    /// The one line that says this psp needed nothing — **the counterpart of
+    /// [`SampleCensusOutcome::line`]**, printed as the decision is made and again in the report,
+    /// so a person watching a run of sixty sees every sample account for itself either way.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "{}: skipped, its census is the one this run would write ({})",
+            self.sample,
+            self.psp.display(),
+        )
+    }
+}
+
 /// What a whole run produced.
 #[derive(Debug, Clone)]
 pub struct CensusReport {
@@ -311,23 +344,42 @@ pub struct CensusReport {
     pub ground: String,
     /// How many bases of it there are.
     pub analysed_bases: u64,
-    /// One entry a sample, in the order the psps were given.
+    /// One entry a sample whose census was rebuilt, in the order the psps were given.
     pub samples: Vec<SampleCensusOutcome>,
+    /// One entry a sample that needed nothing, in the same order.
+    ///
+    /// **Listed, where the refusal report counts its fresh samples and lists only the stale.**
+    /// That report is about what a person must go and do, so the fifty-seven files that are fine
+    /// would bury the three that are not
+    /// ([`CensusesToRegenerate`](crate::ng::run::CensusesToRegenerate)). This one is the record of
+    /// what a run *did*, and a person who ran it over a cohort a fit refused is checking that the
+    /// samples it named are the samples it rebuilt — for which the skipped ones have to be
+    /// nameable too. **A re-run of a sixty-sample cohort therefore prints sixty lines**, which is
+    /// the price of that.
+    pub skipped: Vec<SkippedPsp>,
 }
 
 impl CensusReport {
     /// The report, one line at a time.
     #[must_use]
     pub fn lines(&self) -> Vec<String> {
-        let mut lines = Vec::with_capacity(self.samples.len() + 2);
+        let mut lines = Vec::with_capacity(self.samples.len() + self.skipped.len() + 2);
+        let skipped = match self.skipped.len() {
+            0 => String::new(),
+            count => format!(
+                ", and skipped {count} psp{} that needed nothing",
+                plural(count as u64),
+            ),
+        };
         lines.push(format!(
-            "regenerated {} census{} over {} — {} bases analysed",
+            "regenerated {} census{} over {} — {} bases analysed{skipped}",
             self.samples.len(),
             if self.samples.len() == 1 { "" } else { "es" },
             self.ground,
             self.analysed_bases,
         ));
         lines.extend(self.samples.iter().map(SampleCensusOutcome::line));
+        lines.extend(self.skipped.iter().map(SkippedPsp::line));
         let empty = self
             .samples
             .iter()
@@ -335,7 +387,7 @@ impl CensusReport {
             .count();
         if empty > 0 {
             lines.push(format!(
-                "{} of {} sample{} put nothing into the fit",
+                "{} of the {} sample{} rebuilt put nothing into the fit",
                 empty,
                 self.samples.len(),
                 plural(self.samples.len() as u64),
@@ -345,7 +397,7 @@ impl CensusReport {
     }
 }
 
-/// Rebuild the census in every psp named, and print what each one holds.
+/// Rebuild the census in every psp that needs one, skip the rest, and print what each one holds.
 ///
 /// # Errors
 ///
@@ -363,6 +415,22 @@ pub fn run_regenerate_census(args: &RegenerateCensusArgs) -> Result<(), Regenera
 fn regenerate_every_census(
     args: &RegenerateCensusArgs,
 ) -> Result<CensusReport, RegenerateCensusCliError> {
+    let paths = psps_named_by(args)?;
+
+    // **The cohort first, because its agreement is what everything else rests on** (spec §8): it
+    // refuses files walked over different ground, under a different catalog or different criteria,
+    // or sharing an `@RG ID` (step B3), and it is what says what the ground and the criteria are.
+    // A mistyped `--psp` path is answered here rather than after a reference read.
+    let mut cohort =
+        OpenPspCohort::open(&paths).map_err(|source| RegenerateCensusCliError::Cohort {
+            source: Box::new(source),
+        })?;
+
+    // **What the psps' heads say, before the reference is read** — two of the three causes a
+    // census can need rebuilding for, at one seek and ten bytes a sample (spec §4.2). The third
+    // needs the selection, so it is asked below; nothing is decided here.
+    let heads = what_the_heads_say_about_every_census_in_a_cohort(&mut cohort);
+
     // **The reference is read with an observer**, because the selection has to know where the
     // genome is sequence at all: a position inside a run of `N` has no reference base to compare
     // a read against, and keeping one would put a permanent hole in every sample's records.
@@ -381,45 +449,24 @@ fn regenerate_every_census(
         .map_err(|source| RegenerateCensusCliError::CensusGround { source })?;
     let contigs = with_checksums.contig_list();
 
-    let paths = psps_named_by(args)?;
-
-    // **The cohort is opened to be agreed with, then closed.** Opening it refuses files walked
-    // over different ground, under a different catalog or different criteria, or sharing an
-    // `@RG ID`, and it is what says what the analysed regions and the criteria are. Holding it
-    // open while censuses are rebuilt would keep every psp of the cohort open to read them one at
-    // a time — and each one is about to be rewritten.
-    let (analysed, criteria, catalog_of_the_psps, samples) = {
-        let cohort =
-            OpenPspCohort::open(&paths).map_err(|source| RegenerateCensusCliError::Cohort {
+    // **The reference against the psps, before anything is built from it.** A census rebuilt
+    // against another reference keeps other positions and records that reference's digest, so
+    // every fit that read it would refuse the cohort — having spent this command's rebuild
+    // first. `estimate-parameters` makes the same comparison before it fits (spec §6).
+    cohort
+        .refuse_a_reference_it_was_not_walked_against(&with_checksums)
+        .map_err(
+            |source| RegenerateCensusCliError::WalkedAgainstAnotherReference {
+                path: args.reference.clone(),
+                walked_against: cohort
+                    .the_reference_the_psps_were_walked_against()
+                    .to_string(),
                 source: Box::new(source),
-            })?;
-        // **The reference against the psps, before anything is built from it.** A census rebuilt
-        // against another reference keeps other positions and records that reference's digest, so
-        // every fit that read it would refuse the cohort — having spent this command's rebuild
-        // first. `estimate-parameters` makes the same comparison before it fits (spec §6).
-        cohort
-            .refuse_a_reference_it_was_not_walked_against(&with_checksums)
-            .map_err(
-                |source| RegenerateCensusCliError::WalkedAgainstAnotherReference {
-                    path: args.reference.clone(),
-                    walked_against: cohort
-                        .the_reference_the_psps_were_walked_against()
-                        .to_string(),
-                    source: Box::new(source),
-                },
-            )?;
-        let settings = cohort.segmentation_inputs();
-        (
-            cohort.analysed_regions().clone(),
-            settings.repeat_tract_criteria.clone(),
-            settings.catalog.clone(),
-            cohort
-                .sample_names()
-                .map(str::to_string)
-                .collect::<Vec<_>>(),
-        )
-    };
+            },
+        )?;
 
+    let analysed = cohort.analysed_regions().clone();
+    let criteria = cohort.segmentation_inputs().repeat_tract_criteria.clone();
     let catalog_path = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
     let catalog = run_ground::open_catalog(&catalog_path, &args.reference, &with_checksums)?;
     // **The catalog against the psps, before a segment is cut**, for the reason the reference is
@@ -428,7 +475,7 @@ fn regenerate_every_census(
     refuse_a_catalog_the_psps_were_not_walked_with(
         &catalog_path,
         catalog.header(),
-        &catalog_of_the_psps,
+        &cohort.segmentation_inputs().catalog,
     )?;
     // **The criteria are the psps' own** (spec §6): they decide which stretches are repeat tracts
     // and therefore which loci the selection may keep, and this command has no flag that could
@@ -456,8 +503,80 @@ fn regenerate_every_census(
     })?;
     drop(catalog);
 
-    let mut rebuilt = Vec::with_capacity(paths.len());
-    for (psp, sample) in paths.iter().zip(&samples) {
+    // **Which psps are owed a rebuild, and which need nothing** (spec §8). Freshness here is
+    // §4.2's three causes and damage of the trailer with them, which is every reason a census
+    // cannot be used: this command reads the reference and rebuilds the selection anyway, so
+    // comparing each census against them costs it one open and one read a psp rather than a
+    // second pass over the genome. What that buys: a run stopped part-way and started again does
+    // only the samples still owed, and a build whose selection constants changed rebuilds every
+    // one without being told to.
+    //
+    // **What a psp needing nothing costs: one open and up to a mebibyte read, of which a few
+    // hundred bytes are decoded** — the census reader's head read (`census_file.rs`'s
+    // `HEAD_READ_BYTES`), and less than that for a census shorter than it. Against a whole psp's
+    // records, which is the pass this command exists to avoid, it is a rounding error; against
+    // nothing it is a gibibyte over a thousand samples, and worth knowing.
+    //
+    // **The head's verdict is asked first, and what it saves is that read.** An empty trailer and
+    // a census of another format both come back from the census read as well — it checks the same
+    // magic and the same version word — but only after reading up to a mebibyte to get there,
+    // where the head answers in ten bytes (spec §4.2's cost column). It changes no outcome; it
+    // changes what a cohort of stale psps costs to judge.
+    let records_under = plan.recording_terms();
+    let mut owed: Vec<(PathBuf, String)> = Vec::new();
+    let mut skipped: Vec<SkippedPsp> = Vec::new();
+    for (judged, (path, psp)) in heads.iter().zip(cohort.each_psp_with_its_path_read_only()) {
+        debug_assert_eq!(
+            judged.psp, path,
+            "the verdicts and the readers are the same cohort's, in its order",
+        );
+        let owed_a_rebuild = match &judged.verdict {
+            // **A psp that would not read is owed a rebuild rather than refused here.** Elsewhere
+            // the two are kept apart — regenerating the census of a file that will not read fixes
+            // nothing (`census_freshness`'s `JudgedPsp`) — and here the distinction dissolves,
+            // because this command's own work is to read that psp: if it cannot be read, the
+            // attempt says so with the file's name rather than this pass guessing.
+            Err(_) => true,
+            Ok(CensusVerdict::Fresh) => match the_census_in_a_psp(path, psp) {
+                // **A census whose head is this build's and whose sections will not decode is
+                // owed a rebuild, not an error**: no cheap read can tell it from a whole one, and
+                // rebuilding rewrites exactly those bytes (`CensusVerdict`'s own note). An i/o
+                // fault on the same read arrives here too, and takes the same answer for the
+                // reason above — the rebuild reads the file and names it if it will not.
+                Err(_) => true,
+                // **The census in a psp's trailer is that psp's sample's, and a trailer holding
+                // another sample's census is owed a rebuild.** It cannot happen while a trailer is
+                // written by the file's own writer; a spliced file is what this catches, and one
+                // string comparison is what it costs.
+                Ok(census) if census.sample != judged.sample => true,
+                Ok(census) => {
+                    CensusVerdict::of_recorded_settings(&records_under, &census.terms).is_some()
+                }
+            },
+            Ok(_) => true,
+        };
+        match owed_a_rebuild {
+            true => owed.push((path.to_path_buf(), judged.sample.clone())),
+            false => {
+                let needs_nothing = SkippedPsp {
+                    sample: judged.sample.clone(),
+                    psp: path.to_path_buf(),
+                };
+                // **Said as it is decided**, like a rebuilt sample's line, and to stderr for the
+                // same reason: a person watching sees the run move, and a shell capturing the
+                // report gets the report.
+                eprintln!("{}", needs_nothing.line());
+                skipped.push(needs_nothing);
+            }
+        }
+    }
+    // **The cohort is closed before the first psp is rewritten**: each one is about to be
+    // truncated at its trailer, and holding a thousand open to rewrite them one at a time would
+    // spend the memory psp mode exists to save.
+    drop(cohort);
+
+    let mut rebuilt = Vec::with_capacity(owed.len());
+    for (psp, sample) in &owed {
         let outcome = regenerate_one_census(psp, sample, &plan, &segmentation)?;
         // **Said as each sample finishes, not only at the end**, and to stderr — so a shell
         // capturing the report gets the report and a person watching gets the progress, in the
@@ -470,9 +589,9 @@ fn regenerate_every_census(
         ground: describe(&analysed, &contigs),
         analysed_bases: analysed.iter().map(|region| region.len()).sum(),
         samples: rebuilt,
+        skipped,
     })
 }
-
 /// **One psp: its records read, its census rebuilt, its trailer replaced** — and nothing else in
 /// the file touched.
 ///

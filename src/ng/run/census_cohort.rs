@@ -47,6 +47,7 @@ use crate::ng::parameter_estimation::joint::census::{
     ByteExtent, CensusError, CohortCensusEvidence, CohortRefusal, SampleCensusEvidence,
 };
 use crate::ng::parameter_estimation::joint::census_file::open_census_within;
+use crate::ng::psp::PspReader;
 use crate::ng::read::input::read_groups::{
     NameOrigin, NameWithOrigin, ReadGroup, ReadGroups, SampleReadGroups,
 };
@@ -123,23 +124,45 @@ pub fn each_census_in_the_cohorts_psps(
 ) -> Result<Vec<SampleCensusEvidence>, CensusCohortError> {
     let mut opened = Vec::with_capacity(cohort.sample_count());
     for (path, psp) in cohort.each_psp_with_its_path_read_only() {
-        // **The footer says where the census is**, and it was read when the psp was opened, so
-        // finding it costs nothing.
-        let footer = psp.footer();
-        let (evidence, _identity) = open_census_within(
-            path,
-            ByteExtent::new(footer.trailer_offset, footer.trailer_bytes),
-        )
-        .map_err(|source| CensusCohortError::CensusNotRead {
-            path: path.to_path_buf(),
-            source: Box::new(source),
-        })?;
-        // **The identity is not read, because a trailer cannot be anything but its own file's.**
-        // The walk writes it absent (`psp_census_pair.md` §3.1) and nothing here would have a
-        // second file to compare it against.
-        opened.push(evidence);
+        opened.push(the_census_in_a_psp(path, psp)?);
     }
     Ok(opened)
+}
+
+/// **One psp's census, out of its own trailer** — its header and its directory decoded, and not
+/// one section touched.
+///
+/// **What a command reads when it may not need every sample's census.** `regenerate-census` asks
+/// this of the psps whose heads look fresh, to compare what each census recorded with what its own
+/// run records under (spec §8's third cause). What it costs is the census reader's head read — at
+/// most a mebibyte, and less for a census shorter than that — out of which a few hundred bytes are
+/// decoded; **what it does not cost is the psp's records**, which is the pass that command exists
+/// to avoid (plan step D2).
+///
+/// # Errors
+///
+/// [`CensusCohortError::CensusNotRead`] naming the psp whose trailer will not decode — which
+/// includes a psp carrying no census at all, so a caller that means to tell those apart judges the
+/// head first ([`census_freshness`](super::census_freshness)).
+pub fn the_census_in_a_psp(
+    path: &Path,
+    psp: &PspReader,
+) -> Result<SampleCensusEvidence, CensusCohortError> {
+    // **The footer says where the census is**, and it was read when the psp was opened, so
+    // finding it costs nothing.
+    let footer = psp.footer();
+    let (evidence, _identity) = open_census_within(
+        path,
+        ByteExtent::new(footer.trailer_offset, footer.trailer_bytes),
+    )
+    .map_err(|source| CensusCohortError::CensusNotRead {
+        path: path.to_path_buf(),
+        source: Box::new(source),
+    })?;
+    // **The identity is not read, because a trailer cannot be anything but its own file's.**
+    // The walk writes it absent (`psp_census_pair.md` §3.1) and nothing here would have a
+    // second file to compare it against.
+    Ok(evidence)
 }
 
 /// **A cohort's censuses assembled into one**, refusing samples that cannot be fitted together.

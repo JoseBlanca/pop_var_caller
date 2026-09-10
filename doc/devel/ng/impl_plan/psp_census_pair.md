@@ -233,7 +233,7 @@ per sample, `census_from_psp` then `replace_trailer`. The cohort opened with `Op
 so B3's check applies.
 *Depends:* A4, B3. *Source:* spec §8.
 
-☐ **D2 — fresh psps skipped.** Each psp judged with B2 and, since the selection is rebuilt here
+✅ **D2 — fresh psps skipped.** Each psp judged with B2 and, since the selection is rebuilt here
 anyway, with the digest check as well; a fresh one is reported as skipped and its records not read.
 Tests: a cohort with one stale psp rewrites one trailer and names the rest as skipped; a cohort
 walked under a selection with another seed regenerates every one.
@@ -249,6 +249,10 @@ the same reference and catalog, and the copy identical to the original **byte fo
 header, blocks, index, trailer, footer. On the fixture with a repeat tract and three read groups,
 and in `scripts/ng_fit_stage_end_to_end.sh` on real reads (E1).
 *Depends:* D1. *Source:* spec §11 (parity oracle).
+*As built at D2, 2026-09-10:* **the copy's trailer has to be emptied before the command is run on
+it**, or there is nothing to compare — a psp whose census is the one this run would write is skipped
+(spec §8), so a copy handed straight to the command comes back untouched and `cmp` passes without a
+rebuild having happened. D2's own tests take that shape.
 
 > **Checkpoint D: the repair command rewrites only the tail, only where owed, and a regenerated
 > psp is the walked one to the byte.** Pause for review.

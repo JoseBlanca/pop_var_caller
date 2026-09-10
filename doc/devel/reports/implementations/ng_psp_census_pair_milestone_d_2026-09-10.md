@@ -120,3 +120,121 @@ my own fixture, recalled rather than measured.
   `examples/ng_census_route_cost.rs`), and three doc comments in `src/`, which the step's review
   found and this step's follow-up commit fixes.
 - Full gates are in the commit message, compared as sets against the milestone baseline.
+
+---
+
+## D2 — fresh psps skipped
+
+**Committed:** see `git log` for `feat(ng): D2`.
+
+### What it does
+
+**A psp whose census is the one this run would write is left alone, and the run says so.** What
+counts as needing nothing is every reason a census cannot be used — spec §4.2's three causes, and
+damage of the trailer with them — because this command reads the reference and rebuilds the
+selection anyway, so comparing each census against them costs one open and one read a psp rather
+than a second pass over the genome.
+
+So a run stopped part-way and started again does only the samples still owed, and a build whose
+selection constants changed rebuilds every one without being told to.
+
+**The order the run now takes**, which is also spec §8's and the finding carried out of D1's review:
+
+1. the `--psp` arguments expanded;
+2. **the cohort opened** — its agreement on the ground, the catalog and the criteria is what
+   everything else rests on, and a mistyped path is answered here rather than after a reference
+   read;
+3. **the psps' heads judged**, before the reference is read;
+4. the reference read, and compared with every psp header;
+5. the catalog opened and compared with the one the psps record;
+6. the segments cut and the selection planned;
+7. **each fresh head's census compared with what this run records under** — the third cause;
+8. the cohort closed, and only the psps owed a rebuild rewritten.
+
+**What the head pass buys, since the census read reaches the same two causes on its own.** An empty
+trailer and a census of another format both come back from the census read — it checks the same
+magic and the same version word — but only after the reader's head read has taken up to a mebibyte
+to get there, where the head answers in ten bytes. It changes no outcome; it changes what a cohort
+of stale psps costs to judge. The step's review measured that: with the head's verdict forced to
+*fresh*, the whole suite still passes.
+
+**Two judgements taken deliberately, both recorded in the code.** A psp that will not read is owed
+a rebuild rather than refused here — elsewhere the two are kept apart, because regenerating the
+census of an unreadable file fixes nothing, and here the distinction dissolves, since this
+command's own work is to read that psp and the attempt names it if it cannot. And a census whose
+head is this build's but whose sections will not decode is owed a rebuild too: no cheap read can
+tell it from a whole one, and rebuilding rewrites exactly the bytes that are damaged.
+
+### What it costs, measured rather than estimated
+
+**A psp that needs nothing costs one open and up to a mebibyte read, of which a few hundred bytes
+are decoded** — the census reader's head read, and less than that for a census shorter than it.
+Against a whole psp's records, which is the pass this command exists to avoid, it is a rounding
+error; over a thousand samples it is about a gibibyte, which is worth knowing. **The first draft of
+this section said "a few hundred bytes" for the read itself**, which is what gets *decoded* — wrong
+by about 3,000× — and the review caught it in three places.
+
+### How "its records are not read" is shown
+
+One psp's blocks are corrupted before the run: 32 bytes overwritten just below where the index
+begins, which is inside the last block. A run that read that psp's records would fail; this one
+succeeds and skips it.
+
+**The control is in the same test**, and it is what makes the first half mean anything: with that
+psp's census emptied, the same corrupted file is owed a rebuild, and then the run does fail on it,
+naming the sample and the file. Without the control, a psp that would have read cleanly anyway
+would pass the first half.
+
+### What D2 exposed in D1's tests
+
+**Over a freshly walked cohort, every test in the file now compares the walk's own bytes with
+themselves** — because a freshly walked cohort is exactly what this step skips. Seven of them empty
+the psps' trailers first, which is D1's blocker fix generalised: the bytes a comparison asserts have
+to be bytes the run under test wrote.
+
+### What the review found, and what was done
+
+**No blockers.** Beyond the wrong size above: the error type's doc still described the order this
+step replaced and still said D2 would make the re-run cheap, in the commit that makes it so; the
+report's "put nothing into the fit" line divided by the rebuilt count without saying so; the skip
+list needed the argument for why it lists what the refusal report only counts; and four tests could
+not fail — the report's singulars and its no-skips line were never rendered, the selection test used
+the budget where the kept positions differ anyway, and nothing pinned that the cohort is opened
+before the reference is read. All fixed, the last with a test where a bad `--psp` and a missing
+`--reference` are wrong at once, so whichever is read first is the one that refuses.
+
+**One finding routed to a later step.** Plan step D4's whole-file oracle — a walked psp copied,
+regenerated, and compared byte for byte — now passes without a rebuild happening, because the copy
+is skipped. D4's own line in the plan records that its copy's trailer has to be emptied first.
+
+### Thirteen mutations, eleven measurements
+
+| mutation | outcome |
+|---|---|
+| the head's verdict is always fresh | **survives**, and that is the finding: the census read reaches the same causes, so the head pass is about cost |
+| a census that will not decode is treated as fresh | 1 test fails |
+| a psp whose head will not read is treated as fresh | **survives** — nothing in the tree can produce a head-read failure |
+| the recorded settings are not compared | 1 fails |
+| only the kept positions are compared | 1 fails — the half-budget arm the review asked for |
+| every stale head is treated as fresh | 9 fail |
+| the verdicts are paired with the wrong psps | 11 fail |
+| a run that skipped nothing says it skipped none | 1 fails |
+| the skipped count is always plural | 1 fails |
+| the rebuilt count is always plural | 1 fails |
+| the corruption lands on the block index | 1 fails — which is what says the 32 bytes are in the blocks and not in anything the open pass reads |
+| the reference is checked after the catalog is opened | 1 fails |
+| the cohort is opened after the reference is read | 1 fails — the order carried out of D1 |
+
+**Two of the thirteen were faulty on the first run and are not counted as measurements**: one did
+not compile, and one moved the cohort block back to where it already was, so it proved nothing. Both
+were fixed and re-run, and both are caught. **A mutation that does not compile, or that changes
+nothing, looks exactly like one no test catches** — the driver prints the apply step and the test
+result for each, which is what made the difference visible.
+
+### And one report of mine that was wrong
+
+Before those two were re-run I told the owner the thirteen were running when the driver had died on
+a syntax error I had introduced in it — the mutation list's closing quote lost its newline, bash
+rejected the file, and my check was a peek at an empty log, which cannot tell *not started* from
+*just started*. The relaunch was verified three ways: the log grew, the first mutation reported its
+substitution applied, and the driver process was alive.

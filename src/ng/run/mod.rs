@@ -54,7 +54,7 @@ pub use callers::{
 };
 pub use census_cohort::{
     CensusCohortError, each_census_in_the_cohorts_psps, every_census_in_the_cohorts_psps,
-    read_groups_of, the_censuses_as_one_cohort,
+    read_groups_of, the_census_in_a_psp, the_censuses_as_one_cohort,
 };
 pub use census_fit::{
     CohortFit, CohortFitError, every_read_group_pooled, fit_a_cohort, parameters_file_of,
