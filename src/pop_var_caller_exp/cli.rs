@@ -7,8 +7,8 @@ use super::call_from_alignments::CallFromAlignmentsArgs;
 use super::call_from_psps::CallFromPspsArgs;
 use super::estimate_contamination::EstimateContaminationArgs;
 use super::estimate_parameters::EstimateParametersArgs;
-use super::generate_census::GenerateCensusArgs;
 use super::generate_psps::GeneratePspsArgs;
+use super::regenerate_census::RegenerateCensusArgs;
 use super::repeat_catalog::RepeatCatalogArgs;
 use super::typed_regions::TypedRegionsArgs;
 
@@ -70,22 +70,26 @@ pub enum PopVarCallerExpCommand {
     /// anything is walked; --force replaces it.
     GeneratePsps(GeneratePspsArgs),
 
-    /// Build each stored psp's census, without re-reading a single alignment file.
+    /// Rebuild each psp's census from the records it already holds, without re-reading a
+    /// single alignment file.
     ///
-    /// A census is the small file a parameters fit reads: what one sample showed at a
-    /// fixed set of positions and repeat tracts chosen for the whole run, so the fit can
-    /// ask the same question of every sample and compare their answers.
+    /// A census is what a parameters fit reads: what one sample showed at a fixed set of
+    /// positions and repeat tracts chosen for the whole run, so the fit can ask the same
+    /// question of every sample and compare their answers. It lives in the psp's trailer,
+    /// written there by the walk.
     ///
-    /// `generate-psps` already writes one beside each psp. This is for the cases that
-    /// cannot re-walk the reads: psps written before censuses existed, a census lost or
-    /// built under settings since changed, and a census wanted larger than the one on
-    /// disk.
+    /// This is the repair for the psps a fit refuses — one written by another build, one
+    /// whose census an append discarded, one recorded under settings the run does not use.
+    /// estimate-parameters names those samples and tells you to run this. Each named psp's
+    /// trailer is replaced; its header, blocks and index are the bytes they were.
     ///
-    /// There is no --regions, for the reason call-from-psps has none. The psps record the
-    /// ground they were walked over and the cohort is refused unless they agree about it;
-    /// that agreed ground is what the positions are chosen from. Choosing them over other
-    /// ground would produce censuses the cohort cannot be fitted from.
-    GenerateCensus(GenerateCensusArgs),
+    /// There is no flag here for what counts as a repeat, and no --regions: the ground the
+    /// walk covered and the criteria it cut that ground with are in every psp's header, and
+    /// the cohort is refused unless the files agree about them. The reference and the
+    /// catalog are needed to choose the positions again, and both are checked against the
+    /// psps before anything is written — a census rebuilt against another reference is one
+    /// every fit refuses.
+    RegenerateCensus(RegenerateCensusArgs),
 
     /// Fit a cohort's parameters from its psps and write them as a parameters file.
     ///

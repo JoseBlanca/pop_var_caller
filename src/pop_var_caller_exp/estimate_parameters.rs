@@ -567,67 +567,37 @@ fn the_command_that_regenerates(args: &EstimateParametersArgs) -> String {
 
 /// **Refuse a catalog the psps were not walked with**, saying how it differs from theirs (spec §6).
 ///
-/// **The whole header is compared, as `call-from-psps` compares it**
-/// ([`SegmentationInputs::first_difference`](crate::ng::run::SegmentationInputs::first_difference)
-/// names it only as *the repeat catalog*). Here the part that differs is named as well, because a
-/// catalog is one file with several ways to be another, and the person has to find the right one:
-/// under other criteria or weights, by another version of this program, or over another contig
-/// table.
+/// **The comparison is the catalog header's own**
+/// ([`RepeatCatalogHeader::first_difference`]), so this command and `regenerate-census` name the
+/// same difference in the same words; what is this command's is the sentence around it, which says
+/// what to do. `call-from-psps` makes the same comparison through
+/// [`SegmentationInputs::first_difference`](crate::ng::run::SegmentationInputs::first_difference),
+/// which names only *the repeat catalog* — enough for a run that will not proceed either way, and
+/// not enough for a person deciding which of two files they hold.
 ///
-/// **What cannot differ here is the whole-reference digest**, and that is why no clause names it.
-/// Three checks make it so: this run's catalog was checked against this run's reference as it
-/// opened, the psps' catalog was checked against the walk's reference when the walk opened it
-/// ([`RepeatCatalog::open_checking_against_reference`](crate::ng::repeat_catalog::RepeatCatalog::open_checking_against_reference)),
-/// and the check above proved this run's reference is the one the psps were walked against. The
-/// contig *table* can still differ, because that check compares each contig's name, length and
-/// digest where the header also records the FASTA's line geometry — the same bases wrapped at
-/// another width.
-///
-/// **The last clause is a guard against a damaged file rather than a case a person meets**: two
-/// catalogs over one reference, built under the same criteria and weights by the same version of
-/// this program, hold the same tracts.
-///
-/// **Destructured without `..`**, so a field added to the header stops this compiling rather than
-/// dropping out of the comparison.
+/// **The digest clause cannot fire here**, and the assertion says why: this run's catalog was
+/// checked against this run's reference as it opened, the psps' catalog was checked against the
+/// walk's reference when the walk opened it, and the check above proved those two references are
+/// one. What can still differ is the contig *table*, which also carries the FASTA's line
+/// geometry — the same bases wrapped at another width.
 fn refuse_a_catalog_the_psps_were_not_walked_with(
     path: &Path,
     given: &RepeatCatalogHeader,
     walked_with: &RepeatCatalogHeader,
 ) -> Result<(), EstimateParametersCliError> {
-    let RepeatCatalogHeader {
-        contigs,
-        reference_md5,
-        built_under,
-        scan,
-        tool_version,
-        longest_tract_bp,
-    } = given;
     debug_assert_eq!(
-        reference_md5, &walked_with.reference_md5,
+        given.reference_md5, walked_with.reference_md5,
         "each catalog was checked against the reference of the run that opened it, and those two \
          references were just proven to be one, so a difference here would mean one of those \
          three checks did not run",
     );
-    let difference = if contigs != &walked_with.contigs {
-        "its contig table is not theirs".to_string()
-    } else if built_under != &walked_with.built_under {
-        "it was built under other repeat criteria".to_string()
-    } else if scan != &walked_with.scan {
-        "it was scanned with other scoring weights".to_string()
-    } else if tool_version != &walked_with.tool_version {
-        format!(
-            "it was built by version {tool_version} of this program, and theirs by version {}",
-            walked_with.tool_version
-        )
-    } else if longest_tract_bp != &walked_with.longest_tract_bp {
-        "it holds other repeat tracts".to_string()
-    } else {
-        return Ok(());
-    };
-    Err(EstimateParametersCliError::WalkedWithAnotherCatalog {
-        path: path.to_path_buf(),
-        difference,
-    })
+    match given.first_difference(walked_with) {
+        None => Ok(()),
+        Some(difference) => Err(EstimateParametersCliError::WalkedWithAnotherCatalog {
+            path: path.to_path_buf(),
+            difference,
+        }),
+    }
 }
 
 /// A path as it has to appear on a command line that will be pasted into a shell.

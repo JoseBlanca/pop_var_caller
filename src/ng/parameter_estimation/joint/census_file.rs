@@ -4,8 +4,9 @@
 //! `doc/devel/ng/arch/parameter_prepass_joint_records.md` §1.1a and §2.2.
 //!
 //! **One census per sample, and since `psp_census_pair.md` §3 it lives *inside* that sample's
-//! psp**, as the file's closing payload. (It was a file of its own beside the psp until then, and
-//! `generate-census` still writes such files until plan step D1.) It is a cache: everything in it
+//! psp**, as the file's closing payload. (It was a file of its own beside the psp until then;
+//! nothing writes one now, and this codec is the same either way — a census is bytes, and where
+//! they sit is the caller's.) It is a cache: everything in it
 //! can be recomputed from the psp, and what it saves is a full decompression pass over that psp
 //! every time a cohort is fitted.
 //!
@@ -1232,11 +1233,12 @@ mod tests {
     ///
     /// Every other round-trip test here compares decoded *values*, which is the right check for
     /// a codec on its own. This one is a check on the codec's bytes, and it exists because a
-    /// caller now leans on it: `generate-census`'s parity test decodes the file it wrote and
-    /// re-encodes it without its pileup identity before comparing it with the psp's trailer
-    /// (`psp_census_pair.md` §3). A decode made lossy or normalising — a dropped empty section,
-    /// a reordered directory — would surface there as *the two census producers disagree*,
-    /// which is a whole module away from the change that caused it.
+    /// caller now leans on it: `regenerate-census` decodes a psp's records into a census, encodes
+    /// it, and writes it back as that psp's trailer, and its parity test compares those bytes with
+    /// the ones the walk had written there (`psp_census_pair.md` §3, §11). A decode made lossy or
+    /// normalising — a dropped empty section, a reordered directory — would surface there as *the
+    /// two census producers disagree*, which is a whole module away from the change that caused
+    /// it.
     #[test]
     fn write_census_after_decode_census_returns_the_bytes_it_was_given() {
         for pileup in [

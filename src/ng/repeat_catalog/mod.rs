@@ -312,6 +312,67 @@ pub struct RepeatCatalogHeader {
 }
 
 impl RepeatCatalogHeader {
+    /// **How this catalog differs from `other`, as a clause a refusal can print** — `None` when
+    /// the two files were built the same way, over the same reference, by the same version of
+    /// this program.
+    ///
+    /// **Who asks, and why the answer is a clause rather than a `bool`.** A command handed psps
+    /// takes the catalog it was given and compares it with the one its psps record
+    /// ([`SegmentationInputs`](crate::ng::segmentation_inputs::SegmentationInputs) carries that
+    /// header). *The catalogs differ* leaves a person nothing to act on: a catalog is one file
+    /// with six ways to be another, and which one it is decides whether they have the wrong file
+    /// or a file this build cannot use.
+    ///
+    /// **The reference digest is the clause a psp-taking command has usually ruled out already**,
+    /// by comparing its reference with the psp headers before it opens a catalog at all. It is
+    /// named here anyway, because a library function that assumed its callers' order would be a
+    /// wrong answer the moment one of them changed.
+    ///
+    /// **The contig table is compared apart from the digest**, because the two catch different
+    /// files: the digest is over the bases, and the table also carries each contig's `.fai`
+    /// geometry, so the same bases wrapped at another line width differ here and not there.
+    ///
+    /// **`longest_tract_bp` last, and it is a guard against a damaged file rather than a case a
+    /// person meets**: two catalogs over one reference, built under the same criteria and weights
+    /// by the same version of this program, hold the same tracts.
+    ///
+    /// **Destructured without `..` on purpose**, so a field added to this struct stops this
+    /// compiling rather than dropping out of the comparison — which would let a run rebuild a
+    /// census against a catalog that is not its psps' and say nothing.
+    #[must_use]
+    pub fn first_difference(&self, other: &Self) -> Option<String> {
+        let Self {
+            contigs,
+            reference_md5,
+            built_under,
+            scan,
+            tool_version,
+            longest_tract_bp,
+        } = self;
+        if reference_md5 != &other.reference_md5 {
+            return Some("it was built on another reference".to_string());
+        }
+        if contigs != &other.contigs {
+            return Some("its contig table is not theirs".to_string());
+        }
+        if built_under != &other.built_under {
+            return Some("it was built under other repeat criteria".to_string());
+        }
+        if scan != &other.scan {
+            return Some("it was scanned with other scoring weights".to_string());
+        }
+        if tool_version != &other.tool_version {
+            return Some(format!(
+                "it was built by version {tool_version} of this program, and theirs by version {}",
+                other.tool_version,
+            ));
+        }
+        if longest_tract_bp != &other.longest_tract_bp {
+            return Some("it holds other repeat tracts".to_string());
+        }
+        None
+    }
+
     /// The identity of **no catalog at all**: an empty contig table, a zero reference
     /// digest, default criteria and scan weights, and only `tool_version` naming who
     /// made the file.
@@ -453,6 +514,93 @@ pub enum RepeatCatalogError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A header two catalogs of one reference would share, for the comparison tests below.
+    fn a_header() -> RepeatCatalogHeader {
+        RepeatCatalogHeader {
+            contigs: Vec::new(),
+            reference_md5: [7; 16],
+            built_under: StrRepeatCriteria::default(),
+            scan: ScanParams::default(),
+            tool_version: "1.2.3".to_string(),
+            longest_tract_bp: vec![0],
+        }
+    }
+
+    /// **Two catalogs built the same way over the same reference have no difference to name.**
+    #[test]
+    fn one_catalog_read_twice_is_no_difference() {
+        assert_eq!(a_header().first_difference(&a_header()), None);
+    }
+
+    /// **Each field that can differ names itself**, and *what* it names is what a person reads in
+    /// a refusal from `estimate-parameters` or `regenerate-census`: a catalog is one file with six
+    /// ways to be another, and *the catalogs differ* leaves nobody anything to fix.
+    ///
+    /// **The order is asserted, not only the set.** The reference comes first because a catalog
+    /// built on another assembly makes every other comparison meaningless, and a psp-taking
+    /// command has usually ruled that one out before it asks — so a comparison that checked the
+    /// criteria first would answer *other repeat criteria* about two files that describe different
+    /// genomes.
+    #[test]
+    fn each_way_one_catalog_can_be_another_names_itself() {
+        let mine = a_header();
+
+        let mut on_another_reference = a_header();
+        on_another_reference.reference_md5 = [9; 16];
+        on_another_reference.built_under.classification.min_purity = 0.5;
+        assert_eq!(
+            mine.first_difference(&on_another_reference).as_deref(),
+            Some("it was built on another reference"),
+            "the reference outranks the criteria, which also differ here",
+        );
+
+        let mut another_table = a_header();
+        another_table.contigs = vec![ContigInfo {
+            name: "chr1".to_string(),
+            length: 1_000,
+            md5: None,
+            offset: 0,
+            line_bases: 60,
+            line_width: 61,
+        }];
+        assert_eq!(
+            mine.first_difference(&another_table).as_deref(),
+            Some("its contig table is not theirs"),
+        );
+
+        let mut other_criteria = a_header();
+        other_criteria.built_under.classification.min_purity = 0.5;
+        assert_eq!(
+            mine.first_difference(&other_criteria).as_deref(),
+            Some("it was built under other repeat criteria"),
+        );
+
+        let mut other_weights = a_header();
+        other_weights.scan.match_reward += 1;
+        assert_eq!(
+            mine.first_difference(&other_weights).as_deref(),
+            Some("it was scanned with other scoring weights"),
+        );
+
+        let mut another_build = a_header();
+        another_build.tool_version = "1.2.4".to_string();
+        assert_eq!(
+            mine.first_difference(&another_build),
+            Some(
+                "it was built by version 1.2.3 of this program, and theirs by version 1.2.4"
+                    .to_string()
+            ),
+            "and it says which version is which, since both are files somebody holds",
+        );
+
+        let mut other_tracts = a_header();
+        other_tracts.longest_tract_bp = vec![40];
+        assert_eq!(
+            mine.first_difference(&other_tracts).as_deref(),
+            Some("it holds other repeat tracts"),
+        );
+    }
 
     fn span(start: u64, end: u64) -> TractSpan {
         TractSpan {

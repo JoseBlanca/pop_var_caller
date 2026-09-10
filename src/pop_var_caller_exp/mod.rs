@@ -14,10 +14,10 @@ pub mod calling_run;
 pub mod cli;
 pub mod estimate_contamination;
 pub mod estimate_parameters;
-pub mod generate_census;
 pub mod generate_psps;
 pub mod mode_equivalence;
 pub mod psp_inputs;
+pub mod regenerate_census;
 pub mod repeat_catalog;
 pub mod run_ground;
 #[cfg(test)]
@@ -35,10 +35,10 @@ pub use estimate_contamination::{
 pub use estimate_parameters::{
     EstimateParametersArgs, EstimateParametersCliError, run_estimate_parameters,
 };
-pub use generate_census::{
-    CensusReport, GenerateCensusArgs, GenerateCensusCliError, SampleCensusOutcome,
-    run_generate_census,
-};
 pub use generate_psps::{GeneratePspsArgs, GeneratePspsCliError, run_generate_psps};
+pub use regenerate_census::{
+    CensusReport, RegenerateCensusArgs, RegenerateCensusCliError, SampleCensusOutcome,
+    run_regenerate_census,
+};
 pub use repeat_catalog::{RepeatCatalogArgs, RepeatCatalogCliError, run_repeat_catalog};
 pub use typed_regions::{TypedRegionsArgs, TypedRegionsCliError, run_typed_regions};

@@ -6,9 +6,9 @@
 //! (`doc/devel/ng/spec/psp_census_pair.md` §3). A census is a cache, so a psp can carry one that
 //! this build cannot read, or one recorded under settings other than the ones the run in hand
 //! records under. `estimate-parameters` refuses such a cohort and names every sample in it
-//! (spec §4, §4.1, plan steps C3 and C5); `regenerate-census` will rebuild exactly those (spec §8,
-//! plan step D1). Both ask the same question, and [`CensusVerdict`] is the answer;
-//! `estimate-parameters` reads it, and `regenerate-census` will.
+//! (spec §4, §4.1, plan steps C3 and C5); `regenerate-census` rebuilds the psps it is given
+//! (spec §8, plan step D1) and, at plan step D2, will read these verdicts to skip the ones that
+//! need nothing. Both ask the same question, and [`CensusVerdict`] is the answer.
 //!
 //! **A cohort is judged whole and every sample in it is named** — from the psps' heads
 //! ([`what_the_heads_say_about_every_census_in_a_cohort`]) and, once the run's selection is
@@ -32,25 +32,23 @@ use super::psp_caller::OpenPspCohort;
 /// run it: this module's report (spec §4.3) and the fit's own refusal when the selection does not
 /// match (spec §4.2, third row).
 ///
-/// **It does not exist yet.** Plan step D1 turns today's `generate-census` — which writes a census
-/// *file* beside a psp, and nothing reads those any more — into `regenerate-census`, which
-/// replaces the psp's trailer. Naming the old one instead would be worse than naming one that is
-/// not there: a person who ran it would spend the rebuild and find their psp exactly as stale.
+/// **One constant, so the two messages and the command cannot drift apart** — the report
+/// `estimate-parameters` refuses a stale cohort with, the fit's own backstop
+/// ([`CohortFitError::AnotherSelection`](super::CohortFitError::AnotherSelection)), and the
+/// subcommand itself, whose `SUBCOMMAND` is *defined as* this constant (plan step D1).
 ///
-/// **One constant, so the two messages cannot drift apart** — the refusal `estimate-parameters`
-/// builds its report's command line from, and [`CohortFitError::AnotherSelection`](super::CohortFitError::AnotherSelection).
-///
-/// **At D1 the new subcommand's own name is defined as this constant, never the reverse.** `ng`
-/// does not import from the command-line module outside its tests, and pointing this at
-/// `regenerate_census::SUBCOMMAND` would be the first place it did.
+/// **That direction is the one that keeps the layering.** `ng` does not import from the
+/// command-line module outside its tests, so pointing this at `regenerate_census::SUBCOMMAND`
+/// would be the first place it did — and a literal repeated in three files is how a renamed
+/// command comes to be advertised under its old name.
 pub const THE_COMMAND_THAT_REBUILDS_A_CENSUS: &str = "regenerate-census";
 
 /// **What a run should do with the census in one psp**, in the words spec §4.2 uses.
 ///
 /// **A verdict and not an action**: the same answers serve a command that refuses
 /// ([`estimate-parameters`](crate::pop_var_caller_exp::estimate_parameters)) and one that
-/// rebuilds (`regenerate-census`, plan step D1), and which of those happens is the command's
-/// business.
+/// rebuilds ([`regenerate-census`](crate::pop_var_caller_exp::regenerate_census)), and which of
+/// those happens is the command's business.
 ///
 /// **The four causes cost three different reads to reach.** [`NoCensus`](Self::NoCensus) is in
 /// the psp's footer, which was read when the file was opened. [`AnotherFormat`](Self::AnotherFormat)

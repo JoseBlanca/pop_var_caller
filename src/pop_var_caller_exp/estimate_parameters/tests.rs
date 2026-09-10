@@ -647,19 +647,34 @@ fn a_census_that_disagrees_with_the_rest_of_its_cohort_is_named_alone() {
     );
 }
 
-/// **The command the report names is not the one that writes a census file.**
+/// **The command the report names is one a person can run, and it is the repair.**
 ///
-/// Until plan step D1 the rebuild command does not exist, so this report names something a person
-/// cannot yet run — deliberately. What it must never name is today's `generate-census`: that
-/// writes a census *file* beside the psp, which this fit no longer reads, so following it would
-/// cost the wait and leave the psp exactly as stale. At D1 this becomes what it should be, a parse
-/// of the name against clap.
+/// Until plan step D1 it named nothing that existed — deliberately, because the command it must
+/// never name is the one that wrote a census *file* beside the psp, which no fit reads: following
+/// that would cost the rebuild and leave the psp exactly as stale. Now the name is
+/// `regenerate-census`'s own, and this parses the word the report prints, so a report that sent
+/// somebody after a word the binary does not know fails here.
 #[test]
-fn the_report_does_not_name_the_command_that_writes_a_census_file() {
-    assert_ne!(
+fn the_report_names_the_command_that_rebuilds_a_psps_census() {
+    assert_eq!(
         THE_COMMAND_THAT_REBUILDS_A_CENSUS,
-        crate::pop_var_caller_exp::generate_census::SUBCOMMAND,
-        "that command writes a file beside the psp, and the psp would still be stale",
+        crate::pop_var_caller_exp::regenerate_census::SUBCOMMAND,
+    );
+
+    let parsed = Cli::try_parse_from([
+        "pop_var_caller_exp",
+        THE_COMMAND_THAT_REBUILDS_A_CENSUS,
+        "--reference",
+        "ref.fa",
+        "--psp",
+        "zeta.psp",
+    ])
+    .expect("the command this report prints is one clap answers to");
+
+    assert!(
+        matches!(parsed.cmd, PopVarCallerExpCommand::RegenerateCensus(_)),
+        "and it is the repair rather than another subcommand: {:?}",
+        parsed.cmd,
     );
 }
 
