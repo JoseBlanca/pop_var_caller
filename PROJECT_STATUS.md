@@ -58,6 +58,54 @@ Skills and agents are instructed to leave it untouched.
 > header stores the run's command line verbatim, so the total depends on how long the arguments
 > were.
 >
+> - **Earlier (2026-09-09):** **the calling pass is no longer one thread, and
+> `call-from-psps` is 3.8× faster for a tenth more memory** (branch `ng-psp-vcf-perf-2`;
+> [review](doc/devel/reports/reviews/perf_ng-psp-to-vcf_2026-09-09.md)).
+>
+> On 63 tomato accessions over the whole 8 Mb of SL4.0 at about three reads a position, the
+> command went from **87.3 s to 23.2 s and from 527 MB to 607 MB of peak resident**, interleaved
+> on an idle machine, with the VCF body identical — 199,641 records, at 1, 4 and 18 threads.
+> Instructions retired fell 9.6%.
+>
+> **The calling pass was 90% of the run and it was one thread.** A sampling profile of the real
+> command found 1.57 of 18 cores busy — the calling thread at 96%, all eighteen workers together
+> at 0.61 — with 91.7% of every sample taken being a thread asleep. Building a locus and
+> genotyping it are pure functions of that locus, so a round of building regions is now built
+> *and called* on the pool and the records fold back in genome order; the pass fell from 79 s to
+> 14 s.
+>
+> **The memory is a tenth and not a multiple because the round divides the ground rather than
+> multiplying it.** A round holds `regions in flight × region width` bases, so the two knobs are
+> one lever: the round is cut out of the width one region held before — fifteen regions of 529
+> bases at 63 accessions where the old driver held one of 7,936. Peak resident rises between 4%
+> and 13% at every cohort size from one accession to 63, and the speedup grows with the cohort
+> (1.02× at one sample, 1.3× at eight, 2.6× at 32, 3.4× at 63).
+>
+> **Above about a thousand samples the rule hands back one region and today's behaviour**, because
+> the width is already at its 500-base floor there. A large cohort keeps its memory and gives up
+> the parallelism rather than the other way round. **That end is arithmetic, not a measurement,
+> and it is the review's largest gap.**
+>
+> **A correctness defect was found in code no production caller reached.**
+> `merge_cohort_in_parallel` could not have produced a correct answer over stored psps: a locus's
+> members are numbered inside the window the cache hands out and `build_at` indexes the whole held
+> list, so every region after a round's first would have built its members from the region before
+> it. **The merge's byte-for-byte oracle battery was green on it** because every fixture in that
+> module hands its records over whole, which is the one shape that never calls `build_at`. There
+> is now a fixture that defers its bodies; removing the fix fails three of the four new tests.
+>
+> Four other changes, all with the VCF identical: the genotype prior spells a term as one
+> logarithm of a rising product instead of two `lgamma` subtracted (−6.7% instructions, and the
+> *more* accurate of the two spellings — the owner ruled on the bit-parity test it costs); the
+> site quality's count prior is built once a run rather than once a locus (−3.2%); the locus walk
+> lends its member vector instead of minting one for every locus it closes, 98 in 100 of which
+> are thrown away (−37% allocations, −52% bytes); and the body decoder takes the live identifiers
+> rather than a set built to hold them.
+>
+> **Where the time goes now**, at 63 accessions: calling 14.1 s, the hidden-duplication filter's
+> scoring 6.4 s, startup 2.3 s, writing 0.4 s. Scoring was 7% of the run and is 31%; startup was
+> 3% and is 10%, and is 93% one thread reading and hashing the reference.
+>
 > - **Earlier (2026-09-08):** **calling a cohort from stored psps is twice as fast on
 > a sixtieth of the memory, and writes the same VCF** (branch `ng-psp-vcf-perf`;
 > [review](doc/devel/reports/reviews/perf_ng-psp-to-vcf_2026-09-07.md)).

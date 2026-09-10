@@ -661,15 +661,28 @@ impl AlleleTable {
                 // only because a sequence or a read reached it, both of which add at least one
                 // read. Nothing reachable is filtered out; what it guards is a future path
                 // that creates an entry without filling it.
-                supported: tally
-                    .iter()
-                    .filter(|held| held.tally.num_reads > 0)
-                    .map(|held| SupportedAllele {
-                        allele: held.allele,
-                        read_group: held.read_group,
-                        support: held.tally.finish(),
-                    })
-                    .collect(),
+                //
+                // **Sized from the tally rather than grown from nothing.** A filter's
+                // iterator promises only "somewhere between none and all of them", so
+                // `collect` cannot pre-size and grows 0 → 4 → 8: an ordinary sample showing
+                // one or two pairs still ends up holding four rows' worth of heap. The tally
+                // is the upper bound and it is already in hand, so saying so costs a line and
+                // takes this row's share of the calling pass from 189 MB to what the rows
+                // occupy (8 tomato accessions, 8 Mb of ground).
+                supported: {
+                    let mut rows = Vec::with_capacity(tally.len());
+                    rows.extend(
+                        tally
+                            .iter()
+                            .filter(|held| held.tally.num_reads > 0)
+                            .map(|held| SupportedAllele {
+                                allele: held.allele,
+                                read_group: held.read_group,
+                                support: held.tally.finish(),
+                            }),
+                    );
+                    rows
+                },
                 reads_without_observation: records.iter().fold(0u32, |total, record| {
                     total.saturating_add(record.reads_without_observation)
                 }),
@@ -940,10 +953,14 @@ pub fn build_region_handing_over_windowed<'a, E>(
     // materialising a locus's members costs no allocation after the first that needed one.
     let mut scratch: Vec<SampleLocusObservations> = Vec::new();
     let opening_the_walk = super::timing::Stopwatch::start();
-    let closer = LocusCloser::over_windowed(window, max_cohort_locus_span, min_alt_reads);
+    let mut closer = LocusCloser::over_windowed(window, max_cohort_locus_span, min_alt_reads);
     opening_the_walk.add_to(&super::timing::WALK_SETUP_NANOS);
 
-    for locus in closer {
+    // **Driven by hand rather than by `for`, so that each locus's member vector goes back to
+    // the walk** ([`LocusCloser::recycle`]). A `for` loop moves the closer, which leaves
+    // nowhere to give it back to; the buffer is then minted per closed locus, and 98 of every
+    // 100 closed loci are dropped without ever being built.
+    while let Some(locus) = closer.next() {
         // **Ownership, and the two ways a locus can fail to be ours.** One starting before
         // this builder's ground belongs to an earlier builder, which sees it whole; one
         // starting after its last base belongs to a later builder. Both are skipped rather
@@ -965,6 +982,7 @@ pub fn build_region_handing_over_windowed<'a, E>(
         }
         if locus.region.contig != builder_region.contig || locus.region.start < builder_region.start
         {
+            closer.recycle(locus.members);
             continue;
         }
 
@@ -974,38 +992,43 @@ pub fn build_region_handing_over_windowed<'a, E>(
             // to resolve them against until here, and at about one position in a hundred
             // reaching this arm, the other ninety-nine never ask for the evidence at all
             // (`spec/cohort_merge_psp_path.md` §3.1).
-            Verdict::Build => {
-                let observation = match window.observations {
-                    // Records in hand: the members are slices of them, and nothing can fail.
-                    Some(records) => {
-                        CohortObservation::over(&locus.resolved_against(records), window)
+            Verdict::Build => match window.observations {
+                // Records in hand: the members are slices of them, and nothing can fail.
+                Some(records) => keep(CohortObservation::over(
+                    &locus.resolved_against(records),
+                    window,
+                )),
+                // Evidence still compressed: this is where it is decoded, and the only
+                // place after the cover where a run can fail.
+                None => {
+                    let resolved = locus.resolved_into(build, &mut scratch)?;
+                    // **The width verdict, passed here because this is where a kind
+                    // exists.** The closing walk could not: the bound spares repeat
+                    // tracts, whose span the reference fixes, and a kind lives in a
+                    // record it had not built. So a locus wide enough to refuse is
+                    // built and then refused — which costs, and costs rarely, since a
+                    // refused locus is one wider than the caller undertakes to call.
+                    if super::close::too_wide(
+                        span_of(resolved.region),
+                        resolved.kind,
+                        max_cohort_locus_span,
+                    ) {
+                        refused.push(resolved.region);
+                    } else {
+                        let built = CohortObservation::over(&resolved, window);
+                        drop(resolved);
+                        keep(built);
                     }
-                    // Evidence still compressed: this is where it is decoded, and the only
-                    // place after the cover where a run can fail.
-                    None => {
-                        let resolved = locus.resolved_into(build, &mut scratch)?;
-                        // **The width verdict, passed here because this is where a kind
-                        // exists.** The closing walk could not: the bound spares repeat
-                        // tracts, whose span the reference fixes, and a kind lives in a
-                        // record it had not built. So a locus wide enough to refuse is
-                        // built and then refused — which costs, and costs rarely, since a
-                        // refused locus is one wider than the caller undertakes to call.
-                        if super::close::too_wide(
-                            span_of(resolved.region),
-                            resolved.kind,
-                            max_cohort_locus_span,
-                        ) {
-                            refused.push(resolved.region);
-                            continue;
-                        }
-                        CohortObservation::over(&resolved, window)
-                    }
-                };
-                keep(observation);
-            }
+                }
+            },
             Verdict::Failed => refused.push(locus.region),
             Verdict::TooQuiet => {}
         }
+        // **The member vector goes back to the walk here and nowhere else.** Every arm above
+        // borrows the locus rather than consuming it, so there is one place that owns the
+        // vector at the end of the body and one line that returns it — see
+        // [`LocusCloser::recycle`](super::close::LocusCloser::recycle).
+        closer.recycle(locus.members);
     }
     Ok(())
 }
@@ -2854,7 +2877,7 @@ mod tests {
         let tables: Vec<Vec<Vec<u8>>> = loci
             .iter()
             .map(|locus| {
-                AlleleTable::over(&locus.clone().resolved_against(&[&here, &far_away]))
+                AlleleTable::over(&locus.resolved_against(&[&here, &far_away]))
                     .alleles()
                     .iter()
                     .map(|allele| allele.to_vec())

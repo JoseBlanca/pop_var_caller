@@ -224,6 +224,31 @@ pub struct SiteQualityBuffers<'a> {
     /// `samples × ploidy + 1`: the fold's result back in the log domain, then the
     /// unnormalised log-posterior once the prior has been applied.
     pub(crate) log_allele_count_distribution: &'a mut [f64],
+    /// The Beta-Binomial count prior of step 3, and the run it was built for.
+    ///
+    /// **It is the same vector at every locus of a run**, because every term of it is built
+    /// from the fitted spectrum and the cohort's chromosome count and from nothing the locus
+    /// carries — so it is built once and read back afterwards. That is `4 × (2N + 1) + 5`
+    /// `lgamma` a locus saved at N samples: 73 at eight, 513 at sixty-three, 24,005 at three
+    /// thousand.
+    ///
+    /// **A buffer rather than a run-level constant** because this scratch is what the calling
+    /// loop already carries per thread, and because the seed is an argument here rather than
+    /// a field: nothing stops a caller handing a different spectrum to the next locus, so the
+    /// key holds what the vector was built from and a mismatch rebuilds it.
+    pub(crate) count_prior: &'a mut CountPriorMemo,
+}
+
+/// The Beta-Binomial count prior of [`score_uncorrected_site_quality`]'s step 3, kept between
+/// loci.
+///
+/// **The key is the whole of what the terms are built from** — the cohort's chromosome count
+/// and the two concentrations, compared by bit pattern rather than by value so that a rebuild
+/// is decided the way the terms themselves would be. Empty until the first locus.
+#[derive(Debug, Default, Clone)]
+pub struct CountPriorMemo {
+    built_for: Option<(usize, u64, u64)>,
+    terms: Vec<f64>,
 }
 
 /// **How unlikely is it that the cohort carries no copy of any non-reference allele here?**
@@ -323,6 +348,7 @@ pub fn score_uncorrected_site_quality(
         allele_count_distribution,
         allele_count_distribution_next,
         log_allele_count_distribution,
+        count_prior,
     } = buffers;
 
     let ploidy = usize::from(genotypes.ploidy().get());
@@ -416,22 +442,46 @@ pub fn score_uncorrected_site_quality(
     );
 
     // 3. The Beta-Binomial prior on the cohort's count, from the run's fitted spectrum.
+    //
+    // **Built once a run rather than once a locus.** Every term below is a function of the
+    // fitted spectrum and the chromosome count and of nothing this locus carries, so the
+    // whole vector repeats — see [`CountPriorMemo`]. The expressions, their operands and
+    // their order are what they were when this loop ran per locus, so the row it adds is the
+    // row that loop added, bit for bit.
     let alpha_reference = seed.alpha_ref();
     let alpha_alternative = seed.alpha_alt_total().max(MIN_ALT_CONCENTRATION);
-    let chromosomes = largest_count as f64;
-    let log_beta_normaliser = lgamma(alpha_alternative) + lgamma(alpha_reference)
-        - lgamma(alpha_alternative + alpha_reference);
-    let log_chromosomes_factorial = lgamma(chromosomes + 1.0);
-    let log_denominator = lgamma(alpha_alternative + alpha_reference + chromosomes);
-    for (count, slot) in log_allele_count_distribution.iter_mut().enumerate() {
-        let count = count as f64;
-        // How many ways a total of `count` can be dealt across the chromosomes, and the
-        // Beta term for that split — the two halves of the Beta-Binomial.
-        let log_ways =
-            log_chromosomes_factorial - lgamma(count + 1.0) - lgamma(chromosomes - count + 1.0);
-        let log_split =
-            lgamma(alpha_alternative + count) + lgamma(alpha_reference + chromosomes - count);
-        *slot += log_ways + log_split - log_denominator - log_beta_normaliser;
+    let built_for = (
+        largest_count,
+        alpha_reference.to_bits(),
+        alpha_alternative.to_bits(),
+    );
+    if count_prior.built_for != Some(built_for) {
+        let chromosomes = largest_count as f64;
+        let log_beta_normaliser = lgamma(alpha_alternative) + lgamma(alpha_reference)
+            - lgamma(alpha_alternative + alpha_reference);
+        let log_chromosomes_factorial = lgamma(chromosomes + 1.0);
+        let log_denominator = lgamma(alpha_alternative + alpha_reference + chromosomes);
+        count_prior.terms.clear();
+        count_prior.terms.reserve(largest_count + 1);
+        for count in 0..=largest_count {
+            let count = count as f64;
+            // How many ways a total of `count` can be dealt across the chromosomes, and the
+            // Beta term for that split — the two halves of the Beta-Binomial.
+            let log_ways =
+                log_chromosomes_factorial - lgamma(count + 1.0) - lgamma(chromosomes - count + 1.0);
+            let log_split =
+                lgamma(alpha_alternative + count) + lgamma(alpha_reference + chromosomes - count);
+            count_prior
+                .terms
+                .push(log_ways + log_split - log_denominator - log_beta_normaliser);
+        }
+        count_prior.built_for = Some(built_for);
+    }
+    for (slot, term) in log_allele_count_distribution
+        .iter_mut()
+        .zip(&count_prior.terms)
+    {
+        *slot += term;
     }
 
     // 4. Normalise, and read the entry the whole calculation exists for.

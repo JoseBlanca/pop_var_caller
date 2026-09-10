@@ -58,8 +58,9 @@ use crate::ng::calling::allele_candidates::CandidateSelectionConfig;
 use super::callers::{
     A_REFERENCE_WITH_NO_PATH, CohortCallingInputs, CohortCallingOutcome, CohortCallingTallies,
     DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES, MergeParameters,
-    call_cohort_from_sources_handing_each_record_over, refuse_a_catalog_built_on_another_reference,
-    refuse_parameters_assembled_for_another_cohort, refuse_two_references_that_are_not_one,
+    call_cohort_from_sources_handing_each_record_over, call_cohort_from_sources_in_rounds,
+    refuse_a_catalog_built_on_another_reference, refuse_parameters_assembled_for_another_cohort,
+    refuse_two_references_that_are_not_one,
 };
 use super::cohort_merge::observation_cache::ObservationCache;
 use super::psp_source::{PspSummarySource, StoredSampleTallies};
@@ -560,8 +561,8 @@ impl PspVariantCaller {
         hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
     ) -> Result<(CohortCallingTallies, StoredCohortTallies), RunError>
     where
-        G: LocusGenotyper<S>,
-        S: Default,
+        G: LocusGenotyper<S> + Sync,
+        S: Default + Send,
         E: std::error::Error + Send + Sync + 'static,
     {
         let Self {
@@ -622,12 +623,32 @@ impl PspVariantCaller {
             calling,
             sources,
             window_coverage_histograms,
-        } = call_cohort_from_sources_handing_each_record_over(
-            ObservationCache::over(sources, Box::new(reference_for_the_merge)),
-            inputs,
-            genotyper,
-            hand_over,
-        )?;
+            // **Which driver, decided by the one number that says how much ground a round holds.**
+            // At one region in flight the two are the same arrangement — a region built, its loci
+            // called and written, then the next covered — so the streaming driver is used rather
+            // than a round of one, which spares it the round's fold and its per-round buffers. At
+            // more than one the regions of a round are built and genotyped on the pool and the
+            // records fold back in genome order. **The VCF is the same either way**, which is what
+            // `the_round_driver_writes_what_the_streaming_driver_writes` holds them to.
+        } = if merge_parameters
+            .cohort_locus_builder_regions_in_flight
+            .get()
+            > 1
+        {
+            call_cohort_from_sources_in_rounds(
+                ObservationCache::over(sources, Box::new(reference_for_the_merge)),
+                inputs,
+                genotyper,
+                hand_over,
+            )?
+        } else {
+            call_cohort_from_sources_handing_each_record_over(
+                ObservationCache::over(sources, Box::new(reference_for_the_merge)),
+                inputs,
+                genotyper,
+                hand_over,
+            )?
+        };
         // **The sources come back so that a mode can turn them into per-sample facts**, and
         // this is psp mode doing it: each spent source carries what it drew, which is the only
         // per-sample measurement a run over stored files makes.

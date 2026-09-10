@@ -986,10 +986,17 @@ pub fn encode_record_body_reusing(
 ///
 /// **⚠ `live_reads` must be the set this record's head produced.** See
 /// [`decode_the_body_of`], which is the call a reader that has read a head should be making.
+///
+/// **The set arrives as a slice rather than as a [`LiveSet`]**, which is what the one use below
+/// wants — the residual derivation reads the identifiers in order and nothing here needs the
+/// owning type. A reader that holds a `LiveSet` passes [`LiveSet::ids`]; a reader that keeps its
+/// identifiers in an arena of its own passes the span it already has, which is what
+/// `PspSummarySource` does. Copying the span into a `LiveSet` to satisfy this parameter was 19%
+/// of the calling thread on a 63-sample cohort.
 pub fn decode_record_body(
     bytes: &[u8],
     region: GenomeRegion,
-    live_reads: &LiveSet,
+    live_reads: &[ChainId],
     layout: &RecordLayout,
 ) -> Result<DecodedRecordBody, RecordDecodeError> {
     let mut body = FieldReader::new(bytes);
@@ -1056,7 +1063,7 @@ pub fn decode_record_body(
     {
         as_a_read_set(&mut named_elsewhere);
         let mut derived = Vec::new();
-        residual_reads(live_reads.ids(), &named_elsewhere, &mut derived);
+        residual_reads(live_reads, &named_elsewhere, &mut derived);
         check_a_derived_read_list(
             &body,
             &derived,
@@ -2033,7 +2040,7 @@ pub fn decode_record(
     // **The head is committed to here**: nothing between this and the body can refuse the record,
     // so this is where the live set moves. `decode_the_body_of` reads the set below.
     live_reads.apply_the_changes_just_parsed();
-    decode_the_body_of(&found, live_reads.live(), layout)
+    decode_the_body_of(&found, live_reads.live().ids(), layout)
 }
 
 /// Build the record a head has already located.
@@ -2050,7 +2057,7 @@ pub fn decode_record(
 /// most wrong sets and not all of them.
 pub fn decode_the_body_of(
     found: &LocatedRecord<'_>,
-    live_reads: &LiveSet,
+    live_reads: &[ChainId],
     layout: &RecordLayout,
 ) -> Result<DecodedRecord, RecordDecodeError> {
     let head_bytes = found.record_bytes - found.body.len();
@@ -2277,15 +2284,16 @@ mod tests {
         }
     }
 
-    /// The reads a record names, as the writer's live set would hold them.
-    fn the_live_reads_of(record: &SampleLocusObservations) -> LiveSet {
+    /// The reads a record names, ascending — the live set the writer would have held, in the
+    /// shape the decoder takes.
+    fn the_live_reads_of(record: &SampleLocusObservations) -> Vec<ChainId> {
         let mut ids: Vec<ChainId> = record
             .observations
             .iter()
             .flat_map(|observation| observation.chain_ids.iter().copied())
             .collect();
         as_a_read_set(&mut ids);
-        LiveSet::from_sorted_slice(&ids)
+        ids
     }
 
     /// Encode, decode, and hand back what came out together with the bytes that went in.
@@ -2310,7 +2318,7 @@ mod tests {
         decode_record_body(
             bytes,
             a_region(1, 1),
-            &LiveSet::new(),
+            &[],
             &RecordLayout::as_this_build_writes_it(),
         )
     }
@@ -4822,12 +4830,12 @@ mod tests {
 
             let mut bytes = Vec::new();
             encode_record_body(&record, &mut bytes);
-            let live = LiveSet::from_sorted_slice(&{
+            let live = {
                 let mut every = wanted.clone();
                 every.extend_from_slice(&record.observations[1].chain_ids);
                 as_a_read_set(&mut every);
                 every
-            });
+            };
             let decoded = decode_record_body(
                 &bytes,
                 record.region,
@@ -4892,7 +4900,7 @@ mod tests {
         let refused = decode_record_body(
             &body,
             a_region(1, 1),
-            &LiveSet::new(),
+            &[],
             &RecordLayout::as_this_build_writes_it(),
         )
         .expect_err("observation 200 of a record holding one");
@@ -4916,7 +4924,7 @@ mod tests {
         let decoded = decode_record_body(
             &none,
             names_nothing.region,
-            &LiveSet::new(),
+            &[],
             &RecordLayout::as_this_build_writes_it(),
         )
         .expect("the observation count means no observation is derived");
@@ -4947,7 +4955,7 @@ mod tests {
         encode_record_body(&record, &mut bytes);
 
         // What the writer meant: reads 10, 11 and 20 are live.
-        let honest = LiveSet::from_sorted_slice(&[10, 11, 20]);
+        let honest = [10, 11, 20];
         let decoded = decode_record_body(
             &bytes,
             record.region,
@@ -4958,7 +4966,7 @@ mod tests {
         assert_eq!(decoded.record.observations[0].chain_ids, [10, 11]);
 
         // And a live set with two reads nobody named: four derived where the record says two.
-        let phantom = LiveSet::from_sorted_slice(&[10, 11, 12, 13, 20]);
+        let phantom = [10, 11, 12, 13, 20];
         let refused = decode_record_body(
             &bytes,
             record.region,
@@ -5540,7 +5548,7 @@ mod tests {
                 // **From the head just read, not from the bytes again.** Reading a head applies
                 // that record's chain-id changes, so parsing it twice applies them twice — and
                 // the second time an arriving read is already live, which is damage.
-                let decoded = decode_the_body_of(&found, live_reads.live(), layout)
+                let decoded = decode_the_body_of(&found, live_reads.live().ids(), layout)
                     .unwrap_or_else(|refused| panic!("{what}: record {index} builds: {refused}"));
                 assert_eq!(
                     decoded.head, found.head,

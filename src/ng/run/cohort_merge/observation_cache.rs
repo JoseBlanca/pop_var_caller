@@ -1005,6 +1005,33 @@ impl<S> ObservationCache<S> {
         })
     }
 
+    /// **Where each sample's window begins in its held list** — the prefix
+    /// [`with_observations`](Self::with_observations) skipped, one entry per sample in the run's
+    /// sample order.
+    ///
+    /// **What it is for, and why a caller that does not need it must not use it.** The closer
+    /// numbers a locus's members by their position in the *window* it was handed, while
+    /// [`build_at`](Self::build_at) indexes the *whole* held list. The two agree only where the
+    /// window starts at the head of the list, which is what a driver evicting at each region's
+    /// own first base gets for free (`super::serial`). A driver that evicts once for a round of
+    /// regions does not: every region after the round's first has a non-empty prefix, and its
+    /// members would be built from another record's body. This is what such a driver adds to
+    /// the index.
+    ///
+    /// PROTOTYPE (2026-09-09 concurrency review).
+    pub(super) fn window_starts_into(&self, span: GenomeRegion, into: &mut Vec<usize>) {
+        let left_edge = GenomePosition {
+            contig: span.contig,
+            position: span.start.min(span.end),
+        };
+        into.clear();
+        into.extend(
+            self.samples
+                .iter()
+                .map(|sample| first_reaching_summary(&sample.held_summaries, left_edge)),
+        );
+    }
+
     /// How many observations are held, summed across samples — the size of the window this
     /// cache is the memory of (spec §8).
     ///

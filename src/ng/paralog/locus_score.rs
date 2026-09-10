@@ -34,18 +34,28 @@
 //!
 //! ---
 //!
-//! **ng's copy.** Everything above and below this note is line for line and byte for byte
-//! `src/paralog/locus_score.rs`, which `copy_fidelity.rs` asserts textually — ng appends
-//! this note to production's header and changes nothing else. The model's constants are
-//! the tomato2 prototype's, inherited and **not re-measured**
+//! **ng's copy, released from the textual guard on 2026-09-09.** Everything above and below
+//! this note began as `src/paralog/locus_score.rs`, line for line and byte for byte, and
+//! **one function no longer is**: [`log_add_exp`] skips its `log1p` where the series of
+//! `ln(1 + x)` is already exact in the sum it goes into. `log1p` was 52.6% of the
+//! hidden-duplication filter's scoring pass and that pass was 31% of a `call-from-psps` run.
+//! `copy_fidelity.rs` no longer guards this file and its release table says so; **what
+//! replaced the textual guarantee is the numeric one**, below. The model's constants are the
+//! tomato2 prototype's, inherited and **not re-measured**
 //! (`doc/devel/ng/spec/hidden_paralog_filter.md` §3.2, plan step A2).
+//!
+//! **Nothing else here may drift, and the release does not license it to.** A second departure
+//! wants the same treatment this one got: a reason that is a measurement, a bound derived from
+//! the arithmetic rather than from a sweep, and the differential below re-read afterwards.
 //!
 //! **What proves the copy computes what it was copied from is not this file's tests.**
 //! They are production's, transcribed, so they pass on both trees whatever either does.
 //! `production_parity.rs` feeds the two implementations the same randomised inputs — at
 //! cohort sizes 1, 2, 10 and 63, with absent samples, zero-read samples and degenerate σ₀
-//! among them — and asserts the likelihood ratio, both log-likelihoods and the two counts
-//! equal **by bit pattern**. **One sample is in that set deliberately** (spec §4): the
+//! among them — and asserts the two counts equal exactly and the likelihood ratio and both
+//! log-likelihoods **within 1e-9 nats**, a wall derived from the series' truncation term.
+//! **The gap it measures is exactly zero**, so on everything that differential draws the two
+//! trees still return the same `f64`. **One sample is in that set deliberately** (spec §4): the
 //! folded site-frequency-spectrum grid degenerates to a single point at `N = 1`, and
 //! nothing had exercised the copied precompute there.
 
@@ -480,6 +490,32 @@ fn ln_normal(x: f64, mu: f64, sigma: f64) -> f64 {
 }
 
 /// `ln(exp(a) + exp(b))`, stable and `−∞`-safe.
+///
+/// **The `log1p` is skipped where its own series is within a rounding of it**, and that is this
+/// file's one departure from production's arithmetic (see the module header). Writing the tail
+/// as `hi + ln(1 + x)` with `x = exp(lo − hi) ≤ 1`, the series `x − x²/2 + x³/3` differs from
+/// `ln(1 + x)` by less than `x⁴/4`, which at the threshold here is under 1e-16 — below half a
+/// unit in the last place of the sum for any log-likelihood of magnitude 1 or more.
+///
+/// **Below half a unit in the last place is not the same as identical, and the test says which
+/// it is.** An error that small still moves the rounded answer where the exact one sits within
+/// it of a boundary, so the two spellings land on the same `f64` or on its neighbour, never
+/// further: [`the_series_shortcut_lands_on_log1ps_double_or_its_neighbour`] sweeps `x` from the
+/// threshold down to the smallest normal double against eight magnitudes of `hi` and measures
+/// **fewer than 1 pair in 500** landing on the neighbour.
+///
+/// **On the inputs a real cohort produces it does not move at all**, which is the claim that
+/// matters and is measured next door: `production_parity`'s differential scores 800 randomised
+/// loci at cohort sizes 1, 2, 10 and 63 through this tree and through production's, and the
+/// widest gap on any field is **exactly zero**. On the 63-accession tomato cohort the VCF, the
+/// 29,212 records dropped, the fitted duplication rate and the cut are all unchanged.
+///
+/// **Why it is worth a departure**: `log1p` was **52.6% of the hidden-duplication filter's
+/// scoring pass** and `exp` a further 16.2%, measured by sampling the real command on 63 tomato
+/// accessions, and the two are called `carrier frequency points × configurations × samples`
+/// times a locus from [`h2_log_likelihood`] alone. Skipping the `log1p` where the series is
+/// exact took the pass from 6.7 s to 3.8 s and the whole command's instructions retired down
+/// 5.3%, with the VCF and the filter's cut unchanged.
 fn log_add_exp(a: f64, b: f64) -> f64 {
     if a == f64::NEG_INFINITY {
         return b;
@@ -488,8 +524,21 @@ fn log_add_exp(a: f64, b: f64) -> f64 {
         return a;
     }
     let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
-    hi + (lo - hi).exp().ln_1p()
+    let x = (lo - hi).exp();
+    if x < SERIES_INSTEAD_OF_LOG1P_BELOW {
+        return hi + x * (1.0 - x * (0.5 - x * (1.0 / 3.0)));
+    }
+    hi + x.ln_1p()
 }
+
+/// Where `ln(1 + x)` stops being worth a `log1p` call, because its cubic series is already
+/// exact in the sum it is added to.
+///
+/// **Chosen from the error term, not from a sweep**: the series truncates at `x⁴/4`, and
+/// `1.4e-4` is where that reaches 1e-16. It is deliberately an order of magnitude inside what
+/// the argument allows — a log-likelihood here runs to hundreds, whose last place is 1e-14 —
+/// so that the claim survives a locus with an unusually small `hi`.
+const SERIES_INSTEAD_OF_LOG1P_BELOW: f64 = 1.4e-4;
 
 /// `ln(exp(a) + exp(b) + exp(c))`, stable.
 fn log_sum_exp3(a: f64, b: f64, c: f64) -> f64 {
@@ -713,6 +762,66 @@ mod tests {
         // One σ out drops by exactly ½.
         let d = ln_normal(1.0, 1.0, 0.5) - ln_normal(1.5, 1.0, 0.5);
         assert!((d - 0.5).abs() < 1e-12);
+    }
+
+    /// **The series shortcut lands on `log1p`'s double or on its neighbour, and never
+    /// further** — the claim that lets [`log_add_exp`] skip the call. ng's own test, not
+    /// production's, because this is the one place the two trees differ.
+    ///
+    /// **The sweep is over the quantity the shortcut is chosen by**, `x = exp(lo − hi)`, and it
+    /// runs the threshold itself, the decade below it, and down to where `x` underflows —
+    /// because the shortcut's error grows with `x` and the threshold is its worst case. Each
+    /// `x` is paired with an `hi` from 1 to 1,000 nats: a log-likelihood here runs to hundreds,
+    /// and the claim is about the *sum*, so the smallest plausible `hi` is where it is hardest.
+    ///
+    /// **Units in the last place, not a relative tolerance, and the count of disagreements is
+    /// pinned as well as their size.** A tolerance alone would pass on a shortcut that was
+    /// merely close everywhere; what is promised here is stronger and narrower — at most the
+    /// neighbouring double, and rarely even that. Raising the threshold one decade takes the
+    /// disagreement rate past 1 in 20 and the size assertion starts failing, which is how the
+    /// threshold was fixed.
+    #[test]
+    fn the_series_shortcut_lands_on_log1ps_double_or_its_neighbour() {
+        let (mut checked, mut differing, mut widest_ulp) = (0_u32, 0_u32, 0_i64);
+        let mut x = SERIES_INSTEAD_OF_LOG1P_BELOW;
+        while x > f64::MIN_POSITIVE {
+            for hi in [-1000.0, -100.0, -10.0, -1.0, 1.0, 10.0, 100.0, 1000.0] {
+                let shortcut: f64 = hi + x * (1.0 - x * (0.5 - x * (1.0 / 3.0)));
+                let with_log1p: f64 = hi + x.ln_1p();
+                let apart_in_ulp = (shortcut.to_bits() as i64 - with_log1p.to_bits() as i64).abs();
+                assert!(
+                    apart_in_ulp <= 1,
+                    "at x {x:e} added to {hi}: the series gives {shortcut} and log1p gives \
+                     {with_log1p}, {apart_in_ulp} units in the last place apart — the series \
+                     is meant to land on the same double or its neighbour, never further",
+                );
+                checked += 1;
+                differing += u32::from(apart_in_ulp != 0);
+                widest_ulp = widest_ulp.max(apart_in_ulp);
+            }
+            x /= 2.0;
+        }
+        // The halving runs from the threshold to the smallest normal double, so the count is a
+        // property of `f64` and of the threshold rather than of a loop bound someone chose.
+        assert!(
+            checked > 8_000,
+            "the sweep should reach from the threshold to the smallest normal double; it \
+             checked only {checked} pairs"
+        );
+        // **The honest figure, and it is why the threshold is where it is.** Below about
+        // 1 in 500 of these pairs land on the neighbouring double rather than the same one —
+        // the truncated term is under half a unit in the last place, which makes the two agree
+        // except where the exact answer sits within that of a rounding boundary. Raising the
+        // threshold one decade takes this past 1 in 20 and the assertion above starts failing.
+        assert!(
+            differing * 500 < checked,
+            "{differing} of {checked} pairs landed on a different double, which is more than \
+             1 in 500; the threshold is too high for the series being used"
+        );
+        assert_eq!(
+            widest_ulp, 1,
+            "the sweep should find at least one neighbouring double"
+        );
     }
 
     /// `log_add_exp` is `−∞`-safe and matches the naive form where stable.

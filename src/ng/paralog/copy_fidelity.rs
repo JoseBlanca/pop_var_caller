@@ -1,17 +1,17 @@
 //! **These files are still production's, verbatim — asserted, not claimed.**
 //!
-//! Five files are guarded today, against four production originals:
+//! Four files are guarded today, against three production originals; a fifth was released
+//! on 2026-09-09 and the release table below says why:
 //!
 //! | ng's copy | lines | production's original |
 //! |---|---|---|
 //! | `coverage_model.rs` | 1,157 past its module header | `src/paralog/coverage_model.rs` |
-//! | `locus_score.rs` | 797 | `src/paralog/locus_score.rs` |
 //! | `prior.rs` | 524 | `src/paralog/prior.rs` |
 //! | `model_params.rs` | 236 | the items of `src/paralog/mod.rs` |
 //! | `calibration.rs` | 83 | a **span** of `src/var_calling/paralog_filter/calibrate.rs` |
 //!
-//! `locus_score.rs` differs from its original on three declared lines and `calibration.rs`
-//! on seven; the other three differ on none. ng owns this file outright. It exists so the copies can
+//! `calibration.rs` differs from its original on seven declared lines; the other three differ
+//! on none. ng owns this file outright. It exists so the copies can
 //! be checked from outside themselves — a check written *inside* `coverage_model.rs`
 //! would be lines production's file does not have, so writing it would break the very
 //! identity it asserts.
@@ -107,7 +107,7 @@
 //!
 //! | released at | file | why |
 //! |---|---|---|
-//! | — | — | nothing released yet |
+//! | 2026-09-09 | `locus_score.rs` | `log_add_exp` skips `log1p` where its own cubic series is exact in the sum it goes into. `log1p` was **52.6% of the hidden-duplication filter's scoring pass** and the pass is 31% of `call-from-psps`; the shortcut takes the pass from 6.7 s to 3.8 s. What replaces the textual guarantee is the numeric one next door — [`production_parity`](super::production_parity)'s 800-locus differential, which now allows the two trees 1e-9 nats and **measures a gap of exactly zero** |
 //!
 //! | span narrowed at | file | where ng's copy stops, and why |
 //! |---|---|---|
@@ -265,38 +265,6 @@ fn guarded_copies() -> Vec<GuardedCopy> {
                     ng_type: "crate::ng::window_coverage",
                 },
             }],
-        },
-        GuardedCopy {
-            file_name: "locus_score.rs",
-            production_path: "src/paralog/locus_score.rs",
-            production_source: include_str!("../../paralog/locus_score.rs"),
-            ng_source: include_str!("locus_score.rs"),
-            begins: CopyBegins::AfterTheModuleHeader,
-            ends_before: None,
-            // Three paths into production. The import would build ng's test fixture from
-            // production's types (and does not compile, since ng's are distinct); the two
-            // link definitions would send a reader of ng's own docs into the frozen tree.
-            // The first of those two is a `//!` line inside production's module header,
-            // which is why substitutions are applied to the whole file rather than only to
-            // the content past the header.
-            ng_ends_before: None,
-            repoints: &[
-                Repoint {
-                    production_line: "use crate::paralog::{GridSpec, SfsPriorSpec};",
-                    ng_line: "use crate::ng::paralog::{GridSpec, SfsPriorSpec};",
-                    why: WhyRepointed::PathIntoProduction,
-                },
-                Repoint {
-                    production_line: "//! [`SingleCopyCoverageModel`]: crate::paralog::SingleCopyCoverageModel",
-                    ng_line: "//! [`SingleCopyCoverageModel`]: crate::ng::paralog::SingleCopyCoverageModel",
-                    why: WhyRepointed::PathIntoProduction,
-                },
-                Repoint {
-                    production_line: "/// [`SingleCopyCoverageModel`]: crate::paralog::SingleCopyCoverageModel",
-                    ng_line: "/// [`SingleCopyCoverageModel`]: crate::ng::paralog::SingleCopyCoverageModel",
-                    why: WhyRepointed::PathIntoProduction,
-                },
-            ],
         },
         GuardedCopy {
             file_name: "model_params.rs",
@@ -1218,7 +1186,7 @@ fn every_file_in_the_module_is_guarded_ng_s_own_or_released() {
     ];
 
     // Grows as files are released; keep it in step with the table in this module's header.
-    const RELEASED: [&str; 0] = [];
+    const RELEASED: [&str; 1] = ["locus_score.rs"];
 
     let module_directory = concat!(env!("CARGO_MANIFEST_DIR"), "/src/ng/paralog");
     let mut guarded_files_on_disk = 0;

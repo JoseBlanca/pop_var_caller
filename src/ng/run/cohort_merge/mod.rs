@@ -41,6 +41,7 @@ pub mod observation_cache;
 pub mod organise;
 pub mod parallel;
 pub mod recorded_windows;
+pub mod rounds;
 pub mod serial;
 pub mod timing;
 
@@ -63,6 +64,8 @@ pub(super) mod fixtures {
         LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
     };
     use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId};
+
+    use super::observation_cache;
 
     /// A region on the named contig, both ends inclusive.
     pub(super) fn region_on(contig: u32, start: u64, end: u64) -> GenomeRegion {
@@ -127,6 +130,77 @@ pub(super) mod fixtures {
             .map(Ok)
             .collect::<Vec<_>>()
             .into_iter()
+    }
+
+    /// **One sample's reader that hands over summaries and keeps its records**, the way a
+    /// reader over a stored `.psp` does — and the shape every other fixture in this module
+    /// lacks.
+    ///
+    /// # Why this exists, and it is not for coverage
+    ///
+    /// [`source_of`] returns each record whole, so the cache's `keeps_evidence` is false, its
+    /// windows carry the records themselves and
+    /// [`ObservationSource::build`](observation_cache::ObservationSource::build) is never
+    /// called. **Every byte-for-byte comparison this module makes between its drivers was made
+    /// over sources of that shape**, and a defect reachable only through `build` therefore
+    /// passed all of them: the member indices a closed locus carries are numbered inside the
+    /// window the cache hands out, while `build_at` indexes a sample's whole held list, and the
+    /// two agree only where the window starts at the head. A driver evicting at each region's
+    /// own first base gets that for free; one evicting once for a round of regions does not,
+    /// and every region after a round's first would have built its members from the region
+    /// before it. It was found by running, not by the suite.
+    ///
+    /// So this source keeps its records and hands out `Drawn::Kept`, with the body range
+    /// naming the record's own index — `i..i+1`, which is meaningful to nobody but itself,
+    /// which is exactly what the trait says a body range is.
+    pub(super) struct KeepingSource {
+        records: Vec<SampleLocusObservations>,
+        handed_out: usize,
+    }
+
+    impl KeepingSource {
+        /// A reader over `observations`, keeping every one of them.
+        pub(super) fn over(observations: &[SampleLocusObservations]) -> Self {
+            Self {
+                records: observations.to_vec(),
+                handed_out: 0,
+            }
+        }
+    }
+
+    impl observation_cache::ObservationSource for KeepingSource {
+        type Error = SourceFailed;
+
+        /// Never called: this source overrides `next_drawn`, and the cache calls that.
+        fn next_observation(
+            &mut self,
+            _spare: Option<SampleLocusObservations>,
+        ) -> Option<Result<SampleLocusObservations, Self::Error>> {
+            unreachable!("a keeping source is drawn through `next_drawn`")
+        }
+
+        fn next_drawn(
+            &mut self,
+            _spare: Option<SampleLocusObservations>,
+        ) -> Option<Result<observation_cache::Drawn, Self::Error>> {
+            let at = self.handed_out;
+            let record = self.records.get(at)?;
+            self.handed_out += 1;
+            Some(Ok(observation_cache::Drawn::Kept {
+                summary: observation_cache::LocusSummary::of(record),
+                body: at..at + 1,
+            }))
+        }
+
+        /// **Nothing is released**, which the trait permits and which this fixture wants: a
+        /// source that dropped what the merge had passed could not answer a `build` the driver
+        /// got wrong, and answering it wrongly is the failure this fixture exists to catch.
+        fn build(
+            &self,
+            body: core::ops::Range<usize>,
+        ) -> Result<SampleLocusObservations, Self::Error> {
+            Ok(self.records[body.start].clone())
+        }
     }
 
     /// A building-region width in reference bases.
@@ -731,6 +805,9 @@ pub const DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN: u32 = 500;
 pub struct CohortLocusBuilderRegionsInFlight(pub NonZeroUsize);
 
 impl CohortLocusBuilderRegionsInFlight {
+    /// One region at a time — the streaming driver's arrangement, and every default's.
+    pub const ONE: Self = Self(NonZeroUsize::MIN);
+
     /// One region in flight per thread in rayon's pool — what a run takes when the operator
     /// names no value.
     ///
