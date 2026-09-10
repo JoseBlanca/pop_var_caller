@@ -265,13 +265,26 @@ rebuild having happened. D2's own tests take that shape.
 
 ### Milestone E — the sidecar removed, and everything that spells the old shape
 
-☐ **E1 — scripts.** `scripts/ng_fit_stage_end_to_end.sh` (calls `generate-census`, passes
+✅ **E1 — scripts.** `scripts/ng_fit_stage_end_to_end.sh` (calls `generate-census`, passes
 `--census`, diffs census files → the copy-regenerate-`cmp` of D4); whichever of
 `ng_census_route_cost.sh` and `ng_census_agreement_mutations.sh` name either;
 `examples/ng_census_route_cost.rs`'s `write_psp(path, Some(census))`. Run the end-to-end script on
 the six tomato accessions over the two 100 kb intervals: same parameters file, same VCF as the last
 recorded run.
 *Depends:* C4, D4.
+*As built, 2026-09-10:* **one file the plan did not name**, `examples/ng_psp_drop_census.rs` —
+`replace_trailer(psp, b"")` with a command line around it. D4's oracle needs a psp *owed* a
+rebuild and a copy of a walked one is not: it is skipped and comes back untouched, so `cmp` passes
+without a rebuild (the D4 note above). Nothing that ships empties a trailer, and a shell script
+cannot: the file is cut at the trailer's offset and a footer re-encoded behind the cut.
+`examples/ng_census_route_cost.rs`'s `write_psp` was already one argument. Two claims found stale
+while reading rather than named by this line: the route-cost pair called the second route
+`generate-census` and said "both ship" — no command writes a psp with an empty trailer, so that
+route is the repair's pass over a psp that arrived without a census; and
+`ng_census_agreement_mutations.sh` said its fourth defect could be caught by nothing, which the fit
+stage's Milestone C ended when it put the minted read-error totals into the census. The oracle
+reproduced Milestone A's run on the same six accessions: same census total, same parameters-file
+size, same five calling counters, and every copy identical to its walked psp whole.
 
 ☐ **E2 — the sidecar's machinery deleted.** `PileupIdentity`, `freshness`, `freshness_by_header`
 and their tests; `psp_beside`, `census_path_for`, `CENSUS_FILE_EXTENSION`; what is left of

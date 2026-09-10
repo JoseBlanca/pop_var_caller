@@ -1,21 +1,29 @@
 //! **What each route to a census costs** — plan step B3 of
 //! `doc/devel/ng/impl_plan/parameter_prepass_runs.md`.
 //!
-//! There are two ways to end up with every sample's census, and both ship:
+//! There are two ways to end up with every sample's census, and they are not two ways of doing
+//! the same job:
 //!
 //! - **during the walk** — one pass over the alignment files builds the census as it goes and
-//!   seals it into the psp's trailer, which is what `generate-psps` does;
-//! - **afterwards** — the walk writes the psp alone, and a second pass reads it back and builds
-//!   the census into a file of its own, which is what `generate-census` does.
+//!   seals it into the psp's trailer. This is what every run does: `generate-psps` always builds
+//!   a census and there is no flag to skip it (`psp_census_pair.md` §3.3).
+//! - **afterwards** — the psp is walked with an empty trailer, and a second pass reads the stored
+//!   records back and builds the census from them. **No command produces a psp in that state**;
+//!   it is the state a psp written by an older build arrives in, and the second pass is the one
+//!   `regenerate-census` makes to repair it (§4.2, §8). This harness produces it on purpose, to
+//!   price that repair.
 //!
-//! **They produce the same census, byte for byte apart from one field** — the pileup identity,
-//! which a census sealed inside its psp does not carry (`psp_census_pair.md` §3) and which this
-//! harness therefore leaves off both sides. So the only thing that separates the routes is what
-//! they cost. `the_two_producers_agree_on_a_cohort_with_a_repeat_tract` holds them to that on
-//! fixtures; this harness is where it is checked on real reads, which is why **both routes leave
-//! a `<sample>.census` file for the wrapping script to compare** even though only the second
-//! route produces one in a real run. On the first route that file is the psp's trailer copied
-//! out, **after the clock stops**, so the route it would slow is not charged for it.
+//! **The two produce the same census, byte for byte**, and neither carries a pileup identity —
+//! the psp-header digest and record count by which a census kept in a file of its own names the
+//! file it came from. A census that *is* its psp's trailer has nothing left to pair wrongly with
+//! (`psp_census_pair.md` §3), so no shipped route writes one and this harness writes one on
+//! neither side. What separates the routes is therefore only what they cost. The module
+//! `ng::run::census_from_psp::the_two_producers_agree` holds them to that agreement on fixtures;
+//! this harness is where it is checked on real reads, which is why **both routes leave a
+//! `<sample>.census` file for the wrapping script to compare** even though neither writes such a
+//! file in a real run — `regenerate-census` puts its census in the psp's trailer too. On the
+//! during-the-walk route that file is the trailer copied out, **after the clock stops**, so the
+//! route it would slow is not charged for it.
 //!
 //! This harness runs **one** route per process, so that a wrapper measuring peak resident memory
 //! measures one route rather than the larger of two.
@@ -44,10 +52,10 @@
 //! resident memory is the wrapper's, since a process cannot see its own high-water mark
 //! portably.
 //!
-//! **`census_bytes` is 24 bytes a sample short of what `generate-census` writes**, because
-//! neither side carries the pileup identity — a 16-byte header digest and an 8-byte record
-//! count. Both routes also leave a `<sample>.census` in the work directory for the wrapping
-//! script's `cmp`; on the during-the-walk route a real run writes no such file.
+//! **`census_bytes` is the census exactly as a real run stores it** — what the walk seals into
+//! the psp's trailer, and what `regenerate-census` writes back there. Both routes also leave a
+//! `<sample>.census` in the work directory for the wrapping script's `cmp`; neither route writes
+//! such a file in a real run.
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -305,16 +313,19 @@ fn run(
     let seconds = working.elapsed().as_secs_f64();
 
     // **After the clock, on purpose.** The wrapping script compares the two routes' censuses, so
-    // both have to leave a `<sample>.census` behind — but on this route a real run writes no such
-    // file, and reading the trailer back and writing it out again is a quarter of a megabyte a
-    // sample each way. Charged to the route, it would bias the one measurement this harness
-    // exists to make, against the route that is cheaper. The other route's write is work its real
-    // counterpart does, so it stays inside.
+    // both have to leave a `<sample>.census` behind — but on this route the census is already in
+    // the psp, and reading the trailer back and writing it out again is a quarter of a megabyte a
+    // sample each way, pure double handling. Charged to the route, it would bias the one
+    // measurement this harness exists to make, against the route that is cheaper.
     //
-    // **Neither side is encoded with a pileup identity**, which is the one field the two are
-    // otherwise allowed to differ in (`psp_census_pair.md` §3): a census that is its psp's
-    // trailer names no pileup, so comparing it against a rebuild that named one would fail on a
-    // field neither route is wrong about.
+    // **The other route's write stays inside the clock**, because its real counterpart makes one
+    // of the same size: `regenerate-census` puts the census it built back into the psp's trailer
+    // (`replace_trailer`), so one write of a census is work that route pays for either way.
+    //
+    // **Neither side is encoded with a pileup identity** — the psp-header digest and record count
+    // (`psp_census_pair.md` §3). Neither real route writes one now that both censuses live in a
+    // trailer, so writing one here would make the two sides differ on a field neither is wrong
+    // about.
     for (psp, census) in &to_copy_out {
         let trailer = PspReader::open(psp)?.trailer()?;
         std::fs::write(census, &trailer)
