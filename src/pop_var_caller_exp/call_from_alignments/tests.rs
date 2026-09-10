@@ -283,6 +283,45 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
     }
 }
 
+/// **A run that got two things wrong is told about the catalog first.**
+///
+/// A missing catalog and a period range typed backwards are both refusals of the same call, and
+/// which one a person is shown is a choice the code makes silently: the catalog is checked before
+/// the flags are converted. It is the right way round because the two are not comparable — a
+/// period range is a typo in the command in front of them, and a missing catalog means the file
+/// this run needs has not been built yet, or was built somewhere else. Being told the typo first
+/// costs a second run to learn the real problem.
+///
+/// **Nothing else in the tree sets both**, so without this test the order is free to swap: the
+/// period-range test below calls the conversion directly, and the missing-catalog test above
+/// types a range that is fine.
+#[test]
+fn a_run_with_no_catalog_and_a_backwards_period_range_is_told_about_the_catalog() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let reference = directory.path().join("ref.fa");
+    let mut argv = a_defaults_run();
+    argv.extend(["--min-period", "5", "--max-period", "3"]);
+    let mut args = args_of(&argv);
+    args.reference = reference.clone();
+    args.catalog = None;
+
+    let refused = segments_over(
+        &super::ground_request(&args),
+        &GenomeRegions::whole_contigs(&[]),
+        &ReferenceInfo {
+            md5: None,
+            contigs: Vec::new(),
+            fasta_path: Some(reference),
+        },
+    )
+    .expect_err("neither the catalog nor the period range is usable");
+
+    assert!(
+        matches!(refused, GroundError::MissingCatalog { .. }),
+        "the catalog is checked before the flags are converted, and got {refused:?}",
+    );
+}
+
 /// **A run with no catalog is told which file is missing and the command that builds it**, and
 /// is refused before a single alignment file is opened.
 ///

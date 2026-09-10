@@ -12,7 +12,8 @@
 //! It reads the **censuses**. It does not read the psps — but each census's psp has to be beside
 //! it, because a census names the psp it was built from and evidence from other reads is
 //! otherwise indistinguishable from this run's. What is taken from each psp is its header: one
-//! short read, for the digest the census names it by and for the ground the walk covered.
+//! short read, for the digest the census names it by, for the ground the walk covered, and for
+//! the repeat-tract criteria it cut that ground with (`psp_census_pair.md` §6).
 //!
 //! # Why the reference and the catalog
 //!
@@ -103,9 +104,9 @@ pub struct EstimateParametersArgs {
     #[arg(long, default_value_t = 0.0)]
     pub inbreeding: f64,
 
-    /// The fewest motif copies a tract needs before this run treats it as a repeat: six
-    /// comma-separated numbers, one per period 1 to 6. **Give the values the psps were walked
-    /// under** — they decide which stretches the selection may keep.
+    /// **Not read.** What counts as a repeat comes from the psps' own headers, where their walk
+    /// recorded it (`psp_census_pair.md` §6). Kept so that command lines written for the previous
+    /// release still parse; removed at plan step C2, with the other four.
     #[arg(
         long,
         value_parser = crate::pop_var_caller_exp::cli::parsers::parse_min_copies,
@@ -114,7 +115,7 @@ pub struct EstimateParametersArgs {
     )]
     pub min_copies: MinCopies,
 
-    /// The shortest repeat unit this run treats as a repeat.
+    /// **Not read** — see `--min-copies`.
     #[arg(
         long,
         default_value_t = DEFAULT_MIN_PERIOD,
@@ -123,7 +124,7 @@ pub struct EstimateParametersArgs {
     )]
     pub min_period: u8,
 
-    /// The longest repeat unit this run treats as a repeat.
+    /// **Not read** — see `--min-copies`.
     #[arg(
         long,
         default_value_t = DEFAULT_MAX_PERIOD,
@@ -132,11 +133,11 @@ pub struct EstimateParametersArgs {
     )]
     pub max_period: u8,
 
-    /// A tract longer than this many bases is a satellite.
+    /// **Not read** — see `--min-copies`.
     #[arg(long, default_value_t = DEFAULT_MAX_STR_LEN, help_heading = "What counts as a repeat")]
     pub max_str_len: u64,
 
-    /// The least share of a tract's bases that must match its motif exactly.
+    /// **Not read** — see `--min-copies`.
     #[arg(long, default_value_t = DEFAULT_MIN_PURITY, help_heading = "What counts as a repeat")]
     pub min_purity: f32,
 }
@@ -309,30 +310,42 @@ fn fit_and_assemble(
         .into_selectable()
         .map_err(|source| EstimateParametersCliError::CensusGround { source })?;
 
-    let ground = run_ground::GroundRequest {
-        reference: &args.reference,
-        catalog: args.catalog.as_deref(),
-        regions: None,
-        routing: run_ground::RepeatRouting {
-            min_copies: args.min_copies,
-            min_period: args.min_period,
-            max_period: args.max_period,
-            max_str_len: args.max_str_len,
-            min_purity: args.min_purity,
-        },
-    };
-    // **The ground is the psps' own**, not this command's: the censuses were written over it, and
-    // a selection rebuilt over anything else is refused by the fit.
+    // **The ground and what it is cut with come out of the cohort's psps**, not off this
+    // command line (spec §6). The five flags that used to supply the criteria are values a
+    // person had to retype from a walk that had already recorded them; they are still on the
+    // command line, nothing reads them, and plan step C2 removes them.
+    //
+    // **Both are read from one psp — the first — and what makes one enough is not this code.**
+    // `open_census_cohort` compares the analysed regions across the cohort, and
+    // `CohortCensusEvidence::new` refuses a cohort whose censuses disagree on their recording
+    // terms, the repeat criteria among them; at plan step C2 the cohort opener does it directly
+    // (`OpenPspCohort::open`, step B3). Take that away and this line is the hazard spec §6
+    // describes: a selection built from the first psp's settings that the rest cannot match.
+    //
+    // **What happens if they are wrong anyway is weaker than it sounds.** The fit compares a
+    // digest of the *kept generic positions* against the censuses' own (`fit_a_cohort`), so a
+    // difference is caught only where it moves one of them — and on tomato about 1 position in
+    // 400 is kept (spec §2), so a criterion that retypes a single short tract can pass that
+    // digest and be re-indexed in silence. That is the argument for taking the criteria from the
+    // psps rather than a reason to trust the net below.
     let analysed = open.analysed_regions.clone();
-    let segmentation = run_ground::segments_over(&ground, &analysed, &with_checksums)?;
-    let catalog =
-        RepeatCatalog::open_checking_against_reference(&ground.catalog_path(), &with_checksums)
-            .map_err(|source| {
-                EstimateParametersCliError::Ground(GroundError::Catalog {
-                    path: ground.catalog_path(),
-                    source,
-                })
-            })?;
+    let criteria = open.segmentation_inputs.repeat_tract_criteria.clone();
+    let catalog_path = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
+    let segmentation = run_ground::segments_cut_with(
+        &catalog_path,
+        &args.reference,
+        &criteria,
+        run_ground::CriteriaSource::ThePspHeaders,
+        &analysed,
+        &with_checksums,
+    )?;
+    let catalog = RepeatCatalog::open_checking_against_reference(&catalog_path, &with_checksums)
+        .map_err(|source| {
+            EstimateParametersCliError::Ground(GroundError::Catalog {
+                path: catalog_path.clone(),
+                source,
+            })
+        })?;
     let plan = CensusPlan::of_run(
         CensusSelection::SHIPPED,
         &catalog,

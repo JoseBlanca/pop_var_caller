@@ -74,9 +74,7 @@ impl GroundRequest<'_> {
     /// The catalog this request names — the flag's path, or the one beside the reference.
     #[must_use]
     pub fn catalog_path(&self) -> PathBuf {
-        self.catalog
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| sibling_catalog_path(self.reference))
+        catalog_path_for(self.catalog, self.reference)
     }
 }
 
@@ -217,6 +215,18 @@ pub fn analysed_regions(
     }
 }
 
+/// **The catalog a command reads**: the path it was given, or the file `repeat-catalog` writes
+/// beside the reference.
+///
+/// **One rule, in one place.** It is part of what a user is promised — every subcommand's
+/// `--catalog` says *"defaults to `<reference>.repeats.parquet`"* — and it is spelled at four
+/// call sites, with a fifth arriving with `regenerate-census`. A copy that drifts is a command
+/// that silently reads a different file from its siblings.
+#[must_use]
+pub fn catalog_path_for(catalog: Option<&Path>, reference: &Path) -> PathBuf {
+    catalog.map_or_else(|| sibling_catalog_path(reference), Path::to_path_buf)
+}
+
 /// **What this run counts as a repeat**, built from the five flags that say so.
 ///
 /// The catalog is a source of *candidates*: it is deliberately built below every calling
@@ -259,45 +269,125 @@ pub fn routing_criteria(routing: &RepeatRouting) -> Result<StrRepeatCriteria, Gr
 }
 
 /// The run's segments: the analysed ground cut into the stretches each generator owns, drawn
-/// from the catalog.
+/// from the catalog, **with what counts as a repeat taken from this run's five flags**.
+///
+/// A command whose criteria come from somewhere else — a psp header, which carries the finished
+/// value the walk routed under — calls [`segments_cut_with`] instead, and everything past the
+/// flags is shared.
 ///
 /// # Errors
 ///
-/// [`GroundError::MissingCatalog`] when there is no catalog to read,
-/// [`GroundError::Catalog`] when it will not read or was built on another reference,
-/// [`GroundError::RoutingBelowCatalog`] when this run asked for repeats it does not hold, and
-/// [`GroundError::Segmentation`] when its segment stream fails part-way.
+/// [`GroundError::MissingCatalog`] first, then [`GroundError::PeriodRange`] when the two period
+/// flags do not make a range, and then everything [`segments_cut_with`] answers with.
 pub fn segments_over(
     request: &GroundRequest<'_>,
     analysed: &GenomeRegions,
     with_checksums: &ReferenceInfo,
 ) -> Result<Segmentation, GroundError> {
     let path = request.catalog_path();
-    if !path.exists() {
-        return Err(GroundError::MissingCatalog {
-            path,
-            reference: request.reference.to_path_buf(),
-        });
-    }
+    // **Before the flags are converted**, so that a run whose catalog is not there is told that
+    // and not which of its period flags it typed backwards. [`segments_cut_with`] checks the
+    // same thing again, for the callers that enter there.
+    refuse_a_catalog_that_is_not_there(&path, request.reference)?;
     let criteria = routing_criteria(&request.routing)?;
-    let catalog = RepeatCatalog::open_checking_against_reference(&path, with_checksums).map_err(
-        |source| GroundError::Catalog {
-            path: path.clone(),
+    segments_cut_with(
+        &path,
+        request.reference,
+        &criteria,
+        CriteriaSource::TheFiveFlags,
+        analysed,
+        with_checksums,
+    )
+}
+
+/// **Where a run's repeat criteria came from** — which is what a catalog that cannot serve them
+/// has to know before it can name something the reader is able to move.
+///
+/// A catalog is built below every calling floor so that a reader filters rather than re-scans
+/// (`repeat_catalog.md` §4.1); asking it for tracts *below* what it holds is refused, because
+/// those rows were never written. What to do about that refusal depends entirely on where the
+/// numbers came from: a person who typed `--min-copies 3,3,3,3,3,3` should be told that flag,
+/// and a person whose numbers came out of a psp header has no flag to move — their catalog is
+/// not the one their psps were walked against, and that is what they have to fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CriteriaSource {
+    /// The five flags of this command line.
+    TheFiveFlags,
+    /// The psp headers of the cohort being read, where the walk recorded them
+    /// (`psp_census_pair.md` §6).
+    ThePspHeaders,
+}
+
+/// The same segments, cut with criteria the caller already holds.
+///
+/// **What a psp-driven command enters at.** The five flags are one way to say what this run
+/// counts as a repeat; a psp header is the other, and it carries the finished
+/// [`StrRepeatCriteria`] with no way back to the flags it was built from
+/// (`psp_census_pair.md` §6). Everything past that — refusing a catalog that is not there,
+/// checking the one that is against the reference, cutting the ground and recording what it was
+/// cut with — is the same work, and this is it.
+///
+/// `catalog_path` is the file itself, already resolved; `reference` is named only so a refusal
+/// can say which assembly the missing catalog belongs to; `criteria_from` decides what a catalog
+/// too coarse for these criteria tells the reader to change.
+///
+/// # Errors
+///
+/// [`GroundError::MissingCatalog`] when there is no catalog to read,
+/// [`GroundError::Catalog`] when it will not read, was built on another reference, or cannot
+/// serve criteria that came from a psp header,
+/// [`GroundError::RoutingBelowCatalog`] when the flags of this command line asked for repeats it
+/// does not hold, and [`GroundError::Segmentation`] when its segment stream fails part-way.
+pub fn segments_cut_with(
+    catalog_path: &Path,
+    reference: &Path,
+    criteria: &StrRepeatCriteria,
+    criteria_from: CriteriaSource,
+    analysed: &GenomeRegions,
+    with_checksums: &ReferenceInfo,
+) -> Result<Segmentation, GroundError> {
+    refuse_a_catalog_that_is_not_there(catalog_path, reference)?;
+    let catalog = RepeatCatalog::open_checking_against_reference(catalog_path, with_checksums)
+        .map_err(|source| GroundError::Catalog {
+            path: catalog_path.to_path_buf(),
             source,
-        },
-    )?;
+        })?;
     let spans: Vec<_> = analysed.iter().collect();
     let segments = catalog
-        .genome_segments(&criteria, ReadScope::Regions(&spans))
-        .map_err(|source| catalog_error_naming_the_flag(source, &path))?;
+        .genome_segments(criteria, ReadScope::Regions(&spans))
+        .map_err(|source| match criteria_from {
+            CriteriaSource::TheFiveFlags => catalog_error_naming_the_flag(source, catalog_path),
+            // **No flag to name**: these criteria are what the walk recorded, and this command
+            // line cannot change them. What the reader can change is which catalog they pointed
+            // it at, which the general refusal already names.
+            CriteriaSource::ThePspHeaders => GroundError::Catalog {
+                path: catalog_path.to_path_buf(),
+                source,
+            },
+        })?;
     Segmentation::build(
         segments,
         analysed.clone(),
         catalog.header().clone(),
-        criteria,
-        path,
+        criteria.clone(),
+        catalog_path.to_path_buf(),
     )
     .map_err(|source| GroundError::Segmentation { source })
+}
+
+/// Refuse a catalog that is not on disk, naming the reference it should have been built from.
+///
+/// **A file that is not there is not a file that will not read**: the second means a corrupt or
+/// foreign catalog and sends the user to rebuild it, where this one means `repeat-catalog` has
+/// not been run yet, or was run somewhere else.
+fn refuse_a_catalog_that_is_not_there(catalog: &Path, reference: &Path) -> Result<(), GroundError> {
+    match catalog.exists() {
+        true => Ok(()),
+        false => Err(GroundError::MissingCatalog {
+            path: catalog.to_path_buf(),
+            reference: reference.to_path_buf(),
+        }),
+    }
 }
 
 /// Render a catalog failure, naming the flag to move when the failure is that this run asked

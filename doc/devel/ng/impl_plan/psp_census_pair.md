@@ -168,7 +168,7 @@ are named.
 
 ### Milestone C — `estimate-parameters` over psps
 
-☐ **C1 — the criteria from the header, own commit.** Split `segments_over` after
+✅ **C1 — the criteria from the header, own commit.** Split `segments_over` after
 `routing_criteria` so a caller holding a `StrRepeatCriteria` enters there
 ([`run_ground.rs:242-281`](../../../../src/pop_var_caller_exp/run_ground.rs));
 `estimate-parameters` builds its segmentation from the cohort's `SegmentationInputs` instead of

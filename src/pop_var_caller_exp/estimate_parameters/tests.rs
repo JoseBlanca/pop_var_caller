@@ -35,17 +35,42 @@ fn a_shortest_run() -> Vec<&'static str> {
 /// this command is meant to be handed. The plain on-disk cohort has no repeat tract at all, so a
 /// fit over it exercises only half of what this file records.
 fn a_walked_cohort() -> (AVaryingCohort, PathBuf) {
+    a_cohort_walked_asking_for(MinCopies::default())
+}
+
+/// The same, walked under a copy floor of the caller's choosing.
+///
+/// **What it is for: a cohort whose psps were not walked under this command's default flags.**
+/// The fixture's repeat tract is ten copies of `GT`, so a walk asking for eleven leaves it
+/// ordinary sequence, and a fit that rebuilt its selection under the default floors would keep
+/// positions inside it that the censuses hold nothing at.
+fn a_cohort_walked_asking_for(min_copies: MinCopies) -> (AVaryingCohort, PathBuf) {
+    a_cohort_walked(min_copies, None)
+}
+
+/// The same again, with the ground the walk covered given as well.
+///
+/// **`regions` is what makes the cohort's ground different from the whole reference.** Every
+/// other fixture here walks whole contigs, where *the ground the psps were walked over* and
+/// *every base of the reference* are the same set of positions and no test can tell a command
+/// that takes one from a command that takes the other.
+fn a_cohort_walked(min_copies: MinCopies, regions: Option<&str>) -> (AVaryingCohort, PathBuf) {
     let cohort = a_varying_cohort_on_disk();
     let psps = cohort.directory.path().join("psps");
+    let regions = regions.map(|bed| {
+        let path = cohort.directory.path().join("walked.bed");
+        std::fs::write(&path, bed).expect("the scratch dir is ours");
+        path
+    });
     let walk = GeneratePspsArgs {
         reference: cohort.reference.clone(),
         catalog: Some(cohort.catalog.clone()),
         alignments: cohort.alignments.clone(),
         output_dir: psps.clone(),
-        regions: None,
+        regions,
         force: false,
         build_index_if_missing: false,
-        min_copies: MinCopies::default(),
+        min_copies,
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
@@ -134,6 +159,210 @@ fn one_cohort_fitted_twice_writes_the_same_file() {
         first.to_toml(),
         again.to_toml(),
         "one cohort's parameters are one file",
+    );
+}
+
+/// **The repeat-tract criteria come out of the psps, and the flags that used to supply them are
+/// not read** (spec §6).
+///
+/// One cohort, fitted twice with the copy floor set two different ways on the command line, and
+/// the two files are the same bytes. Before this step the flags built the run's segmentation, so
+/// the second fit rebuilt its selection over a different set of stretches from the one the
+/// censuses were written against — eleven copies where the fixture's tract has ten leaves that
+/// tract ordinary sequence, so the selection keeps positions inside it that the censuses hold
+/// nothing at — and the fit refused the cohort as *built under another selection*.
+///
+/// **Why the flags cannot simply be believed.** They are values a person retypes from a walk that
+/// already recorded them, and a mistyped one does not fail — it fits a plausible file over a
+/// different set of loci from the one the censuses hold, and is caught, if at all, by the fit's
+/// digest check reporting *another selection* twenty seconds later.
+#[test]
+fn the_criteria_flags_do_not_change_the_file_that_is_fitted() {
+    let (cohort, psps) = a_walked_cohort();
+    let output = cohort.directory.path().join("cohort.parameters.toml");
+
+    let (as_walked, _) = fit_and_assemble(&args_over(&cohort, &psps, output.clone()))
+        .expect("the cohort fits with the flags left at their defaults");
+    let mut asking_for_eleven = args_over(&cohort, &psps, output);
+    asking_for_eleven.min_copies = MinCopies::uniform(11);
+    let (whatever_the_flags_said, _) =
+        fit_and_assemble(&asking_for_eleven).expect("and fits with them set to anything else");
+
+    assert_eq!(
+        as_walked.to_toml(),
+        whatever_the_flags_said.to_toml(),
+        "the psps say what a repeat is; the flags are not read",
+    );
+}
+
+/// **A cohort walked under criteria this command was never told is fitted all the same.**
+///
+/// The other half of the same rule: the psps here were walked asking for eleven copies, and the
+/// fit is run with the flags at their defaults — the shape of every real run once the flags are
+/// gone (plan step C2), and the one a person hits today by walking with `--min-copies` and
+/// forgetting to repeat it here.
+///
+/// **It asserts the file differs from the default walk's**, because *it fitted something* is
+/// satisfied by a fit that quietly used the defaults: the two walks type the fixture's tract two
+/// different ways — a tract for one, ordinary sequence for the other — so two files that matched
+/// would mean the walk's criteria never reached the arithmetic.
+#[test]
+fn a_cohort_walked_under_other_criteria_is_fitted_without_being_told_them() {
+    let (cohort, psps) = a_cohort_walked_asking_for(MinCopies::uniform(11));
+    let output = cohort.directory.path().join("cohort.parameters.toml");
+
+    let (from_those_psps, samples) = fit_and_assemble(&args_over(&cohort, &psps, output))
+        .expect("the criteria are read from the psps, so the default flags are no disagreement");
+
+    assert_eq!(samples, 2, "one entry a sample");
+    let (default_cohort, default_psps) = a_walked_cohort();
+    let (from_a_default_walk, _) = fit_and_assemble(&args_over(
+        &default_cohort,
+        &default_psps,
+        default_cohort
+            .directory
+            .path()
+            .join("cohort.parameters.toml"),
+    ))
+    .expect("the default walk fits too");
+    assert_ne!(
+        from_those_psps.to_toml(),
+        from_a_default_walk.to_toml(),
+        "the two walks type the fixture's tract differently, so their fits cannot agree",
+    );
+}
+
+/// **`--catalog` names the file that is read**, and not the one beside the reference.
+///
+/// The two are the same file in every other test here — the fixture's catalog is written to
+/// `ref.fa.repeats.parquet`, which is exactly where a run looks when it is told nothing — so
+/// nothing else in this file can tell a command that honours the flag from one that ignores it.
+/// A person keeping catalogs in one directory and references in another (this project's own
+/// tomato benchmark does, because the reference is on a read-only mount) is the ordinary case.
+#[test]
+fn the_catalog_flag_names_the_file_that_is_read() {
+    let (cohort, psps) = a_walked_cohort();
+    let elsewhere = cohort.directory.path().join("catalogs");
+    std::fs::create_dir(&elsewhere).expect("the scratch dir is ours");
+    let moved = elsewhere.join("the-only-catalog.parquet");
+    std::fs::rename(&cohort.catalog, &moved).expect("the catalog moves");
+
+    let output = cohort.directory.path().join("cohort.parameters.toml");
+    let mut args = args_over(&cohort, &psps, output);
+    args.catalog = Some(moved);
+
+    let (from_where_it_was_moved_to, samples) =
+        fit_and_assemble(&args).expect("the catalog it was pointed at is the one it reads");
+
+    assert_eq!(samples, 2, "one entry a sample");
+    let (beside_the_reference, psps_beside_it) = a_walked_cohort();
+    let (from_the_sibling_path, _) = fit_and_assemble(&args_over(
+        &beside_the_reference,
+        &psps_beside_it,
+        beside_the_reference
+            .directory
+            .path()
+            .join("cohort.parameters.toml"),
+    ))
+    .expect("and the same cohort fits with its catalog left where a run looks by default");
+    assert_eq!(
+        from_where_it_was_moved_to.to_toml(),
+        from_the_sibling_path.to_toml(),
+        "one catalog read from two paths is one answer",
+    );
+}
+
+/// **The selection is rebuilt over the ground the psps were walked on, not over the reference.**
+///
+/// This cohort is walked over the first 400 bases of a 600-base contig and fitted with no
+/// `--regions` at all — which is every real run of this command, since it has no such flag: the
+/// ground comes from the psp headers (spec §5.3, §6).
+///
+/// **Why it is worth its own fixture.** A fit that took every base of the reference does not fail
+/// loudly: it rebuilds a plausible selection that keeps positions in the 200 bases nobody walked,
+/// where the censuses hold nothing, and what the user sees is the cohort refused as *built under
+/// another selection* — if the digest notices at all. Every other cohort in this file is walked
+/// whole, so this is the only test here that can tell the two apart.
+#[test]
+fn the_selection_is_rebuilt_over_the_ground_the_psps_were_walked_on() {
+    // `VARYING_CONTIG` is `("chrV", 600)`, and the fixture's repeat tract sits at 200..220, so
+    // the walked part holds the tract and the unwalked part does not.
+    let (cohort, psps) = a_cohort_walked(MinCopies::default(), Some("chrV\t0\t400\n"));
+    let output = cohort.directory.path().join("cohort.parameters.toml");
+
+    let (file, samples) = fit_and_assemble(&args_over(&cohort, &psps, output))
+        .expect("the ground comes from the psps, so a partial walk fits");
+
+    assert_eq!(samples, 2, "one entry a sample");
+    assert!(
+        !file.fitted_from.census.terms.is_empty(),
+        "and the fit had evidence to fit from",
+    );
+}
+
+/// **A catalog that cannot answer the psps' criteria is refused without naming a flag to move.**
+///
+/// The refusal for *the reader asks for tracts below what this file holds* names the flag that
+/// asked — `--min-copies`, say — because on a walk that is what the person typed and what they
+/// have to change (`run_ground::catalog_error_naming_the_flag`). On this command nobody typed it:
+/// the criteria came out of the psps, and no flag here can move them. What the person can move is
+/// which catalog they pointed at, which the general refusal names.
+///
+/// The catalog built here holds tracts of twenty copies and up; the walk's own calling floors ask
+/// for six at period 2, so the file cannot serve them — the rows are not in it.
+#[test]
+fn a_catalog_that_cannot_serve_the_psps_criteria_is_refused_without_naming_a_flag() {
+    use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
+    use crate::ng::region_typing::segment_criteria::SsrSegmentCriteria;
+    use crate::ng::repeat_catalog::RepeatCatalogBuilder;
+    use crate::ng::repeat_catalog::StrRepeatCriteria;
+    use crate::ng::tandem_repeat::ScanParams;
+
+    let (cohort, psps) = a_walked_cohort();
+    let coarse = cohort
+        .directory
+        .path()
+        .join("twenty-copies.repeats.parquet");
+    let mut builder = RepeatCatalogBuilder::create(
+        &coarse,
+        StrRepeatCriteria {
+            classification: SsrSegmentCriteria {
+                min_copies: MinCopies::uniform(20),
+                ..StrRepeatCriteria::default().classification
+            },
+            ..StrRepeatCriteria::default()
+        },
+        ScanParams {
+            match_reward: 2,
+            mismatch_penalty: 7,
+            min_copies: 20,
+        },
+    )
+    .expect("a catalog to build into");
+    let reference_info = read_reference_info_observing(
+        ReferenceSource::Fasta {
+            fasta: cohort.reference.clone(),
+            fai: None,
+        },
+        &mut builder,
+    )
+    .expect("the reference reads");
+    builder.finish(&reference_info).expect("the catalog writes");
+
+    let output = cohort.directory.path().join("cohort.parameters.toml");
+    let mut args = args_over(&cohort, &psps, output);
+    args.catalog = Some(coarse);
+
+    let error = fit_and_assemble(&args).expect_err("that catalog does not hold what the psps ask");
+
+    let rendered = crate::error_render::format_error_chain(&error);
+    assert!(
+        !rendered.contains("--min-copies"),
+        "no flag on this command line can move the criteria, and got: {rendered}",
+    );
+    assert!(
+        rendered.contains("twenty-copies.repeats.parquet"),
+        "the catalog the run was pointed at is what the reader can change, and got: {rendered}",
     );
 }
 
