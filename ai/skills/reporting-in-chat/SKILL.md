@@ -202,6 +202,33 @@ real before/after are what make a rule stick — this file's value grows by accr
 not by being rewritten. Keep the owner's own words: they are more precise than a
 paraphrase.
 
+### 2026-09-10 — a verb phrase that parsed two ways, in the one sentence carrying a decision
+
+At a milestone checkpoint, the recommendation for the one item that needed a decision read:
+
+> ❌ "It would compare this run's settings against each census's recorded ones before fitting, and
+> refuse naming the field that differs."
+>
+> Owner: *"I don't completely understand. If the census settings do not match we should refuse to
+> run the fit. Is not what we should do? What do you mean by 'refuse naming the field that
+> differs'?"*
+
+> ✅ "Yes — refusing to run the fit is exactly the proposal. 'Naming the field' only means the
+> refusal message says *which* setting doesn't match, instead of just 'these don't match' — because
+> a wrong reference is fixed by rerunning with the right file, and a changed position budget only by
+> regenerating, and a message that can't tell them apart leaves you to guess."
+
+Two failures:
+
+1. **"refuse naming X" reads as "refuse to name X".** A missing comma turned an adverbial phrase —
+   *refuse, naming the field* — into an object, and the sentence appeared to argue *against*
+   refusing. **In a sentence that carries a decision, a participle phrase after a verb gets its own
+   clause**: *refuse, and say in the message which setting differs.*
+2. **The reason for the detail was left out, so the detail looked like the point.** Naming the
+   field matters only because the two kinds of mismatch have opposite fixes, one free and one
+   costing hours. Without that clause the owner could not tell whether the proposal was "refuse" or
+   "something subtler than refusing", and had to ask.
+
 ### 2026-08-27 — three numbers written before the measurement that produced them existed
 
 **Not an owner correction — caught in review before sending, and logged because the mechanism is

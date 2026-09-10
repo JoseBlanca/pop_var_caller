@@ -194,6 +194,27 @@ report names it*; a second test has two stale samples and asserts both are in th
 built under another selection; run `regenerate-census`*.
 *Depends:* C3. *Source:* spec §4.2 row 3.
 
+☐ **C5 — a census built under other settings is refused, naming the setting.** *Added at
+Checkpoint C by the owner's ruling of 2026-09-10: "stop and report the problem".* Each census
+records the seven settings its positions were chosen under (`SelectionTermsDigest`, census.rs
+`SELECTION_FIELDS`: selection seed, reference digest, analysed region set, repeat catalog build
+settings, STR routing criteria, generic target position count, STR per-stratum cap). Today they are
+compared only sample against sample (`CohortCensusEvidence::new`); against the run, the fit compares
+only the digest of the kept positions (`fit_a_cohort`), which lets a census built under other settings
+through whenever both happen to keep the same positions — measured at C4 on the fixture cohort with
+half the shipped position budget. **Compare the run's rebuilt selection terms against the censuses'
+before fitting, and refuse naming the first setting that differs**, with the fix that setting calls
+for: a different reference or catalog means *rerun with the files the psps were walked against*;
+anything else means *regenerate*. Also give `estimate-parameters` the reference-against-header check
+`call-from-psps` makes (`refuse_a_file_against_another_reference`), so a wrong `--reference` is caught
+before any selection is rebuilt; and make spec §6's claim that `--catalog` is checked against the
+header's catalog true. The kept-positions digest stays as a backstop. **And the cross-sample
+refusal** — *samples A and B disagree on selection seed; they did not record the same thing*, which
+names no action — says what to do too, preferably as rows of C3's report. Tests: C4's
+half-budget cohort is refused naming the generic target position count; a wrong `--reference` is
+refused naming the reference before the selection is rebuilt.
+*Depends:* C4. *Source:* spec §4.2, §6; Checkpoint C.
+
 > **Checkpoint C: step 2 takes psps, reads nothing it could be told wrongly, and refuses a stale
 > cohort whole.** Pause for review.
 
