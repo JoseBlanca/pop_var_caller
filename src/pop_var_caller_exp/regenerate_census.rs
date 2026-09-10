@@ -596,10 +596,10 @@ fn regenerate_every_census(
 /// **One psp: its records read, its census rebuilt, its trailer replaced** — and nothing else in
 /// the file touched.
 ///
-/// **The census is written with no pileup identity.** A census in a file of its own names the psp
-/// it was built from, so that the pair can be checked; a census that *is* that psp's trailer has
-/// nothing left to pair wrongly with (spec §3.1), and writing one would make this command's output
-/// differ from the walk's for a field neither needs.
+/// **What it writes is what the walk would have written**, which is what makes a rebuilt psp the
+/// walked one byte for byte. A census used to name the psp it was built from so that a pair which
+/// had come apart could be caught; a census that *is* that psp's trailer cannot come apart from
+/// it, and the naming went at spec §3's Milestone E.
 fn regenerate_one_census(
     psp: &Path,
     sample: &str,
@@ -619,10 +619,10 @@ fn regenerate_one_census(
             sample: sample.to_string(),
             source: Box::new(source),
         })?;
-    let records = produced.identity.records;
+    let records = produced.records;
 
     let mut bytes = Vec::new();
-    write_census(&produced.evidence, None, &mut bytes).map_err(|source| {
+    write_census(&produced.evidence, &mut bytes).map_err(|source| {
         RegenerateCensusCliError::CensusNotEncoded {
             sample: sample.to_string(),
             source: Box::new(source),

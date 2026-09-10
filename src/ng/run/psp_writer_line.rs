@@ -53,8 +53,8 @@
 //! the last one has (`psp_census_pair.md` §3.1). So the bytes have to reach the writing thread,
 //! and the seal is the one message that can carry them: they cross the seam **once**, moved
 //! rather than copied, at the end of a walk that has already handed over millions of loci.
-//! (The census is still *encoded* twice for now — once for the trailer and once for the file
-//! beside the psp that plan step A2 deletes. Only the seam is crossed once.)
+//! (It is encoded once: plan step A2 removed the file that used to sit beside the psp, and the
+//! trailer is the only copy.)
 //!
 //! A walk that builds no census closes with [`PspTrailer::Nothing`], which is what every psp in
 //! this tree carried before. **That is a named choice rather than an empty `Vec`** — see the

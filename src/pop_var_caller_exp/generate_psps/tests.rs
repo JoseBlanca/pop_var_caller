@@ -1135,13 +1135,8 @@ fn census_in(output_dir: &Path, sample: &str) -> CensusFile {
     decode_census(&trailer).expect("the trailer is a census this build reads")
 }
 
-/// **Every psp this command writes carries its own sample's census, and names no pileup.**
-///
-/// Two things, and the second is the decision: the census is the psp's trailer
-/// (`psp_census_pair.md` §3.1), and it carries **no** pileup identity, because a census that is
-/// its psp's own trailer cannot be paired with a psp it was not built from and so has nothing
-/// left to check (§3). An identity written here would be one every later reader has to keep
-/// verifying for no gain.
+/// **Every psp this command writes carries its own sample's census** — the psp's trailer is that
+/// sample's evidence and not another's (`psp_census_pair.md` §3.1).
 #[test]
 fn every_psp_carries_its_own_samples_census() {
     let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
@@ -1153,11 +1148,6 @@ fn every_psp_carries_its_own_samples_census() {
         assert_eq!(
             census.census.sample, sample,
             "each psp's trailer holds the census of the sample that psp is",
-        );
-        assert!(
-            census.pileup.is_none(),
-            "a census that is its psp's own trailer names no pileup, and {sample}'s got: {:?}",
-            census.pileup,
         );
     }
 }

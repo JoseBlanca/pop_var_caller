@@ -443,7 +443,7 @@ mod tests {
         (cohort, walked)
     }
 
-    /// The cohort's censuses, read out of its psps the way the command reads them.
+    /// The cohort's censuses, read out of its psps whole, where the command reads them a half at a time so that it can judge each census in between.
     ///
     /// **The cohort is dropped here and the fit below still reads**, because a census read this
     /// way holds a path and an offset rather than the psp's descriptor

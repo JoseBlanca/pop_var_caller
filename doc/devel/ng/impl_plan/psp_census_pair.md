@@ -286,10 +286,21 @@ stage's Milestone C ended when it put the minted read-error totals into the cens
 reproduced Milestone A's run on the same six accessions: same census total, same parameters-file
 size, same five calling counters, and every copy identical to its walked psp whole.
 
-☐ **E2 — the sidecar's machinery deleted.** `PileupIdentity`, `freshness`, `freshness_by_header`
+✅ **E2 — the sidecar's machinery deleted.** `PileupIdentity`, `freshness`, `freshness_by_header`
 and their tests; `psp_beside`, `census_path_for`, `CENSUS_FILE_EXTENSION`; what is left of
 `census_cohort.rs`. `cargo` says what still reads them; nothing should.
 *Depends:* C2, D1.
+*As built, 2026-09-10:* **`PileupIdentity` was not dead**, so this is a refactor and not a
+deletion: `regenerate-census` reports each sample by the record count it carried, and
+`census_from_psp` returns a plain `records: u64` instead. `psp_beside`, `CensusInCohort` and
+`open_census_cohort` had already gone at C2, and what is left of `census_cohort.rs` is live
+production code. **The census format did not change**: the identity occupied one flag byte that
+every shipped writer sets to absent, and that byte is still written, always zero, so no psp on disk
+became unreadable and `VERSION` stays at 4 — a census that *does* set it is now refused, since the
+naming it carries is what this step deleted. **`every_census_in_the_cohorts_psps` is kept**, with
+the reason in its own doc comment. **Three things went newly unused and were not deleted** —
+`psp::header_digest`, `psp::header_and_its_digest` and `WriteStats::header_digest` — because they
+live in the psp writer rather than in the sidecar; they are at Checkpoint E for a ruling.
 
 ☐ **E3 — the probes landed.** `examples/ng_census_read_vs_psp.rs` and
 `examples/ng_census_locus_spans.rs` from branch `census-vs-psp-perf`; the first writes its census

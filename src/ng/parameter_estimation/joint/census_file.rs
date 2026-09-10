@@ -33,7 +33,9 @@
 //! ```text
 //!   magic     8 bytes   "NGCENSUS"
 //!   version   u16       1
-//!   header              the sample's name, the twelve terms, and the pileup it was built from
+//!   header              the sample's name, its read groups, their minted read-error totals,
+//!                       the twelve terms it was recorded under, and one byte that is always
+//!                       zero (`encode_header`)
 //!   directory u32 n, then n × (section key, offset u64, length u64)
 //!   sections            the bytes each directory entry points at
 //! ```
@@ -47,8 +49,6 @@
 //! **Reading one section on its own.** This module writes the file and reads it whole; the
 //! seeking reader that fills one section at a time is the next unit of work, and the whole-file
 //! read here is its parity oracle.
-
-use md5::{Digest, Md5};
 
 use std::io::{Read, Seek, Write};
 use std::path::Path;
@@ -71,8 +71,9 @@ const MAGIC: &[u8; 8] = b"NGCENSUS";
 
 /// The layout this build writes and the only one it reads.
 ///
-/// **A version and not a feature flag.** A census is a cache with a pileup behind it, so the
-/// answer to a version this build does not know is to rebuild rather than to interpret.
+/// **A version and not a feature flag.** A census can always be rebuilt from the psp that holds
+/// it, so the answer to a version this build does not know is to rebuild rather than to
+/// interpret.
 ///
 /// **Three bumps so far, each one a census this build cannot read at all.** 2 on 2026-08-16,
 /// when the depth code went from five bits on a widening ladder to eight on one with a bin for
@@ -86,126 +87,22 @@ const MAGIC: &[u8; 8] = b"NGCENSUS";
 /// front against this, and names both numbers when they differ.
 pub const VERSION: u16 = 4;
 
+/// **The version, written out as a literal, so that changing it is a deliberate edit in two
+/// places.**
+///
+/// A bump makes every census already written unreadable — every psp on disk needs
+/// `regenerate-census` — so the one thing worth a test here is that the number did not move by
+/// accident. Every other test compares the file's version word against the constant, so they all
+/// pass whichever value it holds.
+#[cfg(test)]
+const THE_VERSION_THIS_BUILD_WRITES: u16 = 4;
+
 /// **How many bytes of a census say which format it is** — the magic above and the version word
 /// behind it, which is all [`version_word_of`] reads.
 ///
 /// **Beside the two values it is made of**, so that widening either is a line away from the
 /// number that says how far a reader must read to find them.
 pub const BYTES_THAT_NAME_THE_VERSION: usize = MAGIC.len() + size_of::<u16>();
-
-/// Which pileup a census was built from.
-///
-/// **A digest and a count, never a modification time** (spec §6.1). A modification time changes
-/// when a file is copied and does not change when its contents are rewritten in place, so it
-/// answers a question nobody asked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PileupIdentity {
-    /// A digest of the pileup's header — its reference, its analysed regions, its read filters
-    /// and the command line that produced it.
-    pub header: [u8; 16],
-    /// How many records that pileup holds.
-    pub records: u64,
-}
-
-impl PileupIdentity {
-    /// The identity of a pileup whose header is `header` and which holds `records` records.
-    ///
-    /// **The bytes are the pileup's own header** — its reference, its analysed regions, its read
-    /// filters and the command line that produced it (spec §6.1). Which bytes exactly is the
-    /// pileup writer's business; what this promises is that two pileups with the same header and
-    /// the same record count get the same identity and no others do.
-    pub fn of_header(header: &[u8], records: u64) -> Self {
-        let mut hasher = Md5::new();
-        hasher.update(header);
-        Self {
-            header: hasher.finalize().into(),
-            records,
-        }
-    }
-}
-
-/// What a run should do with a census file, given the pileup it means to fit from.
-///
-/// **A verdict and not an action.** Rebuilding a census from a pileup is the second producer
-/// (milestone C); until that exists, this says what should happen and the caller decides.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Freshness {
-    /// The census was built from this pileup. Use it.
-    Fresh,
-    /// It was built from a different pileup, and the pileup in hand can rebuild it. The value
-    /// names what differs, so that a run can say why it spent the time.
-    Rebuild(&'static str),
-    /// It was built from a different pileup and there is none here to rebuild from. **Refuse**:
-    /// a census whose evidence came from other reads is not this run's evidence, and the whole
-    /// point of naming the pileup is that the difference is otherwise invisible.
-    Refused(&'static str),
-}
-
-/// Whether a census may be used as it stands, rebuilt, or refused (spec §6.1).
-///
-/// `named` is what the census file says it was built from and `in_hand` is the pileup this run
-/// has, `None` when it cannot be reached.
-///
-/// **Nothing here reads a modification time**, which is the point: a modification time changes
-/// when a file is copied and does not change when its contents are rewritten in place, so it
-/// answers a question nobody asked.
-pub fn freshness(named: Option<PileupIdentity>, in_hand: Option<PileupIdentity>) -> Freshness {
-    match (named, in_hand) {
-        (Some(named), Some(here)) if named == here => Freshness::Fresh,
-        (Some(named), Some(here)) => {
-            let field = if named.header == here.header {
-                "the pileup's record count"
-            } else {
-                "the pileup's header"
-            };
-            Freshness::Rebuild(field)
-        }
-        // A census that names a pileup, with none here: nothing can rebuild it and nothing can
-        // check it, so it is refused rather than trusted.
-        (Some(_), None) => Freshness::Refused("the pileup it was built from, which is not here"),
-        // A census that names no pileup at all — written by a run that had none. It cannot be
-        // checked, so it is rebuilt where that is possible and refused where it is not.
-        (None, Some(_)) => {
-            Freshness::Rebuild("the pileup it was built from, which it does not name")
-        }
-        (None, None) => Freshness::Refused("the pileup it was built from, which it does not name"),
-    }
-}
-
-/// **Whether a census may be used, judged on its psp's header alone** — which is all a fit can
-/// afford to check.
-///
-/// [`freshness`] compares the whole identity: the digest of the psp's header *and* how many
-/// records it holds. A fit can get the first for the price of one short read
-/// ([`psp::header_digest`](crate::ng::psp::header_digest)). **It cannot cheaply get the second.**
-/// A psp's footer carries its block count and its byte offsets and no record count, and the
-/// per-block counts sit inside each block's compressed stream — so obtaining one means
-/// decompressing the psp, at every fit, for every sample. That is the cost psp mode exists to
-/// avoid.
-///
-/// **What that leaves unchecked, precisely**: a psp whose header is unchanged and whose records
-/// are not. Only [`PspWriter::append`](crate::ng::psp::PspWriter::append) can produce one — it
-/// reopens a finished file and carries the header forward — and nothing in the shipped commands
-/// calls it. **The fix is to put a record count in the psp's footer**, which makes both halves
-/// one cheap read; that is a psp format change and belongs with the walk stage rather than here.
-///
-/// `named` is what the census says it was built from and `header_in_hand` is the digest of the
-/// psp beside it, `None` when there is no psp there.
-#[must_use]
-pub fn freshness_by_header(
-    named: Option<PileupIdentity>,
-    header_in_hand: Option<[u8; 16]>,
-) -> Freshness {
-    match (named, header_in_hand) {
-        (Some(named), Some(here)) if named.header == here => Freshness::Fresh,
-        (Some(_), Some(_)) => Freshness::Rebuild("the pileup's header"),
-        (Some(_), None) => Freshness::Refused("the pileup it was built from, which is not here"),
-        (None, Some(_)) => {
-            Freshness::Rebuild("the pileup it was built from, which it does not name")
-        }
-        (None, None) => Freshness::Refused("the pileup it was built from, which it does not name"),
-    }
-}
 
 thread_local! {
     /// Bytes this thread has read out of census files, section by section.
@@ -239,15 +136,13 @@ pub fn reset_bytes_read() {
 #[derive(Debug)]
 pub struct CensusFile {
     pub census: SampleCensusEvidence,
-    /// Absent where the census was built during a walk that wrote no pileup.
-    pub pileup: Option<PileupIdentity>,
 }
 
 // ---------------------------------------------------------------------
 // Writing
 // ---------------------------------------------------------------------
 
-/// Write one sample's census, with the identity of the pileup it was built from.
+/// Write one sample's census.
 ///
 /// # Errors
 ///
@@ -255,7 +150,6 @@ pub struct CensusFile {
 /// types that carry them refuse to hold anything that is not.
 pub fn write_census(
     census: &SampleCensusEvidence,
-    pileup: Option<PileupIdentity>,
     out: &mut impl Write,
 ) -> Result<(), CensusError> {
     // **The sections are encoded before the directory is written**, because the directory holds
@@ -272,7 +166,7 @@ pub fn write_census(
     let mut head = Vec::new();
     head.extend_from_slice(MAGIC);
     put_u16(&mut head, VERSION);
-    encode_header(&mut head, census, pileup);
+    encode_header(&mut head, census);
 
     // The directory's own size depends only on its entries' keys, so it can be laid out at its
     // final size before the offsets are known.
@@ -304,7 +198,7 @@ pub fn write_census(
     Ok(())
 }
 
-fn encode_header(out: &mut Vec<u8>, census: &SampleCensusEvidence, pileup: Option<PileupIdentity>) {
+fn encode_header(out: &mut Vec<u8>, census: &SampleCensusEvidence) {
     put_str(out, &census.sample);
 
     // **Who the read groups are, beside who the sample is**, and in the sample's own numbering:
@@ -366,14 +260,16 @@ fn encode_header(out: &mut Vec<u8>, census: &SampleCensusEvidence, pileup: Optio
     out.extend_from_slice(&terms.depth_ladder.0);
     put_u32(out, terms.depth_cap.get());
 
-    match pileup {
-        Some(identity) => {
-            out.push(1);
-            out.extend_from_slice(&identity.header);
-            put_u64(out, identity.records);
-        }
-        None => out.push(0),
-    }
+    // **One byte that is always zero, and it stays.** It used to say whether the census named
+    // the psp it was built from — a digest and a record count, so that a census kept in a file of
+    // its own could be checked against that file. A census that *is* its psp's trailer cannot come
+    // apart from it, so no shipped writer has set it since the census moved inside
+    // (`psp_census_pair.md` §3), and none can now: there is nothing left to name a psp with.
+    //
+    // **Keeping it is what leaves every census this build has written byte for byte what it was.**
+    // Dropping it would move every field of the directory and cost a format version, which makes
+    // every psp already on disk unreadable, to save one byte a sample.
+    out.push(0);
 }
 
 fn encode_key(out: &mut Vec<u8>, key: SectionKey) {
@@ -481,7 +377,7 @@ pub fn decode_census(bytes: &[u8]) -> Result<CensusFile, CensusError> {
     if cursor.u16()? != VERSION {
         return Err(CensusError::Malformed);
     }
-    let (sample, declared, minted, terms, pileup) = decode_header(&mut cursor)?;
+    let (sample, declared, minted, terms) = decode_header(&mut cursor)?;
     let directory = decode_directory(&mut cursor)?;
 
     let mut sections = std::collections::BTreeMap::new();
@@ -496,7 +392,6 @@ pub fn decode_census(bytes: &[u8]) -> Result<CensusFile, CensusError> {
 
     Ok(CensusFile {
         census: SampleCensusEvidence::resident(sample, terms, declared, minted, sections),
-        pileup,
     })
 }
 
@@ -511,9 +406,7 @@ pub fn decode_census(bytes: &[u8]) -> Result<CensusFile, CensusError> {
 ///
 /// [`CensusError::Io`] when the file will not open or read, [`CensusError::Malformed`] when it is
 /// not a census this build reads.
-pub fn open_census(
-    path: &Path,
-) -> Result<(SampleCensusEvidence, Option<PileupIdentity>), CensusError> {
+pub fn open_census(path: &Path) -> Result<SampleCensusEvidence, CensusError> {
     let whole = std::fs::metadata(path)?.len();
     open_census_within(path, ByteExtent::new(0, whole))
 }
@@ -545,7 +438,7 @@ pub fn open_census(
 pub fn open_census_within(
     path: &Path,
     census: ByteExtent,
-) -> Result<(SampleCensusEvidence, Option<PileupIdentity>), CensusError> {
+) -> Result<SampleCensusEvidence, CensusError> {
     // The header and the directory sit at the census's front, so only their bytes are read. How
     // many that is is not known until they are decoded, so the front is read in one go and the
     // rest is never touched. **Capped at the census's own length**, which matters only for a
@@ -563,7 +456,7 @@ pub fn open_census_within(
     if cursor.take(MAGIC.len())? != MAGIC || cursor.u16()? != VERSION {
         return Err(CensusError::Malformed);
     }
-    let (sample, declared, minted, terms, pileup) = decode_header(&mut cursor)?;
+    let (sample, declared, minted, terms) = decode_header(&mut cursor)?;
     let directory = decode_directory(&mut cursor)?;
 
     // **Every section ends inside the census, checked once here rather than at each read.** A
@@ -580,17 +473,14 @@ pub fn open_census_within(
         }
     }
 
-    Ok((
-        SampleCensusEvidence::backed(
-            sample,
-            terms,
-            declared,
-            minted,
-            path.to_path_buf(),
-            census.offset(),
-            directory.into_iter().collect(),
-        ),
-        pileup,
+    Ok(SampleCensusEvidence::backed(
+        sample,
+        terms,
+        declared,
+        minted,
+        path.to_path_buf(),
+        census.offset(),
+        directory.into_iter().collect(),
     ))
 }
 
@@ -656,7 +546,6 @@ type Header = (
     BTreeMap<ReadGroupId, NamedReadGroup>,
     BTreeMap<ReadGroupId, MintedReadErrors>,
     RecordingTerms,
-    Option<PileupIdentity>,
 );
 
 fn decode_header(cursor: &mut Cursor<'_>) -> Result<Header, CensusError> {
@@ -745,14 +634,17 @@ fn decode_header(cursor: &mut Cursor<'_>) -> Result<Header, CensusError> {
         return Err(CensusError::Malformed);
     }
 
-    let pileup = match cursor.u8()? {
-        0 => None,
-        1 => Some(PileupIdentity {
-            header: cursor.digest()?,
-            records: cursor.u64()?,
-        }),
-        _ => return Err(CensusError::Malformed),
-    };
+    // **The byte the pileup identity used to occupy** — see `encode_header`. It must be zero.
+    // A census with it set was written before the census moved into the psp, names a psp by a
+    // digest and a record count, and **this build does not read one**: the naming is what E2
+    // deleted, so a reader that stepped over those 24 bytes would be accepting a file it can no
+    // longer say anything true about. Nothing in the shipped commands can produce one — the fit
+    // and the repair both read a psp's trailer, and the walk has written this byte zero since
+    // Milestone A — so this refusal is reachable only from a census file kept from an older
+    // build.
+    if cursor.u8()? != 0 {
+        return Err(CensusError::Malformed);
+    }
 
     Ok((
         sample,
@@ -766,7 +658,6 @@ fn decode_header(cursor: &mut Cursor<'_>) -> Result<Header, CensusError> {
             depth_ladder,
             depth_cap: DepthCap::new(depth_cap),
         },
-        pileup,
     ))
 }
 
@@ -1161,7 +1052,7 @@ pub(crate) mod tests_support {
     /// reads — which is the point of a trailer fixture for it.
     pub(crate) fn a_census_this_build_wrote() -> Vec<u8> {
         let mut bytes = Vec::new();
-        write_census(&every_corner(), None, &mut bytes).expect("a vector accepts every write");
+        write_census(&every_corner(), &mut bytes).expect("a vector accepts every write");
         bytes
     }
 }
@@ -1179,10 +1070,52 @@ mod tests {
         CohortCensusEvidence, DepthCode, SsrLocusState,
     };
 
-    fn round_trip(census: &SampleCensusEvidence, pileup: Option<PileupIdentity>) -> CensusFile {
+    fn round_trip(census: &SampleCensusEvidence) -> CensusFile {
         let mut bytes = Vec::new();
-        write_census(census, pileup, &mut bytes).expect("a vector accepts every write");
+        write_census(census, &mut bytes).expect("a vector accepts every write");
         decode_census(&bytes).expect("what this build wrote, this build reads")
+    }
+
+    /// **The version has not moved.**
+    ///
+    /// Every other test here compares a file's version word against [`VERSION`], so they all pass
+    /// whatever it holds. A bump is a real event — every census already written stops being
+    /// readable and every psp on disk needs `regenerate-census` — and this is what makes it a
+    /// deliberate edit in two places rather than a side effect of one.
+    #[test]
+    fn the_version_this_build_writes_has_not_moved() {
+        assert_eq!(VERSION, THE_VERSION_THIS_BUILD_WRITES);
+    }
+
+    /// **A census that names the psp it was built from is refused, not read past.**
+    ///
+    /// The byte that said so is still in the header and this build always writes it zero
+    /// (`encode_header`), so no census it writes can reach this. What can is a census file kept
+    /// from a build before the census moved into the psp: it carries a digest and a record count
+    /// that named a pairing this build no longer checks, and reading past them would be accepting
+    /// a file it can say nothing true about.
+    ///
+    /// **The byte is found rather than guessed.** `encode_header` writes it last, so the header's
+    /// own length places it, and the test cannot drift from the layout it is poking at.
+    #[test]
+    fn a_census_that_names_a_pileup_is_refused() {
+        let census = every_corner();
+        let mut bytes = a_census_this_build_wrote();
+
+        let mut header = Vec::new();
+        encode_header(&mut header, &census);
+        let flag = MAGIC.len() + size_of::<u16>() + header.len() - 1;
+        assert_eq!(bytes[flag], 0, "this build writes the byte absent");
+
+        assert!(
+            decode_census(&bytes).is_ok(),
+            "the fixture decodes before the byte is touched, or this test proves nothing",
+        );
+        bytes[flag] = 1;
+        assert!(
+            matches!(decode_census(&bytes), Err(CensusError::Malformed)),
+            "a census naming a pileup is refused",
+        );
     }
 
     /// **The version word is read out of a census's first bytes, and out of nothing else.**
@@ -1224,9 +1157,8 @@ mod tests {
     #[test]
     fn every_corner_state_survives_a_round_trip() {
         let census = every_corner();
-        let read = round_trip(&census, None);
+        let read = round_trip(&census);
         assert_eq!(read.census, census, "the whole sample, field for field");
-        assert_eq!(read.pileup, None);
     }
 
     /// **Decoding a census and encoding it again gives the bytes it was decoded from.**
@@ -1241,25 +1173,15 @@ mod tests {
     /// directory — would be invisible to every round-trip test that compares decoded *values*.
     #[test]
     fn write_census_after_decode_census_returns_the_bytes_it_was_given() {
-        for pileup in [
-            None,
-            Some(PileupIdentity {
-                header: [7; 16],
-                records: 41,
-            }),
-        ] {
-            let mut first = Vec::new();
-            write_census(&every_corner(), pileup, &mut first)
-                .expect("a vector accepts every write");
-            let read = decode_census(&first).expect("what this build wrote, this build reads");
-            let mut again = Vec::new();
-            write_census(&read.census, read.pileup, &mut again)
-                .expect("a vector accepts every write");
-            assert_eq!(
-                first, again,
-                "decoding a census and encoding it again is the identity on bytes",
-            );
-        }
+        let mut first = Vec::new();
+        write_census(&every_corner(), &mut first).expect("a vector accepts every write");
+        let read = decode_census(&first).expect("what this build wrote, this build reads");
+        let mut again = Vec::new();
+        write_census(&read.census, &mut again).expect("a vector accepts every write");
+        assert_eq!(
+            first, again,
+            "decoding a census and encoding it again is the identity on bytes",
+        );
     }
 
     /// The same value written twice is the same bytes — what §7.12's byte-for-byte comparison
@@ -1269,8 +1191,8 @@ mod tests {
     fn writing_the_same_census_twice_gives_the_same_bytes() {
         let census = every_corner();
         let (mut first, mut second) = (Vec::new(), Vec::new());
-        write_census(&census, None, &mut first).expect("a vector accepts every write");
-        write_census(&census, None, &mut second).expect("a vector accepts every write");
+        write_census(&census, &mut first).expect("a vector accepts every write");
+        write_census(&census, &mut second).expect("a vector accepts every write");
         assert_eq!(first, second);
     }
 
@@ -1278,7 +1200,7 @@ mod tests {
     /// the value that was written — the distinction that has no field of its own.
     #[test]
     fn the_three_states_at_an_ordinary_position_come_back_apart() {
-        let read = round_trip(&every_corner(), None);
+        let read = round_trip(&every_corner());
         let mut census = read.census;
         let groups = census.read_groups();
         census
@@ -1310,7 +1232,7 @@ mod tests {
     /// its read number, the two per-stratum counts, and the locus the walk never reached.
     #[test]
     fn a_tracts_offsets_guard_and_difference_come_back_unchanged() {
-        let read = round_trip(&every_corner(), None);
+        let read = round_trip(&every_corner());
         let mut census = read.census;
         census
             .with_strata(ReadGroupId(0), &[AT_SIX_REPEATS], |sections| {
@@ -1350,7 +1272,7 @@ mod tests {
     fn the_directory_places_every_section_end_to_end_and_none_overlap() {
         let census = every_corner();
         let mut bytes = Vec::new();
-        write_census(&census, None, &mut bytes).expect("a vector accepts every write");
+        write_census(&census, &mut bytes).expect("a vector accepts every write");
 
         let directory = decode_directory_of(&bytes).expect("this build's own file");
         assert_eq!(
@@ -1379,22 +1301,6 @@ mod tests {
         );
     }
 
-    /// The pileup a census was built from travels with it, so B3's staleness check has something
-    /// to compare. **A census built during a walk that wrote no pileup carries none**, and the
-    /// two cases have to be told apart rather than one standing for the other.
-    #[test]
-    fn the_pileup_a_census_was_built_from_survives_and_its_absence_is_not_a_zero() {
-        let identity = PileupIdentity {
-            header: [3; 16],
-            records: 12_345,
-        };
-        assert_eq!(
-            round_trip(&every_corner(), Some(identity)).pileup,
-            Some(identity)
-        );
-        assert_eq!(round_trip(&every_corner(), None).pileup, None);
-    }
-
     /// **A file this build did not write is refused rather than decoded.** Every one of these
     /// would otherwise produce a plausible census: a truncated file reads a length off the end
     /// of a buffer, and a wrong version reads this build's fields at another build's offsets.
@@ -1402,7 +1308,7 @@ mod tests {
     fn a_stream_that_is_not_this_builds_census_is_refused() {
         let census = every_corner();
         let mut bytes = Vec::new();
-        write_census(&census, None, &mut bytes).expect("a vector accepts every write");
+        write_census(&census, &mut bytes).expect("a vector accepts every write");
 
         assert!(matches!(decode_census(&[]), Err(CensusError::Malformed)));
         let mut wrong_magic = bytes.clone();
@@ -1438,13 +1344,11 @@ mod tests {
         let mut resident = every_corner();
         write_census(
             &resident,
-            None,
             &mut std::fs::File::create(&path).expect("a new file"),
         )
         .expect("a file accepts every write");
 
-        let (mut backed, pileup) = open_census(&path).expect("this build's own file");
-        assert_eq!(pileup, None);
+        let mut backed = open_census(&path).expect("this build's own file");
         assert_eq!(backed.sample, resident.sample);
         assert_eq!(
             backed.terms, resident.terms,
@@ -1500,7 +1404,6 @@ mod tests {
         let census = every_corner();
         write_census(
             &census,
-            None,
             &mut std::fs::File::create(&path).expect("a new file"),
         )
         .expect("a file accepts every write");
@@ -1518,7 +1421,7 @@ mod tests {
 
         // Opening reads the head of the file, which is not a section — so the count starts
         // after it, where the sections do.
-        let (mut backed, _) = open_census(&path).expect("this build's own file");
+        let mut backed = open_census(&path).expect("this build's own file");
         reset_bytes_read();
         backed
             .with_strata(ReadGroupId(0), &[AT_SIX_REPEATS], |sections| {
@@ -1575,7 +1478,7 @@ mod tests {
         let census = every_corner();
 
         let mut encoded = Vec::new();
-        write_census(&census, None, &mut encoded).expect("a vector accepts every write");
+        write_census(&census, &mut encoded).expect("a vector accepts every write");
         let before = vec![0x5a_u8; 4_097];
         let after = vec![0xa5_u8; 1_024];
         let mut whole = before.clone();
@@ -1584,10 +1487,8 @@ mod tests {
         std::fs::write(&path, &whole).expect("the scratch dir is ours");
 
         let at = before.len() as u64;
-        let (mut backed, pileup) =
-            open_census_within(&path, ByteExtent::new(at, encoded.len() as u64))
-                .expect("this build wrote it");
-        assert_eq!(pileup, None);
+        let mut backed = open_census_within(&path, ByteExtent::new(at, encoded.len() as u64))
+            .expect("this build wrote it");
         assert_eq!(backed.sample, census.sample, "the header is read at `at`");
         assert_eq!(backed.terms, census.terms);
 
@@ -1663,7 +1564,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a scratch directory");
         let path = dir.path().join("truncated.census");
         let mut encoded = Vec::new();
-        write_census(&every_corner(), None, &mut encoded).expect("a vector accepts every write");
+        write_census(&every_corner(), &mut encoded).expect("a vector accepts every write");
         std::fs::write(&path, &encoded).expect("the scratch dir is ours");
 
         // The same file, opened as though it were one byte shorter than it is — so the last
@@ -1701,7 +1602,7 @@ mod tests {
         for (which, sample) in samples.iter().enumerate() {
             let path = dir.path().join(format!("{}.inside", sample.sample));
             let mut encoded = Vec::new();
-            write_census(sample, None, &mut encoded).expect("a vector accepts every write");
+            write_census(sample, &mut encoded).expect("a vector accepts every write");
             let before = vec![0x5a_u8; 1_024 + which * 997];
             let mut whole = before.clone();
             whole.extend_from_slice(&encoded);
@@ -1711,8 +1612,7 @@ mod tests {
                     &path,
                     ByteExtent::new(before.len() as u64, encoded.len() as u64),
                 )
-                .expect("this build wrote it")
-                .0,
+                .expect("this build wrote it"),
             );
         }
         let mut cohort = CohortCensusEvidence::new(backed).expect("every sample recorded one way");
@@ -1764,11 +1664,10 @@ mod tests {
             let path = dir.path().join(format!("{}.census", sample.sample));
             write_census(
                 sample,
-                None,
                 &mut std::fs::File::create(&path).expect("a new file"),
             )
             .expect("a file accepts every write");
-            backed.push(open_census(&path).expect("this build's own file").0);
+            backed.push(open_census(&path).expect("this build's own file"));
         }
         let mut from_files =
             CohortCensusEvidence::new(backed).expect("every sample recorded one way");
@@ -1874,13 +1773,12 @@ mod tests {
         let census = every_corner();
         write_census(
             &census,
-            None,
             &mut std::fs::File::create(&path).expect("a new file"),
         )
         .expect("a file accepts every write");
         let file_len = std::fs::metadata(&path).expect("the file exists").len();
 
-        let (mut backed, _) = open_census(&path).expect("this build's own file");
+        let mut backed = open_census(&path).expect("this build's own file");
         let asked = backed
             .with_strata(ReadGroupId(0), &[AT_SIX_REPEATS], |sections| {
                 assert_eq!(sections.len(), 1, "one stratum was asked for");
@@ -1903,76 +1801,6 @@ mod tests {
         );
     }
 
-    // ---- the pileup a census names, and what a run does about it ---------------------
-
-    /// **Spec §7.13.** A census built from one pileup and fitted against another must not be
-    /// used as it stands: it is rebuilt where the pileup is there, and refused where it is not.
-    /// The two cases are told apart by *which* value differs, so a run says why.
-    #[test]
-    fn a_census_naming_another_pileup_is_rebuilt_where_it_can_be_and_refused_where_it_cannot() {
-        let built_from = PileupIdentity::of_header(b"reference=A regions=1-100 filters=q20", 4_000);
-        assert_eq!(
-            freshness(Some(built_from), Some(built_from)),
-            Freshness::Fresh
-        );
-
-        // The cheapest thing to change, and the likeliest to change by accident: a different
-        // analysed-region set, which is part of the header.
-        let other_regions =
-            PileupIdentity::of_header(b"reference=A regions=1-200 filters=q20", 4_000);
-        assert_ne!(built_from.header, other_regions.header);
-        assert_eq!(
-            freshness(Some(built_from), Some(other_regions)),
-            Freshness::Rebuild("the pileup's header")
-        );
-        assert_eq!(
-            freshness(Some(built_from), None),
-            Freshness::Refused("the pileup it was built from, which is not here")
-        );
-
-        // The same pileup with records added under it — the header is unchanged and the count
-        // is not, which is exactly what the count is carried for.
-        let grown = PileupIdentity {
-            records: built_from.records + 1,
-            ..built_from
-        };
-        assert_eq!(
-            freshness(Some(built_from), Some(grown)),
-            Freshness::Rebuild("the pileup's record count")
-        );
-    }
-
-    /// **The check must not key on a modification time** (spec §6.1, §7.13), and this is what
-    /// says it does not: the census file is touched, re-opened, and names the same pileup — so
-    /// a run that copied its files, or one whose file system rewrote a timestamp, gets the same
-    /// answer it got before.
-    #[test]
-    fn touching_a_census_changes_nothing_about_which_pileup_it_names() {
-        let dir = tempfile::tempdir().expect("a scratch directory");
-        let path = dir.path().join("touched.census");
-        let identity = PileupIdentity::of_header(b"reference=A regions=1-100 filters=q20", 4_000);
-        write_census(
-            &every_corner(),
-            Some(identity),
-            &mut std::fs::File::create(&path).expect("a new file"),
-        )
-        .expect("a file accepts every write");
-
-        let before = std::fs::metadata(&path).expect("the file exists");
-        let (_, named) = open_census(&path).expect("this build's own file");
-
-        // Touch it: the same bytes, written again, so only the timestamp moves.
-        let bytes = std::fs::read(&path).expect("the file reads");
-        std::fs::write(&path, &bytes).expect("the file is writable");
-        let after = std::fs::metadata(&path).expect("the file exists");
-        assert_eq!(before.len(), after.len(), "the same bytes");
-
-        let (_, named_again) = open_census(&path).expect("this build's own file");
-        assert_eq!(named_again, named);
-        assert_eq!(named, Some(identity));
-        assert_eq!(freshness(named_again, Some(identity)), Freshness::Fresh);
-    }
-
     /// A census with no tracts at all, and one with no ordinary positions — the two ends of the
     /// range this caller works over, where a directory with one entry or an empty section could
     /// each be a special case nobody wrote code for.
@@ -1988,7 +1816,7 @@ mod tests {
                 Section::Generic(GenericEvidence::never_walked(3)),
             )]),
         );
-        assert_eq!(round_trip(&generic_only, None).census, generic_only);
+        assert_eq!(round_trip(&generic_only).census, generic_only);
 
         let tracts_only = SampleCensusEvidence::resident(
             "tracts".to_string(),
@@ -2000,7 +1828,7 @@ mod tests {
                 Section::Ssr(SsrEvidence::never_walked(0)),
             )]),
         );
-        assert_eq!(round_trip(&tracts_only, None).census, tracts_only);
+        assert_eq!(round_trip(&tracts_only).census, tracts_only);
     }
 
     /// **The read groups' names survive the round trip**, which is what a cohort of censuses is
@@ -2038,7 +1866,7 @@ mod tests {
             )]),
         );
 
-        let read = round_trip(&census, None);
+        let read = round_trip(&census);
 
         let named = read.census.declared_read_groups();
         assert_eq!(named.len(), 2, "both entries come back");
@@ -2086,7 +1914,7 @@ mod tests {
             )]),
         );
         let mut bytes = Vec::new();
-        write_census(&census, None, &mut bytes).expect("a vector accepts every write");
+        write_census(&census, &mut bytes).expect("a vector accepts every write");
 
         // What one entry looks like on the wire, and where the count of them sits: both built
         // by the encoder rather than restated here.

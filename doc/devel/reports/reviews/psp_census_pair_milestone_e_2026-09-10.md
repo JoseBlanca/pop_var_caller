@@ -136,3 +136,77 @@ never emptied *and* the check that notices is also disabled, the repair skips ev
 stay byte-identical to the originals, and the final comparison passes. The mutation suite below
 runs that pair deliberately and records it as surviving. It is not a defect to fix in the script:
 the before-comparison *is* the guard, and a guard cannot guard itself.
+
+---
+
+## E2 — the sidecar's machinery deleted
+
+**Reviewed against:** the working tree over `fe7431f9`, 16 files, about 413 lines deleted and 154
+added. **No blocker.** The reviewer's own summary: the deletion is correct and complete, and every
+finding is in prose that survived it, plus one untested branch.
+
+### What the review confirmed rather than faulted
+
+- **Nothing deleted was doing work.** Checked against the pre-change tree: every reader of
+  `CensusFile.pileup` was a test assertion, and `freshness`, `freshness_by_header` and `Freshness`
+  had no reader outside their own module at all.
+- **The format is safe.** The flag byte is the header's last field, so a census written with the
+  identity absent — every trailer since Milestone A — encodes to the same bytes and decodes to the
+  same value. `VERSION` is right to stay at 4.
+- **`psp_beside`, `CensusInCohort` and `open_census_cohort` were already gone**, deleted at C2 and
+  named in that commit's own message. E2's list was partly satisfied before the step began.
+- **A small saving nobody had claimed:** dropping the header digest from `census_from_psp` removes
+  a second file open and full header read per psp, on top of the reader open that follows.
+
+### Should-fix — the untested branch, and the fix changed the behaviour
+
+The arm that stepped over a present identity **could not be reached by any writer in the tree**,
+and the test that had covered the format's two flag values went with the type. Both of the
+reviewer's routes were open: test it with a hand-built census, or refuse. **Refusing was taken**,
+for the reviewer's own argument — such a census names a psp by values this build no longer compares
+against anything, so reading past them accepts a file it can say nothing true about — and a test
+now builds one, finding the flag byte from `encode_header`'s own output rather than guessing an
+offset.
+
+### Should-fix — the version had nothing behind it
+
+Every test compares a file's version word against `VERSION`, so all of them pass whatever it holds,
+and this step's central claim — that the version did not move — had no test. A second constant and
+a test that the two agree makes a bump a deliberate edit in two places. The reviewer's broader
+point, that there is **no golden census on disk**, stands and is bigger than this step: a
+coordinated change to both sides of the flag byte would pass every test while making every psp
+already written unreadable. It goes to Checkpoint E.
+
+### Should-fix — nine sentences that had become false, all applied
+
+Six in the files this step touched, each promising in the present tense a check the step deleted:
+`gatherer.rs`'s two, `generate_psps/tests.rs`, `regenerate_census/tests.rs`,
+`regenerate_census.rs`, and `census_from_psp.rs`'s digest test. Three outside them, each a live
+engineering rationale resting on the deleted mechanism: the psp header's read-filter keys, the
+writer line's "encoded twice for now", and the route-cost harness's constant command line. All
+rewritten around the reason that still holds — for the filters, that a cohort's psps are refused
+unless their headers agree.
+
+**One test was renamed rather than repaired.** `the_census_it_writes_into_the_trailer_names_no_psp`
+had been reduced to a bare decode; it is now
+`the_trailer_it_writes_decodes_as_a_census`, which is what it checks.
+
+### Minor, applied
+
+The struct's summary line still said "which psp it came from"; the module's format table had lost
+the read groups, the minted totals and the flag byte; and a comment explaining a discard sat above
+a line that no longer discarded anything.
+
+### Two documents outside this plan, left alone
+
+`doc/devel/ng/arch/run_streaming.md` cites `PileupIdentity::of_header` and `freshness` by line, and
+`doc/devel/ng/spec/run_streaming.md` §6.1 justifies what the psp header must contain by a consumer
+that no longer exists. Both are present-tense claims about the tree and both are now false. Editing
+another plan's spec is not this plan's to do — they are listed at Checkpoint E.
+
+### What is not guarded any more, and was not before either
+
+The rule that a census's staleness must never key on a modification time (spec §6.1) lost its only
+test with the two functions. The reviewer checked that nothing in `census_freshness.rs`,
+`regenerate_census.rs` or `psp_caller.rs` reads a timestamp, so the property holds structurally —
+but it holds by nobody having written the code, not by a test. Noted at Checkpoint E.

@@ -197,3 +197,116 @@ cannot guard itself.
 `cargo fmt`: the new example. It was formatted with `rustfmt` on its own — running `cargo fmt`
 over the tree would have rewritten the four files that were already unformatted before this branch
 — and the check is back to those four.
+
+---
+
+## E2 — the sidecar's machinery deleted
+
+**Committed:** see `git log` for `refactor(ng): E2`.
+
+### What it does
+
+The sidecar was the `<sample>.census` file that used to sit beside each psp. Since Milestone A the
+census is the psp's own trailer, so the two cannot come apart, and everything that existed to check
+that pairing has nothing left to check. Gone: `PileupIdentity`, the `Freshness` verdict and the two
+functions that produced it, `CENSUS_FILE_EXTENSION` and `census_path_for`, and three tests asserting
+that a trailer's census names no psp — a property the type system now holds, there being nothing
+left to name one with.
+
+**It is a refactor and not a deletion, because `PileupIdentity` was not dead code.**
+`regenerate-census` reports each sample by the record count that type carried, so `census_from_psp`
+returns a plain `records: u64` instead; the header digest beside it had no reader outside tests.
+`write_census` and both census readers lose the argument every shipped caller passed `None` for.
+
+### The census format did not change, and no psp was invalidated
+
+**The identity occupied one flag byte** saying present or absent, and every shipped writer writes
+absent. That byte is still written, always zero, so every census this build has written is byte for
+byte what it was and `VERSION` stays at 4. Removing it would have moved every field of the
+directory, cost a format version, and made every psp already on disk unreadable — to save one byte
+a sample.
+
+**What a census with that byte set now gets is a refusal**, and that is a change from the first
+draft of this step, which stepped over the 24 bytes behind it. The review's argument is the one
+that decided it: such a census names a psp by a digest and a record count that this build no longer
+compares against anything, so reading past them is accepting a file it can say nothing true about.
+Nothing in the shipped commands can produce one — the fit and the repair both read a psp's trailer,
+and the walk has written the byte zero since Milestone A — so the refusal is reachable only from a
+census file kept from an older build.
+
+### Three things went newly unused and were not deleted
+
+`psp::header_digest`, `psp::header_and_its_digest` and `WriteStats::header_digest`. Their only
+reader was the identity. They are left in place with ⚠ notes because they live in the psp writer
+rather than in the sidecar, and dropping the last of them changes what the walk reports about
+itself — **a decision for the owner at Checkpoint E**, where it is listed.
+
+### The decision the plan asked for, either way
+
+`every_census_in_the_cohorts_psps` is **kept**. Production calls the two halves so that a command
+can judge each census between them; this is the whole-cohort read that the tests of that assembly
+are written against, and deleting it would put the composition by hand into five test call sites in
+three modules. The reason is now in its own doc comment, so the next reader does not hunt for a
+production caller that was never there.
+
+### What the review changed
+
+One reading of the format, six sentences that survived the deletion and had become false, and one
+gap in the tests. No finding was a wrong deletion: the reviewer checked the pre-change tree and
+every reader of every deleted item was a test.
+
+- **The unreachable branch.** The step-over arm could not be exercised by any writer in the tree,
+  and the test that had covered the format's two flag values went with the type. Refusing instead
+  makes the behaviour reachable from a hand-built census, and there is now a test that builds one:
+  it finds the flag byte from `encode_header`'s own output rather than guessing an offset, so it
+  cannot drift from the layout it pokes at.
+- **The version had no test behind it.** Every other test compares a file's version word against
+  `VERSION`, so all of them pass whatever it holds. A second constant beside it, and a test that
+  the two agree, makes a bump a deliberate edit in two places.
+- **Six false sentences**, in `gatherer.rs` (two), `generate_psps/tests.rs`,
+  `regenerate_census/tests.rs`, `regenerate_census.rs` and `census_from_psp.rs`: each promised a
+  check that this step deleted, in the present tense. Three more outside those files — the psp
+  header's read-filter keys were justified by the census naming its psp, the writer line still said
+  the census was encoded twice, and the route-cost harness's constant command line rested on the
+  same mechanism. All rewritten around the reason that still holds, which in the first case is that
+  a cohort's psps are refused unless their headers agree.
+
+**Two documents outside this plan are now false and were left alone**: `doc/devel/ng/arch/run_streaming.md`
+cites two deleted items by line, and `doc/devel/ng/spec/run_streaming.md` §6.1 justifies the psp
+header's contents by a consumer that no longer exists. Editing another plan's spec is not this
+plan's to do; both are listed at Checkpoint E.
+
+### The mutations
+
+Nine cases, each applied on its own to a restored tree, with the diff printed at the apply step.
+The baseline over the census tests passes with 204.
+
+| the defect | what happened |
+|---|---|
+| the header's flag byte is written present, with nothing behind it | **caught** |
+| the flag byte is not written at all, so every later field lands one byte early | **caught** |
+| a census that names a psp is read past instead of refused | **caught** — by the test added for it |
+| the format version moves | **caught** — by the test added for it |
+| the record count starts at one | **caught** |
+| the count is of bodies decoded rather than of records read | **survives** |
+| the repair reports no records for any sample | **caught** |
+| the walk seals every psp with an empty trailer | **caught** |
+| a census is read from one byte past its trailer | **caught** |
+
+**The survivor is narrow and named rather than fixed.** The walk this producer uses always hands
+over a body, so counting bodies and counting records give the same number on every fixture; the two
+would part company only under a selective walk, which nothing asks for here. **And one of the nine
+did not compile first time** — the driver printed the compiler's own output beside the result, which
+is what kept it from being recorded as a defect nothing catches.
+
+### The gate
+
+| gate | at `9fdb6d6a` (baseline) | after E2 |
+|---|---|---|
+| `cargo test --lib --bins --tests --all-features --no-fail-fast` | 6,738 lib tests pass; one target red | **6,737 pass**, the same target red |
+| `cargo clippy --lib --bins --tests --all-features -- -D warnings` | 11 errors of 5 kinds in 6 files | **the same 11, in the same 6 files** |
+| `cargo check --all-targets --keep-going` | 4 examples do not compile | **the same 4** |
+| `cargo fmt --check` | 4 files | **the same 4** |
+
+**The one lib test fewer is arithmetic, not a loss**: three deleted with the type they exercised,
+two added by the review's fixes.

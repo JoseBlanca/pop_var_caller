@@ -547,11 +547,10 @@ impl SampleObservationGatherer {
 
     /// **The sample's census, encoded as the psp's trailer** — empty for a walk that built none.
     ///
-    /// **The pileup identity is written absent**, and that is the design rather than an omission
-    /// (`psp_census_pair.md` §3). It exists to catch a census paired with a psp it was not built
-    /// from; a census that *is* the psp's own trailer cannot be paired with anything else, so
-    /// there is nothing left for it to check. The field is already an `Option`, so writing it
-    /// absent is not a format change.
+    /// **It names no psp, and cannot.** A census kept in a file of its own used to name the psp
+    /// it was built from, so that a pair which had come apart could be caught; a census that *is*
+    /// the psp's own trailer cannot come apart from it, and the naming went at
+    /// `psp_census_pair.md`'s Milestone E.
     ///
     /// # Errors
     ///
@@ -569,7 +568,7 @@ impl SampleObservationGatherer {
             return Ok(PspTrailer::Nothing);
         };
         let mut bytes = Vec::new();
-        write_census(evidence, None, &mut bytes).map_err(|source| RunError::CensusNotEncoded {
+        write_census(evidence, &mut bytes).map_err(|source| RunError::CensusNotEncoded {
             sample: sample.to_string(),
             source: Box::new(source),
         })?;
@@ -1566,7 +1565,7 @@ mod census_tests {
     }
 
     /// **The psp's trailer is the sample's census** (`psp_census_pair.md` §3.1) — the same
-    /// evidence the walk accumulated, and no pileup identity.
+    /// evidence the walk accumulated.
     ///
     /// **What it is checked against is the census rebuilt from the psp's own records** — the
     /// second producer, `census_from_psp`, reading back what the first one wrote. So a trailer
@@ -1577,9 +1576,6 @@ mod census_tests {
     /// **This was compared against the census file beside the psp until step A2**, which is the
     /// file that step deletes. The rebuild is the durable oracle and is what step A4 makes the
     /// parity test at the command level.
-    ///
-    /// The identity is asserted absent because that is a decision and not a default: a census
-    /// that *is* its psp's trailer has no pairing left to check (spec §3).
     #[test]
     fn the_psps_trailer_is_the_census_the_walk_built() {
         let (cohort, segmentation, plan) = a_cohort_with_a_census_plan();
@@ -1606,12 +1602,6 @@ mod census_tests {
             inside.census, rebuilt.evidence,
             "the trailer holds the census the walk accumulated",
         );
-        assert!(
-            inside.pileup.is_none(),
-            "a census that is its psp's own trailer names no pileup, and got: {:?}",
-            inside.pileup,
-        );
-
         // **And it holds reads rather than the shape of a census**, which the comparison above
         // now does catch — the rebuild reads the psp's records, so a census closed early differs
         // from it. This stays because it says which way the two would differ, and because it is
@@ -1673,12 +1663,11 @@ mod census_tests {
         .expect("the walk writes its psp");
 
         let footer = *PspReader::open(&psp).expect("the psp opens").footer();
-        let (mut lazily, pileup) = open_census_within(
+        let mut lazily = open_census_within(
             &psp,
             ByteExtent::new(footer.trailer_offset, footer.trailer_bytes),
         )
         .expect("the trailer is a census this build reads");
-        assert!(pileup.is_none(), "and it names no pileup, as its trailer");
 
         // The resident read of the same bytes is the oracle: two readers, one census.
         let trailer = PspReader::open(&psp)

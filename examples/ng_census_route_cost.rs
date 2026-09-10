@@ -299,7 +299,7 @@ fn run(
                 let (stats, _) = gatherer.write_psp(&psp_path)?;
                 let produced = census_from_psp(&psp_path, &plan, &segmentation)?;
                 let mut file = std::fs::File::create(&census_path)?;
-                write_census(&produced.evidence, None, &mut file)?;
+                write_census(&produced.evidence, &mut file)?;
                 (stats, std::fs::metadata(&census_path)?.len())
             }
         };
@@ -358,12 +358,12 @@ fn first_regions_of(bed: &Path, count: usize, scratch: &Path) -> Result<PathBuf,
 
 /// What this harness records about itself in every psp it writes.
 ///
-/// **The command line is a constant and not this process's own**, which the two routes'
-/// censuses depend on. A psp's header carries its provenance; a census names the psp it was
-/// built from by a digest of that header; so recording the route word here would give the two
-/// routes different psp headers, different digests, and two censuses differing in exactly the
-/// sixteen bytes of the digest — measured, before this was a constant. The comparison the
-/// wrapper makes would then fail on the harness rather than on anything about the routes.
+/// **The command line is a constant and not this process's own**, which the comparison the
+/// wrapper makes depends on. A psp's header carries its provenance, so recording the route word
+/// here would give the two routes psps that differ in their headers — and the wrapper's `cmp`
+/// would then fail on the harness rather than on anything about the routes. Until plan step E2 a
+/// census also named its psp by a digest of that header, so the two routes' *censuses* differed
+/// too, which is how this was measured before the constant went in.
 fn provenance() -> WriterProvenance {
     WriterProvenance {
         tool: "ng".to_string(),

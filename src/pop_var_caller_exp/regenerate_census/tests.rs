@@ -394,15 +394,13 @@ fn a_psp_with_no_census_is_rebuilt_and_the_fresh_one_is_skipped() {
     );
 }
 
-/// **The census written into a trailer names no psp**, where a census in a file of its own names
-/// the one it was built from.
+/// **What this command leaves in each trailer is a census this build can read.**
 ///
-/// A census that *is* its psp's trailer has nothing left to pair wrongly with
-/// (`psp_census_pair.md` §3.1), and writing an identity into it would make this command's output
-/// differ from the walk's for a field neither needs — which the byte comparison above would catch,
-/// but as *the censuses differ* rather than as the one field that does.
+/// The byte comparison above says the rebuilt psp is the walked one; this says the trailer it put
+/// there decodes, so a failure there is reported as *these bytes are not a census* rather than as
+/// two files differing.
 #[test]
-fn the_census_it_writes_into_the_trailer_names_no_psp() {
+fn the_trailer_it_writes_decodes_as_a_census() {
     use crate::ng::parameter_estimation::joint::census_file::decode_census;
 
     let (cohort, psps) = a_walked_cohort();
@@ -421,12 +419,7 @@ fn the_census_it_writes_into_the_trailer_names_no_psp() {
             .expect("the psp opens")
             .trailer()
             .expect("its trailer reads");
-        let census = decode_census(&trailer).expect("this build's own census");
-        assert!(
-            census.pileup.is_none(),
-            "{}'s census is its psp's trailer, so it names no psp",
-            sample.sample,
-        );
+        decode_census(&trailer).expect("this build's own census");
     }
 }
 
@@ -736,7 +729,7 @@ fn a_cohort_recorded_under_another_selection_is_rebuilt_whole() {
             let rebuilt =
                 census_from_psp(path, &under_another_budget, &segmentation).expect("the psp reads");
             let mut bytes = Vec::new();
-            write_census(&rebuilt.evidence, None, &mut bytes).expect("the census encodes");
+            write_census(&rebuilt.evidence, &mut bytes).expect("the census encodes");
             crate::ng::psp::replace_trailer(path, &bytes).expect("the tail rewrites");
         }
 

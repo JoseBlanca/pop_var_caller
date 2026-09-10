@@ -164,14 +164,17 @@ pub(crate) fn read_header_from(file: File, path: &Path) -> Result<(Header, usize
 
 /// **The md5 of a psp's header exactly as it stands in the file.**
 ///
-/// This is what a census names the psp it was built from by
-/// ([`PileupIdentity`](crate::ng::parameter_estimation::joint::census_file::PileupIdentity)), and
-/// it must be taken from the bytes on disk rather than from a `Header` value held in memory.
-/// **`PspWriter::create` amends the header before encoding it** — it records the compression
-/// level it chose — so a digest of the header a walk *holds* names a file that does not exist,
-/// and every freshness check comparing the two would answer *rebuild* for ever, silently. The
-/// walk-time producer avoids that by taking the digest the writer hands back; a producer reading
-/// a stored psp takes it here, from the file.
+/// ⚠ **Nothing in the shipped commands calls this.** It was how a census kept in a file of its
+/// own named the psp it was built from, and a census has been its psp's own trailer since
+/// `psp_census_pair.md` §3, so there is no longer a pair to check. It is kept because a digest
+/// of a psp's header is a reasonable thing for a caller to want; see the note on
+/// [`WriteStats::header_digest`](crate::ng::psp::WriteStats::header_digest).
+///
+/// **It must be taken from the bytes on disk rather than from a `Header` value held in memory.**
+/// `PspWriter::create` amends the header before encoding it — it records the compression level
+/// it chose — so a digest of the header a walk *holds* names a file that does not exist. A
+/// caller with the writer's own report takes the digest from there; one reading a stored psp
+/// takes it here, from the file.
 ///
 /// # Errors
 ///

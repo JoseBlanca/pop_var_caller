@@ -27,21 +27,20 @@ use std::path::{Path, PathBuf};
 use crate::ng::parameter_estimation::joint::census::{
     CensusError, DepthCode, NamedReadGroup, SampleCensusEvidence,
 };
-use crate::ng::parameter_estimation::joint::census_file::PileupIdentity;
-use crate::ng::psp::{self, PspReadError, PspReader};
+use crate::ng::psp::{PspReadError, PspReader};
 use crate::ng::run::{CensusPlan, Segmentation};
 use crate::ng::types::ReadGroupId;
 use std::collections::BTreeMap;
 
-/// One sample's census, built from its stored psp, and which psp it came from.
+/// One sample's census, built from its stored psp, and how many records that took.
 #[derive(Debug)]
 #[must_use]
 pub struct CensusOfStoredPileup {
     /// The evidence, ready to be written to a census file or handed to a fit.
     pub evidence: SampleCensusEvidence,
-    /// **Which psp built it** — the digest of that file's header and how many records it holds.
-    /// A fit compares this against the psp beside it and refuses a pair that has come apart.
-    pub identity: PileupIdentity,
+    /// **How many records the psp held** — what the rebuild read to produce the evidence above,
+    /// and what a run reports about it.
+    pub records: u64,
     /// The individual, as the psp's own header names it.
     pub sample: String,
     /// Every read group the psp declares, numbered as that psp numbers them.
@@ -190,9 +189,9 @@ impl CensusOfStoredPileup {
 /// # What it reads, and what it does not
 ///
 /// It reads every record of the file once, in order, and holds one at a time. **The record
-/// count in the identity is counted here rather than taken from the file's own index**, so a
-/// file whose index disagrees with its blocks cannot produce a census claiming a count the
-/// records do not support.
+/// count it reports is counted here rather than taken from the file's own index**, so a file
+/// whose index disagrees with its blocks cannot produce a census claiming a count the records do
+/// not support.
 ///
 /// # Errors
 ///
@@ -208,11 +207,6 @@ pub fn census_from_psp(
         path: path.to_path_buf(),
         source: Box::new(source),
     };
-    // **The digest of the header as it stands in the file, not of the one this process decodes.**
-    // The psp writer amends the header before encoding it, so the two are not the same bytes,
-    // and a census naming a header no psp carries would make every freshness check answer
-    // *rebuild* for ever.
-    let header = psp::header_digest(path).map_err(not_opened)?;
     let mut reader = PspReader::open(path).map_err(not_opened)?;
 
     let sample = reader.header().sample.clone();
@@ -255,7 +249,7 @@ pub fn census_from_psp(
 
     Ok(CensusOfStoredPileup {
         evidence: writer.finish(),
-        identity: PileupIdentity { header, records },
+        records,
         sample,
         read_groups,
     })
@@ -274,16 +268,13 @@ mod tests {
     use crate::ng::run::test_fixtures::{a_census_plan_over, gatherer_over};
     use crate::pop_var_caller_exp::test_fixtures::a_cohort_on_disk;
 
-    /// **The census names the psp it was read from, by that file's own bytes.**
+    /// **The record count is the psp's own, counted from its records.**
     ///
-    /// The identity is the digest of the header as it stands on disk and the number of records
-    /// the file holds, and both are compared against what the walk that wrote the psp reported.
-    /// **This is the check that would fail if the digest were taken from a decoded `Header`
-    /// rather than from the file**: the writer records the compression level into the header
-    /// before encoding it, so a value rebuilt in memory is not the value in the file, and a
-    /// census naming it would send every freshness check to *rebuild* for ever.
+    /// It is what `regenerate-census` reports a sample by, and taking it from the file's index
+    /// instead would let a psp whose index disagrees with its blocks report a count its records
+    /// do not support.
     #[test]
-    fn the_census_it_builds_names_the_psp_it_read() {
+    fn the_record_count_it_reports_is_the_one_the_walk_stored() {
         let cohort = a_cohort_on_disk();
         let (segmentation, plan) = a_census_plan_over(&cohort.reference, &cohort.catalog);
         let psp = cohort.directory.path().join("zeta.psp");
@@ -300,21 +291,18 @@ mod tests {
         let built = census_from_psp(&psp, &plan, &segmentation).expect("the psp is readable");
 
         assert_eq!(
-            built.identity.header, stats.header_digest,
-            "the digest is of the header the writer actually wrote",
-        );
-        assert_eq!(
-            built.identity.records, stats.records,
+            built.records, stats.records,
             "the record count is the one the walk stored",
         );
     }
 
     /// **The digest taken from the file's bytes equals the one taken from its decoded header.**
     ///
-    /// These are two routes to one number and they must not come apart: the walk-time producer
-    /// takes it from the writer, this producer takes it from the file, and a fit compares the
-    /// two. A format change that made a header re-encode differently from how it was written
-    /// would break the pairing silently, and this is what says so.
+    /// ⚠ **This test is the only thing left exercising [`psp::header_digest`]**, whose reader —
+    /// the identity by which a census named its psp — went at plan step E2. It stays because the
+    /// property is the one that would break silently: `PspWriter::create` amends the header
+    /// before encoding it, so a digest of the header a walk *holds* names a file that does not
+    /// exist, and a caller reaching for either route has to get the same number.
     #[test]
     fn the_digest_off_the_file_is_the_digest_of_its_own_header() {
         let cohort = a_cohort_on_disk();
@@ -330,16 +318,20 @@ mod tests {
         .expect("the walk writes its psp");
 
         let from_the_file = psp::header_digest(&psp).expect("the header reads");
-        let re_encoded = PileupIdentity::of_header(
-            &PspReader::open(&psp)
-                .expect("the psp opens")
-                .header()
-                .encode()
-                .expect("the header it was written with re-encodes"),
-            0,
-        );
+        let re_encoded: [u8; 16] = {
+            use md5::Digest as _;
+            let mut hasher = md5::Md5::default();
+            hasher.update(
+                PspReader::open(&psp)
+                    .expect("the psp opens")
+                    .header()
+                    .encode()
+                    .expect("the header it was written with re-encodes"),
+            );
+            hasher.finalize().into()
+        };
 
-        assert_eq!(from_the_file, re_encoded.header);
+        assert_eq!(from_the_file, re_encoded);
     }
 
     /// **The sample and its read groups come from the psp, not from anything handed in.**
@@ -471,13 +463,9 @@ mod the_two_producers_agree {
     /// comparison is of two *encodings* rather than of two in-memory values that a writing
     /// difference could still separate.
     ///
-    /// **The rebuild is encoded with no pileup identity, which is what the trailer carries.**
-    /// A census that is its psp's own trailer has no pairing left to check (spec §3), so the
-    /// field is absent there; encoding the rebuild with one would make the two differ in a
-    /// field neither producer disagrees about, and there would be nothing left to compare.
-    /// `census_from_psp` computes an identity all the same, and since plan step D1 the only part
-    /// of it any caller reads is the record count `regenerate-census` reports; the header digest
-    /// beside it is a second open-and-hash of every psp with nothing left to compare it against.
+    /// **Neither census names a pileup, because a census can no longer name one.** A census
+    /// that is its psp's own trailer has no pairing left to check (spec §3), and the field that
+    /// carried the naming went at plan step E2 — so the two sides cannot differ over it.
     fn both_censuses_for(which: usize) -> (Vec<u8>, Vec<u8>) {
         let cohort = a_varying_cohort_on_disk();
         let (segmentation, plan) = a_census_plan_over(&cohort.reference, &cohort.catalog);
@@ -494,8 +482,7 @@ mod the_two_producers_agree {
 
         let rebuilt = census_from_psp(&psp, &plan, &segmentation).expect("the psp is readable");
         let mut from_the_psp = Vec::new();
-        write_census(&rebuilt.evidence, None, &mut from_the_psp)
-            .expect("a vector accepts every write");
+        write_census(&rebuilt.evidence, &mut from_the_psp).expect("a vector accepts every write");
 
         let from_the_walk = crate::ng::psp::PspReader::open(&psp)
             .expect("the psp opens")
@@ -557,7 +544,7 @@ mod the_two_producers_agree {
         let built = census_from_psp(&psp, &plan, &segmentation).expect("the psp is readable");
 
         assert!(
-            built.identity.records > 0,
+            built.records > 0,
             "the fixture's walk stored no records at all, so nothing was fed to either producer",
         );
         assert!(

@@ -812,17 +812,3 @@ fn provenance() -> Result<WriterProvenance, GeneratePspsCliError> {
 pub fn psp_path_for(output_dir: &Path, sample: &str) -> PathBuf {
     output_dir.join(format!("{sample}.{PSP_FILE_EXTENSION}"))
 }
-
-/// **⚠ This command writes no census file** (`psp_census_pair.md` §3) — the census is the psp's
-/// own trailer. **Nothing writes or reads a census file any more** — plan step D1 turned the last
-/// writer into `regenerate-census`, which replaces a psp's trailer — so the extension and the path
-/// rule below have no caller left in `src/`, which is the state plan step E2 waits for before
-/// deleting them.
-pub const CENSUS_FILE_EXTENSION: &str = "census";
-
-/// Where a census file for `sample` goes, if one is written — beside its psp, under the same
-/// stem. See the ⚠ above: this command does not write one.
-#[must_use]
-pub fn census_path_for(output_dir: &Path, sample: &str) -> PathBuf {
-    output_dir.join(format!("{sample}.{CENSUS_FILE_EXTENSION}"))
-}

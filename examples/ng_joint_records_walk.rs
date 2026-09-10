@@ -1157,10 +1157,10 @@ fn refit_from_files(
     for sample in cohort.samples() {
         let path = dir.join(format!("{}.census", sample.sample));
         let mut file = std::fs::File::create(&path).expect("a census file is writable");
-        write_census(sample, None, &mut file).expect("a census writes");
+        write_census(sample, &mut file).expect("a census writes");
         drop(file);
         written += std::fs::metadata(&path).expect("the census exists").len();
-        backed.push(open_census(&path).expect("this build's own census").0);
+        backed.push(open_census(&path).expect("this build's own census"));
     }
     println!(
         "  wrote          {} files, {:.3} MB in total ({:.3} MB a sample), in {:.1} s",

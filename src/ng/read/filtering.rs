@@ -107,9 +107,10 @@ const OFF: &str = "off";
 
 impl ReadFilterConfig {
     /// This policy as psp-header provenance parameters — recorded, never compared
-    /// (spec `run_streaming.md` §6.1): the census names the psp it was built from by
-    /// digesting the header, filters included, so a header that omitted them could not
-    /// tell a census built from filtered reads apart from one built from all of them.
+    /// (spec `run_streaming.md` §6.1). **Recorded because a cohort's psps are refused
+    /// unless their headers agree** (`OpenPspCohort::open`): a header that omitted the
+    /// filters would let two samples walked under different ones be fitted and called
+    /// together as though they had seen the same reads.
     ///
     /// One key per **configurable** filter, each readable by eye; an off filter is the
     /// string `"off"`. The one absent-when-meaningless key is the mismatch base-quality

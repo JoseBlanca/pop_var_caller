@@ -53,16 +53,19 @@ pub struct WriteStats {
     /// census (`psp_census_pair.md` §3.1), so this is how much of a psp the parameters fit
     /// reads and the rest is what it does not.
     pub trailer_bytes: u64,
-    /// **The md5 of the header exactly as it went into the file** — the first half of the
-    /// identity a census names its pileup by
-    /// ([`PileupIdentity`](crate::ng::parameter_estimation::joint::census_file::PileupIdentity)).
+    /// **The md5 of the header exactly as it went into the file.**
+    ///
+    /// ⚠ **Nothing reads this any more.** It was the first half of the identity by which a census
+    /// kept in a file of its own named the psp it came from, and a census has been its psp's own
+    /// trailer since `psp_census_pair.md` §3, so there is nothing left to pair. Removing it would
+    /// also save the walk one md5 of the header a sample; that is a change to this writer's
+    /// reported statistics and is left for a step that owns them.
     ///
     /// **Handed back because the writer amends the header and nobody else can know what it
     /// wrote.** [`create`](PspWriter::create) records the compression level into
     /// [`ZSTD_COMPRESSION_LEVEL_KEY`] before encoding, so a caller digesting the header it
-    /// *supplied* gets a value no file will ever carry — measured, and it would have made every
-    /// census name a psp that does not exist and every freshness check say *rebuild* for ever.
-    /// Sixteen bytes rather than the header itself, which runs to 16 MB at the format's ceiling.
+    /// *supplied* gets a value no file will ever carry. Sixteen bytes rather than the header
+    /// itself, which runs to 16 MB at the format's ceiling.
     pub header_digest: [u8; 16],
 }
 

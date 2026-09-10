@@ -94,7 +94,10 @@ pub enum CensusCohortError {
 /// **The two halves composed, and what production calls is the halves.**
 /// `estimate-parameters` reads the censuses, judges each against its own run's settings, and
 /// assembles afterwards ([`each_census_in_the_cohorts_psps`], [`the_censuses_as_one_cohort`]);
-/// this is the convenience a test or a caller with nothing to judge wants.
+/// this is the convenience a test or a caller with nothing to judge wants. **So it has no caller
+/// in a shipped command, and that is on purpose rather than an oversight** — it is the whole-cohort
+/// read the tests of that assembly are written against, and deleting it would leave each of them
+/// composing the two halves by hand.
 ///
 /// # Errors
 ///
@@ -151,7 +154,7 @@ pub fn the_census_in_a_psp(
     // **The footer says where the census is**, and it was read when the psp was opened, so
     // finding it costs nothing.
     let footer = psp.footer();
-    let (evidence, _identity) = open_census_within(
+    let evidence = open_census_within(
         path,
         ByteExtent::new(footer.trailer_offset, footer.trailer_bytes),
     )
@@ -159,9 +162,6 @@ pub fn the_census_in_a_psp(
         path: path.to_path_buf(),
         source: Box::new(source),
     })?;
-    // **The identity is not read, because a trailer cannot be anything but its own file's.**
-    // The walk writes it absent (`psp_census_pair.md` §3.1) and nothing here would have a
-    // second file to compare it against.
     Ok(evidence)
 }
 

@@ -555,7 +555,7 @@ fn recensus_under_a_budget_of(cohort: &AVaryingCohort, paths: &[PathBuf], generi
     for path in paths {
         let rebuilt = census_from_psp(path, &plan, &segmentation).expect("the psp reads");
         let mut bytes = Vec::new();
-        write_census(&rebuilt.evidence, None, &mut bytes).expect("the census encodes");
+        write_census(&rebuilt.evidence, &mut bytes).expect("the census encodes");
         crate::ng::psp::replace_trailer(path, &bytes).expect("the tail rewrites");
     }
 }

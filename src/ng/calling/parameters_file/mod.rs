@@ -272,13 +272,15 @@ pub enum ParametersFileError {
     /// values rather than one: a reader has to see what the file was fitted on **and** what they
     /// are pointing it at before they can tell which of the two is the mistake.
     ///
-    /// **It carries both values where the census's own refusal carries neither.** `Freshness`
-    /// one level down is `{ Rebuild, Refused }(&'static str)` — a field name, with the two
-    /// values it compared already discarded (`census_file.rs`, `freshness`). Spec §9's sentence
-    /// says this refusal is "in the shape the census's own refusal already uses", and that
-    /// sentence is wrong about the shape: §6 and §13's fourth test both ask for the field *and*
-    /// the two values that differ, and a bare field name cannot answer *which of my three
-    /// references was this fitted on*. **Owner's ruling of 2026-08-30: exceed the census.**
+    /// **It carries both values where the census's own refusal carried neither.** The census's
+    /// staleness verdict one level down was a field name with the two values it compared already
+    /// discarded. Spec §9's sentence says this refusal is "in the shape the census's own refusal
+    /// already uses", and that sentence is wrong about the shape: §6 and §13's fourth test both
+    /// ask for the field *and* the two values that differ, and a bare field name cannot answer
+    /// *which of my three references was this fitted on*. **Owner's ruling of 2026-08-30: exceed
+    /// the census.** (The verdict it was compared against, `Freshness`, went with the sidecar at
+    /// `psp_census_pair.md`'s Milestone E; what the census refuses on now is
+    /// [`CensusVerdict`](crate::ng::run::CensusVerdict).)
     #[error(
         "the parameters file was fitted from other inputs: {field} is {in_the_file} in the file \
          and {in_the_run} in this run"

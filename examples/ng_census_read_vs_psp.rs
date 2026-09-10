@@ -207,7 +207,7 @@ fn run(
     let census_path = work.join(format!("{}.k{keep_one_in}.census", built.sample));
     let truth = {
         let mut bytes = Vec::new();
-        write_census(&built.evidence, Some(built.identity), &mut bytes)?;
+        write_census(&built.evidence, &mut bytes)?;
         std::fs::write(&census_path, &bytes)?;
         bytes
     };
@@ -252,8 +252,8 @@ fn run(
         let at = Instant::now();
         let produced = census_from_psp(psp_path, &plan, &segmentation)?;
         every_body.seconds.push(at.elapsed().as_secs_f64());
-        every_body.records = produced.identity.records;
-        every_body.bodies_built = produced.identity.records;
+        every_body.records = produced.records;
+        every_body.bodies_built = produced.records;
         drop(produced);
 
         let at = Instant::now();
@@ -273,7 +273,7 @@ fn run(
         needed_bodies.bodies_built = selective.bodies_built;
         needed_bodies.bytes = {
             let mut bytes = Vec::new();
-            write_census(&selective.evidence, None, &mut bytes)?;
+            write_census(&selective.evidence, &mut bytes)?;
             bytes.len() as u64
         };
 

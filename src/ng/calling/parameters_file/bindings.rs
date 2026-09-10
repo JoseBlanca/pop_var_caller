@@ -1628,8 +1628,9 @@ mod tests {
     /// `validate`'s own refusals carry, so a reader meets one vocabulary and can find what they
     /// are told about by searching the file they have in front of them.
     ///
-    /// **The alternative was prose**, in the shape `Freshness`'s `"the pileup's header"` uses one
-    /// level down. It was dropped because two of the three field names it produced —
+    /// **The alternative was prose**, in the shape the census's own staleness verdict used one
+    /// level down — a bare phrase such as `"the pileup's header"`. It was dropped because two of
+    /// the three field names it produced —
     /// *the sample in position 3*, *the library of read group 2* — appear nowhere in a produced
     /// file, so the promise their own doc comment made was false for two cases in three.
     #[test]
