@@ -1233,12 +1233,12 @@ mod tests {
     ///
     /// Every other round-trip test here compares decoded *values*, which is the right check for
     /// a codec on its own. This one is a check on the codec's bytes, and it exists because a
-    /// caller now leans on it: `regenerate-census` decodes a psp's records into a census, encodes
-    /// it, and writes it back as that psp's trailer, and its parity test compares those bytes with
-    /// the ones the walk had written there (`psp_census_pair.md` §3, §11). A decode made lossy or
-    /// normalising — a dropped empty section, a reordered directory — would surface there as *the
-    /// two census producers disagree*, which is a whole module away from the change that caused
-    /// it.
+    /// caller leaned on it: the parity oracle used to decode the census *file* a rebuild had
+    /// written and re-encode it before comparing it with the psp's trailer. **No caller decodes
+    /// and re-encodes a census today** — since plan step D1 the rebuild writes into the trailer
+    /// and the comparison is over those bytes directly. What this keeps guarding is the codec
+    /// itself: a decode made lossy or normalising — a dropped empty section, a reordered
+    /// directory — would be invisible to every round-trip test that compares decoded *values*.
     #[test]
     fn write_census_after_decode_census_returns_the_bytes_it_was_given() {
         for pileup in [

@@ -91,10 +91,15 @@ sample has no reads at all.
 **What it still covers, and it is the part that matters:** the selection is derived twice. The walk
 builds its segmentation and its `CensusPlan` from its own flags, this command builds them from the
 psp headers, and a divergence about how a plan is *built* changes which loci are kept and therefore
-the bytes. **What it no longer covers** is the census *file's* own layout — the header and directory
-a census in a file of its own carries — which `census_file.rs`'s own round-trip test holds, and the
-pileup identity, which this command deliberately does not write and which a test of its own now
-asserts is absent.
+the bytes — measured by mutation, seeding the selection differently fails both parity tests.
+
+**What it did not cover, and the step's review caught both.** A comparison of a psp's trailer before
+and after the run holds just as well when nothing is written at all: with the write removed, all
+fourteen tests passed. And the record count the report prints was compared only against the field
+the report was built from. Both are pinned now — one test empties a psp's trailer so the bytes it
+asserts can only have come from this run, and the line's count is asserted against the psp's own.
+The census *file's* layout and the pileup identity, which a reader might expect in this list, are
+covered elsewhere: by `census_file.rs`'s round-trip tests and by a test of this command's own.
 
 ### A wrong number of my own, caught by its own test
 
@@ -107,9 +112,11 @@ my own fixture, recalled rather than measured.
 
 - **6,731 lib tests pass**, against 6,728 on the tree C5 committed: the command's thirteen tests
   became fourteen, and the catalog-header comparison brought two of its own.
-- `cargo check --all-targets --keep-going` fails on exactly the baseline's four examples, so nothing
-  in the tree still names the command that was renamed. Two scripts and one example do
-  (`scripts/ng_fit_stage_end_to_end.sh`, `scripts/ng_census_route_cost.sh`,
-  `examples/ng_census_route_cost.rs`) — that is plan step E1's own work, and they do not compile
-  into this gate.
+- `cargo check --all-targets --keep-going` fails on exactly the baseline's four examples, so
+  **nothing that compiles into the gate names the command that was renamed**. Four things outside it
+  still do: two scripts and one example, which are plan step E1's own work
+  (`scripts/ng_fit_stage_end_to_end.sh` is now broken rather than out of date — it passes
+  `--output-dir` to a subcommand that no longer exists — plus `scripts/ng_census_route_cost.sh` and
+  `examples/ng_census_route_cost.rs`), and three doc comments in `src/`, which the step's review
+  found and this step's follow-up commit fixes.
 - Full gates are in the commit message, compared as sets against the milestone baseline.

@@ -228,7 +228,7 @@ own. The chain is in this milestone's implementation report.
 ### Milestone D — `regenerate-census`
 
 ✅ **D1 — the rename, and the write into the psp.** Module, `SUBCOMMAND`, `cli.rs` variant and its
-doc, the fifteen tests and the two `SUBCOMMAND`-spelling tests. `--output-dir` and `--force` go;
+doc, its thirteen tests and the two `SUBCOMMAND`-spelling tests. `--output-dir` and `--force` go;
 per sample, `census_from_psp` then `replace_trailer`. The cohort opened with `OpenPspCohort::open`,
 so B3's check applies.
 *Depends:* A4, B3. *Source:* spec §8.

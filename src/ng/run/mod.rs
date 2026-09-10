@@ -577,9 +577,9 @@ pub enum RunError {
     ///
     /// **Refused by every command that opens its cohort with
     /// [`OpenPspCohort::open`](crate::ng::run::OpenPspCohort::open)** — `call-from-psps`,
-    /// `estimate-parameters` and `generate-census`. The owner's ruling of 2026-09-09 is that a fit
-    /// and a calling run are equally unable to pool such files, so the check lives at the opener
-    /// they share.
+    /// `estimate-parameters` and `regenerate-census`. The owner's ruling of 2026-09-09 is that a
+    /// fit and a calling run are equally unable to pool such files, so the check lives at the
+    /// opener they share, and the repair inherits it.
     ///
     /// `field` is [`SegmentationInputs::first_difference`]'s answer, written to read inside this
     /// sentence. The analysed regions have their own refusal,

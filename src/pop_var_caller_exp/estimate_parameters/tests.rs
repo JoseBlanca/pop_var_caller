@@ -656,11 +656,8 @@ fn a_census_that_disagrees_with_the_rest_of_its_cohort_is_named_alone() {
 /// somebody after a word the binary does not know fails here.
 #[test]
 fn the_report_names_the_command_that_rebuilds_a_psps_census() {
-    assert_eq!(
-        THE_COMMAND_THAT_REBUILDS_A_CENSUS,
-        crate::pop_var_caller_exp::regenerate_census::SUBCOMMAND,
-    );
-
+    // `regenerate_census::SUBCOMMAND` *is* this constant, so comparing the two is `X == X`;
+    // what carries the claim is the parse below.
     let parsed = Cli::try_parse_from([
         "pop_var_caller_exp",
         THE_COMMAND_THAT_REBUILDS_A_CENSUS,

@@ -78,8 +78,9 @@ pub enum PopVarCallerExpCommand {
     /// question of every sample and compare their answers. It lives in the psp's trailer,
     /// written there by the walk.
     ///
-    /// This is the repair for the psps a fit refuses — one written by another build, one
-    /// whose census an append discarded, one recorded under settings the run does not use.
+    /// This is the repair for the psps a fit refuses — one written before the census moved
+    /// into the psp, one written by another build, one recorded under settings the run does
+    /// not use.
     /// estimate-parameters names those samples and tells you to run this. Each named psp's
     /// trailer is replaced; its header, blocks and index are the bytes they were.
     ///

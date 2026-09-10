@@ -475,8 +475,9 @@ mod the_two_producers_agree {
     /// A census that is its psp's own trailer has no pairing left to check (spec §3), so the
     /// field is absent there; encoding the rebuild with one would make the two differ in a
     /// field neither producer disagrees about, and there would be nothing left to compare.
-    /// `census_from_psp` still computes an identity, because `generate-census` still writes
-    /// census files that need one.
+    /// `census_from_psp` computes an identity all the same, and since plan step D1 the only part
+    /// of it any caller reads is the record count `regenerate-census` reports; the header digest
+    /// beside it is a second open-and-hash of every psp with nothing left to compare it against.
     fn both_censuses_for(which: usize) -> (Vec<u8>, Vec<u8>) {
         let cohort = a_varying_cohort_on_disk();
         let (segmentation, plan) = a_census_plan_over(&cohort.reference, &cohort.catalog);

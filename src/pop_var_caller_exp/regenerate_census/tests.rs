@@ -56,8 +56,9 @@ fn a_walk_into(psps: &Path, reference: &Path, catalog: &Path, alignments: &[Path
 }
 
 /// The plain cohort, walked: two psps in a directory of their own, each carrying the census its
-/// walk wrote into its trailer. **Its second sample has no reads at all**, which is the shape a
-/// producer that skipped empty sections would get wrong.
+/// walk wrote into its trailer. **The sample `alpha` has no reads at all**, which is the shape a
+/// producer that skipped empty sections would get wrong — and it is the *first* psp this command
+/// reads, since psps arrive in name order.
 fn a_walked_cohort() -> (ACohortOnDisk, PathBuf) {
     let cohort = a_cohort_on_disk();
     let psps = cohort.directory.path().join("psps");
@@ -96,26 +97,29 @@ fn the_trailers_in(psps: &Path, samples: &[&str]) -> Vec<(PathBuf, Vec<u8>)> {
 
 /// **The command is spelled by the constant the library's refusals name.**
 ///
-/// Two messages in `ng::run` tell a person to run this — the report `estimate-parameters` refuses
-/// a stale cohort with, and the fit's own backstop — and until this step they named a command that
-/// did not exist. **What this pins is that the name they print is the one clap answers to**, in
-/// both directions: the constant is this module's `SUBCOMMAND`, and parsing that word gives these
-/// arguments.
+/// The refusals in `ng::run` tell a person to run this command, and until this step they named one
+/// that did not exist. **What this pins is that the word they print is the one clap answers to**:
+/// the argument list parsed here is built from that constant, and clap answers `--help` for it
+/// rather than reporting a subcommand it does not know.
 #[test]
 fn the_subcommand_is_spelled_regenerate_census() {
     let args = args_of(&a_shortest_run());
     assert_eq!(args.reference, PathBuf::from("ref.fa"));
     assert_eq!(args.psps, vec![PathBuf::from("zeta.psp")]);
+    // **`SUBCOMMAND` is *defined as* that constant, so comparing them is `X == X`.** What
+    // carries the claim is the parse above, whose argument list is built from the constant the
+    // library's refusals print: if clap did not answer to that word, `args_of` would not return.
+    let refused = Cli::try_parse_from([
+        "pop_var_caller_exp",
+        THE_COMMAND_THAT_REBUILDS_A_CENSUS,
+        "--help",
+    ])
+    .expect_err("--help exits rather than running");
     assert_eq!(
-        SUBCOMMAND, THE_COMMAND_THAT_REBUILDS_A_CENSUS,
-        "the name the library's refusals print is this command's own",
-    );
-    assert!(
-        Cli::try_parse_from(["pop_var_caller_exp", SUBCOMMAND, "--help"])
-            .expect_err("--help exits")
-            .to_string()
-            .contains(SUBCOMMAND),
-        "and clap answers to it",
+        refused.kind(),
+        clap::error::ErrorKind::DisplayHelp,
+        "clap printed help for this name, rather than failing to recognise it — which its \
+         unrecognised-subcommand error would also echo back",
     );
 }
 
@@ -139,9 +143,11 @@ fn nothing_about_the_ground_or_the_criteria_can_be_typed_here() {
     ] {
         let mut argv = a_shortest_run();
         argv.extend([flag, "whatever"]);
-        let refused = Cli::try_parse_from(argv).expect_err("{flag} is not a flag here");
+        let refused = Cli::try_parse_from(argv)
+            .expect_err("this command takes no such flag")
+            .to_string();
         assert!(
-            refused.to_string().contains(flag),
+            refused.contains(flag),
             "{flag} was accepted, and got: {refused}",
         );
     }
@@ -267,6 +273,49 @@ fn the_census_it_writes_is_the_one_the_walk_wrote_for_a_sample_with_no_reads() {
         tallies.iter().any(|tally| !tally.contributes_nothing()),
         "every sample is empty, so the two producers agreed about nothing: {tallies:?}",
     );
+}
+
+/// **The census is written, and this is the only test here that can see that it is.**
+///
+/// Every other comparison in this file reads a trailer the walk had already put there, so each one
+/// holds just as well for a command that reads every psp, builds every census and writes none of
+/// them — measured by this step's review: with the `replace_trailer` call removed, the other
+/// fourteen tests pass. Plan step D4's whole-file comparison passes on that same no-op too.
+///
+/// This one empties one psp's trailer before the run, so the bytes it asserts can only have come
+/// from this run. **The other psp is left as the walk sealed it**, and both are asserted: the
+/// emptied one comes back carrying the census the walk had written, and the untouched one still
+/// carries its own.
+#[test]
+fn the_census_is_written_into_a_psp_that_has_none() {
+    let (cohort, psps) = a_walked_cohort();
+    let walked = the_trailers_in(&psps, &["alpha", "zeta"]);
+    let emptied = psp_path_for(&psps, "alpha");
+    crate::ng::psp::replace_trailer(&emptied, b"").expect("the tail rewrites");
+    assert_eq!(
+        PspReader::open(&emptied)
+            .expect("the psp opens")
+            .footer()
+            .trailer_bytes,
+        0,
+        "this fixture starts with one psp carrying no census at all",
+    );
+
+    regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
+        .expect("the psps read");
+
+    for (path, before) in &walked {
+        let after = PspReader::open(path)
+            .expect("the psp opens")
+            .trailer()
+            .expect("its trailer reads");
+        assert_eq!(
+            before,
+            &after,
+            "{} does not carry the census its walk wrote",
+            path.display(),
+        );
+    }
 }
 
 /// **The census written into a trailer names no psp**, where a census in a file of its own names
@@ -406,6 +455,18 @@ fn each_line_names_the_psp_and_what_went_into_its_census() {
         zeta.psp,
         psp_path_for(&psps, "zeta"),
         "the psp named is the one this sample's census came from",
+    );
+    // **The count is the psp's own, and nothing else here checks it.** The line is built from the
+    // same field it is compared against, so a rebuild reporting no records at all would pass every
+    // other test in this file — which the command this replaced said in as many words.
+    let counted = {
+        let mut psp = PspReader::open(&psp_path_for(&psps, "zeta")).expect("the psp opens");
+        psp.records().expect("the walk starts").count() as u64
+    };
+    assert_eq!(
+        zeta.records, counted,
+        "the line reports {} stored loci where the psp holds {counted}",
+        zeta.records,
     );
 }
 

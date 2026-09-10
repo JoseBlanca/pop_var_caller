@@ -354,10 +354,10 @@ pub fn segments_cut_with(
 /// of [`segments_cut_with`], for a command that has something to ask the catalog's header before
 /// any segment is cut.
 ///
-/// `estimate-parameters` is that command: it compares the header with the catalog its psps were
-/// walked with, and a catalog that is not theirs would otherwise be met while cutting, as one that
-/// cannot serve the criteria — a message about the file's contents where the fault is which file
-/// was named.
+/// `estimate-parameters` and `regenerate-census` are those commands: each compares the header with
+/// the catalog its psps were walked with, and a catalog that is not theirs would otherwise be met
+/// while cutting, as one that cannot serve the criteria — a message about the file's contents where
+/// the fault is which file was named.
 ///
 /// # Errors
 ///
@@ -383,10 +383,10 @@ pub fn open_catalog(
 /// `catalog_path` is the file `catalog` was opened from, recorded in the segmentation and named by
 /// a refusal; an open catalog does not hand its path out.
 ///
-/// **`CriteriaSource::ThePspHeaders` is now defensive for `estimate-parameters`**, which proves
-/// the catalog's header is the one its psps were walked with before it cuts anything: the criteria
-/// it cuts with are those psps' own, and a catalog that cut them once cuts them again. What is
-/// left for that arm is a file whose header matches and whose rows do not.
+/// **`CriteriaSource::ThePspHeaders` is now defensive for both psp-taking commands**, each of
+/// which proves the catalog's header is the one its psps were walked with before it cuts anything:
+/// the criteria it cuts with are those psps' own, and a catalog that cut them once cuts them
+/// again. What is left for that arm is a file whose header matches and whose rows do not.
 ///
 /// # Errors
 ///

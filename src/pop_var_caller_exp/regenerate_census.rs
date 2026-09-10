@@ -7,19 +7,27 @@
 //! (`doc/devel/ng/spec/psp_census_pair.md` §3).
 //!
 //! **This is the repair, for the psps a fit refuses.** `estimate-parameters` stops and names every
-//! sample whose census it cannot use — one written by another build, one an append discarded, one
-//! recorded under settings this run does not use (spec §4) — and tells the person to run this. It
+//! sample whose census it cannot use — one written before the census moved into the psp, one
+//! written by another build, one recorded under settings this run does not use (spec §4) — and
+//! tells the person to run this. It
 //! rebuilds each named psp's census from that psp's own records, without opening a single
 //! alignment file, and replaces the psp's trailer with it. **Nothing else in the file is
 //! rewritten**: the header, the blocks and the index are the bytes they were.
+//!
+//! **⚠ A repair interrupted mid-write costs a re-walk of that one sample.** The tail is truncated
+//! before the new census is written ([`replace_trailer`]), so between those two moments the psp has
+//! no footer and no reader accepts it — and a psp that cannot be read cannot have its census
+//! rebuilt from its records. The command this replaced could only destroy a cache file beside the
+//! psp. Every other failure leaves the file byte for byte what it was, and says so.
 //!
 //! **Psps in, and nothing else to type.** The ground the walk covered and the criteria it cut that
 //! ground with are in every psp's header, and the cohort is refused unless the files agree about
 //! them, so there is no flag here that says what a repeat is (spec §6, §8). What is left is the
 //! reference and the catalog, which the selection cannot be rebuilt without — and both are checked
 //! against the psps before anything is written, because a census recorded against another
-//! reference is one every later fit refuses, after this command has spent a quarter of an hour a
-//! sample producing it.
+//! reference is one every later fit refuses, after this command has spent the rebuild producing
+//! it — 0.25 to 3.25 s a sample on the fixtures spec §2 measures, and a quarter of an hour at 50×
+//! human.
 //!
 //! **The selection is the run's, not the sample's**, and its numbers are
 //! [`CensusSelection::SHIPPED`]: about two million positions, five thousand tracts a stratum, and
@@ -49,7 +57,7 @@ use crate::ng::repeat_catalog::RepeatCatalogHeader;
 use crate::ng::run::report::{describe, plural};
 use crate::ng::run::{
     CensusFromPspError, CensusPlan, CensusSelection, CensusTally, OpenPspCohort, RunError,
-    THE_COMMAND_THAT_REBUILDS_A_CENSUS, census_from_psp,
+    Segmentation, THE_COMMAND_THAT_REBUILDS_A_CENSUS, census_from_psp,
 };
 use crate::pop_var_caller_exp::psp_inputs::{PspArgumentRefusal, psps_named};
 use crate::pop_var_caller_exp::run_ground::{self, GroundError};
@@ -95,10 +103,19 @@ pub struct RegenerateCensusArgs {
 
 /// Everything that can stop a `regenerate-census` run.
 ///
-/// **Every refusal but one comes before a psp is rewritten**, in the order a person would want
-/// them: the reference, the psp paths, the cohort's own agreement, the reference and the catalog
-/// against the psps, and the selection. The one that arrives later is a psp that will not take the
-/// write, and it says whether that file was left as it was.
+/// **Most of them come before any psp is rewritten**, in the order they are met: the reference,
+/// the ground it offers to select from, the psp paths, the cohort's own agreement, the reference
+/// and the catalog against the psps, and the selection.
+///
+/// **Three arrive inside the loop, and by then earlier psps have been rewritten**
+/// ([`Build`](Self::Build), [`CensusNotEncoded`](Self::CensusNotEncoded),
+/// [`TrailerNotReplaced`](Self::TrailerNotReplaced)): a cohort of sixty that fails at the fortieth
+/// leaves thirty-nine rebuilt, and the run prints no report — what says which those were is the
+/// per-sample progress each one printed as it finished. **The command this replaced had the
+/// property this does not**, and could: it judged every output path before doing any work, because
+/// what it wrote was a separate file. Here the psp is the output. **Plan step D2 is what makes the
+/// re-run cheap** — it skips the psps that need nothing, so a second run does only what is still
+/// owed; until then it rebuilds all sixty.
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum RegenerateCensusCliError {
@@ -216,7 +233,8 @@ pub enum RegenerateCensusCliError {
     /// A psp would not take its new census.
     ///
     /// **What state that file is left in is the cause's to say, and it says it**
-    /// ([`FileAfterAFailedReplacement`]): a psp left byte for byte what it was needs this command
+    /// ([`crate::ng::psp::FileAfterAFailedReplacement`]): a psp left byte for byte what it was
+    /// needs this command
     /// run again, and one already cut back to its trailer has no footer, so that sample has to be
     /// rewritten before anything can read it. **This variant carries no copy of that verdict** —
     /// two fields that could disagree about the state of one file would be a way to tell somebody
@@ -349,17 +367,15 @@ fn regenerate_every_census(
     // genome is sequence at all: a position inside a run of `N` has no reference base to compare
     // a read against, and keeping one would put a permanent hole in every sample's records.
     let mut callable = UnambiguousRuns::default();
-    let with_checksums = std::sync::Arc::new(
-        read_reference_observing_or_creating_fai(
-            args.reference.clone(),
-            ReferenceCheck::VerifyAgainstIndex,
-            &mut callable,
-        )
-        .map_err(|source| RegenerateCensusCliError::Reference {
-            path: args.reference.clone(),
-            source,
-        })?,
-    );
+    let with_checksums = read_reference_observing_or_creating_fai(
+        args.reference.clone(),
+        ReferenceCheck::VerifyAgainstIndex,
+        &mut callable,
+    )
+    .map_err(|source| RegenerateCensusCliError::Reference {
+        path: args.reference.clone(),
+        source,
+    })?;
     let unambiguous = callable
         .into_selectable()
         .map_err(|source| RegenerateCensusCliError::CensusGround { source })?;
@@ -468,7 +484,7 @@ fn regenerate_one_census(
     psp: &Path,
     sample: &str,
     plan: &CensusPlan,
-    segmentation: &crate::ng::run::Segmentation,
+    segmentation: &Segmentation,
 ) -> Result<SampleCensusOutcome, RegenerateCensusCliError> {
     let mut produced = census_from_psp(psp, plan, segmentation).map_err(|source| {
         RegenerateCensusCliError::Build {
