@@ -239,12 +239,18 @@ Tests: a cohort with one stale psp rewrites one trailer and names the rest as sk
 walked under a selection with another seed regenerates every one.
 *Depends:* D1. *Source:* spec §8.
 
-☐ **D3 — a run stopped part-way costs only what is left.** Regenerate three; make the third psp
+✅ **D3 — a run stopped part-way costs only what is left.** Regenerate three; make the third psp
 unreadable after two succeed, then readable again; run again: the third alone is regenerated, the
 first two skipped as fresh.
 *Depends:* D2. *Source:* spec §8, §10 (errors).
+*As built, 2026-09-10:* **two psps rather than three**, because the fixture cohorts have two
+samples and the property needs one of each — a psp skipped and a psp rebuilt in the second run. The
+psp is made to fail by corrupting a block rather than by permissions, which cannot be used: this
+suite runs as root inside the dev container, where a read-only file is not read-only. **What two
+psps cannot see** is a run that pressed on past the failure and rebuilt *later* samples before
+returning the first error; closing that needs a three-sample fixture.
 
-☐ **D4 — the whole-file oracle.** A walked psp copied, `regenerate-census` run on the copy with
+✅ **D4 — the whole-file oracle.** A walked psp copied, `regenerate-census` run on the copy with
 the same reference and catalog, and the copy identical to the original **byte for byte, whole** —
 header, blocks, index, trailer, footer. On the fixture with a repeat tract and three read groups,
 and in `scripts/ng_fit_stage_end_to_end.sh` on real reads (E1).

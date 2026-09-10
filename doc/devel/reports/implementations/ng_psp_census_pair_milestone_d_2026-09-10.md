@@ -238,3 +238,101 @@ a syntax error I had introduced in it — the mutation list's closing quote lost
 rejected the file, and my check was a peek at an empty log, which cannot tell *not started* from
 *just started*. The relaunch was verified three ways: the log grew, the first mutation reported its
 substitution applied, and the driver process was alive.
+
+---
+
+## D3 and D4 — a stopped run, and the whole-file oracle
+
+**Committed:** see `git log` for `feat(ng): D3+D4`. **One loop iteration and one commit for both
+steps**, which the plan-driven skill allows for tightly-coupled adjacent steps and which is named
+here: both are test-only, over the same command, and both rest on the same idiom — a psp whose
+census this run would write is skipped, so a test that wants a rebuild has to make the psp owed
+first.
+
+### D3 — a run stopped part-way does only what is left
+
+D2's skip rule is what makes this true; the step is the test that says so. The first run rebuilds
+`alpha` and then fails on `zeta`, leaving the cohort half repaired. The bytes are put back, and the
+second run skips `alpha` and rebuilds `zeta` alone.
+
+**The property nothing else covers: the second run skips a census *this command* wrote.** Every
+other skip test skips the bytes the walk wrote. If what `write_census` records and what
+`CensusPlan::recording_terms` is compared against came apart, this command would rebuild its own
+output for ever and a stopped run would never converge, however many times a person ran it.
+
+**How the psp is made to fail, and why not the way the plan asked.** Its blocks are corrupted — 32
+bytes just below where the index begins — because the rebuild is the only pass that reads records.
+Permissions would be plainer and cannot be used: this suite runs as root inside the dev container,
+where a read-only file is not read-only. The corruption stands in for a read that failed and then
+stopped failing, which is why the bytes go back between the runs.
+
+**Two psps rather than the plan's three**, recorded in the plan's own D3 line: the fixture cohorts
+have two samples, and the property needs one of each. **What two cannot see** is a run that pressed
+on past the failure and rebuilt *later* samples before returning the first error — with the failing
+psp last there is nothing after it to have been touched. Closing that needs a three-sample fixture.
+
+### D4 — a regenerated psp is the walked one, byte for byte, whole
+
+Both psps of the fixture with a repeat tract are copied into a directory of their own, their
+trailers emptied, and the command run over them; each file then equals the walked one byte for byte
+— header, blocks, index, trailer and footer.
+
+**The emptied trailer is the plan's own note on this step**, added at D2: a psp whose census this
+run would write is skipped, so a copy handed straight to the command comes back untouched and a byte
+comparison passes without a rebuild having happened. It also makes the comparison stronger than the
+plan asked — the footer's trailer length goes to zero and has to come back.
+
+**What it covers that this file's trailer comparisons do not**, and it is two things rather than the
+four the first draft claimed: the header's exact **bytes**, where the sibling test compares its
+`Debug` rendering, and every record's **content**, where that test compares only how many there are.
+The review corrected the other two: a dropped block is caught by that record count, and a rewritten
+index never reaches any comparison because the reader refuses the file first.
+
+**And the honest limit, which is now in the test's own doc.** Against this command as it stands there
+is no small defect this catches first — the only write is `replace_trailer`, which touches nothing
+below the trailer's offset. What it is for is the change that would stop that being true: a rebuild
+that wrote the psp through `PspWriter` again, re-compressed its blocks, or re-encoded its header.
+
+### What the review found, and what was done
+
+**No blockers**, and it confirmed neither test can pass on an idle command. Fixed: the over-claimed
+coverage above; "three read groups" said of a psp that declares two (the *cohort* has three, which
+is why both psps are now copied); the missing guard that the comparison covers the census's
+stratum-keyed half at all, now a tally assertion; the reason permissions were not used; the claim
+that nothing re-reads a skipped psp's records, which this test cannot see and D2's can; a quarter of
+an hour without its subject; and a variable called `whole` that held a psp with an emptied trailer.
+The corruption, written out twice, is one helper now.
+
+### What was measured
+
+- **6,738 lib tests pass**, against 6,736 at D2: these two steps are two tests.
+- Mutations below. Gates in the commit message, as sets against the milestone baseline.
+
+### Ten mutations, nine caught — and the survivor corrected a claim of D2's
+
+| mutation | outcome |
+|---|---|
+| the rebuild order is reversed | 2 tests fail, and only the stopped-run test could see it |
+| a sample that will not rebuild is passed over instead of stopping the run | 2 fail |
+| the tail is never rewritten | 9 fail |
+| nothing is ever skipped | 4 fail |
+| everything is skipped | 13 fail |
+| the census names the psp it came from | 8 fail |
+| only the first psp owed is rebuilt | 9 fail — the reason D4 copies both psps rather than one |
+| **a skipped psp's records are read anyway** | **survives** |
+| the fixture's repeat tract falls below the period-2 floor | 3 fail, one of them the tally assertion this step added |
+| the tail rewrite drops the index checksum | 13 fail |
+
+**The survivor is a correction, not a gap to close.** D2's report and this command's module doc said
+a psp needing nothing "keeps its records unread". What the corrupted-block test pins is narrower and
+is the part that matters: **no rebuild pass happens for a skipped psp** — a rebuild reads every
+record and would fail on the corrupted ones — and that pass is the quarter of an hour a sample.
+Code added to the skip arm that reads the records and discards the result passes every test in the
+file, because a discarded failure is invisible and nothing counts block bytes the way
+`trailer_bytes_read` counts trailer bytes. Both the module doc and the test's own doc now say the
+narrower thing, and say how it was measured.
+
+**Two of the ten aim at code this milestone did not write** — the fixture's tract length and the
+trailer rewrite's footer — and they are here because D4's oracle is the only test in the tree that
+would notice either. Both are caught, the second by thirteen tests, which is the evidence for the
+review's point that the reader refuses a disturbed footer before any comparison reaches it.

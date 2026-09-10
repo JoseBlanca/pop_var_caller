@@ -108,6 +108,33 @@ fn empty_every_trailer(walked: &[(PathBuf, Vec<u8>)]) {
     }
 }
 
+/// **Overwrite 32 bytes just below where the psp's index begins, which is inside its last block.**
+///
+/// **What it is for: a psp whose records cannot be read, while everything the open pass reads is
+/// intact.** `PspReader::open` reads the header, the index and the footer and checks the index's
+/// own checksum, so corrupting any of those refuses the file instead — and the trailer is above the
+/// index, so a census in it still decodes. What is left is a psp that opens, judges and skips
+/// cleanly, and whose rebuild fails the moment it reads a block.
+///
+/// **Permissions would be the plainer way to make a psp unusable and cannot be used here**: this
+/// suite runs as root inside the dev container, where a read-only file is not read-only.
+fn corrupt_a_block_of(psp: &Path) {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let index_begins_at = PspReader::open(psp)
+        .expect("the psp opens")
+        .footer()
+        .index_offset;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(psp)
+        .expect("the scratch dir is ours");
+    file.seek(SeekFrom::Start(index_begins_at - 32))
+        .expect("the blocks end where the index begins");
+    file.write_all(&[0xFF; 32]).expect("32 bytes of nonsense");
+    file.sync_all().expect("the bytes land");
+}
+
 /// **The command is spelled by the constant the library's refusals name.**
 ///
 /// The refusals in `ng::run` tell a person to run this command, and until this step they named one
@@ -406,9 +433,9 @@ fn the_census_it_writes_into_the_trailer_names_no_psp() {
 /// **Only the trailer is rewritten**: the header the psp declares and the records it holds are
 /// what they were.
 ///
-/// The whole-file oracle is plan step D4 — a copied psp regenerated and `cmp`-identical, header,
-/// blocks, index and all. This is the half that can be asserted through the reader: a rebuild that
-/// re-encoded the header, or that dropped a block, would still pass a comparison of trailers.
+/// The whole-file comparison is `a_regenerated_psp_is_the_walked_one_byte_for_byte`, below. This is
+/// the half that can be asserted through the reader, and it is what catches a rebuild that dropped
+/// a block: the record count comes from reading them.
 #[test]
 fn the_psps_header_and_records_are_untouched() {
     let (cohort, psps) = a_walked_cohort();
@@ -612,31 +639,25 @@ fn the_censuses_it_writes_assemble_into_a_cohort() {
 /// this command rebuilds the selection anyway — whether each census recorded the settings this run
 /// records under. A freshly walked cohort passes all three, so there is nothing to do.
 ///
-/// **How "its records are never read" is shown, and it needs a control.** One psp's *blocks* are
+/// **What is shown, and it is narrower than "its records are never read".** One psp's *blocks* are
 /// corrupted before the run: 32 bytes overwritten just below where the index begins, which is
-/// inside the last block. A run that read that psp's records to rebuild its census would fail;
-/// this one succeeds and skips it. **The control is the second half**: with that psp's trailer
-/// emptied, the same corrupted file is owed a rebuild, and then the run does fail on it — which is
-/// what says the corruption was fatal to a record pass rather than harmless.
+/// inside the last block ([`corrupt_a_block_of`]). A rebuild reads every record and would fail on
+/// them; this run succeeds, so **no rebuild pass happened for that psp** — which is the pass that
+/// costs a quarter of an hour a sample at 50× human.
+///
+/// **What it does not pin: that nothing read those blocks at all.** Measured by mutation — code
+/// added to the skip arm that reads the psp's records and discards the result passes every test in
+/// this file, because a discarded failure is invisible and nothing counts block bytes the way
+/// [`trailer_bytes_read`](crate::ng::psp::trailer_bytes_read) counts trailer bytes.
+///
+/// **The control is the second half of the test**: with that psp's trailer emptied, the same
+/// corrupted file is owed a rebuild, and then the run does fail on it — which is what says the
+/// corruption was fatal to a record pass rather than harmless.
 #[test]
 fn a_cohort_that_needs_nothing_is_skipped_whole_and_its_records_are_not_read() {
-    use std::io::{Seek, SeekFrom, Write};
-
     let (cohort, psps) = a_walked_cohort();
     let corrupted = psp_path_for(&psps, "zeta");
-    let index_begins_at = PspReader::open(&corrupted)
-        .expect("the psp opens")
-        .footer()
-        .index_offset;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&corrupted)
-        .expect("the scratch dir is ours");
-    file.seek(SeekFrom::Start(index_begins_at - 32))
-        .expect("the blocks end at the index");
-    file.write_all(&[0xFF; 32]).expect("32 bytes of nonsense");
-    file.sync_all().expect("the bytes land");
-    drop(file);
+    corrupt_a_block_of(&corrupted);
 
     let report = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
         .expect("every census is the one this run would write, so no psp is read past its census");
@@ -848,6 +869,190 @@ fn a_cohort_that_will_not_open_is_refused_before_the_reference_is_read() {
         matches!(&error, RegenerateCensusCliError::Cohort { .. }),
         "the cohort is opened first, so it is the cohort that refuses: {error:?}",
     );
+}
+
+/// **A run stopped part-way does only what is left when it runs again** (spec §8, §10).
+///
+/// This is what the skip rule is for. The first run rebuilds one psp and then fails on the second,
+/// leaving the cohort half repaired; the second run skips the psp already done and rebuilds the one
+/// still owed, so nobody has to remember which those were.
+///
+/// **The property nothing else here covers: the second run skips a census *this command* wrote.**
+/// Every other skip test skips the bytes the walk wrote. If what `write_census` records and what
+/// `CensusPlan::recording_terms` is compared against came apart, this command would rebuild its own
+/// output for ever and a stopped run would never converge, however many times it was run.
+///
+/// **How the failure is made, and why it lands after the first psp.** The psps are read in name
+/// order, so `alpha` is rebuilt before `zeta` is reached, and `zeta`'s blocks are corrupted, so its
+/// rebuild — the only pass that reads records — fails. **Permissions would have been the plainer
+/// way and cannot be used**: this suite runs as root inside the container, where a read-only file
+/// is not read-only. What the corruption stands in for is a read that failed and then stopped
+/// failing, which is why the bytes are put back between the runs.
+///
+/// **Two psps rather than the plan's three**, because the fixture cohorts have two samples and the
+/// property needs one of each: a psp skipped and a psp rebuilt in the second run. **What two cannot
+/// see** is a run that pressed on past the failure and rebuilt *later* samples before returning the
+/// first error — with the failing psp last there is nothing after it to have been touched. That is
+/// the case the plan's three covered, and closing it needs a three-sample fixture.
+#[test]
+fn a_run_stopped_part_way_does_only_what_is_left() {
+    let (cohort, psps) = a_walked_cohort();
+    let walked = the_trailers_in(&psps, &["alpha", "zeta"]);
+    empty_every_trailer(&walked);
+    let breaks_on_its_records = psp_path_for(&psps, "zeta");
+    let with_its_blocks_intact = std::fs::read(&breaks_on_its_records).expect("the psp reads");
+    corrupt_a_block_of(&breaks_on_its_records);
+
+    let error = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
+        .expect_err("zeta's records are nonsense, and a rebuild has to read them");
+
+    assert!(
+        matches!(
+            &error,
+            RegenerateCensusCliError::Build { sample, psp, .. }
+                if sample == "zeta" && psp == &breaks_on_its_records
+        ),
+        "the run stops on the sample it could not rebuild, and names its file: {error:?}",
+    );
+    let alphas_census = the_trailers_in(&psps, &["alpha"])
+        .pop()
+        .expect("one entry")
+        .1;
+    assert_eq!(
+        alphas_census,
+        walked
+            .iter()
+            .find(|(path, _)| path == &psp_path_for(&psps, "alpha"))
+            .expect("alpha was walked")
+            .1,
+        "the sample before the failure was rebuilt and kept",
+    );
+
+    // **The bytes are put back**, which is the part a person does by mending whatever made the read
+    // fail — and this psp's trailer is still empty, so it is still owed.
+    std::fs::write(&breaks_on_its_records, &with_its_blocks_intact)
+        .expect("the scratch dir is ours");
+
+    let report = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
+        .expect("the psps read");
+
+    assert_eq!(
+        report
+            .samples
+            .iter()
+            .map(|sample| sample.sample.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zeta"],
+        "the second run rebuilds the one still owed",
+    );
+    assert_eq!(
+        report
+            .skipped
+            .iter()
+            .map(|it| it.sample.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha"],
+        "and skips the one the first run finished — whose census this command wrote",
+    );
+    for (path, before) in &walked {
+        let after = PspReader::open(path)
+            .expect("the psp opens")
+            .trailer()
+            .expect("its trailer reads");
+        assert_eq!(
+            before,
+            &after,
+            "{} does not carry the census its walk wrote",
+            path.display(),
+        );
+    }
+}
+
+/// **A regenerated psp is the walked one, byte for byte, whole** — header, blocks, index, trailer
+/// and footer (plan step D4 of `psp_census_pair.md`; spec §11's parity oracle).
+///
+/// **What it covers that the trailer comparisons in this file do not**, and it is two things rather
+/// than the four a first draft claimed: the header's exact **bytes**, where the sibling test
+/// compares its `Debug` rendering, and every record's **content**, where that test compares only
+/// how many there are.
+///
+/// **And the honest limit.** Against this command as it stands there is no small defect this
+/// catches first: the only write is `replace_trailer`, which touches nothing below the trailer's
+/// offset, and a psp whose index or footer was disturbed is refused by the reader before any
+/// comparison here. What this is for is the change that would stop that being true — a rebuild that
+/// wrote the psp through `PspWriter` again, re-compressed its blocks, or re-encoded its header.
+///
+/// **The copies' trailers are emptied first** (the plan's own note on this step). A psp whose
+/// census this run would write is skipped since plan step D2, so copies handed straight to the
+/// command come back untouched and a byte comparison passes without a rebuild having happened.
+/// Emptying them also makes the comparison stronger than the plan asks: the footer's trailer length
+/// goes to zero and has to come back.
+///
+/// **Both psps of the fixture with a repeat tract**, which is what gets all three of that cohort's
+/// read groups — its samples declare two and one — and a cohort of more than one, where a run that
+/// rebuilt only its first psp would pass over a cohort of one.
+#[test]
+fn a_regenerated_psp_is_the_walked_one_byte_for_byte() {
+    let cohort = a_varying_cohort_on_disk();
+    let psps = cohort.directory.path().join("psps");
+    a_walk_into(
+        &psps,
+        &cohort.reference,
+        &cohort.catalog,
+        &cohort.alignments,
+    );
+
+    // The copies live in a directory of their own, so the command is handed them and not the
+    // originals.
+    let copies = cohort.directory.path().join("copies");
+    std::fs::create_dir(&copies).expect("the scratch dir is ours");
+    let mut as_the_walk_sealed_them = Vec::new();
+    for sample in ["one", "two"] {
+        let walked = psp_path_for(&psps, sample);
+        let copy = copies.join(format!("{sample}.psp"));
+        std::fs::copy(&walked, &copy).expect("the scratch dir is ours");
+        as_the_walk_sealed_them
+            .push((copy.clone(), std::fs::read(&walked).expect("the psp reads")));
+        crate::ng::psp::replace_trailer(&copy, b"").expect("the tail rewrites");
+        assert_ne!(
+            std::fs::read(&copy).expect("the copy reads"),
+            as_the_walk_sealed_them.last().expect("just pushed").1,
+            "{sample}'s copy differs from the walk's file before the rebuild, or this comparison \
+             is a file against itself",
+        );
+    }
+
+    let report = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &copies))
+        .expect("the copies read");
+
+    assert_eq!(
+        report
+            .samples
+            .iter()
+            .map(|sample| sample.sample.as_str())
+            .collect::<Vec<_>>(),
+        vec!["one", "two"],
+        "both copies were rebuilt",
+    );
+    // **What the comparison was over.** Two psps with no read at a kept tract would compare equal
+    // while covering none of the census's stratum-keyed half.
+    assert!(
+        report
+            .samples
+            .iter()
+            .any(|sample| sample.tally.tracts_with_reads > 0),
+        "no sample has a read at a kept repeat tract, so this fixture stopped being the one with a \
+         tract in it: {:?}",
+        report.samples.iter().map(|it| it.tally).collect::<Vec<_>>(),
+    );
+    for (copy, as_walked) in &as_the_walk_sealed_them {
+        assert_eq!(
+            &std::fs::read(copy).expect("the copy reads"),
+            as_walked,
+            "{} is not the walked psp byte for byte",
+            copy.display(),
+        );
+    }
 }
 
 /// **A reference the psps were not walked against is refused, and no psp is rewritten.**

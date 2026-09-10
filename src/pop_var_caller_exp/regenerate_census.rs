@@ -18,7 +18,8 @@
 //! nothing is every reason a census cannot be used — spec §4.2's three causes, and damage of the
 //! trailer with them — because this command reads the reference and rebuilds the selection anyway,
 //! so comparing each census against them costs one open and one read a psp rather than a second
-//! pass over the genome. **A psp needing nothing keeps its records unread.** So a run stopped
+//! pass over the genome. **A psp needing nothing is not rebuilt, so the pass that reads every
+//! record it holds does not happen.** So a run stopped
 //! part-way and started again does only the samples still owed, and a build whose selection
 //! constants changed rebuilds every one without being told to.
 //!

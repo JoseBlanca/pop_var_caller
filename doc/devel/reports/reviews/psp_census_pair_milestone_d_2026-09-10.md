@@ -271,3 +271,86 @@ one moved a block back to where it already was. Both were fixed and re-run. **A 
 not apply, does not compile, or changes nothing is indistinguishable from one nothing catches**, and
 the only reason it was visible here is that the driver prints the apply step and the compiler's
 output beside each test result.
+
+---
+
+## D3 and D4 — a stopped run, and the whole-file oracle
+
+**Reviewed against:** the working tree over `c55c55d5`, one file — both steps are test-only. One
+read-only agent. **No blockers**, and it agreed the two steps belong in one commit.
+
+**What it confirmed, which is the half worth having.** Neither test can pass on a command that does
+nothing: the stopped-run test's `expect_err` needs a rebuild to have been attempted, and its
+`alpha` assertion reads a trailer the test itself emptied, so only this run's write can put the
+walk's census back; the byte comparison asserts the copies differ *before* the rebuild and that the
+samples were rebuilt. It also traced why the failure lands after the first psp — the arguments are
+sorted, the owed list is built in that order, and the rebuild loop follows it.
+
+### Should-fix, all fixed
+
+**S1 — the byte comparison's unique coverage was over-listed.** It claimed a rebuild that
+re-encoded the header, dropped a block, rewrote the index or disturbed the footer would pass the
+trailer comparisons and fail here. Two of those are false: the record count catches a dropped block,
+and a rewritten index never reaches the comparison because `PspReader::open` re-checks the index's
+checksum and refuses the file. *Fixed* to the two that are true — the header's exact bytes and every
+record's content — **with the honest limit beside them**: against this command as it stands nothing
+small is caught here first, because the only write is `replace_trailer`; what it is for is the change
+that would stop that being true.
+
+**S2 — "three read groups" was said of a psp that declares two.** The cohort has three, split two
+and one. *Fixed by copying both psps*, which gets all three, a sample with one group, and a cohort of
+more than one — where a run that rebuilt only its first psp would have passed over a cohort of one.
+The same sentence claimed the comparison covers the census's stratum-keyed half, which nothing
+guarded; a tally assertion now does, as the sibling parity test's does.
+
+**S3 — the plan still asked for three psps.** *Recorded in its D3 line* as an *as built* note, with
+why permissions could not be used and what two psps cannot see.
+
+**S4 — why the psp was corrupted rather than made read-only** was missing, which is what makes the
+shape honest. *Fixed*, in the test and in the helper.
+
+### Minor, fixed
+
+The claim that nothing re-reads a skipped psp's records, which this test cannot see — it cites D2's,
+which corrupts the psp it expects skipped. The strongest property said plainly: the second run skips
+a census *this command* wrote. The quarter of an hour with its subject. `whole` renamed, since it
+held a psp whose trailer had just been emptied. The error match pins the file as well as the sample.
+`breaks` and `alone` renamed to say what they hold. A stale comment naming the oracle by its plan
+step, where the test now exists. And the corruption, written out statement for statement in two
+tests, is one helper.
+
+### Recorded, not fixed
+
+- **A run that pressed on past a failure and rebuilt later samples is invisible to a two-psp
+  fixture**, since the failing psp is last. The error type's own doc claims the sixty-sample shape;
+  closing it needs a three-sample fixture.
+- **Nothing tests that a psp *after* the failure is left alone**, for the same reason.
+
+### The mutations
+
+Ten, each applied from a backup with its match count asserted and restored with the restore proved
+by `diff`. **Nine caught, one survivor — and the survivor was worth more than the nine.**
+
+| mutation | outcome |
+|---|---|
+| the rebuild order is reversed | 2 tests fail; only the stopped-run test could see it |
+| a sample that will not rebuild is passed over | 2 fail |
+| the tail is never rewritten | 9 fail |
+| nothing is ever skipped | 4 fail |
+| everything is skipped | 13 fail |
+| the census names the psp it came from | 8 fail |
+| only the first psp owed is rebuilt | 9 fail |
+| **a skipped psp's records are read anyway** | **survives** |
+| the fixture's repeat tract falls below the period-2 floor | 3 fail |
+| the tail rewrite drops the index checksum | 13 fail |
+
+**The survivor.** The review predicted it would survive the stopped-run test and be caught by D2's
+corrupted-block test. It survives that one too: the code it adds reads the records and discards the
+result, and a discarded failure is invisible — nothing counts block bytes. So the claim *a skipped
+psp's records are not read* was never pinned; what is pinned is that **no rebuild pass happens**,
+which is the expensive one. The module doc and the test's doc now say that, and cite the measurement.
+
+**Two mutations aim outside this milestone's code** — the fixture's tract length and
+`replace_trailer`'s footer — because D4's byte comparison is the only test that would notice either.
+The second failing thirteen tests is the evidence for S1's limit: a disturbed footer is refused by
+the reader long before any byte comparison sees it.
