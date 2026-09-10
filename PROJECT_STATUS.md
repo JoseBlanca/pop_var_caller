@@ -4258,10 +4258,18 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     plan's Checkpoint A note and spec §6.1 (`a1fdab11`).
 
 #### The census lives inside the psp — one file a sample
-- **Status:** `reviewed` — **Milestone C complete, at Checkpoint C: `estimate-parameters` takes
-  psps, reads nothing it could be told wrongly, and refuses a stale cohort whole.** A1-A4, B1-B4
-  and C1-C5 committed, each implemented, reviewed and fixed. Milestones D and E to come: the
-  repair command `regenerate-census`, then the sidecar's machinery deleted.
+- **Status:** `reviewed` — **Milestone D complete, at Checkpoint D: the repair rewrites only the
+  tail, only where owed, and a regenerated psp is the walked one to the byte.** A1-A4, B1-B4, C1-C5
+  and D1-D4 committed, each implemented, reviewed, mutated and fixed. Milestone E to come: the
+  scripts, the sidecar's machinery deleted, the two probes landed, and the words.
+  - **D1-D4 (2026-09-10).** `generate-census` is `regenerate-census`: psps in, each owed psp's
+    trailer replaced with a fresh census, nothing else in the file rewritten, and what a person can
+    type is `--psp`, `--reference` and `--catalog` — the ground and the criteria come from the psp
+    headers, and both files are checked against them before anything is written. A psp whose census
+    this run would write again is skipped and not rebuilt, so a run stopped part-way and started
+    again does only the samples still owed, and a build whose selection constants changed rebuilds
+    every one without being told to. The oracle: a walked psp's copy, its trailer emptied and
+    rebuilt, is the walked file byte for byte.
   - **C5 (2026-09-10)** was added at Checkpoint C by the owner's ruling: a census recorded under
     settings other than the run's is refused naming the setting that differs, and the two file
     checks that make that message unconditional — `--reference` and the catalog against the psp
