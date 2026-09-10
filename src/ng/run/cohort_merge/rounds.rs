@@ -3,7 +3,7 @@
 //!
 //! This is [`merge_cohort_in_parallel`](super::parallel::merge_cohort_in_parallel)'s round
 //! structure with one difference, and the difference is what the arrangement is for: the
-//! worker does not stop at a [`CohortObservation`](super::build::CohortObservation). It hands
+//! worker does not stop at a [`CohortObservation`]. It hands
 //! each locus straight to a caller-supplied closure while the observation is still on the
 //! worker's own stack, so the round never materialises a `Vec<CohortObservation>` and the
 //! **genotyping runs on the pool beside the body decode**. In a calling run the genotyping is
