@@ -569,40 +569,47 @@ impl StartingPoint {
 
 /// **Where the repeat-tract fit spends the thread pool.**
 ///
-/// The work has two grains that are independent of each other, and a pool can be spread over
-/// one of them or the other but not usefully over both. A repeat-length class is fitted from
-/// its own tracts and no other's, and the classes are fitted in one call — so the choice is
-/// whether the threads split *one class's tracts* while the classes go by one at a time, or
-/// split *the classes* while each is fitted on a single thread.
+/// The work has two grains that are independent of each other, and a pool can be spread over one
+/// of them or the other but not usefully over both. A stratum — every tract of one motif period
+/// whose reference carries the same number of copies — is fitted from its own tracts and no
+/// other's, and the strata are fitted in one call. So the choice is whether the threads split
+/// *one stratum's tracts* while the strata go by one at a time, or split *the strata* while each
+/// is fitted on a single thread.
 ///
-/// **Neither arm moves a floating-point result.** Every parallel site inside the fit collects
-/// its values in tract order and sums them serially, precisely so that the answer does not
-/// depend on how the work was divided; the same cohort fitted under either arm, at any pool
-/// width, returns the same bits.
+/// **Neither arm moves a floating-point result.** Every parallel site inside the fit collects its
+/// values in tract order and sums them serially, precisely so that the answer does not depend on
+/// how the work was divided; the same cohort fitted under either arm, at any pool width, returns
+/// the same bits.
 ///
-/// **What does differ is memory.** Fitting a class holds one likelihood row per sample per
+/// **What does differ is memory.** Fitting a stratum holds one likelihood row per sample per
 /// tract — `tracts × samples × 91 genotypes × 8 bytes`, which is about 46 kB a tract at 63
-/// samples — for as long as that class is being fitted. Under
-/// [`AcrossTheTractsOfOneStratum`](Self::AcrossTheTractsOfOneStratum) one class is resident;
-/// under [`AcrossStrata`](Self::AcrossStrata) one per pool thread is, because a thread
-/// never leaves a class part-way through. So the second arm's peak is bounded by
-/// `threads × the largest class`, and the thread count is the knob that bounds it.
+/// samples — for as long as that stratum is being fitted. Under
+/// [`AcrossTheTractsOfOneStratum`](Self::AcrossTheTractsOfOneStratum) one stratum is resident;
+/// under [`AcrossStrata`](Self::AcrossStrata) one per pool thread is, because a thread never
+/// leaves a stratum part-way through. So the second arm's peak is bounded by `threads × the
+/// largest stratum`, and the thread count is the knob that bounds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WhereTheThreadsGo {
-    /// One repeat-length class at a time, its tracts spread across the pool.
+    /// One stratum at a time, its tracts spread across the pool.
     ///
-    /// **What the fit did before 2026-09-11**, and still the right arm when there is one class
+    /// **What the fit did before 2026-09-11**, and still the right arm when there is one stratum
     /// to fit: there is no other grain to spread then, and this one keeps the whole pool busy.
     AcrossTheTractsOfOneStratum,
-    /// Every repeat-length class at once, each fitted on one thread.
+    /// Every stratum at once, and every starting point of every stratum — each walk on one
+    /// thread ([`every_stratum_from_every_start`]).
     ///
-    /// **The arm that reaches a pool wider than a thin class has tracts.** A class the fit will
-    /// touch at all holds at least [`DEFAULT_REFUSAL_FLOOR`] tracts, which is 8 — so on an
-    /// 18-thread machine the first arm leaves more than half the pool with nothing to do at
-    /// every thin class, and there are far more thin classes than fat ones.
+    /// **The arm that reaches a pool wider than a thin stratum has tracts.** A stratum the fit
+    /// will touch at all holds at least [`DEFAULT_REFUSAL_FLOOR`] tracts, which is 8 — so on an
+    /// 18-thread machine the first arm leaves more than half the pool with nothing to do at every
+    /// thin stratum, and there are far more thin strata than fat ones.
     ///
-    /// **The ceiling is the largest class**, because no class is split: a run under this arm
-    /// cannot finish before its biggest class would have taken on one thread.
+    /// **The unit is the walk and not the stratum**, because a stratum is searched once from each
+    /// starting point and those searches never read each other. Eleven strata at three starting
+    /// points is thirty-three pieces of work, not eleven.
+    ///
+    /// **The ceiling is the longest single walk**, because nothing splits one: a run under this
+    /// arm cannot finish before the slowest stratum's slowest starting point would have finished
+    /// on one thread.
     AcrossStrata,
 }
 
@@ -755,59 +762,93 @@ pub fn fit_stratum(
     )
 }
 
-/// Fit `evidence`, whose tracts may already include borrowed ones, recording where from.
-fn fit_pooled(
+/// **Where one climb from one starting point ended up.**
+///
+/// The fit does not solve for a stratum's slippage numbers, it searches for them: it takes a
+/// guess and walks uphill until the reads stop becoming more likely. A walk stops at the first
+/// peak it reaches, which need not be the highest one, so the search is run once from each of
+/// [`SsrFitConfig::starting_points`] and the best-scoring walk wins. **The walks never read each
+/// other**, which is what makes them a unit of work in their own right.
+#[derive(Debug)]
+struct Climb {
+    parameters: Parameters,
+    /// The mean log-likelihood a tract this walk ended at, which is what the walks are ranked on.
+    score: f64,
+    /// Whether the walk stopped because it had stopped improving rather than because it ran out
+    /// of rounds.
+    converged: bool,
+}
+
+/// **One walk uphill, from one starting point.**
+///
+/// `genotypes` and `live_groups` are properties of the stratum rather than of the starting
+/// point, so they are computed once by the caller and lent to every walk over that stratum.
+fn climb_from(
     evidence: &StratumEvidence,
-    borrowed: &[u64],
+    start: StartingPoint,
     homozygote_excess: &[f64],
+    genotypes: &[(usize, usize)],
+    live_groups: &[bool],
     config: &SsrFitConfig,
     threads: WhereTheThreadsGo,
-) -> Option<StratumFit> {
-    // **The one precondition on `SsrFitConfig::allele_span` that nothing else states.** It is a
-    // public field with no lower bound, read from an environment variable by
-    // `examples/ng_joint_records_walk.rs` and parsed with no floor, and at zero the fit returns
-    // a one-class length spectrum — which is a tract that can only ever be its reference length.
-    // Nothing downstream can use that: `StratumFits::over` refuses it with a message about a
-    // class count, naming the wrong thing. Refused here, where the message can name the knob.
-    assert!(
-        config.allele_span >= 1,
-        "the fit places allele mass from -{span} to +{span} whole repeat units either side of \
-         the reference length, so `SsrFitConfig::allele_span` must be at least 1; at {span} a \
-         tract could only ever carry its reference length",
-        span = config.allele_span
-    );
-    let classes = (2 * config.allele_span + 1) as usize;
-    let genotypes = genotype_pairs(classes);
-    let live_groups = evidence.groups_with_reads();
-    if !live_groups.iter().any(|live| *live) {
-        return None;
+) -> Climb {
+    let allele_classes = (2 * config.allele_span + 1) as usize;
+    let mut parameters = Parameters::start(start, evidence.groups, allele_classes);
+    let mut scorer = Scorer::new(evidence, homozygote_excess, genotypes, config, threads);
+    let mut score = scorer.score(&parameters);
+    let mut converged = false;
+    for _ in 0..config.max_rounds {
+        let before = score;
+        climb_one_round(&mut parameters, &mut scorer, live_groups, allele_classes);
+        score = scorer.score(&parameters);
+        if score - before < config.stillness {
+            converged = true;
+            break;
+        }
     }
+    Climb {
+        parameters,
+        score,
+        converged,
+    }
+}
 
-    let mut best: Option<(Parameters, f64, bool)> = None;
-    for start in &config.starting_points {
-        let mut parameters = Parameters::start(*start, evidence.groups, classes);
-        let mut scorer = Scorer::new(evidence, homozygote_excess, &genotypes, config, threads);
-        let mut score = scorer.score(&parameters);
-        let mut converged = false;
-        for _ in 0..config.max_rounds {
-            let before = score;
-            climb_one_round(&mut parameters, &mut scorer, &live_groups, classes);
-            score = scorer.score(&parameters);
-            if score - before < config.stillness {
-                converged = true;
-                break;
+/// **The better of two walks, under the rule the serial loop has always used.**
+///
+/// A walk replaces the standing best only when it scores **strictly** higher, so a tie keeps
+/// the one that came first — and since the walks are always folded in starting-point order,
+/// "first" means the earlier starting point whether they ran one after another or all at once.
+///
+/// **Spelled as `climb > current` and not as `current >= climb`**, which are the same rule for
+/// every pair of numbers except when one of them is `NaN`: a walk that scored `NaN` loses under
+/// the first and wins under the second, because every comparison with `NaN` is false. A score
+/// should never be `NaN`, and this is the spelling that does not quietly promote one if it is.
+fn the_better_walk(best: Option<Climb>, climb: Climb) -> Option<Climb> {
+    match best {
+        Some(current) => {
+            if climb.score > current.score {
+                Some(climb)
+            } else {
+                Some(current)
             }
         }
-        if best
-            .as_ref()
-            .is_none_or(|(_, best_score, _)| score > *best_score)
-        {
-            best = Some((parameters, score, converged));
-        }
+        None => Some(climb),
     }
+}
 
-    let (parameters, score, converged) = best.expect("at least one starting point");
-    Some(StratumFit {
+/// **The stratum's answer, assembled from the walk that won.**
+fn the_fit_of(
+    evidence: &StratumEvidence,
+    borrowed: &[u64],
+    live_groups: &[bool],
+    winner: Climb,
+) -> StratumFit {
+    let Climb {
+        parameters,
+        score,
+        converged,
+    } = winner;
+    StratumFit {
         stratum: evidence.stratum,
         slippage: live_groups
             .iter()
@@ -854,7 +895,58 @@ fn fit_pooled(
                 })
             })
             .collect(),
-    })
+    }
+}
+
+/// Fit `evidence`, whose tracts may already include borrowed ones, recording where from.
+fn fit_pooled(
+    evidence: &StratumEvidence,
+    borrowed: &[u64],
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+    threads: WhereTheThreadsGo,
+) -> Option<StratumFit> {
+    // **The one precondition on `SsrFitConfig::allele_span` that nothing else states.** It is a
+    // public field with no lower bound, read from an environment variable by
+    // `examples/ng_joint_records_walk.rs` and parsed with no floor, and at zero the fit returns
+    // a one-class length spectrum — which is a tract that can only ever be its reference length.
+    // Nothing downstream can use that: `StratumFits::over` refuses it with a message about a
+    // class count, naming the wrong thing. Refused here, where the message can name the knob.
+    assert!(
+        config.allele_span >= 1,
+        "the fit places allele mass from -{span} to +{span} whole repeat units either side of \
+         the reference length, so `SsrFitConfig::allele_span` must be at least 1; at {span} a \
+         tract could only ever carry its reference length",
+        span = config.allele_span
+    );
+    let genotypes = genotype_pairs((2 * config.allele_span + 1) as usize);
+    let live_groups = evidence.groups_with_reads();
+    if !live_groups.iter().any(|live| *live) {
+        return None;
+    }
+
+    let best = config
+        .starting_points
+        .iter()
+        .map(|start| {
+            climb_from(
+                evidence,
+                *start,
+                homozygote_excess,
+                &genotypes,
+                &live_groups,
+                config,
+                threads,
+            )
+        })
+        .fold(None, the_better_walk);
+
+    Some(the_fit_of(
+        evidence,
+        borrowed,
+        &live_groups,
+        best.expect("at least one starting point"),
+    ))
 }
 
 /// One pass of coordinate ascent over everything the stratum fits.
@@ -940,6 +1032,152 @@ fn normalise(weights: &mut [f64]) {
 }
 
 // ---------------------------------------------------------------------
+// Spending the pool on the walks rather than on the strata
+// ---------------------------------------------------------------------
+
+/// **What a stratum's outcome is before a single walk is taken**, or `None` when it is to be
+/// fitted.
+///
+/// Both arms of [`fit_strata`] ask this, and they must ask the same thing: a stratum refused by
+/// one and fitted by the other would make the answer depend on how the threads were spent, which
+/// is exactly what the arms are built not to do.
+fn refused_before_any_walk(
+    evidence: &StratumEvidence,
+    config: &SsrFitConfig,
+) -> Option<StratumOutcome> {
+    if evidence.tracts_with_reads() == 0 {
+        return Some(StratumOutcome::Refused {
+            stratum: evidence.stratum,
+            tracts: 0,
+            reason: StratumRefusal::NoSpanningReads,
+        });
+    }
+    if evidence.tracts_with_reads() < config.refusal_floor {
+        // Too thin to fit anything of its own. It is not refused yet — the curve and a
+        // neighbour's shares may still furnish it, which is what `derive_thin_strata` decides.
+        return Some(StratumOutcome::Refused {
+            stratum: evidence.stratum,
+            tracts: evidence.tracts_with_reads(),
+            reason: StratumRefusal::BelowTheFloor {
+                tracts: evidence.tracts_with_reads(),
+                floor: config.refusal_floor,
+            },
+        });
+    }
+    None
+}
+
+/// **Every stratum's every starting point, handed to the pool as one flat list of walks.**
+///
+/// The finest independent unit the repeat-tract fit has is not a stratum but a **walk**: one
+/// stratum searched from one starting point (see [`Climb`]). A stratum is searched from each of
+/// [`SsrFitConfig::starting_points`], and those searches never read each other, so a run over
+/// `S` strata at `P` starting points holds `S × P` pieces of work and not `S`.
+///
+/// **Why that matters is the remainder.** Spreading only the strata over the pool leaves a thread
+/// idle for every stratum short of the pool's width, and makes every busy thread walk its own
+/// stratum `P` times end to end. Eleven strata at three starting points on eighteen threads is
+/// eleven pieces where there are thirty-three: seven threads idle, and the run as long as three
+/// walks rather than two. Where the strata already outnumber the threads several times over the
+/// difference is small — seventy-nine strata on eighteen threads go from fifteen walk-lengths to
+/// fourteen.
+///
+/// **The memory bound is the one [`WhereTheThreadsGo::AcrossStrata`] states, unchanged.** A walk
+/// holds one stratum's likelihood tables and a thread runs one walk at a time, so two threads
+/// walking the same stratum from two starting points hold two copies of that stratum's tables —
+/// which is still `threads × the largest stratum` and not more.
+///
+/// **And the answer is the one the serial loop gives.** Each stratum's walks are folded in
+/// starting-point order by [`the_better_walk`] — the same rule reading the same values in the
+/// same order — so which thread finished first cannot decide which walk wins.
+fn every_stratum_from_every_start(
+    strata: &[StratumEvidence],
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+) -> Vec<StratumOutcome> {
+    // **The same precondition `fit_pooled` states**, checked here because this arm does not go
+    // through it. See there for why a span below one is refused rather than fitted.
+    assert!(
+        config.allele_span >= 1,
+        "the fit places allele mass from -{span} to +{span} whole repeat units either side of \
+         the reference length, so `SsrFitConfig::allele_span` must be at least 1; at {span} a \
+         tract could only ever carry its reference length",
+        span = config.allele_span
+    );
+    // One table for the whole run: which pairs of allele classes a diploid can carry depends on
+    // the span alone, and every stratum here is fitted over the same span.
+    let genotypes = genotype_pairs((2 * config.allele_span + 1) as usize);
+
+    // Either the outcome this stratum already has, or the slippage groups its walks will move.
+    // Settled before any walk starts, because a stratum with no reads in any group has no walk
+    // to take.
+    let before_walking: Vec<Result<StratumOutcome, Vec<bool>>> = strata
+        .iter()
+        .map(|evidence| {
+            if let Some(refused) = refused_before_any_walk(evidence, config) {
+                return Ok(refused);
+            }
+            let live = evidence.groups_with_reads();
+            if live.iter().any(|it| *it) {
+                Err(live)
+            } else {
+                Ok(StratumOutcome::Refused {
+                    stratum: evidence.stratum,
+                    tracts: evidence.tracts_with_reads(),
+                    reason: StratumRefusal::NoSpanningReads,
+                })
+            }
+        })
+        .collect();
+
+    // The flat list: one entry a (stratum, starting point) pair, over the strata that will walk.
+    let starts = config.starting_points.len();
+    let walks: Vec<(usize, usize)> = before_walking
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.is_err())
+        .flat_map(|(stratum, _)| (0..starts).map(move |start| (stratum, start)))
+        .collect();
+
+    let climbed: Vec<Climb> = walks
+        .par_iter()
+        .map(|(stratum, start)| {
+            let live = before_walking[*stratum]
+                .as_ref()
+                .expect_err("only the strata that will walk are in this list");
+            climb_from(
+                &strata[*stratum],
+                config.starting_points[*start],
+                homozygote_excess,
+                &genotypes,
+                live,
+                config,
+                WhereTheThreadsGo::AcrossStrata,
+            )
+        })
+        .collect();
+
+    // **Folded back in starting-point order**, which is what makes the winner independent of the
+    // order the walks finished in: `climbed` is in the order of `walks`, and `walks` lists a
+    // stratum's starting points in the order the config gives them.
+    let mut climbed = climbed.into_iter();
+    before_walking
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| match entry {
+            Ok(outcome) => outcome,
+            Err(live) => {
+                let best = (&mut climbed)
+                    .take(starts)
+                    .fold(None, the_better_walk)
+                    .expect("at least one starting point");
+                StratumOutcome::Fitted(Box::new(the_fit_of(&strata[index], &[], &live, best)))
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------
 // Thin strata: every slippage number from its period's curve
 // ---------------------------------------------------------------------
 
@@ -978,27 +1216,21 @@ pub fn fit_strata(
     // another stratum produces — the curves below are drawn afterwards, from the finished
     // answers — so fitting them together changes no number and no order. What it changes is
     // which of the fit's two grains the pool is spread over; see [`WhereTheThreadsGo`].
-    let fit_one = |evidence: &StratumEvidence, threads: WhereTheThreadsGo| {
-        if evidence.tracts_with_reads() == 0 {
-            return StratumOutcome::Refused {
-                stratum: evidence.stratum,
-                tracts: 0,
-                reason: StratumRefusal::NoSpanningReads,
-            };
+    //
+    // **One stratum at a time is still the arm for a run holding one stratum**: spreading the
+    // pool over the strata when there is a single one leaves every thread but one idle, where
+    // splitting that stratum's tracts keeps the whole pool busy.
+    let one_at_a_time = |evidence: &StratumEvidence| {
+        if let Some(refused) = refused_before_any_walk(evidence, config) {
+            return refused;
         }
-        if evidence.tracts_with_reads() < config.refusal_floor {
-            // Too thin to fit anything of its own. It is not refused yet — the curve and a
-            // neighbour's shares may still furnish it, which is what D3 below decides.
-            return StratumOutcome::Refused {
-                stratum: evidence.stratum,
-                tracts: evidence.tracts_with_reads(),
-                reason: StratumRefusal::BelowTheFloor {
-                    tracts: evidence.tracts_with_reads(),
-                    floor: config.refusal_floor,
-                },
-            };
-        }
-        match fit_pooled(evidence, &[], homozygote_excess, config, threads) {
+        match fit_pooled(
+            evidence,
+            &[],
+            homozygote_excess,
+            config,
+            WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+        ) {
             Some(fit) => StratumOutcome::Fitted(Box::new(fit)),
             None => StratumOutcome::Refused {
                 stratum: evidence.stratum,
@@ -1007,19 +1239,11 @@ pub fn fit_strata(
             },
         }
     };
-    // **One stratum is fitted the old way whatever the run asked for**: spreading the pool over
-    // the strata when there is one of them leaves the whole pool idle but for a single thread.
     let across_strata = config.threads == WhereTheThreadsGo::AcrossStrata && strata.len() > 1;
     let mut outcomes: Vec<StratumOutcome> = if across_strata {
-        strata
-            .par_iter()
-            .map(|evidence| fit_one(evidence, WhereTheThreadsGo::AcrossStrata))
-            .collect()
+        every_stratum_from_every_start(strata, homozygote_excess, config)
     } else {
-        strata
-            .iter()
-            .map(|evidence| fit_one(evidence, WhereTheThreadsGo::AcrossTheTractsOfOneStratum))
-            .collect()
+        strata.iter().map(one_at_a_time).collect()
     };
 
     // **The curves are drawn after every stratum has its own answer, never during.** Stage one
