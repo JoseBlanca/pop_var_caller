@@ -13,62 +13,81 @@ parameters, every caller gated at QUAL ≥ 30.
 
 ---
 
-## The answer in one paragraph
+## The answer
 
-**The genotyping is doing what its input says; the input is wrong.** At the 17
-truth-homozygous indels ng genotyped as heterozygous at 30×, ng credits 83 reads to
-the reference allele. Realigning every read at those sites against both haplotypes
-directly — no gap scoring, just which of the two sequences the read's bases fit —
-**one** read fits the reference better, 24 fit the two equally, and the rest fit the
-alternative. At 16 of the 17 sites **not a single read supports the reference**. The
-credit is manufactured by the rule that decides what a read showed, and the reason is
-one line of code: **an insertion's locus covers one reference base, the anchor, so a
-read is asked only whether it agrees with the reference at that one base.** A read
-that agrees there and contradicts the reference twenty bases downstream is recorded as
-an exact reference observation.
+**The genotype arithmetic is right. What it is given to work with is wrong.**
 
-**AD cannot mislead while the likelihoods are right, because they are the same
-number.** `SampleReadCounts::allele_reads` — the `AD` column — is filled by summing
-`row.support.num_reads` over the merge's `supported` rows
-([`run/records.rs:232`](../../../../src/ng/run/records.rs#L232)), and the read
-likelihood is built by walking the same rows through the same allele remapping
+There are 17 places where GIAB says the sample carries an indel on both copies of its
+chromosomes and ng called it on one copy only. At those 17 places ng decided that 83 of
+the reads came from a chromosome without the indel.
+
+**They did not.** I took every read at those sites and asked which of the two possible
+chromosomes it fits: the reference, or the reference with the indel written into it.
+The read's bases are slid along each of the two sequences and the mismatches counted,
+so the indel sits inside the sequence being matched and no gap cost enters the answer.
+Of the 83 reads ng put on the reference, **one** fits the reference better than the
+indel, 24 fit the two equally well, and the rest fit the indel. **At 16 of the 17
+sites no read at all fits the reference better.**
+
+**The reason is one line of code.** ng decides which allele a read supports by
+comparing the bases the read showed across the stretch of reference the variant
+occupies. For an insertion that stretch is a single base — the one the inserted
+sequence hangs off — however long the insertion is. So the only question ever put to
+the read is *do you agree with the reference at this one base?* A read that agrees
+there and contradicts the reference twenty bases further on is filed as a reference
+read.
+
+**One thing this rules out.** It would be possible for `AD` to be a misleading summary
+while the genotype model itself saw something better — but not here, because they are
+the same number. The `AD` column is filled by summing `row.support.num_reads` over the
+merge's `supported` rows
+([`run/records.rs:232`](../../../../src/ng/run/records.rs#L232)); the read likelihood
+is built by walking those same rows through the same allele renumbering
 ([`calling/evidence_shaping.rs:273`](../../../../src/ng/calling/evidence_shaping.rs#L273),
-`GenericObservation::fill_from_supported_alleles`). A read reaches the genotype model
-as *an allele identifier and a count*, never as a sequence, so there is no second
-opinion for the likelihood to hold.
+`GenericObservation::fill_from_supported_alleles`). A read arrives at the genotype
+model as an allele number and a count, never as a sequence. There is no second opinion
+available to it.
 
 ---
 
 ## 1. The truth set is right, and the scoring is right
 
-Both possibilities the investigation was asked to rule out first were checked against
-the GIAB VCF directly, and both are ruled out.
+Before blaming the caller, the cheaper explanations have to go: the truth set could be
+wrong about the genotype, or the scoring could be matching the wrong pair of records.
+Both were checked against the GIAB VCF directly, and both are out.
 
-At **HG002 chr1:243535155** — a 19-base insertion — the truth record is `1/1` with
-`GQ 314`, and GIAB's own read counts are `ADALL=1,261`: across every platform, one
-read on the reference against 261 on the insertion. At **HG003 chr15:96140584** — a
-24-base insertion — the truth record is `1/1` with `GQ 404` and `ADALL=84,346`.
+**HG002 chr1:243535155**, a 19-base insertion. GIAB calls it `1/1` with `GQ 314`. Its
+`ADALL` field — the reads GIAB's own pipeline saw, pooled over every sequencing
+platform it used, PacBio included — is `1,261`: one read on the reference against 261
+on the insertion.
 
-The second site is the more useful of the two, because GIAB's own short-read count
-there is not clean either: 84 reads in 430 sit on the reference, one in five. So
-reference-looking reads at a long homozygous insertion are a real property of
-short-read data, not an ng artefact. **What is an ng artefact is the size.** ng's own
-count at that site is `AD=13,13` — half its reads — where GIAB's pipeline, on the same
-kind of data, gets one in five, and freebayes on exactly these reads gets zero.
+**HG003 chr15:96140584**, a 24-base insertion. GIAB calls it `1/1` with `GQ 404`, and
+`ADALL` is `84,346`.
+
+The second site is the more useful of the two, because GIAB's own counts there are not
+clean either: 84 reads in 430 sit on the reference, one in five. **So reference-looking
+reads at a long homozygous insertion are a real feature of short-read data, not
+something ng invents.** What ng gets wrong is the size of the effect. Its count at that
+site is `AD=13,13` — half its reads on the reference — where GIAB's pipeline gets one
+in five, and freebayes, on exactly the reads ng was given, gets none.
 
 ---
 
-## 2. What separates read assignment from genotyping
+## 2. One site in full
 
-Take the two records the investigation started from. ng's output at 30×:
+Take the two records the investigation started from. ng's output at 30×, where the
+last field is `genotype : genotype quality : depth : reads per allele`:
 
 ```
 HG002  chr1:243535155  T -> TATTTAAA , TATTTTAAAATATATTTAAA   QUAL 390.6  0/2:99:37:12,5,20
 HG003  chr15:96140584  C -> CTGATTGGTCCATTTTACAGATGGT          QUAL 109.6  0/1:99:26:13,13
 ```
 
-Now look at what the aligner actually put there. At **chr15:96140584**, the reads
-overlapping the anchor split into two groups by their CIGAR:
+Now look at what BWA actually put at **chr15:96140584**. The 26 reads covering the
+anchor fall into two groups, and the CIGAR says which: a read whose CIGAR contains
+`24I` was placed as carrying the insertion, one that is all `M` was placed as
+reference. `NM` is how many bases of that read disagree with the reference where it
+was put.
 
 ```
   96140442  148M          NM:i:1      \
@@ -82,27 +101,31 @@ overlapping the anchor split into two groups by their CIGAR:
   96140575  27M24I97M     NM:i:24     /
 ```
 
-The reference around the anchor is an imperfect 24-base tandem repeat
-(`CTGATTGGTCCATTTTACAGAGTG` `CTGATTGGTCCGTTTTACAGAGTG` `CTGATTGGTGCGTTTACAAACC`), so
-BWA can place a read carrying the extra copy as plain `148M` with four or five
-mismatches rather than opening a 24-base gap. **Realigning each read against the two
-haplotypes says which is right**: the `148M` reads at 96140461–96140491 sit 4–5
-mismatches from the reference and **1** from the insertion. They carry the insertion.
+**BWA's placement here is wrong, and the sequence says why.** The reference around the
+anchor is an imperfect 24-base tandem repeat —
+`CTGATTGGTCCATTTTACAGAGTG` `CTGATTGGTCCGTTTTACAGAGTG` `CTGATTGGTGCGTTTACAAACC` — and
+the insertion is one more copy of that unit. Adding a copy to a repeat leaves the local
+sequence nearly unchanged, so BWA can lay a read carrying the extra copy flat against
+the reference at the cost of four or five mismatches, which is cheaper than opening a
+24-base gap. That is what it did for the twelve reads in the first group.
 
-Four reads — those ending within nine bases of the anchor — fit both equally, and they
-are the only reads at the site that genuinely cannot tell. **Zero fit the reference
-better.**
+**Comparing each read against the two chromosomes says which group is right.** The
+`148M` reads starting at 96140461 to 96140491 sit four or five mismatches from the
+reference and **one** from the insertion. They carry the insertion. Only four reads at
+the site — the ones that stop within nine bases of the anchor, before the sequences
+diverge — fit the two equally, and **none fits the reference better.**
 
-ng credits 13 of the 26 to the reference.
+ng puts 13 of the 26 on the reference.
 
-### The same comparison over all 12 insertions
+### The same comparison at all 12 insertions
 
-Realignment is ungapped against each full haplotype window, so the indel is inside the
-sequence being matched rather than in a gap whose cost has to be chosen
+The comparison slides the read along each of the two chromosome sequences and counts
+mismatches; no gaps, because the indel is already inside the sequence being matched
 ([`benchmarks/giab/src/read_haplotype_support.py`](../../../../benchmarks/giab/src/read_haplotype_support.py),
-added with this report):
+added with this report). "ng puts on REF" and "ng puts on ALT" are the two numbers of
+its `AD` field.
 
-| sample | site | inserted | ng credits REF | ng credits ALT | fits REF | fits ALT | fits both |
+| sample | site | bases inserted | ng puts on REF | ng puts on ALT | fits REF | fits ALT | fits both |
 |---|---|---:|---:|---:|---:|---:|---:|
 | HG002 | chr1:169767410 | 1 | 3 | 20 | 0 | 22 | 2 |
 | HG002 | chr1:179298130 | 5 | 3 | 23 | 0 | 27 | 0 |
@@ -125,13 +148,16 @@ the insertion, 24 fit the two equally, and 46 fit the insertion better.**
 
 ## 3. The line of code
 
-A read's observation at a locus is **the bases it showed across the locus's reference
-positions**, and a read is credited to an allele by byte equality against that allele's
-sequence — `SequenceObservation::matches_reference` is a slice comparison
+**How ng decides which allele a read supports.** When the walk passes a read over a
+locus it keeps the bases that read showed across the locus's reference positions, and
+nothing else. It then compares that string of bases, byte for byte, against each
+allele's sequence; the allele it equals is the one the read is counted for. The
+comparison against the reference allele is a plain slice equality,
+`SequenceObservation::matches_reference`
 ([`locus_generation/mod.rs:416`](../../../../src/ng/locus_generation/mod.rs#L416)).
 
-How many reference positions a locus covers is decided by the event that opened the
-record:
+**How wide that stretch of reference is** is decided when the record is opened, by the
+kind of event that opened it:
 
 ```rust
 // src/ng/locus_generation/pileup/decompose.rs:55
@@ -144,11 +170,14 @@ pub fn footprint_span(&self) -> u32 {
 }
 ```
 
-**An insertion's footprint is one reference base however long the inserted sequence**,
-because the anchor is the only reference base the event touches. That is a faithful
-description of the *event*. It is the wrong window for the *question* — *did this read
-come from a haplotype carrying the insertion?* — because the answer lives in the bases
-after the anchor, and the comparison never reaches them.
+**An insertion gets one reference base, however long it is.** That is a true statement
+about the *event*: an insertion adds sequence between two reference bases without
+covering any of them, so the anchor really is the only reference base it touches.
+
+But it is the wrong window for the *question ng is asking*, which is **did this read
+come from a chromosome carrying the insertion?** A read that carries the insertion
+shows the same base at the anchor as a read that does not. What separates them is what
+comes after, and the comparison never reaches it.
 
 The specification saw the hole and left it open.
 [`read_likelihoods.md` §5.4.1](../../ng/spec/read_likelihoods.md) says an insertion has
@@ -165,13 +194,19 @@ reached well past the insertion and disagree with the reference there.
 
 ## 4. How big it is, and how it grows
 
-### With insertion length
+### It grows with the length of the insertion
 
-Reads credited to the reference as a share of the site's reads, at the
-**truth-homozygous** indels ng found, three samples pooled, QUAL ≥ 30, 30×. The
-freebayes column is the same sites, the same reads, its own `AD`:
+The table below takes every place where GIAB says the sample carries an insertion on
+**both** copies of its chromosomes. At such a place no read should look like the
+reference. The number in each cell is the fraction of reads at the site that the
+caller nevertheless put on the reference allele — the first number of `AD` in its VCF.
 
-| inserted bases | sites | ng | freebayes |
+Sites are grouped by how many bases the insertion adds. HG002, HG003 and HG004 are
+pooled, at 30× coverage, counting only records that passed the QUAL ≥ 30 gate.
+freebayes is run on the same sites and the same reads, and its column is read off its
+own `AD`.
+
+| bases the insertion adds | sites | ng | freebayes |
 |---:|---:|---:|---:|
 | 1 | 39 | 0.039 | 0.008 |
 | 2–3 | 14 | 0.052 | 0.003 |
@@ -179,14 +214,18 @@ freebayes column is the same sites, the same reads, its own `AD`:
 | 7–12 | 2 | 0.154 | 0.000 |
 | 13 and over | 3 | 0.388 | 0.210 |
 
-**The prediction holds and the comparison is the point.** ng's reference credit at a
-homozygous insertion rises from 4 reads in 100 at one base to 39 in 100 above thirteen.
-freebayes, which compares a read against a haplotype window rather than against a
-single anchor base, credits essentially nothing below 13 bases — and at 13 and over,
-where a 150-base read stops being able to settle it, it climbs to 21 in 100 and
-freebayes gets 2 of those 3 sites wrong too.
+**Down the ng column**: at a one-base insertion, 4 reads in 100 are put on the
+reference. At an insertion of 13 bases or more, 39 in 100 are. That is the prediction
+the investigation set out to test, and it holds.
 
-**That one quantity is the whole indel-genotype gap between the two callers.** Rerun
+**Across to freebayes**: fewer than 1 read in 100 goes on the reference until the
+insertion passes 13 bases. freebayes compares a read against a window of haplotype
+rather than against one anchor base, so a read that carries the insertion disagrees
+with the reference somewhere inside that window and is not counted as a reference read.
+Past 13 bases a 150-base read stops being able to settle the question for either
+caller, and freebayes climbs to 21 in 100 and gets 2 of those 3 sites wrong itself.
+
+**This one quantity is the whole indel-genotype gap between the two callers.** Rerun
 here from `genotype_disagreements.py` over all three samples at 30×: ng gets the
 genotype wrong at **21 of the 297** truth indels it found, freebayes at **9 of 301**,
 the production caller at **64 of 307**. *(The brief this investigation started from
@@ -194,9 +233,10 @@ gave ng's denominator as 276; 297 is what the documented command returns, and th
 other two callers' figures reproduce exactly. It moves ng's error rate from 7.6% to
 7.1% and changes nothing else.)*
 
-### With depth: flat
+### It does not grow with depth
 
-Same measure, by coverage (the number in brackets is how many sites the cell pools):
+The same measure, split by coverage instead of pooled. The number in brackets is how
+many sites that cell averages over.
 
 | inserted bases | 5× | 10× | 15× | 30× |
 |---:|---:|---:|---:|---:|
@@ -206,18 +246,20 @@ Same measure, by coverage (the number in brackets is how many sites the cell poo
 | 7–12 | — | 0.222 (2) | 0.154 (2) | 0.154 (2) |
 | 13 and over | 0.250 (1) | 0.353 (2) | 0.357 (2) | 0.388 (3) |
 
-**Depth does not touch it**, which is what a systematic misclassification looks like
-and what sampling noise does not: the miscounted reads scale with coverage exactly as
-the correctly counted ones do. The absolute number of wrong genotypes is flat too —
-12, 17, 11, 17 across 5× to 30× — while the number of truth indels ng finds grows from
-103 to 297.
+**Every row is flat.** More coverage does not dilute the wrongly-placed reads, because
+it brings more of them in the same proportion. That is what a systematic
+misclassification looks like, and it is what sampling noise does not: noise would
+shrink as the square root of the depth. The number of wrong genotypes is flat too —
+12, 17, 11, 17 from 5× to 30× — while the number of truth indels ng finds over the
+same ground grows from 103 to 297.
 
-### How few wrong reads it takes
+### How few wrongly-placed reads it takes to change the genotype
 
-Over all four depths, 363 truth-homozygous indels ng found, ordered by the share of
-reads it credited to the reference:
+Every truth-homozygous indel ng found, at all four depths — 363 of them — sorted by
+what fraction of the site's reads ng put on the reference allele. The right-hand
+column counts how many of those sites ng then failed to call homozygous.
 
-| reference-credited share | sites | not called 1/1 |
+| fraction of reads put on the reference | sites | not called 1/1 |
 |---|---:|---:|
 | below 0.02 | 244 | 3 |
 | 0.02–0.05 | 17 | 0 |
@@ -243,11 +285,26 @@ right one; the defect is the assignment, not the trade.
 
 ---
 
-## 5. Deletions: a second, smaller route, through partial reads
+## 5. Deletions: the window grows with the variant, so the same defect stays small
 
-At a deletion the footprint is `deleted_len + 1`, so the comparison does cover the
-deleted bases and the length trend disappears: the reference-credited share is 2 in 100
-at one base, 3 in 100 at two or three, and **zero** at four and above, at every depth.
+**A deletion is compared over the bases it deletes, and that is the whole difference
+from an insertion.**
+
+An insertion's window is one reference base whatever its length, so the longer the
+insertion, the more of the read's evidence falls outside the window and the more reads
+are wrongly put on the reference. A deletion's window is the deleted bases plus one: a
+seven-base deletion is compared over eight bases of reference. A read that really
+carries the deletion has eight bases' worth of chance to disagree with the reference,
+and it takes it. **The window grows with the deletion where it does not grow with the
+insertion**, so the trend runs the other way and dies out:
+
+| bases the deletion removes | ng puts this fraction of reads on the reference |
+|---:|---:|
+| 1 | 0.020 |
+| 2–3 | 0.028 |
+| 4 and over | 0.000 |
+
+Those figures hold at every depth from 5× to 30×.
 
 Five of the 17 wrong genotypes are nonetheless deletions, and they split three ways.
 **Three are the same defect on a shorter window** — `chr1:1388565` (`AD=6,22`),
@@ -367,11 +424,24 @@ buys the last third by spending read depth, and read depth is the wrong currency
 caller that has to work at three reads a position.
 
 **What Shape A does not fix**, and should be said before it is chosen: it leaves 24 of
-the 71 false reference reads in place, so the 13-and-over bucket still sits near 12 in
-100 and some long insertions will still flip. Reaching those needs a read-to-allele
-alignment over flanks — the machinery the repeat-tract path already has in
-`src/ng/alignment` — rather than a byte comparison over any window. That is a larger
-piece of work and it is separable: Shape A does not close the door on it.
+the 71 wrongly-placed reads in place, so insertions of 13 bases and over still put
+about 12 reads in 100 on the reference, and some of them will still be genotyped
+heterozygous. Those are the reads a 150-base read length cannot settle — at
+`chr1:243535155` the insertion is a repeat unit copied into a `TTTTAAAATATA` tract, and
+a read that stops 21 bases past the anchor matches the reference exactly on either
+chromosome. **Nothing that compares sequence can recover those**, because there is no
+sequence difference to find; they need a longer read.
+
+**Neither shape realigns anything, and neither should.** The generic SNP/indel path
+takes the mapper's placement as given — the only thing it changes is the leftmost
+spelling of an indel the mapper already found
+([`read/left_align.rs`](../../../../src/ng/read/left_align.rs): *"Bases and qualities
+are copied through untouched; only the CIGAR changes"*) — and realignment stays on the
+repeat-tract path, where every algorithm in `src/ng/alignment` lives (owner, 2026-09-11).
+Both shapes keep that: they change only **how much of what the read already showed gets
+compared**, at the position the mapper put it. The realignment in this report is a
+measuring instrument — it establishes which haplotype each read fits independently of
+any caller — and it belongs in the benchmark tree, not in the walk.
 
 **The deletion route needs its own fix and it is small.** `allele_is_compatible_with_partial`
 should compare a partial's bases against the allele's sequence *continued into the

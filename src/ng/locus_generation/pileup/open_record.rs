@@ -2621,6 +2621,71 @@ fn window_of_read(
     window
 }
 
+/// **How many reference positions a record carrying this event has to cover** — the ground
+/// every read at the locus is then asked to account for.
+///
+/// For a `Match` and a `Deletion` this is [`ReadEvent::footprint_span`], the positions the
+/// event is itself evidence about: a match speaks for the base it sits on, and a deletion for
+/// every base it removes, because a read crossing them without spending a base is evidence they
+/// are absent. **An insertion is the exception, and it needs `inserted_len + 1`** where it
+/// witnesses only its anchor.
+///
+/// # Why an insertion's record is wider than the insertion witnesses
+///
+/// A record's reference positions are the only ground a read is compared over. Give an
+/// insertion one base and the only question ever put to a read is *do you show the reference
+/// base at the anchor?* — and a read shows that base whether or not it carries the insertion,
+/// because the inserted sequence sits *after* it. Two populations of read then answer
+/// "reference" with no evidence for it:
+///
+/// - **a read that stopped at the anchor.** It had no bases left with which to show the
+///   insertion, so the mapper wrote none. Over one base of ground it is a complete observation
+///   equal to the reference; over `inserted_len + 1` it no longer reaches the far side and
+///   becomes a partial one — compatible with both alleles and counted for neither, which is
+///   what a read that saw nothing should contribute.
+/// - **a read the mapper laid flat across a tandem repeat.** Where the inserted sequence is a
+///   copy of a repeat unit, aligning the read against the reference with a few substitutions is
+///   cheaper than opening a gap, so the CIGAR carries no insertion at all. Over one base of
+///   ground its anchor base matches and it is a reference read; over `inserted_len + 1` its
+///   substitutions fall inside the compared stretch and it is not.
+///
+/// Measured on `benchmarks/giab/per_sample` at 30×: one base of ground put 71 reads on the
+/// reference at the 12 homozygous insertions ng genotyped as heterozygous, of which **one**
+/// fitted the reference better than the insertion. Widening to the insertion's own length takes
+/// the reads wrongly placed on the reference from 4 in 100 to 3 in 100 at a one-base insertion
+/// and from 39 in 100 to 16 in 100 above thirteen bases, and ng's indel genotype agreement from
+/// 276 of 297 to 283 of 295
+/// (`doc/devel/reports/reviews/ng_indel_genotypes_vs_giab_2026-09-11.md`).
+///
+/// **This is not realignment and must not become it.** The read keeps the placement the mapper
+/// gave it; the only thing that changes is how much of what it already showed gets compared.
+/// Realignment stays on the repeat-tract path (owner, 2026-09-11).
+///
+/// # Why the width is the insertion's own length and not a constant
+///
+/// A read needs `inserted_len` bases past the anchor before it *could* have shown the
+/// insertion, so that is exactly the ground on which "this read saw enough" becomes true. A
+/// wider fixed window sets aside more reads than the evidence requires: measured at 30 bases,
+/// between a quarter and a third of the reads at these sites become partial, and true
+/// heterozygotes fall to between 24 and 40 reads in 100 on the reference where they should sit
+/// near half — close enough to the one-in-eight point at which a genotype turns to start losing
+/// real heterozygotes at low coverage.
+///
+/// # Why it lives here and not on `ReadEvent`
+///
+/// [`decompose`](super::decompose) is one of production's files, transcribed and left
+/// byte-for-byte alone (`copy_fidelity`). `footprint_span` there is a fact about a CIGAR
+/// operation and is production's; **how wide a record has to be is ng's locus generator's
+/// policy**, so it belongs in ng's own module rather than in the frozen copy.
+fn record_span(event: &ReadEvent) -> u32 {
+    match event {
+        // `len()` is an inserted run taken from a read's CIGAR, so it is bounded by the read
+        // length and cannot approach `u32::MAX`.
+        ReadEvent::Insertion { seq, .. } => seq.len() as u32 + 1,
+        ReadEvent::Match { .. } | ReadEvent::Deletion { .. } => event.footprint_span(),
+    }
+}
+
 /// A record's footprint end, stopped at the region's last base.
 ///
 /// `region_end` is 1-based inclusive and the ends here are exclusive, so the bound is
@@ -2699,7 +2764,13 @@ pub(super) fn process_position(
             // would make it zero-width instead.
             let event_end = clamped_to_region(
                 event_start,
-                event_start.saturating_add(ev.footprint_span()),
+                // **`record_span`, not the event's own `footprint_span`, and the two
+                // differ only at an insertion.** The record's positions are the ground
+                // every read here is compared over, so an insertion needs its own length
+                // of them: over one base the only question a read is ever asked is
+                // whether it shows the anchor base, which it does whether or not it
+                // carries the insertion. See [`record_span`].
+                event_start.saturating_add(record_span(ev)),
                 region_end,
             );
 

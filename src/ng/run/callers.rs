@@ -5926,11 +5926,16 @@ mod records_handed_over_as_the_run_finishes_them {
     /// **An insertion goes through the whole path and its record needs no padding base.**
     ///
     /// This is the claim three documents now rest on, as a test rather than as prose: the
-    /// generic mint anchors its indels — an insertion's reference span is its anchor base alone
-    /// (`ReadEvent::footprint_span`) — so the record is `REF A` against `ALT ACC`, **no allele
-    /// is empty**, and `POS` does not move. A mint that instead emitted the inserted bases with
-    /// an empty reference would need a padding base here, and `VcfRecord::new` would refuse the
-    /// record without one.
+    /// generic mint anchors its indels, and an insertion's record covers its anchor plus its own
+    /// inserted length (`ReadEvent::record_span`) — so a two-base insertion into a reference of
+    /// `A`s gives `REF AAA` against `ALT ACCAA`, **no allele is empty**, and `POS` does not move.
+    /// A mint that instead emitted the inserted bases with an empty reference would need a
+    /// padding base here, and `VcfRecord::new` would refuse the record without one.
+    ///
+    /// **The reference allele was the anchor base alone until 2026-09-11**, when the record was
+    /// widened so that a read has to account for the ground an insertion could occupy before it
+    /// counts as a reference read. Two bases of reference after the anchor are the visible
+    /// difference; `bcftools norm` reduces both spellings to the same variant.
     ///
     /// It is also the only fixture in this module whose reads are not all substitutions, which
     /// is what the correctness review found missing: discarding the fetched padding base passed
@@ -5958,15 +5963,18 @@ mod records_handed_over_as_the_run_finishes_them {
         );
         assert_eq!(
             record.alleles()[0].as_ref(),
-            b"A",
-            "REF is the anchor base alone — the insertion's reference span is 1",
+            b"AAA",
+            "REF is the anchor base plus the two reference bases a two-base insertion could \
+             have occupied — the ground a read must account for before it counts as a \
+             reference read",
         );
         assert!(
             record
                 .alternatives()
                 .iter()
-                .any(|allele| allele.as_ref() == b"ACC"),
-            "and the alternative is the anchor plus the two inserted bases, got {:?}",
+                .any(|allele| allele.as_ref() == b"ACCAA"),
+            "and the alternative is the anchor, the two inserted bases, and the same two \
+             reference bases after them, got {:?}",
             record
                 .alternatives()
                 .iter()
