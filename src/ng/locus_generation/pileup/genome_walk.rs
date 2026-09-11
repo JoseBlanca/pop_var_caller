@@ -1245,6 +1245,10 @@ impl WalkerState {
         // because a shared chain id is a mate pair and a mate pair is known at admission
         // (`ActiveReads::may_have_mate_overlap_at`). At 300× a pair is present at most
         // columns and the skip simply stops firing.
+        // **Cleared here and not only inside the resolver**, which the line below skips at
+        // most columns: a stale list would bar reads from records at a position where no
+        // pair was ever contested.
+        self.mate_overlap_buf.losers_removed.clear();
         if may_have_mate_overlap {
             resolve_mate_overlap_at_pos(
                 contributors,
@@ -1446,6 +1450,7 @@ impl WalkerState {
             self.chrom_id,
             contributors,
             &self.truncated_read_ids_buf,
+            &self.mate_overlap_buf.losers_removed,
             &self.active_reads,
             reference,
             self.region_end,
@@ -1649,6 +1654,17 @@ struct MateOverlapScratch {
     by_chain_id: Vec<(ChainId, usize)>,
     to_remove: Vec<usize>,
     bq_updates: Vec<(usize, u8, bool)>,
+    /// **The read ids dropped as indel-overlap losers at this position**, which the fold
+    /// needs and `to_remove` cannot give it: those are indices into a list this function
+    /// then compacts, and the fold runs afterwards against records rather than contributors.
+    ///
+    /// Dropping the loser from this column is not enough on its own. A record is as wide as
+    /// the variant that opened it, so the walker reaches further positions of the *same*
+    /// record, where the loser is an ordinary matching read and comes back — and the window
+    /// it folds there is pulled from its own cursor, so it carries the indel it just lost
+    /// with, and the pair is counted twice. `process_position` bars these ids from the
+    /// records this position affects, for as long as those records live.
+    losers_removed: Vec<u32>,
 }
 
 /// Does any pair of contributors at this column share a chain id?
@@ -1717,7 +1733,9 @@ fn resolve_mate_overlap_at_pos(
         by_chain_id,
         to_remove,
         bq_updates,
+        losers_removed,
     } = scratch;
+    losers_removed.clear();
     by_chain_id.clear();
     by_chain_id.extend(
         contributors
@@ -1800,6 +1818,9 @@ fn resolve_mate_overlap_at_pos(
                     // then first-of-pair, then alignment_start.
                     let loser_idx = pick_overlap_loser(contributors, a, b);
                     to_remove.push(loser_idx);
+                    // Read id rather than index: `to_remove` is compacted away a few lines
+                    // below, and what the fold has to recognise the loser by is its id.
+                    losers_removed.push(contributors[loser_idx].read_id);
                 } else {
                     // Match-only mate overlap (S7): apply
                     // samtools-style BQ math.

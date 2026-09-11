@@ -283,3 +283,138 @@ fn per_sample_counts_of_the_wrong_width_are_refused() {
     inputs.samples[0].allele_reads = vec![5, 5, 5];
     let _ = assemble_record(&locus, inputs);
 }
+
+// ---------------------------------------------------------------------------
+// Dropping an alternative no sample's genotype names
+// ---------------------------------------------------------------------------
+
+/// A three-allele table — reference `A` against `T` and `G` — so an alternative can survive
+/// selection, carry reads, and still take no called copy.
+fn three_alleles() -> CandidateAlleles {
+    let mut table = CandidateAlleles::new(b"A".to_vec().into_boxed_slice(), LocusKind::Generic);
+    table.admit(b"T".to_vec().into_boxed_slice());
+    table.admit(b"G".to_vec().into_boxed_slice());
+    table
+}
+
+fn locus_over_three(calls: Vec<SampleGenotypeCall>, copies: Vec<f64>) -> LocusInference {
+    let table = three_alleles();
+    let expected = ExpectedAlleleCopies::new(copies, &table);
+    LocusInference::new(
+        region(),
+        table,
+        calls,
+        expected,
+        true,
+        3,
+        Provenance::FittedHere,
+        None,
+        quality(0.0),
+        None,
+    )
+}
+
+fn evidence_over_three(samples: Vec<SampleEvidenceForOutput>) -> LocusEvidenceForOutput {
+    let mapq = (0..3)
+        .map(|allele| {
+            let reads: u64 = samples
+                .iter()
+                .map(|sample| u64::from(sample.allele_reads[allele]))
+                .sum();
+            MapqPool {
+                reads,
+                mapq_sum: reads * 60,
+            }
+        })
+        .collect();
+    LocusEvidenceForOutput {
+        samples,
+        allele_mapq: mapq,
+        padding_base: None,
+        corrected_site_quality: quality(120.0),
+        artifact_penalties: None,
+        repeat_tract: None,
+        filter: FilterVerdict::Pass,
+    }
+}
+
+/// **An alternative no genotype names does not reach the file, and its reads are not lost.**
+///
+/// The sample is called `0/2` — reference and `G` — so `T` takes no copy although three reads
+/// matched it. `T` goes, `G` is renumbered from 2 to 1, and the three reads move into
+/// `DP − ΣAD`, the column that already means *reads no written allele explains*. `DP` is
+/// therefore unchanged at 20, which is the property worth pinning: a trim that lost the reads
+/// would report a shallower site than the sample had.
+#[test]
+fn an_alternative_no_sample_calls_is_dropped_and_its_reads_become_unexplained() {
+    let locus = locus_over_three(vec![called(&[0, 2], 40.0)], vec![1.0, 0.0, 1.0]);
+    let record = assemble_record(
+        &locus,
+        evidence_over_three(vec![sample(vec![9, 3, 8], 0)]),
+    );
+
+    assert_eq!(
+        record
+            .alleles()
+            .iter()
+            .map(|allele| String::from_utf8_lossy(allele).into_owned())
+            .collect::<Vec<_>>(),
+        vec!["A", "G"],
+        "the alternative no genotype named is gone and the reference stays first",
+    );
+    assert_eq!(
+        sample_columns(&record, diploid()),
+        "0/1:40:20:9,8",
+        "the call is renumbered onto the surviving table, and DP still counts all 20 reads \
+         with the dropped allele's three in DP − ΣAD",
+    );
+}
+
+/// **An alternative some sample does call stays, whatever the others say.**
+///
+/// Two samples, one calling `T` and the other `G`: both alternatives are named somewhere, so
+/// the table is untouched and no genotype moves. The guard against a trim that keys on one
+/// sample's call rather than on the cohort's.
+#[test]
+fn an_alternative_one_sample_calls_survives_for_the_whole_cohort() {
+    let locus = locus_over_three(
+        vec![called(&[0, 1], 40.0), called(&[0, 2], 35.0)],
+        vec![2.0, 1.0, 1.0],
+    );
+    let record = assemble_record(
+        &locus,
+        evidence_over_three(vec![sample(vec![9, 8, 0], 0), sample(vec![7, 0, 6], 0)]),
+    );
+
+    assert_eq!(record.alleles().len(), 3, "both alternatives are called somewhere");
+    assert_eq!(
+        sample_columns(&record, diploid()),
+        "0/1:40:17:9,8,0\t0/2:35:13:7,0,6",
+        "and neither sample's call is renumbered",
+    );
+}
+
+/// **A record no sample calls anything at is left exactly as it is.**
+///
+/// A refused locus writes every sample as a no-call (spec §8), so no genotype names any allele.
+/// Applied literally the rule would empty the `ALT` column of the one record whose whole purpose
+/// is to say the caller could not decide — so it does not fire at all.
+#[test]
+fn a_record_every_sample_no_calls_keeps_its_alternatives() {
+    let locus = locus_over_three(
+        vec![called_saying(&[0, 0], 3.0, true)],
+        vec![2.0, 0.0, 0.0],
+    );
+    let record = assemble_record(
+        &locus,
+        evidence_over_three(vec![sample(vec![0, 0, 0], 4)]),
+    );
+
+    assert_eq!(
+        record.alleles().len(),
+        3,
+        "no genotype names an allele, so there is nothing to trim against and the record \
+         states the alternatives it was called over",
+    );
+    assert_eq!(sample_columns(&record, diploid()), "./.:.:4:0,0,0");
+}

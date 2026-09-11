@@ -38,7 +38,7 @@ use super::{
 };
 use crate::ng::calling::quality::artifact_correction::ArtifactPenalties;
 use crate::ng::calling::{LocusInference, SampleGenotypeCall};
-use crate::ng::types::Phred;
+use crate::ng::types::{AlleleId, Genotype, Phred};
 use crate::ng::window_coverage::WindowCoverage;
 
 /// **What one sample showed at a locus, once the locus itself is gone.**
@@ -152,7 +152,7 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
         .map(|bases| bases.to_vec().into_boxed_slice())
         .collect();
 
-    let sample_columns = locus
+    let sample_columns: Vec<SampleColumn> = locus
         .per_sample
         .iter()
         .zip(evidence.samples)
@@ -165,12 +165,23 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
         })
         .collect();
 
+    let mut expected_copies = locus.cohort_expected_copies().copies().to_vec();
+    let mut allele_mapq = evidence.allele_mapq;
+    let mut alleles = alleles;
+    let mut sample_columns = sample_columns;
+    drop_alternatives_no_sample_calls(
+        &mut alleles,
+        &mut expected_copies,
+        &mut allele_mapq,
+        &mut sample_columns,
+    );
+
     VcfRecord::new(
         locus.region,
         alleles,
-        locus.cohort_expected_copies().copies().to_vec(),
+        expected_copies,
         sample_columns,
-        evidence.allele_mapq,
+        allele_mapq,
         evidence.padding_base,
         evidence.corrected_site_quality,
         evidence.artifact_penalties,
@@ -191,6 +202,130 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
 ///   evidence.
 ///
 /// A sample that is neither keeps the genotype and quality the loop gave it.
+/// **Drop every alternative allele no sample's genotype names**, and renumber what is left.
+///
+/// # What it removes, and why it is not "alleles with no evidence"
+///
+/// A record's alternatives are the candidates the locus was *called over*, not the ones the
+/// cohort turned out to carry. A candidate can survive selection on a couple of reads, take no
+/// called copy in any sample, and still reach the file — measured on
+/// `benchmarks/giab/per_sample` at 30×, 9 records of 2,290 carried one, and each such allele had
+/// two reads behind it. **So the test cannot be "has no reads", and it cannot be applied where
+/// the observations are made**: at that point nothing knows yet what will be called. It is
+/// `AC == 0` — no genotype in the file names this allele — and it can only be asked once every
+/// sample has been genotyped, which is here.
+///
+/// It is what freebayes does (its `MEANALT` says how many alternatives it saw at a site where it
+/// reports one) and what `bcftools view --trim-alt-alleles` does to a file after the fact.
+///
+/// # The reads do not vanish; they move one column
+///
+/// A dropped allele's `AD` entry is added to that sample's `DP − ΣAD`, which ng already writes
+/// and already documents as *reads no written allele explains*
+/// ([`SampleReadCounts`](crate::ng::vcf::SampleReadCounts)) — the column that already holds a
+/// dropped candidate's reads and the partial observations. So the depth is conserved and lands
+/// in the field whose meaning already covers it.
+///
+/// # When no sample names anything, nothing is dropped
+///
+/// **A refused locus writes every sample as a no-call** (spec §8), so no genotype names any
+/// allele and this rule, applied literally, would empty the ALT column of a record whose whole
+/// purpose is to say the caller could not decide. The same holds for a cohort genotyped
+/// homozygous-reference throughout. In both cases the record is left exactly as it was: the
+/// alternatives it carries are the only statement it has to make.
+///
+/// # What is left alone
+///
+/// `QUAL`, the site's artifact penalties and the filter verdict were computed over the whole
+/// candidate set and are **not** recomputed. That is the same choice `bcftools` makes, and the
+/// honest reading of the field: the quality is the evidence the site was judged on, not a
+/// property of the alleles that survived the judging.
+fn drop_alternatives_no_sample_calls(
+    alleles: &mut Vec<Box<[u8]>>,
+    expected_copies: &mut Vec<f64>,
+    allele_mapq: &mut Vec<MapqPool>,
+    sample_columns: &mut [SampleColumn],
+) {
+    // The reference allele is never dropped: it is the bases the record's span spells, and
+    // `VcfRecord::new` refuses a record without one.
+    let mut kept = vec![false; alleles.len()];
+    kept[0] = true;
+    let mut any_named = false;
+    for column in sample_columns.iter() {
+        if let Some(genotype) = column.call.genotype() {
+            for allele in genotype.alleles() {
+                any_named = true;
+                // PANIC-FREE: `VcfRecord::new` asserts the same bound a few lines later, and
+                // every genotype here was built over this very allele table.
+                kept[usize::from(allele.get())] = true;
+            }
+        }
+    }
+    if !any_named || kept.iter().all(|k| *k) {
+        return;
+    }
+
+    // Old index -> new index, built once and read by all four parallel arrays.
+    let mut renumbered = vec![None; alleles.len()];
+    let mut next = 0_usize;
+    for (old, keep) in kept.iter().enumerate() {
+        if *keep {
+            renumbered[old] = Some(next);
+            next += 1;
+        }
+    }
+
+    for column in sample_columns.iter_mut() {
+        let mut reads = Vec::with_capacity(next);
+        let mut dropped_reads = 0_u32;
+        for (old, count) in column.read_counts.allele_reads().iter().enumerate() {
+            if kept[old] {
+                reads.push(*count);
+            } else {
+                dropped_reads = dropped_reads.saturating_add(*count);
+            }
+        }
+        let unexplained = column
+            .read_counts
+            .unexplained_reads()
+            .saturating_add(dropped_reads);
+        column.read_counts = SampleReadCounts::new(reads, unexplained);
+        if let SampleCall::Called { genotype, .. } = &mut column.call {
+            let renamed: Vec<AlleleId> = genotype
+                .alleles()
+                .iter()
+                .map(|allele| {
+                    // PANIC-FREE: every allele a genotype names was marked kept above, so
+                    // its slot in `renumbered` is `Some`.
+                    let new = renumbered[usize::from(allele.get())]
+                        .expect("a genotype's allele is kept by construction");
+                    AlleleId(new as u16)
+                })
+                .collect();
+            *genotype = Genotype::new(renamed);
+        }
+    }
+
+    let mut old = 0_usize;
+    alleles.retain(|_| {
+        let keep = kept[old];
+        old += 1;
+        keep
+    });
+    let mut old = 0_usize;
+    expected_copies.retain(|_| {
+        let keep = kept[old];
+        old += 1;
+        keep
+    });
+    let mut old = 0_usize;
+    allele_mapq.retain(|_| {
+        let keep = kept[old];
+        old += 1;
+        keep
+    });
+}
+
 fn written_call(call: &SampleGenotypeCall) -> SampleCall {
     match call {
         SampleGenotypeCall::Missing => SampleCall::NoCall,

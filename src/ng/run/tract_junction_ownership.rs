@@ -520,8 +520,13 @@ fn a_deletion_across_flank_and_tract_is_two_loci_each_with_its_own_allele() {
 /// "right→silent"). The fix re-homes it: the generic walk claims an insertion
 /// anchored on the base before its region's first base whenever that base is
 /// repeat ground and the tract has refused the spelling, and the record spells
-/// the inserted bases before the region's first base — one variant locus at
-/// chr1:53, reference `C` against `GGC`.
+/// the inserted bases before the region's first base — one variant locus starting
+/// at chr1:53, with the inserted `GG` ahead of the reference bases.
+///
+/// **The locus spans chr1:53–55 and not chr1:53 alone** (2026-09-11): a record covers
+/// the ground its insertion could occupy (`open_record::record_span`), so a two-base
+/// insertion asks for its anchor plus two reference positions. The re-homing rule is
+/// unchanged — what moved is how much reference the record then holds.
 #[test]
 fn a_foreign_insertion_at_the_tracts_last_base_is_genotyped_by_the_snp_indel_path_alone() {
     let (_reference_dir, reference) = junction_reference();
@@ -552,8 +557,9 @@ fn a_foreign_insertion_at_the_tracts_last_base_is_genotyped_by_the_snp_indel_pat
     let flank = variants[0];
     assert_eq!(
         (flank.region.start.get(), flank.region.end.get()),
-        (TRACT_SPAN.1 + 1, TRACT_SPAN.1 + 1),
-        "the one variant locus is the flank's first base",
+        (TRACT_SPAN.1 + 1, TRACT_SPAN.1 + 3),
+        "the one variant locus starts at the flank's first base and covers the ground the \
+         two inserted bases could have occupied",
     );
     assert!(
         matches!(flank.alleles().kind(), LocusKind::Generic),
@@ -566,9 +572,13 @@ fn a_foreign_insertion_at_the_tracts_last_base_is_genotyped_by_the_snp_indel_pat
             .iter()
             .map(<[u8]>::to_vec)
             .collect::<Vec<_>>(),
-        vec![b"C".to_vec(), b"GGC".to_vec()],
+        vec![
+            chr1_window(53, 55),
+            [b"GG".to_vec(), chr1_window(53, 55)].concat(),
+        ],
         "the inserted bases go down before the flank's first base — the only spelling \
-         that keeps the anchor base out of the tract's ground",
+         that keeps the anchor base out of the tract's ground — and the record's reference \
+         runs to 55",
     );
     assert_called_homozygous_alternative(flank, "the flank locus");
     assert!(
