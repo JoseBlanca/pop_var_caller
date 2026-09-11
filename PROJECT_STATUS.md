@@ -27,6 +27,52 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
+> - **Last completed task (2026-09-11):** **a homozygous insertion is no longer genotyped
+> heterozygous — the record now covers the ground the insertion could occupy** (branch
+> `ng-indel-gt`;
+> [report](doc/devel/reports/reviews/ng_indel_genotypes_vs_giab_2026-09-11.md)).
+>
+> **A record's reference positions are the only ground a read is compared over, and an
+> insertion had one of them.** A read shows the anchor base whether or not it carries the
+> insertion, because the inserted sequence sits after it — so the only question ever put to a
+> read was one it could not fail. Two populations answered *reference* with no evidence for
+> it: reads that stopped at the anchor with no bases left to show the insertion, and reads the
+> mapper laid flat across a tandem repeat because substitutions were cheaper than a gap.
+>
+> At the 12 homozygous insertions ng genotyped heterozygous at 30×, **it put 71 reads on the
+> reference allele; realigning every read against both chromosomes, one of the 71 fits the
+> reference better than the insertion**, 24 fit the two equally and 46 fit the insertion. At
+> 16 of the 17 wrong sites no read at all fits the reference better. The genotype model was
+> doing what its input said — `AD` and the read likelihood are the same number, summed from
+> the same merge rows — so the defect was the input.
+>
+> **`record_span` gives an insertion its own length of ground, and nothing is realigned**
+> (owner, 2026-09-11: realignment stays on the repeat-tract path). Reads put on the reference
+> at truth-homozygous insertions, by inserted length: 0.040 → 0.033 at one base, 0.060 →
+> 0.015 at two or three, 0.133 → 0.045 at four to six, 0.154 → 0.022 at seven to twelve,
+> **0.388 → 0.161 above thirteen**, against freebayes' 0.010 / 0.003 / 0.000 / 0.000 / 0.210.
+> The length trend is gone, which is the signature to look for.
+>
+> **On ordinary sequence ng and freebayes now find exactly the same 185 indels of 196 and miss
+> exactly the same 11.** Every one of the six indels freebayes finds that ng does not is on
+> repeat ground. Over all ground, indel genotypes right go from 276 of 297 to 283 of 295
+> against freebayes' 292 of 301, and precision from 0.983 to 0.990. SNPs keep their 2,006 with
+> three fewer false calls. **330 truth indels over 1.5 Mb of three human samples is a small
+> board** — a six-indel difference is six events, not a rate — and more data is owed before
+> the ng-against-freebayes gap is called.
+>
+> **Two defects it exposed, both fixed here.** A read pair left one observation per *position*
+> where it should leave one per *record*, so widening insertion records made overlapping mates
+> count twice; the losing mate is now barred from the records the contest's position affected.
+> Not specific to insertions — a deletion's record has always been several positions wide. And
+> an alternative no sample's genotype named still reached the file (9 records of 2,290); those
+> are now trimmed, with the reads moving into `DP − ΣAD`, which already means *reads no written
+> allele explains*, and the total depth unchanged to the byte.
+>
+> **The two whole-output differentials against production's walker are retired** (owner: *"our
+> objective is to improve over what production does"*). ng's records are deliberately no longer
+> production's, so the harness's premise fails rather than one of its six classes.
+>
 > - **Last completed task (2026-09-10):** **a sample is one file — the census a parameters fit
 > reads is inside its psp** (branch `census-vs-psp-perf`, Checkpoint E of
 > [psp_census_pair.md](doc/devel/ng/impl_plan/psp_census_pair.md);
