@@ -106,12 +106,12 @@ fn a_span_at_the_contigs_first_base_takes_the_base_to_its_right() {
 /// **The shape the generic path actually produces needs no padding base**, which is why the
 /// rule above is answered and never exercised on today's run.
 ///
-/// The generic mint anchors its indels — an insertion's reference span is its anchor base alone
-/// and a deletion's is the anchor plus the deleted run
-/// (`ReadEvent::footprint_span`, `locus_generation/pileup/decompose.rs`) — so a five-base
-/// deletion is `REF ACGTTG` against `ALT A`, and the alternative spells a base rather than
-/// nothing. The empty allele spec §5 was written for is the repeat-tract path's full-tract
-/// deletion, which is unbuilt.
+/// The generic mint anchors its indels — a deletion's reference span is the anchor plus the
+/// deleted run and an insertion's is the anchor plus its own inserted length
+/// (`ReadEvent::record_span`, `locus_generation/pileup/decompose.rs`) — so a five-base deletion
+/// is `REF ACGTTG` against `ALT A`, and the alternative spells a base rather than nothing. The
+/// empty allele spec §5 was written for is the repeat-tract path's full-tract deletion, which is
+/// unbuilt.
 #[test]
 fn a_deletion_shaped_the_way_the_generic_mint_shapes_one_needs_no_padding_base() {
     let reference = reference_of(b"ACGTTGCA");

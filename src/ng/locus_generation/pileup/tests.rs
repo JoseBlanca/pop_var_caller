@@ -550,7 +550,14 @@ fn insertion_record_has_alt_longer_than_ref() {
         .find(|a| a.bases.len() > anchor.footprint_len() as usize);
     assert!(ins.is_some(), "INS allele should be longer than REF");
     let ins = ins.unwrap();
-    assert_eq!(&*ins.bases, b"AXX", "anchor + 2 inserted bases");
+    // **The anchor, the two inserted bases, and the two reference bases after them** — a
+    // record covers the ground its insertion could occupy (`open_record::record_span`), so
+    // a two-base insertion is compared over three reference positions rather than one. The
+    // reference here is `AAAACGT`, so those two positions read `AA`.
+    assert_eq!(
+        &*ins.bases, b"AXXAA",
+        "the anchor, the inserted bases, and the reference bases the record covers after them",
+    );
     assert_eq!(ins.num_obs, 1);
 }
 

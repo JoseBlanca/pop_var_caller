@@ -213,6 +213,7 @@ impl Case {
             || self.config.max_indel_column_depth < default.max_indel_column_depth
     }
 
+
     fn fasta(&self) -> MockFasta {
         MockFasta::with_chromosomes(
             &self
@@ -2746,6 +2747,34 @@ fn the_determinism_digest_responds_to_the_evidence() {
 /// So what is actually asserted here is that the two walkers agree at *every* locus of a
 /// fixture built to contain no fabrication. The filter is the guard that keeps that true if
 /// the fixture ever gains a partial witness; it is not the thing under test.
+/// **RETIRED 2026-09-11 — ng's records are no longer production's, by intent.**
+///
+/// This test asserted that ng's walk emits the same records as production's, item for
+/// item, differing only in the bytes of an allele. That held while ng's generic walk was a
+/// transcription of production's. It stopped holding when an insertion's record was widened
+/// to cover the ground the insertion could occupy (`open_record::record_span`): a wider
+/// record reaches a neighbour the narrow one did not and the two become one, so the two
+/// walkers' streams no longer hold the same records and there is nothing left to line up
+/// item for item.
+///
+/// **Excluding the cases that carry an insertion was tried and does not work.** It is the
+/// shape `Case::caps_can_fire` already uses for the other boundary, and it takes the
+/// corpus from 8,000 qualifying loci to 784 and silences class 6 entirely — which is the
+/// hole the harness's own "a class counted zero is a branch nothing takes" rule exists to
+/// refuse. A guard that has to be blinded to most of its corpus is not a guard.
+///
+/// **Retired rather than repaired, on the owner's ruling** (2026-09-11: *"I'm not worried
+/// about that at all, our objective is to improve over what production does"*), which is
+/// the same ruling recorded in `copy_fidelity`'s header for the copies themselves. What
+/// replaces it is not another differential against production but ng's own tests plus a
+/// measurement against a truth set: `doc/devel/reports/reviews/ng_indel_genotypes_vs_giab_2026-09-11.md`
+/// scores both callers on GIAB, where ng's indel genotypes go from 276 of 297 right to 283
+/// of 295 and freebayes has 292 of 301.
+///
+/// Kept as `#[ignore]` rather than deleted for one milestone, so the harness underneath it
+/// — the case generator, the divergence classes, the census — is still compiled and still
+/// available to whatever replaces it.
+#[ignore = "ng's records are deliberately no longer production's — see the note above"]
 #[test]
 fn ng_agrees_with_production_where_production_fabricated_nothing() {
     let mut capped = 0usize;
@@ -3170,6 +3199,34 @@ fn counters_agree_apart_from_the_widen_path(
 /// check with nothing to catch. Both passes run over the same cases, and each asserts what
 /// it is in a position to assert: the one-group pass that class 2 is *silent*, the two-group
 /// pass that it is not.
+/// **RETIRED 2026-09-11 — ng's records are no longer production's, by intent.**
+///
+/// This test asserted that ng's walk emits the same records as production's, item for
+/// item, differing only in the bytes of an allele. That held while ng's generic walk was a
+/// transcription of production's. It stopped holding when an insertion's record was widened
+/// to cover the ground the insertion could occupy (`open_record::record_span`): a wider
+/// record reaches a neighbour the narrow one did not and the two become one, so the two
+/// walkers' streams no longer hold the same records and there is nothing left to line up
+/// item for item.
+///
+/// **Excluding the cases that carry an insertion was tried and does not work.** It is the
+/// shape `Case::caps_can_fire` already uses for the other boundary, and it takes the
+/// corpus from 8,000 qualifying loci to 784 and silences class 6 entirely — which is the
+/// hole the harness's own "a class counted zero is a branch nothing takes" rule exists to
+/// refuse. A guard that has to be blinded to most of its corpus is not a guard.
+///
+/// **Retired rather than repaired, on the owner's ruling** (2026-09-11: *"I'm not worried
+/// about that at all, our objective is to improve over what production does"*), which is
+/// the same ruling recorded in `copy_fidelity`'s header for the copies themselves. What
+/// replaces it is not another differential against production but ng's own tests plus a
+/// measurement against a truth set: `doc/devel/reports/reviews/ng_indel_genotypes_vs_giab_2026-09-11.md`
+/// scores both callers on GIAB, where ng's indel genotypes go from 276 of 297 right to 283
+/// of 295 and freebayes has 292 of 301.
+///
+/// Kept as `#[ignore]` rather than deleted for one milestone, so the harness underneath it
+/// — the case generator, the divergence classes, the census — is still compiled and still
+/// available to whatever replaces it.
+#[ignore = "ng's records are deliberately no longer production's — see the note above"]
 #[test]
 fn every_divergence_from_production_is_one_of_the_six_named_classes() {
     let mut one_group = DivergenceCensus::default();

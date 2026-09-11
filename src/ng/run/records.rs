@@ -28,11 +28,12 @@
 //! which is the only moment that knows both the span and whether any allele is empty.
 //!
 //! **⚑ And on today's path it is never fetched, which is worth knowing before reading this as
-//! live code.** The generic mint anchors its indels: an insertion's reference span is its anchor
-//! base alone and a deletion's is the anchor plus the deleted run
-//! (`ReadEvent::footprint_span`, `locus_generation/pileup/decompose.rs`), so a
-//! deletion's alternative is one base and never nothing, and **no allele a generic locus is
-//! called over is ever empty**. The empty allele spec §5 was written for is the repeat-tract
+//! live code.** Every generic record starts at an anchor base that both of its alleles keep: a
+//! deletion's reference span is the anchor plus the deleted run and an insertion's is the anchor
+//! plus its own inserted length (`ReadEvent::record_span`,
+//! `locus_generation/pileup/decompose.rs`), so a deletion's alternative is the anchor base and
+//! never nothing, an insertion's is longer still, and **no allele a generic locus is called over
+//! is ever empty**. The empty allele spec §5 was written for is the repeat-tract
 //! path's full-tract deletion, and that path is unbuilt. What this is, then, is the answer
 //! ready for when a record needs it — and it cannot be left out: `VcfRecord::new` asserts a
 //! padding base is carried **exactly** when some allele is empty, so a run that did not compute
