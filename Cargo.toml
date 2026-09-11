@@ -395,6 +395,13 @@ test = true
 name = "ng_ssr_thin_stratum_gate"
 required-features = ["bench-fixtures"]
 
+# Where the repeat-tract fit's threads are better spent — over one repeat-length class's
+# tracts, or over the classes at once. Draws its classes from `ssr_fit::bench_fixtures`,
+# so it needs the same feature as the gate above.
+[[example]]
+name = "ng_ssr_strata_threads"
+required-features = ["bench-fixtures"]
+
 # The site quality's cost across the cohort sizes the caller commits to —
 # `doc/devel/ng/spec/calling_quality.md` §13's Q3, which names this benchmark as the way to
 # settle it. It draws its own likelihood table, so it needs no fixture feature and
