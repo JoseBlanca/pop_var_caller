@@ -213,36 +213,6 @@ impl Case {
             || self.config.max_indel_column_depth < default.max_indel_column_depth
     }
 
-    /// **Whether any read here carries an insertion** — and therefore whether the two
-    /// walkers still lay their records over the same ground.
-    ///
-    /// # The differential's second stated boundary
-    ///
-    /// Production gives an insertion's record one reference base, its anchor. ng gives it
-    /// the anchor plus the insertion's own length, because a record's reference positions
-    /// are the only ground a read is compared over and one base cannot separate a read that
-    /// carries the insertion from a read that merely ends at it
-    /// ([`open_record::record_span`](super::open_record), 2026-09-11).
-    ///
-    /// **That changes how many records exist, not only what bytes they hold.** A wider
-    /// record reaches a neighbour the narrow one did not, and the two are then one record —
-    /// so the two walkers' streams stop corresponding item for item and the whole-output
-    /// comparison has nothing left to line up. This is a boundary of the same kind as
-    /// [`caps_can_fire`](Self::caps_can_fire) and it is skipped the same way: the cases are
-    /// counted, and the count is asserted non-zero, so a generator that stopped drawing
-    /// insertions could not turn the exclusion into a claim about cases that no longer
-    /// exist.
-    ///
-    /// What the exclusion costs is covered instead by the tests that pin the new record
-    /// shape directly — `tests::insertion_record_has_alt_longer_than_ref`,
-    /// `open_record::tests::an_insertion_anchored_on_the_regions_last_base_contributes_no_allele`
-    /// — and by the GIAB measurement in
-    /// `doc/devel/reports/reviews/ng_indel_genotypes_vs_giab_2026-09-11.md`.
-    fn carries_an_insertion(&self) -> bool {
-        self.reads
-            .iter()
-            .any(|read| read.cigar.iter().any(|op| matches!(op, CigarOp::Insertion(_))))
-    }
 
     fn fasta(&self) -> MockFasta {
         MockFasta::with_chromosomes(
@@ -2777,10 +2747,37 @@ fn the_determinism_digest_responds_to_the_evidence() {
 /// So what is actually asserted here is that the two walkers agree at *every* locus of a
 /// fixture built to contain no fabrication. The filter is the guard that keeps that true if
 /// the fixture ever gains a partial witness; it is not the thing under test.
+/// **RETIRED 2026-09-11 — ng's records are no longer production's, by intent.**
+///
+/// This test asserted that ng's walk emits the same records as production's, item for
+/// item, differing only in the bytes of an allele. That held while ng's generic walk was a
+/// transcription of production's. It stopped holding when an insertion's record was widened
+/// to cover the ground the insertion could occupy (`open_record::record_span`): a wider
+/// record reaches a neighbour the narrow one did not and the two become one, so the two
+/// walkers' streams no longer hold the same records and there is nothing left to line up
+/// item for item.
+///
+/// **Excluding the cases that carry an insertion was tried and does not work.** It is the
+/// shape `Case::caps_can_fire` already uses for the other boundary, and it takes the
+/// corpus from 8,000 qualifying loci to 784 and silences class 6 entirely — which is the
+/// hole the harness's own "a class counted zero is a branch nothing takes" rule exists to
+/// refuse. A guard that has to be blinded to most of its corpus is not a guard.
+///
+/// **Retired rather than repaired, on the owner's ruling** (2026-09-11: *"I'm not worried
+/// about that at all, our objective is to improve over what production does"*), which is
+/// the same ruling recorded in `copy_fidelity`'s header for the copies themselves. What
+/// replaces it is not another differential against production but ng's own tests plus a
+/// measurement against a truth set: `doc/devel/reports/reviews/ng_indel_genotypes_vs_giab_2026-09-11.md`
+/// scores both callers on GIAB, where ng's indel genotypes go from 276 of 297 right to 283
+/// of 295 and freebayes has 292 of 301.
+///
+/// Kept as `#[ignore]` rather than deleted for one milestone, so the harness underneath it
+/// — the case generator, the divergence classes, the census — is still compiled and still
+/// available to whatever replaces it.
+#[ignore = "ng's records are deliberately no longer production's — see the note above"]
 #[test]
 fn ng_agrees_with_production_where_production_fabricated_nothing() {
     let mut capped = 0usize;
-    let mut with_an_insertion = 0usize;
     let mut compared = 0usize;
     let mut anchored = 0usize;
     let mut anchored_multi_base = 0usize;
@@ -2798,13 +2795,6 @@ fn ng_agrees_with_production_where_production_fabricated_nothing() {
             // different reads by design, so there is nothing here to compare.
             if case.caps_can_fire() {
                 capped += 1;
-                continue;
-            }
-            // See `Case::carries_an_insertion`: ng's insertion record covers the ground the
-            // insertion could occupy where production's covers one base, so the two streams
-            // no longer hold the same records to compare.
-            if case.carries_an_insertion() {
-                with_an_insertion += 1;
                 continue;
             }
 
@@ -2897,15 +2887,6 @@ fn ng_agrees_with_production_where_production_fabricated_nothing() {
         "only {capped} of {total} cases drew caps small enough to fire — the differential \
          is no longer excluding the capped columns it says it excludes, so either the \
          generator changed or `caps_can_fire` no longer recognises them"
-    );
-    // The same argument for the second boundary — see `Case::carries_an_insertion`. An
-    // exclusion of nothing would let ng's insertion record drift with this anchor still
-    // green, which is the one thing the exclusion must not buy.
-    assert!(
-        with_an_insertion > 0,
-        "no case of {total} drew a read carrying an insertion, so the differential is \
-         excluding an empty set and `Case::carries_an_insertion` has stopped describing \
-         anything the generator produces"
     );
     // The anchor is only worth the ground it covered, and **multi-base loci are the part
     // that matters**: at a one-base locus every contributor is `Complete` whatever the
@@ -3218,12 +3199,39 @@ fn counters_agree_apart_from_the_widen_path(
 /// check with nothing to catch. Both passes run over the same cases, and each asserts what
 /// it is in a position to assert: the one-group pass that class 2 is *silent*, the two-group
 /// pass that it is not.
+/// **RETIRED 2026-09-11 — ng's records are no longer production's, by intent.**
+///
+/// This test asserted that ng's walk emits the same records as production's, item for
+/// item, differing only in the bytes of an allele. That held while ng's generic walk was a
+/// transcription of production's. It stopped holding when an insertion's record was widened
+/// to cover the ground the insertion could occupy (`open_record::record_span`): a wider
+/// record reaches a neighbour the narrow one did not and the two become one, so the two
+/// walkers' streams no longer hold the same records and there is nothing left to line up
+/// item for item.
+///
+/// **Excluding the cases that carry an insertion was tried and does not work.** It is the
+/// shape `Case::caps_can_fire` already uses for the other boundary, and it takes the
+/// corpus from 8,000 qualifying loci to 784 and silences class 6 entirely — which is the
+/// hole the harness's own "a class counted zero is a branch nothing takes" rule exists to
+/// refuse. A guard that has to be blinded to most of its corpus is not a guard.
+///
+/// **Retired rather than repaired, on the owner's ruling** (2026-09-11: *"I'm not worried
+/// about that at all, our objective is to improve over what production does"*), which is
+/// the same ruling recorded in `copy_fidelity`'s header for the copies themselves. What
+/// replaces it is not another differential against production but ng's own tests plus a
+/// measurement against a truth set: `doc/devel/reports/reviews/ng_indel_genotypes_vs_giab_2026-09-11.md`
+/// scores both callers on GIAB, where ng's indel genotypes go from 276 of 297 right to 283
+/// of 295 and freebayes has 292 of 301.
+///
+/// Kept as `#[ignore]` rather than deleted for one milestone, so the harness underneath it
+/// — the case generator, the divergence classes, the census — is still compiled and still
+/// available to whatever replaces it.
+#[ignore = "ng's records are deliberately no longer production's — see the note above"]
 #[test]
 fn every_divergence_from_production_is_one_of_the_six_named_classes() {
     let mut one_group = DivergenceCensus::default();
     let mut two_groups = DivergenceCensus::default();
     let mut capped = 0usize;
-    let mut with_an_insertion = 0usize;
 
     // Both generators: the general one reaches the classes that need partial witnesses, the
     // complete-reads one is where a divergence must be the widen or nothing, so running it
@@ -3266,27 +3274,6 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
                     }
                     continue;
                 }
-                // See `Case::carries_an_insertion`: ng lays an insertion's record over the
-                // ground the insertion could occupy and production over one base, so the
-                // two streams no longer hold the same records and no classification of a
-                // *difference between them* is available. Class 3 is measured off ng's own
-                // walk here for the same reason it is on the capped cases: an exclusion
-                // that silently took a class to zero would be read as a missing branch.
-                if case.carries_an_insertion() {
-                    with_an_insertion += 1;
-                    for (groups, census) in [(1, &mut one_group), (2, &mut two_groups)] {
-                        let ours = ng_walk_in_groups(&case, groups);
-                        for item in &ours.records {
-                            if let Ok(locus) = item
-                                && (locus.reads_without_observation > 0
-                                    || locus.reads_discarded_by_cap > 0)
-                            {
-                                census.counters += 1;
-                            }
-                        }
-                    }
-                    continue;
-                }
 
                 let theirs = production_walk(&case);
                 for (groups, census) in [(1, &mut one_group), (2, &mut two_groups)] {
@@ -3305,11 +3292,6 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
         capped > 0,
         "no case drew caps small enough to fire, so this census is excluding an empty set \
          and `Case::caps_can_fire`'s boundary has stopped describing anything"
-    );
-    assert!(
-        with_an_insertion > 0,
-        "no case drew a read carrying an insertion, so this census is excluding an empty \
-         set and `Case::carries_an_insertion`'s boundary has stopped describing anything"
     );
 
     // The seventh class, floored like the other six: a class counted zero is a branch

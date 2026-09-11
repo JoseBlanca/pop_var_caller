@@ -542,6 +542,37 @@ pub(super) struct OpenPileupRecord {
     /// `ref_span` (B1 in `ia/reviews/pileup_2026-05-06.md`).
     ///
     folded_reads: FoldedReads,
+    /// **The reads barred from this record because their mate already stands for the
+    /// pair here** — an indel mate-overlap loser, kept out for the record's whole life
+    /// rather than for the one position it lost at.
+    ///
+    /// # Why the walk's own removal is not enough
+    ///
+    /// A read pair is one molecule and leaves one observation on a record. Where two
+    /// mates both report an indel at one reference position, the walk settles it there
+    /// and drops the loser from that position's contributors
+    /// (`genome_walk::resolve_mate_overlap_at_pos`). That was a complete answer while
+    /// every indel record was one position wide: the anchor *was* the record, and the
+    /// loser had nowhere else to arrive.
+    ///
+    /// **A record several positions wide gives it somewhere.** At the next position of
+    /// the same record the loser is an ordinary matching read, so nothing drops it — and
+    /// the window it folds is pulled from its own cursor across the whole record, so it
+    /// carries the indel it just lost with. The pair is then counted twice, and
+    /// `folded_reads` cannot catch it because the two mates are two read ids.
+    ///
+    /// **Scoped to the records the contest's position affected, and to no others.** Two
+    /// mates can legitimately hold two observations on one record when they report
+    /// *different* evidence — `parity::a_deletion_anchored_before_its_record_contributes_none_of_the_bases_it_deleted`
+    /// has exactly that, one mate matching across the record's first four positions and
+    /// the other resuming past its own deletion — and a bar keyed on the pair rather than
+    /// on the contested position would delete one of them. The walk contested those two
+    /// at a different position, belonging to a different record, and this list is empty
+    /// here.
+    ///
+    /// Surfaced by widening insertion records (`record_span`, 2026-09-11); never specific
+    /// to insertions, since a deletion's record has always been several positions wide.
+    mate_overlap_losers: SmallVec<[u32; 1]>,
     /// The reads that covered this record and witnessed **nothing** inside it — every
     /// position of their window masked, `N`, or otherwise silent, so there is no
     /// observation to emit (spec §1 goal 2).
@@ -738,6 +769,7 @@ impl OpenPileupRecord {
             reads_without_observation: Vec::new(),
             reads_discarded_by_cap: Vec::new(),
             folded_reads,
+            mate_overlap_losers: SmallVec::new(),
         }
     }
 
@@ -752,6 +784,7 @@ impl OpenPileupRecord {
             reads_without_observation: Vec::new(),
             reads_discarded_by_cap: Vec::new(),
             folded_reads: FoldedReads::with_capacity(fold_capacity),
+            mate_overlap_losers: SmallVec::new(),
         }
     }
 
@@ -2168,6 +2201,7 @@ fn fold_read_into_record(
     folded_reads.store_at(slot, active.read_id, state);
 }
 
+
 /// Re-place every **live** read already folded into this record against the window it now
 /// has. Called from `widen`, immediately after `alleles[0]` grows — see the comment there
 /// for why the contributor-only re-fold production does is not enough.
@@ -2715,6 +2749,9 @@ pub(super) fn process_position(
     chrom_id: u32,
     contributors: &[ReadContribution],
     truncated_by_cap: &[u32],
+    // The reads dropped at this position as indel mate-overlap losers — see
+    // `OpenPileupRecord::mate_overlap_losers`, which is where they are barred.
+    mate_overlap_losers: &[u32],
     active_reads: &ActiveReads,
     reference: &dyn RefSeq,
     // The last reference position the walk's region owns — see `WalkerState::region_end`.
@@ -2850,11 +2887,22 @@ pub(super) fn process_position(
         // disjoint-borrow shape Mi6 (`pileup_2026-05-09.md`)
         // introduced, with `ref_seq` collapsed onto `alleles[0]` —
         // the bytes are no longer duplicated on the record.
+        // **The bar is registered before the fold, on every record this position
+        // affects.** The contest happened at this walker position, so the records it
+        // reaches are the records the pair was contested inside; a loser barred here stays
+        // barred for as long as the record lives, which is the whole point — the position
+        // it lost at is walked past long before the record closes.
+        for loser in mate_overlap_losers {
+            if !rec.mate_overlap_losers.contains(loser) {
+                rec.mate_overlap_losers.push(*loser);
+            }
+        }
         let OpenPileupRecord {
             alleles,
             folded_reads,
             reads_without_observation,
             reads_discarded_by_cap,
+            mate_overlap_losers: barred_from_this_record,
             ..
         } = rec;
         // `saturating_add`, matching `footprint_end_exclusive()` — every other reader of
@@ -2876,6 +2924,21 @@ pub(super) fn process_position(
             // (the same step that produces `contributors`), and
             // `process_position` runs before `expire_passed_reads`,
             // so the entry is still at the index the contributor recorded.
+            // **A barred read folds nothing, and withdraws whatever it already left.**
+            // It can have folded here before it lost: the record may have been opened by
+            // an earlier event and this read folded into it as an ordinary match, and the
+            // contribution would then sit in a bucket for a molecule its mate now stands
+            // for. `fold_read_into_record`'s no-observation path does the same withdrawal
+            // for the same reason.
+            if barred_from_this_record.contains(&contrib.read_id) {
+                if let Some(previous) = fold_state.folded_reads.remove(contrib.read_id) {
+                    subtract_contribution(
+                        &mut fold_state.alleles[previous.allele_index].support,
+                        &previous.contribution,
+                    );
+                }
+                continue;
+            }
             let active_read = active_reads.at(contrib.active_index);
             // **The events this read shows inside this record — re-used rather than
             // re-derived when the record is one base wide and sits under the walker.**
@@ -4357,6 +4420,7 @@ mod tests {
                 0,
                 &contributors,
                 &[],
+                &[],
                 &active,
                 &reference,
                 None,
@@ -4420,6 +4484,7 @@ mod tests {
             0,
             &contributors,
             &[],
+            &[],
             &active,
             &reference,
             None,
@@ -4447,6 +4512,7 @@ mod tests {
             7,
             0,
             &contributors,
+            &[],
             &[],
             &active,
             &reference,
@@ -4726,6 +4792,7 @@ mod tests {
             0,
             &contributors,
             &[],
+            &[],
             &active,
             &reference,
             None,
@@ -4763,6 +4830,7 @@ mod tests {
             7,
             0,
             &contributors,
+            &[],
             &[],
             &active,
             &reference,
@@ -4838,6 +4906,7 @@ mod tests {
                 0,
                 &contributors,
                 &[],
+                &[],
                 &active,
                 &reference,
                 None,
@@ -4912,6 +4981,7 @@ mod tests {
             0,
             &contributors,
             &[],
+            &[],
             &active,
             &reference,
             Some(9),
@@ -4945,15 +5015,21 @@ mod tests {
             0,
             &contributors,
             &[],
+            &[],
             &active,
             &reference,
             Some(10),
             None,
         )
         .expect("the fixture walks cleanly");
+        // **`AC` and `ATTC`, not `A` and `ATT`.** A record covers the ground its insertion
+        // could occupy (`record_span`), so a two-base insertion asks for three reference
+        // positions — here clipped to two by the region's own end at 10. The reference over
+        // 9..=10 is `AC`, and the read shows the anchor, its two inserted bases, and the
+        // reference base at 10.
         assert_eq!(
             alleles_of(&inside),
-            vec![b"A".to_vec(), b"ATT".to_vec()],
+            vec![b"AC".to_vec(), b"ATTC".to_vec()],
             "one base further in, the same insertion is ordinary SNP/indel ground and its \
              bases reach the record",
         );
@@ -4999,6 +5075,7 @@ mod tests {
             7,
             0,
             &contributors,
+            &[],
             &[],
             &active,
             &reference,
@@ -5083,6 +5160,7 @@ mod tests {
             5,
             0,
             &contributors,
+            &[],
             &[],
             &active,
             &reference,
@@ -5209,6 +5287,7 @@ mod tests {
             0,
             &contributors,
             &[],
+            &[],
             &active,
             &reference,
             None,
@@ -5263,6 +5342,7 @@ mod tests {
             5,
             0,
             &contributors,
+            &[],
             &[],
             &active,
             &reference,
@@ -5404,6 +5484,7 @@ mod tests {
                 0,
                 &contributors,
                 &truncated,
+                &[],
                 &active,
                 &reference,
                 None,
@@ -5478,6 +5559,7 @@ mod tests {
                 0,
                 &contributors,
                 std::slice::from_ref(&holey_id),
+                &[],
                 &active,
                 &reference,
                 None,
@@ -5615,6 +5697,7 @@ mod tests {
                 0,
                 &contributors,
                 &[],
+                &[],
                 &active,
                 &reference,
                 None,
@@ -5709,6 +5792,7 @@ mod tests {
             0,
             &contributors,
             &[],
+            &[],
             &active,
             &reference,
             None,
@@ -5736,6 +5820,7 @@ mod tests {
             7,
             0,
             &contributors,
+            &[],
             &[],
             &active,
             &reference,
@@ -5809,6 +5894,7 @@ mod tests {
                 pos,
                 0,
                 &contributors,
+                &[],
                 &[],
                 &active,
                 &reference,

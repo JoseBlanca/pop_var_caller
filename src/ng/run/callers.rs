@@ -6182,19 +6182,27 @@ mod records_handed_over_as_the_run_finishes_them {
     /// zeta and alpha carry a shared SNP at `chr1:17` (three and four reads, so the samples
     /// are numerically distinguishable); alpha alone carries `chr1:35`; iota carries a
     /// two-base insertion anchored at `chr1:14`; kappa shows two sequences one read each at
-    /// `chr1:15`, which the merge builds on the pooled two and candidate selection then
-    /// empties — the called-but-not-written locus; and mu has reads that all match the
-    /// reference, so it is genotyped from coverage alone at every locus.
+    /// `chr1:15`; and mu has reads that all match the reference, so it is genotyped from
+    /// coverage alone at every locus.
     ///
-    /// **⚑ Every locus this cohort produces is one reference position wide**, and that is a
-    /// limitation rather than a choice: the fixture reference is a hundred identical bases,
-    /// so two substitutions never share a base to chain on, an insertion's reference span is
-    /// its anchor alone, and a deletion left-aligns off the record (measured at D1). Two
-    /// samples departing at adjacent positions were tried and closed as two separate loci,
-    /// not one. `the_mixed_cohorts_records_describe_the_serial_callers_loci` asserts the
-    /// one-position width, so the limitation is checked rather than assumed — it is what
-    /// stops this module from pinning the parallel cover's chain-following, which
-    /// `cohort_merge`'s own fixtures do instead.
+    /// **⚑ Kappa's two singletons are inside iota's insertion, and that is new.** Since
+    /// 2026-09-11 an insertion's record covers the ground the insertion could occupy
+    /// (`open_record::record_span`), so iota's two-base insertion at 14 spans 14, 15 and 16
+    /// — and 15 is where kappa departs. The two are one locus now, where they were two, and
+    /// kappa's singletons are emptied by candidate selection *inside* it rather than
+    /// emptying a locus of their own. **So this cohort no longer produces a
+    /// called-but-not-written locus**, which is what
+    /// `the_record_path_is_byte_identical_at_every_thread_count` asserts.
+    ///
+    /// **⚑ Every *substitution* locus this cohort produces is one reference position wide**,
+    /// and that is a limitation rather than a choice: the fixture reference is a hundred
+    /// identical bases, so two substitutions never share a base to chain on and a deletion
+    /// left-aligns off the record (measured at D1). Two samples departing at adjacent
+    /// positions were tried and closed as two separate loci, not one.
+    /// `the_mixed_cohorts_records_describe_the_serial_callers_loci` asserts both widths —
+    /// one for the substitutions, three for the insertion — so the limitation is checked
+    /// rather than assumed. It is what stops this module from pinning the parallel cover's
+    /// chain-following, which `cohort_merge`'s own fixtures do instead.
     fn the_mixed_cohort() -> (Vec<TempDir>, Vec<PathBuf>) {
         let (zeta_dir, zeta) = sample_showing_on_reads("zeta", "zeta.bam", &[7], 3);
         let (alpha_dir, alpha) = sample_showing_on_reads("alpha", "alpha.bam", &[7, 25], 4);
@@ -6363,8 +6371,10 @@ mod records_handed_over_as_the_run_finishes_them {
             "the shared SNP, alpha's own SNP and iota's insertion reach the file",
         );
         assert_eq!(
-            baseline.calling.loci_called_but_not_written, 1,
-            "kappa's two-singletons locus is called and establishes nothing",
+            baseline.calling.loci_called_but_not_written, 0,
+            "kappa's two singletons at 15 fall inside iota's insertion record at 14..=16, so \
+             they are emptied inside a locus that *is* written rather than emptying one of \
+             their own — see `the_mixed_cohort`",
         );
         // **Every sample, not the first one.** A run hands one segmentation to the whole
         // cohort, so all five walk the same three segments and handle all three; reading only
@@ -6678,22 +6688,42 @@ mod records_handed_over_as_the_run_finishes_them {
             "and the difference is exactly the called-but-not-written count",
         );
 
-        // **The fixture's limitation, asserted rather than described.** Every locus this
-        // cohort produces is one reference position wide, because a reference of a hundred
-        // identical bases gives substitutions no shared base to chain on and slides deletions
-        // off the record. That is why this module cannot pin the parallel cover's
-        // chain-following and `cohort_merge`'s in-memory fixtures can. Asserting it keeps the
-        // claim honest in both directions: if a later change to the mint or to candidate
-        // selection ever does produce a wider locus here, this fails and the paragraph above
-        // has to be rewritten rather than quietly becoming false.
+        // **The fixture's limitation, asserted rather than described.** Every substitution
+        // locus this cohort produces is one reference position wide, because a reference of
+        // a hundred identical bases gives substitutions no shared base to chain on and
+        // slides deletions off the record. That is why this module cannot pin the parallel
+        // cover's chain-following and `cohort_merge`'s in-memory fixtures can.
+        //
+        // **The insertion is the one exception, and it is three wide.** A record covers the
+        // ground its insertion could occupy (`open_record::record_span`), so `zeta`'s
+        // two-base insertion takes its anchor plus two reference positions. It is asserted
+        // as a separate number rather than folded into the maximum, because the two say
+        // different things: the substitutions are one wide as a property of *this
+        // reference*, and the insertion is three wide as a property of the *mint*.
+        //
+        // Asserting both keeps the claim honest in both directions: a later change that
+        // widens a substitution locus here, or that returns the insertion's record to its
+        // anchor alone, fails this and the paragraph above has to be rewritten rather than
+        // quietly becoming false.
+        let width_of = |region: &GenomeRegion| region.end.0.saturating_sub(region.start.0) + 1;
+        let substitution_widths: Vec<u64> = written_regions
+            .iter()
+            .map(width_of)
+            .filter(|width| *width == 1)
+            .collect();
+        assert!(
+            !substitution_widths.is_empty(),
+            "the fixture writes substitution loci: {written_regions:?}",
+        );
         let widest = written_regions
             .iter()
-            .map(|region| region.end.0.saturating_sub(region.start.0) + 1)
+            .map(width_of)
             .max()
             .expect("the fixture writes records");
         assert_eq!(
-            widest, 1,
-            "every locus this reference can express is one position wide: {written_regions:?}",
+            widest, 3,
+            "the widest locus here is zeta's two-base insertion, three reference positions \
+             wide: {written_regions:?}",
         );
     }
 
