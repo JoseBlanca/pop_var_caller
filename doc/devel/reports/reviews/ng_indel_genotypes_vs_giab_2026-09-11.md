@@ -471,3 +471,83 @@ item here and worth taking whatever is decided about Shape A.
   "not reference" without asking which candidate it lands on, so it predicts the
   reference credit correctly and says nothing about the allele table. **That is the
   first thing to measure if Shape A is taken.**
+
+---
+
+## 9. What was built, and what it measured
+
+The fix in §7 was taken, together with two defects it exposed. Branch `ng-indel-gt`.
+
+**An insertion's record now covers the ground the insertion could occupy**
+([`open_record::record_span`](../../../../src/ng/locus_generation/pileup/open_record.rs)) —
+the anchor plus the inserted length, where it used to be the anchor alone. Nothing is
+realigned: the read keeps the mapper's placement, and only how much of what it already
+showed gets compared changes.
+
+**A read pair now leaves one observation on a record, not one per position.** The walk
+settles mate overlap at the reference position an indel is anchored, which was a complete
+answer while an indel record was one position wide. A wider record gave the losing mate a
+later position to arrive at, where nothing drops it and the window it folds carries the
+indel it lost with — so the pair was counted twice. The loser is now barred from the records
+the contest's position affected, for as long as those records live. Not specific to
+insertions: a deletion's record has always been several positions wide.
+
+**An alternative no sample's genotype names no longer reaches the file.** Nine records of
+2,290 carried one, each with two reads behind it; the reads move into `DP − ΣAD`, which
+already means *reads no written allele explains*, and the total depth is unchanged to the
+byte.
+
+### What it bought, at 30× over the three samples
+
+Reads put on the reference at truth-homozygous insertions, by inserted length:
+
+| bases inserted | before | after | freebayes |
+|---:|---:|---:|---:|
+| 1 | 0.040 | 0.033 | 0.010 |
+| 2–3 | 0.060 | 0.015 | 0.003 |
+| 4–6 | 0.133 | 0.045 | 0.000 |
+| 7–12 | 0.154 | 0.022 | 0.000 |
+| 13 and over | 0.388 | 0.161 | 0.210 |
+
+**The length trend is gone**, which is the property to look for, because the trend was the
+signature of the defect. Wrong genotypes at those insertions fall from 12 to 3 against
+freebayes' 4 — above 13 bases ng is now the better of the two, where a 150-base read starts
+to be unable to settle it for either.
+
+Indel accuracy split by the ground ng types it on, three samples pooled:
+
+| ground | caller | in truth | found | missed | not in truth | genotype right |
+|---|---|---:|---:|---:|---:|---|
+| ordinary sequence | ng | 196 | 185 | 11 | 1 | 178/185 |
+| ordinary sequence | freebayes | 196 | 185 | 11 | 0 | 180/185 |
+| one repeat tract | ng | 84 | 69 | 15 | 1 | 65/69 |
+| one repeat tract | freebayes | 84 | 74 | 10 | 0 | 72/74 |
+| tract cluster | ng | 50 | 41 | 9 | 1 | 40/41 |
+| tract cluster | freebayes | 50 | 42 | 8 | 0 | 40/42 |
+| **all** | **ng** | **330** | **295** | **35** | **3** | **283/295** |
+| **all** | **freebayes** | **330** | **301** | **29** | **0** | **292/301** |
+
+**On ordinary sequence the two callers now find exactly the same 185 indels and miss exactly
+the same 11.** Every one of the 6 indels freebayes finds that ng does not is on repeat
+ground. SNPs are unchanged in recall — 2,006 found either way — with three fewer false calls.
+
+**330 truth indels over 1.5 Mb of three human samples is a small board**, and a 6-indel
+difference is six events rather than a rate measured at scale. The ground labels are ng's own
+typing, applied to both callers so the comparison is on the same sites; *ordinary sequence*
+means ng routed it down the generic path, not that the sequence there is unrepetitive — most
+of the insertions this report is about sit on ground labelled ordinary while being locally
+repetitive.
+
+### Two things it cost
+
+**Two indels of 297 are no longer found**, both explained. At `chr7:85066913`, a `(AG)n`
+tract, QUAL falls from 31.6 to 17.6 and the record stops passing the QUAL ≥ 30 gate on
+unchanged evidence. At `chr9:11024723` an insertion and a SNP two bases apart become one
+complex allele, which the scorer counts as missing the simple insertion — freebayes emits the
+identical complex allele there and is scored the same way.
+
+**The production-parity differentials are retired.** ng's records are deliberately no longer
+production's: a wider record merges with a neighbour, so the two walkers' streams stop
+corresponding item for item, and it is the harness's premise that fails rather than one of
+its six classes. Excluding insertion cases was tried and takes the corpus from 8,000
+qualifying loci to 784 while silencing one divergence class entirely.
