@@ -949,7 +949,7 @@ mod tests {
     use super::*;
     use crate::ng::calling::genotype_prior::SpectrumSeed;
     use crate::ng::calling::likelihood::ssr::{DEFAULT_OUTLIER_WEIGHT, RepeatTractOutlierWeight};
-    use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
+    use crate::ng::parameter_estimation::calibration::MintedReadErrors;
     use crate::ng::parameter_estimation::joint::contamination::{
         ContaminationEstimate, NotIdentifiedReason,
     };
@@ -958,7 +958,9 @@ mod tests {
         DerivedStratum, PeriodLengthSpectrum, SharesProvenance, Slippage, StratumFit,
         StratumOutcome, StratumRefusal,
     };
-    use crate::ng::parameter_estimation::ssr::{RepeatCount, Stratum as SsrStratum, StratumKey};
+    use crate::ng::parameter_estimation::repeat_strata::{
+        RepeatCount, Stratum as SsrStratum, StratumKey,
+    };
     use crate::ng::types::{Ploidy, ReadGroupId, SsrPeriod};
     use std::collections::BTreeSet;
 
@@ -2293,7 +2295,7 @@ mod tests {
     /// [`resolve_error_rates`](crate::ng::parameter_estimation::generic::fallback::resolve_error_rates)
     /// hands a read group with too few sites to fit, no sibling above the floor to borrow from
     /// and nothing supplied the pre-pass's own constant —
-    /// [`DEFAULT_ERROR_RATE`](crate::ng::parameter_estimation::generic::DEFAULT_ERROR_RATE) at
+    /// [`DEFAULT_ERROR_RATE`](crate::ng::parameter_estimation::DEFAULT_ERROR_RATE) at
     /// 0.001, marked `Defaulted`. `ReadGroupCalibration::from_fitted_rate` then copies **the
     /// rate's** warrant onto `rate / mean minted error`, so what is written is `defaulted` beside
     /// a multiplier of 0.001 over that library's own average. That is the low-data corner
@@ -2322,7 +2324,7 @@ mod tests {
             ReadGroups::of_lanes(&[("HWI.3", "TS-1", "lib3"), ("HWI.4", AWKWARD_SAMPLE, "lib4")]);
         // The pre-pass's bottom rung, for both libraries: nothing could be fitted and nothing was
         // supplied, so each takes the stated constant.
-        let defaulted_rate = crate::ng::parameter_estimation::generic::DEFAULT_ERROR_RATE;
+        let defaulted_rate = crate::ng::parameter_estimation::DEFAULT_ERROR_RATE;
         let rates = BTreeMap::from([
             (
                 ReadGroupId(0),

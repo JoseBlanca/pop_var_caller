@@ -1,11 +1,13 @@
 //! The joint fit — every parameter estimated once, over every sample at the same loci.
 //!
-//! ng step 4's **second** route to the parameters
-//! ([`generic`](super::generic) is the first). Where that route folds each sample's loci
-//! into histograms and fits from those, this one keeps raw evidence at a bounded set of
-//! loci — **the same loci in every sample** — and fits everything once when every sample
-//! is in. What that buys is the locus's own allele frequency in the cohort, a quantity a
-//! histogram has forgotten by construction.
+//! **ng step 4's only route to the parameters.** It keeps raw evidence at a bounded set of loci —
+//! **the same loci in every sample** — and fits everything once when every sample is in. What that
+//! buys is the locus's own allele frequency in the cohort.
+//!
+//! *There was a second route until 2026-09-11: it folded each sample's loci into whole-genome
+//! histograms and fitted from those, one sample at a time, and a histogram has forgotten which
+//! locus was which so it could not reach a population frequency at all. See
+//! [`parameter_estimation`](super) for what went with it.*
 //!
 //! Design: `doc/devel/ng/spec/parameter_prepass_joint_fit.md` (what the route is),
 //! `parameter_prepass_joint_loci.md` (which loci), `parameter_prepass_joint_records.md`

@@ -78,7 +78,9 @@ use crate::ng::parameter_estimation::joint::ssr_fit::{
 use crate::ng::parameter_estimation::joint::stratum_fits::{
     FittedLengthSpectrum, FittedSlippage, StratumFits,
 };
-use crate::ng::parameter_estimation::ssr::{RepeatCount, Stratum as SsrStratum, StratumKey};
+use crate::ng::parameter_estimation::repeat_strata::{
+    RepeatCount, Stratum as SsrStratum, StratumKey,
+};
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::read::input::read_groups::ReadGroups;
 use crate::ng::types::{BatchId, ErrorRate, InbreedingF, Ploidy, ReadGroupId, SsrPeriod};
@@ -1335,7 +1337,7 @@ mod the_north_star_round_trip {
     use super::tests::the_counts_the_projection_out_reads;
     use super::*;
     use crate::ng::calling::genotype_prior::{SeedRegime, SpectrumSeed};
-    use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
+    use crate::ng::parameter_estimation::calibration::MintedReadErrors;
     use crate::ng::parameter_estimation::joint::contamination::{
         ContaminationEstimate, ContaminationSource, NotIdentifiedReason,
     };

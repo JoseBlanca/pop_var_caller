@@ -1,4 +1,11 @@
 # ng step 4 — the STR stutter parameters: types & interfaces
+> ## ⛔ Removed on 2026-09-11
+>
+> **The per-sample STR types and interfaces this lays out are gone**, except the stratum vocabulary,
+> which moved to `parameter_estimation::repeat_strata`. The cohort fit that replaced it is
+> `joint::ssr_fit`. See
+> [`impl_plan/remove_histogram_route.md`](../impl_plan/remove_histogram_route.md).
+
 
 *Status: architecture draft (2026-08-06, revised 2026-08-09 for spec §4.5 — the second floor on
 slipped reads, the split provenance it forces on `StratumFit`, and the substitution rate emitted for

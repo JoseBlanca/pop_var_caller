@@ -39,7 +39,7 @@
 //! # The identity this tool also checks
 //!
 //! The census and the pre-pass's own accumulator
-//! ([`calibration`](pop_var_caller::ng::parameter_estimation::generic::calibration)) are supposed
+//! ([`calibration`](pop_var_caller::ng::parameter_estimation::calibration)) are supposed
 //! to see **the same reads**: complete witnesses at generic loci. This tool folds every locus
 //! through the accumulator as well and prints both read counts and both log-error sums, so a run
 //! where the two disagree says so in its own output instead of leaving the claim to an argument.
@@ -95,10 +95,10 @@ use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGenera
 use pop_var_caller::ng::locus_generation::{
     GeneratorSet, GeneratorSlot, SampleLocusObservationsIterator, UnhandledReason,
 };
-use pop_var_caller::ng::parameter_estimation::generic::calibration::{
+use pop_var_caller::ng::parameter_estimation::calibration::{
     MintedReadErrors, fold_into, minted_error_by_read_group,
 };
-use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use pop_var_caller::ng::parameter_estimation::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
 use pop_var_caller::ng::read::input::read_groups::build_read_groups;
@@ -131,7 +131,7 @@ struct GroupAnswer {
     census: MintedErrorTotals,
     /// **The same fold, but with each site thinned to the depth the error-rate histogram bins
     /// at.** The histogram caps every position at
-    /// [`DepthBinEdges::max_depth`](pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges::max_depth)
+    /// [`DepthBinEdges::max_depth`](pop_var_caller::ng::parameter_estimation::depth_bins::DepthBinEdges::max_depth)
     /// before the rate is fitted; the calibration fold caps nothing. Per site that is harmless —
     /// the draw is on counts and never on a quality — but it changes **how much weight each site
     /// carries**: a 500-read position gets 500 votes in the denominator and 124 in the population

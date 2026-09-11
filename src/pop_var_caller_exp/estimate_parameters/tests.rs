@@ -92,7 +92,7 @@ fn args_over(cohort: &AVaryingCohort, psps: &Path, output: PathBuf) -> EstimateP
         output,
         force: false,
         ploidy: 2,
-        inbreeding: 0.0,
+        inbreeding: None,
     }
 }
 
@@ -407,17 +407,19 @@ fn a_reference_the_psps_were_not_walked_against_is_refused_before_the_selection_
     );
 }
 
-/// **The inbreeding coefficient is recorded as supplied, not fitted.**
+/// **A stated coefficient overrides the fitted one and is recorded as supplied.**
 ///
-/// It comes from a sample's own windowed genome histogram, which is the other pre-pass route. A
-/// file that reported a declared value as fitted would make a run's own assumption look like a
-/// measurement.
+/// The override is the owner's ruling of 2026-08-27 — a user who knows how their material was
+/// bred knows it whatever the cohort size — and the warrant is what keeps it honest: a file that
+/// reported a declared value as fitted would make a run's own assumption look like a measurement.
+/// **The cohort here has two samples and its fit does produce coefficients**, so this pins the
+/// precedence and not merely the absence of a fit.
 #[test]
-fn the_inbreeding_coefficient_is_recorded_as_supplied() {
+fn a_stated_inbreeding_coefficient_overrides_the_fit_and_is_recorded_as_supplied() {
     let (cohort, psps) = a_walked_cohort();
     let output = cohort.directory.path().join("cohort.parameters.toml");
     let mut args = args_over(&cohort, &psps, output);
-    args.inbreeding = 0.25;
+    args.inbreeding = Some(0.25);
 
     let (file, _) = fit_and_assemble(&args).expect("the cohort fits");
 
@@ -428,6 +430,55 @@ fn the_inbreeding_coefficient_is_recorded_as_supplied() {
             row.inbreeding_coefficient.warrant,
             crate::ng::calling::parameters_file::Warrant::Supplied,
             "a declared coefficient is supplied, never fitted",
+        );
+    }
+}
+
+/// **With nothing stated, the file carries what the fit measured, marked `fitted_here`.**
+///
+/// This is the whole point of writing the coefficient into the parameters file: the calling
+/// commands take no flag for it, so a coefficient the fit measured reaches a run only if it is
+/// written here. Before 2026-09-11 the command declared zero on every row and threw the fit's own
+/// number away.
+///
+/// **What pins that is the warrant and the observation count, not the value** — and it is worth
+/// saying which, because this fixture's two samples are not inbred and their fitted homozygote
+/// excess comes back at about 3 × 10⁻¹⁰. So an assertion on the number would pass against a
+/// hard-coded zero and prove nothing.
+///
+/// The observation count is the second, independent discriminator: the writer leaves it out of the
+/// file for a `supplied` or `defaulted` value on purpose — *"a zero count would claim a
+/// measurement over no genome"* (`from_run_parameters`'s `warranted_value`) — so
+/// `observations = { covered_positions = … }` can only have come from a fitted estimate.
+#[test]
+fn with_nothing_stated_the_fits_own_coefficient_is_written_and_marked_fitted() {
+    let (cohort, psps) = a_walked_cohort();
+    let output = cohort.directory.path().join("cohort.parameters.toml");
+    let args = args_over(&cohort, &psps, output);
+    assert!(
+        args.inbreeding.is_none(),
+        "the fixture must state nothing for this test to be about the fitted rung",
+    );
+
+    let (file, _) = fit_and_assemble(&args).expect("the cohort fits");
+
+    assert!(!file.inbreeding.by_sample.is_empty(), "one row a sample");
+    for row in &file.inbreeding.by_sample {
+        assert_eq!(
+            row.inbreeding_coefficient.warrant,
+            crate::ng::calling::parameters_file::Warrant::FittedHere,
+            "two samples identify a homozygote excess, so it is fitted here: {:?}",
+            row,
+        );
+        assert!(
+            (0.0..1.0).contains(&row.inbreeding_coefficient.value),
+            "a coefficient is a fraction below one: {:?}",
+            row,
+        );
+        assert!(
+            row.inbreeding_coefficient.observations.is_some(),
+            "a fitted coefficient says how much data stood behind it, in its own unit: {:?}",
+            row,
         );
     }
 }

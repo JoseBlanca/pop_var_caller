@@ -95,7 +95,9 @@ use crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatche
 use crate::ng::parameter_estimation::joint::stratum_fits::{
     LengthSpectrum, LengthSpectrumRung, StratumFits,
 };
-use crate::ng::parameter_estimation::ssr::{RepeatCount, Stratum as SsrStratum, StratumKey};
+use crate::ng::parameter_estimation::repeat_strata::{
+    RepeatCount, Stratum as SsrStratum, StratumKey,
+};
 use crate::ng::types::{
     AlleleId, BatchId, BatchOfEachReadGroup, BatchOfEachSample, ErrorRate, GenomeRegion, Genotype,
     InbreedingF, LogProb, Phred, Ploidy, ReadGroupId, SsrPeriod,
@@ -3666,7 +3668,7 @@ mod tests {
     /// parameters live: `BTreeMap::new` is a `const fn`, and a temporary would be freed at the
     /// end of the statement that built the view.
     static NO_SUBSTITUTION_RATES: std::collections::BTreeMap<
-        crate::ng::parameter_estimation::ssr::StratumKey,
+        crate::ng::parameter_estimation::repeat_strata::StratumKey,
         crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
     > = std::collections::BTreeMap::new();
 
@@ -4311,7 +4313,7 @@ mod tests {
     #[test]
     fn the_run_answers_a_tracts_prior_shape_from_its_own_stratum() {
         use crate::ng::parameter_estimation::joint::stratum_fits::LengthSpectrumRung;
-        use crate::ng::parameter_estimation::ssr::RepeatCount;
+        use crate::ng::parameter_estimation::repeat_strata::RepeatCount;
 
         let strata = strata_with_length_spectra();
         let calibration = one_read_group();
@@ -4395,7 +4397,7 @@ mod tests {
         inbreeding: &'a [InbreedingF],
         strata: &'a StratumFits,
         substitution: &'a std::collections::BTreeMap<
-            crate::ng::parameter_estimation::ssr::StratumKey,
+            crate::ng::parameter_estimation::repeat_strata::StratumKey,
             crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
         >,
     ) -> FrozenParameters<'a> {

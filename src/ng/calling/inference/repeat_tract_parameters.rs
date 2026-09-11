@@ -98,7 +98,7 @@ use crate::ng::parameter_estimation::joint::ssr_fit::Slippage;
 use crate::ng::parameter_estimation::joint::stratum_fits::{
     FittedSlippage, LengthSpectrum, NoSlippage,
 };
-use crate::ng::parameter_estimation::ssr::RepeatCount;
+use crate::ng::parameter_estimation::repeat_strata::RepeatCount;
 use crate::ng::types::{ErrorRate, Motif, ReadGroupId};
 
 use std::num::NonZeroU32;
@@ -114,7 +114,7 @@ use std::num::NonZeroU32;
 /// reaches it is marked [`Provenance::Defaulted`].
 ///
 /// **It is *defined as* the SNP/indel path's default
-/// ([`DEFAULT_ERROR_RATE`](crate::ng::parameter_estimation::generic::DEFAULT_ERROR_RATE)), so
+/// ([`DEFAULT_ERROR_RATE`](crate::ng::parameter_estimation::DEFAULT_ERROR_RATE)), so
 /// editing that constant moves this one**, and it is still not the same parameter.
 /// `doc/devel/ng/spec/read_likelihoods.md` §4.3 forbids tying the two *fitted* rates — each
 /// absorbs what its own model cannot otherwise explain — and nothing here ties them: wherever
@@ -128,8 +128,7 @@ use std::num::NonZeroU32;
 /// measured, not about strata that were not measured at all, which is the condition this is
 /// reached under. And base quality inside tracts is systematically worse than outside them
 /// (§4.1), so 0.001 is very likely optimistic at a tract. Nothing here measures by how much.
-pub const DEFAULT_SSR_SUBSTITUTION_RATE: f64 =
-    crate::ng::parameter_estimation::generic::DEFAULT_ERROR_RATE;
+pub const DEFAULT_SSR_SUBSTITUTION_RATE: f64 = crate::ng::parameter_estimation::DEFAULT_ERROR_RATE;
 
 /// **The fitted numbers one repeat tract's scoring contexts are built from**, one pair per
 /// `(read group, candidate)`, together with the length support the tract's junk term is spread
@@ -1000,7 +999,7 @@ mod tests {
         StratumOutcome,
     };
     use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
-    use crate::ng::parameter_estimation::ssr::{Stratum as SsrStratum, StratumKey};
+    use crate::ng::parameter_estimation::repeat_strata::{Stratum as SsrStratum, StratumKey};
     use crate::ng::types::{InbreedingF, LogProb, Ploidy, SsrPeriod, SummedLogError};
 
     use std::collections::BTreeMap;

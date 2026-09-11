@@ -57,8 +57,8 @@ pub use census_cohort::{
     read_groups_of, the_census_in_a_psp, the_censuses_as_one_cohort,
 };
 pub use census_fit::{
-    CohortFit, CohortFitError, every_read_group_pooled, fit_a_cohort, parameters_file_of,
-    parameters_from_the_fit,
+    CohortFit, CohortFitError, every_read_group_pooled, fit_a_cohort, fitted_inbreeding_of,
+    parameters_file_of, parameters_from_the_fit,
 };
 pub use census_freshness::{
     CensusVerdict, CensusesToRegenerate, JudgedPsp, THE_COMMAND_THAT_REBUILDS_A_CENSUS,

@@ -50,7 +50,7 @@
 //!   [`from_fitted_rate`](crate::ng::calling::likelihood::ReadGroupCalibration::from_fitted_rate)
 //!   copies the **rate's** warrant onto the ratio. The pre-pass's error-rate ladder has a
 //!   `Defaulted` bottom rung of its own —
-//!   [`DEFAULT_ERROR_RATE`](crate::ng::parameter_estimation::generic::DEFAULT_ERROR_RATE) at
+//!   [`DEFAULT_ERROR_RATE`](crate::ng::parameter_estimation::DEFAULT_ERROR_RATE) at
 //!   0.001, taken by a read group with too few sites to fit, no sibling to borrow from and nothing
 //!   supplied — so a run can legitimately write a `defaulted` multiplier of `0.001 / that
 //!   library's mean minted error`, which is one only by coincidence. **So the file's reader cannot
@@ -287,6 +287,41 @@ impl DeclaredInbreeding {
     /// scores a plant under a coefficient meant for another.
     #[must_use]
     pub fn of_each_sample(&self, read_groups: &ReadGroups) -> Vec<Estimate<InbreedingF>> {
+        self.of_each_sample_over(read_groups, &BTreeMap::new())
+    }
+
+    /// The same, with **a cohort fit's own coefficients as the middle rung** — what
+    /// `estimate-parameters` hands to the parameters file it writes.
+    ///
+    /// # The ladder, highest first
+    ///
+    /// 1. **what the operator said about this sample by name**, `Supplied`;
+    /// 2. **what they said about the whole run**, `Supplied`;
+    /// 3. **what the cohort fit measured for this sample**, carrying the fit's own warrant —
+    ///    `FittedHere` where it measured one, and `Defaulted` at a single sample, where the
+    ///    homozygote excess is zero whatever the truth because one genome's totals cannot
+    ///    identify it;
+    /// 4. **[`DEFAULT_INBREEDING_COEFFICIENT`]**, `Defaulted` — nobody said and nothing was
+    ///    fitted.
+    ///
+    /// **A stated coefficient outranks a fitted one, and that is a ruling rather than an
+    /// oversight** (owner, 2026-08-27, recorded on
+    /// [`InbreedingSource::User`](crate::ng::parameter_estimation::joint::census_moments::InbreedingSource::User)):
+    /// *a user who knows how their material was bred knows it whatever the cohort size*. **It is
+    /// not the order [`Provenance::weaker_of`] uses**, which puts `Supplied` below `FittedHere` —
+    /// that order is about what a *derived* value may claim, so that a score resting on a handed
+    /// number cannot advertise itself as measured. Which number to take and what it may claim are
+    /// two questions, and only the first is settled here.
+    ///
+    /// `fitted` is keyed by **sample name**, for the reason this whole type is: joining on row
+    /// order would make two swapped samples a silent mis-attribution. A sample the fit produced no
+    /// coefficient for is simply absent from it and falls to the rung below.
+    #[must_use]
+    pub fn of_each_sample_over(
+        &self,
+        read_groups: &ReadGroups,
+        fitted: &BTreeMap<Box<str>, Estimate<InbreedingF>>,
+    ) -> Vec<Estimate<InbreedingF>> {
         read_groups
             .read_groups_per_sample()
             .iter()
@@ -301,12 +336,15 @@ impl DeclaredInbreeding {
                         provenance: Provenance::Supplied,
                         observations: 0,
                     },
-                    None => Estimate {
-                        value: InbreedingF::try_new(DEFAULT_INBREEDING_COEFFICIENT)
-                            .expect("zero is a coefficient in [0, 1)"),
-                        provenance: Provenance::Defaulted,
-                        observations: 0,
-                    },
+                    None => fitted
+                        .get(sample.sample.as_ref())
+                        .cloned()
+                        .unwrap_or(Estimate {
+                            value: InbreedingF::try_new(DEFAULT_INBREEDING_COEFFICIENT)
+                                .expect("zero is a coefficient in [0, 1)"),
+                            provenance: Provenance::Defaulted,
+                            observations: 0,
+                        }),
                 }
             })
             .collect()
@@ -456,7 +494,9 @@ mod tests {
     use crate::ng::parameter_estimation::joint::stratum_fits::{
         FittedSlippage, LengthSpectrumRung, NoSlippage, STATED_FLAT_CONCENTRATION, StratumFits,
     };
-    use crate::ng::parameter_estimation::ssr::{RepeatCount, Stratum as SsrStratum, StratumKey};
+    use crate::ng::parameter_estimation::repeat_strata::{
+        RepeatCount, Stratum as SsrStratum, StratumKey,
+    };
     use crate::ng::read::input::read_groups::ReadGroups;
     use crate::ng::repeat_catalog::StrRepeatCriteria;
     use crate::ng::types::{
@@ -872,6 +912,100 @@ mod tests {
         assert_eq!(one_plant[0].provenance, Provenance::Defaulted);
         assert_eq!(one_plant[1].value.get(), 0.42);
         assert_eq!(one_plant[1].provenance, Provenance::Supplied);
+    }
+
+    /// **The four rungs of the ladder, on one run** — and the one that matters is the third,
+    /// because it did not exist before 2026-09-11: a coefficient the cohort fit measured.
+    ///
+    /// The fixture's run is `TS-1` then `Ailsa Craig`, in that order.
+    #[test]
+    fn a_fitted_coefficient_sits_below_a_stated_one_and_above_the_default() {
+        let read_groups = a_runs_read_groups();
+        let fitted_for_both: BTreeMap<Box<str>, Estimate<InbreedingF>> =
+            [("TS-1", 0.31), ("Ailsa Craig", 0.77)]
+                .into_iter()
+                .map(|(sample, coefficient)| {
+                    (
+                        sample.into(),
+                        Estimate {
+                            value: a_coefficient(coefficient),
+                            provenance: Provenance::FittedHere,
+                            observations: 1_806,
+                        },
+                    )
+                })
+                .collect();
+
+        // Rung 3: nothing stated, so both take what the fit measured — with its warrant and its
+        // evidence count, which is what tells a reader of the file it was measured at all.
+        let fitted =
+            DeclaredInbreeding::nothing_said().of_each_sample_over(&read_groups, &fitted_for_both);
+        assert_eq!(fitted[0].value.get(), 0.31);
+        assert_eq!(fitted[1].value.get(), 0.77);
+        assert!(
+            fitted
+                .iter()
+                .all(|estimate| estimate.provenance == Provenance::FittedHere
+                    && estimate.observations == 1_806),
+            "the fit's own warrant and count travel with its number: {fitted:?}"
+        );
+
+        // Rung 1 beats rung 3, on the named sample only. **This is the owner's ruling of
+        // 2026-08-27** — a stated coefficient wins — and the join is by name, so a builder that
+        // zipped statements against the run's order would put the 0.5 on TS-1 and still pass a
+        // count-based check.
+        let one_stated = DeclaredInbreeding::nothing_said()
+            .and_this_sample("Ailsa Craig", a_coefficient(0.5))
+            .of_each_sample_over(&read_groups, &fitted_for_both);
+        assert_eq!(one_stated[0].value.get(), 0.31, "TS-1 keeps the fitted one");
+        assert_eq!(one_stated[0].provenance, Provenance::FittedHere);
+        assert_eq!(
+            one_stated[1].value.get(),
+            0.5,
+            "Ailsa Craig takes the stated one"
+        );
+        assert_eq!(one_stated[1].provenance, Provenance::Supplied);
+
+        // Rung 2 beats rung 3 as well: a run-wide statement is still a statement.
+        let run_wide = DeclaredInbreeding::one_value_for_every_sample(a_coefficient(0.9))
+            .of_each_sample_over(&read_groups, &fitted_for_both);
+        assert!(
+            run_wide.iter().all(|estimate| estimate.value.get() == 0.9
+                && estimate.provenance == Provenance::Supplied),
+            "a run-wide statement overrides every fitted coefficient: {run_wide:?}"
+        );
+
+        // Rung 4: a sample the fit produced nothing for falls to the default, while its
+        // neighbour keeps its fitted number. **A fit that could not measure one sample must not
+        // cost the others theirs.**
+        let only_one_fitted: BTreeMap<Box<str>, Estimate<InbreedingF>> = fitted_for_both
+            .iter()
+            .filter(|(sample, _)| sample.as_ref() == "Ailsa Craig")
+            .map(|(sample, estimate)| (sample.clone(), estimate.clone()))
+            .collect();
+        let partly =
+            DeclaredInbreeding::nothing_said().of_each_sample_over(&read_groups, &only_one_fitted);
+        assert_eq!(partly[0].value.get(), DEFAULT_INBREEDING_COEFFICIENT);
+        assert_eq!(partly[0].provenance, Provenance::Defaulted);
+        assert_eq!(partly[1].value.get(), 0.77);
+        assert_eq!(partly[1].provenance, Provenance::FittedHere);
+    }
+
+    /// **`of_each_sample` is `of_each_sample_over` with nothing fitted**, so the defaults path and
+    /// the fitting path cannot drift apart on the join rule or on the warrants.
+    #[test]
+    fn the_two_resolutions_agree_where_nothing_was_fitted() {
+        let read_groups = a_runs_read_groups();
+        for declared in [
+            DeclaredInbreeding::nothing_said(),
+            DeclaredInbreeding::one_value_for_every_sample(a_coefficient(0.6)),
+            DeclaredInbreeding::nothing_said().and_this_sample("TS-1", a_coefficient(0.2)),
+        ] {
+            assert_eq!(
+                declared.of_each_sample(&read_groups),
+                declared.of_each_sample_over(&read_groups, &BTreeMap::new()),
+            );
+        }
     }
 
     /// **A per-sample statement overrides the run-wide one, and is joined by name.**

@@ -45,20 +45,15 @@
 //! second accumulation at fold time and a field on every observation. Corrected in the spec on
 //! 2026-08-24 by the owner.
 //!
-//! # The sites are the same; the reads are not, and the gap is 3 parts in 100 at 300×
+//! # The reads this averages over are not quite the reads the rate is fitted from
 //!
-//! §3.2 requires the average to run over exactly the reads the fitted rate was fitted from. **The
-//! *sites* are identical by construction** — both paths run behind one `LocusKind::Generic` gate in
-//! [`add_locus`](super::accumulators::GenericAccumulators::add_locus), before its inbreeding-mode
-//! branch, and both iterate `complete_observations()`. Neither the library count, nor the ploidy
-//! map, nor a supplied inbreeding coefficient divides them.
-//!
-//! **The per-position depth cap does.** The histogram route thins every position to at most
-//! [`MAX_BINNED_DEPTH`](super::depth_bins) reads before fitting; this fold thins nothing. Per site
-//! that is harmless — the draw is hypergeometric on counts and never looks at a read's quality —
-//! but across sites it re-weights: a 500-read position casts 500 votes here and 124 in the
-//! population the rate was fitted from, and deep positions are where reads pile up from
-//! elsewhere and where mapping quality collapses.
+//! §3.2 requires the average to run over exactly the reads the fitted rate was fitted from, and
+//! **the per-position depth cap is where the two part company**. A census records a position's
+//! allele counts thinned to at most [`MAX_BINNED_DEPTH`](super::depth_bins) reads; this fold thins
+//! nothing. Per site that is harmless — the thinning is proportional on counts and never looks at
+//! a read's quality — but across sites it re-weights: a 500-read position casts 500 votes here and
+//! 124 in the population the rate was fitted from, and deep positions are where reads pile up
+//! from elsewhere and where mapping quality collapses.
 //!
 //! **Measured, not argued** (`examples/ng_minted_error_means.rs`). On HG002's 100 benchmark regions
 //! at 300×, where the fit sees 41 read-positions in 100, the denominator's geometric mean is
@@ -70,22 +65,20 @@
 //! read. The 2.7% is carried knowingly, and it is a question about how the *fit* weights deep sites
 //! against shallow ones rather than about this average (spec §3.2).
 //!
-//! # One thing the numerator can be that this cannot
+//! # A library with no fitted rate still has its own denominator
 //!
-//! A read group standing on fewer than [`MIN_SITES_TO_FIT`](super::MIN_SITES_TO_FIT) sites — ten
-//! thousand — does not get its own fitted rate:
-//! [`resolve_error_rates`](super::fallback::resolve_error_rates) hands it the mean of the other
-//! groups' rates, or a supplied one, or a default. **Its denominator is still its own reads**, so
-//! for such a group the scale is "make this library's average charged error come out at somebody
-//! else's measured rate". §3.2's sentence about one site set does not describe that case, and a
-//! capture panel or a minor library in a multi-library sample reaches it.
+//! A read group the fit could not measure takes a defaulted rate, and **its denominator is still
+//! its own reads** — so for such a group the scale reads "make this library's average charged error
+//! come out at a rate nobody measured on it". §3.2's sentence about one site set does not describe
+//! that case, and a capture panel or a minor library in a multi-library sample reaches it.
+//! `RunParameters::assemble` is where the pairing is enforced: a fitted rate with no accumulator
+//! total behind it, or the reverse, is refused rather than combined.
 //!
-//! **It is the least wrong of the available answers, and the sizes are measured** (2026-08-24, 63
-//! tomato libraries; `arch/parameter_prepass_generic.md` §5 carries the table). A borrowed rate
+//! **The sizes are measured** (2026-08-24, 63 tomato libraries). Standing on a neighbour's rate
 //! leaves the average charged error a median factor of **1.51** from the library's own; the default
 //! of 0.001 leaves it at 2.99; and not rescaling at all leaves it at about **5**, because read
-//! qualities overstate quality by roughly that much. Borrowing is a compromise with a size, not a
-//! placeholder.
+//! qualities overstate quality by roughly that much. A defaulted scale is a compromise with a
+//! size, not a placeholder.
 
 use std::collections::BTreeMap;
 
@@ -103,9 +96,9 @@ const PARTS_OF_ONE: f64 = (1_u64 << 20) as f64;
 ///
 /// # The sum is an integer, and it has to be
 ///
-/// [`GenericAccumulators::merge`](super::accumulators::GenericAccumulators::merge) is
-/// **order-independent** — its own test merges three shards in all six orders and asserts the
-/// results agree — and that holds for its tables because they sum integer counts. A running `f64`
+/// **A shard's totals are merged into another shard's, and that has to be order-independent** —
+/// a genome walked in parallel must produce the same denominator as one walked in one thread.
+/// Integer counts give that; a running `f64`
 /// would have quietly broken it: floating-point addition is not associative, so a run that merged
 /// its shards in a different order would produce a denominator differing in the last bits, and the
 /// whole run's genotypes with it. Nothing would have failed, because no existing test compares this
@@ -162,7 +155,6 @@ const PARTS_OF_ONE: f64 = (1_u64 << 20) as f64;
 /// `i128` also aligns the struct to 16 — 32 bytes against `i64`'s 16 — and the map holds one entry
 /// per read group.
 ///
-/// [`merge`]: super::accumulators::GenericAccumulators::merge
 #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
 pub struct MintedReadErrors {
     /// Σ over the reads of `ln P(this read is wrong)`, in units of 2⁻²⁰.
@@ -278,9 +270,9 @@ impl MintedReadErrors {
 
 /// Total one locus's minted error per read group, into `out`.
 ///
-/// `out` is scratch — cleared, then filled — for the reason
-/// [`count_by_read_group`](super::depth_and_alt_reads::count_by_read_group)'s is: this runs once
-/// per covered position over hundreds of millions of them.
+/// `out` is scratch — cleared, then filled — because this runs once per covered position over
+/// hundreds of millions of them, and a fresh `Vec` per locus would be an allocation on the
+/// hottest path of the walk.
 ///
 /// **The same observations the read-group histogram counts, under the same gate.** A non-generic
 /// locus contributes nothing here because it contributes nothing there, and the reads are the
@@ -316,8 +308,8 @@ pub fn minted_error_by_read_group(
 /// **The order the groups arrive in cannot change the answer, and that is the fixed point's
 /// doing rather than this function's.** Each group is its own key and each sum is an exact
 /// integer, so nothing here is order-sensitive — measured, not argued: deleting
-/// [`minted_error_by_read_group`]'s sort changes no total in either this module's tests or
-/// [`accumulators`](super::accumulators)'. The sort is kept because that function *states* it
+/// [`minted_error_by_read_group`]'s sort changes no total in this module's tests. The sort is
+/// kept because that function *states* it
 /// returns ascending order and a caller reading the scratch vector directly should get it —
 /// `each_read_groups_mean_is_over_its_own_reads` hands it a locus whose groups arrive descending,
 /// so the claim is pinned. **It is not what makes this fold reproducible.** Were the sum an
@@ -429,9 +421,9 @@ mod tests {
         assert_eq!(disclaimed.mean_error_probability(), Some(1.0));
     }
 
-    /// **The fold is exact and therefore order-independent**, which is the property
-    /// [`GenericAccumulators::merge`](super::super::accumulators::GenericAccumulators) already
-    /// promises for its tables and which an `f64` running sum here would have broken silently.
+    /// **The fold is exact and therefore order-independent**, which is what lets a sharded walk
+    /// and a single-threaded one agree, and which an `f64` running sum would have broken
+    /// silently.
     ///
     /// The values are deliberately ones whose `f64` sum is order-dependent: `0.1`, `0.2` and
     /// `0.3` added left to right and right to left differ in the last bit. Here every order
@@ -551,9 +543,9 @@ mod tests {
     }
 
     /// **The sum is wide enough for a run, and an `i64` would not have been.** Swapping
-    /// `log_error_sum_scaled` to `i64` left every other test in this module and in
-    /// [`accumulators`](super::accumulators) green, because their fixtures peak near 2.7 × 10⁷
-    /// scaled units and an `i64` holds 9.2 × 10¹⁸. This is the test that sees it.
+    /// `log_error_sum_scaled` to `i64` left every other test in this module green, because their
+    /// fixtures peak near 2.7 × 10⁷ scaled units and an `i64` holds 9.2 × 10¹⁸. This is the test
+    /// that sees it.
     ///
     /// The scale is a real one. `reads` counts a read **at a position**, so a human genome at 30×
     /// is about 9.3 × 10¹⁰ of them; the 1.288 × 10¹² accumulated here is about fourteen such

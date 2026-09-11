@@ -131,7 +131,7 @@ pub mod stutter_rates;
 
 use crate::ng::calling::genotype_prior::{COUNT_PATH_DESYNC_THRESHOLD, SampleAlleleCopies};
 use crate::ng::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
-use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
+use crate::ng::parameter_estimation::calibration::MintedReadErrors;
 use crate::ng::parameter_estimation::joint::contamination::{
     ContaminationEstimate, ContaminationSource,
 };
@@ -238,7 +238,7 @@ pub const MIN_BASE_ERROR: f64 = 1e-12;
 /// [`ReadGroupCalibration::from_fitted_rate`] copies the *rate's* warrant onto a ratio, and the
 /// pre-pass's
 /// error-rate ladder has a defaulted bottom rung of its own —
-/// [`DEFAULT_ERROR_RATE`](crate::ng::parameter_estimation::generic::DEFAULT_ERROR_RATE) — so a
+/// [`DEFAULT_ERROR_RATE`](crate::ng::parameter_estimation::DEFAULT_ERROR_RATE) — so a
 /// read group the fit could not measure gets a multiplier of `0.001 / its own mean minted error`,
 /// which is one only by coincidence. `parameters_file::validate` carries the argument for why no
 /// rule can be written there.
@@ -367,7 +367,7 @@ impl ReadGroupCalibration {
     /// [`ContaminationView`] uses for a fraction that could not be identified: *absent* and
     /// *zero* are different answers, and only one of them is safe to multiply by.
     ///
-    /// The accumulator is `parameter_estimation::generic::calibration`'s, which sums the
+    /// The accumulator is `parameter_estimation::calibration`'s, which sums the
     /// per-read log error in fixed point precisely so that merging shards in different
     /// orders gives the same denominator — the same determinism requirement the row itself
     /// works under (spec §8).

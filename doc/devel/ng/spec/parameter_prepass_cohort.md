@@ -9,6 +9,17 @@ nothing else.** It fills `CohortEstimator`
 by any of this. `src/ssr/` and `src/pileup/` are frozen production: everything said about them here
 is a record, not a change.*
 
+> ## ⚠ The diversity estimator this specifies is not the one a run uses
+>
+> §3's `Hexp = mean over samples of Hobs / (1 − F)` needed the runs-of-homozygosity coefficient to
+> avoid circularity, and **that estimator was removed on 2026-09-11**
+> ([`impl_plan/remove_histogram_route.md`](../impl_plan/remove_histogram_route.md)). A run's
+> diversity now comes from the allele-frequency curve the census fit produces, read off in closed
+> form with no panel and no `F` in it
+> ([`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md)), and the coefficient a
+> caller reads is the census fit's own homozygote excess — which **is** circular, and which
+> `joint::census_moments` says so about in its output rather than hiding.
+
 ---
 
 ## 1. Scope — what this document is, and when it runs

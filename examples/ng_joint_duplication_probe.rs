@@ -88,7 +88,7 @@ use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGenera
 use pop_var_caller::ng::locus_generation::{
     GeneratorSet, GeneratorSlot, LocusKind, SampleLocusObservationsIterator, UnhandledReason,
 };
-use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use pop_var_caller::ng::parameter_estimation::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
 use pop_var_caller::ng::read::input::read_groups::build_read_groups;

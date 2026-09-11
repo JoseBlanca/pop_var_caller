@@ -36,6 +36,20 @@ a change.*
 >
 > The empirical sections (§2, §3, §5, §7) are measurements on real data and carry their own numbers.
 
+> ## ⛔ The per-sample implementation this specifies was removed on 2026-09-11
+>
+> **The per-sample STR fit is gone** with the whole-genome histogram route it belonged to
+> ([`impl_plan/remove_histogram_route.md`](../impl_plan/remove_histogram_route.md)). Repeat-tract
+> slippage is now fitted once over the cohort's censuses
+> ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6.2, and
+> `joint::ssr_fit`).
+>
+> **This document is kept as the reference for the model rather than the machinery**: what a stratum
+> is and why tracts are grouped by motif period and reference repeat count (§4 —
+> `parameter_estimation::repeat_strata`), what slippage is, and the substitution-rate agreement
+> §4.5 requires. **What it says about per-sample accumulators and their fits describes code that no
+> longer exists.**
+
 ---
 
 ## 1. What this path fits, and what it borrows

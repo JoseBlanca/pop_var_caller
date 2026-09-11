@@ -48,7 +48,7 @@
 use std::collections::BTreeMap;
 use std::env;
 
-use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use pop_var_caller::ng::parameter_estimation::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
     AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
     GenericEvidence, NamedReadGroup, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,

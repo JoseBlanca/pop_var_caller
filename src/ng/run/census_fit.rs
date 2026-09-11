@@ -33,12 +33,14 @@ use crate::ng::calling::parameters_file::{
     CensusIdentity, ParametersFile, ReadsBehindEachCalibration,
 };
 use crate::ng::calling::run_parameters::RunParameters;
-use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
+use crate::ng::parameter_estimation::calibration::MintedReadErrors;
 use crate::ng::parameter_estimation::joint::census::{
     CensusError, CohortCensusEvidence, RecordingTerms,
 };
 use crate::ng::parameter_estimation::joint::contamination::ContaminationEstimate;
-use crate::ng::parameter_estimation::joint::fit::{JointFit, JointFitConfig, JointFitError};
+use crate::ng::parameter_estimation::joint::fit::{
+    HomozygoteExcess, JointFit, JointFitConfig, JointFitError,
+};
 use crate::ng::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::ng::parameter_estimation::joint::loci::{CensusLoci, CensusLociDigester};
 use crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
@@ -46,7 +48,9 @@ use crate::ng::parameter_estimation::joint::ssr_fit::{
     self, SsrFitConfig, StratumEvidence, StratumOutcome, gather_strata, strata_of_kept_loci,
 };
 use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
-use crate::ng::parameter_estimation::ssr::{RepeatCount, Stratum as SsrStratum, StratumKey};
+use crate::ng::parameter_estimation::repeat_strata::{
+    RepeatCount, Stratum as SsrStratum, StratumKey,
+};
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::read::input::read_groups::ReadGroups;
 use crate::ng::repeat_catalog::StrRepeatCriteria;
@@ -246,14 +250,20 @@ pub fn every_read_group_pooled(cohort: &CohortCensusEvidence) -> BTreeMap<ReadGr
 /// pair stays whole and that library takes the defaulted calibration rather than a fitted rate
 /// with no evidence behind it.
 ///
-/// `inbreeding` is one coefficient a sample, in the cohort's own sample order, and is a
-/// declaration rather than a fit on this route.
+/// `inbreeding` is one coefficient a sample **in the run's own sample order**, already resolved
+/// against the ladder in
+/// [`DeclaredInbreeding::of_each_sample_over`](crate::ng::calling::parameters_file::DeclaredInbreeding::of_each_sample_over)
+/// — so it may be what the operator stated, what this fit measured, or the default, and it carries
+/// which. **It arrives as the warranted estimates rather than as bare values so that the numbers
+/// this assembles and the numbers the parameters file writes cannot be two different lists**: an
+/// earlier version took the values here and the estimates in `parameters_file_of`, which let a
+/// caller hand the run one coefficient and the file another with nothing to notice.
 #[must_use]
 pub fn parameters_from_the_fit(
     fit: &CohortFit,
     cohort: &CohortCensusEvidence,
     slippage_group_of: &BTreeMap<ReadGroupId, u32>,
-    inbreeding: Vec<InbreedingF>,
+    inbreeding: &[Estimate<InbreedingF>],
     ploidy: Ploidy,
 ) -> RunParameters {
     // **The clean class's rate is the sequencing error rate.** The fit models two: how often a
@@ -344,7 +354,7 @@ pub fn parameters_from_the_fit(
         &minted_by_read_group,
         &contamination_by_read_group,
         SequencingBatches::all_together_over(cohort.read_groups().len(), cohort.len()),
-        inbreeding,
+        inbreeding.iter().map(|estimate| estimate.value).collect(),
         RunParameters::seed_from_moments(
             fit.generic.fitted_alternative_frequency(),
             fit.generic.fitted_diversity(),
@@ -353,6 +363,58 @@ pub fn parameters_from_the_fit(
         ssr_substitution_rate,
         ploidy,
     )
+}
+
+/// **The inbreeding coefficients this fit measured, by sample name** — the middle rung of
+/// [`DeclaredInbreeding::of_each_sample_over`](crate::ng::calling::parameters_file::DeclaredInbreeding::of_each_sample_over)'s
+/// ladder.
+///
+/// The quantity is each sample's **homozygote excess**: how much less heterozygous it is than the
+/// allele frequencies this same fit produced predict. **That is circular and the output says so**
+/// — `joint::census_moments` carries the warning — and it is the only fitted source there is since
+/// the runs-of-homozygosity estimator was removed
+/// (`impl_plan/remove_histogram_route.md`).
+///
+/// **Keyed by name, never by position**, because the run's sample order is the run's and a list
+/// joined by order sends one plant's coefficient to another with nothing to notice.
+///
+/// It takes the fit's `hom_excess` map rather than the whole fit, because that map is all it
+/// reads — and a function that took the fit would need one built to be tested at all.
+///
+/// # A sample is left out rather than coerced, in one case
+///
+/// The excess is a fraction in `[0, 1]` and a coefficient is one in `[0, 1)`, so an excess of
+/// exactly one has no coefficient to become. Such a sample is **absent from this map** and falls to
+/// the rung below, which is the honest handling: a maximisation that returns its own bound has
+/// reported where it stopped looking rather than what it measured. *The shipped maximisation cannot
+/// return exactly one — it is a golden-section search that reports the midpoint of a bracket
+/// strictly inside `[0, 1]` — so this guards the type's contract rather than an observed case.*
+#[must_use]
+pub fn fitted_inbreeding_of(
+    hom_excess: &BTreeMap<String, Estimate<HomozygoteExcess>>,
+) -> BTreeMap<Box<str>, Estimate<InbreedingF>> {
+    hom_excess
+        .iter()
+        .filter_map(|(sample, excess)| {
+            InbreedingF::try_new(excess.value.get())
+                .ok()
+                .map(|coefficient| {
+                    (
+                        sample.as_str().into(),
+                        Estimate {
+                            value: coefficient,
+                            // **The fit's own warrant travels with the number.** It is
+                            // `FittedHere` where the cohort could identify the excess and
+                            // `Defaulted` at a single sample, where it comes out zero whatever
+                            // the truth — and a reader of the file has to be able to tell those
+                            // apart.
+                            provenance: excess.provenance,
+                            observations: excess.observations,
+                        },
+                    )
+                })
+        })
+        .collect()
 }
 
 /// **The parameters file a fit over censuses writes.**
@@ -384,6 +446,91 @@ pub fn parameters_file_of(
         CensusIdentity::of(terms),
         repeat_routing,
     )
+}
+
+#[cfg(test)]
+mod fitted_inbreeding_tests {
+    //! **What the fit's homozygote excess becomes when it is offered as a coefficient.**
+
+    use super::*;
+
+    fn excess(value: f64, provenance: Provenance) -> Estimate<HomozygoteExcess> {
+        Estimate {
+            value: HomozygoteExcess::try_new(value).expect("a fraction in [0, 1]"),
+            provenance,
+            observations: 1_806,
+        }
+    }
+
+    /// **The fit's own warrant travels with its number, and the two warrants it produces mean
+    /// different things to a reader.** `FittedHere` is *this cohort identified it*; `Defaulted` is
+    /// what a single-sample fit returns, where the excess comes out zero whatever the truth
+    /// because one genome's totals cannot identify it. A conversion that stamped everything
+    /// `FittedHere` would tell a one-sample run it had measured its plant.
+    #[test]
+    fn the_fits_warrant_and_evidence_count_travel_with_the_coefficient() {
+        let hom_excess: BTreeMap<String, Estimate<HomozygoteExcess>> = [
+            (
+                "identified".to_string(),
+                excess(0.78, Provenance::FittedHere),
+            ),
+            ("one_sample".to_string(), excess(0.0, Provenance::Defaulted)),
+        ]
+        .into_iter()
+        .collect();
+
+        let coefficients = fitted_inbreeding_of(&hom_excess);
+
+        assert_eq!(coefficients.len(), 2);
+        let identified = &coefficients["identified"];
+        assert!((identified.value.get() - 0.78).abs() < 1e-15);
+        assert_eq!(identified.provenance, Provenance::FittedHere);
+        assert_eq!(identified.observations, 1_806);
+        assert_eq!(coefficients["one_sample"].provenance, Provenance::Defaulted);
+    }
+
+    /// **An excess of exactly one has no coefficient to become, so that sample is left out** and
+    /// falls to the rung below rather than being coerced to something just under one — which would
+    /// be the same number to every consumer while claiming to be a measurement.
+    ///
+    /// The excess is a fraction in `[0, 1]` and a coefficient one in `[0, 1)`: at `F = 1` every
+    /// genotype is homozygous by construction, which is why the coefficient type excludes it.
+    /// **Its neighbour keeps its own number**, which is the property that matters — one
+    /// unconvertible sample must not cost the cohort its other coefficients.
+    #[test]
+    fn a_sample_whose_excess_is_exactly_one_is_left_out_and_its_neighbour_is_not() {
+        let hom_excess: BTreeMap<String, Estimate<HomozygoteExcess>> = [
+            (
+                "at_the_ceiling".to_string(),
+                excess(1.0, Provenance::FittedHere),
+            ),
+            ("ordinary".to_string(), excess(0.42, Provenance::FittedHere)),
+        ]
+        .into_iter()
+        .collect();
+
+        let coefficients = fitted_inbreeding_of(&hom_excess);
+
+        assert!(
+            !coefficients.contains_key("at_the_ceiling"),
+            "an excess of one is not a coefficient: {coefficients:?}"
+        );
+        assert!((coefficients["ordinary"].value.get() - 0.42).abs() < 1e-15);
+    }
+
+    /// **Just below the ceiling still converts**, so the exclusion above is the type's boundary
+    /// and not a range this function narrowed on its own.
+    #[test]
+    fn an_excess_just_below_one_still_becomes_a_coefficient() {
+        let hom_excess: BTreeMap<String, Estimate<HomozygoteExcess>> = [(
+            "nearly".to_string(),
+            excess(1.0 - 1e-9, Provenance::FittedHere),
+        )]
+        .into_iter()
+        .collect();
+
+        assert_eq!(fitted_inbreeding_of(&hom_excess).len(), 1);
+    }
 }
 
 #[cfg(test)]
@@ -754,14 +901,12 @@ mod writing_the_parameters_file {
             psps[0].as_path(),
             "the first sample's read groups name the first sample's psp",
         );
-        // **Declared, not fitted, on this route** — the coefficient comes from a sample's own
-        // windowed genome histogram, which is the other pre-pass route.
+        // **A stated coefficient, which is what this fixture is about** — the resolution between
+        // stated and fitted is `DeclaredInbreeding`'s and is tested there.
         let declared = InbreedingF::try_new(0.0).expect("zero is a coefficient");
-        let inbreeding: Vec<InbreedingF> = (0..open.len()).map(|_| declared).collect();
-        let stated: Vec<Estimate<InbreedingF>> = inbreeding
-            .iter()
-            .map(|value| Estimate {
-                value: *value,
+        let stated: Vec<Estimate<InbreedingF>> = (0..open.len())
+            .map(|_| Estimate {
+                value: declared,
                 provenance: Provenance::Supplied,
                 observations: 0,
             })
@@ -771,7 +916,7 @@ mod writing_the_parameters_file {
             &fit,
             &open,
             &pooled,
-            inbreeding,
+            &stated,
             crate::ng::types::Ploidy::try_new(2).expect("diploid"),
         );
         let terms = open

@@ -29,24 +29,34 @@
 //!   records under**, and every sample that differs is named with the first setting that does and
 //!   the command that regenerates it (`psp_census_pair.md` plan step C5).
 //!
-//! # What it leaves declared
+//! # The inbreeding coefficient, and the three things it can be
 //!
-//! **The inbreeding coefficient**, which is fitted from a sample's own windowed genome histogram
-//! — the other pre-pass route, not this one. `--inbreeding` states one for the whole cohort and
-//! the file records it as supplied.
+//! **The file this writes is the only way a coefficient reaches a calling run** — the calling
+//! commands take no flag for it — so the ladder is resolved here, once, and written with the
+//! warrant that says which rung it came from
+//! ([`DeclaredInbreeding::of_each_sample_over`](crate::ng::calling::parameters_file::DeclaredInbreeding::of_each_sample_over)):
+//!
+//! - **`supplied`** — `--inbreeding` was given. It overrides the fit, because a user who knows how
+//!   their material was bred knows it whatever the cohort size (owner, 2026-08-27).
+//! - **`fitted_here`** — nothing was stated, and this cohort's fit measured each sample's
+//!   homozygote excess: how much less heterozygous it is than the fit's own allele frequencies
+//!   predict. **Circular, and the run says so** rather than hiding it — it is the only fitted
+//!   source since the runs-of-homozygosity estimator was removed.
+//! - **`defaulted`** — nothing was stated and nothing could be fitted, so zero. **A single-sample
+//!   run lands here even though the fit ran**, because one genome's totals cannot identify an
+//!   excess and it comes out zero whatever the truth.
 
 use std::path::{Path, PathBuf};
 
 use clap::Args;
 use thiserror::Error;
 
-use crate::ng::calling::parameters_file::ParametersFile;
+use crate::ng::calling::parameters_file::{DeclaredInbreeding, ParametersFile};
 use crate::ng::parameter_estimation::joint::fit::JointFitConfig;
 use crate::ng::parameter_estimation::joint::loci::{
     ReferenceDigest, SelectionError, UnambiguousRuns,
 };
 use crate::ng::parameter_estimation::joint::ssr_fit::SsrFitConfig;
-use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::reference_info::{
     ReferenceCheck, ReferenceInfoError, read_reference_observing_or_creating_fai,
 };
@@ -54,8 +64,9 @@ use crate::ng::repeat_catalog::RepeatCatalogHeader;
 use crate::ng::run::{
     CensusCohortError, CensusPlan, CensusSelection, CensusesToRegenerate, CohortFitError,
     OpenPspCohort, RunError, THE_COMMAND_THAT_REBUILDS_A_CENSUS, each_census_in_the_cohorts_psps,
-    every_read_group_pooled, fit_a_cohort, parameters_file_of, parameters_from_the_fit,
-    read_groups_of, the_censuses_as_one_cohort, what_the_heads_say_about_every_census_in_a_cohort,
+    every_read_group_pooled, fit_a_cohort, fitted_inbreeding_of, parameters_file_of,
+    parameters_from_the_fit, read_groups_of, the_censuses_as_one_cohort,
+    what_the_heads_say_about_every_census_in_a_cohort,
     what_the_run_says_about_every_census_in_a_cohort,
 };
 use crate::ng::types::{ContigId, InbreedingF, Ploidy};
@@ -101,13 +112,19 @@ pub struct EstimateParametersArgs {
     #[arg(long, default_value_t = 2)]
     pub ploidy: u8,
 
-    /// The inbreeding coefficient to record for every sample.
+    /// The inbreeding coefficient to record for every sample, **overriding the fitted one**.
     ///
-    /// **Declared, never fitted on this route.** It is fitted from a sample's own windowed genome
-    /// histogram, which is the other pre-pass route; the file records whatever is stated here as
-    /// supplied, so a reader can tell it from a measurement.
-    #[arg(long, default_value_t = 0.0)]
-    pub inbreeding: f64,
+    /// **Omit it and the fit's own number is written**: each sample's homozygote excess, how much
+    /// less heterozygous it is than the allele frequencies this cohort's own fit predicts. The
+    /// file marks that `fitted_here`, and marks what is stated here `supplied`, so a reader can
+    /// tell them apart.
+    ///
+    /// **A stated coefficient wins, and that is a ruling** (owner, 2026-08-27): a user who knows
+    /// how their material was bred knows it whatever the cohort size. **It is also why this is an
+    /// option and not a default of zero** — `--inbreeding 0` is *these plants are not inbred*,
+    /// which is a claim, and saying nothing is *use what you measured*, which is a different one.
+    #[arg(long)]
+    pub inbreeding: Option<f64>,
 }
 
 /// Everything that can stop an `estimate-parameters` run.
@@ -309,12 +326,17 @@ fn fit_and_assemble(
             what: "--ploidy",
             value: args.ploidy.to_string(),
         })?;
-    let inbreeding = InbreedingF::try_new(args.inbreeding).map_err(|_| {
-        EstimateParametersCliError::NotAValue {
-            what: "--inbreeding",
-            value: args.inbreeding.to_string(),
-        }
-    })?;
+    let declared = match args.inbreeding {
+        None => DeclaredInbreeding::nothing_said(),
+        Some(coefficient) => DeclaredInbreeding::one_value_for_every_sample(
+            InbreedingF::try_new(coefficient).map_err(|_| {
+                EstimateParametersCliError::NotAValue {
+                    what: "--inbreeding",
+                    value: coefficient.to_string(),
+                }
+            })?,
+        ),
+    };
     // **Before a census is opened**, so a run that cannot write its answer does not spend a fit
     // finding out.
     if !args.force && args.output.exists() {
@@ -505,20 +527,12 @@ fn fit_and_assemble(
 
     let samples = evidence.len();
     let read_groups = read_groups_of(&evidence, cohort.paths());
-    let stated: Vec<Estimate<InbreedingF>> = (0..samples)
-        .map(|_| Estimate {
-            value: inbreeding,
-            provenance: Provenance::Supplied,
-            observations: 0,
-        })
-        .collect();
-    let parameters = parameters_from_the_fit(
-        &fit,
-        &evidence,
-        &pooled,
-        (0..samples).map(|_| inbreeding).collect(),
-        ploidy,
-    );
+    // **One list, resolved once, handed to both the run and the file.** The ladder is
+    // `DeclaredInbreeding`'s: what the operator stated, else what this fit measured, else the
+    // default — joined to the run's samples by name, and carrying which of the three it was.
+    let inbreeding =
+        declared.of_each_sample_over(&read_groups, &fitted_inbreeding_of(&fit.generic.hom_excess));
+    let parameters = parameters_from_the_fit(&fit, &evidence, &pooled, &inbreeding, ploidy);
     let terms = evidence
         .terms()
         .expect("a cohort of one or more samples records terms")
@@ -533,7 +547,7 @@ fn fit_and_assemble(
     let file = parameters_file_of(
         &parameters,
         &read_groups,
-        &stated,
+        &inbreeding,
         &reference,
         &terms,
         &segmentation.inputs().repeat_tract_criteria,

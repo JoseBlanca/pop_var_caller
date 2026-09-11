@@ -24,7 +24,6 @@
 //! calling handover does not exist as a whole. Nothing here waits on it.
 
 use super::fit::JointFit;
-use crate::ng::parameter_estimation::generic::runs::MIN_WINDOWS_TO_FIT_INBREEDING;
 use crate::ng::types::InbreedingF;
 
 /// **How many alternative copies a position carries across the panel, and how uncertain that
@@ -540,40 +539,25 @@ fn probability_that_the_panel_segregates(position_genotype: &[f64], samples: usi
     alternative_copies_in(position_genotype, samples).segregating
 }
 
-/// **Where the panel's inbreeding coefficient came from**, which a run must say because the three
+/// **Where the panel's inbreeding coefficient came from**, which a run must say because the two
 /// sources are not interchangeable and one of them carries a circularity
 /// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §4.1, §7).
+///
+/// # There used to be a third, and it was the one §4.1 preferred
+///
+/// **The runs-of-homozygosity estimator** read the coefficient off the *distribution* of
+/// heterozygosity along a genome — which windows lie in stretches where an individual's two copies
+/// descend from one recent ancestor — and needed no population expectation, so nothing about it
+/// depended on the diversity this correction computes. **It was removed on 2026-09-11** with the
+/// per-sample histogram route it lived in: it reads a *local* quantity, and a census window holds
+/// about a quarter of one heterozygote at the shipped budget
+/// (`impl_plan/remove_histogram_route.md`).
+///
+/// **So the circularity below is no longer avoidable, and that is the whole reason this enum still
+/// exists**: the output has to keep saying which source a coefficient came from, because the
+/// fitted one now always carries the dependence that §4.1 wanted to escape.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum InbreedingSource {
-    /// **The runs-of-homozygosity estimator** — a two-state model over genome windows returning
-    /// the share of the analysable genome lying in stretches where an individual's two copies
-    /// descend from one recent ancestor (`parameter_estimation::generic::runs`).
-    ///
-    /// **This is the source §4.1 prefers**, on three reasons of which the first is decisive: it
-    /// reads the *distribution* of heterozygosity along a genome and needs no population
-    /// expectation, so nothing about it depends on the diversity this correction is computing. It
-    /// is also what the derivation asks for — realized autozygosity is what a run of homozygosity
-    /// *is* — and it works at one sample.
-    ///
-    /// `windows` is how many the model was fitted over, which spec §7 asks a run to print because
-    /// the estimator's own floor is
-    /// [`MIN_WINDOWS_TO_FIT_INBREEDING`]
-    /// — 3,000 — below which what it returns is its own noise.
-    ///
-    /// **⚠ The below-the-floor warning this report carries cannot fire on a coefficient that came
-    /// from `fit_inbreeding`, and that is worth knowing rather than discovering.** That function
-    /// **refuses** below the floor — `ParameterEstimationError::InbreedingNotFittable`, naming the
-    /// window count and the floor — so a run never gets a thin coefficient to report in the first
-    /// place. What the warning guards is a report assembled by hand, or by some future route that
-    /// reaches the coefficient without going through that refusal.
-    ///
-    /// **⚑ What spec §4.2 actually asks for is a warning when the count is *near* the floor, and
-    /// it names no number.** This report does not invent one: `runs::resolution_at` exists and its
-    /// own documentation forbids being used as a threshold — measured, three fits above it on
-    /// genomes with no runs at all would have been called detections. So the count is printed and
-    /// the reader judges, which is the same treatment the segregating count and the two-route gap
-    /// get. **Where "near" goes is the owner's.**
-    RunsOfHomozygosity { windows: u32 },
     /// **The joint fit's homozygote excess** — how much less heterozygous an individual is than
     /// the fitted frequencies predict.
     ///
@@ -587,8 +571,8 @@ pub enum InbreedingSource {
     /// **The joint fit is not the pure ratio estimator** — from two samples up it also sees how
     /// many samples carry the allele at each position, which is real information the ratio has
     /// not got, and it recovers 0.80 from a truth of 0.8 there (report §3.5). **But the direction
-    /// of the dependence is the wrong way round**, and the runs estimator has no such dependence
-    /// at all.
+    /// of the dependence is the wrong way round**, and the removed runs estimator had no such
+    /// dependence at all.
     ///
     /// It also absorbs population structure: a cohort that is really two subpopulations looks
     /// homozygote-excessive for reasons no individual's parents caused.
@@ -602,7 +586,7 @@ pub enum InbreedingSource {
 }
 
 /// **What a run had to correct its heterozygosity with, before the panel's one number is taken
-/// from it** — the three shapes a run can arrive in, and the decision of which source it is
+/// from it** — the two shapes a run can arrive in, and the decision of which source it is
 /// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §4.1, §4.2).
 ///
 /// **The panel's value is the plain mean over samples, unweighted, whichever source supplied
@@ -618,17 +602,12 @@ pub enum PanelInbreeding<'a> {
     /// and a fitted coefficient at three samples is worth overriding for the same reason it is at
     /// one (§4.2, owner's decision of 2026-08-27).
     Supplied(&'a [InbreedingF]),
-    /// **The per-sample route's runs-of-homozygosity coefficients**, one entry per sample that has
-    /// one, each with the count of windows holding sites it was fitted over.
+    /// **The joint fit's own homozygote excess** — per sample, and circular (see
+    /// [`InbreedingSource::JointFitHomozygoteExcess`]).
     ///
-    /// **A sample can legitimately be missing from this list**: `fit_inbreeding_if_diploid`
-    /// declines above and below two genome copies — above two, `F` needs several
-    /// identity-by-descent coefficients; below two there are no heterozygotes to be short of — so
-    /// a haploid sample contributes nothing rather than a zero. **Averaging a zero in for it would
-    /// invent a coefficient**, which is why the mean is over the entries present.
-    FittedFromRuns(&'a [(InbreedingF, u32)]),
-    /// **Nothing produced a runs coefficient, so the joint fit's own homozygote excess stands
-    /// in** — per sample, and circular (see [`InbreedingSource::JointFitHomozygoteExcess`]).
+    /// **This was the fallback and is now the only fitted source**, since the runs-of-homozygosity
+    /// estimator was removed on 2026-09-11 (`impl_plan/remove_histogram_route.md`). A run that
+    /// wants a coefficient carrying no dependence on the fitted diversity has to state one.
     HomozygoteExcess(&'a [InbreedingF]),
 }
 
@@ -646,28 +625,6 @@ impl PanelInbreeding<'_> {
         match self {
             Self::Supplied(coefficients) => {
                 (mean_of(coefficients, "the user"), InbreedingSource::User)
-            }
-            Self::FittedFromRuns(fitted) => {
-                assert!(
-                    !fitted.is_empty(),
-                    "a run whose coefficient came from the runs estimator has at least one \
-                     sample it was fitted on; an empty list is a run whose per-sample \
-                     coefficients went missing between the two routes"
-                );
-                let coefficients: Vec<InbreedingF> =
-                    fitted.iter().map(|(coefficient, _)| *coefficient).collect();
-                // **The thinnest sample's window count, not the mean of them.** What the count is
-                // printed for is telling a reader whether any of the panel's coefficients rests on
-                // too little, and a mean hides one thin sample among sixty-two whole genomes.
-                let windows = fitted
-                    .iter()
-                    .map(|(_, windows)| *windows)
-                    .min()
-                    .expect("the list is not empty");
-                (
-                    mean_of(&coefficients, "the runs estimator"),
-                    InbreedingSource::RunsOfHomozygosity { windows },
-                )
             }
             Self::HomozygoteExcess(coefficients) => (
                 mean_of(coefficients, "the joint fit's homozygote excess"),
@@ -795,22 +752,15 @@ impl CensusMomentsReport {
     pub fn warnings(&self) -> Vec<String> {
         let mut warnings = Vec::new();
         match self.inbreeding_source {
-            InbreedingSource::RunsOfHomozygosity { windows } => {
-                if (windows as usize) < MIN_WINDOWS_TO_FIT_INBREEDING {
-                    warnings.push(format!(
-                        "the inbreeding coefficient was fitted over {windows} genome windows, \
-                         below the {MIN_WINDOWS_TO_FIT_INBREEDING} its estimator needs before what \
-                         it returns is a measurement rather than its own noise"
-                    ));
-                }
-            }
             InbreedingSource::JointFitHomozygoteExcess => {
                 warnings.push(
                     "the inbreeding coefficient is the joint fit's own homozygote excess, which \
                      is measured against a population expectation this same fit produced — so the \
-                     heterozygosity below has been divided by a number that depends on it. The \
-                     runs-of-homozygosity estimator has no such dependence and is what the design \
-                     prefers"
+                     heterozygosity below has been divided by a number that depends on it. This \
+                     is the only fitted source there is: the estimator that had no such \
+                     dependence read the coefficient off runs of homozygosity along the genome, \
+                     and was removed with the route it lived in. A run that needs a coefficient \
+                     free of this dependence must state one"
                         .to_owned(),
                 );
                 if self.samples == 1 {
@@ -894,11 +844,9 @@ impl std::fmt::Display for CensusMomentsReport {
             "  inbreeding coefficient             {:.3}, from {}",
             self.panel_inbreeding,
             match self.inbreeding_source {
-                InbreedingSource::RunsOfHomozygosity { windows } =>
-                    format!("the runs-of-homozygosity estimator over {windows} genome windows"),
                 InbreedingSource::JointFitHomozygoteExcess =>
-                    "the joint fit's own homozygote excess".to_owned(),
-                InbreedingSource::User => "the user".to_owned(),
+                    "the joint fit's own homozygote excess",
+                InbreedingSource::User => "the user",
             }
         )?;
         for warning in self.warnings() {
@@ -1588,46 +1536,22 @@ mod tests {
         assert_eq!(source, InbreedingSource::User);
     }
 
-    /// **A haploid sample contributes no coefficient rather than a zero**, and the mean is over
-    /// the samples that have one.
-    ///
-    /// `fit_inbreeding_if_diploid` declines above and below two genome copies — above two, `F`
-    /// needs several identity-by-descent coefficients; below two there are no heterozygotes to be
-    /// short of. **Averaging a zero in for such a sample would invent a coefficient**, and on a
-    /// panel of two where one is haploid it would halve the correction.
+    /// **The homozygote excess is the only fitted source there is**, since the
+    /// runs-of-homozygosity estimator was removed — so the arm that carries it is the one whose
+    /// mean and provenance have to be right.
     #[test]
-    fn a_sample_with_no_coefficient_is_absent_rather_than_zero() {
-        let one_fitted = [(InbreedingF::try_new(0.8).expect("legal"), 8_004)];
-        let (mean, _) = PanelInbreeding::FittedFromRuns(&one_fitted).for_the_panel();
-        assert!((mean.get() - 0.8).abs() < 1e-15, "got {}", mean.get());
-
-        // The same panel with a zero averaged in for the sample that has none would give 0.4.
-        let with_an_invented_zero = [
-            (InbreedingF::try_new(0.8).expect("legal"), 8_004),
-            (InbreedingF::try_new(0.0).expect("legal"), 8_004),
-        ];
-        let (halved, _) = PanelInbreeding::FittedFromRuns(&with_an_invented_zero).for_the_panel();
-        assert!((halved.get() - 0.4).abs() < 1e-15);
-    }
-
-    /// **The window count reported for a panel is the thinnest sample's, not the mean of them** —
-    /// because what the count is printed for is telling a reader whether *any* of the panel's
-    /// coefficients rests on too little evidence, and a mean hides one thin sample among
-    /// sixty-two whole genomes.
-    ///
-    /// Here: sixty-two samples at a tomato genome's 8,004 windows and one at 3,100. The mean is
-    /// 7,926 and says nothing; the minimum is 3,100, which clears the estimator's 3,000 floor by
-    /// 3.3%.
-    #[test]
-    fn the_reported_window_count_is_the_thinnest_samples() {
-        let mut fitted: Vec<(InbreedingF, u32)> =
-            vec![(InbreedingF::try_new(0.8).expect("legal"), 8_004); 62];
-        fitted.push((InbreedingF::try_new(0.8).expect("legal"), 3_100));
-        let (_, source) = PanelInbreeding::FittedFromRuns(&fitted).for_the_panel();
-        assert_eq!(
-            source,
-            InbreedingSource::RunsOfHomozygosity { windows: 3_100 }
+    fn the_homozygote_excess_arm_reports_its_mean_and_says_it_is_the_fits_own() {
+        let coefficients: Vec<InbreedingF> = [0.23, 0.78, 0.90]
+            .into_iter()
+            .map(|f| InbreedingF::try_new(f).expect("a legal coefficient"))
+            .collect();
+        let (mean, source) = PanelInbreeding::HomozygoteExcess(&coefficients).for_the_panel();
+        assert!(
+            (mean.get() - 0.636_666_666_666_666_7).abs() < 1e-12,
+            "got {}",
+            mean.get()
         );
+        assert_eq!(source, InbreedingSource::JointFitHomozygoteExcess);
     }
 
     /// **A run claiming a source and supplying nothing from it is refused, not meant to zero** —
@@ -1639,14 +1563,13 @@ mod tests {
         let _ = PanelInbreeding::Supplied(&[]).for_the_panel();
     }
 
-    /// **The same, on the runs arm, with its own message** — because a run that fitted
-    /// coefficients per sample and arrived here with none lost them between the two routes, which
-    /// is a different defect from a user supplying an empty list.
+    /// The same on the fitted arm, which after the removal is the one a cohort run takes.
     #[test]
-    #[should_panic(expected = "went missing between the two routes")]
-    fn a_runs_source_with_no_samples_is_refused() {
-        let _ = PanelInbreeding::FittedFromRuns(&[]).for_the_panel();
+    #[should_panic(expected = "makes the correction vanish")]
+    fn a_fitted_panel_with_no_coefficients_is_refused() {
+        let _ = PanelInbreeding::HomozygoteExcess(&[]).for_the_panel();
     }
+
     /// A report over a small census, so the tests below can name every number in it.
     fn a_report(inbreeding_source: InbreedingSource, samples: usize) -> CensusMomentsReport {
         let mut sums = CensusMomentSums::over(samples);
@@ -1759,14 +1682,8 @@ mod tests {
         assert_eq!(warnings.len(), 1, "got {warnings:?}");
         assert!(warnings[0].contains("measured against a population expectation this same fit"));
         assert!(report.to_string().contains("⚠"));
-
-        // And the other two sources are not circular, so neither warns on that account.
+        // And a stated coefficient is not circular, so it does not warn on that account.
         assert!(a_report(InbreedingSource::User, 10).warnings().is_empty());
-        assert!(
-            a_report(InbreedingSource::RunsOfHomozygosity { windows: 8_004 }, 10)
-                .warnings()
-                .is_empty()
-        );
     }
 
     /// **At one sample the homozygote excess is 0.000 whatever the truth, so the run says its
@@ -1819,37 +1736,6 @@ mod tests {
         );
     }
 
-    /// **The runs estimator warns below its own floor of 3,000 windows and not above it** — below
-    /// that, `parameter_prepass_generic.md` §6.1 records that what it returns is its own noise.
-    ///
-    /// **⚠ This branch cannot be reached by a coefficient that came from `fit_inbreeding`**, which
-    /// refuses below the floor rather than returning a thin estimate. So what is tested here is a
-    /// guard on a hand-assembled report, and the fixture is hand-assembled to match. Said plainly
-    /// because a test whose subject cannot arise on the shipped path reads as coverage it is not.
-    #[test]
-    fn the_runs_estimator_warns_below_its_own_window_floor() {
-        let thin = a_report(InbreedingSource::RunsOfHomozygosity { windows: 1_200 }, 4);
-        let warnings = thin.warnings();
-        assert_eq!(warnings.len(), 1, "got {warnings:?}");
-        assert!(
-            warnings[0].contains("1200 genome windows"),
-            "{:?}",
-            warnings[0]
-        );
-
-        // A tomato genome is 8,004 windows, which is well above the floor.
-        let whole_genome = a_report(InbreedingSource::RunsOfHomozygosity { windows: 8_004 }, 4);
-        assert!(whole_genome.warnings().is_empty());
-        // And exactly at the floor is not below it.
-        let at_the_floor = a_report(
-            InbreedingSource::RunsOfHomozygosity {
-                windows: MIN_WINDOWS_TO_FIT_INBREEDING as u32,
-            },
-            4,
-        );
-        assert!(at_the_floor.warnings().is_empty());
-    }
-
     /// **Where the coefficient came from reaches the printed output**, distinguishably — which is
     /// the whole requirement §7 restates from `calling_priors.md` §4: two runs that used different
     /// information must not look the same.
@@ -1858,16 +1744,13 @@ mod tests {
         let printed: Vec<String> = [
             InbreedingSource::User,
             InbreedingSource::JointFitHomozygoteExcess,
-            InbreedingSource::RunsOfHomozygosity { windows: 8_004 },
         ]
         .into_iter()
         .map(|source| a_report(source, 4).to_string())
         .collect();
         assert!(printed[0].contains("from the user"));
         assert!(printed[1].contains("from the joint fit's own homozygote excess"));
-        assert!(printed[2].contains("runs-of-homozygosity estimator over 8004 genome windows"));
         assert_ne!(printed[0], printed[1]);
-        assert_ne!(printed[1], printed[2]);
     }
 
     /// **Two chunks merged are one walk** — field for field, not only on the two fields a whole-fit

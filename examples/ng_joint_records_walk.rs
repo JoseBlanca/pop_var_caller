@@ -51,7 +51,7 @@ use pop_var_caller::ng::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig
 use pop_var_caller::ng::locus_generation::{
     GeneratorSet, GeneratorSlot, LocusKind, SampleLocusObservationsIterator, UnhandledReason,
 };
-use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use pop_var_caller::ng::parameter_estimation::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
     CensusWriter, CohortCensusEvidence, DepthCap, DepthCode, NamedReadGroup, ReadCap,
     SampleCensusEvidence,

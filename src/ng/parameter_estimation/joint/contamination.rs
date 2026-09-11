@@ -122,7 +122,7 @@
 //! Giving every depth to the cap a bin of its own takes a genuinely 3%-contaminated sample from
 //! **0.0120 to 0.0263**, with all 39 clean samples of the same drawn panel staying at exactly
 //! 0.0000 (`reports/census_depth_resolution_2026-08-16.md`). That ladder is what
-//! [`for_census`](crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges::for_census)
+//! [`for_census`](crate::ng::parameter_estimation::depth_bins::DepthBinEdges::for_census)
 //! now builds, so the numbers below — measured on the coarse one — understate what this module
 //! returns at depth. The three readings of a sample's own coordinates also collapse onto one
 //! value once the depth is exact, which is why that choice no longer buys or costs anything
@@ -148,7 +148,7 @@ use rayon::prelude::*;
 
 use std::collections::BTreeMap;
 
-use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use crate::ng::parameter_estimation::depth_bins::DepthBinEdges;
 use crate::ng::types::ReadGroupId;
 
 use super::census::{

@@ -1,53 +1,54 @@
-//! ng step 4 — the parameters the caller runs on, measured from the sample's own
-//! loci before anything is called.
+//! ng step 4 — the parameters the caller runs on, measured from the cohort's own loci before
+//! anything is called.
 //!
-//! Four numbers per sample come out of the SNP/indel path: a per-read-group error
-//! rate, the sample's heterozygosity, its homozygous-non-reference rate, and its
-//! inbreeding coefficient. They are measured from **every** covered position,
-//! including the overwhelming majority that show no alternative allele at all —
-//! which is what separates this step from production's estimator. Production writes
-//! the pure-reference columns; it is production's *heterozygosity accumulator* that
-//! never looks at them (`spec/parameter_prepass.md` §2.1), so the loss is in the
-//! estimator rather than in the data — and what is lost is the strongest evidence
-//! there is about the error rate.
+//! **One route, and it is [`joint`]**: every parameter fitted once, over every sample at the same
+//! bounded set of positions — the *census* — so that a position's own allele frequency in the
+//! population is a quantity the fit can weigh a genotype against. What comes out is a per-library
+//! error rate and mismapped-position rate, the population's allele-frequency curve, each sample's
+//! departure from Hardy–Weinberg proportions, each library's contamination, and the repeat-tract
+//! slippage numbers per stratum.
 //!
-//! Design: `doc/devel/ng/spec/parameter_prepass_generic.md` (the design and its
-//! rationale), `doc/devel/ng/spec/parameter_prepass.md` (the shared framing), and
-//! `doc/devel/ng/arch/parameter_prepass_generic.md` (types and interfaces).
+//! Design: `doc/devel/ng/spec/parameter_prepass.md` (the shared framing),
+//! `parameter_prepass_joint_fit.md` (what the route is), `parameter_prepass_joint_loci.md` (which
+//! positions) and `parameter_prepass_joint_records.md` (what is recorded at each).
 //!
-//! Two sub-units, split so that the shaping of data and the mathematics on it never
-//! live in one file:
+//! # There used to be a second route, and it was removed on 2026-09-11
 //!
-//! - [`fitting`] — the mathematics. Knows nothing about markers, loci or windows: it
-//!   is given a table of numbers and returns the values that best explain them. A
-//!   folder rather than a file because it is the one genuine swappable seam — one
-//!   trait, an implementation on this path and a second on the STR path.
-//! - [`generic`] — the SNP/indel path: the two accumulators, the cell table, the
-//!   vocabulary they are keyed on, and what each of the four numbers is fitted from.
-//! - [`ssr`] — the STR path: the same procedure over a noise model that lets a read gain
-//!   or lose whole repeat copies, fitted per motif period and repeat count.
-//! - `subsample` — how either path thins a locus's reads down to its cap, seeded from the
-//!   locus's position so that two runs over the same sample keep the same reads however the
-//!   genome was cut into shards. Shared because both caps are the same draw.
+//! The **per-sample whole-genome histogram** route folded each sample's every covered position
+//! into histograms and fitted from those, one sample at a time. It was never run by any shipped
+//! command, and the join that would have handed its results to the caller had no caller outside
+//! its own tests. What only it could produce was an inbreeding coefficient read off *which windows
+//! of the genome lie in a run of homozygosity* — a local quantity a census cannot support, since a
+//! census window holds about a quarter of one heterozygote at the shipped budget.
 //!
-//! The path-specific vocabulary is not here: an error-rate ladder in per-base
-//! probabilities and a window size for runs of homozygosity are the SNP/indel path's, and
-//! an offset in whole repeat copies is the STR path's, so each lives in its own folder
-//! where the other cannot inherit it. What this file does hold is what **every** parameter
-//! step 4 emits carries — where the number came from, and how much data stood behind it —
-//! and the step's error type.
+//! **The coefficient a caller reads is now the per-sample departure from Hardy–Weinberg**, which
+//! [`joint::fit`] measures from the census because it is an average over positions rather than a
+//! local quantity. That estimator is **circular** — it is measured against a population
+//! expectation the same fit produced — and `joint::census_moments`'s output says so rather than
+//! hiding it. Removing the runs estimator gave that up knowingly
+//! (`impl_plan/remove_histogram_route.md`, and the measurement behind the decision is
+//! `doc/devel/reports/ng_census_inbreeding_budget_2026-09-11.md`).
 //!
-//! **STR-ness is a property of an implementation, not a top-level division**
-//! (`arch/module_layout.md` principle 2), which is why [`ssr`] is a sibling of [`generic`]
-//! rather than a separate tree.
+//! # What sits here rather than in [`joint`]
+//!
+//! Three things the census route needs that are not the fit, and that calling reads too — so they
+//! are shared vocabulary rather than a route's internals:
+//!
+//! - [`depth_bins`] — the depth ladder a census codes its depths on, and the ladder a run's cells
+//!   are keyed by. Two samples binned under different edges hold codes that mean different
+//!   depths, which is why the ladder's digest is one of the settings a fit refuses on.
+//! - [`calibration`] — what a library's own base qualities *claimed*, summed as the loci go past.
+//!   A base-quality calibration is fitted from that and the measured error rate together.
+//! - [`repeat_strata`] — how a repeat tract's stratum is named: a motif period, the reference's
+//!   repeat count, and the library and ploidy that make one fitted set of slippage numbers.
+//!
+//! And what **every** parameter this step emits carries: where the number came from
+//! ([`Provenance`]) and how much data stood behind it ([`Estimate`]).
 
-pub mod fitting;
-pub mod generic;
+pub mod calibration;
+pub mod depth_bins;
 pub mod joint;
-pub mod ssr;
-pub(crate) mod subsample;
-
-use crate::ng::types::{DomainError, Ploidy};
+pub mod repeat_strata;
 
 /// Where a parameter came from.
 ///
@@ -78,9 +79,9 @@ impl Provenance {
     /// score, and saying otherwise would launder the weaker of the two — the failure this enum's
     /// own documentation exists to prevent.
     ///
-    /// **The order is the ladder this module already states**, in
-    /// [`ParameterEstimationError`]'s own doc: *fitted here, borrowed from the sample's other
-    /// read groups, supplied, defaulted*. So [`Self::FittedHere`] is the strongest and
+    /// **The order is the ladder this step has always stated**: *fitted here, borrowed from the
+    /// sample's other read groups, supplied, defaulted*. So [`Self::FittedHere`] is the strongest
+    /// and
     /// [`Self::Defaulted`] the weakest, and **[`Self::Supplied`] sits below [`Self::Borrowed`]**
     /// — a number the run was handed says nothing about this data, where a borrowed one is at
     /// least a measurement of a neighbouring grain.
@@ -127,451 +128,21 @@ pub struct Estimate<T> {
     pub observations: u64,
 }
 
-/// What went wrong while estimating a sample's parameters.
+/// The per-base error rate used when none could be fitted and none was supplied.
 ///
-/// `#[non_exhaustive]` because the STR path and the two censuses add their own
-/// conditions as they land.
+/// **Soft, and the only defaulted parameter of this step.** Chemistry varies far less between runs
+/// than biology does between samples, so a stated constant is defensible here in a way it is not
+/// for the population's diversity or for inbreeding — which is why a run without those says so
+/// rather than inventing them.
 ///
-/// **The three fitting failures are not interchangeable, and only one of the four
-/// parameters may be guessed.** An error rate has a ladder of fallbacks — fitted here,
-/// borrowed from the sample's other read groups, supplied, defaulted — because
-/// chemistry varies far less between runs than biology does between samples. Neither
-/// the genotype frequencies nor the inbreeding coefficient has any such rung.
-#[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
-pub enum ParameterEstimationError {
-    /// Too few sites to fit this sample's genotype frequencies at this ploidy.
-    ///
-    /// **Not recoverable here.** There is no sibling to borrow from — a sample has one
-    /// heterozygosity — and no constant worth inventing, because this is the biology.
-    ///
-    /// `floor` travels on the variant rather than being read from a constant, so that
-    /// the message quotes the floor the *caller* applied. This error is
-    /// `#[non_exhaustive]` and shared with the STR path, whose floors are its own; a
-    /// message hard-wired to the SNP/indel constant would quote the wrong number at the
-    /// wrong grain the first time the STR path raises it.
-    #[error(
-        "sample {sample}: {sites} sites at ploidy {ploidy} is too few to fit genotype \
-         frequencies (need {floor}); supply them or drop the sample"
-    )]
-    GenotypeFrequenciesNotFittable {
-        sample: String,
-        ploidy: Ploidy,
-        sites: u64,
-        floor: u64,
-    },
-
-    /// `F` was to be fitted and the runs model had too few windows to run on.
-    ///
-    /// **Deliberately has no default.** Inbreeding is the parameter that differs most
-    /// between an outcrosser and a selfing landrace, so any constant would be wrong for
-    /// half the runs — and the cohort's diversity divides by `1 − F`, so a wrong one is
-    /// amplified rather than absorbed.
-    #[error(
-        "sample {sample}: {windows} usable windows is too few to fit the inbreeding \
-         coefficient (need {floor}); supply one instead"
-    )]
-    InbreedingNotFittable {
-        sample: String,
-        windows: usize,
-        floor: usize,
-    },
-
-    /// A sample's genotype frequencies were built with the wrong number of entries for
-    /// their ploidy, or with entries that do not sum to one.
-    ///
-    /// **This is our own arithmetic being broken, not a data condition** — which is why
-    /// the fits construct through the checked door and `.expect()`. It is here rather
-    /// than in [`DomainError`] because the invariant is about a *set* of frequencies
-    /// against a ploidy, which no single constrained scalar can express: entry `k` of
-    /// the set is the rate for `k` non-reference copies, so a set one entry short hands
-    /// back the wrong dosage's rate under the right name.
-    #[error(
-        "a ploidy-{ploidy} sample needs one genotype frequency per dosage 0..={ploidy}, \
-         got {entries} summing to {total}"
-    )]
-    GenotypeFrequenciesOffSimplex {
-        ploidy: Ploidy,
-        entries: usize,
-        total: f64,
-    },
-
-    /// No starting point found two states that were both used **and** distinguishable, so
-    /// no separation between them was established.
-    ///
-    /// **Two conditions and not one**, which the message's "found no second state" covers
-    /// only loosely: a start fails it either by emptying the inside state — the collapsed
-    /// search — or by arriving at two states within
-    /// [`MAX_IDENTIFIED_STATE_RATIO`](crate::ng::parameter_estimation::generic::runs::MAX_IDENTIFIED_STATE_RATIO)
-    /// of each other, where `F` is not identified at all because the likelihood is exactly
-    /// flat in it.
-    ///
-    /// **This is not `F` = 0**, and the distinction is the reason the variant exists.
-    /// An outcrossing genome and a search that failed leave identical fitted values —
-    /// an empty inside state and its frequencies at their starting guesses — and only
-    /// the scores across starting points tell them apart. Returning zero here is the
-    /// one way this estimator produces a confidently wrong number rather than a visible
-    /// failure.
-    #[error(
-        "sample {sample}: the runs model found no second state from any of {starts} \
-         starting points — this is a search that failed, not an inbreeding coefficient \
-         of zero; widen the state separations or supply F"
-    )]
-    InbreedingStatesNotSeparated { sample: String, starts: usize },
-
-    /// The runs model's starting points scored alike and answered differently, so the
-    /// data did not determine an inbreeding coefficient.
-    ///
-    /// **Also not `F` = 0, and a different failure from
-    /// [`Self::InbreedingStatesNotSeparated`].** There the search never found a second
-    /// state; here it found one from every start and found a *different* one each time,
-    /// with nothing to choose between them — which is what a chain reading sampling noise
-    /// looks like from the outside. Measured on a genome drawn with no runs at all, where
-    /// nine starts returned `F` from 0.0003 to 0.8497 while scoring **within 0.91 nats of
-    /// one another**, and the winning start's two states sat at a ratio of 0.086 — nowhere
-    /// near the 0.9 the other check refuses on, so it saw nothing at all
-    /// (`doc/devel/ng/research/inbreeding_resolution_2026-08-09.md` §1, §4, §6).
-    ///
-    /// **Only the tied starts count**, which is what keeps this from refusing a fit the
-    /// data did determine: on a genome with real runs and a floor of spurious
-    /// heterozygotes five times the real rate, six starts agree on `F` = 0.3157 and three
-    /// collapse to zero — and those three score 1,473 nats worse, so they have been
-    /// rejected rather than disagreed with.
-    #[error(
-        "sample {sample}: {tied_starts} of the runs model's {starts} starting points \
-         scored alike and disagreed about the inbreeding coefficient by {spread:.4}, more \
-         than the {threshold} that leaves it identified — this is a genome the model could \
-         not read, not an inbreeding coefficient of zero; supply F instead"
-    )]
-    InbreedingStartsDisagree {
-        sample: String,
-        /// How many of them could not be told apart by score — the ones the spread is
-        /// over.
-        tied_starts: usize,
-        /// How many were tried in all.
-        starts: usize,
-        /// The largest fitted `F` minus the smallest, across the tied starting points.
-        spread: f64,
-        /// What it was compared against, so the message does not have to be read against
-        /// a constant the reader has to go and find.
-        threshold: f64,
-    },
-
-    /// **A sample reached the assembly of a run's calling parameters with no inbreeding
-    /// coefficient**, so the run is refused and the sample is named.
-    ///
-    /// The three variants above are the fit failing. This one is the fit never having been
-    /// asked: a coefficient is measured on the **diploid** part of a genome, and a sample with
-    /// no diploid region reports `None` without that being a failure — above two copies the
-    /// quantity needs several identity-by-descent coefficients and is deferred, below two there
-    /// are no heterozygotes to be short of. So the parameters are complete and calling still
-    /// cannot proceed, which is why this is raised where the two meet rather than where the fit
-    /// ran.
-    ///
-    /// **Refused rather than defaulted, on the same grounds as its three neighbours.** How much
-    /// less heterozygous a sample is than random mating predicts is what most separates an
-    /// outcrosser from a selfing landrace, and the cohort's diversity divides by `1 − F` — so a
-    /// number invented here is amplified rather than absorbed.
-    ///
-    /// **And not taken from the cohort fit's homozygote excess either**, which is available and
-    /// looks like the obvious fallback. That excess is measured by the very fit whose diversity
-    /// the coefficient exists to correct, so borrowing it makes the correction circular; the
-    /// census-moments report carries the same warning.
-    #[error(
-        "sample {sample}: no inbreeding coefficient was fitted for it, and calling has no \
-         default for one — a cohort's diversity divides by 1 − F, so an invented coefficient is \
-         amplified rather than absorbed. A sample reports none when no part of its genome is \
-         diploid, which is where the coefficient is measured; supply one instead"
-    )]
-    InbreedingNotFittedForSample { sample: String },
-
-    /// **A library this run declared, and no sample fitted an error rate for.**
-    ///
-    /// **A hard fail, and the owner's ruling of 2026-09-01**: where the user gave no default and
-    /// a library did not manage to estimate a parameter, the run stops and says so. It is the
-    /// same shape as [`InbreedingNotFittedForSample`](Self::InbreedingNotFittedForSample) — a
-    /// number nothing measured and nothing supplied — and the same answer.
-    ///
-    /// **It is reachable from data, not only from a mis-paired caller.** A sample's fitted rates
-    /// cover the read groups that produced reads, so a library whose reads were all refused at
-    /// admission has no entry anywhere. That is an ordinary thing for a lane to do.
-    ///
-    /// **Refusing is what stops the failure being deferred to a locus.** The read-group axis is
-    /// built from the rates that are present, so a missing library is dropped from the axis: an
-    /// interior gap trips the contiguity check with a message about ids, and a missing *highest*
-    /// library shortens the axis in silence — after which the run dies at whichever locus first
-    /// carries one of that library's reads, which is exactly the deferred failure assembly
-    /// exists to turn into a message about the run.
-    ///
-    /// **What to do about it is on the line**, because the two answers are different work:
-    /// exclude the library from the run, or supply a rate for it in the parameters file.
-    #[error(
-        "read group {read_group} ({id}) of sample {sample}: this run declares it and no sample          fitted an error rate for it, and calling has no default for one — a library whose reads          were all refused at admission looks exactly like this. Leave the library out of the          run, or supply a rate for it in the parameters file"
-    )]
-    ErrorRateNotFittedForReadGroup {
-        /// The run's own dense index for the library.
-        read_group: u32,
-        /// The `@RG ID` its file declares.
-        id: String,
-        /// The sample whose file declares it.
-        sample: String,
-    },
-
-    /// The walk that was to produce this sample's loci failed part-way through.
-    ///
-    /// **Fatal, and never absorbed.** The loci a walk failed to produce are *missing*
-    /// evidence, not zero evidence: a rate fitted over a truncated genome is a plausible
-    /// number describing a genome nobody chose, and nothing downstream would announce it.
-    /// The stream's own error type already says the same thing by yielding `Err` once and
-    /// then ending, so that `?` makes it un-ignorable rather than a silent end of stream.
-    ///
-    /// **It carries the walk's own error, and that cost this enum its `Clone` and
-    /// `PartialEq`.** `LocusGenerationError` has neither, so holding one means dropping both
-    /// from every variant here. F1's first draft rendered the cause to a `String` to keep
-    /// them — on the stated grounds that the tests relied on them, which a review measured
-    /// and disproved: removing the two derives compiles with **zero** errors across
-    /// `--all-targets`.
-    ///
-    /// What the `String` was costing is the part worth keeping. Five of
-    /// `LocusGenerationError`'s six variants name the [`GenomeRegion`](crate::ng::types::GenomeRegion)
-    /// where the walk broke, and rendering flattens that to prose a caller would have to
-    /// parse. A cohort driver deciding whether to retry one region or abandon the sample
-    /// needs to `matches!` on the inner variant, which it can now do.
-    #[error("sample {sample}: the walk that produces its loci failed")]
-    LocusGeneration {
-        sample: String,
-        #[source]
-        source: crate::ng::locus_generation::LocusGenerationError,
-    },
-
-    /// A constrained scalar rejected its value while a named fit was running — a rate
-    /// outside `[0, 1]`, a ploidy of zero.
-    ///
-    /// **Not transparent, and not `#[from]`, and both for the same reason.** The inner
-    /// [`DomainError`] names the quantity and the offending value, which is half of what a
-    /// reader needs; what it cannot know is *whose* data and *which* fit produced it, and
-    /// on a cohort run of hundreds of samples that is the half that locates the fault. A
-    /// transparent variant forwards the inner message unchanged and drops both. A `#[from]`
-    /// conversion is worse than the missing context alone: it makes `?` silently mint this
-    /// variant at every one of the five constructors that can raise a `DomainError`, so the
-    /// sample and the fit would have to be *remembered* to be attached, and the compiler
-    /// would never ask. Constructing it by hand is what forces each site to say where it
-    /// was.
-    #[error("sample {sample}: {fit} rejected a value — {source}")]
-    Domain {
-        sample: String,
-        /// Which fit was running, in the words the emitted summary uses — "the error-rate
-        /// scan", "the runs model". A reader who has the sample and the fit can find the
-        /// site; one who has only the quantity cannot.
-        fit: &'static str,
-        source: DomainError,
-    },
-}
+/// A library that takes this rate also takes a defaulted base-quality calibration, because the two
+/// come out of one pass over one set of reads: `RunParameters::assemble` refuses a fitted rate with
+/// no accumulator total behind it, and says why.
+pub const DEFAULT_ERROR_RATE: f64 = 0.001;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::parameter_estimation::generic::MIN_SITES_TO_FIT;
-    use crate::ng::parameter_estimation::generic::runs::MIN_WINDOWS_TO_FIT_INBREEDING;
-
-    fn ploidy(copies: u8) -> Ploidy {
-        Ploidy::try_new(copies).expect("a positive copy number")
-    }
-
-    /// **Every message names the sample and the number that was too small**, next to
-    /// the floor it fell short of. A parameter-estimation failure is read out of a log
-    /// on a cohort run of hundreds of samples, so a message that omits which sample, or
-    /// omits how far short it fell, sends the reader back to the data to find out.
-    #[test]
-    fn each_fitting_failure_names_the_sample_and_the_number_that_was_too_small() {
-        let frequencies = ParameterEstimationError::GenotypeFrequenciesNotFittable {
-            sample: "SL_landrace_07".to_string(),
-            ploidy: ploidy(2),
-            sites: 812,
-            floor: MIN_SITES_TO_FIT,
-        };
-        let message = frequencies.to_string();
-        assert!(message.contains("SL_landrace_07"), "{message}");
-        assert!(message.contains("812"), "{message}");
-        assert!(
-            message.contains("ploidy 2"),
-            "the ploidy renders: {message}"
-        );
-        // Against the constant's own rendering rather than a literal: `contains("10000")`
-        // is also true of a floor of 100,000, so a floor raised tenfold would have left
-        // this assertion green.
-        assert!(
-            message.contains(&MIN_SITES_TO_FIT.to_string()),
-            "the floor it fell short of: {message}"
-        );
-
-        let inbreeding = ParameterEstimationError::InbreedingNotFittable {
-            sample: "HG002_chr20".to_string(),
-            windows: 1_200,
-            floor: MIN_WINDOWS_TO_FIT_INBREEDING,
-        };
-        let message = inbreeding.to_string();
-        assert!(message.contains("HG002_chr20"), "{message}");
-        assert!(message.contains("1200"), "{message}");
-        assert!(
-            message.contains(&MIN_WINDOWS_TO_FIT_INBREEDING.to_string()),
-            "the floor it fell short of: {message}"
-        );
-    }
-
-    /// A set of genotype frequencies can be wrong for its ploidy in two ways, and the
-    /// message has to say which. Entry `k` is the rate for `k` non-reference copies, so
-    /// a set one entry short is not merely incomplete — it hands back the wrong dosage's
-    /// rate under the right name.
-    #[test]
-    fn the_off_simplex_message_names_the_ploidy_the_entry_count_and_the_total() {
-        let malformed = ParameterEstimationError::GenotypeFrequenciesOffSimplex {
-            ploidy: ploidy(2),
-            entries: 1,
-            total: 1.0,
-        };
-        let message = malformed.to_string();
-
-        assert!(message.contains("ploidy-2"), "{message}");
-        assert!(message.contains("0..=2"), "the dosages expected: {message}");
-        assert!(message.contains("got 1"), "{message}");
-    }
-
-    /// The one message that has to say what it is **not**. An outcrosser and a failed
-    /// search leave the same fitted values, so a reader who takes this for `F = 0` has
-    /// been told a confident wrong number — which is exactly what the variant exists to
-    /// prevent.
-    #[test]
-    fn the_unseparated_states_message_says_it_is_not_an_inbreeding_coefficient_of_zero() {
-        let unseparated = ParameterEstimationError::InbreedingStatesNotSeparated {
-            sample: "SL_landrace_07".to_string(),
-            starts: 9,
-        };
-        let message = unseparated.to_string();
-
-        assert!(message.contains("SL_landrace_07"), "{message}");
-        assert!(
-            message.contains('9'),
-            "how many starts were tried: {message}"
-        );
-        assert!(
-            message.contains("not an inbreeding coefficient"),
-            "the reader must not take this for F = 0: {message}"
-        );
-    }
-
-    /// **The other message that has to say what it is not — and it also has to be tellable
-    /// apart from the one above.** Both refusals mean *no `F` was established*, and a
-    /// consumer that cannot tell which fired cannot act on either: one says widen the
-    /// separations, the other says the genome carries no signal to widen towards. So this
-    /// asserts the shared warning, the numbers only this variant has, and that the two
-    /// messages differ.
-    #[test]
-    fn the_disagreeing_starts_message_says_what_it_is_not_and_is_not_the_other_refusal() {
-        let disagreed = ParameterEstimationError::InbreedingStartsDisagree {
-            sample: "SL_landrace_07".to_string(),
-            tied_starts: 9,
-            starts: 9,
-            spread: 0.8494,
-            threshold: 0.05,
-        };
-        let message = disagreed.to_string();
-
-        assert!(message.contains("SL_landrace_07"), "{message}");
-        assert!(
-            message.contains("0.8494"),
-            "how far apart they landed: {message}"
-        );
-        assert!(
-            message.contains("0.05"),
-            "and what that was measured against: {message}"
-        );
-        assert!(
-            message.contains("not an inbreeding coefficient of zero"),
-            "the reader must not take this for F = 0 either: {message}"
-        );
-        assert!(
-            message.contains("supply F"),
-            "what to do about it: {message}"
-        );
-        assert_ne!(
-            message,
-            ParameterEstimationError::InbreedingStatesNotSeparated {
-                sample: "SL_landrace_07".to_string(),
-                starts: 9,
-            }
-            .to_string(),
-            "the two refusals have to be tellable apart in a log"
-        );
-    }
-
-    /// **The refusal a run meets rather than a fit** — and it has to be tellable apart from
-    /// the three fitting failures, because what a reader does about it is different.
-    ///
-    /// The other three say a search was run and did not settle, and the answer is to widen it
-    /// or to supply the number. This one says no search was ever run, because the sample has no
-    /// diploid region to run one on — so re-running the fit changes nothing and only supplying
-    /// the coefficient will. A message that named the sample and stopped there would leave a
-    /// reader re-running a fit that cannot answer.
-    ///
-    /// It also has to say plainly that there is no default. The cohort fit's homozygote excess
-    /// is sitting right there and is the obvious thing to reach for, and reaching for it makes
-    /// the correction circular.
-    #[test]
-    fn the_missing_coefficient_refusal_names_the_sample_and_is_not_a_failed_fit() {
-        let missing = ParameterEstimationError::InbreedingNotFittedForSample {
-            sample: "SL_landrace_07".to_string(),
-        };
-        let message = missing.to_string();
-
-        assert!(message.contains("SL_landrace_07"), "the sample: {message}");
-        assert!(
-            message.contains("no default"),
-            "that there is nothing to fall back on: {message}"
-        );
-        assert!(
-            message.contains("diploid"),
-            "why the sample has none, so a reader does not re-run a fit that cannot \
-             answer: {message}"
-        );
-        assert!(
-            message.contains("supply one"),
-            "what to do about it: {message}"
-        );
-        assert_ne!(
-            message,
-            ParameterEstimationError::InbreedingNotFittable {
-                sample: "SL_landrace_07".to_string(),
-                windows: 1_200,
-                floor: MIN_WINDOWS_TO_FIT_INBREEDING,
-            }
-            .to_string(),
-            "a coefficient never asked for and one the fit could not reach are different \
-             failures with different answers"
-        );
-    }
-
-    /// A domain violation carries **three** things a reader needs, and the inner error has
-    /// only one of them. The quantity and the offending value come from the newtype; the
-    /// sample and the fit have to be attached here, because on a cohort run of hundreds of
-    /// samples those are what say where to look.
-    #[test]
-    fn a_domain_violation_names_the_sample_and_the_fit_as_well_as_the_quantity() {
-        let rejected = ParameterEstimationError::Domain {
-            sample: "SL_landrace_07".to_string(),
-            fit: "the runs model",
-            source: DomainError::InbreedingF(1.5),
-        };
-        let message = rejected.to_string();
-
-        assert!(message.contains("SL_landrace_07"), "the sample: {message}");
-        assert!(message.contains("the runs model"), "the fit: {message}");
-        assert!(message.contains("1.5"), "the offending value: {message}");
-        assert!(
-            message.contains("inbreeding coefficient"),
-            "the quantity, in the newtype's own words: {message}"
-        );
-    }
 
     /// The four provenances are distinct values, not a scale — `Borrowed` is not
     /// "better" than `Defaulted` in any ordering the type imposes, and deliberately so:

@@ -45,8 +45,8 @@ use std::path::PathBuf;
 use md5::{Digest, Md5};
 
 use crate::ng::locus_generation::{LocusKind, ReadWitness, SampleLocusObservations};
-use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
-use crate::ng::parameter_estimation::generic::depth_bins::{DepthBin, DepthBinEdges};
+use crate::ng::parameter_estimation::calibration::MintedReadErrors;
+use crate::ng::parameter_estimation::depth_bins::{DepthBin, DepthBinEdges};
 use crate::ng::parameter_estimation::joint::loci::{
     CensusLoci, CensusLociDigest, CensusLociDigester, SelectionTerms,
 };
@@ -133,7 +133,7 @@ pub enum DepthCode {
 /// How many bits one entry takes. The census ladder holds a bin for every depth to the cap of
 /// 124 and ten rungs above it, so 135 bins plus the sentinel need eight — three more than the
 /// five a ladder of thirty widening bins took, and the reason to spend them is on
-/// [`CENSUS_DEPTH_BIN_COUNT`](crate::ng::parameter_estimation::generic::depth_bins): a coarse
+/// [`CENSUS_DEPTH_BIN_COUNT`](crate::ng::parameter_estimation::depth_bins): a coarse
 /// depth beside an exact count of disagreeing reads halves the contamination a 30× sample
 /// reports.
 pub const DEPTH_CODE_BITS: u32 = 8;
@@ -150,7 +150,7 @@ const NEVER_WALKED_CODE: u8 = ((1_u16 << DEPTH_CODE_BITS) - 1) as u8;
 // bin has to sit strictly below it. `to_bits` asserts the same thing per entry, and that
 // assert fires while a run is walking a genome; this one fires while it is being built.
 const _: () = assert!(
-    crate::ng::parameter_estimation::generic::depth_bins::CENSUS_DEPTH_BIN_COUNT
+    crate::ng::parameter_estimation::depth_bins::CENSUS_DEPTH_BIN_COUNT
         <= NEVER_WALKED_CODE as usize,
     "the census ladder has outgrown the depth code: its top rung would be written \
      as the never-walked sentinel, which is the code for a bug"
@@ -2422,7 +2422,7 @@ impl CensusWriter {
         // census's kept positions would be a second definition of a per-read-group total, and
         // the one number it feeds — how far a library's own base qualities may be trusted — is
         // a property of the library rather than of which positions were kept.
-        crate::ng::parameter_estimation::generic::calibration::minted_error_by_read_group(
+        crate::ng::parameter_estimation::calibration::minted_error_by_read_group(
             locus,
             &mut self.minted_scratch,
         );

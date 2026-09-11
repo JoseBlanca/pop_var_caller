@@ -8,6 +8,22 @@ coefficient `F`. Everything fitted from those two histograms is here, because th
 specifies an accumulator specifies what is fitted from it. `src/ssr/` and `src/pileup/` are frozen
 production: everything said about them here is a record, not a change.*
 
+> ## ⛔ The route this specifies was removed on 2026-09-11
+>
+> **The per-sample whole-genome histogram route is gone from the code**, and with it the two
+> accumulators, the coupled error-rate and genotype-frequency fit, and the runs-of-homozygosity
+> estimator of the inbreeding coefficient. No shipped command ever ran it; the census route
+> ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md)) is the only one left. The
+> decision, what it gave up and the measurement behind it are in
+> [`impl_plan/remove_histogram_route.md`](../impl_plan/remove_histogram_route.md) and
+> [`reports/ng_census_inbreeding_budget_2026-09-11.md`](../../reports/ng_census_inbreeding_budget_2026-09-11.md).
+>
+> **This document is kept, and is still the reference for four things the census route inherited**:
+> the depth ladder and its sizing (§4, §9 — `parameter_estimation::depth_bins`), the two-class noise
+> model and the measurement that forced it (§2.1), the base-quality calibration's denominator
+> (`parameter_estimation::calibration`), and what `F` *is* and how the caller uses it (§6). **What it
+> says about accumulators, fits and window chains describes code that no longer exists.**
+
 ---
 
 ## 1. What this path produces, and what it reads

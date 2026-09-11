@@ -212,6 +212,29 @@ would be silently wrong against a re-ordered sample list. At least one is requir
 **This is the file's only cohort-sized axis** — one row a sample, so 3,000 rows at the top of the
 committed range (§9).
 
+**This file is the only way a coefficient reaches a calling run.** `call-from-psps` and
+`call-from-alignments` take no flag for it: they either read this table or run on `--defaults`.
+So the three things a coefficient can be are resolved once, by `estimate-parameters`, and the
+**warrant on the row is what says which** (`DeclaredInbreeding::of_each_sample_over`):
+
+| warrant | what it means | where it comes from |
+|---|---|---|
+| `supplied` | somebody said | `estimate-parameters --inbreeding` |
+| `fitted_here` | this cohort's fit measured it | each sample's homozygote excess |
+| `defaulted` | nobody said and nothing was fitted | zero |
+
+**A stated coefficient overrides a fitted one** (owner, 2026-08-27): a user who knows how their
+material was bred knows it whatever the cohort size. *That is the opposite order from
+`Provenance::weaker_of`, which ranks `supplied` below `fitted_here` — deliberately, because that
+ranking answers what a **derived** value may claim rather than which number to take.*
+
+**`defaulted` is also what a single-sample run gets even though its fit ran**, because one genome's
+totals cannot identify a homozygote excess: it comes back zero whatever the truth, and the file must
+not report that as a measurement. **And the fitted rung is circular** — the excess is measured
+against allele frequencies the same fit produced — which is stated rather than corrected, since the
+estimator that carried no such dependence was removed on 2026-09-11
+([`impl_plan/remove_histogram_route.md`](../impl_plan/remove_histogram_route.md)).
+
 ### 3.6 The ordinary-site prior's seed
 
 Three values: the reference concentration, the total alternative concentration, and which regime

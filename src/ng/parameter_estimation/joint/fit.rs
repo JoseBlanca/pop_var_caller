@@ -44,7 +44,7 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
-use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use crate::ng::parameter_estimation::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::types::{ExpectedAlternativeFrequency, ExpectedHeterozygosity, Ploidy, ReadGroupId};
 

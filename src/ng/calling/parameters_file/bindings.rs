@@ -63,7 +63,7 @@ use crate::ng::region_typing::segment_criteria::SsrSegmentCriteria;
 use crate::ng::repeat_catalog::StrRepeatCriteria;
 
 #[cfg(test)]
-use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use crate::ng::parameter_estimation::depth_bins::DepthBinEdges;
 #[cfg(test)]
 use crate::ng::parameter_estimation::joint::census::{
     DepthCap, DepthLadderDigest, ReadCap, SelectionTermsDigest,

@@ -50,7 +50,7 @@ use crate::ng::calling::{
 use crate::ng::locus_generation::SsrDetail;
 use crate::ng::parameter_estimation::Provenance;
 use crate::ng::parameter_estimation::joint::ssr_fit::Slippage;
-use crate::ng::parameter_estimation::ssr::RepeatCount;
+use crate::ng::parameter_estimation::repeat_strata::RepeatCount;
 use crate::ng::types::{AlleleId, Genotype, InbreedingF, LogProb, Ploidy};
 use std::iter::repeat_n;
 use std::num::NonZeroU32;
@@ -2881,7 +2881,7 @@ mod tests {
     /// The rate differs per stratum, so a lookup keyed by the wrong repeat count is a different
     /// number rather than the same one.
     fn tract_substitution_rates() -> std::collections::BTreeMap<
-        crate::ng::parameter_estimation::ssr::StratumKey,
+        crate::ng::parameter_estimation::repeat_strata::StratumKey,
         crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
     > {
         substitution_rates_over(&[4, 6, 7], TRACT_READ_GROUPS)
@@ -2892,11 +2892,11 @@ mod tests {
         strata: &[u32],
         read_groups: usize,
     ) -> std::collections::BTreeMap<
-        crate::ng::parameter_estimation::ssr::StratumKey,
+        crate::ng::parameter_estimation::repeat_strata::StratumKey,
         crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
     > {
         use crate::ng::parameter_estimation::Estimate;
-        use crate::ng::parameter_estimation::ssr::{
+        use crate::ng::parameter_estimation::repeat_strata::{
             RepeatCount, Stratum as SsrStratum, StratumKey,
         };
         use crate::ng::types::{ErrorRate, SsrPeriod};
@@ -2999,7 +2999,7 @@ mod tests {
     /// parameters live: `BTreeMap::new` is a `const fn`, and a temporary would be freed at the
     /// end of the statement that built the view.
     static NO_SUBSTITUTION_RATES: std::collections::BTreeMap<
-        crate::ng::parameter_estimation::ssr::StratumKey,
+        crate::ng::parameter_estimation::repeat_strata::StratumKey,
         crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
     > = std::collections::BTreeMap::new();
 
@@ -6559,7 +6559,7 @@ mod tests {
         inbreeding: &'a [InbreedingF],
         strata: &'a StratumFits,
         substitution: &'a std::collections::BTreeMap<
-            crate::ng::parameter_estimation::ssr::StratumKey,
+            crate::ng::parameter_estimation::repeat_strata::StratumKey,
             crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
         >,
         ploidy: Ploidy,
@@ -7742,7 +7742,7 @@ mod tests {
         observations_of_each_sample: &[&[SequenceObservation]],
         strata: &StratumFits,
         substitution: &std::collections::BTreeMap<
-            crate::ng::parameter_estimation::ssr::StratumKey,
+            crate::ng::parameter_estimation::repeat_strata::StratumKey,
             crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
         >,
         calibration: &[ReadGroupCalibration],
@@ -7767,7 +7767,7 @@ mod tests {
         repeat_counts: &[NonZeroU32],
         strata: &StratumFits,
         substitution: &std::collections::BTreeMap<
-            crate::ng::parameter_estimation::ssr::StratumKey,
+            crate::ng::parameter_estimation::repeat_strata::StratumKey,
             crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
         >,
         calibration: &[ReadGroupCalibration],
@@ -7842,7 +7842,7 @@ mod tests {
         observations_of_each_sample: &[&[SequenceObservation]],
         strata: &StratumFits,
         substitution: &std::collections::BTreeMap<
-            crate::ng::parameter_estimation::ssr::StratumKey,
+            crate::ng::parameter_estimation::repeat_strata::StratumKey,
             crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
         >,
         calibration: &[ReadGroupCalibration],
@@ -9010,7 +9010,7 @@ mod tests {
         fraction: f64,
         strata: &StratumFits,
         substitution: &std::collections::BTreeMap<
-            crate::ng::parameter_estimation::ssr::StratumKey,
+            crate::ng::parameter_estimation::repeat_strata::StratumKey,
             crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
         >,
         scratch: &mut CallingScratch<StutterSubstitutionScratch>,

@@ -1,4 +1,12 @@
 # ng step 4 — the generic prior estimates: types & interfaces
+> ## ⛔ Removed on 2026-09-11
+>
+> **Every type and interface this document lays out is gone**, except the depth ladder (§2.2) and the
+> base-quality calibration, which moved to `parameter_estimation::depth_bins` and
+> `parameter_estimation::calibration`. See
+> [`impl_plan/remove_histogram_route.md`](../impl_plan/remove_histogram_route.md). Kept as the record
+> of a design that was built, measured and retired.
+
 
 *Status: architecture draft (2026-08-05), companion to the spec
 [`../spec/parameter_prepass_generic.md`](../spec/parameter_prepass_generic.md) (the design and

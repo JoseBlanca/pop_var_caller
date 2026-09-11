@@ -171,7 +171,7 @@ impl DepthBin {
 ///
 /// **Deliberately neither `PartialEq` nor `Clone`, and both for the same reason.** Two
 /// ladders are "the same rule" only when they are the same `Arc`, which is what
-/// [`DepthAltHistogram::merge`](super::histogram::DepthAltHistogram::merge) checks. A
+/// every consumer that folds two shards together checks. A
 /// derived `==` would compare two vectors both derived from the same compile-time
 /// constants, so it would answer `true` for any two ladders that exist at all — a check
 /// that cannot fail, sitting one keystroke away from the check that must not be skipped.

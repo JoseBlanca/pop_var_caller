@@ -88,7 +88,7 @@ use pop_var_caller::ng::calling::genotype_prior::{PriorRow, SpectrumSeed};
 use pop_var_caller::ng::calling::genotype_prior::{
     VariantClass, fill_locus_concentration, seed_from_population_moments,
 };
-use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use pop_var_caller::ng::parameter_estimation::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
     AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
     GenericEvidence, NamedReadGroup, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,

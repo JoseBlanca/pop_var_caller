@@ -113,7 +113,7 @@
 //! **`reference_repeats` is the repeat count a stratum is the bin for**, everywhere, and never
 //! a candidate allele's repeat count. Two types in the tree spell that field differently —
 //! [`census::Stratum`](crate::ng::parameter_estimation::joint::census::Stratum) calls it
-//! `reference_repeats` and [`ssr::Stratum`](crate::ng::parameter_estimation::ssr::Stratum) calls
+//! `reference_repeats` and [`repeat_strata::Stratum`](crate::ng::parameter_estimation::repeat_strata::Stratum) calls
 //! it `repeats` — and they are the same quantity, so the file uses one word **and one width**
 //! for it.
 //!
@@ -197,9 +197,8 @@ pub const FORMAT_VERSION: u32 = 1;
 /// gap in it (spec §6). Both add variants, and neither belongs to `from_toml`.
 ///
 /// `#[non_exhaustive]` for that reason: this is the house pattern for an error enum a later
-/// stage extends ([`ReferenceInfoError`](crate::ng::reference_info::ReferenceInfoError) and
-/// [`ParameterEstimationError`](crate::ng::parameter_estimation::ParameterEstimationError) both
-/// say so in their own words).
+/// stage extends ([`ReferenceInfoError`](crate::ng::reference_info::ReferenceInfoError) says so in
+/// its own words).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ParametersFileError {

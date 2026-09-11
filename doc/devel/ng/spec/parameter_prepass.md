@@ -684,20 +684,38 @@ settled one holds whichever way the others go.
 | the choice | the options | status |
 |---|---|---|
 | **how we estimate** | marginalise the genotype, or call it and count | **settled** — marginalise (§3), whatever the other two rows do. §9.1 measures *how much* it wins by; it does not reopen the choice |
-| **what we accumulate** | genome-wide histograms, or census sites | **open** — build both, measure, decide (§4.1) |
+| **what we accumulate** | genome-wide histograms, or census sites | **settled 2026-09-11 — census sites, and the histogram route is deleted** (§4.1) |
 | **what the genotype is weighted by while we fit** | one pooled set of genotype frequencies, or each locus's own | **open on both paths**, and only askable where a census is the data object (§4.2) |
 
 **GangSTR is not one of these.** Its distinguishing move — four classes of read evidence, to reach
 alleles longer than a read — is an STR matter with no generic counterpart, and it is worked through
 in [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §7.
 
-### 4.1 Histograms or census sites — build both and measure
+### 4.1 Histograms or census sites — CLOSED 2026-09-11: census sites
 
-**The census arm of this comparison is now a design rather than a proposal**, and it is
-[`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md): every parameter fitted once, over
-every sample's census evidence, with each locus weighted by its own allele frequency in the cohort.
-That document settles how it is fitted, what it cannot reach, and what the two routes' numbers mean
-when they disagree; this section stays as the statement of the question.
+> **The decision, and what it cost.** The census route is the only one, and the whole-genome
+> histogram route is deleted from the code
+> ([`impl_plan/remove_histogram_route.md`](../impl_plan/remove_histogram_route.md)).
+>
+> **It was not decided on the comparison this section asks for.** No shipped command had ever run
+> the histogram route, so the choice was between keeping 35,000 lines nothing called and deleting
+> them. The one arm that did run — both routes' pooled error rate on 63 tomato accessions over
+> 8 Mb — agreed to 2 parts in 1,000, and the per-library comparison was never made
+> ([`reports/ng_error_rate_routes_2026-08-24.md`](../reports/ng_error_rate_routes_2026-08-24.md)).
+>
+> **What the census gave up is the one thing this section already knew it could not do** — the
+> paragraph below on the windowed statistic inbreeding needs. Raising the budget to six million
+> positions was built and measured: it recovers a selfing genome's coefficient to within 0.086 of
+> the truth against 0.105 at two million, and never fabricates one on a genome with no runs
+> ([`reports/ng_census_inbreeding_budget_2026-09-11.md`](../../reports/ng_census_inbreeding_budget_2026-09-11.md)).
+> **The owner's ruling was that the caller does not need it**: the coefficient a caller reads is
+> the census fit's per-sample homozygote excess, which two million positions already support
+> because it is an average over positions. The budget stayed at two million and the estimator went.
+>
+> **So the circularity `parameter_prepass_generic.md` §6.3 warns about is now permanent**, and
+> `joint::census_moments` states it in the run's output instead of correcting it.
+
+*The statement of the question, kept because it is what the decision above was taken against:*
 
 **The two objects differ in what they can reach, not only in shape.**
 

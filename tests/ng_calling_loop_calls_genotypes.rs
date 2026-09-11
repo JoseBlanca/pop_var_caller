@@ -74,7 +74,7 @@ use pop_var_caller::ng::parameter_estimation::joint::ssr_fit::{
 use pop_var_caller::ng::parameter_estimation::joint::stratum_fits::{
     LengthSpectrumRung, StratumFits,
 };
-use pop_var_caller::ng::parameter_estimation::ssr::{
+use pop_var_caller::ng::parameter_estimation::repeat_strata::{
     RepeatCount, Stratum as SsrStratum, StratumKey,
 };
 use pop_var_caller::ng::run::cohort_merge::MinAltReads;

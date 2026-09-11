@@ -482,7 +482,7 @@ impl ParametersFile {
             // [`from_fitted_rate`](crate::ng::calling::likelihood::ReadGroupCalibration::from_fitted_rate)
             // copies **the rate's** warrant onto the ratio. The pre-pass's error-rate ladder has
             // a `Defaulted` bottom rung of its own —
-            // [`DEFAULT_ERROR_RATE`](crate::ng::parameter_estimation::generic::DEFAULT_ERROR_RATE)
+            // [`DEFAULT_ERROR_RATE`](crate::ng::parameter_estimation::DEFAULT_ERROR_RATE)
             // at 0.001, taken by a read group with too few sites to fit, no sibling to borrow
             // from and nothing supplied — so a legitimate run produces a `defaulted` multiplier
             // of `0.001 / that library's mean minted error`, which is one only by coincidence.

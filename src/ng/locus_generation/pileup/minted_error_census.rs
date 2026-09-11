@@ -2,7 +2,7 @@
 //! per-read error, kept in *both* the shapes an average can be taken in.
 //!
 //! The pre-pass's calibration accumulator
-//! ([`calibration`](crate::ng::parameter_estimation::generic::calibration)) keeps Σ `ln ε` and the
+//! ([`calibration`](crate::ng::parameter_estimation::calibration)) keeps Σ `ln ε` and the
 //! read count, and the scale it feeds divides by their **geometric** mean, `exp(Σ ln ε / n)`. The
 //! **arithmetic** mean, `Σ ε / n`, is not recoverable from those two numbers and nothing in the
 //! walk carries it, so the question *how far apart are the two on real reads* could only ever be
@@ -16,7 +16,7 @@
 //! widens untouched — and its witness and read group are settled. Recording there, for
 //! [`ReadWitness::Complete`](crate::ng::locus_generation::ReadWitness) reads only, gives exactly
 //! the reads that
-//! [`minted_error_by_read_group`](crate::ng::parameter_estimation::generic::calibration::minted_error_by_read_group)
+//! [`minted_error_by_read_group`](crate::ng::parameter_estimation::calibration::minted_error_by_read_group)
 //! later sums over: complete witnesses at generic loci, before the per-position depth cap, which
 //! draws on counts and never on a quality.
 //!

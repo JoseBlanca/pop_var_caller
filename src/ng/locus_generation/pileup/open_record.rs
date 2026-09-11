@@ -3041,7 +3041,7 @@ fn min_bq_for_read(window_events: &[ReadEvent], fallback_bq: u8) -> u8 {
 /// ordinary-column lane in `fast_column.rs`.
 ///
 /// **The pre-pass's calibration accumulator does not call this, and does not need to**
-/// ([`calibration`](crate::ng::parameter_estimation::generic::calibration), built 2026-08-24).
+/// ([`calibration`](crate::ng::parameter_estimation::calibration), built 2026-08-24).
 /// It sums what the fold already wrote down: an observation's `q_sum` is this answer summed over
 /// that observation's own reads, so the accumulator adds up numbers that exist rather than
 /// minting a second time. **That is why this stayed `pub(crate)`** — there is no consumer

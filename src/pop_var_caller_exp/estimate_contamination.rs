@@ -54,7 +54,7 @@ use crate::ng::locus_generation::{
     GeneratorSet, GeneratorSlot, LocusGenerationError, SampleLocusObservationsIterator,
     UnhandledReason,
 };
-use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use crate::ng::parameter_estimation::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::joint::census::{
     CensusWriter, CohortCensusEvidence, CohortRefusal, DepthCap, NamedReadGroup, ReadCap,
     SampleCensusEvidence,

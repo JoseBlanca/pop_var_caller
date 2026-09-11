@@ -53,7 +53,7 @@
 use std::io::{Read, Seek, Write};
 use std::path::Path;
 
-use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
+use crate::ng::parameter_estimation::calibration::MintedReadErrors;
 use crate::ng::parameter_estimation::joint::loci::{BlockDigest, CensusLociDigest};
 use crate::ng::repeat_catalog::StratumCounts;
 use crate::ng::types::{ContigId, ReadGroupId};
@@ -893,7 +893,7 @@ pub(crate) mod tests_support {
 
     use std::collections::BTreeMap;
 
-    use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+    use crate::ng::parameter_estimation::depth_bins::DepthBinEdges;
     use crate::ng::parameter_estimation::joint::census::{DepthCode, RECORDED_OFFSET_RANGE};
     use crate::ng::parameter_estimation::joint::loci::CensusLociDigester;
     use crate::ng::types::{GenomePosition, Position};
@@ -1065,7 +1065,7 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+    use crate::ng::parameter_estimation::depth_bins::DepthBinEdges;
     use crate::ng::parameter_estimation::joint::census::{
         CohortCensusEvidence, DepthCode, SsrLocusState,
     };

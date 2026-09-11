@@ -31,7 +31,7 @@ use crate::ng::locus_generation::ssr::DEFAULT_SSR_MAX_READS_PER_LOCUS;
 use crate::ng::locus_generation::{
     LocusCounts, SampleLocusObservations, SampleLocusObservationsIterator,
 };
-use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use crate::ng::parameter_estimation::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::joint::census::{
     CensusWriter, DepthCap, DepthLadderDigest, NamedReadGroup, ReadCap, RecordingTerms,
     SampleCensusEvidence, SelectionTermsDigest,
@@ -167,10 +167,32 @@ impl CensusSelection {
     /// `parameter_prepass_joint_loci.md` §6's first question closed, measured on a tomato
     /// archive.
     ///
+    /// # Why it is not larger, which was measured rather than assumed
+    ///
+    /// Two million is ample for every parameter the census is asked for, because each of them is
+    /// an **average over positions** — an error rate, an allele-frequency curve, a slippage
+    /// level. Tripling the budget to six million moved them by under 1%: the genotype prior's
+    /// reference concentration by 0.15%, its alternative total by 0.85%, and the four read
+    /// groups' error multipliers by at most 0.3%, on four tomato accessions over the 8 Mb
+    /// benchmark (`doc/devel/reports/ng_census_inbreeding_budget_2026-09-11.md` §5).
+    ///
+    /// **The one quantity that would have needed more is no longer estimated here.** An
+    /// inbreeding coefficient read off *which windows of the genome lie in a run of
+    /// homozygosity* is a local quantity, so it depends on the positions a single window holds —
+    /// 250 at this budget on a tomato genome, which carries a quarter of one heterozygote. That
+    /// estimator has been removed (owner, 2026-09-11): the coefficient a caller reads is the
+    /// per-sample departure from Hardy–Weinberg, which the cohort fit measures from these same
+    /// two million positions because it too is an average over them.
+    ///
     /// **The seed is a constant and not a clock**, which is what makes psp mode work at all: a
     /// cohort is walked by separate invocations, so a seed that differed between them would keep
     /// disjoint sets of positions and the samples could not be pooled. Two invocations agree
     /// here by construction rather than by somebody typing the same number twice.
+    ///
+    /// **⚠ Changing any of these makes every census written under the old value stale**, because
+    /// they are among the settings a fit compares before it will pool two samples
+    /// (`SelectionTerms`). `estimate-parameters` names each stale sample and the command that
+    /// repairs it, which is `regenerate-census` — no re-walk of the reads.
     pub const SHIPPED: Self = Self {
         seed: 0x5EED_C0FF_EE15_0000,
         generic_target: 2_000_000,

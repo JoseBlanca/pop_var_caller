@@ -27,7 +27,68 @@ Skills and agents are instructed to leave it untouched.
 > psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
 > are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
 >
-> - **Last completed task (2026-09-10):** **a sample is one file — the census a parameters fit
+> - **Last completed task (2026-09-11):** **ng has one route to its parameters, and the
+> whole-genome histogram route is deleted** (branch `census-audit`;
+> [plan](doc/devel/ng/impl_plan/remove_histogram_route.md),
+> [the measurement behind the decision](doc/devel/reports/ng_census_inbreeding_budget_2026-09-11.md)).
+>
+> **34,685 lines and 548 tests went**, out of 61,536 under `src/ng/parameter_estimation/` — the two
+> per-sample accumulators, the coupled error-rate and genotype-frequency fit, the per-sample STR
+> fit, the search seam both used, and the runs-of-homozygosity estimator of the inbreeding
+> coefficient. **No shipped command had ever run any of it**: `generate-psps`,
+> `estimate-parameters`, `call-from-psps` and `regenerate-census` all read censuses, and
+> `RunParameters::from_prepass` — the join that would have handed histogram results to the caller —
+> had no caller outside its own tests.
+>
+> **Four things were rehomed first, because the census route and calling read them**: the depth
+> ladder and the base-quality calibration's denominator (now
+> `parameter_estimation::{depth_bins, calibration}`), the defaulted error rate, and how a repeat
+> tract's stratum is named (now `parameter_estimation::repeat_strata`).
+>
+> **The oracle is byte identity.** `estimate-parameters` over four tomato accessions' psps writes a
+> parameters file identical to the one the pre-removal binary wrote — md5
+> `bcc95d64d20d3edc7c6ee9c4ccc09933`, 96,373 bytes both times — because the removal touches no code
+> the census route executes.
+>
+> **What was given up, knowingly.** ng can no longer estimate autozygosity from the genomic
+> *distribution* of heterozygosity, which `parameter_prepass_generic.md` §6.3 preferred precisely
+> because it carries no dependence on the diversity it corrects. The coefficient a caller reads is
+> the cohort fit's per-sample homozygote excess, which **is** circular; `joint::census_moments`
+> states that in the run's output rather than correcting it.
+>
+> **The census budget stayed at two million**, and that was measured rather than assumed: tripling
+> it to six million moved the parameters the census was already fitting by under 1% — the genotype
+> prior's reference concentration by 0.15%, the four read groups' error multipliers by at most 0.3%
+> — while costing 4.86 MB a sample on disk and 2.78× the fit's peak memory. Six million was enough
+> for the runs estimator at a typical accession (worst error 0.086 against a realised 0.78, against
+> 0.105 at two million) and refused three samples in five at the panel's least heterozygous end.
+> **It bought that one estimator and nothing else, which is why it was not kept.**
+>
+> **And the follow-up landed the same day: `estimate-parameters` now writes the coefficient it
+> fitted.** The parameters file is the only way one reaches a calling run — the calling commands
+> take no flag for it — so the three things it can be are resolved once and the warrant on each row
+> says which: **`supplied`** where `--inbreeding` was given, which overrides the fit (owner,
+> 2026-08-27: a user who knows how their material was bred knows it whatever the cohort size);
+> **`fitted_here`** where the cohort's own fit measured each sample's homozygote excess; and
+> **`defaulted`** at zero where neither. `--inbreeding` became an option rather than a default of
+> zero, because *these plants are not inbred* and *use what you measured* are different
+> instructions.
+>
+> On the four tomato accessions over 8 Mb the fit writes 0.9128, 0.9836, 0.9822 and 0.9464 over
+> about 1.9 million covered positions each, and calling with them rather than with zero changes
+> **4,497 genotypes of 191,752 (2.35%)**, cutting the heterozygous call rate from 6.77% to 2.61%.
+> The two psps that are one plant sequenced twice come back 0.0015 apart.
+>
+> **⚠ Those coefficients are a four-sample artefact, not tomato's biology** — the 63-accession fit
+> put the panel at 0.23 to 0.90, median 0.78, and at four samples the allele-frequency curve is
+> barely constrained so the excess absorbs what the curve cannot hold. **What is verified is the
+> plumbing.** Whether a fitted coefficient *improves* calling is still open: the replicate pair's
+> agreement rises from 95.04% to 98.07%, but "both heterozygous" collapses from 1,230 pairs to 172,
+> so most of that is a prior that has nearly forbidden heterozygotes rather than one that has found
+> the right ones. **The GIAB trio, where truth exists and the right coefficient is zero, is what
+> would settle it, and it has not been run.**
+>
+> - **Earlier (2026-09-10):** **a sample is one file — the census a parameters fit
 > reads is inside its psp** (branch `census-vs-psp-perf`, Checkpoint E of
 > [psp_census_pair.md](doc/devel/ng/impl_plan/psp_census_pair.md);
 > [report](doc/devel/reports/implementations/ng_psp_census_pair_2026-09-10.md)).
