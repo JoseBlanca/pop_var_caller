@@ -21,6 +21,16 @@ have a well-defined phased truth genotype:
   detected      = caller called the locus a length variant (the detection recall)
   gt_correct    = detected AND exact genotype match
   acc | detected = gt_correct / detected  (given you detected it, did you nail it?)
+  locus_cov     = median share of the catalog locus covered by the record credited
+                  to it, for the callers matched by overlap rather than by position
+  wrong_partial = share of those callers' WRONG calls scored on a record covering
+                  less than half the locus
+
+The last two exist because a caller matched by overlap is credited with a locus on
+a single base of overlap, so "genotyped this locus wrong" and "never covered this
+locus" arrive in the same cell. Read `acc | detected` as a model's error rate only
+where `wrong_partial` is small. Before changing how any of this is scored, read the
+warning above `fb_gt` — the obvious symmetric repair is a bug, and it was measured.
 
 Usage: genotype_accuracy.py   (from ssr_hg002/)
 """
@@ -164,9 +174,41 @@ def ours_hip_gt(path, is_hipstr):
     return out
 
 
+# ⚠ DO NOT "FIX" THE ASYMMETRY BELOW BY RECOMPUTING THE TRUTH OVER THE CALLER'S
+# OWN RECORD SPAN. It looks like the obvious repair and it introduces a bug.
+#
+# The asymmetry is genuine. The truth is summed over the CATALOG locus, while a
+# position-anchored caller's deltas are measured over whatever span its own record
+# happens to have; HipSTR, matched at the exact catalog position, is never charged
+# for ground outside the locus. Taking the truth over the caller's record instead
+# makes the two symmetric — and grades every caller against a question its own
+# output defined, so a caller scores better by answering less.
+#
+# Measured on ng at 300x (2026-09-11): the change turns 15 of 242 wrong calls into
+# right ones, and those 15 records cover a median 9% of the locus they are scored
+# at. Eight of them overlap it by 1 to 8 bases. One is a 44 bp record at a 516 bp
+# tract whose truth genotype is (-96, -4); the rule would score it a correct
+# genotyping of that tract on the strength of 44 of its bases.
+#
+# The locus is the question. A caller that did not cover it did not answer it, and
+# the repair is to SAY SO — which is what the `locus_cov` and `wrong_partial`
+# columns are for — not to move the question to wherever the answer already is.
+#
+# Filtering on coverage is not the repair either, and the thresholds were measured
+# before being rejected: requiring half the locus lifts freebayes from 0.916 to
+# 0.944 but discards correct calls too, because a right record is often narrower
+# than the catalog's span; requiring the record to contain the truth edits it is
+# graded on drops ng to a fifth of its calls, since its tract record is the
+# TRIMMED tract and GIAB's truth records sit on the ragged ends outside it.
 def fb_gt(index, chrom, s, e):
     """APPROX freebayes genotype: bp deltas from the overlapping indel record with the
-    largest length change that is in the GT."""
+    largest length change that is in the GT.
+
+    Returns `(deltas, locus_covered)`, where `locus_covered` is the share of the
+    catalog locus `[s, e)` that the chosen record spans. Any overlap at all is
+    accepted — a record covering one base of the locus still answers for it — so
+    `locus_covered` is how a reader tells "genotyped this locus wrong" from "never
+    covered it", which this scorer otherwise reports in the same cell."""
     best = None
     for s0, e0, ref, alleles, fmt, sample in overlapping(index, chrom, s, e):
         g = phased(gfield(fmt, sample, "GT"))
@@ -178,33 +220,65 @@ def fb_gt(index, chrom, s, e):
             continue
         mag = max(abs(d) for d in deltas)
         if best is None or mag > best[0]:
-            best = (mag, deltas)
-    return best[1] if best else None
+            best = (mag, deltas, max(0, min(e, e0) - max(s, s0)) / (e - s))
+    return (best[1], best[2]) if best else None
 
 
 # ---- compare ----------------------------------------------------------------
+# `locus_cov` and `wrong_partial` are reported only for the position-anchored
+# callers, because they are the only ones that can be scored on a record that does
+# not cover the locus: `ours` and HipSTR are looked up at the exact catalog
+# position, so their record IS the locus and both columns would read 1.00 and 0.00
+# by construction. They print `.` there rather than a number that says nothing.
+#
+#   locus_cov     median share of the catalog locus spanned by the record this
+#                 scorer picked as the caller's answer, over the loci it detected.
+#   wrong_partial share of the WRONG calls that were scored on a record covering
+#                 less than half the locus. A high value means the wrong-genotype
+#                 count is partly a count of loci the caller never covered, and the
+#                 accuracy column should not be read as a model's error rate.
 print(f"{'cov':>4} {'caller':>9} {'truthpos':>8} {'detected':>8} {'gt_correct':>10} "
-      f"{'recall':>7} {'acc|det':>8}")
+      f"{'recall':>7} {'acc|det':>8} {'locus_cov':>9} {'wrong_partial':>13}")
+ANCHORED = ("freebayes",)
 for cov in COVERAGES:
     ours = ours_hip_gt(OURS(cov), False)
     hip = ours_hip_gt(HIP(cov), True)
     fbi = build_index(FB(cov), min_qual=FB_MINQUAL)
     tot = 0
     stat = {c: [0, 0] for c in ("ours", "hipstr", "freebayes")}  # [detected, correct]
+    covs = {c: [] for c in ANCHORED}          # locus share covered, per detected locus
+    partial_wrong = {c: [0, 0] for c in ANCHORED}  # [wrong on a partial record, wrong]
     for (chrom, pos), m in loci.items():
         tg = truth_gt(chrom, m["start"], m["end"], m["period"])
         if tg is None:
             continue
         tot += 1
-        for name, g in (("ours", ours.get((chrom, pos))),
-                        ("hipstr", hip.get((chrom, pos))),
-                        ("freebayes", fb_gt(fbi, chrom, m["start"], m["end"]))):
+        for name, call in (("ours", ours.get((chrom, pos))),
+                           ("hipstr", hip.get((chrom, pos))),
+                           ("freebayes", fb_gt(fbi, chrom, m["start"], m["end"]))):
+            # the loci-keyed callers return bare deltas; the anchored ones also
+            # return the share of the locus their record covered.
+            g, covered = call if name in ANCHORED and call is not None else (call, None)
             if g is not None and any(d != 0 for d in g):
                 stat[name][0] += 1
                 if g == tg:
                     stat[name][1] += 1
+                elif name in ANCHORED:
+                    partial_wrong[name][1] += 1
+                    if covered < 0.5:
+                        partial_wrong[name][0] += 1
+                if name in ANCHORED:
+                    covs[name].append(covered)
     for name in ("ours", "hipstr", "freebayes"):
         det, cor = stat[name]
         rec = cor / tot if tot else 0
         acc = cor / det if det else 0
-        print(f"{cov:>4} {name:>9} {tot:>8} {det:>8} {cor:>10} {rec:>7.3f} {acc:>8.3f}")
+        if name in ANCHORED and covs[name]:
+            v = sorted(covs[name])
+            med = f"{v[len(v) // 2]:.2f}"
+            part, wrong = partial_wrong[name]
+            pw = f"{part / wrong:.2f}" if wrong else "."
+        else:
+            med = pw = "."
+        print(f"{cov:>4} {name:>9} {tot:>8} {det:>8} {cor:>10} {rec:>7.3f} {acc:>8.3f} "
+              f"{med:>9} {pw:>13}")

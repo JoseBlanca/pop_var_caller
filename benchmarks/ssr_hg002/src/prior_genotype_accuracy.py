@@ -165,6 +165,13 @@ def ours_hip_gt(path, is_hipstr):
     return out
 
 
+# ⚠ A caller matched by overlap is credited with a locus on a single base of
+# overlap, so "genotyped it wrong" and "never covered it" land in the same cell.
+# DO NOT repair that by recomputing the truth over the caller's own record span:
+# that grades each caller against a question its own output defined, so answering
+# less scores better. The measurement that rules it out, and the two thresholds
+# that were tried and rejected, are in the warning above `fb_gt` in
+# `genotype_accuracy.py`, which also reports the coverage columns.
 def fb_gt(index, chrom, s, e):
     """APPROX freebayes genotype: bp deltas from the overlapping indel record with the
     largest length change that is in the GT."""
