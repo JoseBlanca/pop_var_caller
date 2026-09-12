@@ -890,8 +890,8 @@ fn refuse_a_file_against_another_reference(
         return Err(refuse(format!(
             "it was walked against the assembly whose checksum is {} and this run's reference \
              is {}",
-            crate::pop_var_caller::common::format_md5_hex(stored),
-            crate::pop_var_caller::common::format_md5_hex(run),
+            crate::ng::reference_info::format_md5_hex(stored),
+            crate::ng::reference_info::format_md5_hex(run),
         )));
     }
     if header.contigs.len() != reference.contigs.len() {
@@ -924,8 +924,8 @@ fn refuse_a_file_against_another_reference(
         {
             return Err(refuse(format!(
                 "contig '{name}' has checksum {} in the psp and {} in this run's reference",
-                crate::pop_var_caller::common::format_md5_hex(*stored_md5),
-                crate::pop_var_caller::common::format_md5_hex(run_md5),
+                crate::ng::reference_info::format_md5_hex(*stored_md5),
+                crate::ng::reference_info::format_md5_hex(run_md5),
             )));
         }
     }
@@ -2008,7 +2008,7 @@ mod tests {
         assert_eq!(sample, "beta", "the check reaches the second file");
         assert!(
             difference.contains("has checksum")
-                && difference.contains(&crate::pop_var_caller::common::format_md5_hex(real)),
+                && difference.contains(&crate::ng::reference_info::format_md5_hex(real)),
             "the refusal names both checksums: {difference}",
         );
     }

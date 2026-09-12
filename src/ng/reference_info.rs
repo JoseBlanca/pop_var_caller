@@ -66,6 +66,27 @@ pub struct ContigInfo {
     pub md5: Option<[u8; 16]>,
 }
 
+/// Render a 16-byte MD5 as the 32 lowercase hex characters SAM's `@SQ M5` and the psp's
+/// `chromosome.md5` are written in.
+///
+/// Every digest in ng is computed here — `read_fasta` for a contig's bases and for the
+/// whole reference — so the one way of spelling one belongs here too, beside the `[u8; 16]`
+/// it renders. The callers are all message-writers: an alignment file whose assembly does
+/// not match the reference, a catalog built against another reference, a psp that was
+/// written against a third. Each of those is a refusal a person has to act on, and a
+/// digest they cannot compare against the one `samtools` prints is a refusal they cannot
+/// act on.
+pub(crate) fn format_md5_hex(bytes: [u8; 16]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(32);
+    for b in bytes {
+        // PANIC-FREE: `std::fmt::Write` on a `String` is infallible — the only failure mode
+        // is OOM, which the runtime turns into an abort, not an `Err`.
+        write!(&mut out, "{b:02x}").expect("writing to a String never fails");
+    }
+    out
+}
+
 /// What reading a reference yields: the whole-assembly digest and every contig's info.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReferenceInfo {
@@ -1696,6 +1717,33 @@ mod tests {
         out
     }
 
+    /// [`format_md5_hex`] is `hex_to_md5`'s inverse, on digests with a leading zero byte and a
+    /// byte above `0x0f` in every position that matters.
+    ///
+    /// **The leading zero is the case worth naming**: a renderer that dropped a pad would give
+    /// 31 characters for this digest and 32 for almost every other, so a spot check on a
+    /// randomly chosen digest passes 255 times in 256. `samtools` writes the pad, and an `M5`
+    /// that is short by one does not compare equal to the one in an alignment file's header.
+    #[test]
+    fn format_md5_hex_is_hex_to_md5_inverted_including_the_leading_zero() {
+        for hex in [
+            "00ef897c3d6ff0c78aff06ac189178dd",
+            "6aef897c3d6ff0c78aff06ac189178dd",
+            "00000000000000000000000000000000",
+            "ffffffffffffffffffffffffffffffff",
+        ] {
+            let rendered = format_md5_hex(hex_to_md5(hex));
+            assert_eq!(rendered, hex, "round trip through the 16 bytes");
+            assert_eq!(rendered.len(), 32, "every digest renders to 32 characters");
+            assert!(
+                rendered
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "lowercase hex only, as samtools writes it: {rendered}"
+            );
+        }
+    }
+
     fn write_bytes_fasta(bytes: &[u8]) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("ref.fa");
@@ -1843,7 +1891,7 @@ mod tests {
             .join("tests/data/tandem_repeat/golden.ssr_catalog.bed.gz");
         let reader = CatalogReader::new(std::fs::File::open(cat_path).unwrap()).unwrap();
         let expected = reader.header().reference_md5.clone();
-        let got = crate::pop_var_caller::common::format_md5_hex(info.md5.unwrap());
+        let got = format_md5_hex(info.md5.unwrap());
         assert_eq!(
             got, expected,
             "whole-reference digest vs the golden .cat header"

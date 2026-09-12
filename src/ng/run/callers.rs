@@ -52,7 +52,7 @@ use crate::ng::read::input::read_groups::{ReadGroups, SampleReadGroups};
 use crate::ng::read::input::reference::OpenReference;
 use crate::ng::read::input::{AssemblyMismatch, check_assembly};
 use crate::ng::ref_seq::WindowedRefSeq;
-use crate::ng::reference_info::ReferenceInfo;
+use crate::ng::reference_info::{ReferenceInfo, format_md5_hex};
 use crate::ng::run::cohort_merge::build::{CohortObservation, RegionOutcome};
 use crate::ng::run::cohort_merge::observation_cache::{ObservationCache, ObservationSource};
 use crate::ng::run::cohort_merge::recorded_windows::{
@@ -70,7 +70,6 @@ use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::ng::vcf::VcfRecord;
 use crate::ng::vcf::assemble::assemble_record;
 use crate::ng::window_coverage::{SampleHistogram, WindowCoverage};
-use crate::pop_var_caller::common::format_md5_hex;
 
 use super::RunError;
 use super::records::{
@@ -2974,9 +2973,9 @@ mod checks_that_needed_their_own_fixtures {
         fixture_reference, fixture_reference_from_its_index, header, matching_contigs, named_bam,
         read_named_with_length_in_read_group,
     };
+    use crate::ng::reference_info::format_md5_hex;
     use crate::ng::repeat_catalog::RepeatCatalogHeader;
     use crate::ng::types::Ploidy;
-    use crate::pop_var_caller::common::format_md5_hex;
     use std::path::PathBuf;
     use tempfile::TempDir;
 

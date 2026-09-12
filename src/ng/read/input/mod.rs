@@ -54,9 +54,8 @@ use crate::ng::read::input::read_groups::{
     build_read_groups,
 };
 use crate::ng::read::input::reference::OpenReference;
-use crate::ng::reference_info::ReferenceInfo;
+use crate::ng::reference_info::{ReferenceInfo, format_md5_hex};
 use crate::ng::types::{ContigId, GenomeRegion, ReadGroupId};
-use crate::pop_var_caller::common::format_md5_hex;
 
 use crate::ng::ref_seq::{ContigTable, RawRefSeq};
 
