@@ -13,25 +13,152 @@
 //! read type reaches all of them whatever else is decided (spec §3).
 //!
 //! The fields, their invariants and [`PreparedRead::length`] are production's,
-//! transcribed rather than re-derived. The construction path is production's
-//! too — [`PreparedRead::from_production`] takes the output of
-//! `prepare_passthrough` and re-attaches the group — so ng computes none of the
-//! per-field wiring itself and the read-preparation parity fixture stays exact.
+//! transcribed rather than re-derived. **So is the construction path, which ng now
+//! carries**: [`prepare_passthrough`] is production's `--no-baq` arm copied here on
+//! 2026-09-12, deriving the same four values from the same flags and CIGAR and returning
+//! ng's read with its group attached. Until then ng minted production's read and converted
+//! it; `from_production` survives only as the oracles' bridge and is `#[cfg(test)]`.
+//! Either way ng re-derives none of the per-field wiring, and the read-preparation parity
+//! fixture is what says so.
 //!
 //! Design: `doc/devel/ng/spec/locus_generation_pileup.md` §6,
 //! `doc/devel/ng/arch/locus_generation_pileup.md` *Module home*.
 
 use std::sync::Arc;
 
+use crate::bam::alignment_input::{
+    FLAG_FIRST_OF_PAIR, FLAG_PAIRED, FLAG_REVERSE_STRAND, MappedRead,
+};
 use crate::ng::types::ReadGroupId;
-// Production's, reused rather than re-minted — the same call, for the same reason, as
-// `ng::alignment`'s (see its "# Reusing production's `CigarOp`"). The import path
-// misleads: `CigarOp` is crate-wide CIGAR vocabulary that happens to live in the walker.
+// The decoder's, which is where a CIGAR run is built and read back. It sat in
+// `pileup::walker` until 2026-09-12, and the old path was the misleading one: this is
+// crate-wide read vocabulary, not the walk's.
 use crate::bam::alignment_input::CigarOp;
 // Aliased, so "ours" and "production's" read at a glance instead of being carried by a
-// four-segment path at every one of the dozen sites below.
+// four-segment path at every site below. **`#[cfg(test)]` since 2026-09-12**: the only
+// things naming production's types now are the oracles' bridges.
+#[cfg(test)]
 use crate::pileup::walker::MateRole as ProductionMateRole;
+#[cfg(test)]
 use crate::pileup::walker::PreparedRead as ProductionPreparedRead;
+
+// ---------------------------------------------------------------------
+// Minting one
+// ---------------------------------------------------------------------
+
+/// Turn a decoded read into the walk's input: derive what the walk needs, carry the rest
+/// across, and attach the read group.
+///
+/// **"Passthrough" is about the base qualities.** Production's function of this name is its
+/// `--no-baq` arm — the one that hands the read's own qualities to the walk instead of
+/// replacing them with BAQ-adjusted ones. ng defers BAQ entirely
+/// (`doc/devel/ng/spec/read_preparation.md` §1), so this is the only arm there is, and the
+/// name is kept because the parity fixture compares against the arm it names.
+///
+/// Four things are derived and the rest is moved unchanged: where the alignment ends, the
+/// read's name as a shared string, its mate role, and its mapping quality on a log scale.
+///
+/// # ng's copy of production's `baq_engine::prepare_passthrough`
+///
+/// Copied on 2026-09-12 with its four helpers, so that ng mints its own read rather than
+/// minting production's and converting. The arithmetic is production's: the same reference
+/// span, the same flag tests, the same `ln` of the same Phred. What it does differently is
+/// take `read_group` and return ng's [`PreparedRead`] — which is the one field production's
+/// type has nowhere to put, and the reason ng owns this type at all.
+pub(crate) fn prepare_passthrough(
+    read: MappedRead,
+    chrom_id: u32,
+    read_group: ReadGroupId,
+) -> PreparedRead {
+    let bq_baq = read.qual.clone();
+    let alignment_start = read.pos as u32;
+    let alignment_end = alignment_end_of(alignment_start, &read.cigar);
+    let qname = qname_to_arc(&read.qname);
+    let mate_role = mate_role_of(read.flag);
+    let is_reverse_strand = read.flag & FLAG_REVERSE_STRAND != 0;
+    let mq_log_err = phred_to_ln_perr(read.mapq);
+    let mapq = read.mapq;
+    PreparedRead {
+        chrom_id,
+        alignment_start,
+        alignment_end,
+        cigar: read.cigar,
+        seq: read.seq,
+        bq_baq,
+        mq_log_err,
+        mapq,
+        is_reverse_strand,
+        qname,
+        mate_role,
+        adaptor_boundary: read.adaptor_boundary,
+        read_group,
+    }
+}
+
+/// The last reference base the alignment covers, 1-based and inclusive.
+///
+/// Sums the CIGAR steps that consume reference. **Every variant is named rather than caught
+/// by a wildcard**, so a step added to [`CigarOp`] has to be classified deliberately instead
+/// of silently contributing nothing and shortening every read that carries it.
+fn alignment_end_of(start_1: u32, cigar: &[CigarOp]) -> u32 {
+    let mut ref_span: u32 = 0;
+    for op in cigar {
+        match *op {
+            CigarOp::Match(l)
+            | CigarOp::SeqMatch(l)
+            | CigarOp::SeqMismatch(l)
+            | CigarOp::Deletion(l)
+            | CigarOp::Skip(l) => ref_span = ref_span.saturating_add(l),
+            CigarOp::Insertion(_)
+            | CigarOp::SoftClip(_)
+            | CigarOp::HardClip(_)
+            | CigarOp::Padding(_) => {}
+        }
+    }
+    start_1.saturating_add(ref_span).saturating_sub(1)
+}
+
+/// The read's name, shared rather than copied — the walk keeps one in its pending-mate table
+/// beside the read itself.
+///
+/// SAM says a name is printable ASCII, so the ordinary path is one allocation. A name that is
+/// not valid UTF-8 goes through `from_utf8_lossy`, whose owned string is stolen rather than
+/// copied again.
+fn qname_to_arc(qname: &[u8]) -> Arc<str> {
+    match std::str::from_utf8(qname) {
+        Ok(s) => Arc::<str>::from(s),
+        Err(_) => Arc::<str>::from(String::from_utf8_lossy(qname)),
+    }
+}
+
+/// Which half of a pair this read is, from its SAM flags.
+///
+/// Unpaired if `0x1` is clear. Otherwise first-of-pair if `0x40` is set and second-of-pair if
+/// it is not — which treats `0x80` as redundant, so a malformed record with both bits set or
+/// both clear is read as second-of-pair rather than refused here. Rejecting those is the
+/// input stage's job.
+fn mate_role_of(flag: u16) -> MateRole {
+    if flag & FLAG_PAIRED == 0 {
+        MateRole::Solo
+    } else if flag & FLAG_FIRST_OF_PAIR != 0 {
+        MateRole::FirstOfPair
+    } else {
+        MateRole::SecondOfPair
+    }
+}
+
+/// A Phred mapping quality as the natural log of the probability the placement is wrong:
+/// `ln(10^(-Q/10))`.
+///
+/// `Q = 0` means *no information about the placement*, so the probability is 1 and its log is
+/// 0 — which the general formula gives anyway, and which is written out because the caller
+/// reads it as a special case.
+fn phred_to_ln_perr(q: u8) -> f64 {
+    if q == 0 {
+        return 0.0;
+    }
+    -(q as f64) * std::f64::consts::LN_10 / 10.0
+}
 
 // ---------------------------------------------------------------------
 // MateRole
@@ -99,9 +226,14 @@ impl MateRole {
     /// it.
     ///
     /// An inherent `pub(crate)` function rather than a `From` impl, matching its
-    /// neighbour [`PreparedRead::from_production`]: trait impls carry no visibility, so a
+    /// neighbour `PreparedRead::from_production`: trait impls carry no visibility, so a
     /// `From` would publish an ng→production coupling that nothing outside the crate can
     /// use.
+    ///
+    /// **`#[cfg(test)]` since 2026-09-12**, with its neighbour and for the same reason:
+    /// [`mate_role_of`] now derives the role from the SAM flags directly, so no run turns a
+    /// production role into ng's.
+    #[cfg(test)]
     pub(crate) fn from_production(role: ProductionMateRole) -> Self {
         match role {
             ProductionMateRole::Solo => MateRole::Solo,
@@ -307,6 +439,11 @@ impl PreparedRead {
     /// this compiling instead of being silently dropped on the way into ng's —
     /// the same reason `AlignedRead::into_mapped_read` destructures on the way
     /// out.
+    /// **`#[cfg(test)]` since 2026-09-12**: nothing a run executes builds production's read
+    /// any more. [`prepare_passthrough`] mints ng's directly, so the only readers left are
+    /// the oracles that hand one stream to both walkers, and this file's own tests of the
+    /// conversion. It goes when those oracles do.
+    #[cfg(test)]
     pub(crate) fn from_production(read: ProductionPreparedRead, read_group: ReadGroupId) -> Self {
         let ProductionPreparedRead {
             chrom_id,

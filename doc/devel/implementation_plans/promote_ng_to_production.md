@@ -155,7 +155,7 @@ and makes ng's version the only one.
   `pileup/walker/mod.rs` re-exports it in one line so production compiles unchanged; that
   changes nothing production computes, and the file goes at D3 regardless.
 - ✅ **B6** · *Depends:* B5 (`CigarOp`) · *Source:* `alignment.md` (algorithm 1a, the structured left-aligner).
-- ☐ **B7** · **own commit, do not bundle** · *Depends:* B5 · *Source:* `read_preparation.md` §1.
+- ✅ **B7** · **own commit, do not bundle** · *Depends:* B5 · *Source:* `read_preparation.md` §1.
 - ☐ **B8** · *Depends:* B1–B7 · *Source:* `Cargo.toml` `[lints.rustdoc]` (`broken_intra_doc_links = "deny"`).
 - ☐ **B9. The forward guard.** Add to `scripts/precommit-check.sh`, beside the existing
   "production must not depend on ng" step, its mirror: outside `#[cfg(test)]` modules, `src/ng`

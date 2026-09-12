@@ -501,11 +501,9 @@ mod tests {
         ) -> Result<Option<crate::ng::read::PreparedRead>, crate::ng::read::ReadPrepError> {
             let read_group = read.read_group;
             let chrom_id = u32::try_from(read.ref_id).expect("a fixture contig id fits u32");
-            Ok(Some(crate::ng::read::PreparedRead::from_production(
-                crate::pileup::per_sample::baq_engine::prepare_passthrough(
-                    read.into_mapped_read(),
-                    chrom_id,
-                ),
+            Ok(Some(crate::ng::read::prepared_read::prepare_passthrough(
+                read.into_mapped_read(),
+                chrom_id,
                 read_group,
             )))
         }

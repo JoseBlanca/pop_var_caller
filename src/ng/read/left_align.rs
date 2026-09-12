@@ -25,9 +25,9 @@ use crate::bam::alignment_input::cigar_ref_span;
 use crate::ng::alignment::{Alignment, AlignmentNormalizer, DefaultAlignmentNormalizer};
 use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::prepared_read::PreparedRead;
+use crate::ng::read::prepared_read::prepare_passthrough;
 use crate::ng::ref_seq::{EvictableRefSeq, RefSeq};
 use crate::ng::types::ContigId;
-use crate::pileup::per_sample::baq_engine::prepare_passthrough;
 
 /// Whether this line-up carries anything left-alignment could move.
 ///
@@ -241,10 +241,7 @@ fn into_prepared(read: AlignedRead) -> PreparedRead {
     let chrom_id = u32::try_from(read.ref_id).expect("ref_id fits u32");
     // Read before the conversion, which is where production's type loses it.
     let read_group = read.read_group;
-    PreparedRead::from_production(
-        prepare_passthrough(read.into_mapped_read(), chrom_id),
-        read_group,
-    )
+    prepare_passthrough(read.into_mapped_read(), chrom_id, read_group)
 }
 
 #[cfg(test)]

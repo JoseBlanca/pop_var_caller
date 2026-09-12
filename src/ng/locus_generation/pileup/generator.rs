@@ -1469,11 +1469,9 @@ mod tests {
         ) -> Result<Option<PreparedRead>, ReadPrepError> {
             let read_group = read.read_group;
             let chrom_id = u32::try_from(read.ref_id).expect("ref_id fits u32");
-            Ok(Some(PreparedRead::from_production(
-                crate::pileup::per_sample::baq_engine::prepare_passthrough(
-                    read.into_mapped_read(),
-                    chrom_id,
-                ),
+            Ok(Some(crate::ng::read::prepared_read::prepare_passthrough(
+                read.into_mapped_read(),
+                chrom_id,
                 read_group,
             )))
         }
