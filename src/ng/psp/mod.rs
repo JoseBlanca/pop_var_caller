@@ -74,6 +74,7 @@ pub(crate) mod reader;
 pub(crate) mod record;
 pub(crate) mod segmentation_section;
 pub(crate) mod trailer;
+pub(crate) mod varint;
 pub(crate) mod walk;
 pub(crate) mod writer;
 

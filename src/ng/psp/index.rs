@@ -10,9 +10,8 @@
 //! large block removes the problem rather than solving it, and the coarse-index-and-chain
 //! scheme `run_streaming.md` §7.2 asks for must not be built.
 
+use crate::ng::psp::varint::{VarintError, decode_u64_leb128, encode_u64_leb128};
 use crate::ng::types::{ContigId, GenomePosition, Position};
-use crate::psp::errors::VarintError;
-use crate::psp::varint::{decode_u64_leb128, encode_u64_leb128};
 
 /// One psp block, as the index names it.
 ///
@@ -196,10 +195,9 @@ pub fn decode_index(
 
 /// The checksum the footer carries over the index's bytes.
 ///
-/// **Production's function, called rather than copied**
-/// ([`src/psp/index.rs`](../../../../src/psp/index.rs)): it is XXH3-64 truncated to its low 32
-/// bits, which is the truncation zstd uses for its own frame checksum, and the reason to share
-/// it is that there is then one XXH3 in the codebase rather than two that could differ.
+/// XXH3-64 truncated to its low 32 bits — the same truncation zstd uses for its own frame
+/// content checksum (RFC 8878 §3.1.1), so one hash backs both and a reader needs one
+/// implementation rather than two that could drift.
 ///
 /// **Why the index carries one when the header and the footer do not.** All four regions
 /// outside the blocks are uncompressed and so are outside zstd's own per-frame checksum, but
@@ -212,7 +210,7 @@ pub fn decode_index(
 /// *(This comment previously said the index is the one region no frame checksum covers. It is
 /// not; that is true of production's layout, not of ng's.)*
 pub fn checksum_index(bytes: &[u8]) -> u32 {
-    crate::psp::index::checksum_index(bytes)
+    xxhash_rust::xxh3::xxh3_64(bytes) as u32
 }
 
 fn take_varint(

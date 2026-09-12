@@ -139,7 +139,7 @@ and makes ng's version the only one.
 | B8 | the 39 doc-comment links into production (`[`…`](crate::pileup::…)`) | 39 | repointed to ng's copy, or turned into plain text where the link was historical. `cargo doc` with `-D warnings` is the check |
 
 - ✅ **B1** · *Depends:* — · *Source:* `src/ng/mod.rs` freeze paragraph ("copies the code").
-- ☐ **B2** · *Depends:* — · *Source:* `psp_file_format.md` (the LEB128 varint the record and index encodings use).
+- ✅ **B2** · *Depends:* — · *Source:* `psp_file_format.md` (the LEB128 varint the record and index encodings use).
 - ☐ **B3** · *Depends:* — · *Source:* `psp_chain_id_encoding.md`.
 - ☐ **B4** · *Depends:* — · *Source:* `calling_priors.md` (the constants' meaning).
 - ☐ **B5** · *Depends:* — · *Source:* `module_layout.md` (`read/` owns the decoded read).

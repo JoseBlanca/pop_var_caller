@@ -60,12 +60,11 @@ use crate::ng::psp::chain_ids::{
     residual_reads,
 };
 use crate::ng::psp::header::{FieldEncoding, FieldName, FieldSpec, Manifest};
+use crate::ng::psp::varint::{
+    VarintError, decode_i64_svarint, decode_u64_leb128, encode_i64_svarint, encode_u64_leb128,
+};
 use crate::ng::types::{ContigId, GenomeRegion, Motif, Position, ReadGroupId, SummedLogError};
 use crate::pileup_record::ChainId;
-use crate::psp::errors::VarintError;
-use crate::psp::varint::{
-    decode_i64_svarint, decode_u64_leb128, encode_i64_svarint, encode_u64_leb128,
-};
 
 /// What a reader learns about a record before deciding to build it.
 ///

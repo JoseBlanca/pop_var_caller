@@ -76,9 +76,8 @@ use std::iter::FusedIterator;
 use thiserror::Error;
 
 use super::WindowCoverage;
+use crate::ng::psp::varint::{MAX_VARINT_BYTES, VarintError, decode_u64_leb128, encode_u64_leb128};
 use crate::ng::types::{ContigId, Position};
-use crate::psp::errors::VarintError;
-use crate::psp::varint::{MAX_VARINT_BYTES, decode_u64_leb128, encode_u64_leb128};
 
 /// The field names the decoder reports, one per field of the layout above.
 ///

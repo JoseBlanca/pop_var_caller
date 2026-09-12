@@ -44,9 +44,8 @@ use crate::ng::psp::record::{
     OffsetBase, RecordDecodeError, RecordEncodeError, RecordEncoder, RecordHead, RecordLayout,
     RecordLayoutError, decode_the_body_of, read_record_head,
 };
+use crate::ng::psp::varint::{VarintError, decode_u64_leb128, encode_u64_leb128};
 use crate::ng::types::{Bp, ContigId, GenomeRegion, Position};
-use crate::psp::errors::VarintError;
-use crate::psp::varint::{decode_u64_leb128, encode_u64_leb128};
 
 // ---------------------------------------------------------------------
 // The block head

@@ -23,9 +23,9 @@ use super::{
     GenericLocusSample, RepeatTractSample, SpillEntry, SpillError, SpillReader, SpillWriter,
     SpilledSamples,
 };
+use crate::ng::psp::varint::encode_u64_leb128;
 use crate::ng::run::paralog_filter::WindowCoverage;
 use crate::ng::types::{ContigId, Position};
-use crate::psp::varint::encode_u64_leb128;
 
 /// A window pair.
 fn a_window(gc_fraction: f32, mean_depth: f32) -> WindowCoverage {
