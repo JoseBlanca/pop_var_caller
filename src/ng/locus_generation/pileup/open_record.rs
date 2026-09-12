@@ -184,11 +184,11 @@ impl FoldedReads {
 }
 
 /// The support one allele bucket has accumulated — **ng's own**, and production's
-/// [`AlleleSupportStats`](crate::pileup_record::AlleleSupportStats) **minus
+/// `AlleleSupportStats` **minus
 /// `placed_start`**.
 ///
 /// `placed_left` stays because something computes on it:
-/// [`vcf::qual_refine`](crate::vcf) turns it into the read-position-bias term
+/// `vcf::qual_refine` turns it into the read-position-bias term
 /// subtracted from QUAL, live through `final_qual` into the cohort VCF writer
 /// and the `--min-qual` gate, so dropping it would forfeit the ability to
 /// reproduce production's QUAL. `placed_start` is merged, serialised and printed

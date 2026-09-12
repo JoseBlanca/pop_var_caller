@@ -27,6 +27,39 @@ if [ -n "$guard_hits" ]; then
     exit 1
 fi
 
+step "1b/6 dependency guard: shipped ng must not depend on production"
+# **The mirror of the step above, added by the promotion**
+# (doc/devel/implementation_plans/promote_ng_to_production.md, milestone B). Nothing
+# under src/ng/ that a run executes may use a module production owns, because those
+# modules are being deleted. What ng needed from them has been copied in.
+#
+# **Two rules together decide what counts as shipped**, because neither alone does.
+#
+# Column zero: a module-level "use" starts there, while a use inside a test module or
+# a test function is indented. That excludes the oracle imports embedded in ordinary
+# modules, of which there are about twenty.
+#
+# The file list: a whole module gated #[cfg(test)] at its parent has its imports at
+# column zero like any other, so the dedicated parity and copy-fidelity files need
+# naming. Each one exists to run production beside ng and assert the two agree, which
+# is the whole reason the promotion severs before it deletes; they keep reaching in
+# until milestone C freezes their answers into fixtures, and the list empties then.
+#
+# Matching on indentation is a heuristic and its limit is worth stating: a shipped
+# import written indented inside a function would slip past. rustfmt does not produce
+# one at module level, and the compiler is the real check the moment production is
+# gone. This exists so the end state of milestone B is visible before D starts, and
+# so that a new reach-in fails here rather than at the deletion.
+production_modules="pileup|psp|pileup_record|genetics|pop_var_caller|var_calling|vcf|ssr|paralog|sample_summary|baq|norm_seqs"
+oracles="parity\.rs|copy_fidelity\.rs|leftmost_property\.rs|test_fixtures\.rs|mock_reference\.rs|ssr_production_differential\.rs|prepared_read\.rs"
+reach_in=$(grep -rnE "^use crate::($production_modules)(::|;| )" src/ng --include="*.rs" \
+    | grep -Ev "$oracles" || true)
+if [ -n "$reach_in" ]; then
+    printf "\033[1;31mguard failed: shipped ng code depends on production:\033[0m\n%s\n" "$reach_in"
+    printf "copy what is needed into ng, as milestone B did, rather than reaching in.\n"
+    exit 1
+fi
+
 step "2/6  cargo fmt --check"
 cargo fmt --check
 

@@ -544,14 +544,14 @@ impl Default for MinAltObs {
 /// at 63, where the merge then assembled a cohort observation at 546 positions per
 /// kilobase.
 ///
-/// The value is copied and the name is not. Production spells it
-/// [`DEFAULT_MIN_ALT_OBS_PER_SAMPLE`], the default of `--min-alt-obs-per-sample`, and
-/// feeds that one number both to the cohort keep rule ng's descends from
-/// (`derive_is_kept`) and to a per-sample pre-EM filter (`passes_min_alt_obs`,
-/// `variant_caller.rs`). ng's threshold is only the first, so reaching the constant by
-/// name would let a retune of production's per-sample filter move ng's cohort keep.
-///
-/// [`DEFAULT_MIN_ALT_OBS_PER_SAMPLE`]: crate::var_calling::DEFAULT_MIN_ALT_OBS_PER_SAMPLE
+/// The value is copied and the name is not. Production spelled it
+/// `var_calling::DEFAULT_MIN_ALT_OBS_PER_SAMPLE`, the default of
+/// `--min-alt-obs-per-sample`, and fed that one number both to the cohort keep rule ng's
+/// descends from (`derive_is_kept`) and to a per-sample pre-EM filter
+/// (`passes_min_alt_obs`, `variant_caller.rs`). ng's threshold is only the first, so
+/// reaching the constant by name would have let a retune of production's per-sample filter
+/// move ng's cohort keep. Named rather than linked: the deliberate non-reuse is the point,
+/// and production is being deleted.
 pub const DEFAULT_MIN_ALT_OBS: u32 = 2;
 
 /// What share of one sample's compared reads must be non-reference — the share half of

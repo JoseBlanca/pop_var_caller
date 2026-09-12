@@ -55,7 +55,7 @@
 //! Hashing it would hide the ordering dependence rather than remove it. The query name
 //! is what a BAM says the read *is*.
 //!
-//! [`WalkerConfig::max_snp_column_depth`]: crate::pileup::walker::WalkerConfig::max_snp_column_depth
+//! [`WalkerConfig::max_snp_column_depth`]: super::WalkerConfig::max_snp_column_depth
 
 use super::{MateRole, PreparedRead};
 

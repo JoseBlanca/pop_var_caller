@@ -15,7 +15,7 @@
 //! or fits anything.
 //!
 //! **The sliding window and its histogram fold are production's**
-//! ([`SlidingWindowCoverageAccumulator`](crate::sample_summary::coverage::SlidingWindowCoverageAccumulator),
+//! (`SlidingWindowCoverageAccumulator`,
 //! transcribed with its tests under the freeze rule that `src/sample_summary/` is not edited).
 //! The copy is deliberate and is held to its original by a differential test
 //! (`production_parity.rs`) — a later reader who is tempted to delete it and call production
@@ -115,7 +115,7 @@ pub const DEPTH_SCALE_WINDOWS: u32 = 10_000;
 ///
 /// **What it is measured against** is the coverage model fit's own rejection guard: the fit
 /// refuses a sample outright once more than a fifth of its windows are past the top of the range
-/// ([`DEFAULT_MAX_OVERFLOW_FRACTION`](crate::paralog::coverage_model::DEFAULT_MAX_OVERFLOW_FRACTION)),
+/// (`DEFAULT_MAX_OVERFLOW_FRACTION`),
 /// because at that point the sample's single-copy peak has itself overflowed and the regular bins
 /// hold noise. Worst overflow across ten sample-stores of two species, at each setting tried:
 ///

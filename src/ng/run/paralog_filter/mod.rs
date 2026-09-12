@@ -97,6 +97,6 @@ impl From<&SpillEntry> for RecordPlace {
 /// fields and nothing else, and did not change.
 ///
 /// The crate holds a second, unrelated `WindowCoverage` in
-/// [`crate::sample_summary::coverage`], which is production's per-tile summary; the two do not
+/// `crate::sample_summary::coverage`, which is production's per-tile summary; the two do not
 /// meet.
 pub use crate::ng::window_coverage::WindowCoverage;

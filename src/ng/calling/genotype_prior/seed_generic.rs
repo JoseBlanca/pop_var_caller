@@ -381,8 +381,8 @@ pub fn seed_from_population_moments(
 ///
 /// **One class for the locus, and a locus that mixes them is still Q1's to settle.** Production
 /// its pseudocount on each *alternative allele* — `0.01` for a substitution against `0.00125` for
-/// an indel ([`DEFAULT_SNP_ALT_PSEUDOCOUNT`](crate::var_calling::posterior_engine::DEFAULT_SNP_ALT_PSEUDOCOUNT),
-/// [`DEFAULT_INDEL_ALT_PSEUDOCOUNT`](crate::var_calling::posterior_engine::DEFAULT_INDEL_ALT_PSEUDOCOUNT))
+/// an indel (`DEFAULT_SNP_ALT_PSEUDOCOUNT`,
+/// `DEFAULT_INDEL_ALT_PSEUDOCOUNT`)
 /// — and a generic locus can carry one of each, since
 /// [`LocusKind::Generic`](crate::ng::locus_generation::LocusKind) covers both. Taking one class
 /// forecloses nothing: an alternative allele's class is readable from the locus's own

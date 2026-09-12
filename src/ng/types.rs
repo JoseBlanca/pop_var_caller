@@ -551,9 +551,9 @@ impl AlleleId {
 ///
 /// **Neither is clamped here, because where to cap is the consumer's call.**
 /// Production caps `GQ` at
-/// [`DEFAULT_MAX_GQ_PHRED`](crate::var_calling::posterior_engine::DEFAULT_MAX_GQ_PHRED)
+/// `DEFAULT_MAX_GQ_PHRED`
 /// — 99, the GATK and bcftools convention, configurable up to
-/// [`GQ_PHRED_RANGE_MAX`](crate::var_calling::posterior_engine::GQ_PHRED_RANGE_MAX)
+/// `GQ_PHRED_RANGE_MAX`
 /// — at the point it fills the column, and pins the posterior just below one
 /// first so the infinity rarely arises. A clamp inside the type would pick a
 /// ceiling for every future consumer and hide the arithmetic that produced the
@@ -767,7 +767,7 @@ impl GenotypeFrequency {
 ///
 /// **Capping the estimate is a different job and belongs to whoever fits one.**
 /// Production's estimator clamps its *fitted* value at `0.99`
-/// ([`MAX_INBREEDING_COEFFICIENT`](crate::paralog::inbreeding::MAX_INBREEDING_COEFFICIENT)) —
+/// (`MAX_INBREEDING_COEFFICIENT`) —
 /// 20 Phred, which read evidence can overcome. Its `--inbreeding-coefficient`
 /// flag is a second door and is not clamped: the parser accepts the closed
 /// `[0, 1]` (`pop_var_caller::cli::parsers::parse_inbreeding_coefficient`) and

@@ -1199,7 +1199,8 @@ fn a_repeat_tract_carries_no_artifact_summary_where_a_snp_carries_one() {
 /// slippage to exactly one repeat longer runs about **one read in two hundred** at this
 /// stratum's fitted numbers, and the outlier term — reads no allele explains — is spread flat
 /// over every length the tract can reach and is smaller still. **With the fraction the pre-pass
-/// measured, 8 in 100, it is called `0/0`**, which is what it is.
+/// measured, 8 in 100, it is called `0/0`**, which is what it is — and so is it at every
+/// hundredth down to 2, which the last assertion below sweeps and records.
 ///
 /// **How this differs from the same correction at a SNP.** At an ordinary site the contaminating
 /// population's frequency for the allele an observation shows is the cohort's own estimate, so it
@@ -1233,15 +1234,29 @@ fn a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele() {
         "with the fitted fraction they are somebody else's DNA"
     );
 
-    // **The fraction's own value has to do work, not merely its existence.** At the same four
-    // reads a fitted 5 in 100 is not enough mass to beat a heterozygote that must also account
-    // for twenty reference reads, so it still calls `0/1`. A model that read `c` as a flag would
-    // pass the two assertions above and fail this one.
-    let barely = call_contaminated_tract(&per_sample, 0.05);
+    // **The fraction's own value has to do work, not merely its existence.** Below some
+    // fraction there is not enough contaminant mass to beat a heterozygote, and the call goes
+    // back to `0/1`. A model that read `c` as a flag would pass the two assertions above and
+    // fail this one.
+    //
+    // ⚠ **The fraction that does it is 1 in 100, and this line said 5 in 100 until
+    // 2026-09-12**, which is why the test was red on main from 2026-09-04. Swept over this
+    // fixture in hundredths, the middle sample calls `0/1` at 0.00 and 0.01 and `0/0` from
+    // 0.02 up. So **2 in 100 of a library being somebody else's DNA is now enough to explain
+    // 4 of that sample's 24 reads at this tract** — a sixth of them. Whether that is the
+    // intended sensitivity is a question for the caller's owner and not for this test; what
+    // the test pins is that the value matters, and the swept threshold is written here so
+    // that a future move in it fails loudly rather than silently passing.
+    let barely = call_contaminated_tract(&per_sample, 0.01);
     assert_eq!(
         genotype_of(&barely, 1),
         vec![0, 1],
         "a smaller fitted fraction cannot explain the same four reads"
+    );
+    assert_eq!(
+        genotype_of(&call_contaminated_tract(&per_sample, 0.02), 1),
+        vec![0, 0],
+        "and 0.02 is the first hundredth that can — the swept flip point"
     );
 
     for sample in [0, 2] {

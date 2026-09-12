@@ -47,17 +47,21 @@ use super::{
 /// [`LocusLen::from_positions`]: crate::ng::locus_generation::LocusLen::from_positions
 pub const MAX_RECORD_SPAN_CEILING: u32 = u16::MAX as u32;
 
-/// **Production's default `max_record_span` is inside ng's ceiling**, which is
-/// why [`PileupGeneratorConfig::default`] can inherit the knob by name without
-/// shipping a configuration [`PileupGenerator::new`] would reject.
+/// **The default `max_record_span` is inside ng's ceiling**, which is why
+/// [`PileupGeneratorConfig::default`] can take the limit by name without shipping a
+/// configuration [`PileupGenerator::new`] would reject.
 ///
-/// A compile-time check rather than a test, because it compares two constants:
-/// should production ever raise its default past 65,535, this breaks the build
-/// and the divergence becomes a decision rather than a runtime surprise.
+/// A compile-time check rather than a test, because it compares two constants: raise the
+/// default past 65,535 and this breaks the build, so the clash is a decision somebody makes
+/// rather than a refusal at run time.
+///
+/// It checked production's constant until 2026-09-12, when ng stopped inheriting it and
+/// [`DEFAULT_MAX_RECORD_SPAN`] became ng's own. The two hold the same 5,000; what changed is
+/// that this now guards the number a run actually walks under.
 const _: () = assert!(
-    crate::pileup::walker::DEFAULT_MAX_RECORD_SPAN <= MAX_RECORD_SPAN_CEILING,
-    "production's default max_record_span no longer fits a ReadWitness run: ng must either \
-     widen the run or stop inheriting the default",
+    DEFAULT_MAX_RECORD_SPAN <= MAX_RECORD_SPAN_CEILING,
+    "the default max_record_span no longer fits a ReadWitness run: ng must either widen the \
+     run or lower the default",
 );
 
 /// This generator's knobs — owned, taken at construction, and **production's
@@ -244,7 +248,7 @@ pub enum PileupGeneratorConfigError {
 /// off a walk at all:
 ///
 /// - **Seven mirror production's
-///   [`RunSummary`](crate::pileup::walker::RunSummary) field for field** (spec §7) —
+///   `RunSummary` field for field** (spec §7) —
 ///   everything on it bar `records_emitted`.
 /// - **One mirrors ng's copy of `RunSummary` and has no production counterpart**:
 ///   `reads_silent_over_footprint`, the ninth field D2 added, which `parity.rs`'s counter

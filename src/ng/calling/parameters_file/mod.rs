@@ -221,7 +221,7 @@ pub enum ParametersFileError {
         /// render the parser's whole diagnostic twice under any chain-walking reporter — and
         /// this crate has one ([`format_error_chain`](crate::error_render::format_error_chain)).
         /// The house pattern for exactly this type is
-        /// [`SampleSummaryError::ParseToml`](crate::sample_summary::SampleSummaryError), which
+        /// `SampleSummaryError::ParseToml`, which
         /// names the failure and leaves the detail to the source.
         #[source]
         source: toml::de::Error,

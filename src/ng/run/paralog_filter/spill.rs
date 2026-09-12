@@ -68,7 +68,7 @@
 //! the codebase's way of making a struct that gains a field fail to compile rather than lose it
 //! quietly
 //! ([`cohort_merge`](crate::ng::run::cohort_merge)'s `render`,
-//! [`var_calling::types`](crate::var_calling::types)).
+//! `var_calling::types`).
 
 use std::io::{self, BufRead, Read, Write};
 use std::iter::FusedIterator;
