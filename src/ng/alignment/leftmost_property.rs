@@ -42,7 +42,7 @@
 //! `#[cfg(test)]`: this is test support for the normalizers. It ships no production code.
 
 use super::Alignment;
-use crate::pileup::walker::CigarOp;
+use crate::bam::alignment_input::CigarOp;
 
 /// Which kind of indel can slide left. A closed set of two, so the sibling normalizer test
 /// modules that match on a witness get an exhaustive `match` and the compiler catches a
@@ -250,7 +250,7 @@ pub(crate) fn assert_left_aligned(alignment: &Alignment, read: &[u8], reference:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pileup::walker::CigarOp::{Deletion, Insertion, Match, Skip, SoftClip};
+    use crate::bam::alignment_input::CigarOp::{Deletion, Insertion, Match, Skip, SoftClip};
 
     fn alignment(reference_offset: u64, cigar: Vec<CigarOp>) -> Alignment {
         Alignment {

@@ -45,7 +45,7 @@
 //! alignment.)
 
 use super::{Alignment, AlignmentNormalizer};
-use crate::pileup::walker::CigarOp;
+use crate::bam::alignment_input::CigarOp;
 
 /// The iteration cap: the most passes [`RepeatedLeftAligner`] runs before reporting exhaustion.
 /// freebayes' `stablyLeftAlign` uses 20 (`LeftAlign.h:118`); adopted as the default.
@@ -381,9 +381,9 @@ fn is_indel(op: CigarOp) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bam::alignment_input::CigarOp::{Deletion, Insertion, Match};
     use crate::ng::alignment::left_align_structured::StructuredLeftAligner;
     use crate::ng::alignment::leftmost_property::{assert_left_aligned, is_left_aligned};
-    use crate::pileup::walker::CigarOp::{Deletion, Insertion, Match};
 
     fn align(reference_offset: u64, cigar: Vec<CigarOp>) -> Alignment {
         Alignment {

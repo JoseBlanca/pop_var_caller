@@ -27,7 +27,7 @@ use crate::ng::types::ReadGroupId;
 // Production's, reused rather than re-minted — the same call, for the same reason, as
 // `ng::alignment`'s (see its "# Reusing production's `CigarOp`"). The import path
 // misleads: `CigarOp` is crate-wide CIGAR vocabulary that happens to live in the walker.
-use crate::pileup::walker::CigarOp;
+use crate::bam::alignment_input::CigarOp;
 // Aliased, so "ours" and "production's" read at a glance instead of being carried by a
 // four-segment path at every one of the dozen sites below.
 use crate::pileup::walker::MateRole as ProductionMateRole;

@@ -860,9 +860,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::bam::alignment_input::CigarOp;
     use crate::ng::locus_generation::pileup::decompose::decompose;
     use crate::ng::types::ReadGroupId;
-    use crate::pileup::walker::CigarOp;
 
     /// **What the ordinary-column lane is allowed to take, base by base.**
     ///

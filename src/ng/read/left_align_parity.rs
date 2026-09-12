@@ -42,6 +42,7 @@ use tempfile::TempDir;
 use super::PLACEHOLDER_READ_GROUP;
 use super::ReadPreparer;
 use super::left_align::LeftAlignPreparer;
+use crate::bam::alignment_input::CigarOp;
 use crate::bam::alignment_input::{MappedRead, cigar_ref_span, read_exceeds_mismatch_fraction};
 use crate::fasta::{ContigEntry, ContigList};
 use crate::ng::read::aligned_read::AlignedRead;
@@ -51,7 +52,6 @@ use crate::ng::types::ContigId;
 use crate::pileup::per_sample::read_processor::{
     RawContigRefCache, ReadOutcome, ReadProcessingConfig, process_read,
 };
-use crate::pileup::walker::CigarOp;
 
 /// One contig of a fixture reference: its name and its bases, verbatim.
 struct FixtureContig {

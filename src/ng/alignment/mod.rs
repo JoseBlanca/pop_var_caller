@@ -47,8 +47,8 @@ pub mod stutter;
 pub use emission::{BaseScores, Emission, FlatEmission, PerQualityEmission};
 pub use stutter::{StutterModel, StutterRates};
 
+use crate::bam::alignment_input::CigarOp;
 use crate::ng::types::{BaseQual, Bp, DomainError, LogProb, Motif};
-use crate::pileup::walker::CigarOp;
 use std::ops::Range;
 
 /// A read placed against a reference stretch: where the placement starts, and the

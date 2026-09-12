@@ -478,11 +478,11 @@ pub(in crate::ng::read) fn verdict_on_aligned_read(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bam::alignment_input::CigarOp;
     use crate::bam::alignment_input::FLAG_PAIRED;
     use crate::ng::psp::ParameterValue;
     use crate::ng::ref_seq::InMemoryRefSeq;
     use crate::ng::types::ReadGroupId;
-    use crate::pileup::walker::CigarOp;
 
     /// Every configurable filter lands under its own key with its **exact** value, from
     /// a policy whose two booleans differ — so transposing the qc-fail and duplicate

@@ -1204,11 +1204,36 @@ where
     }
 }
 
+/// The same four limits, in production's own struct.
+///
+/// **The two walkers read two `WalkerConfig` types since 2026-09-12**, when ng stopped
+/// reaching into `pileup/walker/` for the one it walks under. They hold the same five fields
+/// and this hands production the values ng was given, so the comparison stays a comparison of
+/// *walks* rather than of settings — which is the whole premise of this file.
+///
+/// Written field by field so that a limit added to either side stops this compiling.
+fn production_config(config: &WalkerConfig) -> crate::pileup::walker::WalkerConfig {
+    let WalkerConfig {
+        max_snp_column_depth,
+        max_indel_column_depth,
+        max_record_span,
+        mate_lookup_window,
+        max_active_reads,
+    } = *config;
+    crate::pileup::walker::WalkerConfig {
+        max_snp_column_depth,
+        max_indel_column_depth,
+        max_record_span,
+        mate_lookup_window,
+        max_active_reads,
+    }
+}
+
 /// Production's answer.
 fn production_walk(case: &Case) -> WalkOutcome {
     let fasta = case.fasta();
     drive_production(
-        production_run(case.reads.clone(), &fasta, &case.config),
+        production_run(case.reads.clone(), &fasta, &production_config(&case.config)),
         render_production_error,
         |walker| production_counters(walker.summary()),
     )
@@ -4485,7 +4510,11 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
     // Driven one after the other, not interleaved, so the shared reader's `RefCell` is
     // never borrowed by both walks at once.
     let theirs = drive_production(
-        production_run(production_reads, reference.clone(), &config),
+        production_run(
+            production_reads,
+            reference.clone(),
+            &production_config(&config),
+        ),
         render_production_error,
         |walker| production_counters(walker.summary()),
     );

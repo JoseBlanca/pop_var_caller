@@ -28,7 +28,10 @@ use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
 
 use super::chain_id_allocator::{ChainIdAllocator, ChainIdAllocatorCounters};
 use super::genome_walk::{PileupWalker, RegionReadSource, RunSummary};
-use super::{DEFAULT_MAX_ACTIVE_READS, WalkerConfig};
+use super::{
+    DEFAULT_MATE_LOOKUP_WINDOW, DEFAULT_MAX_ACTIVE_READS, DEFAULT_MAX_INDEL_COLUMN_DEPTH,
+    DEFAULT_MAX_RECORD_SPAN, DEFAULT_MAX_SNP_COLUMN_DEPTH, WalkerConfig,
+};
 
 /// The widest `max_record_span` this generator accepts: 65,535 reference
 /// positions, the widest footprint a [`ReadWitness`] run can describe.
@@ -82,17 +85,17 @@ pub struct PileupGeneratorConfig {
     // constants by name so a retune arrives as a diff, and a literal in the
     // prose here would go stale silently while every test stayed green (review).
     /// Reads folded at a position with no indel anchored there. Defaults to
-    /// [`DEFAULT_MAX_SNP_COLUMN_DEPTH`](crate::pileup::walker::DEFAULT_MAX_SNP_COLUMN_DEPTH).
+    /// [`DEFAULT_MAX_SNP_COLUMN_DEPTH`](super::DEFAULT_MAX_SNP_COLUMN_DEPTH).
     pub max_snp_column_depth: u32,
     /// Reads folded at a position where any read has an indel. Defaults to
-    /// [`DEFAULT_MAX_INDEL_COLUMN_DEPTH`](crate::pileup::walker::DEFAULT_MAX_INDEL_COLUMN_DEPTH).
+    /// [`DEFAULT_MAX_INDEL_COLUMN_DEPTH`](super::DEFAULT_MAX_INDEL_COLUMN_DEPTH).
     pub max_indel_column_depth: u32,
     /// Widest record footprint before the walk fails. Defaults to
-    /// [`DEFAULT_MAX_RECORD_SPAN`](crate::pileup::walker::DEFAULT_MAX_RECORD_SPAN);
+    /// [`DEFAULT_MAX_RECORD_SPAN`](super::DEFAULT_MAX_RECORD_SPAN);
     /// ng additionally rejects anything above [`MAX_RECORD_SPAN_CEILING`].
     pub max_record_span: u32,
     /// How far a first mate stays available for pairing. Defaults to
-    /// [`DEFAULT_MATE_LOOKUP_WINDOW`](crate::pileup::walker::DEFAULT_MATE_LOOKUP_WINDOW).
+    /// [`DEFAULT_MATE_LOOKUP_WINDOW`](super::DEFAULT_MATE_LOOKUP_WINDOW).
     pub mate_lookup_window: u32,
     /// Active-read ceiling: how many reads the walk will hold open at once. Defaults
     /// to [`DEFAULT_MAX_ACTIVE_READS`], **32,768 since 2026-08-05** (it was 4,096).
@@ -136,10 +139,10 @@ impl Default for PileupGeneratorConfig {
     /// on production's side reaches ng as a diff rather than as drift.
     fn default() -> Self {
         Self {
-            max_snp_column_depth: crate::pileup::walker::DEFAULT_MAX_SNP_COLUMN_DEPTH,
-            max_indel_column_depth: crate::pileup::walker::DEFAULT_MAX_INDEL_COLUMN_DEPTH,
-            max_record_span: crate::pileup::walker::DEFAULT_MAX_RECORD_SPAN,
-            mate_lookup_window: crate::pileup::walker::DEFAULT_MATE_LOOKUP_WINDOW,
+            max_snp_column_depth: DEFAULT_MAX_SNP_COLUMN_DEPTH,
+            max_indel_column_depth: DEFAULT_MAX_INDEL_COLUMN_DEPTH,
+            max_record_span: DEFAULT_MAX_RECORD_SPAN,
+            mate_lookup_window: DEFAULT_MATE_LOOKUP_WINDOW,
             // ng's copy of the constant, which `walker_vocabulary_tests` pins equal
             // to production's — the one `DEFAULT_*` the verbatim copy forked, because
             // it is declared inside `chain_id_allocator.rs`.

@@ -613,8 +613,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::bam::alignment_input::CigarOp;
     use crate::ng::types::ReadGroupId;
-    use crate::pileup::walker::CigarOp;
 
     fn solo_read(qname: &str, chrom_id: u32, alignment_start: u32, span: u32) -> PreparedRead {
         PreparedRead {

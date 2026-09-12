@@ -37,9 +37,8 @@ use std::io;
 
 use noodles_sam::alignment::RecordBuf;
 
-use crate::bam::alignment_input::{cigar_to_ops, compute_adaptor_boundary};
+use crate::bam::alignment_input::{CigarOp, cigar_to_ops, compute_adaptor_boundary};
 use crate::ng::types::{MapQual, ReadGroupId};
-use crate::pileup::walker::CigarOp;
 
 /// One alignment record as it comes off the file, undecoded — the seam that lets
 /// the flag/MAPQ cascade (#1–#6) run *before* the record is decoded.

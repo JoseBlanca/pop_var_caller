@@ -35,22 +35,15 @@ pub use errors::WalkerError;
 // ---------------------------------------------------------------------
 
 /// One CIGAR operation: an opcode (M/I/D/N/S/H/P/=/X) with a length in
-/// reference or read positions, depending on the op. Mirrors htslib /
-/// noodles' op set; consumed by the walker's CIGAR cursor, the BAQ
-/// engine's window computation, and the CRAM input parser that builds
-/// it from each record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CigarOp {
-    Match(u32),
-    Insertion(u32),
-    Deletion(u32),
-    Skip(u32),
-    SoftClip(u32),
-    HardClip(u32),
-    Padding(u32),
-    SeqMatch(u32),
-    SeqMismatch(u32),
-}
+/// reference or read positions, depending on the op.
+///
+/// **Declared by the decoder that produces it**
+/// ([`crate::bam::alignment_input`]) and re-exported here, which is where every
+/// consumer of it has always named it. It moved on 2026-09-12 because the input
+/// stage both builds these (`cigar_to_ops`) and reads them (`cigar_ref_span`,
+/// `cigar_is_bad`), so a type it owned already had to live somewhere that
+/// outlives this walker. Nothing about the type or its use changed.
+pub use crate::bam::alignment_input::CigarOp;
 
 // ---------------------------------------------------------------------
 // Defaults / tunables

@@ -420,7 +420,7 @@ pub fn fetch_capped_reads<R: RawRefSeq>(
 // directly and a plain scratch buffer. Consumed by the classify pipeline (D2b).
 // ---------------------------------------------------------------------
 mod read_region {
-    use crate::pileup::walker::CigarOp;
+    use crate::bam::alignment_input::CigarOp;
     use std::ops::Range;
 
     /// The lower-quartile base-quality floor a delimited tract must clear (production's
@@ -778,13 +778,13 @@ mod classify {
         tract_span_from_input, widen_region,
     };
     use super::{RepeatDelimiter, SsrLocus};
+    use crate::bam::alignment_input::CigarOp;
     use crate::ng::alignment::{
         ReadBases, RepeatContext, RepeatGeometry, RepeatSpan, StutterModel,
     };
     use crate::ng::locus_generation::{LocusLen, ReadWitness};
     use crate::ng::read::aligned_read::AlignedRead;
     use crate::ng::types::Bp;
-    use crate::pileup::walker::CigarOp;
     use std::ops::Range;
 
     /// Why a read yielded no usable observation — the tally increments the matching
@@ -1229,11 +1229,11 @@ mod classify {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::bam::alignment_input::CigarOp;
         use crate::ng::alignment::PerQualityEmission;
         use crate::ng::alignment::ssr_best_path_flat_gap::{SsrFlatGapAligner, ViterbiScratch};
         use crate::ng::region_typing::segment_criteria::{Motif, SsrSegment};
         use crate::ng::types::{Position, ReadGroupId};
-        use crate::pileup::walker::CigarOp;
 
         // Reference frame: 6-base flanks around a CACACA tract → "GGGGGGCACACATTTTTT".
         const FRAME: &[u8] = b"GGGGGGCACACATTTTTT";
@@ -1661,9 +1661,9 @@ mod tally {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::bam::alignment_input::CigarOp;
         use crate::ng::locus_generation::LocusLen;
         use crate::ng::types::ReadGroupId;
-        use crate::pileup::walker::CigarOp;
 
         /// An `AlignedRead` with a given strand flag and MAPQ — the only fields the tally reads
         /// off the read; the sequence and qualities live in the `Classified` handed alongside.
@@ -3953,13 +3953,13 @@ mod tests {
     /// covered here.
     #[test]
     fn ng_complete_observations_match_frozen_production_byte_for_byte() {
+        use crate::bam::alignment_input::CigarOp;
         use crate::ng::alignment::ssr_best_path_flat_gap::{
             SsrFlatGapAligner, ViterbiScratch as NgViterbiScratch,
         };
         use crate::ng::alignment::{PerQualityEmission, StutterModel};
         use crate::ng::locus_generation::ReadWitness;
         use crate::ng::read::aligned_read::AlignedRead;
-        use crate::pileup::walker::CigarOp;
         // Frozen production oracle (called test-only, as the reservoir parity test does; ng does not
         // depend on production at run time).
         use crate::ssr::pileup::alignment::{

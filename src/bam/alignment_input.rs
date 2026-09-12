@@ -23,7 +23,46 @@ use crate::bam::index_preflight::{
     AlignmentFileKind, AlignmentIndex, load_alignment_index, preflight_alignment_indexes,
 };
 use crate::fasta::{ContigEntry, ContigList};
-use crate::pileup::walker::CigarOp;
+/// One step of a read's CIGAR: what the aligner did there, and for how many bases.
+///
+/// A read's placement against the reference is spelled out as a run of these — so many bases
+/// lined up, so many inserted, so many deleted — and the length each carries counts
+/// *reference* bases or *read* bases depending on which step it is. `Match`, `SeqMatch` and
+/// `SeqMismatch` consume both; `Insertion` and `SoftClip` consume read only; `Deletion` and
+/// `Skip` consume reference only; `HardClip` and `Padding` consume neither.
+///
+/// The set is SAM's, so htslib's and noodles' too. **`Match` is SAM's `M`, which means
+/// *aligned*, not *equal*** — a mismatched base is still `M`, and most aligners emit nothing
+/// else. `SeqMatch` and `SeqMismatch` are SAM's `=` and `X`, which do distinguish the two.
+///
+/// **It lives here because this module is where a CIGAR becomes one**: [`cigar_to_ops`] builds
+/// the run from a record, [`MappedRead::cigar`] holds it, and [`cigar_ref_span`] and
+/// [`cigar_is_bad`] read it back. Consumers downstream — the pileup walk, the left-aligner,
+/// ng's read filters and alignment algorithms — all name the type this decoder produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CigarOp {
+    /// SAM `M`: aligned to the reference, matching or not. Consumes both.
+    Match(u32),
+    /// SAM `I`: bases the read has and the reference does not. Consumes read only.
+    Insertion(u32),
+    /// SAM `D`: bases the reference has and the read does not. Consumes reference only.
+    Deletion(u32),
+    /// SAM `N`: reference the read skips over — an intron, in spliced alignment. Consumes
+    /// reference only, and differs from [`Deletion`](Self::Deletion) in what it means rather
+    /// than in what it consumes.
+    Skip(u32),
+    /// SAM `S`: read bases left out of the alignment but still carried in the record.
+    /// Consumes read only.
+    SoftClip(u32),
+    /// SAM `H`: read bases the aligner cut from the record altogether. Consumes neither.
+    HardClip(u32),
+    /// SAM `P`: padding against a multiple alignment. Consumes neither.
+    Padding(u32),
+    /// SAM `=`: aligned *and* equal to the reference. Consumes both.
+    SeqMatch(u32),
+    /// SAM `X`: aligned and *not* equal to the reference. Consumes both.
+    SeqMismatch(u32),
+}
 
 // ---------------------------------------------------------------------
 // Defaults

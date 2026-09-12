@@ -20,6 +20,7 @@
 //! Design: `doc/devel/ng/spec/read_preparation.md`, `doc/devel/ng/arch/read_preparation.md`.
 
 use super::{ReadPrepError, ReadPreparer};
+use crate::bam::alignment_input::CigarOp;
 use crate::bam::alignment_input::cigar_ref_span;
 use crate::ng::alignment::{Alignment, AlignmentNormalizer, DefaultAlignmentNormalizer};
 use crate::ng::read::aligned_read::AlignedRead;
@@ -27,7 +28,6 @@ use crate::ng::read::prepared_read::PreparedRead;
 use crate::ng::ref_seq::{EvictableRefSeq, RefSeq};
 use crate::ng::types::ContigId;
 use crate::pileup::per_sample::baq_engine::prepare_passthrough;
-use crate::pileup::walker::CigarOp;
 
 /// Whether this line-up carries anything left-alignment could move.
 ///

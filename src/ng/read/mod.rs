@@ -167,9 +167,9 @@ pub trait ReadPreparer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bam::alignment_input::CigarOp;
     use crate::ng::types::ContigId;
     use crate::pileup::per_sample::baq_engine::prepare_passthrough;
-    use crate::pileup::walker::CigarOp;
 
     /// A minimal mapped read: 4 matched bases at position 10 on contig 0.
     fn mapped_read() -> AlignedRead {

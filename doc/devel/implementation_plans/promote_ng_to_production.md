@@ -133,7 +133,7 @@ and makes ng's version the only one.
 | B2 | `psp::varint`, `psp::errors::VarintError`, `psp::index::checksum_index` | 10 | `ng/psp/varint.rs` (copied whole, 314 lines with its tests) and `ng/psp/index.rs` |
 | B3 | `pileup_record::ChainId` | 10 | `ng/types.rs` — it is the id vocabulary the psp, the walker and the merge share. `benches/ng_psp_perf.rs` and `examples/dhat_ng_psp.rs` import it too and are repointed here |
 | B4 | `genetics::{lgamma, PROBABILITY_FLOOR, MIN_ALT_CONCENTRATION}` (and `ALPHA_REF`, `alpha_from_diversity` in tests) | 9 | `ng/genetics.rs` — the five items and their tests, nothing else of the 595 lines |
-| B5 | `pileup::walker::CigarOp`, `WalkerConfig`, the four `DEFAULT_*` constants | 20 | `CigarOp` to `ng/read/aligned_read.rs` (it is decoded-read vocabulary; `read/mod.rs` and `alignment/mod.rs` say so already); `WalkerConfig` and the constants to `ng/locus_generation/pileup/mod.rs`, the only consumer |
+| B5 | `pileup::walker::CigarOp`, `WalkerConfig`, the four `DEFAULT_*` constants | 20 | `WalkerConfig` and the constants to `ng/locus_generation/pileup/mod.rs`, the only consumer. **`CigarOp` went to `src/bam/alignment_input.rs`, not into ng** — see the note below |
 | B6 | `pileup::walker::indel_norm::left_align_indels` and the `norm_seqs::normalize_alleles` it calls (464 + 214 lines) | 1 | `ng/alignment/left_align_structured.rs`, which is documented as "1a *is* production's `left_align_indels`" |
 | B7 | `pileup::walker::{PreparedRead, MateRole}` and `baq_engine::prepare_passthrough` with its four helpers | 5 | `ng/read/prepared_read.rs` already defines ng's own `PreparedRead` and `MateRole`; `prepare_passthrough` is rewritten to build ng's directly, and `from_production` / `into_production` are deleted. **Own commit** — the oracle is `left_align_parity` (still live) plus Checkpoint B's VCF |
 | B8 | the 39 doc-comment links into production (`[`…`](crate::pileup::…)`) | 39 | repointed to ng's copy, or turned into plain text where the link was historical. `cargo doc` with `-D warnings` is the check |
@@ -142,7 +142,18 @@ and makes ng's version the only one.
 - ✅ **B2** · *Depends:* — · *Source:* `psp_file_format.md` (the LEB128 varint the record and index encodings use).
 - ✅ **B3** · *Depends:* — · *Source:* `psp_chain_id_encoding.md`.
 - ✅ **B4** · *Depends:* — · *Source:* `calling_priors.md` (the constants' meaning).
-- ☐ **B5** · *Depends:* — · *Source:* `module_layout.md` (`read/` owns the decoded read).
+- ✅ **B5** · *Depends:* — · *Source:* `module_layout.md` (`read/` owns the decoded read).
+
+  **Deviation, recorded 2026-09-12: `CigarOp` is declared in `src/bam/alignment_input.rs`,
+  not in ng.** The plan put it in `ng/read/aligned_read.rs`, and building it showed why that
+  is the wrong home: the input stage *both* produces a CIGAR run (`cigar_to_ops`) and reads
+  it back (`cigar_ref_span`, `cigar_is_bad`), and `MappedRead::cigar` is a field of that
+  type. `bam` is shared infrastructure this plan keeps, so declaring the type in ng would
+  have left `bam` importing a second one from the tree being deleted, and forced a conversion
+  at every crossing — 18 lines of mapping existing only to undo a misplacement. Declared in
+  `bam` there is one type, no conversion, and the parity oracles keep typechecking.
+  `pileup/walker/mod.rs` re-exports it in one line so production compiles unchanged; that
+  changes nothing production computes, and the file goes at D3 regardless.
 - ☐ **B6** · *Depends:* B5 (`CigarOp`) · *Source:* `alignment.md` (algorithm 1a, the structured left-aligner).
 - ☐ **B7** · **own commit, do not bundle** · *Depends:* B5 · *Source:* `read_preparation.md` §1.
 - ☐ **B8** · *Depends:* B1–B7 · *Source:* `Cargo.toml` `[lints.rustdoc]` (`broken_intra_doc_links = "deny"`).

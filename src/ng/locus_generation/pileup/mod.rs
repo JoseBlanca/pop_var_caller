@@ -67,23 +67,24 @@
 //! - [`PreparedRead`], [`MateRole`], [`ReadLengthError`] — **ng's**, copied and
 //!   extended with `read_group` (spec §6). They are the reason the whole walker
 //!   is copied: every one of the seven names `PreparedRead` in its signatures.
-//! - [`CigarOp`], [`WalkerConfig`] and two of the `DEFAULT_*` constants —
-//!   **production's, reused as-is**. ng does not modify them, so it does not copy
-//!   them; they are reached by name rather than by literal so there is one source
-//!   of truth until ng deliberately diverges.
-//!   **One constant is ng's, forced by the verbatim rule:**
-//!   [`DEFAULT_MAX_ACTIVE_READS`] is declared *inside* `chain_id_allocator.rs`, so
-//!   the copy brought its own — two definitions of `4096` now exist, and
-//!   `chain_id_allocator.rs`'s `Self::with_caps(DEFAULT_MAX_ACTIVE_READS,
-//!   super::DEFAULT_MATE_LOOKUP_WINDOW)` reaches ng's for the first and production's
-//!   for the second. `the_copied_active_reads_cap_is_still_productions` pins the two
-//!   equal; when they are deliberately allowed to differ, that test is what says so.
+//! - [`CigarOp`] — **the decoder's** ([`crate::bam::alignment_input`]), which is where the
+//!   type moved on 2026-09-12: the input stage both builds a CIGAR run and reads it back, so
+//!   it owns the type, and ng reaches the same declaration production does. Re-exported here
+//!   only so the copied files' `super::CigarOp` keeps resolving.
+//! - [`WalkerConfig`] and the four `DEFAULT_*` limits — **ng's own**, declared below. They
+//!   were production's until 2026-09-12 and are its values transcribed, so what a run walks
+//!   under has not moved; what changed is that ng no longer reaches into a tree it is about
+//!   to delete for them.
+//!   **[`DEFAULT_MAX_ACTIVE_READS`] is the one that has genuinely diverged**, and it is
+//!   declared in `chain_id_allocator.rs` because the verbatim copy put it there: ng holds
+//!   32,768 reads open against production's 4,096, and
+//!   `the_copied_active_reads_cap_is_still_productions` is what records the pair rather than
+//!   pinning them equal.
 //!
 //! The vocabulary is bound `pub(crate)`, not `pub`: it is an internal aid for the
-//! copies, not an ng-flavoured public alias for production's types. A consumer that
-//! wants `CigarOp` should say `crate::pileup::walker::CigarOp` and see whose it is —
-//! which matters from plan 3 on, when ng's walker starts to diverge and two live
-//! paths to one name would stop being harmless.
+//! copies, not a second public path to a name declared elsewhere. A consumer outside this
+//! module that wants `CigarOp` should say [`crate::bam::alignment_input::CigarOp`] and name
+//! the decoder that produced it.
 //!
 //! # The reference: ng's own, with no adaptor between
 //!
@@ -327,14 +328,85 @@ mod parity;
 // holds the column caps and comes with its own defaults), and an unused re-export is
 // invisible to the compiler, so carrying them would be shape without substance.
 // `PileupGeneratorConfig` names them in plan 3, from production directly.
+pub(crate) use crate::bam::alignment_input::CigarOp;
 pub(crate) use crate::ng::read::prepared_read::{MateRole, PreparedRead, ReadLengthError};
-pub(crate) use crate::pileup::walker::{CigarOp, DEFAULT_MAX_RECORD_SPAN, WalkerConfig};
-// `#[cfg(test)]` because that is where the one copy reaching it lives:
-// `ChainIdAllocator::new` is itself `#[cfg(test)]` (production code calls `with_caps`
-// from `run`). Left ungated it is an unused import in a non-test build — which the
-// previous `pub use` hid, since a `pub` re-export is never reported unused.
-#[cfg(test)]
-pub(crate) use crate::pileup::walker::DEFAULT_MATE_LOOKUP_WINDOW;
+
+// ---------------------------------------------------------------------
+// What the walk is allowed to hold, and how far it will look
+// ---------------------------------------------------------------------
+
+/// How wide a single record may get before the walk refuses it, in reference bases.
+///
+/// Bounds what one open record costs. Reads wider than this are dropped by the read filters
+/// upstream, so in an ordinary run the walk's own check never fires; it is here because a
+/// record that grew past it would otherwise grow without limit.
+pub(crate) const DEFAULT_MAX_RECORD_SPAN: u32 = 5_000;
+
+/// How far past a first mate's start the walk keeps looking for its partner, in reference
+/// bases, before giving up and treating the read as unpaired.
+///
+/// Sized for ordinary Illumina paired-end inserts of 200 to 500 bases with room to spare. A
+/// protocol whose mates sit further apart than this would need it raised, and would otherwise
+/// lose the pairing quietly rather than loudly.
+pub(crate) const DEFAULT_MATE_LOOKUP_WINDOW: u32 = 10_000;
+
+/// How many reads the walk will fold into one position that carries no insertion or deletion.
+///
+/// samtools' `MPLP_MAX_DEPTH`. Pathologically deep ground truncates here rather than costing
+/// unbounded time.
+pub(crate) const DEFAULT_MAX_SNP_COLUMN_DEPTH: u32 = 8_000;
+
+/// How many reads the walk will fold into one position that carries an insertion or deletion.
+///
+/// samtools' `MPLP_MAX_INDEL_DEPTH`, and far tighter than the SNP cap for a reason: indel
+/// evidence in a homopolymer saturates long before the likelihood gains anything from more of
+/// it.
+pub(crate) const DEFAULT_MAX_INDEL_COLUMN_DEPTH: u32 = 250;
+
+/// The four limits the walk reads as it runs.
+///
+/// **The truncation is per position, not per allele**, and that is the property worth stating:
+/// when a position has more reads than the cap allows, the walk keeps the first `cap` of them
+/// in the order they arrived and drops the rest. Clipping each allele separately instead would
+/// bias the allele frequency — a position where 99 reads show one base and 1 shows another
+/// would come back as roughly 71 against 29 at a cap of 250.
+///
+/// That order is the order the alignment files delivered the reads, which for coordinate-sorted
+/// input is near enough arbitrary with respect to which allele a read carries. A pipeline that
+/// concatenated per-lane files rather than merging them could break that, and the fix there is
+/// to interleave upstream: this cap is a defence against unbounded work, not a sampler.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub(crate) struct WalkerConfig {
+    /// Reads folded at a position with no insertion or deletion. See
+    /// [`DEFAULT_MAX_SNP_COLUMN_DEPTH`].
+    pub max_snp_column_depth: u32,
+    /// Reads folded at a position carrying one. See [`DEFAULT_MAX_INDEL_COLUMN_DEPTH`].
+    pub max_indel_column_depth: u32,
+    /// How wide one record may get. See [`DEFAULT_MAX_RECORD_SPAN`].
+    pub max_record_span: u32,
+    /// How far to look for a mate. See [`DEFAULT_MATE_LOOKUP_WINDOW`].
+    pub mate_lookup_window: u32,
+    /// How many reads may be open at once; exceeding it stops the walk rather than growing
+    /// memory without limit. See [`DEFAULT_MAX_ACTIVE_READS`].
+    pub max_active_reads: u32,
+}
+
+impl Default for WalkerConfig {
+    /// **`max_active_reads` is ng's 32,768 and not production's 4,096**, which is the one
+    /// limit of the five ng deliberately moved (`chain_id_allocator`'s own header says why).
+    /// Nothing a run executes reads this `Default` — [`PileupGeneratorConfig`] carries the
+    /// limits a run walks under and builds its own — so it is the fixtures that see it.
+    fn default() -> Self {
+        Self {
+            max_snp_column_depth: DEFAULT_MAX_SNP_COLUMN_DEPTH,
+            max_indel_column_depth: DEFAULT_MAX_INDEL_COLUMN_DEPTH,
+            max_record_span: DEFAULT_MAX_RECORD_SPAN,
+            mate_lookup_window: DEFAULT_MATE_LOOKUP_WINDOW,
+            max_active_reads: DEFAULT_MAX_ACTIVE_READS,
+        }
+    }
+}
 
 // This module's own surface, as against the vocabulary above.
 //

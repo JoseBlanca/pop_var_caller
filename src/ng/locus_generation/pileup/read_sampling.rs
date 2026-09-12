@@ -102,8 +102,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::bam::alignment_input::CigarOp;
     use crate::ng::types::ReadGroupId;
-    use crate::pileup::walker::CigarOp;
 
     fn read(qname: &str, alignment_start: u32, mate_role: MateRole) -> PreparedRead {
         PreparedRead {

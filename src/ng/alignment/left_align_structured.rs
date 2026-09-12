@@ -178,8 +178,8 @@ fn drive_to_fixpoint<N: AlignmentNormalizer>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bam::alignment_input::CigarOp::{self, Deletion, Insertion, Match};
     use crate::ng::alignment::leftmost_property::{assert_left_aligned, is_left_aligned};
-    use crate::pileup::walker::CigarOp::{self, Deletion, Insertion, Match};
 
     fn align(reference_offset: u64, cigar: Vec<CigarOp>) -> Alignment {
         Alignment {
