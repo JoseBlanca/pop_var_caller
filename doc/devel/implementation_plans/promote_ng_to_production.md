@@ -103,14 +103,14 @@ must not be bundled with a neighbour, so a `git bisect` on the oracle can name t
 
 ### Milestone A — the baseline the rest is measured against
 
-- ☐ **A1. Write the baseline.** Build release; run `call-from-alignments` and
+- ✅ **A1. Write the baseline.** Build release; run `call-from-alignments` and
   `generate-psps` + `call-from-psps` over the four-CRAM cohort into
   `tmp/promote_ng/baseline/`; record the md5 of each VCF with `##commandline` stripped, of the
   psps' bodies (header timestamp stripped, as spec §12.1 allows), and of the parameters file
   `estimate-parameters` writes from those psps. Record `cargo test` totals for the library, the
   integration tests and the examples separately.
   *Depends:* preconditions. *Source:* `run_streaming.md` §12.1, §12.3.
-- ☐ **A2. Freeze the oracle inputs in a script**, `scripts/promote_ng_oracle.sh`, that takes a
+- ✅ **A2. Freeze the oracle inputs in a script**, `scripts/promote_ng_oracle.sh`, that takes a
   binary path and writes the same md5s to a directory, so every checkpoint below is one command
   and one `diff`. It wraps `ng_mode_equivalence_oracle.sh` rather than repeating it.
   *Depends:* A1. *Source:* `scripts/ng_mode_equivalence_oracle.sh`.
