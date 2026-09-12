@@ -75,11 +75,23 @@ slot falls back to `NoLoci`.
 |---|---|---|
 | `SsrSegment` | a locus generator | [locus_generation_ssr.md](locus_generation_ssr.md) (the STR generator) |
 | `Generic` | a locus generator | deferred (§11) |
-| `SsrBundle` | a locus generator | deferred (§11) |
+| `SsrBundle` | `NoLoci` — deferred indefinitely | here (§5) |
 | `Satellite` | `NoLoci` — never handled | here (§5) |
 
-**`Satellite` is the one kind this spec resolves.** It is out of scope for the whole caller, so it is
-wired to `NoLoci` permanently. Every other kind's behaviour lives in that kind's own generator spec;
+**`Satellite` and `SsrBundle` are the two kinds this spec resolves, and it resolves them
+differently.** `Satellite` is out of scope for the whole caller, so it is wired to `NoLoci`
+permanently. **`SsrBundle` is a cluster of real repeat tracts none of which has clean flanks, and
+ng deliberately calls nothing there** — owner's ruling of 2026-09-12, taken with the cost measured:
+on the HG002 tandem-repeat benchmark at 300 reads a position, 199 of the 2,653 tracts the truth set
+calls length-variant sit in such a cluster and ng misses every one of them, and on the GIAB
+per-sample benchmark it finds none of the 10 truth variants in cluster ground at any depth from 5×
+to 300×. That recall is given up on purpose: with no clean flank there is nothing to anchor a read
+to, so a caller there would be reading alignments it cannot trust, and a wrong call in a repeat
+cluster is worse than a missing one. **Building a generator for it is deferred sine die** — a
+possibility, not a plan, and nothing else should be sequenced behind it. What such a generator
+would do if it were ever written is sketched in §11, unchanged.
+
+Every other kind's behaviour lives in that kind's own generator spec;
 this document neither describes nor depends on it — including the STR generator that v1 supplies for
 `SsrSegment`.
 
@@ -142,8 +154,10 @@ pub enum LocusKind {
     Generic,
     /// A microsatellite tract — carries the motif and the flanks the read model needs.
     Ssr(SsrDetail),
-    /// A repeat cluster with no clean flanks, coarser than a single tract. What it carries
-    /// is the bundle generator's to decide (deferred, §11).
+    /// A repeat cluster with no clean flanks, coarser than a single tract. **ng calls
+    /// nothing here and that is settled** (§5): no clean flank, no trustworthy anchor. A
+    /// generator for it is deferred sine die, and what it would carry would be that
+    /// generator's to decide (§11).
     SsrBundle,
 }
 
@@ -661,10 +675,14 @@ neither.
   covers the window's covered positions (production) or all of them; and — on the generic path —
   span-vs-base coverage and how to compose one profile from overlapping loci without double-counting a
   deletion's interior.
-- **A generator for `SsrBundle`** — it records at least depth per position, so a bundle's bases stop
-  being a hole in the depth profile the windowed statistics slide over. Whether it also emits
-  observed sequences is open. Routed to `NoLoci { NotImplemented }` meanwhile, with its bases counted,
-  so the gap stays visible until it is filled. **Home: `src/ng/locus_generation/`**, beside the STR generator.
+- **A generator for `SsrBundle` — deferred sine die, and not a gap waiting to be closed** (§5;
+  owner's ruling of 2026-09-12). ng calls nothing in a cluster of flankless repeats on purpose. If
+  one were ever built, the first thing worth having is not calls: it is at least depth per position,
+  so a bundle's bases stop being a hole in the depth profile the windowed statistics slide over.
+  Whether it would also emit observed sequences is open, and the reason to doubt it is the same
+  reason the slot is empty — no clean flank means no trustworthy anchor. Routed to
+  `NoLoci { NotImplemented }` with its bases counted, so the ground it covers stays visible in every
+  run report. **Home if it ever lands: `src/ng/locus_generation/`**, beside the STR generator.
 - **The cohort merge** — many samples' loci into cohort loci, by overlap (§3). **Home: the cohort
   spec.** Its one requirement on this step is that a locus carry enough to be projected onto a wider
   span.

@@ -932,7 +932,9 @@ impl GeneratorSet {
     }
 
     /// What the **`SsrBundle`** generator has counted, if one is filled and counts
-    /// anything. `None` today: the slot has no generator (spec §10).
+    /// anything. **Always `None`, and not because nobody got to it**: ng calls nothing in a
+    /// cluster of flankless repeats by decision, and a generator for that ground is deferred
+    /// sine die (`locus_generation.md` §5).
     pub fn ssr_bundle_counts(&self) -> Option<GeneratorCounts<'_>> {
         self.ssr_bundle.counts()
     }
