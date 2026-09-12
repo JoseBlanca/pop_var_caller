@@ -32,7 +32,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
-use crate::pileup_record::ChainId;
+use crate::ng::types::ChainId;
 
 use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::types::GenomeRegion;

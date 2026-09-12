@@ -255,7 +255,7 @@ pub struct PspSummarySource<'a> {
     ///
     /// **A span addresses the whole file, not this buffer** — the same rule `kept` follows, and
     /// for the same reason: the merge holds spans across draws.
-    live_ids: Vec<crate::pileup_record::ChainId>,
+    live_ids: Vec<crate::ng::types::ChainId>,
     /// How many entries have been dropped from the front of `live_ids`.
     live_released: u64,
     /// What this sample contributed, for the run report.

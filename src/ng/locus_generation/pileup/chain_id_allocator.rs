@@ -45,7 +45,7 @@ use std::sync::Arc;
 
 use ahash::AHashMap;
 
-use crate::pileup_record::ChainId;
+use crate::ng::types::ChainId;
 
 use super::PreparedRead;
 use super::errors::WalkerError;

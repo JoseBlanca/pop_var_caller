@@ -40,9 +40,9 @@ use super::{MaxCohortLocusSpan, MinAltReads};
 use crate::ng::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, WitnessedLocusPositions,
 };
+use crate::ng::types::ChainId;
 use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::ng::window_coverage::WindowCoverage;
-use crate::pileup_record::ChainId;
 
 /// The byte a gathered reference position starts as, so that a position no member
 /// covered is a loud failure rather than a `NUL` inside every allele.

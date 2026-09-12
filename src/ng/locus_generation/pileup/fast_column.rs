@@ -75,8 +75,8 @@ use crate::ng::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
 };
 use crate::ng::ref_seq::RefSeq;
+use crate::ng::types::ChainId;
 use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId, SummedLogError};
-use crate::pileup_record::ChainId;
 
 use super::active_read_set::ActiveReads;
 use super::cigar_cursor::BaseShown;

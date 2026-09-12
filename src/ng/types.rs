@@ -228,6 +228,27 @@ impl fmt::Display for ReadGroupId {
     }
 }
 
+/// Which run of a read through the genome an observation came from — the identifier that
+/// says *these two alleles, at two different positions, were seen on the same DNA fragment*.
+///
+/// A **phase chain** is one read, or one mate pair, followed across every position it
+/// covers. Two observations sharing a chain id sit on the same physical molecule, so they
+/// are on the same chromosome copy; two with different ids say nothing about each other.
+/// That is what makes phasing possible at all, and it is why the id has to survive from the
+/// walk that mints it, through the psp that stores it, into the merge that reads it — three
+/// modules, which is why the name lives here with the rest of the shared vocabulary rather
+/// than in the allocator that hands them out.
+///
+/// Minted by [`ChainIdAllocator`](crate::ng::locus_generation::pileup), one per read as the
+/// walk first meets it, and unique only within one sample's walk: two samples' chain 7 are
+/// unrelated.
+///
+/// **A plain `u64`, not a newtype**, which is the one place ng's id vocabulary is not a
+/// newtype. It is production's spelling, kept while the two callers had to exchange these
+/// numbers; `u64` gives about 1.8 × 10¹⁹ values per sample, past any read count, and the
+/// allocator catches overflow rather than wrapping.
+pub type ChainId = u64;
+
 /// Which set of read groups ran together — an index into the run's declared batching.
 ///
 /// A **sequencing batch** is the group of libraries that were sequenced beside one another,

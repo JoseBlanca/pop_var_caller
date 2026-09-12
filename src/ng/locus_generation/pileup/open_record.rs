@@ -19,8 +19,8 @@
 use smallvec::SmallVec;
 
 use crate::ng::ref_seq::RefSeq;
+use crate::ng::types::ChainId;
 use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
-use crate::pileup_record::ChainId;
 
 use super::DEFAULT_MAX_RECORD_SPAN;
 use super::active_read_set::ActiveReads;

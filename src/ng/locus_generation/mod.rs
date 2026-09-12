@@ -27,10 +27,10 @@ use crate::ng::read::input::{IngestError, SampleReads};
 use crate::ng::ref_seq::RefSeqError;
 use crate::ng::region_typing::segment_criteria::{Motif, SsrSegment};
 use crate::ng::region_typing::{RegionKind, TypedRegion};
+use crate::ng::types::ChainId;
 use crate::ng::types::{
     ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId, SummedLogError,
 };
-use crate::pileup_record::ChainId;
 
 /// One sample's locus: the stretch of genome it covers, and what that sample's reads
 /// showed there.

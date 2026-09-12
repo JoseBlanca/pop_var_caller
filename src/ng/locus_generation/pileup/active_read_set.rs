@@ -20,7 +20,7 @@ use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
-use crate::pileup_record::ChainId;
+use crate::ng::types::ChainId;
 
 use super::PreparedRead;
 use super::chain_id_allocator::ChainIdAllocator;

@@ -50,7 +50,7 @@
 use std::cmp::Ordering;
 
 use crate::ng::psp::record::{FieldReader, RecordDecodeError, entries_to_reserve, put_varint};
-use crate::pileup_record::ChainId;
+use crate::ng::types::ChainId;
 
 // The names this module's faults are reported under, so a message says which field it was.
 const DEPARTURE_COUNT: &str = "chain-id departure count";

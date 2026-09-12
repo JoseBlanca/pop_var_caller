@@ -2129,8 +2129,8 @@ mod tests {
         DEFAULT_BLOCK_BYTE_CEILING, DEFAULT_GENOMIC_BLOCK_SIZE_BP, DEFAULT_LOOK_BACK_WINDOW_LOG,
     };
     use crate::ng::psp::record::{OffsetBase, RecordLayout, decode_record, record_fields};
+    use crate::ng::types::ChainId;
     use crate::ng::types::{ReadGroupId, SummedLogError};
-    use crate::pileup_record::ChainId;
     use proptest::prelude::*;
 
     /// The grid these tests cut on. **A fixture of its own and not the shipped default**: every

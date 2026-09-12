@@ -172,7 +172,7 @@ fn assert_same_evidence_up_to_chain_renaming(
     what: &str,
 ) {
     use crate::ng::locus_generation::SampleLocusObservations;
-    use crate::pileup_record::ChainId;
+    use crate::ng::types::ChainId;
     use std::collections::HashMap;
 
     let without_ids = |locus: &SampleLocusObservations| {
@@ -236,8 +236,8 @@ mod chain_renaming_tests {
     use crate::ng::locus_generation::{
         LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
     };
+    use crate::ng::types::ChainId;
     use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
-    use crate::pileup_record::ChainId;
 
     /// One position covered by one read, named `chain`.
     fn locus_named(position: u64, chain: ChainId) -> SampleLocusObservations {

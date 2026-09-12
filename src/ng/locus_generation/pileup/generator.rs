@@ -1449,8 +1449,8 @@ mod tests {
     };
     use crate::ng::read::{AlignedRead, PreparedRead, ReadPrepError};
     use crate::ng::ref_seq::InMemoryRefSeq;
+    use crate::ng::types::ChainId;
     use crate::ng::types::ContigId;
-    use crate::pileup_record::ChainId;
 
     /// Production's `--no-baq` build, re-attached to ng's read type — the read
     /// preparation these tests want out of the way, so what they measure is the
