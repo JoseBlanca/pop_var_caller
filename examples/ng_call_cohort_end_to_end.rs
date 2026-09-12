@@ -166,18 +166,17 @@ use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::GenomeRegions;
 use pop_var_caller::ng::region_typing::DEFAULT_MAX_STR_LEN;
+use pop_var_caller::ng::region_typing::GenomeRegions;
 use pop_var_caller::ng::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
-use pop_var_caller::pop_var_caller_exp::run_ground::{self, GroundRequest, RepeatRouting};
 use pop_var_caller::ng::run::cohort_merge::timing;
 use pop_var_caller::ng::run::{
-    AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, CalledCohort,
-    MergeParameters,
+    AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, CalledCohort, MergeParameters,
 };
 use pop_var_caller::ng::types::{Genotype, Ploidy};
+use pop_var_caller::pop_var_caller_exp::run_ground::{self, GroundRequest, RepeatRouting};
 use pop_var_caller::regions::ContigBounds;
 
 /// How many alignment files a run takes when nothing says otherwise.

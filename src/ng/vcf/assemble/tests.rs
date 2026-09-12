@@ -348,10 +348,7 @@ fn evidence_over_three(samples: Vec<SampleEvidenceForOutput>) -> LocusEvidenceFo
 #[test]
 fn an_alternative_no_sample_calls_is_dropped_and_its_reads_become_unexplained() {
     let locus = locus_over_three(vec![called(&[0, 2], 40.0)], vec![1.0, 0.0, 1.0]);
-    let record = assemble_record(
-        &locus,
-        evidence_over_three(vec![sample(vec![9, 3, 8], 0)]),
-    );
+    let record = assemble_record(&locus, evidence_over_three(vec![sample(vec![9, 3, 8], 0)]));
 
     assert_eq!(
         record
@@ -386,7 +383,11 @@ fn an_alternative_one_sample_calls_survives_for_the_whole_cohort() {
         evidence_over_three(vec![sample(vec![9, 8, 0], 0), sample(vec![7, 0, 6], 0)]),
     );
 
-    assert_eq!(record.alleles().len(), 3, "both alternatives are called somewhere");
+    assert_eq!(
+        record.alleles().len(),
+        3,
+        "both alternatives are called somewhere"
+    );
     assert_eq!(
         sample_columns(&record, diploid()),
         "0/1:40:17:9,8,0\t0/2:35:13:7,0,6",
@@ -401,14 +402,8 @@ fn an_alternative_one_sample_calls_survives_for_the_whole_cohort() {
 /// is to say the caller could not decide — so it does not fire at all.
 #[test]
 fn a_record_every_sample_no_calls_keeps_its_alternatives() {
-    let locus = locus_over_three(
-        vec![called_saying(&[0, 0], 3.0, true)],
-        vec![2.0, 0.0, 0.0],
-    );
-    let record = assemble_record(
-        &locus,
-        evidence_over_three(vec![sample(vec![0, 0, 0], 4)]),
-    );
+    let locus = locus_over_three(vec![called_saying(&[0, 0], 3.0, true)], vec![2.0, 0.0, 0.0]);
+    let record = assemble_record(&locus, evidence_over_three(vec![sample(vec![0, 0, 0], 4)]));
 
     assert_eq!(
         record.alleles().len(),

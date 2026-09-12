@@ -78,9 +78,7 @@ use pop_var_caller::ng::run::{
     MergeParameters, OpenPspCohort, PspVariantCaller, StoredCohortInputs,
 };
 use pop_var_caller::ng::types::Ploidy;
-use pop_var_caller::pop_var_caller_exp::run_ground::{
-    self, GroundRequest, RepeatRouting,
-};
+use pop_var_caller::pop_var_caller_exp::run_ground::{self, GroundRequest, RepeatRouting};
 
 /// How many psps a run takes when nothing says otherwise.
 ///

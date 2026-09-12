@@ -2201,7 +2201,6 @@ fn fold_read_into_record(
     folded_reads.store_at(slot, active.read_id, state);
 }
 
-
 /// Re-place every **live** read already folded into this record against the window it now
 /// has. Called from `widen`, immediately after `alleles[0]` grows — see the comment there
 /// for why the contributor-only re-fold production does is not enough.

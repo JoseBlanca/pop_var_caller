@@ -213,7 +213,6 @@ impl Case {
             || self.config.max_indel_column_depth < default.max_indel_column_depth
     }
 
-
     fn fasta(&self) -> MockFasta {
         MockFasta::with_chromosomes(
             &self

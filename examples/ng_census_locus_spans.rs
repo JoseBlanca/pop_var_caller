@@ -193,7 +193,8 @@ fn run(
         "so of every kept position the census sees carrying non-reference evidence, \
          {} of {} have that evidence dropped",
         kept_under_a_wide_record_with_a_disagreeing_read,
-        kept_under_one_base_with_a_disagreeing_read + kept_under_a_wide_record_with_a_disagreeing_read,
+        kept_under_one_base_with_a_disagreeing_read
+            + kept_under_a_wide_record_with_a_disagreeing_read,
     );
     Ok(())
 }
