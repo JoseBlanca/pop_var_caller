@@ -52,7 +52,7 @@
 //! are spread across the population, which [`seed_generic`](super::seed_generic) reads. Neither
 //! is ever called just "the spectrum" (`population_diversity.md` §2).
 
-use crate::genetics::MIN_ALT_CONCENTRATION;
+use crate::ng::genetics::MIN_ALT_CONCENTRATION;
 use crate::ng::parameter_estimation::joint::stratum_fits::LengthSpectrum;
 
 use super::Concentration;

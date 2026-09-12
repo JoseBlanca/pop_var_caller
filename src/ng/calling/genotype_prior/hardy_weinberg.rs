@@ -50,9 +50,9 @@
 //! that: it checks the row against a closed form evaluated at exactly the frequencies handed in,
 //! which any hidden pseudocount would break.
 
-use crate::genetics::PROBABILITY_FLOOR;
 use crate::ng::calling::genotype_prior::dirichlet_multinomial::log_sum_exp_2;
 use crate::ng::calling::genotype_prior::{GenotypePriorModel, PriorRow};
+use crate::ng::genetics::PROBABILITY_FLOOR;
 use crate::ng::types::{InbreedingF, LogProb};
 
 /// The comparator implementation of the step-8 seam: Hardy–Weinberg at the plug-in frequency
@@ -181,9 +181,9 @@ fn fill_plug_in_mixture_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::genetics::wright_genotype_log_priors;
     use crate::ng::calling::GenotypeTable;
     use crate::ng::calling::genotype_prior::{Concentration, MarginalizedDirichletPrior};
+    use crate::ng::genetics::wright_genotype_log_priors;
     use crate::ng::types::Ploidy;
 
     /// tomato1's fitted expected heterozygosity, spec §4.1 — the diversity every thin-input
@@ -563,13 +563,13 @@ mod tests {
     fn the_frequency_floor_keeps_every_entry_finite_at_the_edges() {
         // A fully invariant cohort's seed: the alternative concentration floored, the reference
         // ordinary. Reachable, and the row must be finite and ordered.
-        let invariant = [1.0, crate::genetics::MIN_ALT_CONCENTRATION];
+        let invariant = [1.0, crate::ng::genetics::MIN_ALT_CONCENTRATION];
         let row = row_under(&PlugInWrightPrior, &invariant, 2, 0.0);
         assert!(row[0] > row[1] && row[1] > row[2], "{row:?}");
 
         // A total large enough that the floor is what keeps the row finite. `Concentration::new`
         // accepts this: both entries are finite and at or above `MIN_ALT_CONCENTRATION`.
-        let absurd = [1e300, crate::genetics::MIN_ALT_CONCENTRATION];
+        let absurd = [1e300, crate::ng::genetics::MIN_ALT_CONCENTRATION];
         let row = row_under(&PlugInWrightPrior, &absurd, 2, 0.0);
         // `row_under` already refuses a non-finite entry, so reaching here is the assertion; what
         // this adds is that the floored entries are the floor's own value and not something the

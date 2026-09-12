@@ -6,10 +6,10 @@
 //! branch for two copies that are the same one counted twice, is the inbreeding mixture that
 //! plan step B2 wraps around it (`doc/devel/ng/spec/calling_priors.md` §3.2).
 
-use crate::genetics::PROBABILITY_FLOOR;
-#[cfg(test)]
-use crate::genetics::lgamma;
 use crate::ng::calling::genotype_prior::{GenotypePriorModel, PriorRow};
+use crate::ng::genetics::PROBABILITY_FLOOR;
+#[cfg(test)]
+use crate::ng::genetics::lgamma;
 use crate::ng::types::{InbreedingF, LogProb};
 
 /// Fill the row with each genotype's **random-mating** log-prior — what the genotype would be
@@ -884,8 +884,9 @@ mod tests {
                         let concentration =
                             concentration_of(allele_count, reference, alternative_total);
                         let total: f64 = concentration.iter().sum();
-                        let shared_constant = crate::genetics::lgamma(total + f64::from(copies))
-                            - crate::genetics::lgamma(total);
+                        let shared_constant =
+                            crate::ng::genetics::lgamma(total + f64::from(copies))
+                                - crate::ng::genetics::lgamma(total);
                         let row = mixed_row_for(
                             copies,
                             allele_count,
@@ -930,7 +931,7 @@ mod tests {
                 let row = mixed_row_for(2, 2, reference, alternative, inbreeding);
 
                 let (hom_reference, heterozygote, hom_alternative) =
-                    crate::genetics::wright_genotype_log_priors(frequency, inbreeding);
+                    crate::ng::genetics::wright_genotype_log_priors(frequency, inbreeding);
 
                 // Row order is the VCF one: 0/0, 0/1, 1/1.
                 let ours_het_over_hom_ref = row[1].get() - row[0].get();
@@ -972,7 +973,7 @@ mod tests {
         let frequency = 0.2;
         let inbreeding = 0.5;
         let (hom_reference, heterozygote, _) =
-            crate::genetics::wright_genotype_log_priors(frequency, inbreeding);
+            crate::ng::genetics::wright_genotype_log_priors(frequency, inbreeding);
         let wright_het_over_hom_ref = heterozygote - hom_reference;
 
         // Seeded with a measured bound rather than `f64::INFINITY`, so the first total carries an

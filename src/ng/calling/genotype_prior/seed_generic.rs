@@ -24,7 +24,7 @@
 //! **The panel's size appears nowhere in this module.** That is the point of the change: the two
 //! numbers are statements about a population.
 
-use crate::genetics::MIN_ALT_CONCENTRATION;
+use crate::ng::genetics::MIN_ALT_CONCENTRATION;
 use crate::ng::types::{ExpectedAlternativeFrequency, ExpectedHeterozygosity};
 
 use super::{Concentration, SeedRegime, SpectrumSeed};
@@ -326,7 +326,7 @@ pub fn seed_from_population_moments(
 /// polymorphism independent of how many alleles it happens to carry** — a triallelic site is not
 /// twice as polymorphic as a biallelic one merely for holding a third allele
 /// (`doc/devel/ng/spec/calling_priors.md` §4). That is the shape of production's
-/// `alpha_from_diversity` ([`genetics.rs`](crate::genetics::alpha_from_diversity)), ported with
+/// `alpha_from_diversity` ([`genetics.rs`](crate::ng::genetics::alpha_from_diversity)), ported with
 /// the fitted pair as input instead of `α_ref = 1` and `α_alt = θ` hard-coded, and filling a
 /// caller's buffer instead of returning a fresh `Vec` per locus.
 ///
@@ -431,7 +431,7 @@ pub fn fill_locus_concentration<'a>(
 #[cfg(test)]
 mod seed_tests {
     use super::*;
-    use crate::genetics::lgamma;
+    use crate::ng::genetics::lgamma;
     use crate::ng::parameter_estimation::joint::fit::FrequencyDensity;
 
     /// **What a concentration pair says about how often a diploid drawn from it is

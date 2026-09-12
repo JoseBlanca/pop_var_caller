@@ -27,8 +27,8 @@
 //! emission threshold that reads it all belong to the output stream's own document (§3.4), which
 //! is unwritten. This module supplies the arithmetic and nothing else.
 
-use crate::genetics::lgamma;
 use crate::ng::calling::quality::ArtifactTestCounts;
+use crate::ng::genetics::lgamma;
 use crate::ng::types::Phred;
 
 /// **How much the site quality each artifact test took away.**

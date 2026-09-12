@@ -80,6 +80,7 @@ mod scanner_parity;
 
 pub mod alignment;
 pub mod calling;
+pub mod genetics;
 pub mod locus_generation;
 pub mod paralog;
 pub mod parameter_estimation;

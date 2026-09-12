@@ -33,10 +33,10 @@
 
 pub mod artifact_correction;
 
-use crate::genetics::{MIN_ALT_CONCENTRATION, lgamma};
 use crate::ng::calling::genotype_prior::SpectrumSeed;
 use crate::ng::calling::genotype_prior::dirichlet_multinomial::log_sum_exp_2;
 use crate::ng::calling::{GenotypeIdx, GenotypeTableView};
+use crate::ng::genetics::{MIN_ALT_CONCENTRATION, lgamma};
 use crate::ng::types::{AlleleId, DomainError, LogProb, Phred};
 
 /// The most a per-sample genotype quality is allowed to reach.

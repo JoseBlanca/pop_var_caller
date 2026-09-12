@@ -89,7 +89,7 @@ pub use hardy_weinberg::PlugInWrightPrior;
 pub use seed_generic::{VariantClass, fill_locus_concentration, seed_from_population_moments};
 pub use seed_ssr::{fill_seed_share_per_candidate, fill_ssr_seed};
 
-use crate::genetics::MIN_ALT_CONCENTRATION;
+use crate::ng::genetics::MIN_ALT_CONCENTRATION;
 use crate::ng::types::InbreedingF;
 
 /// The five types whose invariants are checked at construction, in a module of their own so
@@ -801,7 +801,7 @@ pub fn fill_sample_concentration(
 /// entry may be positive and the row does not sum to anything in particular (spec §3.1).
 ///
 /// **Every entry is finite. A genotype the prior rules out carries a very negative number, never
-/// `−∞`** — the probability is floored at [`PROBABILITY_FLOOR`](crate::genetics::PROBABILITY_FLOOR)
+/// `−∞`** — the probability is floored at [`PROBABILITY_FLOOR`](crate::ng::genetics::PROBABILITY_FLOOR)
 /// before the logarithm, so it lands near `−691` and the row always has a maximum the loop can
 /// subtract (spec §8, arch §1.1).
 ///

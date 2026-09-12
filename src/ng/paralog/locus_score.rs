@@ -60,7 +60,7 @@
 //! nothing had exercised the copied precompute there.
 
 use super::ParalogModelParams;
-use crate::genetics::{
+use crate::ng::genetics::{
     PROBABILITY_FLOOR, linear_grid_point, sfs_grid_point, wright_genotype_log_priors,
 };
 

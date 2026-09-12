@@ -141,7 +141,7 @@ and makes ng's version the only one.
 - ✅ **B1** · *Depends:* — · *Source:* `src/ng/mod.rs` freeze paragraph ("copies the code").
 - ✅ **B2** · *Depends:* — · *Source:* `psp_file_format.md` (the LEB128 varint the record and index encodings use).
 - ✅ **B3** · *Depends:* — · *Source:* `psp_chain_id_encoding.md`.
-- ☐ **B4** · *Depends:* — · *Source:* `calling_priors.md` (the constants' meaning).
+- ✅ **B4** · *Depends:* — · *Source:* `calling_priors.md` (the constants' meaning).
 - ☐ **B5** · *Depends:* — · *Source:* `module_layout.md` (`read/` owns the decoded read).
 - ☐ **B6** · *Depends:* B5 (`CigarOp`) · *Source:* `alignment.md` (algorithm 1a, the structured left-aligner).
 - ☐ **B7** · **own commit, do not bundle** · *Depends:* B5 · *Source:* `read_preparation.md` §1.

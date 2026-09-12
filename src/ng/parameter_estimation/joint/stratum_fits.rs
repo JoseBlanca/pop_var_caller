@@ -331,7 +331,7 @@ pub struct FittedLengthSpectrum {
 /// at all.**
 ///
 /// One chromosome's worth of belief, spread flat over whatever lengths the locus offers — the
-/// same quantity and the same reading [`ALPHA_REF`](crate::genetics::ALPHA_REF) carries on the
+/// same quantity and the same reading [`ALPHA_REF`](crate::ng::genetics::ALPHA_REF) carries on the
 /// ordinary-site path, where it is the *count of chromosomes* a neutral seed gives the reference
 /// allele. At one chromosome the reads move the prior from the first read onward, which is the
 /// honest posture for a number with no measurement behind it.
