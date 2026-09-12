@@ -1,7 +1,7 @@
 //! Algorithm 1a — the **structured left-alignment pass**, an [`AlignmentNormalizer`].
 //!
 //! This is a **port, not a re-implementation**: it wraps production's
-//! [`left_align_indels`](crate::pileup::walker::indel_norm) (itself a port of GATK's
+//! [`left_align_indels`](super::indel_norm) (itself a port of GATK's
 //! `AlignmentUtils.leftAlignIndels`), and supplies only the trait wrapper. Nothing about
 //! left-alignment is re-derived here — the plan's "reuse over rewrite" principle (arch §5, plan
 //! step B1).
@@ -53,7 +53,7 @@ use super::{Alignment, AlignmentNormalizer};
 // same kind of debt already recorded on `Alignment` for the `CigarOp` reuse — lifting `indel_norm`
 // to a caller-agnostic peer is a production edit, and production is frozen; the port-back of this
 // module is the moment to do it. `left_align_indels` is `pub(crate)`, so nothing leaks publicly.
-use crate::pileup::walker::indel_norm::left_align_indels;
+use super::indel_norm::left_align_indels;
 
 /// Algorithm 1a: left-align every indel in an alignment to its leftmost equivalent position with
 /// **one structured pass**, by wrapping production's [`left_align_indels`].

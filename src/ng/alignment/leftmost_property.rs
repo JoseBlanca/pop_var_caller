@@ -11,7 +11,7 @@
 //!
 //! # Why this is not a call into `normalize_alleles`
 //!
-//! Production's [`normalize_alleles`](crate::norm_seqs::normalize_alleles) *is* a left-aligner,
+//! Production's [`normalize_alleles`](crate::ng::alignment::norm_seqs::normalize_alleles) *is* a left-aligner,
 //! and algorithm 1a will port it. If this checker were built on it, it would grade 1a against
 //! itself — an oracle has to be independent of the thing it grades. So the shift test here is
 //! written straight from the definition: it looks at each indel and the aligned column

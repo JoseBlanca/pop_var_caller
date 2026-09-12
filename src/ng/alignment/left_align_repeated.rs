@@ -325,7 +325,7 @@ fn canonicalize(ops: &[CigarOp]) -> Vec<CigarOp> {
 }
 
 // The three helpers below (and `canonicalize` above) duplicate private twins in production's
-// `pileup::walker::indel_norm` — `op_len`, `with_len`, `is_indel`, `build_cigar`. They are copied,
+// `ng::alignment::indel_norm` — `op_len`, `with_len`, `is_indel`, `build_cigar`. They are copied,
 // not imported, because those are `fn`-private and production is frozen (arch §5): a rival must not
 // lean on what it competes with. Debt: the four move together, and the port-back of this module is
 // where they unify.

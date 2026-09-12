@@ -29,10 +29,12 @@
 #[cfg(test)]
 mod delimit_parity;
 pub mod emission;
+pub mod indel_norm;
 pub mod left_align_repeated;
 pub mod left_align_structured;
 #[cfg(test)]
 mod leftmost_property;
+pub(crate) mod norm_seqs;
 pub mod ssr_anchor_firm;
 pub mod ssr_anchor_robust;
 pub mod ssr_best_path_flat_gap;
