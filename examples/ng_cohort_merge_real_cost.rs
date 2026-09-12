@@ -133,7 +133,7 @@ use pop_var_caller::ng::region_typing::{RegionKind, TypedRegion};
 use pop_var_caller::ng::run::cohort_merge::build::RegionOutcome;
 use pop_var_caller::ng::run::cohort_merge::close::{LocusCloser, Verdict};
 use pop_var_caller::ng::run::cohort_merge::observation_cache::{
-    ObservationCache, ObservationSource, building_regions_of,
+    MergeReference, ObservationCache, ObservationSource, ReferenceUnreadable, building_regions_of,
 };
 use pop_var_caller::ng::run::cohort_merge::parallel::merge_cohort_in_parallel;
 use pop_var_caller::ng::run::cohort_merge::serial::{
@@ -153,6 +153,18 @@ use reference_check_knob::reference_check_from_env;
 /// This probe's sources cannot fail: the observations are already in memory.
 #[derive(Debug)]
 struct Never;
+
+/// The cache reads the reference itself now, and can refuse; this probe's cannot usefully.
+///
+/// Every cache below is handed a `WindowedRefSeq` over the same FASTA the walk just read every
+/// one of these observations out of, so a refusal here would mean the file changed under a
+/// running probe. The conversion exists because `merge_cohort_through_cache` asks the source's
+/// error type to absorb the cache's own, not because this probe has a failure to absorb.
+impl From<ReferenceUnreadable> for Never {
+    fn from(unreadable: ReferenceUnreadable) -> Self {
+        unreachable!("the reference the walk just read became unreadable: {unreadable}")
+    }
+}
 
 /// How many repeats each merge time is the median of.
 const REPEATS: usize = 5;
@@ -647,6 +659,27 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
         reference_check_from_env()?,
     )?;
     let contigs = info.contig_list();
+    // **The merge reads the reference itself now**, so every cache below is handed one. Built
+    // here rather than inside each timed span: opening a FASTA and reading its index is
+    // setup, and this probe's whole point is what the merge costs once it is running.
+    //
+    // A fresh accessor per cache, never a shared one — an accessor two readers slide in two
+    // directions is what `WindowedRefSeq`'s own documentation records at 14.6 GB of peak
+    // resident memory. The `.fai` behind them is shared, which is the cheap half.
+    let reference_contigs = Arc::new(contigs.clone());
+    let reference_index = WindowedRefSeq::read_index(fasta)?;
+    let merge_reference = {
+        let fasta = fasta.to_path_buf();
+        let contigs = reference_contigs.clone();
+        let index = reference_index.clone();
+        move || -> Box<dyn MergeReference + Send + Sync> {
+            Box::new(WindowedRefSeq::with_shared_index(
+                fasta.clone(),
+                contigs.clone(),
+                index.clone(),
+            ))
+        }
+    };
     let analysed = analysed_regions_of(
         bed,
         |name| {
@@ -752,7 +785,11 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                 Verdict::TooQuiet => quiet += 1,
                 Verdict::Failed => failed += 1,
             }
-            for member in &locus.members {
+            // **A locus's members are index ranges now, not records**, so they are resolved
+            // against the cohort before their observations can be read. This is a counting
+            // pass and not on any clock, so the vector `resolved_against` allocates per locus
+            // costs nothing that is reported.
+            for member in &locus.resolved_against(&all).members {
                 compared_total += member
                     .observations
                     .iter()
@@ -841,7 +878,10 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                     std::num::NonZeroUsize::new(regions).expect("non-zero"),
                 );
                 // Minted, which is what a run does today; the check is about the schedule.
-                let mut cache = ObservationCache::over(sources_over(&cohort, Supply::Minted));
+                let mut cache = ObservationCache::over(
+                    sources_over(&cohort, Supply::Minted),
+                    merge_reference(),
+                );
                 let merged = merge_cohort_in_parallel(
                     &analysed,
                     &mut cache,
@@ -963,7 +1003,10 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                             drop(merged);
                         }
                         "cache" => {
-                            let mut cache = ObservationCache::over(sources_over(&cohort, supply));
+                            let mut cache = ObservationCache::over(
+                                sources_over(&cohort, supply),
+                                merge_reference(),
+                            );
                             let blocks_at = allocated_blocks();
                             let bytes_at = allocated_bytes();
                             let live_at = live_blocks();
@@ -985,7 +1028,10 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                             loci += merged.cohort_observations.len();
                         }
                         "parallel" => {
-                            let mut cache = ObservationCache::over(sources_over(&cohort, supply));
+                            let mut cache = ObservationCache::over(
+                                sources_over(&cohort, supply),
+                                merge_reference(),
+                            );
                             let blocks_at = allocated_blocks();
                             let bytes_at = allocated_bytes();
                             let live_at = live_blocks();
@@ -1099,7 +1145,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
         let width =
             CohortLocusBuilderRegionsLen(std::num::NonZeroU32::new(bases).expect("non-zero"));
         let (median, fastest, slowest) = timed(
-            || ObservationCache::over(sources_over(&cohort, supply)),
+            || ObservationCache::over(sources_over(&cohort, supply), merge_reference()),
             |mut cache| {
                 std::hint::black_box(
                     &merge_cohort_through_cache(
@@ -1125,7 +1171,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
             );
             let (median, fastest, slowest) = pool.install(|| {
                 timed(
-                    || ObservationCache::over(sources_over(&cohort, supply)),
+                    || ObservationCache::over(sources_over(&cohort, supply), merge_reference()),
                     |mut cache| {
                         std::hint::black_box(
                             &merge_cohort_in_parallel(

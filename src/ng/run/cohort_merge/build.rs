@@ -831,9 +831,9 @@ pub struct RegionOutcome {
 /// against 131.6). It short-circuits at the first sample that has a record in range, which on
 /// that data is the first sample. So it is kept for the input the module also has to serve —
 /// one sample, or coverage thin enough to leave gaps — and costs the dense case nothing.
-pub fn build_region<'a>(
+pub fn build_region(
     builder_region: GenomeRegion,
-    observations_per_sample: &[&'a [SampleLocusObservations]],
+    observations_per_sample: &[&[SampleLocusObservations]],
     max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_reads: MinAltReads,
 ) -> RegionOutcome {
@@ -905,9 +905,9 @@ pub fn build_region_windowed<'a, E>(
 /// not settle is emitted with `converged` false rather than refused. A sink that could fail
 /// would need the failure threaded through the merge's every driver for a case that does not
 /// arise.
-pub fn build_region_handing_over<'a>(
+pub fn build_region_handing_over(
     builder_region: GenomeRegion,
-    observations_per_sample: &[&'a [SampleLocusObservations]],
+    observations_per_sample: &[&[SampleLocusObservations]],
     max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_reads: MinAltReads,
     keep: &mut impl FnMut(CohortObservation),

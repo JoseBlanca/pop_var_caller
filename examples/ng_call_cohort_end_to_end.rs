@@ -488,7 +488,8 @@ fn run(
             // back in the answer (`records_written`), so nothing here keeps one.
             let written = caller.call_cohort_handing_each_record_over(
                 &genotyper,
-                &mut |_record| -> Result<(), std::io::Error> { Ok(()) },
+                // The window coverage travels beside the record now; this arm wants neither.
+                &mut |_record, _windows| -> Result<(), std::io::Error> { Ok(()) },
             )?;
             let calling_seconds = calling.elapsed().as_secs_f64();
             #[cfg(feature = "dhat-heap")]

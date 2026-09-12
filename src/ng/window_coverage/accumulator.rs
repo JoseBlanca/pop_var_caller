@@ -677,8 +677,12 @@ mod tests {
         }
         // Median 12, range 10, 40 bins → width 3.0; depth 12 → column 4; GC 1.0 → the last of
         // two GC bins, 1; each row holds 41 cells, so the cell is 1 × 41 + 4.
+        //
+        // The row and column are named rather than folded into the one number `45`, so a
+        // failure says which cell was expected to hold the count.
+        let (gc_bin, depth_bin, cells_per_row) = (1, 4, 41);
         assert_eq!(histogram.depth_bin_width, 3.0);
-        assert_eq!(histogram.counts[1 * 41 + 4], 20);
+        assert_eq!(histogram.counts[gc_bin * cells_per_row + depth_bin], 20);
         assert_eq!(histogram.counts.iter().sum::<u32>(), 20);
     }
 
@@ -1039,13 +1043,7 @@ mod tests {
     #[test]
     fn every_folded_window_lands_in_exactly_one_histogram_cell() {
         let stream: Vec<(u64, u8, u32)> = (1..=25u64)
-            .map(|p| {
-                (
-                    p,
-                    [b'A', b'G', b'C', b'T', b'N'][(p % 5) as usize],
-                    (p * 3) as u32,
-                )
-            })
+            .map(|p| (p, b"AGCTN"[(p % 5) as usize], (p * 3) as u32))
             .collect();
         let (_, histogram) = run_sliding(sliding_config(), 0, &stream);
         assert_eq!(
@@ -1558,7 +1556,7 @@ mod tests {
     /// `a_held_back_window_lands_in_the_same_cell_as_one_folded_immediately` is what covers it.
     #[test]
     fn a_stream_gives_one_histogram_whether_its_windows_are_folded_early_or_late() {
-        let bases = [b'G', b'A', b'C', b'T', b'G', b'G', b'A', b'T'];
+        let bases = *b"GACTGGAT";
         let stream: Vec<(u64, u8, u32)> = (1..=8u64)
             .map(|p| (p, bases[(p - 1) as usize], 12u32))
             .collect();
@@ -1759,8 +1757,15 @@ mod tests {
         // GC 1.0 → the last of two GC bins, 1; each row holds depth_bins + 1 = 5 cells. The two
         // held back at depth 10 land at 10 / 2.5 = 4, the overflow column, and the live 40 with
         // them.
-        assert_eq!(histogram.counts[1 * 5 + 4], 3);
-        assert_eq!(histogram.counts[1 * 5 + 1], 1, "the live window at depth 3");
+        // Named for the reason the sibling test above gives: a bare `9` and `6` would not say
+        // which GC row and which depth column a failure landed in.
+        let (gc_bin, cells_per_row) = (1, 5);
+        assert_eq!(histogram.counts[gc_bin * cells_per_row + 4], 3);
+        assert_eq!(
+            histogram.counts[gc_bin * cells_per_row + 1],
+            1,
+            "the live window at depth 3"
+        );
         assert_eq!(histogram.counts.iter().sum::<u32>(), 4);
         assert_eq!(histogram.windows_folded, 4);
     }

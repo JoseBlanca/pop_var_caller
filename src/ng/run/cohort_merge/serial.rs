@@ -66,9 +66,9 @@ use crate::ng::types::{GenomePosition, GenomeRegion};
 /// regions**, which are few and long; short building regions are what the observation cache
 /// exists to make affordable (milestone D), and that is where the parallel arrangement will
 /// get them.
-pub fn merge_cohort_serially<'a>(
+pub fn merge_cohort_serially(
     analysed: &[GenomeRegion],
-    observations_per_sample: &[&'a [SampleLocusObservations]],
+    observations_per_sample: &[&[SampleLocusObservations]],
     max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_reads: MinAltReads,
 ) -> RegionOutcome {

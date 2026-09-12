@@ -106,6 +106,7 @@ use pop_var_caller::ng::region_typing::{RegionKind, TypedRegion, TypedRegionConf
 use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
 use pop_var_caller::ng::run::cohort_merge::build::CohortObservation;
 use pop_var_caller::ng::run::cohort_merge::close::{LocusCloser, Verdict};
+use pop_var_caller::ng::run::cohort_merge::observation_cache::WindowedCohort;
 use pop_var_caller::ng::run::cohort_merge::{
     MaxCohortLocusSpan, MinAltObs, MinAltReadShare, MinAltReads,
 };
@@ -242,20 +243,40 @@ fn table_reads_of(observation: &CohortObservation) -> u64 {
         .sum()
 }
 
+/// The cohort as the assembler wants it: records in hand, no summaries and no windows.
+///
+/// **A run over stored files has the other shape** — summaries without the records, and each
+/// sample's finalised coverage windows beside them — which is why [`CohortObservation::over`]
+/// takes a [`WindowedCohort`] rather than the slices. This probe walks alignment files, so it
+/// has the records and nothing else, and every locus it assembles gets an absent window.
+fn records_only<'a>(all: &'a [&'a [SampleLocusObservations]]) -> WindowedCohort<'a> {
+    WindowedCohort {
+        observations: Some(all),
+        summaries: None,
+        finalised_windows: None,
+    }
+}
+
 /// **The same locus with only the first `samples` samples of the run covering it**, its
 /// allele table untouched — how the bar's answer moves as a cohort grows, with the table
 /// held fixed so that nothing but the number of samples asked can move it.
 fn restrict_to_first_samples(observation: &CohortObservation, samples: usize) -> CohortObservation {
+    // **`window_coverage` is parallel to `per_sample`, entry for entry**, so the two are
+    // filtered together and not one after the other: dropping a sample from one list and not
+    // from the other would hand every surviving sample its neighbour's read depth.
+    let (per_sample, window_coverage) = observation
+        .per_sample
+        .iter()
+        .zip(&observation.window_coverage)
+        .filter(|(sample, _)| sample.sample < samples)
+        .map(|(sample, window)| (sample.clone(), *window))
+        .unzip();
     CohortObservation {
         region: observation.region,
         alleles: observation.alleles.clone(),
-        per_sample: observation
-            .per_sample
-            .iter()
-            .filter(|sample| sample.sample < samples)
-            .cloned()
-            .collect(),
+        per_sample,
         kind: observation.kind.clone(),
+        window_coverage,
     }
 }
 
@@ -754,7 +775,11 @@ fn run_tracts(
         Err(_) => None,
     };
     for locus in LocusCloser::over(&all, MaxCohortLocusSpan::DEFAULT, MinAltReads::DEFAULT) {
-        let motif = match &locus.kind {
+        // **A closed locus holds index ranges now, and its kind comes off a member's record**,
+        // so it is resolved against the cohort before either can be read. Resolved once here
+        // and reused below, rather than twice.
+        let resolved = locus.resolved_against(&all);
+        let motif = match &resolved.kind {
             LocusKind::Ssr(detail) => Some(detail.motif),
             _ => None,
         };
@@ -775,7 +800,7 @@ fn run_tracts(
             }
             continue;
         }
-        let observation = CohortObservation::over(&locus);
+        let observation = CohortObservation::over(&resolved, &records_only(&all));
         // A bundle is a repeat cluster with no clean flanks and nothing builds one today, but the
         // kind exists and `select_ssr` refuses it by design — so it is counted here rather than
         // handed over. `Generic` cannot appear: every region this arm walks came from the
@@ -953,7 +978,9 @@ fn run(
     let built: Vec<CohortObservation> =
         LocusCloser::over(&all, MaxCohortLocusSpan::DEFAULT, keep_rule)
             .filter(|locus| locus.verdict == Verdict::Build)
-            .map(|locus| CohortObservation::over(&locus))
+            .map(|locus| {
+                CohortObservation::over(&locus.resolved_against(&all), &records_only(&all))
+            })
             .collect();
     println!("# loci the merge built: {}", built.len());
 

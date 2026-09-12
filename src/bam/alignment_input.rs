@@ -1318,7 +1318,11 @@ mod tests {
 
         // A fixed generator rather than a crate: the sequence is the same on every machine
         // and every run, so a disagreement can be reproduced from the seed alone.
-        let mut state: u64 = 0x2026_09_08_u64;
+        // The seed is the date this fixture was written, 2026-09-08, so that it reads as a
+        // seed rather than as a number somebody tuned. Grouped in fours because that is what
+        // `clippy::unusual_byte_groupings` accepts, which still leaves the year and the
+        // month-day legible either side of the underscore.
+        let mut state: u64 = 0x2026_0908_u64;
         let mut next = move || {
             state ^= state << 13;
             state ^= state >> 7;

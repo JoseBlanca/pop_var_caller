@@ -2984,7 +2984,7 @@ mod tests {
             4,
         );
         assert!(
-            one_class_at_a_time.iter().any(|value| *value == 1.0),
+            one_class_at_a_time.contains(&1.0),
             "the fixture must fit at least one class, or the comparison is between two empties"
         );
         the_same_bits(

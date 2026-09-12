@@ -427,7 +427,11 @@ mod tests {
             stats.records, loci,
             "every locus handed over is in the file"
         );
-        PspWriter::append(&path).expect("a sealed file reopens");
+        // The claim is that the call succeeds — a sealed file can be reopened for appending —
+        // so the writer itself is not wanted. Bound and dropped rather than discarded with
+        // `let _ =`, which would also swallow a writer this test had meant to use.
+        let reopened = PspWriter::append(&path).expect("a sealed file reopens");
+        drop(reopened);
     }
 
     /// **The bytes handed to `finish` are the bytes the sealed file carries.**

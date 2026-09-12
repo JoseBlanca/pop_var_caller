@@ -122,7 +122,7 @@ fn the_transcription_matches_production_on_streams_neither_test_was_written_for(
                 // record a position, but the accumulator's order rule is non-decreasing, and
                 // a repeat is the boundary of it.
                 position += stream.next_below(9);
-                let alphabet = [b'A', b'C', b'G', b'T', b'N', b'g', b'c', b'n'];
+                let alphabet = *b"ACGTNgcn";
                 let reference_base = alphabet[stream.next_below(alphabet.len() as u64) as usize];
                 let depth = stream.next_below(40) as u32;
                 // Production takes a `u32` position; ng's is a `u64`. Converting rather than

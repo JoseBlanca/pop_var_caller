@@ -95,14 +95,13 @@ fn peak_rss_mib() -> f64 {
         return f64::NAN;
     };
     for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmHWM:") {
-            if let Some(kib) = rest
+        if let Some(rest) = line.strip_prefix("VmHWM:")
+            && let Some(kib) = rest
                 .split_whitespace()
                 .next()
                 .and_then(|it| it.parse::<f64>().ok())
-            {
-                return kib / 1024.0;
-            }
+        {
+            return kib / 1024.0;
         }
     }
     f64::NAN
