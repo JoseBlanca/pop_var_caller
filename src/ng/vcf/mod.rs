@@ -1,5 +1,5 @@
-//! **The one file a run writes** — SNPs, indels and repeat tracts in a single VCF, where
-//! production writes two (`doc/devel/ng/spec/vcf_output.md`).
+//! **The one file a run writes** — SNPs, indels and repeat tracts in a single VCF, where the
+//! deleted production caller wrote two (`doc/devel/ng/spec/vcf_output.md`).
 //!
 //! This module holds what a record *is* once its locus is gone, and — as later steps land —
 //! how it becomes bytes. It computes no quality, fits no frequency and decides nothing about

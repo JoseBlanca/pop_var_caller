@@ -594,10 +594,17 @@ Measured on the tree at `9746cee6`, by `pop_var_caller::<production module>` in 
   - `result_large_err`'s `allow` stays: its comment named production's error types, but removing it
     fires the lint 152 times in ng. The comment now says so, and three dependency comments that
     pointed at deleted files (`crossbeam-channel`, `libm`, `wide`) name ng's users.
-- ☐ **D7. `src/ng/mod.rs`'s header** — the freeze paragraph and the oracle inventory describe a
+- ✅ **D7. `src/ng/mod.rs`'s header** — the freeze paragraph and the oracle inventory describe a
   world that no longer exists; rewrite to say what ng *is*, with a dated line saying production
   was deleted here. `src/lib.rs`'s crate doc likewise.
-  *Depends:* D2–D4.
+  *Depends:* D2–D4. Done 2026-09-13. ng's header is now a map of its modules in the order a run
+  reaches them, and one paragraph saying what "production" means in the comments that still use
+  the word, where its answers were frozen (`d9e7b076`) and the last commit that holds its source
+  whole (`74e424ea`). The freeze rules, the visibility exceptions and the oracle-finding grep are
+  gone, except one that still binds — nothing depends on `trf-mod` — which the header keeps. The
+  crate doc says what the crate is and points at that paragraph; its pointer to a pipeline spec
+  under `ia/`, which no longer exists, is gone. Three present-tense descriptions of production's
+  two stages in `regions.rs` and one in `ng/vcf/mod.rs` are put in the past.
 
 > **Checkpoint D: one caller, same calls.** `cargo build`, `clippy --all-targets -D warnings`,
 > `test`, `doc -D warnings`, `bench --no-run` all green; `cargo test` total equals A1's minus

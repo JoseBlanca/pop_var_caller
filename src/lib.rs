@@ -1,8 +1,10 @@
 //! # `pop_var_caller`
 //!
-//! Multi-sample variant caller — per-sample → cohort merge pipeline.
-//! See `ia/specs/calling_pipeline_architecture.md` for the stage
-//! breakdown.
+//! A population variant caller: SNPs, indels and repeat tracts, from one sample to a cohort, from
+//! aligned reads to one VCF. The caller is [`ng`]; its command line is [`pop_var_caller_exp`].
+//! [`bam`], [`fasta`] and [`regions`] read its inputs — alignment files, the reference and region
+//! lists. They were first written for an older caller, deleted on 2026-09-13; [`ng`]'s header says
+//! what that means for the comments in this tree.
 //!
 //! ## Feature flags
 //!
@@ -11,8 +13,8 @@
 //!   not for production builds.
 //! - `alloc-mimalloc` — the `mimalloc` global allocator, **on by
 //!   default**: faster and smaller than the system allocator on this
-//!   crate's workloads, measured on both the production `var-calling`
-//!   path and the ng cohort merge. `--no-default-features` opts out.
+//!   crate's workloads, measured on the ng cohort merge (and before
+//!   that on the deleted production caller's `var-calling` path). `--no-default-features` opts out.
 //!   Cannot hold the `#[global_allocator]` slot alongside `dhat-heap`,
 //!   which wins it — so a heap profile is
 //!   `--no-default-features --features dhat-heap`.
