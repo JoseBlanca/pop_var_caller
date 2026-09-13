@@ -1124,8 +1124,8 @@ pub(crate) fn digest_of(field: &str, spelled: &str) -> Result<[u8; 16], BrokenRu
         return Err(wrong());
     }
     let mut digest = [0u8; 16];
-    for (byte, pair) in digest.iter_mut().zip(spelled.as_bytes().chunks_exact(2)) {
-        let pair = std::str::from_utf8(pair).map_err(|_| wrong())?;
+    for (byte, pair) in digest.iter_mut().zip(spelled.as_bytes().as_chunks::<2>().0) {
+        let pair = std::str::from_utf8(pair.as_slice()).map_err(|_| wrong())?;
         *byte = u8::from_str_radix(pair, 16).map_err(|_| wrong())?;
     }
     Ok(digest)

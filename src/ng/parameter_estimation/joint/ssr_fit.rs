@@ -2040,16 +2040,14 @@ fn ln_tract(
             // addition changes the answer and Rust does not allow it uninvited. Splitting it here
             // says which association we want, in the source, where it is reproducible.
             let mut lanes = wide::f64x4::ZERO;
-            let mut weights = independent.chunks_exact(4);
-            let mut values = row[..width].chunks_exact(4);
-            for (weight, value) in weights.by_ref().zip(values.by_ref()) {
-                let weight = wide::f64x4::new([weight[0], weight[1], weight[2], weight[3]]);
-                let value = wide::f64x4::new([value[0], value[1], value[2], value[3]]);
-                lanes += weight * value;
+            let (weights, weights_left) = independent.as_chunks::<4>();
+            let (values, values_left) = row[..width].as_chunks::<4>();
+            for (weight, value) in weights.iter().zip(values) {
+                lanes += wide::f64x4::new(*weight) * wide::f64x4::new(*value);
             }
             let parts = lanes.to_array();
             let mut at_random = (parts[0] + parts[1]) + (parts[2] + parts[3]);
-            for (weight, value) in weights.remainder().iter().zip(values.remainder()) {
+            for (weight, value) in weights_left.iter().zip(values_left) {
                 at_random += weight * value;
             }
             // **Only the homozygous slots**: the by-descent prior is zero at every heterozygous

@@ -577,14 +577,23 @@ Measured on the tree at `9746cee6`, by `pop_var_caller::<production module>` in 
   them (`giab/src/{run_ng_per_sample,ng_missed_sites_probe}.sh`, `ssr_hg002/src/run_ng_coverages.sh`,
   and the hard-coded path in `ssr_hg002/src/sweep_tract_parameters.sh` and
   `lib/run_tract_qual_experiment.sh`).
-- ☐ **D6. `Cargo.toml` and the gates.** Remove the two clippy `allow`s and fix what fires in ng
-  (`as_chunks::<N>()` for `chunks_exact`, per the comment that asked for it); `precommit-check.sh`
-  step 1 (production must not import ng) and B9's mirror both become vacuous — replace them with
-  nothing, and empty the step's oracle exemption list, whose files no longer import production. The
-  dev-dependency `serial_test` lost its only user at D1 (`cohort_cli_integration.rs`) and goes too,
-  as do `anyhow`, `bytemuck` and `noodles-vcf`, which no remaining source file names after D2–D4.
-  *Depends:* D2–D4. *Source:* `Cargo.toml` `[lints.clippy]` comment ("Drop both `allow`s when
-  production is retired").
+- ✅ **D6. `Cargo.toml` and the gates.** *Depends:* D2–D4. *Source:* `Cargo.toml` `[lints.clippy]`
+  comment ("Drop both `allow`s when production is retired"). Done 2026-09-13.
+  - The two clippy `allow`s and their comment are gone. `manual_slice_fill` fires nowhere;
+    `chunks_exact_to_as_chunks` fired four times in three places, now `as_chunks::<N>()`: the
+    four-lane dot product in `parameter_estimation/joint/ssr_fit.rs` (two calls; full chunks and
+    the leftover tail pair up exactly as before) and two 32-character hex decoders, `psp/header.rs` and
+    `read/input/open_bam.rs`, whose length is checked first so there is no tail.
+  - `precommit-check.sh` loses step 1 (production must not import ng) and step 1b (shipped ng must
+    not import production), with the 1b oracle exemption list; the remaining five steps are
+    renumbered. **What replaces them:** step 1 protected a production tree that no longer exists,
+    and every module step 1b named is gone, so the compiler now rejects any import 1b would have
+    caught.
+  - Four dependencies nothing names are removed: `anyhow`, `bytemuck`, `noodles-vcf`, and the
+    dev-dependency `serial_test`. `Cargo.lock` loses the eight packages only they pulled in.
+  - `result_large_err`'s `allow` stays: its comment named production's error types, but removing it
+    fires the lint 152 times in ng. The comment now says so, and three dependency comments that
+    pointed at deleted files (`crossbeam-channel`, `libm`, `wide`) name ng's users.
 - ☐ **D7. `src/ng/mod.rs`'s header** — the freeze paragraph and the oracle inventory describe a
   world that no longer exists; rewrite to say what ng *is*, with a dated line saying production
   was deleted here. `src/lib.rs`'s crate doc likewise.

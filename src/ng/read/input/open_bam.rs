@@ -829,7 +829,7 @@ fn decode_md5_hex(hex: &[u8]) -> Option<[u8; 16]> {
     let hex: &[u8; 32] = hex.try_into().ok()?;
 
     let mut digest = [0u8; 16];
-    for (byte, pair) in digest.iter_mut().zip(hex.chunks_exact(2)) {
+    for (byte, pair) in digest.iter_mut().zip(hex.as_chunks::<2>().0) {
         *byte = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
     Some(digest)
