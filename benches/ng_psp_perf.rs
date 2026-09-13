@@ -42,7 +42,8 @@
 //! at 83 % of identifiers on the human sample and 91 % on tomato, and which is the case the
 //! reader's live-set merge cannot take its cheap path on. What they do **not** reproduce is a real
 //! sample's variety of witnesses, read groups and locus kinds; for record-for-record fidelity
-//! against a real corpus, see `examples/ng_psp_parity.rs`.
+//! against a real corpus, `examples/ng_psp_parity.rs` was the harness until promotion step C14 deleted
+//! it with production; its result is in `doc/devel/reports/implementations/ng_psp_h1_2026-08-28.md`.
 //!
 //! # Two things these numbers are not
 //!

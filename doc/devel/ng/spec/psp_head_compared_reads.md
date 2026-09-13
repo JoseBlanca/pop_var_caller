@@ -181,7 +181,7 @@ zero.
 | head plumbing | `RECORD_HEAD_FIELDS`, `RecordHead`, `read_record_head`, `RecordLayout::from_manifest` ([`record.rs`](../../../../src/ng/psp/record.rs)) | one entry, one field, one read, one declaration — no new mechanism |
 | the consistency check | `decode_the_body_of` ([`record.rs:1992`](../../../../src/ng/psp/record.rs)) | the denominator joins the existing head-vs-body comparison |
 | the kind codec | `put_kind` / `read_locus_kind` ([`record.rs:1093,1351`](../../../../src/ng/psp/record.rs)) | moved to the head's encode/decode; the tract detail's body fields unchanged |
-| the cost probes | [`examples/ng_psp_head_encoding.rs`](../../../../examples/ng_psp_head_encoding.rs), [`examples/ng_psp_skip_value.rs`](../../../../examples/ng_psp_skip_value.rs) | extended with the sixth field and rerun on the same corpora |
+| the cost probes | `examples/ng_psp_head_encoding.rs` (deleted at promotion step C14), [`examples/ng_psp_skip_value.rs`](../../../../examples/ng_psp_skip_value.rs) | extended with the sixth field and rerun on the same corpora |
 
 ## 8. Open questions
 

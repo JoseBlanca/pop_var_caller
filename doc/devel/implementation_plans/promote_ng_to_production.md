@@ -310,10 +310,26 @@ carries a header line naming the production commit that wrote it.
     fraction (`window_coverage/testdata/production_windows_by_seed.tsv`, 200 rows), and ng's stream
     is reduced the same way. **Given up:** a divergence still fails at its seed, but no longer names
     the window or the field. Changing one digest fails the test.
-- ☐ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
+- ✅ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
   `ng_psp_head_encoding.rs` (`test = true` in `Cargo.toml`), `paralog_score_parity.rs` — are
   deleted with a line each in the report saying which document already holds their result.
   *Depends:* — · *Source:* PROJECT_STATUS entries for each.
+  Done 2026-09-13. Where each result lives:
+  - `ng_psp_against_production.rs` — the reader's speed against production's `.psp` (1.8× on 62
+    samples): `psp_file_format.md` §5.4 and `reports/reviews/perf_ng-psp_2026-08-30.md`.
+  - `ng_psp_parity.rs` — ng's psp round-trips production's records and agrees with an independent
+    encoder: `reports/implementations/ng_psp_h1_2026-08-28.md` and `…_h4_2026-08-30.md`.
+  - `ng_psp_head_encoding.rs` — variable-length against fixed-width record heads after compression:
+    `psp_file_format.md` §4.3 and `reports/implementations/ng_psp_head_h2_2026-09-04.md`,
+    `…_h3_2026-09-04.md`.
+  - `paralog_score_parity.rs` — the hidden-duplication filter's statistics on tomato2 data:
+    `reports/implementations/paralog_r1_data_validation_2026-07-01.md`. Its Python companion
+    `benchmarks/tomato2/src/paralog_score_parity.py` stays with the benchmark's other scripts
+    (plan §8, benchmark drivers are D6's).
+  The two with `test = true` lose their `[[example]]` entries in `Cargo.toml` — and with them the
+  36 tests those two harnesses carried on their own mechanics (4 and 32), which is why the suite
+  drops by 36 here — and four doc
+  references that pointed at them as live tools now say they were deleted.
 
 #### The rest of C, found by sweeping for oracles outside the thirteen dedicated files
 

@@ -30,7 +30,7 @@
 //! # ⚠ What this corpus cannot tell you
 //!
 //! **⚠ That caveat is spent, and the figure below is not.** It read: *ng cannot yet write a psp
-//! of its own, so these stores are built from a production `.psp` by `examples/ng_psp_parity.rs`,
+//! of its own, so these stores are built from a production `.psp` by `examples/ng_psp_parity.rs` (deleted at promotion step C14),
 //! which names about 3.4 % of the reads ng will name, so the ratio here is an upper bound.* ng
 //! writes its own stores now (`pop_var_caller_exp generate-psps`), so a store from that command
 //! carries ng's own chain ids and the reading is no longer a bound — **on the store it was taken
