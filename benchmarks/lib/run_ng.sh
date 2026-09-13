@@ -32,7 +32,7 @@
 # run_freebayes.sh does, so a benchmark's fairness setting applies to ng too.
 #
 # Env overrides (see common.sh for the rest):
-#   NG_BIN        binary (default: auto-detect container then host build)
+#   NG_BIN        binary (default: the newer runnable of the container and host builds)
 #   NG_CATALOG    repeat catalog (default: <reference>.repeats.parquet)
 #   NG_PARAMETERS fitted parameters file; without it the run is --defaults
 #   REFERENCE     FASTA (.fai sibling required)
@@ -51,30 +51,6 @@ bench_load_config "$CONFIG"
 EXTRA_ARGS=${EXTRA_ARGS:-}
 OUT_DIR="$OUT_ROOT/ng"
 NG_CATALOG="${NG_CATALOG:-${REFERENCE}.repeats.parquet}"
-
-# --- binary discovery ------------------------------------------------------
-# Mirrors bench_discover_ours_bin: container build first (canonical per
-# CLAUDE.md), then host build, verifying each actually runs here — a Linux ELF
-# under target-container/ is +x but unusable on a macOS host.
-discover_ng_bin() {
-    if [[ -z "${NG_BIN:-}" ]]; then
-        local candidate
-        for candidate in \
-            "$PROJECT_ROOT/target-container/release/pop_var_caller_exp" \
-            "$PROJECT_ROOT/target/release/pop_var_caller_exp"; do
-            if [[ -x "$candidate" ]] && "$candidate" --version >/dev/null 2>&1; then
-                NG_BIN="$candidate"
-                break
-            fi
-        done
-    fi
-    if [[ -z "${NG_BIN:-}" || ! -x "${NG_BIN}" ]]; then
-        echo "no pop_var_caller_exp binary found." >&2
-        echo "build with: ./scripts/dev.sh cargo build --release --bin pop_var_caller_exp" >&2
-        echo "or set NG_BIN=<path>" >&2
-        exit 1
-    fi
-}
 
 ensure_catalog() {
     [[ -f "$NG_CATALOG" ]] && return 0
@@ -210,7 +186,7 @@ run_cohort() {
     echo "samples in vcf: $(bench_sample_count "$out_vcf")"
 }
 
-discover_ng_bin
+bench_discover_ng_bin
 
 case "$MODE" in
     single) run_single ;;

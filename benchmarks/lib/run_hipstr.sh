@@ -7,8 +7,9 @@
 # HipSTR genotypes a fixed set of STR regions (its --regions BED). To compare
 # apples-to-apples with our caller, that BED is *derived from our own
 # ssr-catalog* (catalog_to_hipstr_bed.py), so both tools genotype the same
-# loci. The catalog must already exist — build it (and our .ssr.psp / VCF)
-# first with run_ours_ssr.sh; this runner errors if it's missing.
+# loci. The catalog must already exist: production's STR caller wrote it under
+# results/ours/, and its builder was deleted in promotion Milestone D, so this
+# runner errors if it's missing.
 #
 # single : one CRAM            -> single-sample bgzipped str-vcf.
 # cohort : all CRAMs (one cmd) -> joint bgzipped str-vcf. HipSTR has no
@@ -72,7 +73,8 @@ ensure_regions() {
     fi
     [[ -s "$CATALOG" ]] || {
         echo "ssr-catalog not found: $CATALOG" >&2
-        echo "build it first: benchmarks/lib/run_ours_ssr.sh $CONFIG $MODE" >&2
+        echo "its builder (run_ours_ssr.sh) was deleted with the production STR caller;" >&2
+        echo "set CATALOG to an existing catalog" >&2
         exit 1
     }
     mkdir -p "$OUT_DIR"

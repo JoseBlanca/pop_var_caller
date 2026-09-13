@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Benchmark config: ssr_tomato1 — SSR (microsatellite) genotyping on the same
 # ~63-sample S. lycopersicum cohort as the SNP `tomato1` bench. Parallel to the
-# SNP benches, but the pipeline is three stages:
-#   ssr-catalog (trf-mod, once) -> ssr-pileup (per sample) -> ssr-call (cohort).
-# Run it with benchmarks/lib/run_ours_ssr.sh. Every value is env-overridable.
+# SNP benches. The production STR caller that this config first drove, and its
+# runner `run_ours_ssr.sh`, were deleted in promotion Milestone D; the config
+# stays for `run_hipstr.sh`, and its results stay under results/ours/. Every
+# value is env-overridable.
 #
-# NOTE: the SSR caller has no region flag (like the SNP caller); the cohort
-# CRAMs are pre-sliced to an SSR-targeted region set. ssr-catalog scans the
-# WHOLE reference, so catalog loci outside the slice simply no-call.
+# NOTE: the cohort CRAMs are pre-sliced to an SSR-targeted region set.
 #
 # BED here is NOT a caller flag — it is the slice the CRAMs were cut to
 # (ssr_regions.bed: ~15k catalog SSRs ±500 bp, ch00 excluded; built by
@@ -36,15 +35,5 @@ SINGLE_CRAM="${SINGLE_CRAM:-}"
 PLOIDY="${PLOIDY:-2}"
 THREADS="${THREADS:-4}"
 
-# --- SSR-specific knobs ---
-# Path to trf-mod (ssr-catalog finds it on PATH by default; set to override).
-TRF_MOD_PATH="${TRF_MOD_PATH:-}"
-# Appended to `ssr-catalog` (e.g. --min-purity / --min-score / --flank-bp).
-CATALOG_EXTRA="${CATALOG_EXTRA:-}"
-# Appended to each `ssr-pileup`. `--build-index-if-missing` rebuilds a missing
-# .crai in place rather than erroring on an un-indexed input.
-PILEUP_EXTRA="${PILEUP_EXTRA:---build-index-if-missing}"
-# Appended to `ssr-call`.
-CALL_EXTRA="${CALL_EXTRA:-}"
-# CATALOG defaults to $OUT_ROOT/ours/$BENCH_NAME.ssr.catalog inside the runner
+# CATALOG defaults to $OUT_ROOT/ours/$BENCH_NAME.ssr.catalog inside run_hipstr.sh
 # (OUT_ROOT is resolved after this file is sourced); set CATALOG to override.

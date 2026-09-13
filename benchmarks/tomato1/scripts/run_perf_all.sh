@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Run the full tomato1 performance benchmark suite that feeds
-# perf_dashboard.py (the four-section pop_var_caller vs freebayes vs GATK
-# comparison).
+# Run the tomato1 performance benchmark suite that feeds perf_dashboard.py
+# (freebayes and GATK). The production caller's scripts (`perf_ours_*`) were
+# deleted with that caller in promotion Milestone D; the dashboard still reads
+# the results they wrote.
 #
 # Split by where each tool lives:
-#   - HOST  (uv run --script): pop_var_caller + freebayes.
+#   - HOST  (uv run --script): freebayes.
 #   - CONTAINER (scripts/dev.sh, reference genome bind-mounted): GATK,
 #     which isn't on the host. The genome lives outside the project tree,
 #     so it's mounted via DEV_EXTRA_MOUNT.
 #
 # Sections and the scripts that feed them:
-#   §1 one intermediate, 4 threads:      perf_ours_psp_4t, perf_gatk_gvcf_4t
-#   §2 scaling CRAM→VCF:                 perf_ours_pileup_build + perf_ours_joint,
-#                                        perf_freebayes
-#   §3 scaling intermediate→VCF:         perf_ours_joint, perf_gatk_joint
+#   §1 one intermediate, 4 threads:      perf_gatk_gvcf_4t
+#   §2 scaling CRAM→VCF:                 perf_freebayes
+#   §3 scaling intermediate→VCF:         perf_gatk_joint
 #
 # NOTE: GATK direct multi-sample HaplotypeCaller (CRAM→VCF) is deliberately
 # NOT measured — its wall is super-linear in N (re-assembly over pooled deep
@@ -21,7 +21,6 @@
 # is the GVCF flow (§4, perf_gatk_joint).
 #
 # §4 assumes the per-sample intermediates already exist:
-#   - ours: results/ours/cohort/psp/*.psp
 #   - GATK: results/gatk/cohort/gvcf/*.g.vcf.gz
 # build them first with the cohort drivers if missing (see the warnings
 # this script prints).
@@ -30,14 +29,12 @@
 #   benchmarks/tomato1/scripts/run_perf_all.sh [all|host|container]
 #
 #   all        run everything (default)
-#   host       only the host scripts (pop_var_caller + freebayes)
+#   host       only the host scripts (freebayes)
 #   container  only the GATK scripts (inside scripts/dev.sh)
 #
 # Env:
 #   GENOMES            dir bind-mounted into the container for GATK's
 #                      reference (default: $HOME/genomes)
-#   POP_VAR_CALLER_BIN pop_var_caller release binary (default:
-#                      <project>/target/release/pop_var_caller)
 #   SIZES, THREADS, REFERENCE, GATK_BIN, JAVA_HEAP, ... forwarded to the
 #                      per-caller scripts (see each script's header).
 
@@ -54,15 +51,7 @@ case "$MODE" in
     *) echo "usage: $0 [all|host|container]" >&2; exit 2 ;;
 esac
 
-# Host scripts; pileup_build runs first because it (cold-)builds the
-# canonical cohort PSPs that perf_ours_joint then reads.
-#   §2 ours CRAM→VCF = pileup_build makespan(N) + ours_joint wall(N)
-#       (build the PSPs ONCE, reuse for every N — a sample's .psp is
-#        cohort-size-independent, so no re-calling per N).
 HOST_SCRIPTS=(
-    perf_ours_pileup_build.py    # §2 stage-1 (builds canonical PSPs once, timed)
-    perf_ours_psp_4t.py          # §1
-    perf_ours_joint.py           # §2 stage-2 + §3 (psp→vcf per N)
     perf_freebayes.py            # §2
 )
 CONTAINER_SCRIPTS=(
@@ -101,8 +90,6 @@ run_container() {
 }
 
 # --- Pre-flight warning for §4 GATK (GVCFs must be pre-built) -----------
-# The ours PSPs are (re)built by perf_ours_pileup_build.py at the top of
-# the host run, so only the GATK GVCFs need to pre-exist.
 gvcf_dir="$TEST_DIR/results/gatk/cohort/gvcf"
 if [[ "$MODE" != host ]] && ! compgen -G "$gvcf_dir/*.g.vcf.gz" >/dev/null; then
     echo "WARNING: no *.g.vcf.gz in $gvcf_dir — §4 perf_gatk_joint will have no inputs." >&2

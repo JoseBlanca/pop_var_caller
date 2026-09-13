@@ -554,13 +554,29 @@ Measured on the tree at `9746cee6`, by `pop_var_caller::<production module>` in 
   (by module at D1: `var_calling` 410, `ssr` 368, `psp` 202, `pileup` 181, `pop_var_caller` 119,
   `sample_summary` 75, `paralog` 66, `vcf` 58, `genetics` 22, `baq` 11, `norm_seqs` 3,
   `pileup_record` 2 — 1,517 listed, of which 4 were ignored) and `bam`'s `worker_reader_is_send`.
-- ☐ **D5. Scripts and benchmark drivers.** `scripts/{cohort_memory_vs_samples,psp_block_window_sweep}.sh`
-  drive the deleted binary — deleted; `scripts/attribute_peak.py` lists production's source
-  directories in its heap-attribution table — trimmed. Under `benchmarks/`, the 15 `run_ours_*` /
-  `perf_ours_*` / `build_psp` drivers that call `pop_var_caller var-calling` — deleted; their
-  *results* and reports stay, since they are the record ng was measured against.
-  `benchmarks/lib/common.sh`'s binary discovery moves to the one binary.
-  *Depends:* D1.
+- ✅ **D5. Scripts and benchmark drivers.** *Depends:* D1. Done 2026-09-13, from a file-by-file
+  inventory of `scripts/` and `benchmarks/` for the deleted binary's subcommands, its examples and
+  its binary name (`tmp/promote_ng/d5_inventory.md` in the worktree). **Deleted, 16:**
+  `scripts/{cohort_memory_vs_samples,psp_block_window_sweep}.sh`; `benchmarks/lib/run_ours{,_ssr}.sh`;
+  `giab/src/run_ours_per_sample.sh`; `ssr_hg002/src/{run_ours_coverages,run_prior_comparison}.sh`
+  and `add_m5_to_bams.sh`, whose only purpose was a header the deleted `ssr-pileup` required;
+  `tomato1/scripts/perf_ours_{joint,joint_mem_scaling,joint_threads,pileup_build,psp_4t}.py`;
+  `tomato2/src/{build_psp,build_window_coverage,run_varcalling}.sh`. The plan said 15 drivers under
+  `benchmarks/`; there were 13 that call the binary, plus that header script. **Trimmed, 10:** the
+  shared runners lose only their production branch — `run_depth_sweep.sh` its `ours` phase,
+  `run_perf_all.sh` its `perf_ours_*` entries, `build_cohort_intermediates.sh` its `psp` mode,
+  `perf_common.py` two directories only those scripts read; `human_genome_bottle` and
+  `ssr_tomato1`'s configs lose the knobs only the deleted runners read; `run_hipstr.sh` and
+  `ssr_hg002/README.txt` stop pointing at deleted scripts; `attribute_peak.py`'s table keeps ng's row
+  and gains `bam`/`fasta`, and says Milestone E must split the `ng` row; `ssr_error_signals_dashboard.py`
+  stops telling the reader to run a deleted example. **`common.sh`'s binary
+  discovery** now finds `pop_var_caller_exp` into `NG_BIN`, the variable `run_ng.sh` already
+  documents, and takes the newer runnable build of the two trees, as `CLAUDE.md` asks; `run_ng.sh`
+  calls it instead of its own copy. Results and reports stay. Three scripts outside `common.sh`
+  carry their own copy of the discovery and still name `pop_var_caller_exp`; E's rename has to reach
+  them (`giab/src/{run_ng_per_sample,ng_missed_sites_probe}.sh`, `ssr_hg002/src/run_ng_coverages.sh`,
+  and the hard-coded path in `ssr_hg002/src/sweep_tract_parameters.sh` and
+  `lib/run_tract_qual_experiment.sh`).
 - ☐ **D6. `Cargo.toml` and the gates.** Remove the two clippy `allow`s and fix what fires in ng
   (`as_chunks::<N>()` for `chunks_exact`, per the comment that asked for it); `precommit-check.sh`
   step 1 (production must not import ng) and B9's mirror both become vacuous — replace them with

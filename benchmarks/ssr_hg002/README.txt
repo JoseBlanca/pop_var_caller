@@ -115,11 +115,13 @@ NOT pick the tomato default regime (that stays a cohort question).
 RESULTS + SCRIPTS (added 2026-07-09)
 ------------------------------------
 Pipeline scripts in src/ (run from ssr_hg002/):
-  add_m5_to_bams.sh          add @SQ M5 to each BAM header (pileup requires it)
+  add_m5_to_bams.sh          add @SQ M5 to each BAM header (pileup required it)
+                             [deleted in promotion Milestone D, with the caller]
   restrict_catalog_to_bed.py catalog -> catalog/HG002_Tier_restricted.cat (13,272 loci;
                              needed so the ssr-call burn-in samples COVERED loci)
   subsample_coverages.sh     the 5x..50x ladder from the 300x source
   run_ours_coverages.sh      ssr-pileup + ssr-call per coverage -> results/ours/{psp,vcf}
+                             [deleted in promotion Milestone D; its results stay]
   run_hipstr_coverages.sh    HipSTR per coverage -> results/hipstr/ (--use-unpaired
                              --min-reads 5: the BAM slice orphaned mates; see script)
   run_freebayes_coverages.sh freebayes per coverage -> results/freebayes/ (general

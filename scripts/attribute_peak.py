@@ -14,7 +14,7 @@ string attributes every site in the program to whatever example was profiled.
 Matching the file path against the project's own module directories is what
 separates them.
 
-    uv run tmp/milestone_z/attribute_peak.py <dhat-heap.json> [--top N]
+    uv run scripts/attribute_peak.py <dhat-heap.json> [--top N]
 """
 
 import argparse
@@ -28,41 +28,22 @@ FRAME = re.compile(r"^0x[0-9a-f]+:\s*(?P<symbol>.*?)\s*\((?P<path>[^()]*):\d+(?:
 
 # Which module a project source path belongs to, and what to call it. Order
 # matters: the first pattern that matches the path wins.
-# Some files hold more than one thing. `pipeline.rs` carries both the per-sample
-# summary parse and the reference fetch behind the low-complexity filter, and
-# they belong to different groups, so these symbol rules are checked against the
-# whole stack before any path rule. Getting this wrong once made a reference-span
-# copy look like sample metadata and inverted the comparison between two runs.
-SYMBOLS = [
-    ("reference / dust", ("sdust_mask_for_span", "dust_mask", "ReferenceFetcher",
-                          "fetch_span", "sdust")),
-    ("per-sample metadata", ("SampleSummary", "decompress_metadata", "from_toml_bytes")),
-]
-
+#
+# The rows for production's per-sample file, calling engine and pileup — and the
+# symbol rules that split `var_calling/pipeline.rs` between two of them — went
+# with that code in promotion Milestone D. **When ng's modules move from
+# `src/ng/` up to `src/` (promotion Milestone E), the `ng` row below matches
+# nothing and has to be split by module.**
 MODULES = [
-    # Per-sample metadata: the .psp's own metadata section, decompressed and
-    # parsed once per open file and held for the whole run. It scales with the
-    # cohort size and with nothing else — not the block size, not the record
-    # encoding, not the depth.
-    ("per-sample metadata", ("src/psp/metadata", "src/psp/header")),
-    ("block decode", ("src/psp/",)),
-    ("per-sample columns", ("src/var_calling/sample_reader", "src/var_calling/from_psp/")),
-    ("cohort chunk", ("src/var_calling/cohort_chunk", "src/var_calling/chunk",
-                      "src/var_calling/producer")),
-    ("merger", ("src/var_calling/per_group_merger", "src/var_calling/variant_caller",
-                "src/var_calling/variant_grouping")),
-    ("posterior", ("src/var_calling/posterior_engine",)),
-    ("dust", ("src/var_calling/dust_filter",)),
-    ("pileup record", ("src/pileup_record", "src/pileup/")),
     ("ng", ("src/ng/",)),
+    ("read input", ("src/bam/", "src/fasta/")),
 ]
 
 # Paths that are the project's own source rather than a dependency's. dhat
 # reports std as `src/vec/mod.rs`, `alloc/src/...` — indistinguishable from ours
 # by prefix alone, so ours are named explicitly.
 PROJECT_DIRS = (
-    "src/psp/", "src/var_calling/", "src/ng/", "src/pileup/", "src/pileup_record",
-    "src/pop_var_caller/", "src/reference", "src/region", "src/vcf",
+    "src/ng/", "src/bam/", "src/fasta/", "src/pop_var_caller_exp/", "src/region",
 )
 
 
@@ -79,16 +60,6 @@ def is_project(path):
 
 def classify(frames):
     """Return (group, representative frame) for one allocation site."""
-    parsed = [parse(f) for f in frames]
-
-    # Symbol rules first: they cross file boundaries and settle the files that
-    # hold more than one kind of thing.
-    for group, needles in SYMBOLS:
-        for symbol, path in parsed:
-            if any(n in symbol for n in needles):
-                inner = next((f"{s}  ({p})" for s, p in parsed if is_project(p)), symbol)
-                return group, inner
-
     for frame in frames:
         symbol, path = parse(frame)
         if not is_project(path):

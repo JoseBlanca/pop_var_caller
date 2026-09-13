@@ -854,9 +854,10 @@ def _(Counter, defaultdict, gzip, mo, pairs, run_sel):
 
     _msg = (f"read evidence: {len(reads):,} loci · catalog: {len(catalog):,} loci"
             if have_reads else
-            "_`our_reads.tsv` not found for this run — generate it with "
-            "`cargo run --release --example ssr_slip_dump -- <run>/ours/cohort/psp/*.ssr.psp "
-            "> <run>/our_reads.tsv`. The HipSTR-only standard still works below._")
+            "_`our_reads.tsv` not found for this run. It was written by the `ssr_slip_dump` "
+            "example, deleted with the production STR caller in promotion Milestone D, so only "
+            "runs that already have it show read evidence. The HipSTR-only standard still works "
+            "below._")
     mo.md(_msg)
     return catalog, have_reads, reads
 
