@@ -303,7 +303,13 @@ carries a header line naming the production commit that wrote it.
     16-locus BGZF text file, so rather than freeze its contents, ng gained a 50-line test-only
     reader for it, `ng::golden_catalog`, which C19's three tests will use too. The committed file
     stays the oracle.
-  - ☐ C13
+  - ✅ **C13** `window_coverage/production_parity.rs` — **frozen as digests; the 1 test kept.**
+    Production's accumulator emitted 447,581 windows over the 200 generated streams, about 13 MB
+    window by window, over the fixture cap. What it emitted on each stream was recorded at
+    `d9e7b076` as a count and an FNV-1a digest of every window's contig, centre, mean depth and GC
+    fraction (`window_coverage/testdata/production_windows_by_seed.tsv`, 200 rows), and ng's stream
+    is reduced the same way. **Given up:** a divergence still fails at its seed, but no longer names
+    the window or the field. Changing one digest fails the test.
 - ☐ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
   `ng_psp_head_encoding.rs` (`test = true` in `Cargo.toml`), `paralog_score_parity.rs` — are
   deleted with a line each in the report saying which document already holds their result.

@@ -17,9 +17,9 @@
 //! **The sliding window and its histogram fold are production's**
 //! (`SlidingWindowCoverageAccumulator`,
 //! transcribed with its tests under the freeze rule that `src/sample_summary/` is not edited).
-//! The copy is deliberate and is held to its original by a differential test
-//! (`production_parity.rs`) — a later reader who is tempted to delete it and call production
-//! instead should know that ng's version has already diverged twice. A window built from fewer
+//! The copy is deliberate and is held to its original's recorded output by a differential test
+//! (`production_parity.rs`, frozen at promotion step C13) — and ng's version has already
+//! diverged from it twice, on purpose. A window built from fewer
 //! than [`WindowCoverageConfig::min_window_positions`] covered positions reports nothing, where
 //! production's would report a number; and the depth bin width is fitted to each sample rather
 //! than configured, so the two sides' histograms are cut on different axes and only the windows

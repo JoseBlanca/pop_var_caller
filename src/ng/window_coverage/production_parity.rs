@@ -1,6 +1,15 @@
 //! Does the transcription still compute production's window? A differential against the
 //! accumulator it was copied from.
 //!
+//! **Production's side is frozen since promotion step C13.** Until then each of the 200 generated
+//! streams was fed to production's accumulator beside ng's and every window compared. Production is
+//! being deleted, and its 447,581 windows are too many to commit one by one, so what it emitted on
+//! each stream was recorded at commit `d9e7b076` as a count and a digest
+//! (`testdata/production_windows_by_seed.tsv`), and ng's stream is reduced the same way and compared.
+//! **What that gives up:** a divergence still fails, at the seed it happens in, but no longer names
+//! the window or the field; bisecting it needs ng's windows printed and read by hand. The prose below
+//! describes the comparison as it was built.
+//!
 //! [`accumulator`](super::accumulator) claims to be `SlidingWindowCoverageAccumulator`
 //! (`src/sample_summary/coverage.rs`) with its vocabulary changed and its arithmetic untouched.
 //! The transcribed unit tests check the arithmetic against hand-computed means; this checks it
@@ -8,11 +17,6 @@
 //! positions, `N` bases in both cases, contig changes, and window widths from one base to
 //! wider than the 500 the run configures, over contigs long enough that a 500-base window
 //! genuinely slides rather than swallowing the contig whole.
-//!
-//! **Test-only, and production is the oracle, not a dependency.** ng reads production this way
-//! in other places too (`ng/scanner_parity.rs`, and `calling::genotype_table_parity` until promotion
-//! step C5 froze its answers); nothing
-//! shipped depends on `src/sample_summary/`.
 //!
 //! **This has narrowed to the windows, and will not narrow further.** ng's accumulator has
 //! both of its additions now: the floor (spec §3.3), which is switched off here so the two
@@ -26,7 +30,32 @@
 
 use super::{WindowCoverageAccumulator, WindowCoverageConfig};
 use crate::ng::types::{ContigId, Position};
-use crate::sample_summary::coverage::{CoverageBinScheme, SlidingWindowCoverageAccumulator};
+
+/// **Production's windows on one stream, as recorded**: the width that stream drew, how many
+/// windows production emitted, and the digest of all of them — see the fixture's header.
+struct ProductionStream {
+    window_bp: u32,
+    windows: usize,
+    digest: u64,
+}
+
+/// Production's recorded stream for `seed`.
+fn production_stream(seed: u64) -> ProductionStream {
+    let line = include_str!("testdata/production_windows_by_seed.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .find(|line| line.split('\t').next() == Some(seed.to_string().as_str()))
+        .unwrap_or_else(|| panic!("no recorded production stream for seed {seed}"));
+    let fields: Vec<&str> = line.split('\t').collect();
+    let [_, window_bp, windows, digest] = fields[..] else {
+        panic!("a recorded stream has four columns: {line}");
+    };
+    ProductionStream {
+        window_bp: window_bp.parse().expect("a window width"),
+        windows: windows.parse().expect("a window count"),
+        digest: u64::from_str_radix(digest, 16).expect("a digest"),
+    }
+}
 
 /// Knuth's multiplier for a 64-bit linear congruential generator, with the increment from the
 /// same table (`MMIX`).
@@ -37,7 +66,7 @@ const LCG_HIGH_BITS_SHIFT: u32 = 33;
 /// Knuth's multiplicative-hash constant, used only to spread consecutive seeds apart.
 const SEED_SPREAD: u64 = 2_654_435_761;
 
-/// A linear congruential generator, so both accumulators are fed one identical stream and the
+/// A linear congruential generator, so ng is fed exactly the stream production's windows were recorded on, and the
 /// stream is the same on every machine and every run. Numbers, not randomness, is the point —
 /// a failure has to be reproducible from its seed alone.
 struct DeterministicStream(u64);
@@ -67,7 +96,8 @@ impl DeterministicStream {
 /// notice it.
 const WINDOWS_COMPARED: u64 = 447_581;
 
-/// Every window ng emits equals production's, bit for bit, and so does every histogram cell.
+/// Every window ng emits equals production's, bit for bit — through a digest of the whole stream
+/// since promotion step C13.
 ///
 /// **Bit equality, not a tolerance.** The two implementations do the same arithmetic in the
 /// same order, so any difference at all is a transcription slip rather than rounding, and a
@@ -75,7 +105,7 @@ const WINDOWS_COMPARED: u64 = 447_581;
 ///
 /// The mutation that proves it discriminates: pulling the window's left edge **in** by one base
 /// (`centre - half_window_bp` to `centre - (half_window_bp - 1)`, which narrows the window
-/// rather than widening it) fails this on a value at the first seed, and fails three of the
+/// rather than widening it) fails the digest at the first seed, and fails three of the
 /// eleven transcribed tests. At `window_bp = 1` that literal mutation underflows instead of
 /// producing a wrong window, because the half-window is zero there.
 #[test]
@@ -99,17 +129,7 @@ fn the_transcription_matches_production_on_streams_neither_test_was_written_for(
             depth_scale_windows: 10_000,
             depth_range_in_medians: 10.0,
         };
-        // Production's window width is ng's; its depth bin width has no counterpart on ng's
-        // side any more, and is set to a value this comparison never reads.
-        let scheme = CoverageBinScheme {
-            window_bp: config.window_bp,
-            gc_bins: config.gc_bins,
-            depth_bin_width: 0.7,
-            depth_bins: config.depth_bins,
-        };
-        let mut production = SlidingWindowCoverageAccumulator::new(scheme);
         let mut transcription = WindowCoverageAccumulator::new(config);
-        let mut production_windows = Vec::new();
         let mut transcribed_windows = Vec::new();
 
         for contig in 0..3u32 {
@@ -126,71 +146,61 @@ fn the_transcription_matches_production_on_streams_neither_test_was_written_for(
                 let alphabet = *b"ACGTNgcn";
                 let reference_base = alphabet[stream.next_below(alphabet.len() as u64) as usize];
                 let depth = stream.next_below(40) as u32;
-                // Production takes a `u32` position; ng's is a `u64`. Converting rather than
-                // casting, so that a wider stream fails here instead of silently comparing
-                // against a wrapped one.
-                let production_position =
-                    u32::try_from(position).expect("fixture positions stay inside u32");
-                production.observe(contig, production_position, reference_base, depth);
                 transcription.observe(ContigId(contig), Position(position), reference_base, depth);
-                while let Some(window) = production.pop_ready() {
-                    production_windows.push(window);
-                }
                 while let Some(window) = transcription.pop_ready() {
                     transcribed_windows.push(window);
                 }
             }
         }
 
-        // The two histograms' *cells* are not comparable — production cuts its depth axis at a
-        // fixed width and ng at one fitted to the sample — but two things about ng's still are,
-        // and neither has anything to do with the depth axis: that a stream of real windows
-        // produces a histogram at all, and that every window emitted was folded into it.
-        let (production_tail, _production_histogram) = production.finish();
+        // Production's histogram cells are not comparable — it cut its depth axis at a fixed width
+        // and ng cuts at one fitted to the sample — but two things about ng's still are, and
+        // neither has anything to do with the depth axis: that a stream of real windows produces a
+        // histogram at all, and that every window emitted was folded into it.
         let (transcribed_tail, transcribed_histogram) = transcription.finish();
         let transcribed_histogram = transcribed_histogram.fitted().expect(
             "every window here clears a floor of 1 and the depths are positive, so a width is \
              fitted and a histogram comes back",
         );
-        production_windows.extend(production_tail);
         transcribed_windows.extend(transcribed_tail);
 
+        let production = production_stream(seed);
         assert_eq!(
-            production_windows.len(),
+            production.window_bp, window_bp,
+            "seed {seed}: the stream drew a different window width from the one recorded, so the \
+             generator has changed and the recording no longer describes it",
+        );
+        assert_eq!(
             transcribed_windows.len(),
+            production.windows,
             "seed {seed}, window_bp {window_bp}: different number of windows emitted",
         );
-        for (theirs, (at, ours)) in production_windows.iter().zip(transcribed_windows.iter()) {
-            assert_eq!(
-                theirs.chrom_id,
-                at.contig.get(),
-                "seed {seed}: windows emitted in a different contig order",
+        // Reduced exactly as production's were: contig and centre as `u32`, then the mean depth
+        // and GC fraction as the bit patterns of their `f32`s, all little-endian, in emission
+        // order. Converting the centre rather than casting it, so that a wider stream fails here
+        // instead of silently digesting a wrapped one.
+        let mut bytes = Vec::with_capacity(transcribed_windows.len() * 16);
+        for (at, window) in &transcribed_windows {
+            bytes.extend(at.contig.get().to_le_bytes());
+            bytes.extend(
+                u32::try_from(at.position.get())
+                    .expect("fixture positions stay inside u32")
+                    .to_le_bytes(),
             );
-            assert_eq!(
-                u64::from(theirs.pos),
-                at.position.get(),
-                "seed {seed}: windows emitted at different centres",
-            );
-            assert_eq!(
-                theirs.mean_depth.to_bits(),
-                ours.mean_depth.to_bits(),
-                "seed {seed}, contig {} position {}: mean depth {} against {}",
-                theirs.chrom_id,
-                theirs.pos,
-                theirs.mean_depth,
-                ours.mean_depth,
-            );
-            assert_eq!(
-                theirs.gc_fraction.to_bits(),
-                ours.gc_fraction.to_bits(),
-                "seed {seed}, contig {} position {}: GC {} against {}",
-                theirs.chrom_id,
-                theirs.pos,
-                theirs.gc_fraction,
-                ours.gc_fraction,
-            );
-            windows_compared += 1;
+            bytes.extend(window.mean_depth.to_bits().to_le_bytes());
+            bytes.extend(window.gc_fraction.to_bits().to_le_bytes());
         }
+        let digest = bytes
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |digest, &byte| {
+                (digest ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        assert_eq!(
+            digest, production.digest,
+            "seed {seed}, window_bp {window_bp}: some window's contig, centre, mean depth or GC \
+             fraction differs from production's — print ng's windows for this seed to find which",
+        );
+        windows_compared += transcribed_windows.len() as u64;
         assert!(
             transcribed_windows
                 .iter()
