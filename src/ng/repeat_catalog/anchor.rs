@@ -255,20 +255,10 @@ fn on_contig(regions: &[TypedRegion], contig: ContigId) -> Vec<TypedRegion> {
 /// the Parquet encoding, and the reader.
 #[test]
 fn the_catalog_reproduces_the_golden_catalog_through_the_shipping_stack() {
-    use crate::ssr::catalog::io::CatalogReader;
-
-    let fixture = |name: &str| {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("data")
-            .join("tandem_repeat")
-            .join(name)
-    };
-    let mut reader =
-        CatalogReader::new(std::fs::File::open(fixture("golden.ssr_catalog.bed.gz")).unwrap())
-            .unwrap();
-    let cat_params = reader.header().params.clone();
-    let golden = reader.read_all().unwrap();
+    // Read by ng's own reader of the golden file since promotion step C19.
+    let catalog = crate::ng::golden_catalog::golden_catalog();
+    let cat_params = catalog.settings;
+    let golden = catalog.loci;
     assert!(!golden.is_empty(), "the golden catalog must have loci");
 
     let contigs = golden_contigs();
@@ -338,9 +328,9 @@ fn the_catalog_reproduces_the_golden_catalog_through_the_shipping_stack() {
     let mut missed = Vec::new();
     for locus in &golden {
         let it = (
-            locus.chrom().to_string(),
-            u64::from(locus.start()) + 1,
-            u64::from(locus.end()),
+            locus.chrom.clone(),
+            u64::from(locus.start) + 1,
+            u64::from(locus.end),
         );
         if !ours.iter().any(|one| overlaps(&it, one))
             && !satellites.iter().any(|one| overlaps(&it, one))

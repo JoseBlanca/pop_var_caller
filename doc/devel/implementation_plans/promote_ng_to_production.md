@@ -397,7 +397,12 @@ mattered:
     (`generator.rs`), and `HEAD_MAGIC` `PSP\n` (`psp/mod.rs`, `psp/header.rs`). Two assertions
     that production's own `DEFAULT_MAX_ACTIVE_READS` was still 4,096 were facts about production
     alone and are now comments; ng's 32,768 stays asserted.
-  - ☐ C19 · ☐ C20 · ☐ C21 · ☐ C22 · ☐ C23 · ☐ C24 · ☐ C25
+  - ✅ **C19** — the three golden-catalog tests (`region_typing/mod.rs`, `repeat_catalog/anchor.rs`,
+    `reference_info.rs`) read `tests/data/tandem_repeat/golden.ssr_catalog.bed.gz` through
+    `ng::golden_catalog`, the reader C12 added, instead of production's `CatalogReader`. They
+    read the same four things — the loci's contig, start and end, the three settings, and the
+    reference MD5 — and all three pass unchanged.
+  - ☐ C20 · ☐ C21 · ☐ C22 · ☐ C23 · ☐ C24 · ☐ C25
 - ☐ **C26** · *Depends:* C1, C9.
 
   **Deviation, recorded 2026-09-12: `cram_files` goes to `src/bam/`, and §2's "shared

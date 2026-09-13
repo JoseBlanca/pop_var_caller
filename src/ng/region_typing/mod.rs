@@ -2214,7 +2214,6 @@ mod tests {
     /// as a bug.
     #[test]
     fn the_resident_partition_reproduces_the_golden_catalog() {
-        use crate::ssr::catalog::io::CatalogReader;
         use std::fs::File;
         use std::io::BufReader;
         use std::path::Path;
@@ -2227,12 +2226,11 @@ mod tests {
                 .join(name)
         };
 
-        // The golden catalog and the settings it was built at — read, never
-        // written (production is frozen).
-        let mut golden_reader =
-            CatalogReader::new(File::open(fixture("golden.ssr_catalog.bed.gz")).unwrap()).unwrap();
-        let cat_params = golden_reader.header().params.clone();
-        let golden = golden_reader.read_all().unwrap();
+        // The golden catalog and the settings it was built at, read by ng's own reader of that
+        // file since promotion step C19.
+        let catalog = crate::ng::golden_catalog::golden_catalog();
+        let cat_params = catalog.settings;
+        let golden = catalog.loci;
         assert!(!golden.is_empty(), "the golden catalog must have loci");
 
         // ng's walk at the SAME settings, pinned explicitly. As of spec §2.3 ng's
@@ -2290,11 +2288,7 @@ mod tests {
             |a: &(String, u64, u64), b: &(String, u64, u64)| a.0 == b.0 && a.1 <= b.2 && b.1 <= a.2;
         let mut missed = Vec::new();
         for g in &golden {
-            let g1 = (
-                g.chrom().to_string(),
-                u64::from(g.start()) + 1,
-                u64::from(g.end()),
-            );
+            let g1 = (g.chrom.clone(), u64::from(g.start) + 1, u64::from(g.end));
             if !ours.iter().any(|o| overlaps(&g1, o)) {
                 // Absent is legal ONLY inside a satellite run — the one expected
                 // divergence (the file applies no cap; a reader does).

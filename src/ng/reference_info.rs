@@ -1885,12 +1885,9 @@ mod tests {
 
     #[test]
     fn fasta_pass_reference_md5_matches_the_golden_cat_header() {
-        use crate::ssr::catalog::io::CatalogReader;
         let info = read_fasta_none(golden_ref_path()).unwrap();
-        let cat_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/tandem_repeat/golden.ssr_catalog.bed.gz");
-        let reader = CatalogReader::new(std::fs::File::open(cat_path).unwrap()).unwrap();
-        let expected = reader.header().reference_md5.clone();
+        // Read by ng's own reader of the golden file since promotion step C19.
+        let expected = crate::ng::golden_catalog::golden_catalog().reference_md5;
         let got = format_md5_hex(info.md5.unwrap());
         assert_eq!(
             got, expected,
