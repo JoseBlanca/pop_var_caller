@@ -521,18 +521,39 @@ Measured on the tree at `9746cee6`, by `pop_var_caller::<production module>` in 
   repointed the rest.
   *Depends:* C. Done 2026-09-13: the suite drops from 6,351 to 6,301, the seven integration tests'
   12 + 6 + 5 + 11 + 11 + 4 + 1; `src/main.rs` carried none.
-- ☐ **D2. The command surface, the calling engine, the VCF writer and the STR caller** — the
-  import loop above: `src/pop_var_caller/`, `src/var_calling/`, `src/vcf/`, `src/ssr/`, and
-  `lib.rs`'s four `pub mod` lines. Intra-doc links from kept modules into them are rewritten as
-  plain text (`fasta/fetcher.rs` has one).
-  *Depends:* D1.
-- ☐ **D3. The per-sample stage.** `src/pileup/`, `src/psp/`, `src/paralog/`,
-  `src/sample_summary/`, `src/baq/`. `bam` names production in three places this step must
-  settle: `bam/mod.rs`'s module doc and `alignment_input.rs`'s two doc links, and
-  `alignment_input.rs`'s tests, which build records with `pileup::per_sample::record_specs`.
-  *Depends:* D2.
-- ☐ **D4. The leaves.** `src/norm_seqs.rs`, `src/genetics.rs`, `src/pileup_record.rs`.
-  *Depends:* D3.
+- ✅ **D2–D4, in one commit. The whole production library.** `src/pop_var_caller/`,
+  `src/var_calling/`, `src/vcf/`, `src/ssr/`, `src/pileup/`, `src/psp/`, `src/paralog/`,
+  `src/sample_summary/`, `src/baq/`, `src/norm_seqs.rs`, `src/genetics.rs`, `src/pileup_record.rs`,
+  and their twelve `pub mod` lines. *Depends:* D1.
+
+  **Deviation, recorded 2026-09-13: the three steps are one commit, because none of the three
+  intermediate trees passes clippy.** They compile; what fails is `dead_code` under `-D warnings`.
+  Deleting the import loop (old D2) left the psp reader's two-phase block decode, which only
+  `var_calling` called, and a CRAM/BAM per-worker reader in `bam` that only `ssr` called, with no
+  caller; deleting the per-sample stage (old D3) left all of `norm_seqs` with none. Keeping each
+  commit green would have meant trimming code out of modules the very next commit deletes.
+
+  What the kept modules needed, all found by building, not by reading:
+  - `bam::segment_reader`'s `WorkerReader` and `AlignmentFile::worker_reader` are deleted, with
+    the one test that asserted `WorkerReader` is `Send`. Only production's STR driver built one;
+    nothing else could, so the code was dead the moment `ssr` went. This is the one piece of
+    shared infrastructure the plan prunes, and only because the compiler refuses it.
+  - `pileup::per_sample::record_specs`, the builder of synthetic records `bam::alignment_input`'s
+    tests use, moves to `bam::record_specs` as C16 moved `cram_files`, importing `CigarOp` from
+    `bam` instead of through production's re-export.
+  - Seven intra-doc links from kept modules into deleted ones — three in `bam/mod.rs`, one in
+    `bam/alignment_input.rs`, one in `regions.rs`, two in `fasta/mod.rs` — are rewritten as prose;
+    so is a plain path link in `alignment_input.rs` and one in `fasta/fetcher.rs`.
+  - **Left in place, and callerless:** `bam::segment_reader` and `bam::segment_merge` — the pooled
+    per-segment read source and its multi-file merge — were reached only from production's
+    command surface and STR caller. ng reads through `ng::read::input`. Both modules carry
+    `#![cfg_attr(not(test), allow(dead_code))]`, so the compiler does not flag them, and their own
+    tests still run. Deleting them is the shared-infrastructure pruning §8 hands on.
+
+  Test count: 6,301 → 4,787 passed, and 8 → 4 ignored. The 1,514 are production's library tests
+  (by module at D1: `var_calling` 410, `ssr` 368, `psp` 202, `pileup` 181, `pop_var_caller` 119,
+  `sample_summary` 75, `paralog` 66, `vcf` 58, `genetics` 22, `baq` 11, `norm_seqs` 3,
+  `pileup_record` 2 — 1,517 listed, of which 4 were ignored) and `bam`'s `worker_reader_is_send`.
 - ☐ **D5. Scripts and benchmark drivers.** `scripts/{cohort_memory_vs_samples,psp_block_window_sweep}.sh`
   drive the deleted binary — deleted; `scripts/attribute_peak.py` lists production's source
   directories in its heap-attribution table — trimmed. Under `benchmarks/`, the 15 `run_ours_*` /
@@ -544,13 +565,14 @@ Measured on the tree at `9746cee6`, by `pop_var_caller::<production module>` in 
   (`as_chunks::<N>()` for `chunks_exact`, per the comment that asked for it); `precommit-check.sh`
   step 1 (production must not import ng) and B9's mirror both become vacuous — replace them with
   nothing, and empty the step's oracle exemption list, whose files no longer import production. The
-  dev-dependency `serial_test` lost its only user at D1 (`cohort_cli_integration.rs`) and goes too.
-  *Depends:* D4. *Source:* `Cargo.toml` `[lints.clippy]` comment ("Drop both `allow`s when
+  dev-dependency `serial_test` lost its only user at D1 (`cohort_cli_integration.rs`) and goes too,
+  as do `anyhow`, `bytemuck` and `noodles-vcf`, which no remaining source file names after D2–D4.
+  *Depends:* D2–D4. *Source:* `Cargo.toml` `[lints.clippy]` comment ("Drop both `allow`s when
   production is retired").
 - ☐ **D7. `src/ng/mod.rs`'s header** — the freeze paragraph and the oracle inventory describe a
   world that no longer exists; rewrite to say what ng *is*, with a dated line saying production
   was deleted here. `src/lib.rs`'s crate doc likewise.
-  *Depends:* D4.
+  *Depends:* D2–D4.
 
 > **Checkpoint D: one caller, same calls.** `cargo build`, `clippy --all-targets -D warnings`,
 > `test`, `doc -D warnings`, `bench --no-run` all green; `cargo test` total equals A1's minus
@@ -611,7 +633,7 @@ Measured on the tree at `9746cee6`, by `pop_var_caller::<production module>` in 
 
 | item | why not here | where it goes |
 |---|---|---|
-| Pruning `bam`, `fasta`, `regions` of items only production reached (e.g. the BAQ-related read filters in `alignment_input`) | a `pub` item in a library never fires `dead_code`, so the pruning needs its own inventory; and it changes shared code this plan promised not to touch | a follow-on plan, `shared_infrastructure_prune.md` |
+| Pruning `bam`, `fasta`, `regions` of items only production reached (e.g. the BAQ-related read filters in `alignment_input`, and the callerless `bam::segment_reader` and `bam::segment_merge` D2–D4 left) | a `pub` item in a library never fires `dead_code`, so the pruning needs its own inventory; and it changes shared code this plan promised not to touch | a follow-on plan, `shared_infrastructure_prune.md` |
 | Moving `doc/devel/ng/{spec,arch,impl_plan,reports}` to `doc/devel/` and repairing `src/ng/...` paths in about 200 Markdown files | doc churn that would bury the code diff; nothing in it is checked by a build | the same follow-on |
 | Renaming the `ng_` prefix off 40 examples, 5 integration tests, 5 benches, 8 scripts | cosmetic; better done once the doc paths move with it | the same follow-on |
 | PROJECT_STATUS's *About this project* paragraph, which still describes `pileup → .psp → DUST → merger → posterior engine` | protected: "do not edit this paragraph" | the owner |

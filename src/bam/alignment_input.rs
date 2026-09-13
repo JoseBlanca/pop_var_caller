@@ -166,9 +166,9 @@ pub struct FilterCounts {
     pub bad_cigar: u64,
     /// Reads dropped because the BAQ stage refused to produce a usable
     /// per-base posterior (HMM overflow, ref window past chrom end,
-    /// CIGAR with `N`/no-match, etc.). One bucket per
-    /// [`BaqSkipReason`](crate::pileup::per_sample::baq_engine::BaqSkipReason) currently does not
-    /// exist — every BAQ skip reason rolls up into this counter. Split
+    /// CIGAR with `N`/no-match, etc.). There is no per-reason bucket (production's
+    /// `BaqSkipReason`, deleted with `src/pileup/`, had several); every BAQ skip reason
+    /// rolls up into this counter. Split
     /// later if a deployment cares which reason dominates.
     pub baq_rejected: u64,
 }
@@ -1086,7 +1086,7 @@ pub(crate) fn cigar_is_bad(cigar: &[CigarOp]) -> bool {
 /// decoding; `ref_seq` is the reference slice covering
 /// `[read.pos, read.pos + cigar_ref_span(cigar))`. Indexing into
 /// these slices uses the standard CIGAR semantics — see
-/// [`crate::pileup::walker::decompose`] for the
+/// `src/ng/locus_generation/pileup/decompose.rs` for the
 /// reference walk pattern this function mirrors.
 pub(crate) fn read_exceeds_mismatch_fraction(
     cigar: &[CigarOp],
@@ -1219,7 +1219,7 @@ pub(crate) fn cigar_to_ops(cigar: &sam::alignment::record_buf::Cigar) -> Vec<Cig
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pileup::per_sample::record_specs::{RecordSpec, record_spec};
+    use crate::bam::record_specs::{RecordSpec, record_spec};
 
     fn default_seq(len: usize) -> Vec<u8> {
         b"A".repeat(len)

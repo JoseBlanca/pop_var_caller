@@ -302,8 +302,8 @@ mod tests {
     /// than an error.
     ///
     /// Compared through the `Debug` rendering rather than by value: it names the field
-    /// that moved when it fails. (`PileupRecord` *does* have a hand-written `PartialEq`
-    /// — [pileup_record.rs:208](crate::pileup_record) — which an earlier version of this
+    /// that moved when it fails. (`PileupRecord` *did* have a hand-written `PartialEq`
+    /// — production's `pileup_record.rs:208`, since deleted — which an earlier version of this
     /// comment denied. The `Debug` comparison is a
     /// diagnostics choice here, not a necessity.)
     #[test]

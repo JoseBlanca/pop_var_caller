@@ -10,9 +10,8 @@
 //! and seek to its spans rather than walking the genome.
 //!
 //! **Coordinate convention.** Spans are **1-based inclusive**
-//! `[start, end]`, matching the PSP reader's region API
-//! ([`crate::psp::PspReader::region_records`]) and the pileup walker's
-//! position convention. A BED file is 0-based half-open `[start, end)`;
+//! `[start, end]`, matching the pileup walk's position convention (and production's PSP reader's
+//! region API, deleted in promotion Milestone D). A BED file is 0-based half-open `[start, end)`;
 //! the parser converts a BED span `[b_start, b_end)` to the 1-based
 //! inclusive span `[b_start + 1, b_end]` at the single boundary where
 //! BED text is read.

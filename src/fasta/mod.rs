@@ -158,11 +158,9 @@ pub trait MultiChromRefFetcher {
 }
 
 /// Forwarding impl so callers may pass either an owned fetcher or a
-/// shared reference into [`PileupWalker::new`] / [`run`]. The walker
-/// only ever calls `&self` methods, so the borrow is sufficient.
-///
-/// [`PileupWalker::new`]: crate::pileup::walker::PileupWalker::new
-/// [`run`]: crate::pileup::walker::run
+/// shared reference. The fetcher's methods all take `&self`, so the borrow is
+/// sufficient. (Production's pileup walker, deleted in promotion Milestone D,
+/// was the caller that needed it.)
 impl<T: MultiChromRefFetcher + ?Sized> MultiChromRefFetcher for &T {
     fn fetch(
         &self,

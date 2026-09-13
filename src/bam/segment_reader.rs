@@ -1135,56 +1135,6 @@ impl CramFile {
     }
 }
 
-/// A per-worker read source: a caching CRAM reader (decode-once), or the shared
-/// pooled path for BAM (lighter decode, no slice concept). Built by
-/// [`AlignmentFile::worker_reader`] — one per worker via the driver's
-/// `map_init` — and unifies fetching into `(reads, FilterCounts)`.
-pub(crate) enum WorkerReader<'a> {
-    Cram(CachingCramReader),
-    /// BAM keeps the existing pooled per-call path; the borrow ties the reader
-    /// to the shared [`AlignmentFile`] (which outlives the worker pool).
-    Bam(&'a AlignmentFile),
-}
-
-impl WorkerReader<'_> {
-    /// Reads overlapping `[start, end]` on `chrom` + the complete filter tally —
-    /// the same `(reads, FilterCounts)` for both formats. For CRAM this hits the
-    /// per-worker container cache; for BAM it drains the pooled iterator.
-    pub(crate) fn fetch_mapped_reads(
-        &mut self,
-        chrom: &str,
-        start: u32,
-        end: u32,
-    ) -> Result<(Vec<MappedRead>, FilterCounts), AlignmentInputError> {
-        match self {
-            Self::Cram(reader) => reader.fetch_mapped_reads(chrom, start, end),
-            Self::Bam(file) => {
-                let mut iter = file.get_reads_from_segment(chrom, start, end)?;
-                let mut reads = Vec::new();
-                for read in iter.by_ref() {
-                    reads.push(read?);
-                }
-                let counts = *iter.filter_counts();
-                Ok((reads, counts))
-            }
-        }
-    }
-}
-
-impl AlignmentFile {
-    /// Build a per-worker [`WorkerReader`]: a caching CRAM reader (own handle +
-    /// cache) for CRAM, or a borrow of `self` for BAM. Infallible (CRAM opens
-    /// lazily on first decode). One per worker, via the driver's `map_init`.
-    pub(crate) fn worker_reader(&self) -> WorkerReader<'_> {
-        match self {
-            Self::Cram(file) => {
-                WorkerReader::Cram(file.caching_reader(DEFAULT_MAX_CACHED_CONTAINERS))
-            }
-            Self::Bam(_) => WorkerReader::Bam(self),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------
 // The per-call iterator (format-dispatching wrapper)
 // ---------------------------------------------------------------------
@@ -1278,16 +1228,6 @@ mod tests {
         // threads. A regression that made a field non-`Sync` (e.g. a
         // `RefCell` in the pool) would fail to compile here.
         assert_sync::<AlignmentFile>();
-    }
-
-    fn assert_send<T: Send>() {}
-
-    #[test]
-    fn worker_reader_is_send() {
-        // `map_init` hands each `WorkerReader` to a rayon worker, so it must be
-        // `Send`. A future non-`Send` field would otherwise surface as a deep
-        // generic error at the driver call site; pin it to this named test.
-        assert_send::<WorkerReader<'static>>();
     }
 
     #[test]

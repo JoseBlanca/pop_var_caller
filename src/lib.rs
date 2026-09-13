@@ -20,21 +20,9 @@
 #![forbid(unsafe_code)]
 
 pub mod bam;
-pub mod baq;
 pub mod error_render;
 pub mod fasta;
-pub mod genetics;
 pub mod iter_ext;
 pub mod ng;
-pub(crate) mod norm_seqs;
-pub mod paralog;
-pub mod pileup;
-pub mod pileup_record;
-pub mod pop_var_caller;
 pub mod pop_var_caller_exp;
-pub mod psp;
 pub mod regions;
-pub mod sample_summary;
-pub mod ssr;
-pub mod var_calling;
-pub mod vcf;

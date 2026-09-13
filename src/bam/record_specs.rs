@@ -15,7 +15,7 @@ use noodles_sam::alignment::record_buf::QualityScores;
 use noodles_sam::alignment::record_buf::RecordBuf;
 use noodles_sam::alignment::record_buf::Sequence;
 
-use crate::pileup::walker::CigarOp;
+use crate::bam::alignment_input::CigarOp;
 
 /// Spec for a synthetic record built by `record_spec`. Every test
 /// composes its records by mutating fields on a base — keeping the

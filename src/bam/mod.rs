@@ -24,10 +24,9 @@
 //!   access (e.g. the per-chromosome parallel `var-calling-from-bam`
 //!   driver).
 //!
-//! The walker-side input types ([`MappedRead`](alignment_input::MappedRead)
-//! → [`crate::pileup::walker::PreparedRead`]) are produced here and
-//! consumed by the BAQ glue ([`crate::pileup::per_sample::baq_engine`])
-//! and then by the walker. CIGAR ops use [`crate::pileup::walker::CigarOp`].
+//! The walk's input starts here: a [`MappedRead`](alignment_input::MappedRead) becomes ng's
+//! [`PreparedRead`](crate::ng::read::PreparedRead) in read preparation. CIGAR ops are
+//! [`CigarOp`](alignment_input::CigarOp), defined here and used crate-wide.
 
 pub mod alignment_input;
 // `bam_input` and `cram_input` are the per-format record-stream
@@ -42,6 +41,10 @@ pub(crate) mod cram_input;
 pub(crate) mod cram_files;
 pub mod errors;
 pub mod index_preflight;
+// Test fixtures: synthetic `RecordBuf`s from minimal field specs, for `alignment_input`'s tests;
+// it lived in `pileup::per_sample` until promotion Milestone D deleted that module.
+#[cfg(test)]
+pub(crate) mod record_specs;
 // The shared indexed-segment read source: pooled, thread-safe
 // per-segment read queries over one BAM/CRAM. Reuses the per-format
 // scanners' decode helpers; adds reader ownership + a pool. Consumed
