@@ -1,5 +1,14 @@
 //! **ng's frequency loop against the shipping caller's, genotype for genotype.**
 //!
+//! **Production's side is frozen since promotion step C6.** Until then every fixture here ran
+//! production's `run_em_columnar` on the same table. Production is being deleted, so what its
+//! loop returned on each of the nine tables below — the genotype it called for every sample, its
+//! iteration count and whether it converged — was recorded at commit `d9e7b076` and is written in
+//! [`PRODUCTION_ANSWERS`], keyed by a digest of everything production was handed. A fixture whose
+//! table, sample count, allele count, diversity or coefficients change has no frozen answer and
+//! fails rather than comparing against the wrong one. The prose below describes the comparison as
+//! it was built, with production running; what it asserts is unchanged.
+//!
 //! The loop in [`inference::summarise_condition`](super::inference::summarise_condition) is a
 //! port of `src/var_calling/posterior_engine.rs`'s — the same expectation-maximization over the
 //! same Dirichlet-multinomial prior with the same leave-one-out sharing — and what a port has to
@@ -28,10 +37,11 @@
 //! ([`posterior_engine.rs`](../../../../src/var_calling/posterior_engine.rs), `run_em_columnar`'s
 //! prologue); ng derives it from a [`SpectrumSeed`](super::genotype_prior::SpectrumSeed)'s
 //! reference concentration and alternative total, floored the same way. Seeding ng at
-//! `(ALPHA_REF, θ)` therefore makes the two arrays equal entry for entry, and both read the same
-//! `ALPHA_REF` out of [`crate::genetics`]. **A test that set ng's seed to a hand-typed pair would
-//! be comparing two transcriptions**, and a change to production's constant would leave it
-//! passing.
+//! `(ALPHA_REF, θ)` therefore makes the two arrays equal entry for entry. Production read
+//! `ALPHA_REF` out of `crate::genetics`; ng reads its copy in [`crate::ng::genetics`], and
+//! `the_two_loops_run_under_the_same_threshold_and_the_same_cap` pins that copy to production's
+//! value, 1.0, since promotion step C6 — without that the two would be two transcriptions of one
+//! number with nothing holding them together.
 //!
 //! # Where the two are expected to differ, and both places are pinned rather than excused
 //!
@@ -78,18 +88,12 @@
 //!
 //! # This is ng's test; production is only the yardstick
 //!
-//! Nothing here changes production and nothing in production names ng, exactly as
+//! Nothing here changed production and nothing in production names ng, exactly as
 //! [`genotype_table_parity`](super::genotype_table_parity) and
-//! [`crate::ng::scanner_parity`] are arranged. **It needed no edit to the frozen tree at all.**
-//! Every production item named here is already visible: `run_em_columnar`, `EmInputs`,
-//! `MergedAllelesView`, `RecordScratch` and `RecordScratch::empty` are `pub(crate)`, and
-//! `PosteriorEngineConfig`, `RecordLocus`, `EmDiagnostics`, `AlleleSupportStats`, `MergedAllele`
-//! and `mod backends` are `pub`. The one earlier parity module cost production a `mod shape`
-//! declaration; this one costs nothing.
+//! [`crate::ng::scanner_parity`] are arranged.
 
 use std::collections::BTreeMap;
 
-use crate::genetics::ALPHA_REF;
 use crate::ng::calling::genotype_prior::seed_generic::{VariantClass, fill_locus_concentration};
 use crate::ng::calling::genotype_prior::{MarginalizedDirichletPrior, SeedRegime, SpectrumSeed};
 use crate::ng::calling::inference::RunnableCallingLoopConfig;
@@ -100,17 +104,11 @@ use crate::ng::calling::{
     CallingScratch, CandidateAlleles, FrozenParameters, GenericLocusSample, GenericSampleEvidence,
     GenotypeIdx, GenotypeTable, LocusEvidence, LocusInference, ReadGroupCalibration,
 };
+use crate::ng::genetics::ALPHA_REF;
 use crate::ng::locus_generation::LocusKind;
 use crate::ng::parameter_estimation::Provenance;
 use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
 use crate::ng::types::{ContigId, GenomeRegion, InbreedingF, LogProb, Ploidy, Position};
-use crate::pileup_record::AlleleSupportStats;
-use crate::var_calling::per_group_merger::MergedAllele;
-use crate::var_calling::posterior_engine::backends::InterpUnivariateSimdMath;
-use crate::var_calling::posterior_engine::{
-    EmDiagnostics, EmInputs, MergedAllelesView, PosteriorEngineConfig, RecordLocus, RecordScratch,
-    run_em_columnar,
-};
 
 /// The four bases, so that each allele of a fixture is a different one byte long.
 const BASES: &[u8] = b"ACGT";
@@ -148,68 +146,57 @@ impl Locus<'_> {
         self.log_likelihoods.len() / self.samples
     }
 
-    /// **The genotypes production calls**, one index per sample into the genotype table's order,
-    /// with what its loop reports about how it got there.
-    fn production_calls(&self) -> (Vec<usize>, EmDiagnostics) {
-        // **Every allele one base long, so nothing production does with allele *lengths* comes
-        // into it.** The likelihood table is the input under test; the bytes only have to make a
-        // well-formed record whose reference is entry 0.
-        let merged: Vec<MergedAllele> = (0..self.alleles)
-            .map(|allele| MergedAllele {
-                seq: vec![BASES[allele % BASES.len()]],
-                is_compound: false,
-                constituents: Vec::new(),
-            })
-            .collect();
-        let view = MergedAllelesView::new(&merged);
-        // **The per-allele read summaries production carries beside the likelihoods**, which its
-        // loop reads none of: they reach the reported record and its quality, not the E-step or
-        // the M-step. One plausible shape repeated, rather than a second encoding of evidence
-        // that would then have to agree with the table.
-        let scalars = vec![
-            AlleleSupportStats {
-                num_obs: 10,
-                q_sum: -30.0,
-                fwd: 5,
-                placed_left: 5,
-                placed_start: 0,
-                mapq_sum: 600,
-                mapq_sum_sq: 36_000,
-            };
-            self.samples * self.alleles
-        ];
-        let anchor_flags = vec![false; self.samples * self.alleles];
+    /// **The genotypes production called**, one index per sample into the genotype table's
+    /// order, with how many iterations its loop took and whether it converged — read from
+    /// [`PRODUCTION_ANSWERS`] by a digest of this locus.
+    ///
+    /// **What production was handed, for the record**, since the call that handed it is gone: the
+    /// table as its `log_likelihoods`; one `MergedAllele` per allele, one base long, reference
+    /// first; for every sample and allele the same read summary (10 observations, `q_sum` −30,
+    /// 5 forward, 5 placed left, MAPQ sum 600 and 36,000 squared), which its loop does not read;
+    /// no chain anchors; ploidy 2; and a `PosteriorEngineConfig` carrying this locus's diversity,
+    /// sample 0's coefficient as the default and the whole slice as per-sample overrides, run
+    /// through the interpolating `InterpUnivariateSimdMath` backend.
+    fn production_calls(&self) -> ProductionAnswer {
+        let digest = self.digest();
+        let &(_, best_genotype, iterations, converged) = PRODUCTION_ANSWERS
+            .iter()
+            .find(|(key, ..)| *key == digest)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no frozen production answer for a locus with digest {digest:016x} — its \
+                     inputs are not the ones production was run on"
+                )
+            });
+        ProductionAnswer {
+            best_genotype: best_genotype.to_vec(),
+            iterations,
+            converged,
+        }
+    }
 
-        let config = PosteriorEngineConfig::new()
-            .with_nucleotide_diversity(self.diversity)
-            .expect("a diversity in range")
-            .with_fixation_index_default(self.inbreeding[0])
-            .expect("an inbreeding coefficient in range")
-            .with_fixation_index_overrides(Some(self.inbreeding.to_vec()))
-            .expect("every coefficient in range");
-        let math = InterpUnivariateSimdMath;
-        let mut scratch = RecordScratch::empty();
-        let outputs = run_em_columnar(
-            EmInputs {
-                locus: RecordLocus {
-                    chrom_id: 1,
-                    start: 1_000,
-                    end: 1_000,
-                },
-                ploidy: 2,
-                n_samples: self.samples,
-                n_genotypes: self.genotypes(),
-                alleles: &view,
-                scalars: &scalars,
-                log_likelihoods: self.log_likelihoods,
-                chain_anchor_flags_for_validation: &anchor_flags,
-            },
-            &config,
-            &math,
-            &mut scratch,
-        )
-        .expect("production calls this record");
-        (outputs.best_genotype, outputs.diagnostics)
+    /// **Everything production was handed that could change its answer**, reduced to one number:
+    /// FNV-1a over the sample count, the allele count, the diversity's bit pattern, every
+    /// likelihood's and every coefficient's. Written out rather than taken from `std`'s hasher,
+    /// whose output is not promised to be stable across releases.
+    fn digest(&self) -> u64 {
+        let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |bytes: &[u8]| {
+            for &byte in bytes {
+                digest ^= u64::from(byte);
+                digest = digest.wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        eat(&(self.samples as u64).to_le_bytes());
+        eat(&(self.alleles as u64).to_le_bytes());
+        eat(&self.diversity.to_bits().to_le_bytes());
+        for value in self.log_likelihoods {
+            eat(&value.to_bits().to_le_bytes());
+        }
+        for value in self.inbreeding {
+            eat(&value.to_bits().to_le_bytes());
+        }
+        digest
     }
 
     /// The candidate table the fixture's allele count spells.
@@ -346,8 +333,9 @@ impl Locus<'_> {
     fn both(&self) -> Comparison {
         let table = GenotypeTable::build(diploid(), self.alleles);
         let genotypes = table.view();
-        let (indices, diagnostics) = self.production_calls();
-        let production = indices
+        let answer = self.production_calls();
+        let production = answer
+            .best_genotype
             .into_iter()
             .map(|index| {
                 genotypes
@@ -364,8 +352,8 @@ impl Locus<'_> {
             .collect();
         Comparison {
             production,
-            production_iterations: diagnostics.iterations,
-            production_converged: diagnostics.converged,
+            production_iterations: answer.iterations,
+            production_converged: answer.converged,
             ng,
             ng_passes: inference.passes,
             ng_converged: inference.converged,
@@ -400,6 +388,57 @@ impl Locus<'_> {
             .collect()
     }
 }
+
+/// What production's loop returned on one locus, as frozen.
+struct ProductionAnswer {
+    best_genotype: Vec<usize>,
+    iterations: u32,
+    converged: bool,
+}
+
+/// **Production's answers, one per locus a fixture below hands it**: the locus's digest, the
+/// genotype index production called for each sample, its iteration count, and whether it
+/// converged. Recorded from `run_em_columnar` at commit `d9e7b076` (promotion plan step C6).
+const PRODUCTION_ANSWERS: [(u64, &[usize], u32, bool); 9] = [
+    // the_two_loops_call_the_same_genotypes_at_a_biallelic_site
+    (0xaf5a_3a78_93dc_2452, &[2, 1, 0], 2, true),
+    // the_two_loops_agree_where_the_cohort_carries_a_thin_sample
+    (
+        0xc81e_e649_bfc9_e469,
+        &[2, 2, 2, 2, 2, 2, 2, 2, 2, 1],
+        3,
+        true,
+    ),
+    // both_loops_let_the_cohort_overturn_a_thin_samples_reads
+    (
+        0xb6fb_9364_10da_a7cf,
+        &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        3,
+        true,
+    ),
+    // the_two_loops_part_at_an_inbred_panel_and_ng_is_the_corrected_one — outbred
+    (
+        0x9176_250e_8b9f_a9c7,
+        &[2, 2, 2, 2, 2, 0, 0, 0, 0, 1],
+        3,
+        true,
+    ),
+    // the_two_loops_part_at_an_inbred_panel_and_ng_is_the_corrected_one — F = 0.9
+    (
+        0x255a_bd21_4ede_237f,
+        &[2, 2, 2, 2, 2, 0, 0, 0, 0, 1],
+        3,
+        true,
+    ),
+    // the_two_loops_split_the_alternative_concentration_the_same_way
+    (0x29f4_9756_2aa0_7261, &[2, 2, 2, 2, 5, 5, 1], 3, true),
+    // the_two_loops_call_one_sample_alike_on_production_s_other_e_step
+    (0x1a69_d147_4c47_67a8, &[0], 2, true),
+    // a_samples_own_inbreeding_coefficient_is_what_reaches_its_row
+    (0x3ae4_a201_2bb1_f802, &[2, 2, 2, 2, 0, 0, 1, 1], 3, true),
+    // a_locus_the_reads_leave_open_is_decided_identically_and_counts_its_passes_one_apart
+    (0xadb3_09af_484c_bfdc, &[0, 0, 0, 0, 0, 0, 0, 0], 36, true),
+];
 
 /// **What the two loops said, side by side**, with what each reported about its own run.
 struct Comparison {
@@ -693,9 +732,8 @@ mod tests {
     /// exercised at and which no other fixture reaches.
     ///
     /// *(The stronger check — ng's concentration against production's own array rather than
-    /// against its formula — is not available: `RecordScratch::alpha` is private to
-    /// `posterior_engine`, and widening the frozen tree for a test is not a trade this module
-    /// makes.)*
+    /// against its formula — was never made: `RecordScratch::alpha` was private to
+    /// `posterior_engine`, and since promotion step C6 production is not run here at all.)*
     #[test]
     fn the_two_loops_split_the_alternative_concentration_the_same_way() {
         // Six genotypes at three alleles, in table order: 0/0, 0/1, 1/1, 0/2, 1/2, 2/2.
@@ -851,20 +889,28 @@ mod tests {
         );
     }
 
-    /// **The two loops run under the same threshold and the same cap, and nothing but this
-    /// asserts it.**
+    /// **The two loops run under the same threshold, the same cap and the same reference
+    /// concentration, and nothing but this asserts it.**
     ///
-    /// They are two independent pairs of constants — production's in `posterior_engine`, ng's in
-    /// `inference` — equal today because two edits agree. Every fixture here runs both at their
-    /// defaults, so a change to one side alone would turn every parity assertion in this file
-    /// into a comparison of two differently-configured loops, and nothing would say so.
+    /// They are independent constants — production's in `posterior_engine` and `genetics`, frozen
+    /// here, ng's in `inference` and `ng::genetics` — equal because two edits agreed. Every fixture
+    /// here runs both at their defaults, so a change to one side alone would turn every parity
+    /// assertion in this file into a comparison of two differently-configured loops, and nothing
+    /// would say so.
     #[test]
     fn the_two_loops_run_under_the_same_threshold_and_the_same_cap() {
         use crate::ng::calling::inference::{DEFAULT_CONVERGENCE_THRESHOLD, DEFAULT_MAX_PASSES};
-        use crate::var_calling::posterior_engine::{
-            DEFAULT_CONVERGENCE_THRESHOLD as PRODUCTION_THRESHOLD,
-            DEFAULT_MAX_ITERATIONS as PRODUCTION_CAP,
-        };
+        // Production's `posterior_engine::DEFAULT_CONVERGENCE_THRESHOLD` and
+        // `DEFAULT_MAX_ITERATIONS` at commit `d9e7b076`, frozen at promotion step C6.
+        const PRODUCTION_THRESHOLD: f64 = 1e-3;
+        const PRODUCTION_CAP: u32 = 50;
+        // Production's `genetics::ALPHA_REF` at the same commit.
+        const PRODUCTION_ALPHA_REF: f64 = 1.0;
+        assert_eq!(
+            ALPHA_REF.to_bits(),
+            PRODUCTION_ALPHA_REF.to_bits(),
+            "ng's reference concentration is not production's, so the two loops' priors differ"
+        );
 
         assert_eq!(
             DEFAULT_CONVERGENCE_THRESHOLD, PRODUCTION_THRESHOLD,

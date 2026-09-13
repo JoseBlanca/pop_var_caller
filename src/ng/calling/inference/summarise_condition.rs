@@ -8583,8 +8583,8 @@ mod tests {
     ///
     /// # Why a differential and not a parity oracle
     ///
-    /// The SNP/indel path has an oracle — the existing caller's own loop, handed the same
-    /// likelihood table (`calling::loop_parity`). **The repeat-tract path does not**, and the
+    /// The SNP/indel path has an oracle — the existing caller's own loop's recorded answers on
+    /// the same likelihood tables (`calling::loop_parity`). **The repeat-tract path does not**, and the
     /// reason `doc/devel/ng/spec/calling_em_loop.md` §10 gives is that the two loops converge on a
     /// different quantity at a different scale, so two loops stopping at different points on one
     /// trajectory would disagree at any genotype near a boundary for no reason any document

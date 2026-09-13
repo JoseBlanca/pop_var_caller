@@ -242,7 +242,14 @@ carries a header line naming the production commit that wrote it.
     its alleles, its log coefficient as a bit pattern, its homozygous allele. The four
     comparisons — count, allele counts in order, coefficient bits, homozygous lookup — read
     from the file. Corrupting one coefficient fails one test.
-  - ☐ C6 · ☐ C7 · ☐ C8 · ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
+  - ✅ **C6** `calling/loop_parity.rs` — **frozen, all 9 tests kept.** Production's
+    `run_em_columnar` was handed nine likelihood tables across the tests; what it returned on each
+    — the genotype called for every sample, its iteration count, whether it converged — is now a
+    nine-entry table in the file, keyed by an FNV-1a digest of everything production was handed,
+    so a changed input finds no answer and fails. Production's convergence threshold (1e-3), pass
+    cap (50) and reference concentration (1.0) are frozen literals ng's constants are checked
+    against. Changing one frozen genotype fails one test.
+  - ☐ C7 · ☐ C8 · ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
 - ☐ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
   `ng_psp_head_encoding.rs` (`test = true` in `Cargo.toml`), `paralog_score_parity.rs` — are
   deleted with a line each in the report saying which document already holds their result.
