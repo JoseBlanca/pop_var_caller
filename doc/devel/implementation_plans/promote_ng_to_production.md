@@ -407,7 +407,14 @@ mattered:
     `d9e7b076`, is a six-entry bit-pattern array in the test; the reconciliation (add back the
     multinomial coefficient, undo the error spread and the read-group scale) is unchanged and
     still within 1e-9. Moving one recorded value by 0.03 nats fails it.
-  - ☐ C21 · ☐ C22 · ☐ C23 · ☐ C24 · ☐ C25
+  - ✅ **C21** `calling/genotype_prior/dirichlet_multinomial.rs` — **frozen.** Production's
+    `genetics::dirichlet_multinomial_log_priors` rows over the test's grid — 8 shapes × 4 reference
+    entries × 4 alternative totals, 1,904 genotype values — were recorded at `d9e7b076` into
+    `calling/genotype_prior/testdata/dirichlet_multinomial_production.tsv` (68 KB); the test's 1e-9
+    agreement bound is unchanged. The neighbouring accuracy test compares against exact
+    logarithms and ng's own `lgamma`, and never read production. Corrupting one recorded value
+    fails the test.
+  - ☐ C22 · ☐ C23 · ☐ C24 · ☐ C25
 - ☐ **C26** · *Depends:* C1, C9.
 
   **Deviation, recorded 2026-09-12: `cram_files` goes to `src/bam/`, and §2's "shared

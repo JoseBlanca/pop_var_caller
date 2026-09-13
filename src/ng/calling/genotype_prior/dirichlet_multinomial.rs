@@ -502,6 +502,47 @@ mod tests {
         );
     }
 
+    /// Production's recorded row at one grid point, in genotype order.
+    fn production_row(
+        copies: u8,
+        allele_count: usize,
+        reference: f64,
+        alternative_total: f64,
+    ) -> Vec<f64> {
+        let key = [
+            copies.to_string(),
+            allele_count.to_string(),
+            format!("{reference:?}"),
+            format!("{alternative_total:?}"),
+        ];
+        let mut row: Vec<(usize, f64)> =
+            include_str!("testdata/dirichlet_multinomial_production.tsv")
+                .lines()
+                .filter(|line| !line.starts_with('#'))
+                .filter_map(|line| {
+                    let fields: Vec<&str> = line.split('\t').collect();
+                    let [a, b, c, d, genotype, bits] = fields[..] else {
+                        panic!("a recorded prior has six columns: {line}");
+                    };
+                    ([a, b, c, d] == key.each_ref().map(String::as_str)).then(|| {
+                        (
+                            genotype.parse().expect("a genotype index"),
+                            f64::from_bits(u64::from_str_radix(bits, 16).expect("a bit pattern")),
+                        )
+                    })
+                })
+                .collect();
+        assert!(!row.is_empty(), "no recorded production row for {key:?}");
+        row.sort_by_key(|&(genotype, _)| genotype);
+        assert!(
+            row.iter()
+                .enumerate()
+                .all(|(index, &(genotype, _))| index == genotype),
+            "the recorded row for {key:?} is not one entry per genotype"
+        );
+        row.into_iter().map(|(_, value)| value).collect()
+    }
+
     /// **The port agrees with what it was ported from, and where they differ this one is the
     /// closer to the truth.**
     ///
@@ -532,8 +573,10 @@ mod tests {
     /// truncating the fold at six alleles. They move a row by 9.9 nats at a hundred samples and
     /// get 57 of 78 genotypes wrong on a twelve-allele locus.
     ///
-    /// Reading production here is an oracle and never a dependency: nothing ng ships imports
-    /// from `src/genetics.rs` beyond `lgamma` and the alternative-concentration floor.
+    /// **Production's rows are frozen since promotion step C21.** What
+    /// `genetics::dirichlet_multinomial_log_priors` returned at every grid point, genotype by
+    /// genotype, was recorded at commit `d9e7b076` into
+    /// `testdata/dirichlet_multinomial_production.tsv` (1,904 values) and is read from there.
     #[test]
     fn the_port_agrees_with_production_and_is_never_the_further_from_exact() {
         for (copies, allele_count) in [
@@ -548,17 +591,9 @@ mod tests {
         ] {
             for reference in [1.0, 201.0, 2001.0, 6001.0] {
                 for alternative_total in [1e-3, 1e-2, 0.25, 40.0] {
-                    let (row, concentration) =
-                        row_for(copies, allele_count, reference, alternative_total);
-                    let table =
-                        GenotypeTable::build(Ploidy::try_new(copies).unwrap(), allele_count);
-                    let view = table.view();
-                    let production = crate::genetics::dirichlet_multinomial_log_priors(
-                        view.genotype_allele_counts(),
-                        view.log_multinomial_coeffs(),
-                        allele_count,
-                        &concentration,
-                    );
+                    let (row, _) = row_for(copies, allele_count, reference, alternative_total);
+                    let production =
+                        production_row(copies, allele_count, reference, alternative_total);
                     assert_eq!(production.len(), row.len());
                     for (genotype, (&ours, &theirs)) in row.iter().zip(&production).enumerate() {
                         // **An absolute distance in nats, and that is the right measure
