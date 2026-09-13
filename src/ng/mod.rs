@@ -35,10 +35,9 @@
 //! against `src/ssr/` and `calling::genotype_table_parity` against `src/var_calling/`
 //! were the first two; there are now several more, and the way to find them is
 //! `grep -rnE 'use crate::|include_str!\("\.\./\.\.' src/ng | grep -v 'crate::ng'` rather
-//! than a list here that goes stale. **The second alternative matters**: the copy guards
-//! (`paralog/copy_fidelity.rs`, `locus_generation/pileup/copy_fidelity.rs`) read production's
-//! source as *text* at compile time rather than importing from it, and a `use`-only sweep
-//! does not see them at all. Every one is `#[cfg(test)]`, so nothing shipped depends on production; the
+//! than a list here that goes stale. **The second alternative matters**: the copy guard
+//! `paralog/copy_fidelity.rs` reads production's source as *text* at compile time rather than
+//! importing from it, and a `use`-only sweep does not see it at all. Every one is `#[cfg(test)]`, so nothing shipped depends on production; the
 //! direction that matters is the other one, and production still depends on nothing in ng.
 //! A port's whole claim is that it agrees with what it was ported from, and only production
 //! can settle that. **Every occurrence outside a `#[cfg(test)]` module needs a stated
@@ -66,14 +65,13 @@
 //! **The heaviest instance of that rule so far is
 //! [`locus_generation::pileup`]** — begun as a verbatim copy of `src/pileup/walker/`
 //! (~5,500 lines), kept *provably* identical to its source so that ng's later,
-//! deliberate divergences could be told apart from transcription slips. It is checked
-//! textually, not asserted: `pileup/copy_fidelity.rs`.
+//! deliberate divergences could be told apart from transcription slips. A textual guard,
+//! `pileup/copy_fidelity.rs`, checked that.
 //!
-//! **Those divergences have now begun**, so "a verbatim copy" is no longer true of the
-//! directory as a whole: three files have been released from the guard and changed on
-//! purpose — the walker no longer fabricates the reference bases a read did not witness
-//! — and four remain verbatim and guarded. `copy_fidelity.rs` names which are which, and
-//! is the only thing that stays true as the balance shifts.
+//! **Those divergences came, file by file** — the walker no longer fabricates the reference
+//! bases a read did not witness — and each changed file was released from the guard. When
+//! promotion step C2 deleted the guard, `decompose.rs` was the only file it still covered; the
+//! record of the releases is in its header at `d9e7b076`.
 
 #[cfg(test)]
 mod scanner_parity;

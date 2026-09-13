@@ -2707,7 +2707,7 @@ fn window_of_read(
 /// # Why it lives here and not on `ReadEvent`
 ///
 /// [`decompose`](super::decompose) is one of production's files, transcribed and left
-/// byte-for-byte alone (`copy_fidelity`). `footprint_span` there is a fact about a CIGAR
+/// byte-for-byte alone (a textual guard kept it so until promotion step C2). `footprint_span` there is a fact about a CIGAR
 /// operation and is production's; **how wide a record has to be is ng's locus generator's
 /// policy**, so it belongs in ng's own module rather than in the frozen copy.
 fn record_span(event: &ReadEvent) -> u32 {

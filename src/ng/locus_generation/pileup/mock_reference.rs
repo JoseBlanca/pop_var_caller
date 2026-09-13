@@ -10,8 +10,8 @@
 //!
 //! This is the *other* direction, and it is a fixture concern rather than an
 //! architectural one. `MockFasta` — production's in-memory test double — lives
-//! inside [`tests.rs`](super::tests), which is one of the files
-//! [`copy_fidelity`](super::copy_fidelity) still guards as verbatim, and its
+//! inside [`tests.rs`](super::tests), which was then one of the files a textual
+//! guard (`copy_fidelity.rs`, retired at promotion step C2) kept verbatim, and its
 //! `chromosomes` field is private to that module. So ng cannot make it a
 //! [`RefSeq`] *in place* without editing a file the plan keeps frozen, and cannot
 //! read its bytes from outside either. What it can do is call the one surface

@@ -7,8 +7,8 @@
 //! byte-for-byte production's. What ng added: [`ActiveRead::ever_contributed`]
 //! and the [`ActiveReads::silent_exits`] tally it feeds, which is what makes
 //! `reads_silent_over_footprint` countable (spec §6, plan D2). Everything else
-//! is still the transcription, and the release table in `copy_fidelity.rs`'s
-//! header is the record.
+//! is still the transcription. The release table that recorded it was in
+//! `copy_fidelity.rs`'s header, deleted at promotion step C2; see `d9e7b076`.
 //!
 //! The depth-cap change of 2026-08-05 added two more:
 //! [`worst_sampling_key`](ActiveReads::worst_sampling_key) and

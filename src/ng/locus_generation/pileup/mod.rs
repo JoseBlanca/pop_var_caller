@@ -6,31 +6,24 @@
 //! on a frozen type (`doc/devel/ng/spec/locus_generation_pileup.md` §3,
 //! `doc/devel/ng/arch/locus_generation_pileup.md` *Module home*).
 //!
-//! # Eight files were transcribed; three are still verbatim
+//! # Eight files were transcribed from production's walker
 //!
 //! [`genome_walk`], [`open_record`], [`cigar_cursor`], [`decompose`],
 //! [`active_read_set`], [`chain_id_allocator`] and [`errors`] — plus `tests.rs`,
-//! production's own end-to-end suite — were transcribed from
-//! `src/pileup/walker/` **unchanged**, and `copy_fidelity.rs` checks that
-//! textually rather than leaving it a claim in this comment. The rule that paid
-//! three times on this branch is *transcribe first, change second*: a copy that is
-//! provably production is the baseline every later change is measured against, and
-//! without it the generator's deliberate divergences could not be told from
-//! transcription slips.
+//! production's own end-to-end suite — were transcribed from `src/pileup/walker/`
+//! **unchanged**. The rule that paid three times on this branch is *transcribe first,
+//! change second*: a copy that is provably production is the baseline every later
+//! change is measured against, and without it the generator's deliberate divergences
+//! could not be told from transcription slips.
 //!
-//! **Plan 3 spends that baseline, file by file.** Each step releases the file it
-//! changes from `copy_fidelity.rs`'s checked set and says so in that file's own
-//! header, so the guard keeps protecting what is still a copy instead of being
-//! switched off wholesale at the first change. A0 released [`genome_walk`],
-//! [`open_record`] and [`errors`] — the reference adaptor's removal — and B2 released
-//! `tests.rs`, whose assertions had to move to ng's own locus type (spec §12), and D2
-//! released [`active_read_set`] for the per-read "ever contributed" flag. **Three are
-//! still guarded**, and `copy_fidelity.rs`'s release table is the list that stays true.
-//!
-//! What the copy was proven to *compute* was, until promotion step C1, the stage-1
-//! differential (`parity.rs`); what it is proven to *be* is `copy_fidelity.rs`. The two are
-//! different claims. Both are named as files rather than linked: they are
-//! `#[cfg(test)]` modules, so an intra-doc link to them breaks `cargo doc`.
+//! **Plan 3 and the changes after it spent that baseline, file by file**, each releasing the file it
+//! changed from a textual guard (`copy_fidelity.rs`) and saying so in that file's own
+//! header: A0 released [`genome_walk`], [`open_record`] and [`errors`], B2 `tests.rs`,
+//! D2 [`active_read_set`], and the 2026-08-05 changes [`cigar_cursor`] and
+//! [`chain_id_allocator`]. [`decompose`] was the last still guarded. **The guard was
+//! retired at promotion step C2, and the stage-1 differential (`parity.rs`) was cut down at
+//! C1 to what does not need production's walker**; what either proved is in this module's
+//! history at `d9e7b076`.
 //!
 //! **The walk emits ng's own [`SampleLocusObservations`](crate::ng::locus_generation::SampleLocusObservations)
 //! from B2 on**, not production's `PileupRecord` — and since Milestone D **nothing in this
@@ -301,19 +294,14 @@ mod chain_renaming_tests {
     }
 }
 
-/// **ng's, not a copy** — the textual check that the still-untouched copies are
-/// production's, from outside the files it checks (spec §3).
-#[cfg(test)]
-mod copy_fidelity;
-
 /// **ng's, not a copy** — [`RefSeq`](crate::ng::ref_seq::RefSeq) over `tests.rs`'s
 /// `MockFasta`, so production's copied suite can drive ng's walker (A0).
 #[cfg(test)]
 mod mock_reference;
 
-/// **ng's, not a copy** — the stage-1 differential: the two walkers compute the
-/// same thing, over one read stream (spec §3, §13.1). `copy_fidelity` says the
-/// copy *is* production's; this says it *does* what production's does.
+/// **ng's, not a copy** — what is left of the stage-1 differential: determinism across
+/// processes, the generated cases' coverage floor, and production's error stream
+/// frozen (spec §3, §13.1).
 #[cfg(test)]
 mod parity;
 

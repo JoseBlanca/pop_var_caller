@@ -18,9 +18,9 @@
 //! `SampleLocusObservations` and its behaviour deliberately diverges; §12
 //! classifies each test three ways for that moment.
 //!
-//! `copy_fidelity.rs`'s `the_eight_copies_are_still_productions` is what keeps
-//! "verbatim" a checked property rather than a claim in a doc comment — and it checks
-//! this file too, which is why it is not in it.
+//! `copy_fidelity.rs`'s textual guard was what kept
+//! "verbatim" a checked property rather than a claim in a doc comment, until it released
+//! this file at B2; the guard itself was retired at promotion step C2.
 
 use std::sync::Arc;
 

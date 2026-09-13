@@ -186,7 +186,7 @@ carries a header line naming the production commit that wrote it.
 | file | tests | what it compares | action |
 |---|---:|---|---|
 | `locus_generation/pileup/parity.rs` | 14 | ng's walker records against production's, same read stream | **freeze** — but first confirm what remains: PROJECT_STATUS (2026-09-11) records that the two *whole-output* differentials were retired because ng's records are deliberately no longer production's. Anything left asserting equality on a record ng has since changed is deleted with that citation |
-| `locus_generation/pileup/copy_fidelity.rs` | 1 | source text of 4 walker files | **delete** |
+| `locus_generation/pileup/copy_fidelity.rs` | 1 | source text of the walker files not yet released — one, `decompose.rs`, by `d9e7b076` | **delete** |
 | `paralog/copy_fidelity.rs` | 10 | source text of 4 filter files | **delete** |
 | `paralog/production_parity.rs` | 14 | scorer ratios, bit for bit, on randomised loci | **freeze** |
 | `calling/genotype_table_parity.rs` | 4 | genotype enumeration order, coefficients, homozygous rows | **freeze** — small, exact, and three of its four failures are silent |
@@ -214,7 +214,11 @@ carries a header line naming the production commit that wrote it.
     now read ng's walk. Two ng-only checks the retired census ran — at least half as many chain
     ids as reads, and partial-witness runs inside their locus — moved into
     `every_emitted_observation_carries_a_read` rather than going unrun.
-  - ☐ C2 · ☐ C3 · ☐ C4 · ☐ C5 · ☐ C6 · ☐ C7 · ☐ C8 · ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
+  - ✅ **C2** `locus_generation/pileup/copy_fidelity.rs` — deleted. The row said four walker
+    files; at `d9e7b076` it guarded one, `decompose.rs`, the others having been released as ng
+    changed them. Doc comments in six files and the module's arch doc that described it as a
+    running check now say it was retired.
+  - ☐ C3 · ☐ C4 · ☐ C5 · ☐ C6 · ☐ C7 · ☐ C8 · ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
 - ☐ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
   `ng_psp_head_encoding.rs` (`test = true` in `Cargo.toml`), `paralog_score_parity.rs` — are
   deleted with a line each in the report saying which document already holds their result.
