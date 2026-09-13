@@ -420,7 +420,15 @@ mattered:
     its two helpers is 70 lines. So they are a `production_pair_hmm` module inside the test,
     identical to production's but for visibility and rustfmt's wrapping of one signature. Mutating
     the copy's mismatch rate fails all three tests.
-  - ☐ C23 · ☐ C24 · ☐ C25
+  - ✅ **C23** `locus_generation/ssr.rs` — **frozen as literals; both tests kept.** Production's
+    `locus_seed` for four loci, the seed for `(chrX, 7)` and the eight reads its `Reservoir` kept
+    from 10,000 offers, recorded at `d9e7b076`, are now constants in the reservoir test. The
+    observation test's production answer — `CACA` twice and `CACACA` three times, with the partial
+    read dropped as border-off-end — is the value the test asserted ng equal to while it still
+    called production, now written in the test; ng's side still runs its real classify and tally.
+    The sweep counted 6 tests for this file; only these two called production. The rest are ports
+    of production's own `fetch_reads.rs` tests, sharing their names, and never called it.
+  - ☐ C24 · ☐ C25
 - ☐ **C26** · *Depends:* C1, C9.
 
   **Deviation, recorded 2026-09-12: `cram_files` goes to `src/bam/`, and §2's "shared

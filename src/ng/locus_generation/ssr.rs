@@ -2955,24 +2955,23 @@ mod tests {
     }
 
     /// **The parity oracle for the port**: ng's seed and reservoir must produce output
-    /// identical to frozen production (`src/ssr/pileup/fetch_reads.rs`), byte for byte. The
+    /// identical to production's `src/ssr/pileup/fetch_reads.rs` as of `d9e7b076`, byte for byte. The
     /// self-consistency tests above would survive a drifted constant; this one would not —
     /// it is what makes "byte-faithful port" a checked claim rather than an asserted one.
-    /// (Calling production as a test-only oracle mirrors region typing's `build_loci`
-    /// differential; ng does not depend on production at run time.)
+    ///
+    /// **Production's answers are frozen since promotion step C23**: its `locus_seed` for the four
+    /// loci and the kept set its `Reservoir` held, recorded at commit `d9e7b076`.
     #[test]
     fn ng_seed_and_reservoir_match_frozen_production_byte_for_byte() {
-        use crate::ssr::pileup::fetch_reads as production;
-
-        for (chrom, start) in [
-            ("chr1", 0u32),
-            ("chr1", 100),
-            ("chrX", 4242),
-            ("scaffold_7", 999_999),
+        for (chrom, start, production_seed) in [
+            ("chr1", 0u32, 0x17ca_5576_8bd0_a6ad_u64),
+            ("chr1", 100, 0x17ca_b176_8bd1_4301),
+            ("chrX", 4242, 0x16ab_7176_8aea_2282),
+            ("scaffold_7", 999_999, 0xb4f8_cd00_1980_491e),
         ] {
             assert_eq!(
                 locus_seed(chrom, start),
-                production::locus_seed(chrom, start),
+                production_seed,
                 "seed for ({chrom}, {start})"
             );
         }
@@ -2986,17 +2985,16 @@ mod tests {
             }
             r.into_held()
         };
-        let prod_kept = |seed| {
-            let mut r = production::Reservoir::new(8, seed);
-            for x in 1..=10_000u32 {
-                r.offer(x);
-            }
-            r.into_held()
-        };
+        // Production's `Reservoir` with the same capacity, seed and offers kept these.
+        const PRODUCTION_KEPT: [u32; 8] = [9794, 3095, 2292, 9898, 13, 764, 4816, 3616];
         let seed = locus_seed("chrX", 7);
         assert_eq!(
+            seed, 0x169b_de76_8acf_abb9,
+            "production's seed for (chrX, 7)"
+        );
+        assert_eq!(
             kept(seed),
-            prod_kept(seed),
+            PRODUCTION_KEPT,
             "the kept set must be identical"
         );
     }
@@ -3928,17 +3926,20 @@ mod tests {
     /// must match production's `SsrLocusObs.observed` byte for byte, in bases and count, **with the
     /// cap disabled** on a fixture shallower than any cap.
     ///
-    /// Both sides run over the **same** reads and the **same** reference frame. ng runs its real
+    /// **Production's side is frozen since promotion step C23** — see the recorded block in the
+    /// body. The paragraphs below describe the comparison as it was built.
+    ///
+    /// Both sides ran over the **same** reads and the **same** reference frame. ng runs its real
     /// per-read pipeline (`classify::classify_read`, the `SsrFlatGapAligner` over production's
-    /// `PerQualityEmission` table) and its real `tally`; production runs its real delimiter
+    /// `PerQualityEmission` table) and its real `tally`; production ran its real delimiter
     /// (`delimit_read` over `HmmModel`) and its real `tally`. The two aligners are *different
     /// algorithms* — this is exactly the claim under test: that on the complete class of clean reads
     /// they delimit the identical tract. The generator's fetch/cap are not exercised here because,
     /// with the cap disabled, they only select reads and never change an observation's bases; that
-    /// wiring is covered by D3 and the dump-tool fixture (E1). The production side reproduces
+    /// wiring is covered by D3 and the dump-tool fixture (E1). The production side reproduced
     /// production's *clean-read* classify path (extract → delimit → the Region tract), which for
-    /// these Q40, fully-spanned reads is exactly what production's `classify_read` does — asserted,
-    /// not assumed, via `flank_truncated` and the quality floor.
+    /// these Q40, fully-spanned reads is exactly what production's `classify_read` does — this was
+    /// asserted, while production still ran, via `flank_truncated` and the quality floor.
     ///
     /// Partial observations are ng's new behaviour with **no oracle**: this checks only that they
     /// *exist* (ng's classify keeps as a partial the read production's delimiter drops as
@@ -3949,7 +3950,7 @@ mod tests {
     /// exact-match behaviour. An *expansion* allele or a soft-clipped read cannot be added without
     /// leaving this regime: both drive the tract past the reference-sized window, tripping the
     /// long-allele **widening** recovery — a branch this production-side reproduction deliberately
-    /// does not model (it asserts `!flank_truncated`). Widening-path and soft-clip parity are not
+    /// does not model (it asserted `!flank_truncated`). Widening-path and soft-clip parity are not
     /// covered here.
     #[test]
     fn ng_complete_observations_match_frozen_production_byte_for_byte() {
@@ -3960,15 +3961,6 @@ mod tests {
         use crate::ng::alignment::{PerQualityEmission, StutterModel};
         use crate::ng::locus_generation::ReadWitness;
         use crate::ng::read::aligned_read::AlignedRead;
-        // Frozen production oracle (called test-only, as the reservoir parity test does; ng does not
-        // depend on production at run time).
-        use crate::ssr::pileup::alignment::{
-            Delimited, HmmModel, ViterbiScratch as ProdViterbiScratch, delimit_read,
-        };
-        use crate::ssr::pileup::footprint::{extract_region, flank_truncated, read_footprint};
-        use crate::ssr::pileup::locus_tally::{QcCounts, ReadObs, tally as production_tally};
-        use crate::ssr::types::{Locus, Motif as ProductionMotif};
-
         // A 6 bp G-flank + CACACA + 6 bp T-flank — production's own delimiter fixture frame.
         const FRAME: &[u8] = b"GGGGGGCACACATTTTTT";
 
@@ -4040,79 +4032,16 @@ mod tests {
             .map(|obs| (obs.bases.to_vec(), obs.num_obs))
             .collect();
 
-        // --- production: real delimit_read + real tally ---------------------
-        let production_locus = Locus::new(
-            "chr1".into(),
-            6, // 0-based tract start
-            12,
-            ProductionMotif::new(b"CA").unwrap(),
-            1.0,
-            FRAME.into(),
-            0, // ref_bytes_start (0-based)
-        )
-        .unwrap();
-        // The clean-read glue below reproduces production's `classify_read`
-        // (src/ssr/pileup/driver.rs:195) — private, so it cannot be called directly. Only its
-        // control flow is copied; the delimiter (`delimit_read`) and the `tally` are the real frozen
-        // production code. Both simplifications the reproduction makes are **self-checking**, so it
-        // cannot silently drift from production: the widening branch is asserted away
-        // (`!flank_truncated`) and the quality gate is asserted to pass. If production's
-        // `classify_read` grows a step before its Region→Sequence path, update here too.
-        let model = HmmModel::new();
-        let mut production_scratch = ProdViterbiScratch::new();
-        let outcomes: Vec<ReadObs> = reads
-            .iter()
-            .map(|read| {
-                let footprint = read_footprint(&read.cigar, read.pos);
-                let region =
-                    extract_region(&read.cigar, footprint, read.seq.len(), &production_locus);
-                match delimit_read(
-                    &read.seq[region.clone()],
-                    &read.qual[region.clone()],
-                    &production_locus,
-                    &model,
-                    &mut production_scratch,
-                ) {
-                    Delimited::Region(tract) => {
-                        // The fixture reads span cleanly: a complete tract with full flanks, so
-                        // production's classify_read takes its Region→Sequence path, not widening.
-                        assert!(
-                            !flank_truncated(
-                                &region,
-                                &tract,
-                                read.seq.len(),
-                                production_locus.left_flank().len(),
-                                production_locus.right_flank().len(),
-                            ),
-                            "the fixture read is not window-truncated"
-                        );
-                        // Production gates on the tract's lower-quartile base quality
-                        // (MIN_REGION_Q1 = 15); every tract base here is Q40, so its
-                        // `sequence_or_low_quality` returns `Sequence`. Asserted so that skipping
-                        // the gate cannot mask a divergence.
-                        assert!(
-                            read.qual[region.clone()][tract.clone()]
-                                .iter()
-                                .all(|&q| q >= 15),
-                            "the fixture tract clears production's quality floor"
-                        );
-                        ReadObs::Sequence(read.seq[region][tract].into())
-                    }
-                    Delimited::BorderOffEnd => ReadObs::BorderOffEnd,
-                }
-            })
-            .collect();
-        let qc = QcCounts {
-            depth: reads.len() as u32,
-            n_filtered: 0,
-            mapped_reads: reads.len() as u32,
-        };
-        let production = production_tally(&production_locus, &outcomes, qc);
-        let production_observed: Vec<(Vec<u8>, u32)> = production
-            .observed
-            .iter()
-            .map(|(bases, count)| (bases.to_vec(), *count))
-            .collect();
+        // --- production: recorded ---------------------------------------------
+        // What production's `delimit_read` over `HmmModel`, driven through its clean-read classify
+        // path, and its `tally` gave on these six reads at commit `d9e7b076` (promotion step C23):
+        // the two complete alleles with their counts, and the partially-covering read dropped as
+        // border-off-end. This is the value the test asserted ng equal to while it still called
+        // production live, and production's code did not change after `d9e7b076`. That test also
+        // asserted both simplifications its glue made — no read was window-truncated, and every
+        // tract base cleared production's quality floor.
+        let production_observed: Vec<(Vec<u8>, u32)> =
+            vec![(b"CACA".to_vec(), 2), (b"CACACA".to_vec(), 3)];
 
         // --- the parity assertion -------------------------------------------
         assert_eq!(
@@ -4130,9 +4059,7 @@ mod tests {
             counts.observations_partial, 1,
             "ng's classify keeps the partially-covering read as a partial"
         );
-        assert_eq!(
-            production.n_border_off_end, 1,
-            "production's delimiter drops that same read as border-off-end — no oracle for its bytes"
-        );
+        // Production's delimiter dropped that same read as border-off-end (recorded above), so
+        // there is no oracle for the partial's bytes.
     }
 }
