@@ -1,5 +1,13 @@
 //! **Byte-parity of ng's tract delimiter against production's — the port anchor.**
 //!
+//! **Production's side is frozen since promotion step C10.** Until then every case ran production's
+//! `delimit_read` beside ng's aligner. Production is being deleted, so its answer on each of the
+//! 11,992 cases the tests build was recorded at commit `d9e7b076` into
+//! `testdata/delimit_parity_production.tsv`, keyed by a digest of the case, and the tests compare
+//! ng against that file. The prose below describes the oracle as it was built; what is asserted is
+//! unchanged. **One capability is lost:** a soak above the recorded 3,000 cases per seed has no
+//! production answers to compare against, so it now fails on the first unrecorded case.
+//!
 //! Algorithm 3 ([`SsrFlatGapAligner`](super::ssr_best_path_flat_gap::SsrFlatGapAligner)) is
 //! a port of production's `delimit_read`, and it is the **only aligner in this module with a
 //! parity oracle**: algorithms 2, 4, 5 and 6 are *measured*, not verified (spec §10.3, arch
@@ -23,13 +31,11 @@
 //!   missing. So the reclassification is checked **by count and by shape**, which is all the
 //!   oracle can support (plan step B3).
 //!
-//! # Why this lives in `src/ng/` and reads `src/ssr/`
+//! # Why this lives in `src/ng/`
 //!
-//! It is **ng's test**: its subject is ng's aligner, and production is only the yardstick.
-//! `src/ssr/` is frozen (owner, 2026-07-16) and is read here, never written — the same shape
-//! as [`scanner_parity`](crate::ng::scanner_parity), and the same shape as the slip-cutoff
-//! cross-check in [`stutter`](super::stutter). It is `#[cfg(test)]`, so **shipping ng code
-//! still depends on nothing in production**.
+//! It is **ng's test**: its subject is ng's aligner, and production is only the yardstick — since
+//! promotion step C10 a recorded one, so the test reads a file and depends on nothing in
+//! production.
 
 use super::ssr_best_path_flat_gap::{SsrFlatGapAligner, ViterbiScratch};
 use super::{
@@ -38,10 +44,9 @@ use super::{
 use super::{StutterModel, stutter};
 use crate::ng::types::Bp;
 use crate::ng::types::Motif as NgMotif;
-use crate::ssr::pileup::alignment::{
-    Delimited, HmmModel, ViterbiScratch as ProdScratch, delimit_read,
-};
-use crate::ssr::types::{Locus, Motif as ProdMotif};
+use std::collections::HashMap;
+use std::ops::Range;
+use std::sync::OnceLock;
 
 /// A deterministic PRNG, so a failure is reproducible from its seed alone.
 ///
@@ -168,25 +173,85 @@ fn generate(rng: &mut SplitMix64) -> Case {
     }
 }
 
-/// Run production's delimiter on a case.
-fn production_answer(case: &Case) -> Delimited {
-    let reference = case.reference();
-    let tract_start = case.left_flank.len() as u32;
-    let tract_end = tract_start + case.tract.len() as u32;
-    let locus = Locus::new(
-        "parity".into(),
-        tract_start,
-        tract_end,
-        ProdMotif::new(&case.motif).expect("a valid motif"),
-        1.0,
-        reference.into_boxed_slice(),
-        0,
-    )
-    .expect("a valid locus");
+/// **Production's two-case answer**: `Region(range)`, the read bytes it measured as the tract, or
+/// a side-blind `BorderOffEnd`. A local copy of production's `Delimited`, which this file matched on.
+enum Delimited {
+    Region(Range<u32>),
+    BorderOffEnd,
+}
 
-    let model = HmmModel::new();
-    let mut scratch = ProdScratch::new();
-    delimit_read(&case.read, &case.quality, &locus, &model, &mut scratch)
+impl Case {
+    /// **This case, reduced to one number** — FNV-1a over the left flank, tract, right flank, motif,
+    /// read and quality, each length-prefixed. The key production's answers are looked up by.
+    fn digest(&self) -> u64 {
+        let mut bytes = Vec::new();
+        for part in [
+            &self.left_flank,
+            &self.tract,
+            &self.right_flank,
+            &self.motif,
+            &self.read,
+            &self.quality,
+        ] {
+            bytes.extend((part.len() as u64).to_le_bytes());
+            bytes.extend(part.iter());
+        }
+        bytes
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |digest, &byte| {
+                (digest ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            })
+    }
+}
+
+/// Production's recorded answers, keyed by case digest, parsed once.
+fn production_answers() -> &'static HashMap<u64, (u32, u32, bool)> {
+    static ANSWERS: OnceLock<HashMap<u64, (u32, u32, bool)>> = OnceLock::new();
+    ANSWERS.get_or_init(|| {
+        let mut answers = HashMap::new();
+        for line in include_str!("testdata/delimit_parity_production.tsv")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+        {
+            let fields: Vec<&str> = line.split('\t').collect();
+            let (digest, answer) = match fields[..] {
+                [digest, "R", start, end] => (
+                    digest,
+                    (
+                        start.parse().expect("a region start"),
+                        end.parse().expect("a region end"),
+                        true,
+                    ),
+                ),
+                [digest, "O"] => (digest, (0, 0, false)),
+                _ => panic!("a delimitation row is `digest R start end` or `digest O`: {line}"),
+            };
+            let digest = u64::from_str_radix(digest, 16).expect("a case digest");
+            assert!(
+                answers.insert(digest, answer).is_none(),
+                "case {digest:016x} is recorded twice"
+            );
+        }
+        answers
+    })
+}
+
+/// **Production's delimiter on a case**, as recorded: `delimit_read` over the case's read and
+/// qualities, against a locus whose reference is the flanks and tract and whose tract sits after
+/// the left flank, with `HmmModel::new()`.
+fn production_answer(case: &Case) -> Delimited {
+    let &(start, end, measured) = production_answers().get(&case.digest()).unwrap_or_else(|| {
+        panic!(
+            "no recorded production answer for case {:016x} — it is not one of the cases \
+                 production was run on (a soak past the recorded 3,000 cases a seed has none)",
+            case.digest()
+        )
+    });
+    if measured {
+        Delimited::Region(start..end)
+    } else {
+        Delimited::BorderOffEnd
+    }
 }
 
 /// Run ng's aligner on the same case.
@@ -251,20 +316,25 @@ fn assert_self_consistent(span: &RepeatSpan, case: &Case, context: &str) {
 /// hit many times over, small enough to stay a unit test.
 const CASES_PER_SEED: usize = 3_000;
 
-/// Cases per seed, overridable by `PVC_PARITY_CASES` so a soak run is one command away.
+/// Cases per seed, overridable by `PVC_PARITY_CASES` — since promotion step C10 only downward,
+/// since production's recorded answers stop at 3,000 a seed.
 ///
 /// The default is a **sentinel**, not a campaign: every recurrence mutation tried against
 /// this harness died within the first 40 cases, so 3,000 × 4 catches drift promptly and
-/// cheaply. But the port was originally justified by a far larger sweep, and the ability to
-/// repeat that should not need editing the source — `PVC_PARITY_CASES=50000 cargo test
-/// ng_measures_the_same_bytes` reproduces it.
+/// cheaply. The port was originally justified by a far larger sweep, which
+/// `PVC_PARITY_CASES=50000 cargo test ng_measures_the_same_bytes` reproduced **while production
+/// ran beside it**; since promotion step C10 only the recorded 3,000 cases a seed have answers, and
+/// a larger value fails on the first case past them.
 ///
 /// **The default's detection floor is coarser for *banding* than for the recurrence.** A
 /// gross band deficiency (dropping the run-off flank terms) still fails on the first seed
 /// inside 3,000 cases, but a *one-cell*-too-narrow band (a `BAND_HEADROOM` short by one) first
 /// diverges only around case 28,307 — past the default. So the delimiter's band headroom
-/// carries a deliberate multiple-cell margin (see `BAND_HEADROOM`), and any change that
-/// narrows the band toward its true minimum must be validated at soak size, not the default.
+/// carries a deliberate multiple-cell margin (see `BAND_HEADROOM`). **A change that narrows the
+/// band toward its true minimum has had no validation since promotion step C10**: the soak that
+/// validated it compared against production, and production's answers are recorded only for the
+/// default cases. Until a reference that does not need production exists — ng's own aligner with the
+/// band opened to the whole matrix is the natural one — the margin must not be lowered.
 fn cases_per_seed() -> usize {
     std::env::var("PVC_PARITY_CASES")
         .ok()
@@ -456,19 +526,15 @@ fn the_named_fixture_cases_all_agree_with_production() {
 
 /// ng's copied slip cutoffs must not drift from production's — asserted where the stutter
 /// model lives, and re-stated here because this file is where "ng agrees with production" is
-/// the subject.
+/// the subject. Production's `ssr::cohort::param_estimation::MAX_SLIP` was 10 at commit
+/// `d9e7b076`, frozen here at promotion step C10.
 ///
 /// **ng carries two where production carries one**, named for the scale each counts in
 /// (`doc/devel/ng/spec/read_likelihoods.md` §4.2). Both inherit production's provisional 10,
 /// so both must equal it while the two models are meant to agree.
 #[test]
 fn the_shared_constants_still_agree() {
-    assert_eq!(
-        stutter::MAX_WHOLE_REPEAT_SLIP as usize,
-        crate::ssr::cohort::param_estimation::MAX_SLIP
-    );
-    assert_eq!(
-        stutter::MAX_PART_REPEAT_SLIP as usize,
-        crate::ssr::cohort::param_estimation::MAX_SLIP
-    );
+    const PRODUCTION_MAX_SLIP: usize = 10;
+    assert_eq!(stutter::MAX_WHOLE_REPEAT_SLIP as usize, PRODUCTION_MAX_SLIP);
+    assert_eq!(stutter::MAX_PART_REPEAT_SLIP as usize, PRODUCTION_MAX_SLIP);
 }

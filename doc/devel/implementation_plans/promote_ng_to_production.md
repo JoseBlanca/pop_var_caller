@@ -278,7 +278,16 @@ carries a header line naming the production commit that wrote it.
     field. Restoring one row's unshifted CIGAR fails one test. The masked-reference test's check
     that production left every read's CIGAR as the mapper wrote it now checks the recording
     against the fixture's own input, not production's behaviour.
-  - ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
+  - ✅ **C10** `alignment/delimit_parity.rs` — **frozen, all 3 tests kept.** Production's
+    `delimit_read` answer — a measured byte range, or "ran off an end" — on the 11,986 generated
+    cases with a read and the 6 named ones was recorded at `d9e7b076` into
+    `alignment/testdata/delimit_parity_production.tsv` (274 KB), keyed by a digest of the case;
+    `MAX_SLIP` (10) is a frozen literal. Changing one row's range fails a test. **Lost, and raised
+    at Checkpoint C:** the soak that `PVC_PARITY_CASES` drove past 3,000 cases a seed, which is
+    what validated `BAND_HEADROOM` (a band one cell too narrow first diverged near case 28,307).
+    The docs now say the margin must not be lowered until a production-free reference exists — ng's
+    aligner with the band opened to the whole matrix is the candidate.
+  - ☐ C11 · ☐ C12 · ☐ C13
 - ☐ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
   `ng_psp_head_encoding.rs` (`test = true` in `Cargo.toml`), `paralog_score_parity.rs` — are
   deleted with a line each in the report saying which document already holds their result.

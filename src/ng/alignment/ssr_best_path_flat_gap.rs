@@ -14,7 +14,8 @@
 //! measurement result:
 //!
 //! - **It is the module's only byte-parity oracle.** This is a port of production's
-//!   `delimit_read`, held byte-identical to it over a 200,000-case soak (`delimit_parity`).
+//!   `delimit_read`, held byte-identical to it over a 200,000-case soak (`delimit_parity`), and since promotion step
+//!   C10 against production's answers recorded for 12,000 of those cases.
 //!   Algorithm 4 has **no oracle of its own** — its correctness rests on the differential
 //!   cross-check *against this aligner* (`algorithm_4_agrees_with_algorithm_3_on_clean_reads`).
 //!   Removing or disabling algorithm 3 would delete the only thing that validates algorithm 4.
@@ -162,7 +163,9 @@ const UNREACHABLE: f64 = f64::NEG_INFINITY;
 ///    takes **8**, generous because the delimiter's soft tract gap is cheaper than the
 ///    marginal's flank gap so a bow reaches a little further, and because the cost of being
 ///    too generous is a few wasted cells while the cost of being too narrow is a silently
-///    wrong measurement. Held at byte-parity across the whole 200,000-case soak.
+///    wrong measurement. Held at byte-parity across the whole 200,000-case soak while production ran
+///    beside it. **Do not lower it**: since promotion step C10 only 12,000 recorded cases check it,
+///    and a band one cell too narrow first showed near case 28,307 of one seed.
 ///
 /// **No term is derived from the stutter model's slip cutoffs**
 /// ([`MAX_WHOLE_REPEAT_SLIP`](super::stutter::MAX_WHOLE_REPEAT_SLIP),

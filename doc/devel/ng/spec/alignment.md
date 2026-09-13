@@ -769,7 +769,9 @@ can be scored against the repeat that was actually simulated. Two requirements o
    **Banding follows as its own change**, at the width §3 sets — the per-read length difference plus
    headroom — carrying a test that the output on the parity fixture is unchanged, and a case at the
    long-allele extreme where a too-narrow band would show. A performance commit with its own
-   evidence, rather than a behaviour change smuggled into the port.
+   evidence, rather than a behaviour change smuggled into the port. *(Since promotion step C10,
+   2026-09-13, the parity fixture holds production's recorded answers for 12,000 cases rather than
+   running production; a soak past them has no reference.)*
 2. **5** — the marginal that pairs with it, and a small one: it is a single function, most of whose
    work is a base-by-base comparison. Its unequal-length forward must be tested deliberately, because
    the caller it was written for never reaches it (§5.1).

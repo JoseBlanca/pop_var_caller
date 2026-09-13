@@ -18,7 +18,8 @@
 //! slips; the [`BestPathAligner`] and [`MarginalAligner`] traits they meet at; and the two
 //! shared components, the [`emission`] scoring every aligner uses and the [`stutter`] model;
 //! and the first algorithm, [`ssr_best_path_flat_gap`] — the repeat-aware delimiter, which is
-//! this module's **only byte-parity oracle** against production (`delimit_parity`, test-only).
+//! this module's **only byte-parity oracle** against production (`delimit_parity`, test-only; since
+//! promotion step C10 against production's recorded answers).
 //! The [`MarginalAligner`] trait has two implementations: algorithm 5
 //! ([`ssr_marginal_sequence`] — the sequence-versus-sequence marginal, a linear-space port of
 //! production's `align_subst`, byte-parity-checked against it) and algorithm 6
