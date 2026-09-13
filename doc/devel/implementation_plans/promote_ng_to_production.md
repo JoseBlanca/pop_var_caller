@@ -428,7 +428,22 @@ mattered:
     called production, now written in the test; ng's side still runs its real classify and tally.
     The sweep counted 6 tests for this file; only these two called production. The rest are ports
     of production's own `fetch_reads.rs` tests, sharing their names, and never called it.
-  - ☐ C24 · ☐ C25
+  - ✅ **C24** `region_typing/segment_criteria.rs` — **copied, not frozen; all 56 tests kept.**
+    *Deviation from the row, recorded 2026-09-13:* eight of the nine tests that ran production
+    compare ng's classification with production's `build_loci` on intervals they build, and C12
+    had already copied that function, unchanged, into `scanner_parity.rs`. Recording its answers
+    would have left two frozen forms of one function, and one of the eight feeds it ng's scanner
+    output, so any scanner change would have orphaned the recording. The copy is instead
+    its own test-only module, `ng::production_post_filter`, used by both files; its output gained
+    the purity it already computed, because this file's comparison checks purity. Before
+    production's call was removed, both were run side by side on every comparison the tests make —
+    20 cases, 29 loci, purity compared bit for bit — and agreed. The helper that builds both
+    sides' settings from one source was **not split**: its production half now builds the copy's
+    settings type, which has the same four fields, so the other 21 tests needed no change and the
+    one-source guarantee stands. The Motif test is literals: production kept `AT`, `CAG`, `ACGTAC`
+    with periods 2, 3, 6 and refused seven bases. Mutating the copy's purity arithmetic fails
+    eight tests; changing one recorded period fails the ninth.
+  - ☐ C25
 - ☐ **C26** · *Depends:* C1, C9.
 
   **Deviation, recorded 2026-09-12: `cram_files` goes to `src/bam/`, and §2's "shared

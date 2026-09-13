@@ -28,8 +28,8 @@
 //! Step 3 needs classification windowed, 1-based/`u64`, `RepeatInterval`-driven,
 //! all-knobs, and handing bundle members back rather than dropping them. That is
 //! five changes to `build_loci`, which is not "a small tweak" — and production is
-//! frozen (spec Revision 2026-07-16, owner): `src/ssr/` stays exactly as it is,
-//! so it remains an **independent yardstick** for the experiments ng exists to
+//! frozen (spec Revision 2026-07-16, owner): `src/ssr/` was to stay exactly as it
+//! was, so that it remained an **independent yardstick** for the experiments ng exists to
 //! run. A production catalog we had rebased to suit ng would be a mirror, not an
 //! oracle.
 //!
@@ -39,7 +39,9 @@
 //! implementations from the same intervals and assert identical loci (spec
 //! §8.0). What sharing one function used to guarantee by construction is now a
 //! test — a weaker guarantee, and the price of a production tree an experiment
-//! cannot break.
+//! cannot break. Since promotion step C24 production's side is its post-filter
+//! as it stood at commit `d9e7b076`, copied into the test-only
+//! `crate::ng::production_post_filter`, because production itself is being deleted.
 //!
 //! **The differential's blind spot, stated because it is not obvious.** Both
 //! sides run the *same* inputs through *transcribed* logic, so an input class no
@@ -1550,19 +1552,23 @@ mod tests {
         assert_eq!(short.as_bytes(), b"AC");
     }
 
-    /// The port must not drift from the type it was copied from. Cheap to check:
-    /// both are in this crate.
+    /// The port must not drift from the type it was copied from. Production's
+    /// `ssr::types::Motif::new`, recorded at commit `d9e7b076` (promotion step C24): it
+    /// kept `AT`, `CAG` and `ACGTAC` verbatim with periods 2, 3 and 6, and refused the
+    /// seven-base `ACGTACG`.
     #[test]
     fn motif_matches_productions_on_the_same_bytes() {
-        for bytes in [b"AT".as_ref(), b"CAG".as_ref(), b"ACGTAC".as_ref()] {
+        for (bytes, productions_period) in [
+            (b"AT".as_ref(), 2),
+            (b"CAG".as_ref(), 3),
+            (b"ACGTAC".as_ref(), 6),
+        ] {
             let ours = Motif::new(bytes).expect("ng motif");
-            let theirs = crate::ssr::types::Motif::new(bytes).expect("production motif");
-            assert_eq!(ours.as_bytes(), theirs.as_bytes());
-            assert_eq!(ours.period(), theirs.period());
+            assert_eq!(ours.as_bytes(), bytes, "production kept the bytes verbatim");
+            assert_eq!(ours.period(), productions_period);
         }
-        // And they agree on what is invalid.
+        // And they agree on what is invalid: production refused seven bases.
         assert!(Motif::new(b"ACGTACG").is_err());
-        assert!(crate::ssr::types::Motif::new(b"ACGTACG").is_err());
     }
 
     // ---- the locus type ----------------------------------------------------
@@ -1953,14 +1959,13 @@ mod tests {
     //
     // The oracle the Revision made necessary. ng's `classify` and production's
     // `build_loci` are two copies of one policy; this drives both from the same
-    // intervals and asserts they still agree. It is the tripwire on silent
-    // drift, and it is expected to be re-pinned the day an experiment
+    // intervals and asserts they still agree. Production's side is its frozen copy
+    // in `crate::ng::production_post_filter` since promotion step C24. It is the
+    // tripwire on silent drift, and it is expected to be re-pinned the day an experiment
     // deliberately moves ng's classification away from the catalog's rules.
 
-    use crate::ssr::catalog::CatalogParams;
-    use crate::ssr::catalog::postprocess::build_loci;
-    use crate::ssr::catalog::trf::TrfRecord;
-    use crate::ssr::types::Locus as ProdLocus;
+    use crate::ng::golden_catalog::GoldenCatalogSettings;
+    use crate::ng::production_post_filter::{PostFilteredLocus, TrfRecord, build_loci};
 
     /// One settings pair, built once, for both implementations.
     ///
@@ -1982,7 +1987,7 @@ mod tests {
         min_purity: f32,
         min_score: i32,
         bundle_threshold: u32,
-    ) -> (SsrSegmentCriteria, CatalogParams) {
+    ) -> (SsrSegmentCriteria, GoldenCatalogSettings) {
         (
             SsrSegmentCriteria {
                 min_purity,
@@ -2000,7 +2005,7 @@ mod tests {
                 periods: PeriodRange::new(2, 6).expect("2..=6 is a valid period range"),
                 min_copies: MinCopies::new([10, 5, 4, 3, 3, 3], 3),
             },
-            CatalogParams {
+            GoldenCatalogSettings {
                 min_purity,
                 min_score,
                 // ng's one number drives *both* of production's knobs (equal, spec §2.4).
@@ -2012,7 +2017,8 @@ mod tests {
 
     /// Bridge ng's scanner intervals into production's parse shape. The only
     /// route from a `RepeatInterval` to `build_loci`, and `#[cfg(test)]` — which
-    /// is exactly where it belongs (spec §5c).
+    /// is exactly where it belongs (spec §5c). The record is built as production's
+    /// `TrfRecord::for_test` built it; the post-filter reads none of the fields it drops.
     fn as_trf(intervals: &[RepeatInterval]) -> Vec<TrfRecord> {
         intervals
             .iter()
@@ -2022,13 +2028,12 @@ mod tests {
                 // compare across that seam, so it narrows here — and `expect`s rather
                 // than casting, because a truncated coordinate would compare the wrong
                 // tract and the test would pass while asserting nothing.
-                TrfRecord::for_test(
-                    u32::try_from(iv.start).expect("fixture coordinates fit u32"),
-                    u32::try_from(iv.end).expect("fixture coordinates fit u32"),
-                    u16::from(iv.period),
-                    iv.score,
-                    b"",
-                )
+                TrfRecord {
+                    start: u32::try_from(iv.start).expect("fixture coordinates fit u32"),
+                    end: u32::try_from(iv.end).expect("fixture coordinates fit u32"),
+                    period: u16::from(iv.period),
+                    score: iv.score,
+                }
             })
             .collect()
     }
@@ -2039,16 +2044,16 @@ mod tests {
     /// what makes this test pin the arithmetic rather than restate a bug in both
     /// directions.
     #[track_caller]
-    fn assert_same_locus(ng: &SsrSegment, prod: &ProdLocus) {
-        assert_eq!(ng.chrom(), prod.chrom(), "chrom");
+    fn assert_same_locus(ng: &SsrSegment, prod: &PostFilteredLocus) {
+        assert_eq!(ng.chrom(), prod.chrom, "chrom");
         assert_eq!(
             ng.start(),
-            u64::from(prod.start()) + 1,
+            u64::from(prod.start) + 1,
             "start: 1-based == 0-based + 1 ({ng})"
         );
         assert_eq!(
             ng.end(),
-            u64::from(prod.end()),
+            u64::from(prod.end),
             "end: inclusive == exclusive ({ng})"
         );
         // **`ref_bytes` and the flanks are not compared, because ng no longer has
@@ -2059,25 +2064,16 @@ mod tests {
         // every decision production makes: which tracts classify, and at what span, motif,
         // period and purity — which is what "the port is faithful" has to mean once the
         // payload is gone.
-        // By bytes: the two `Motif`s are now distinct types (see `Motif`'s docs
-        // — production's is `pub(crate)`, ng's is ported). Comparing the bytes is
-        // also what would catch the ported type drifting from production's.
-        assert_eq!(
-            ng.motif().as_bytes(),
-            prod.motif().as_bytes(),
-            "motif ({ng})"
-        );
-        assert_eq!(ng.period(), prod.period(), "period ({ng})");
-        assert_eq!(
-            ng.purity_fraction(),
-            prod.purity_fraction(),
-            "purity ({ng})"
-        );
+        // By bytes: production's post-filter hands back the motif as bytes, and a
+        // motif's period is its length, as production's `Motif` reported it.
+        assert_eq!(ng.motif().as_bytes(), prod.motif, "motif ({ng})");
+        assert_eq!(ng.period(), prod.motif.len(), "period ({ng})");
+        assert_eq!(ng.purity_fraction(), prod.purity_fraction, "purity ({ng})");
         // The length identity the rebase turns on: production's `end - start`
         // (half-open) is ng's `end - start + 1` (inclusive) — same bases.
         assert_eq!(
             ng.tract_len(),
-            u64::from(prod.end() - prod.start()),
+            u64::from(prod.end - prod.start),
             "tract_len ({ng})"
         );
     }
@@ -2100,7 +2096,7 @@ mod tests {
     #[track_caller]
     fn assert_agrees_at(
         ng_p: &SsrSegmentCriteria,
-        prod_p: &CatalogParams,
+        prod_p: &GoldenCatalogSettings,
         intervals: &[RepeatInterval],
         chrom: &str,
         seq: &[u8],
@@ -2116,7 +2112,7 @@ mod tests {
             ours.iter().map(SsrSegment::to_string).collect::<Vec<_>>(),
             theirs
                 .iter()
-                .map(|l| format!("{}:{}-{}", l.chrom(), l.start(), l.end()))
+                .map(|l| format!("{}:{}-{}", l.chrom, l.start, l.end))
                 .collect::<Vec<_>>()
         );
         for (ng, prod) in ours.iter().zip(theirs.iter()) {
@@ -2517,11 +2513,10 @@ mod tests {
     /// A1 carried production's two copy-floor tables verbatim; A2 folds them into
     /// one [`MinCopies`]. This is the fold's proof obligation: the single
     /// table must give what **each** original gave, at every period each could
-    /// reach. The two originals live in frozen production and are private
-    /// (`postprocess::copy_number_floor`, and `copy_floor` inside
-    /// `scanner_parity`'s copy), so they are restated here as the
-    /// oracle — which is the point: if production ever changes, this fails and says
-    /// so, rather than ng drifting quietly.
+    /// reach. The two originals are private: `copy_number_floor` in
+    /// `crate::ng::production_post_filter` (production's `postprocess::copy_number_floor`,
+    /// copied at `d9e7b076`) and `copy_floor` in `scanner_parity`. They are restated here
+    /// as the oracle, so a change to either copy that is not mirrored here fails this test.
     ///
     /// **Pinned against the catalog's table explicitly, not `Default`.** As of spec
     /// §2.3 ng's `Default` carries the short-read floors (`[6,4,4,3,3,3]`), *not*
@@ -2538,7 +2533,8 @@ mod tests {
     /// reconciliation.
     #[test]
     fn the_catalog_copy_floor_table_reproduces_both_of_productions() {
-        // `postprocess::copy_number_floor` — classification's, verbatim.
+        // `production_post_filter::copy_number_floor` (production's
+        // `postprocess::copy_number_floor`) — verbatim.
         fn productions_copy_floor(period: usize) -> u64 {
             match period {
                 1 => 10,
