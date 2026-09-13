@@ -830,7 +830,6 @@ mod tests {
     use crate::fasta::{
         ChromRefFetcher, ContigEntry, MultiChromRefFetcher, StreamingChromRefFetcher,
     };
-    use crate::pileup::per_sample::read_processor::RawContigRefCache;
     use std::io::Write;
 
     // ----- InMemoryRefSeq -------------------------------------------------
@@ -1217,20 +1216,24 @@ mod tests {
         }
     }
 
+    /// Production's `RawContigRefCache::fetch_raw_slice` over this fixture, recorded at commit
+    /// `d9e7b076` (promotion step C25): every one of its 72 slices — each start, each length,
+    /// both contigs — was the matching run of the contig's bytes exactly as the FASTA holds
+    /// them, case and ambiguity codes untouched. So each slice is compared against that run of
+    /// the recorded contig.
     #[test]
     fn resident_raw_matches_production_raw_cache() {
+        const PRODUCTION_RAW_CONTIGS: [&[u8]; 2] = [b"acgtNRYK", b"ACGTACGT"];
         let (_dir, path, contigs) = build_fasta(FASTA_CONTIGS);
-        let resident = ResidentRefSeq::new(repository_for(&path), contigs.clone());
-        let mut production = RawContigRefCache::new(repository_for(&path), contigs);
+        let resident = ResidentRefSeq::new(repository_for(&path), contigs);
 
         for (chrom_id, (_name, bases)) in FASTA_CONTIGS.iter().enumerate() {
             let len = bases.len() as u64;
             for start in 1..=len {
                 for length in 1..=(len - start + 1) {
                     let ours = raw(&resident, ContigId(chrom_id as u32), start, length);
-                    let prod = production
-                        .fetch_raw_slice(chrom_id, start, length as u32)
-                        .expect("production raw slice");
+                    let first = (start - 1) as usize;
+                    let prod = &PRODUCTION_RAW_CONTIGS[chrom_id][first..first + length as usize];
                     assert_eq!(
                         ours.as_slice(),
                         prod,

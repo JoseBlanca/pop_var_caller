@@ -443,7 +443,13 @@ mattered:
     one-source guarantee stands. The Motif test is literals: production kept `AT`, `CAG`, `ACGTAC`
     with periods 2, 3, 6 and refused seven bases. Mutating the copy's purity arithmetic fails
     eight tests; changing one recorded period fails the ninth.
-  - ☐ C25
+  - ✅ **C25** `ref_seq.rs` — **frozen as literals; the 1 test kept.** Production's
+    `RawContigRefCache::fetch_raw_slice` answered all 72 slices the test asks for — every start
+    and length on both contigs of the fixture — and every answer was the matching run of the
+    contig's bytes as the FASTA holds them, case and ambiguity codes untouched. So the recording
+    is the two contigs, `acgtNRYK` and `ACGTACGT`, and each of ng's slices is compared against
+    its run of them. Production's cache is unchanged since `d9e7b076`. Changing one recorded byte
+    fails the test.
 - ☐ **C26** · *Depends:* C1, C9.
 
   **Deviation, recorded 2026-09-12: `cram_files` goes to `src/bam/`, and §2's "shared
