@@ -325,7 +325,7 @@ carries a header line naming the production commit that wrote it.
   - `paralog_score_parity.rs` — the hidden-duplication filter's statistics on tomato2 data:
     `reports/implementations/paralog_r1_data_validation_2026-07-01.md`. Its Python companion
     `benchmarks/tomato2/src/paralog_score_parity.py` stays with the benchmark's other scripts
-    (plan §8, benchmark drivers are D6's).
+    (plan §8, benchmark drivers are D5's — D6's before D was renumbered).
   The two with `test = true` lose their `[[example]]` entries in `Cargo.toml` — and with them the
   36 tests those two harnesses carried on their own mechanics (4 and 32), which is why the suite
   drops by 36 here — and four doc
@@ -350,7 +350,7 @@ mattered:
 - **Three of them are shipped code, not tests.** `src/pop_var_caller_exp/` — ng's own command
   surface, which §1 counts as part of ng — still imports `crate::pop_var_caller::common`. B9's
   guard is scoped to `src/ng` and cannot see them, so Checkpoint B passed with them present. They
-  must land before D1 deletes `src/pop_var_caller/`.
+  must land before D2 deletes `src/pop_var_caller/`.
 - **One is a test-fixture builder that shared infrastructure also uses.** `cram_files` writes
   synthetic FASTA and CRAM files to a tempdir. It lives in `src/pileup/per_sample/`, which D3
   deletes, and `src/bam/` (three files) and `src/fasta/` (one) call it from their own tests. Those
@@ -465,7 +465,7 @@ mattered:
   §2 excluded shared infrastructure to keep this plan from *pruning* it; taking in a file whose
   four non-ng callers already live there is not pruning, and B5 already crossed this line for
   `CigarOp` for the same reason. Production's own `ssr` callers keep compiling through the move
-  because the new path is a `use`, and they go at D4 regardless.
+  because the new path is a `use`, and they go at D2 regardless.
 
 > **Checkpoint C: production is now imported only by production.** The sweep command at the head
 > of the second table, run over `src/ng`, `src/pop_var_caller_exp`, `src/main_exp.rs`, `tests/ng_*`,
@@ -480,47 +480,72 @@ returns nothing. `cargo test --lib --tests`: 6,351 passed, 0 failed, 8 ignored; 
 oracle is byte-identical to the baseline. **What the sweep cannot see:** it matches `crate::`
 paths, and examples name the library as `pop_var_caller::`. Four `examples/ng_*` probes still
 import production that way — `ng_depth_term_family` and `ng_prior_moment_estimators` (`lgamma`),
-`ng_normalizer_screen` (`CigarOp`), `ng_window_coverage_probe` (a paralog constant). D5 already
-owns them.
+`ng_normalizer_screen` (`CigarOp`), `ng_window_coverage_probe` (a paralog constant). D1 owns
+them (D5 before D was renumbered).
 
 ### Milestone D — delete production
 
 Leaves first, so each commit compiles. `lib.rs` loses its `pub mod` line with each tree.
 
-- ☐ **D1. The command surface and its tests.** `src/main.rs`, `src/pop_var_caller/`, the
-  `[[bin]] pop_var_caller` entry; `tests/{cohort_cli,pileup_cli,psp_to_pileup,thread_budget,
-  contamination_estimation}_integration.rs`.
-  *Depends:* C. *Source:* §2 In.
-- ☐ **D2. The calling engine.** `src/var_calling/`, `src/vcf/`;
-  `tests/{cohort_vcf_writer,posterior_engine}_integration.rs`; benches
-  `cohort_var_calling_perf`, `paralog_scoring_perf`.
+**Deviation, recorded 2026-09-13, before D1: the steps below replace the eight this section first
+listed.** Two facts about the tree made that order uncompilable:
+
+- **Production's library modules import each other in a loop.** `pop_var_caller` (the command
+  surface) imports `var_calling`, `vcf` and `ssr`; `var_calling`'s pipeline takes the command
+  surface's `VarCallingArgs` and shared constants; `ssr` and `vcf` take its `common` helpers; and
+  `vcf` and `var_calling` import each other. None of the four can go before the others, so the
+  command surface (old D1), the calling engine (old D2) and the STR caller (old D4's largest
+  part) are deleted in one commit.
+- **The gates compile every example, bench and integration test** (`clippy --all-targets`), so a
+  consumer of production outside the library cannot outlive the module it imports — old D5
+  (examples) after D4 would have broken D1's gates. The consumers are the true leaves, and go
+  first.
+
+Measured on the tree at `9746cee6`, by `pop_var_caller::<production module>` in each file:
+
+- ☐ **D1. Everything outside the library that runs production.** `src/main.rs` and the
+  `[[bin]] pop_var_caller` entry; the seven integration tests `tests/{cohort_cli,
+  cohort_vcf_writer,contamination_estimation,pileup_cli,posterior_engine,psp_to_pileup,
+  thread_budget}_integration.rs` and `tests/common/`, which only three of them used; the six
+  benches `{baq_perf,cohort_var_calling_perf,paralog_scoring_perf,pileup_walker_scaling,
+  psp_reader_perf,psp_writer_perf}` and their `[[bench]]` entries; the twenty examples that import
+  only production (`blocksize_rewrite`, `dhat_{baq,paralog,pileup,psp_reader,psp_writer,
+  var_calling}`, `dump_sample_summary`, `het_baseline`, `paralog_fit_probe`,
+  `profile_{cohort_e2e,posterior_engine}`, `psp_{block_stats,rechunk,record_stream_compression,
+  row_stream_roundtrip}`, `ssr_{psp_dump,psp_seqdump,slip_dump}`, `tomato2_sigma0`). The four ng
+  probes that borrowed one item are repointed to the identical item ng or shared code holds:
+  `ng_depth_term_family` and `ng_prior_moment_estimators` to `ng::genetics::lgamma`,
+  `ng_normalizer_screen` to `bam::alignment_input::CigarOp` (production's was a re-export of it
+  since B5), `ng_window_coverage_probe` to `ng::paralog::coverage_model::DEFAULT_MAX_OVERFLOW_FRACTION`
+  (0.20 in both). The plan first counted 22 and 8; C14 deleted four of the examples and B and C
+  repointed the rest.
+  *Depends:* C.
+- ☐ **D2. The command surface, the calling engine, the VCF writer and the STR caller** — the
+  import loop above: `src/pop_var_caller/`, `src/var_calling/`, `src/vcf/`, `src/ssr/`, and
+  `lib.rs`'s four `pub mod` lines. Intra-doc links from kept modules into them are rewritten as
+  plain text (`fasta/fetcher.rs` has one).
   *Depends:* D1.
 - ☐ **D3. The per-sample stage.** `src/pileup/`, `src/psp/`, `src/paralog/`,
-  `src/sample_summary/`, `src/baq/`; benches `pileup_walker_scaling`, `baq_perf`,
-  `psp_reader_perf`, `psp_writer_perf`.
+  `src/sample_summary/`, `src/baq/`. `bam` names production in three places this step must
+  settle: `bam/mod.rs`'s module doc and `alignment_input.rs`'s two doc links, and
+  `alignment_input.rs`'s tests, which build records with `pileup::per_sample::record_specs`.
   *Depends:* D2.
-- ☐ **D4. The STR caller and the leaves.** `src/ssr/`, `src/norm_seqs.rs`, `src/genetics.rs`,
-  `src/pileup_record.rs`.
+- ☐ **D4. The leaves.** `src/norm_seqs.rs`, `src/genetics.rs`, `src/pileup_record.rs`.
   *Depends:* D3.
-- ☐ **D5. Examples.** The 22 examples that import only production (`dhat_var_calling`,
-  `het_baseline`, `psp_rechunk`, `ssr_psp_dump`, …, listed by `grep -l 'pop_var_caller::\(pileup\|var_calling\|…\)' examples/`), and the 8 ng probes that borrowed one production item
-  (`ng_depth_term_family` → `lgamma`, `ng_normalizer_screen` → `CigarOp`, …) repointed to ng's
-  copies.
-  *Depends:* D4.
-- ☐ **D6. Scripts and benchmark drivers.** `scripts/{cohort_memory_vs_samples,psp_block_window_sweep}.sh`
+- ☐ **D5. Scripts and benchmark drivers.** `scripts/{cohort_memory_vs_samples,psp_block_window_sweep}.sh`
   drive the deleted binary — deleted; `scripts/attribute_peak.py` lists production's source
   directories in its heap-attribution table — trimmed. Under `benchmarks/`, the 15 `run_ours_*` /
   `perf_ours_*` / `build_psp` drivers that call `pop_var_caller var-calling` — deleted; their
   *results* and reports stay, since they are the record ng was measured against.
   `benchmarks/lib/common.sh`'s binary discovery moves to the one binary.
   *Depends:* D1.
-- ☐ **D7. `Cargo.toml` and the gates.** Remove the two clippy `allow`s and fix what fires in ng
-  (`as_chunks::<N>()` for `chunks_exact`, per the comment that asked for it); drop the
-  `[[bench]]` entries from D2–D3; `precommit-check.sh` step 1 (production must not import ng)
-  and B9's mirror both become vacuous — replace them with nothing.
+- ☐ **D6. `Cargo.toml` and the gates.** Remove the two clippy `allow`s and fix what fires in ng
+  (`as_chunks::<N>()` for `chunks_exact`, per the comment that asked for it); `precommit-check.sh`
+  step 1 (production must not import ng) and B9's mirror both become vacuous — replace them with
+  nothing, and empty the step's oracle exemption list, whose files no longer import production.
   *Depends:* D4. *Source:* `Cargo.toml` `[lints.clippy]` comment ("Drop both `allow`s when
   production is retired").
-- ☐ **D8. `src/ng/mod.rs`'s header** — the freeze paragraph and the oracle inventory describe a
+- ☐ **D7. `src/ng/mod.rs`'s header** — the freeze paragraph and the oracle inventory describe a
   world that no longer exists; rewrite to say what ng *is*, with a dated line saying production
   was deleted here. `src/lib.rs`'s crate doc likewise.
   *Depends:* D4.
@@ -537,7 +562,7 @@ Leaves first, so each commit compiles. `lib.rs` loses its `pub mod` line with ea
   `crate::ng::` becomes `crate::` and every `pop_var_caller::ng::` in `tests/`, `examples/`,
   `benches/` becomes `pop_var_caller::`. No module name collides — production's `psp`, `vcf`,
   `paralog` are gone at D3–D4, which is why E follows D. **One commit, rename-only.**
-  *Depends:* D8. *Source:* `module_layout.md` §"Where ng lives".
+  *Depends:* D7. *Source:* `module_layout.md` §"Where ng lives".
 - ☐ **E2. The binary.** `src/main_exp.rs` → `src/main.rs`; `src/pop_var_caller_exp/` →
   `src/cli/`; clap `name = "pop_var_caller"`; the `[[bin]]` entry; `##commandline` now says
   `pop_var_caller`. The 4 `scripts/ng_*.sh` and 6 `benchmarks/**/run_ng*` drivers that look
