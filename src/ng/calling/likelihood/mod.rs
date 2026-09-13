@@ -2562,9 +2562,12 @@ mod tests {
     /// `what_the_row_charges_a_poor_read_is_not_capped`.
     #[test]
     fn the_floor_still_equals_productions() {
+        // Production's `var_calling::contamination_estimation::MIN_BASE_ERROR` at commit
+        // `d9e7b076`, frozen at promotion step C18.
+        const PRODUCTION_MIN_BASE_ERROR: f64 = 1e-12;
         assert_eq!(
-            MIN_BASE_ERROR,
-            crate::var_calling::contamination_estimation::MIN_BASE_ERROR
+            MIN_BASE_ERROR.to_bits(),
+            PRODUCTION_MIN_BASE_ERROR.to_bits()
         );
     }
 

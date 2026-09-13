@@ -1033,15 +1033,17 @@ mod tests {
     /// given rather than reporting a damaged ng file.
     #[test]
     fn a_production_psp_on_disk_is_refused_as_a_foreign_file() {
+        // Production's `psp::header::HEAD_MAGIC` at commit `d9e7b076`, frozen at promotion step C18.
+        const PRODUCTION_HEAD_MAGIC: [u8; 4] = *b"PSP\n";
         let mut productions = Vec::new();
-        productions.extend_from_slice(&crate::psp::header::HEAD_MAGIC);
+        productions.extend_from_slice(&PRODUCTION_HEAD_MAGIC);
         productions.extend_from_slice(&(1u64).to_le_bytes());
         productions.push(b'x');
         let (_dir, path) = a_file_holding(&productions);
 
         match read_header(&path) {
             Err(PspReadError::NotAnNgPsp { found, .. }) => {
-                assert_eq!(found, crate::psp::header::HEAD_MAGIC);
+                assert_eq!(found, PRODUCTION_HEAD_MAGIC);
             }
             other => panic!("expected NotAnNgPsp, got {other:?}"),
         }

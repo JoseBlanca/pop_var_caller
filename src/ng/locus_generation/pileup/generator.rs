@@ -1742,10 +1742,11 @@ mod tests {
     /// **Four of the five defaults are production's, read from production's own
     /// constants.**
     ///
-    /// Asserted against the `pub const`s rather than against literals: a literal
-    /// here would let production retune a knob and ng silently keep the old
-    /// value, which is the drift the "by name, not by literal" rule exists to
-    /// prevent (arch §1.1).
+    /// Asserted against production's `pub const`s by name until promotion step C18, so a knob
+    /// production retuned could not leave ng on the old value (arch §1.1). Production is being
+    /// deleted, so its five values at commit `d9e7b076` are frozen below instead: the rule's
+    /// purpose ends with the tree it guarded against, and what stays is the record of where ng
+    /// started.
     ///
     /// **The fifth is ng's own from 2026-08-05**, and the assertion says so rather than
     /// being deleted: `max_active_reads` is 32,768 where production's constant is 4,096,
@@ -1754,33 +1755,26 @@ mod tests {
     /// back without anybody noticing; this one fails if either number moves.
     #[test]
     fn the_default_knobs_are_productions_five_constants() {
+        // Production's `pileup::walker` defaults at commit `d9e7b076`.
+        const PRODUCTION_MAX_SNP_COLUMN_DEPTH: u32 = 8_000;
+        const PRODUCTION_MAX_INDEL_COLUMN_DEPTH: u32 = 250;
+        const PRODUCTION_MAX_RECORD_SPAN: u32 = 5_000;
+        const PRODUCTION_MATE_LOOKUP_WINDOW: u32 = 10_000;
+
         let config = PileupGeneratorConfig::default();
-        assert_eq!(
-            config.max_snp_column_depth,
-            crate::pileup::walker::DEFAULT_MAX_SNP_COLUMN_DEPTH
-        );
+        assert_eq!(config.max_snp_column_depth, PRODUCTION_MAX_SNP_COLUMN_DEPTH);
         assert_eq!(
             config.max_indel_column_depth,
-            crate::pileup::walker::DEFAULT_MAX_INDEL_COLUMN_DEPTH
+            PRODUCTION_MAX_INDEL_COLUMN_DEPTH
         );
-        assert_eq!(
-            config.max_record_span,
-            crate::pileup::walker::DEFAULT_MAX_RECORD_SPAN
-        );
-        assert_eq!(
-            config.mate_lookup_window,
-            crate::pileup::walker::DEFAULT_MATE_LOOKUP_WINDOW
-        );
+        assert_eq!(config.max_record_span, PRODUCTION_MAX_RECORD_SPAN);
+        assert_eq!(config.mate_lookup_window, PRODUCTION_MATE_LOOKUP_WINDOW);
         assert_eq!(
             config.max_active_reads, 32_768,
             "ng's own, not production's"
         );
-        assert_eq!(
-            crate::pileup::walker::DEFAULT_MAX_ACTIVE_READS,
-            4096,
-            "production's, unchanged — ng is frozen out of editing it, and this states \
-             what ng diverged *from*"
-        );
+        // Production's `DEFAULT_MAX_ACTIVE_READS` was 4,096 — what ng diverged *from*. With
+        // production gone there is nothing left to assert about it.
     }
 
     /// The whole config, not just the one knob C1 constrains: production's

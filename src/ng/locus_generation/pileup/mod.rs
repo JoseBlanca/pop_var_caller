@@ -540,19 +540,14 @@ mod walker_vocabulary_tests {
     /// ng holds **eight times** as many reads as production. Production's 4,096 was
     /// refusing 19,725 reads of 113,629,764 on one ~130× tomato chromosome, and a read
     /// refused at the door contributes at no position — so positions ended up with less
-    /// coverage than the input had for them (owner, 2026-08-05). Both numbers are
-    /// asserted, so a retune on either side lands here as a decision rather than as
-    /// drift.
+    /// coverage than the input had for them (owner, 2026-08-05). Both numbers were asserted
+    /// until promotion step C18; production's is now only this comment, since there is no
+    /// production constant left to retune.
     #[test]
     fn the_copied_active_reads_cap_is_still_productions() {
         assert_eq!(
             DEFAULT_MAX_ACTIVE_READS, 32_768,
             "ng's ceiling on reads held open at once"
-        );
-        assert_eq!(
-            crate::pileup::walker::DEFAULT_MAX_ACTIVE_READS,
-            4096,
-            "production's, which ng no longer follows"
         );
     }
 }

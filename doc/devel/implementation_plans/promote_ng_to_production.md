@@ -390,7 +390,14 @@ mattered:
   `pileup::per_sample`, which goes with that module at D3. The file's content is unchanged.
 - ✅ **C17** · *Depends:* — · *Source:* B3's row. Done 2026-09-13: both files now import
   `pop_var_caller::ng::types::ChainId`, the same `u64` alias, so nothing they compute can change.
-- ☐ **C18**–**C25**, one checkbox each, in table order · *Depends:* B9.
+- **C18**–**C25**, one checkbox each, in table order · *Depends:* B9.
+  - ✅ **C18** — the six constant checks. Production's values at `d9e7b076` are now literals in
+    each test: `MAX_SLIP` 10 (`stutter.rs`), `MIN_BASE_ERROR` 1e-12 (`calling/likelihood/mod.rs`,
+    compared by bit pattern), the walker's four limits 8,000 / 250 / 5,000 / 10,000
+    (`generator.rs`), and `HEAD_MAGIC` `PSP\n` (`psp/mod.rs`, `psp/header.rs`). Two assertions
+    that production's own `DEFAULT_MAX_ACTIVE_READS` was still 4,096 were facts about production
+    alone and are now comments; ng's 32,768 stays asserted.
+  - ☐ C19 · ☐ C20 · ☐ C21 · ☐ C22 · ☐ C23 · ☐ C24 · ☐ C25
 - ☐ **C26** · *Depends:* C1, C9.
 
   **Deviation, recorded 2026-09-12: `cram_files` goes to `src/bam/`, and §2's "shared

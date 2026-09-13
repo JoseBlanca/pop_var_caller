@@ -1566,22 +1566,21 @@ mod tests {
 
     /// **The copied cutoffs must not drift from production's.** Both are inherited from its
     /// single provisional 10, and their docs say so; this makes that true rather than
-    /// aspirational. A **test-only** reference, so shipping ng code still depends on nothing
-    /// in production.
+    /// aspirational. Production's `ssr::cohort::param_estimation::MAX_SLIP` was 10 at commit
+    /// `d9e7b076`, frozen here at promotion step C18.
     ///
     /// **ng carries two where production carries one**, named for the scale each counts in.
     /// Splitting the name is what makes them independently settable by whoever measures them;
     /// until someone does, both must equal the number they were copied from.
     #[test]
     fn the_copied_cutoffs_still_equal_productions() {
+        const PRODUCTION_MAX_SLIP: usize = 10;
         assert_eq!(
-            MAX_WHOLE_REPEAT_SLIP as usize,
-            crate::ssr::cohort::param_estimation::MAX_SLIP,
+            MAX_WHOLE_REPEAT_SLIP as usize, PRODUCTION_MAX_SLIP,
             "ng's whole-repeat cutoff has drifted from production's"
         );
         assert_eq!(
-            MAX_PART_REPEAT_SLIP as usize,
-            crate::ssr::cohort::param_estimation::MAX_SLIP,
+            MAX_PART_REPEAT_SLIP as usize, PRODUCTION_MAX_SLIP,
             "ng's part-repeat cutoff has drifted from production's"
         );
     }
