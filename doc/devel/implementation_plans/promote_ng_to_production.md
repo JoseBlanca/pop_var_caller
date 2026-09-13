@@ -611,6 +611,18 @@ Measured on the tree at `9746cee6`, by `pop_var_caller::<production module>` in 
 > production's tests and the deleted oracle tests, and the report says the two numbers;
 > A2's md5s equal A1's. Pause for review.
 
+**Reached 2026-09-13, at `c950d73e`.** `cargo fmt --check`, `clippy --all-targets -D warnings`,
+`doc -D warnings`, the release build and `cargo bench --no-run` (with `-j 2`; the default job count
+runs the 16 GB container out of memory) are green. `cargo test --lib --tests`: **4,787 passed,
+0 failed, 4 ignored** — 4,791 tests, against A1's **6,370** (6,358 passed, 1 failed, 11 ignored).
+The 1,579 between them, from each step's commit message: Milestone B's copies brought **52**
+tests with them (A1 to 6,407 passed and 15 ignored at `d9e7b076`); Milestone C removed **63**
+(to 6,351 and 8 at C26 — deleted oracles and guard tests, each step's count in its commit); and
+Milestone D deleted **1,568** with production — 50 integration tests at D1, and at D2–D4 1,517
+library tests (4 of them ignored) and `bam`'s `worker_reader_is_send`. The identity oracle is
+byte-identical to A1's digests. Measured sizes: 314,531 lines of Rust under `src/`, from 407,231
+at `74e424ea`; 62 examples; 6 benches; 1 binary.
+
 ### Milestone E — ng moves to `src/`, and its binary takes the name
 
 - ☐ **E1. The move.** `git mv src/ng/<module> src/<module>` for each of ng's 19 top-level
