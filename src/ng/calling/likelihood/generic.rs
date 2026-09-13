@@ -1930,10 +1930,24 @@ mod tests {
     /// Either shortcut would let the comparison agree with itself: the first passes with the
     /// whole error-spread step deleted and the value hardcoded, which is the shape of test B1
     /// shipped and had to repair; the second cancels a wrong table entry on both sides.
+    ///
+    /// **Production's side is frozen since promotion step C20.** What
+    /// `var_calling::per_group_merger::standard_log_likelihood` returned for each of the six
+    /// genotypes of this fixture — the three supported rows as its per-allele summaries, the
+    /// unmatched `q_sum` as its `other` row, three alleles, ploidy 2 — was recorded at commit
+    /// `d9e7b076` and is [`PRODUCTION_ROW`] below, as bit patterns.
     #[test]
     fn ng_and_production_agree_once_the_two_recorded_changes_are_undone() {
-        use crate::pileup_record::AlleleSupportStats;
-        use crate::var_calling::per_group_merger::standard_log_likelihood;
+        /// Production's log-likelihood for each genotype of the fixture, in the table's genotype
+        /// order (`0/0, 0/1, 1/1, 0/2, 1/2, 2/2`), as recorded at commit `d9e7b076`.
+        const PRODUCTION_ROW: [u64; 6] = [
+            0xc03d_0000_0000_0000,
+            0xc02a_5b49_e024_95e8,
+            0xc02b_0000_0000_0000,
+            0xc039_6779_f28c_d3fe,
+            0xc01a_cda7_2295_0763,
+            0xc038_4000_0000_0000,
+        ];
 
         /// `ln(n!)`, written here rather than borrowed from production's table.
         ///
@@ -1978,38 +1992,16 @@ mod tests {
             &mut ours,
         );
 
-        let stats: Vec<AlleleSupportStats> = supported
-            .iter()
-            .map(|o| AlleleSupportStats {
-                num_obs: o.num_reads,
-                q_sum: o.q_sum,
-                fwd: 0,
-                placed_left: 0,
-                placed_start: 0,
-                mapq_sum: 0,
-                mapq_sum_sq: 0,
-            })
-            .collect();
-        let other = AlleleSupportStats {
-            num_obs: 0,
-            q_sum: unmatched,
-            fwd: 0,
-            placed_left: 0,
-            placed_start: 0,
-            mapq_sum: 0,
-            mapq_sum_sq: 0,
-        };
-
         let mut compared = 0usize;
         for (genotype, ours) in ours.iter().enumerate() {
             let counts = &view.genotype_allele_counts()[genotype * 3..(genotype + 1) * 3];
-            // Production takes the genotype as a multiset of allele indices, one per copy.
+            // Production took the genotype as a multiset of allele indices, one per copy.
             let as_copies: Vec<u8> = counts
                 .iter()
                 .enumerate()
                 .flat_map(|(allele, &copies)| std::iter::repeat_n(allele as u8, copies as usize))
                 .collect();
-            let theirs = standard_log_likelihood(&stats, &other, &as_copies, 3, 2);
+            let theirs = f64::from_bits(PRODUCTION_ROW[genotype]);
 
             // The coefficient production carries and ng drops, in closed form.
             let carried_reads: u64 = counts

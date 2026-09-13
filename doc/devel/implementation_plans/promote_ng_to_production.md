@@ -402,7 +402,12 @@ mattered:
     `ng::golden_catalog`, the reader C12 added, instead of production's `CatalogReader`. They
     read the same four things — the loci's contig, start and end, the three settings, and the
     reference MD5 — and all three pass unchanged.
-  - ☐ C20 · ☐ C21 · ☐ C22 · ☐ C23 · ☐ C24 · ☐ C25
+  - ✅ **C20** `calling/likelihood/generic.rs` — **frozen.** Production's
+    `standard_log_likelihood` for the six genotypes of the test's three-allele fixture, recorded at
+    `d9e7b076`, is a six-entry bit-pattern array in the test; the reconciliation (add back the
+    multinomial coefficient, undo the error spread and the read-group scale) is unchanged and
+    still within 1e-9. Moving one recorded value by 0.03 nats fails it.
+  - ☐ C21 · ☐ C22 · ☐ C23 · ☐ C24 · ☐ C25
 - ☐ **C26** · *Depends:* C1, C9.
 
   **Deviation, recorded 2026-09-12: `cram_files` goes to `src/bam/`, and §2's "shared
