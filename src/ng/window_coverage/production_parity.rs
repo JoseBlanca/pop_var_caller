@@ -10,7 +10,8 @@
 //! genuinely slides rather than swallowing the contig whole.
 //!
 //! **Test-only, and production is the oracle, not a dependency.** ng reads production this way
-//! in two other places (`ng/scanner_parity.rs`, `calling::genotype_table_parity`); nothing
+//! in other places too (`ng/scanner_parity.rs`, and `calling::genotype_table_parity` until promotion
+//! step C5 froze its answers); nothing
 //! shipped depends on `src/sample_summary/`.
 //!
 //! **This has narrowed to the windows, and will not narrow further.** ng's accumulator has

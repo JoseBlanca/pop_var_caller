@@ -236,7 +236,13 @@ carries a header line naming the production commit that wrote it.
     (274 KB), f64s as bit patterns. The tests still generate the inputs from the same seeds
     and compare ng against the file; each asserts it read every answer in its section. Changing
     one fixture value fails one test; changing one generator draw rate fails three.
-  - ☐ C5 · ☐ C6 · ☐ C7 · ☐ C8 · ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
+  - ✅ **C5** `calling/genotype_table_parity.rs` — **frozen, all 4 tests kept.** Production's
+    `shape_for` tables for the 76 shapes the tests compare (27,384 genotype rows) were written at
+    `d9e7b076` to `calling/testdata/genotype_tables_production.txt` (733 KB): each genotype as
+    its alleles, its log coefficient as a bit pattern, its homozygous allele. The four
+    comparisons — count, allele counts in order, coefficient bits, homozygous lookup — read
+    from the file. Corrupting one coefficient fails one test.
+  - ☐ C6 · ☐ C7 · ☐ C8 · ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
 - ☐ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
   `ng_psp_head_encoding.rs` (`test = true` in `Cargo.toml`), `paralog_score_parity.rs` — are
   deleted with a line each in the report saying which document already holds their result.

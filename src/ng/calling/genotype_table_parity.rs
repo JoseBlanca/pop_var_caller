@@ -12,40 +12,121 @@
 //! (`doc/devel/ng/impl_plan/calling_foundations.md`, step C2;
 //! `doc/devel/ng/arch/calling_em_loop.md` §8).
 //!
-//! **The oracle is production's own artefact, built by production's own code.**
-//! `shape_for(ploidy, n_alleles)` returns the `GenotypeShape` the shipping posterior
-//! engine uses, and every field compared below is the one the engine reads. Nothing is
-//! re-derived here and nothing is transcribed, so a change to production's enumeration,
-//! its fold, or any of its three formulas makes this test fail rather than pass quietly.
+//! **The oracle is production's own artefact, built by production's own code — frozen since
+//! promotion step C5.** Until then this file called `shape_for(ploidy, n_alleles)`, which
+//! returned the `GenotypeShape` production's posterior engine used, and compared every field
+//! the engine read. Production is being deleted, so each of the 76 shapes the tests compare was
+//! written once, at commit `d9e7b076`, to
+//! [`testdata/genotype_tables_production.txt`](testdata/genotype_tables_production.txt) — 27,384
+//! genotype rows — and the tests compare against that file. Nothing is re-derived here and
+//! nothing is transcribed by hand.
 //!
-//! **Reaching it cost one edit to the frozen tree, and it is the only one.**
-//! `posterior_engine.rs` declared `mod shape;` privately, so `GenotypeShape` and
-//! `shape_for` could not be named from `src/ng/` whatever their own `pub(crate)`
-//! visibility — a call from here failed with ``error[E0603]: module `shape` is
-//! private``. The declaration is now `pub(crate)` (owner, 2026-08-21). That is the
-//! whole change: no production behaviour moved, nothing was re-exported, and the
-//! dependency runs one way — this test reads production, production still names nothing
-//! in ng.
+//! **This is ng's test; production is only the yardstick.** It is its own file rather than a
+//! block inside `genotype_table.rs`'s `mod tests` so that the table's own tests stay free of
+//! the comparison.
 //!
-//! **This is ng's test; production is only the yardstick**, exactly as
-//! [`crate::ng::scanner_parity`] reads `src/ssr/` without writing to it. It is its own
-//! file rather than a block inside `genotype_table.rs`'s `mod tests` so that ng's only
-//! `use crate::var_calling::` sits in one greppable place and the table's own tests stay
-//! free of production.
-//!
-//! **The oracle stops being production above 255 alleles.** `genotype_order`, which
-//! `GenotypeShape::build` enumerates with, iterates `min_allele..(n_alleles as u8)`, so
-//! 256 alleles yields no genotypes at all, where the port reaches 65,536. A grid that
-//! went that wide would fail on the count assertion and read as though the port were
-//! wrong. The widest shape here is 18 alleles.
+//! **The oracle stopped being production above 255 alleles.** `genotype_order`, which
+//! `GenotypeShape::build` enumerated with, iterated `min_allele..(n_alleles as u8)`, so
+//! 256 alleles yielded no genotypes at all, where the port reaches 65,536. The widest shape
+//! here is 18 alleles.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use crate::ng::calling::genotype_table::GenotypeTable;
 use crate::ng::types::{AlleleId, Ploidy};
-use crate::var_calling::posterior_engine::shape::shape_for;
 
-/// Compare one shape's four quantities against production's `GenotypeShape` and return
+/// Production's table for one shape, as read back from the fixture.
+struct ProductionShape {
+    genotype_count: usize,
+    /// Row-major `genotype_count × allele_count`, as production's `genotype_allele_counts`.
+    genotype_allele_counts: Vec<u32>,
+    /// Bit patterns, as production's `log_multinomial_coeffs`.
+    log_multinomial_coeff_bits: Vec<u64>,
+    homozygous_allele_for: Vec<Option<AlleleId>>,
+}
+
+/// Every shape in the fixture, keyed by `(ploidy, allele count)`, parsed once.
+fn production_shapes() -> &'static HashMap<(u8, usize), ProductionShape> {
+    static SHAPES: OnceLock<HashMap<(u8, usize), ProductionShape>> = OnceLock::new();
+    SHAPES.get_or_init(|| {
+        let digit = |c: char| c.to_digit(36).expect("a base-36 allele digit") as usize;
+        let mut shapes = HashMap::new();
+        let mut lines = include_str!("testdata/genotype_tables_production.txt")
+            .lines()
+            .filter(|line| !line.starts_with('#'));
+        while let Some(header) = lines.next() {
+            let fields: Vec<&str> = header.split(' ').collect();
+            let ["shape", ploidy, allele_count, genotype_count] = fields[..] else {
+                panic!("a shape header, not {header:?}");
+            };
+            let (ploidy, allele_count, genotype_count): (u8, usize, usize) = (
+                ploidy.parse().expect("a ploidy"),
+                allele_count.parse().expect("an allele count"),
+                genotype_count.parse().expect("a genotype count"),
+            );
+            let mut shape = ProductionShape {
+                genotype_count,
+                genotype_allele_counts: vec![0; genotype_count * allele_count],
+                log_multinomial_coeff_bits: Vec::with_capacity(genotype_count),
+                homozygous_allele_for: Vec::with_capacity(genotype_count),
+            };
+            for row in 0..genotype_count {
+                let line = lines
+                    .next()
+                    .expect("a genotype line for every genotype counted");
+                let fields: Vec<&str> = line.split(' ').collect();
+                let [alleles, coeff_bits, homozygous] = fields[..] else {
+                    panic!("a genotype line, not {line:?}");
+                };
+                // Checked here rather than left to the comparison: a digit past the width would
+                // land in the next row's counts and fail later under a misleading message.
+                assert_eq!(
+                    alleles.len(),
+                    usize::from(ploidy),
+                    "shape {ploidy} {allele_count}: {line:?} does not carry one digit per copy"
+                );
+                assert!(
+                    alleles.as_bytes().is_sorted(),
+                    "shape {ploidy} {allele_count}: {line:?} lists its alleles out of order"
+                );
+                for allele in alleles.chars() {
+                    let allele = digit(allele);
+                    assert!(
+                        allele < allele_count,
+                        "shape {ploidy} {allele_count}: {line:?} names an allele past the width"
+                    );
+                    shape.genotype_allele_counts[row * allele_count + allele] += 1;
+                }
+                shape
+                    .log_multinomial_coeff_bits
+                    .push(u64::from_str_radix(coeff_bits, 16).expect("a bit pattern"));
+                shape.homozygous_allele_for.push(match homozygous {
+                    "-" => None,
+                    allele => {
+                        assert_eq!(
+                            allele.len(),
+                            1,
+                            "a homozygous allele is one digit: {line:?}"
+                        );
+                        let allele = digit(allele.chars().next().expect("one digit"));
+                        Some(AlleleId(
+                            u16::try_from(allele).expect("an allele fits a u16"),
+                        ))
+                    }
+                });
+            }
+            let previous = shapes.insert((ploidy, allele_count), shape);
+            assert!(
+                previous.is_none(),
+                "shape {ploidy} {allele_count} is frozen twice"
+            );
+        }
+        shapes
+    })
+}
+
+/// Compare one shape's four quantities against production's frozen `GenotypeShape` and return
 /// how many genotypes the **table** holds, so the caller can assert a grid's total
 /// reach. The table's own count rather than production's: the two are asserted equal one
 /// line earlier, and returning the table's makes the totals evidence about the subject.
@@ -58,9 +139,10 @@ use crate::var_calling::posterior_engine::shape::shape_for;
 fn compare_against_production(copies: u8, allele_count: usize) -> usize {
     let ploidy = Ploidy::try_new(copies).expect("the grids start at ploidy 1");
     let table = GenotypeTable::build(ploidy, allele_count);
-    let production = shape_for(copies, allele_count);
-
     let shape = format!("ploidy {copies} over {allele_count} alleles");
+    let production = production_shapes()
+        .get(&(copies, allele_count))
+        .unwrap_or_else(|| panic!("{shape}: production's tables were not frozen for this shape"));
 
     // 0. The table agrees about which shape it is. Everything below indexes rows by the
     //    width the table declares, so a table holding the right numbers under the wrong
@@ -75,7 +157,7 @@ fn compare_against_production(copies: u8, allele_count: usize) -> usize {
     // 1. Genotype count.
     assert_eq!(
         table.genotype_count(),
-        production.n_genotypes,
+        production.genotype_count,
         "{shape}: count"
     );
 
@@ -95,30 +177,19 @@ fn compare_against_production(copies: u8, allele_count: usize) -> usize {
         .iter()
         .map(|coeff| coeff.to_bits())
         .collect();
-    let theirs: Vec<u64> = production
-        .log_multinomial_coeffs
-        .iter()
-        .map(|coeff| coeff.to_bits())
-        .collect();
     assert_eq!(
         ours,
-        theirs,
+        production.log_multinomial_coeff_bits,
         "{shape}: log multinomial coefficients as bit patterns, or how many of them — \
-         ours {:?}, production {:?}",
+         ours {:?}",
         table.log_multinomial_coeffs(),
-        production.log_multinomial_coeffs
     );
 
-    // 4. The homozygous lookup. ng names the allele with an `AlleleId`, production with
-    //    a bare `u8`; the widening is the only difference between the two tables.
-    let theirs: Vec<Option<AlleleId>> = production
-        .homozygous_allele_for
-        .iter()
-        .map(|entry| entry.map(|allele| AlleleId(u16::from(allele))))
-        .collect();
+    // 4. The homozygous lookup. Production named the allele with a bare `u8`; the fixture
+    //    widens it to ng's `AlleleId` on reading.
     assert_eq!(
         table.homozygous_alleles(),
-        theirs.as_slice(),
+        production.homozygous_allele_for.as_slice(),
         "{shape}: homozygous lookup, or how many entries it has"
     );
 
@@ -131,9 +202,8 @@ fn compare_against_production(copies: u8, allele_count: usize) -> usize {
 
 /// The grid the plan names: ploidy 2 and 4, allele counts 1 to 6 — a diploid and a
 /// tetraploid locus at every candidate width up to the cap the calling loop will ship,
-/// `DEFAULT_MAX_CANDIDATE_ALLELES = 6`. That name is not yet a constant in this tree;
-/// it is inherited from production's `DEFAULT_MAX_ALLELES_PER_RECORD`
-/// (`src/var_calling/per_group_merger.rs`) and recorded in
+/// [`DEFAULT_MAX_CANDIDATE_ALLELES`](crate::ng::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES),
+/// whose value is inherited from production's `DEFAULT_MAX_ALLELES_PER_RECORD` and recorded in
 /// `doc/devel/ng/arch/calling_em_loop.md` §8.
 ///
 /// Every shape here recurs in the wider grid below, so this test's own contribution is

@@ -41,10 +41,10 @@
 //! same reason the types above do — two of the four sub-modules consume it, so it
 //! belongs one level above them — and its three types are re-exported here, so that
 //! all of calling's shared vocabulary is named at one depth. Beside it again, and
-//! test-only: `genotype_table_parity`, which checks that table against production's
-//! `GenotypeShape` value for value. It is a file of its own rather than a block inside
-//! [`genotype_table`]'s own tests so that ng's single `use crate::var_calling::` — an
-//! oracle, never a dependency of anything shipped — sits in one greppable place.
+//! test-only: `genotype_table_parity`, which checks that table value for value against
+//! production's `GenotypeShape`, frozen in `testdata/` at promotion step C5. It is a file of its
+//! own rather than a block inside [`genotype_table`]'s own tests so that the table's tests stay
+//! free of the comparison.
 //!
 //! The scalars other steps also name — `AlleleId`, `Phred`, `Genotype` — are not here
 //! but in [`crate::ng::types`], with the rest of ng's shared vocabulary.
