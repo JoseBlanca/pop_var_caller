@@ -249,7 +249,19 @@ carries a header line naming the production commit that wrote it.
     so a changed input finds no answer and fails. Production's convergence threshold (1e-3), pass
     cap (50) and reference concentration (1.0) are frozen literals ng's constants are checked
     against. Changing one frozen genotype fails one test.
-  - ☐ C7 · ☐ C8 · ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
+  - ✅ **C7** `calling/quality_parity.rs` — **frozen; 16 tests → 14.** What production's
+    `run_em_columnar` returned as site quality on eight distinct likelihood tables, and what
+    `vcf::qual_refine::refine_qual` returned on eight sets of reads, are two tables in the file,
+    keyed by FNV-1a digests of the inputs; production's shipped pseudocounts `(10, 0.01)` are
+    frozen literals. Two tests had no ng half left once production was not run — the
+    environment-variable guard on production's strand ramp, and a locus with no alternative
+    reads, where ng's correction is never called and the test only read production's answer
+    back — and were deleted; a third's production-only assertion now asserts ng's floor
+    instead. **Found, not fixed:** `a_homozygous_variant_cohort_is_skipped_by_both` is
+    documented as a cohort the correction leaves alone, yet production took its 900 Phred to
+    0 and ng agrees within 0.001 — a wrong doc comment or a defect both share; out of this
+    plan's scope and raised with the owner.
+  - ☐ C8 · ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
 - ☐ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
   `ng_psp_head_encoding.rs` (`test = true` in `Cargo.toml`), `paralog_score_parity.rs` — are
   deleted with a line each in the report saying which document already holds their result.

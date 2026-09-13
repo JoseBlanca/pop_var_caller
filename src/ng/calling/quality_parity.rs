@@ -1,6 +1,15 @@
 //! **ng's site quality against the shipping caller's, at the same prior — and what moves when
 //! the prior becomes the run's own.**
 //!
+//! **Production's side is frozen since promotion step C7.** Until then the fixtures here ran
+//! production's `run_em_columnar` for the site quality and `vcf::qual_refine::refine_qual` for
+//! the artifact correction. Production is being deleted, so the value each returned on each input
+//! below was recorded at commit `d9e7b076` and is written in [`PRODUCTION_SITE_QUALITIES`] and
+//! [`PRODUCTION_CORRECTED_QUALITIES`], keyed by an FNV-1a digest of everything production was
+//! handed that could change it. A fixture whose inputs change finds no answer and fails. Production's two
+//! shipped Beta-Binomial pseudocounts, `(10, 0.01)`, are frozen too. The prose below describes
+//! the comparison as it was built, with production running; what it asserts is unchanged.
+//!
 //! [`score_uncorrected_site_quality`](super::quality::score_uncorrected_site_quality) is a port
 //! of `src/var_calling/posterior_engine.rs`'s `compute_qual_via_exact_af` — the same collapse
 //! to non-reference copies, the same linear-domain fold over the cohort's allele count, the
@@ -58,11 +67,7 @@
 //! [`tests::a_cohort_past_the_ceiling_is_where_the_two_part_and_the_difference_is_the_cap`]
 //! pins the one place they diverge.
 //!
-//! Nothing here changes production. Every item it names is already visible: `run_em_columnar`,
-//! `EmInputs`, `MergedAllelesView`, `RecordScratch` and `RecordScratch::empty` are `pub(crate)`,
-//! and `PosteriorEngineConfig`, `RecordLocus`, `AlleleSupportStats`, `MergedAllele`, the two
-//! pseudocount constants and `mod backends` are `pub` — the same arrangement
-//! [`loop_parity`](super::loop_parity) found.
+//! Nothing here changed production.
 
 use crate::ng::calling::genotype_prior::{SeedRegime, SpectrumSeed};
 use crate::ng::calling::quality::ArtifactTestCounts;
@@ -71,15 +76,66 @@ use crate::ng::calling::quality::score_uncorrected_site_quality;
 use crate::ng::calling::{CallingScratch, CandidateAlleles, GenotypeTable};
 use crate::ng::locus_generation::LocusKind;
 use crate::ng::types::{AlleleId, LogProb, Phred, Ploidy};
-use crate::pileup_record::AlleleSupportStats;
-use crate::var_calling::per_group_merger::MergedAllele;
-use crate::var_calling::posterior_engine::backends::InterpUnivariateSimdMath;
-use crate::var_calling::posterior_engine::{
-    DEFAULT_REF_PSEUDOCOUNT, DEFAULT_SNP_ALT_PSEUDOCOUNT, EmInputs, MergedAllelesView,
-    PosteriorEngineConfig, RecordLocus, RecordScratch, run_em_columnar,
-};
-use crate::var_calling::posterior_engine::{EmDiagnostics, PosteriorRecord};
-use crate::vcf::qual_refine::refine_qual;
+
+/// Production's `posterior_engine::DEFAULT_REF_PSEUDOCOUNT` at commit `d9e7b076`: the site
+/// quality's Beta-Binomial reference-side concentration, inherited from GATK.
+const DEFAULT_REF_PSEUDOCOUNT: f64 = 10.0;
+
+/// Production's `posterior_engine::DEFAULT_SNP_ALT_PSEUDOCOUNT` at the same commit: what each
+/// SNP alternative adds to the other side.
+const DEFAULT_SNP_ALT_PSEUDOCOUNT: f64 = 0.01;
+
+/// FNV-1a over `bytes`. Written out rather than taken from `std`'s hasher, whose output is not
+/// promised to be stable across releases, because the digests key frozen answers.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |digest, &byte| {
+        (digest ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// **Production's site quality for each locus a fixture hands it**, as `(digest, bit pattern)`:
+/// the digest of the sample count, allele count, both concentrations and every likelihood, in
+/// that order; the `qual_phred` production's `run_em_columnar` returned. Recorded at commit
+/// `d9e7b076` (promotion plan step C7).
+const PRODUCTION_SITE_QUALITIES: [(u64, u64); 8] = [
+    (0x4a9c_064e_a4d3_9710, 0x4038_b9f2_b8bc_ad7a),
+    (0x5b76_fe14_befb_9369, 0x3f08_7b9d_aa6b_0970),
+    (0x4fe4_90af_f5f8_3cdd, 0x402d_4046_d6e0_2855),
+    (0xa13b_531b_1d62_551e, 0x4034_c189_5f2a_92c0),
+    (0xb82d_eb1d_3095_8c4d, 0x3ffd_1844_990e_acb3),
+    (0x33a0_8e05_4843_59a3, 0x4041_79c2_aa3f_407c),
+    (0x5f76_231b_1c28_21c1, 0x402c_3cc3_a31b_719e),
+    (0xa928_6c12_acef_e259, 0x40c4_3bf3_f745_73a6),
+];
+
+/// **Production's corrected quality for each set of reads a fixture hands it**, as
+/// `(digest, bit pattern)`: the digest of every sample's six read counts and called genotype, in
+/// sample order, then the baseline; the value production's `refine_qual` returned. Recorded at
+/// commit `d9e7b076` (promotion plan step C7).
+const PRODUCTION_CORRECTED_QUALITIES: [(u64, u64); 8] = [
+    (0xdb9e_5c01_e719_e33d, 0x0000_0000_0000_0000),
+    (0x468e_27c3_4777_c2d9, 0x408c_2000_0000_0000),
+    (0x7497_0761_484f_0819, 0x0000_0000_0000_0000),
+    (0xc0bd_0425_a281_0840, 0x4088_1130_227d_072a),
+    (0x876b_480a_c3b7_1e66, 0x4087_bc86_8263_adda),
+    (0xa03d_ce85_9e85_04c7, 0x4088_16d5_9a26_8c5f),
+    (0x39f8_c2af_3630_b4c8, 0x408b_b816_9ac5_a474),
+    (0x5399_abe5_6ab0_e2c8, 0x4088_9e4f_52e6_d522),
+];
+
+/// The frozen answer under `digest`, or a failure naming it.
+fn frozen(answers: &[(u64, u64)], digest: u64, what: &str) -> f64 {
+    let &(_, bits) = answers
+        .iter()
+        .find(|(key, _)| *key == digest)
+        .unwrap_or_else(|| {
+            panic!(
+                "no frozen production {what} for inputs with digest {digest:016x} — they are \
+                 not the inputs production was run on"
+            )
+        });
+    f64::from_bits(bits)
+}
 
 /// The four bases, so that each allele of a fixture is a different one byte long.
 const BASES: &[u8] = b"ACGT";
@@ -119,70 +175,25 @@ impl<'a> Locus<'a> {
         self.log_likelihoods.len() / self.samples
     }
 
-    /// **The site quality production computes from this table**, in Phred.
+    /// **The site quality production computed from this table**, in Phred — read from
+    /// [`PRODUCTION_SITE_QUALITIES`].
     ///
-    /// Driven through `run_em_columnar` rather than through `compute_qual_via_exact_af`, which
-    /// is private — and nothing is lost by it, because the quality is a function of the
-    /// *input* likelihood table and the record-static pseudocounts, neither of which the EM
-    /// moves. The loop runs, and its converged frequencies do not reach this number.
+    /// **What production was handed, for the record**: this table through `run_em_columnar`,
+    /// with one one-base `MergedAllele` per allele (so every alternative classified as a SNP and
+    /// drew `snp_alt_pseudocount`), the same read summary for every sample and allele, no chain
+    /// anchors, ploidy 2, and a `PosteriorEngineConfig` carrying this locus's two concentrations.
+    /// The quality is a function of the input table and those concentrations, neither of which
+    /// the EM moves.
     fn production_site_quality(&self) -> f64 {
-        // **Every allele one base long, so nothing production does with allele *lengths* comes
-        // into it** — every alternative classifies as a SNP and so draws
-        // `snp_alt_pseudocount`, which is what makes the alternative side of the Beta a plain
-        // multiple of one number.
-        let merged: Vec<MergedAllele> = (0..self.alleles)
-            .map(|allele| MergedAllele {
-                seq: vec![BASES[allele % BASES.len()]],
-                is_compound: false,
-                constituents: Vec::new(),
-            })
-            .collect();
-        let view = MergedAllelesView::new(&merged);
-        // The per-allele read summaries production carries beside the likelihoods. The site
-        // quality reads none of them — it is a fold over the table and the prior — so one
-        // plausible shape repeated is enough to make a well-formed record.
-        let scalars = vec![
-            AlleleSupportStats {
-                num_obs: 10,
-                q_sum: -30.0,
-                fwd: 5,
-                placed_left: 5,
-                placed_start: 0,
-                mapq_sum: 600,
-                mapq_sum_sq: 36_000,
-            };
-            self.samples * self.alleles
-        ];
-        let anchor_flags = vec![false; self.samples * self.alleles];
-
-        let config = PosteriorEngineConfig::new()
-            .with_ref_pseudocount(self.reference_concentration)
-            .expect("a reference concentration in range")
-            .with_snp_alt_pseudocount(self.per_alternative_concentration)
-            .expect("an alternative concentration in range");
-        let math = InterpUnivariateSimdMath;
-        let mut scratch = RecordScratch::empty();
-        run_em_columnar(
-            EmInputs {
-                locus: RecordLocus {
-                    chrom_id: 1,
-                    start: 1_000,
-                    end: 1_000,
-                },
-                ploidy: 2,
-                n_samples: self.samples,
-                n_genotypes: self.genotypes(),
-                alleles: &view,
-                scalars: &scalars,
-                log_likelihoods: self.log_likelihoods,
-                chain_anchor_flags_for_validation: &anchor_flags,
-            },
-            &config,
-            &math,
-            &mut scratch,
-        )
-        .expect("production scores this record")
-        .qual_phred
+        let mut bytes = Vec::new();
+        bytes.extend((self.samples as u64).to_le_bytes());
+        bytes.extend((self.alleles as u64).to_le_bytes());
+        bytes.extend(self.reference_concentration.to_bits().to_le_bytes());
+        bytes.extend(self.per_alternative_concentration.to_bits().to_le_bytes());
+        for value in self.log_likelihoods {
+            bytes.extend(value.to_bits().to_le_bytes());
+        }
+        frozen(&PRODUCTION_SITE_QUALITIES, fnv1a(&bytes), "site quality")
     }
 
     /// The candidate table the fixture's allele count spells.
@@ -383,6 +394,8 @@ mod tests {
             per_alternative_concentration: 1.0,
         };
         let shipped = Locus::at_productions_prior(&table, 20, 2);
+        // A check on the fixture, not on ng: the two concentration pairs gave production
+        // qualities far apart, so agreeing at both is not agreeing by accident.
         assert!(
             (moved.production_site_quality() - shipped.production_site_quality()).abs() > 1.0,
             "the two concentration pairs have to give production materially different \
@@ -505,6 +518,7 @@ mod tests {
         let locus = Locus::at_productions_prior(&table, 60, 2);
         let production = locus.production_site_quality();
         let ng = locus.ng_at_productions_prior();
+        // A check on the fixture, not on ng: production's frozen answer is past the ceiling.
         assert!(
             production > f64::from(MAX_SITE_QUALITY),
             "the fixture has to drive production past ng's ceiling for this test to be about \
@@ -539,62 +553,38 @@ mod tests {
     /// [`genotype_table_parity`](super::genotype_table_parity)'s to pin, and it does.
     const GENOTYPES: [[u8; 2]; 3] = [[0, 0], [0, 1], [1, 1]];
 
-    fn stats((reads, forward, placed_left): (u32, u32, u32)) -> AlleleSupportStats {
-        AlleleSupportStats {
-            num_obs: reads,
-            // The three moments below reach the VCF's annotations and neither correction reads
-            // them; one plausible shape keeps the record well-formed.
-            q_sum: -3.0 * f64::from(reads),
-            fwd: forward,
-            placed_left,
-            placed_start: 0,
-            mapq_sum: reads * 60,
-            mapq_sum_sq: u64::from(reads) * 3_600,
-        }
-    }
-
-    /// **The corrected quality production computes** from these reads and this baseline.
+    /// **The corrected quality production computed** from these reads and this baseline — read
+    /// from [`PRODUCTION_CORRECTED_QUALITIES`].
+    ///
+    /// **What production was handed, for the record**: a biallelic `PosteriorRecord` (alleles
+    /// `A`, `T`) with these samples' called genotypes, a per-allele read summary whose read count,
+    /// forward count and placed-left count are the fixture's (with `q_sum` −3 a read, MAPQ 60 a
+    /// read), the baseline as `qual_phred`, and [`GENOTYPES`] as the genotype table, through
+    /// `vcf::qual_refine::refine_qual`. The other record fields — posteriors, frequencies, GQ,
+    /// diagnostics — are not read by that function.
     fn production_corrected_quality(samples: &[SampleReads], baseline: f64) -> f64 {
-        let alleles: Vec<MergedAllele> = b"AT"
-            .iter()
-            .map(|&base| MergedAllele {
-                seq: vec![base],
-                is_compound: false,
-                constituents: Vec::new(),
-            })
-            .collect();
-        let scalars: Vec<AlleleSupportStats> = samples
-            .iter()
-            .flat_map(|sample| [stats(sample.reference), stats(sample.alternative)])
-            .collect();
-        let record = PosteriorRecord {
-            locus: RecordLocus {
-                chrom_id: 1,
-                start: 1_000,
-                end: 1_000,
-            },
-            alleles,
-            ploidy: 2,
-            n_samples: samples.len(),
-            n_genotypes: GENOTYPES.len(),
-            allele_frequencies: vec![0.5, 0.5],
-            compound_frequencies: vec![None, None],
-            posteriors: vec![1.0 / 3.0; samples.len() * GENOTYPES.len()],
-            best_genotype: samples.iter().map(|sample| sample.genotype).collect(),
-            gq_phred: vec![30.0; samples.len()],
-            qual_phred: baseline,
-            scalars,
-            other_scalars: Vec::new(),
-            chain_anchor_flags: vec![false; samples.len() * 2],
-            diagnostics: EmDiagnostics {
-                iterations: 3,
-                final_max_delta_p: 1e-5,
-                converged: true,
-            },
-            paralog_posterior: None,
-        };
-        let table: Vec<Vec<u8>> = GENOTYPES.iter().map(|genotype| genotype.to_vec()).collect();
-        refine_qual(&record, &table, baseline)
+        let mut bytes = Vec::new();
+        for sample in samples {
+            let (reference_reads, reference_forward, reference_left) = sample.reference;
+            let (alternative_reads, alternative_forward, alternative_left) = sample.alternative;
+            for count in [
+                reference_reads,
+                reference_forward,
+                reference_left,
+                alternative_reads,
+                alternative_forward,
+                alternative_left,
+            ] {
+                bytes.extend(count.to_le_bytes());
+            }
+            bytes.extend((sample.genotype as u64).to_le_bytes());
+        }
+        bytes.extend(baseline.to_bits().to_le_bytes());
+        frozen(
+            &PRODUCTION_CORRECTED_QUALITIES,
+            fnv1a(&bytes),
+            "corrected quality",
+        )
     }
 
     /// **The nine numbers ng's correction reads**, pooled from the same samples.
@@ -657,20 +647,6 @@ mod tests {
             "{what}: ng corrects to {ng} where production corrects to {production}, a \
              difference of {}",
             (production - ng).abs()
-        );
-    }
-
-    /// **Production's ramp endpoints must be the compiled-in ones for any of this to mean
-    /// anything.** It reads `PVC_BIAS_RAMP` once into a `OnceLock`, so a value set in the
-    /// environment would silently give the two sides different ramps and every comparison below
-    /// would be measuring that instead. ng has no such knob — its endpoints are typed constants,
-    /// which is the point of §3.5 — so the check has only one side to make.
-    #[test]
-    fn productions_ramp_is_not_overridden_from_the_environment() {
-        assert!(
-            std::env::var("PVC_BIAS_RAMP").is_err(),
-            "PVC_BIAS_RAMP is set, so production's strand ramp is not the (3, 7) ng compiles \
-             in and the differential below is comparing two different tests"
         );
     }
 
@@ -774,26 +750,10 @@ mod tests {
             20.0,
             "a weak baseline against two large penalties",
         );
-        assert_eq!(production_corrected_quality(&samples, 20.0), 0.0);
-    }
-
-    /// **A locus no read reached an alternative at keeps its baseline**, which is production's
-    /// early return and ng's `None` — the two spellings of the same answer.
-    ///
-    /// ng's correction is never called here: the worker hands the output stage no summary at
-    /// all, and that stage passes the baseline through (§3.4). So what this asserts is the half
-    /// that can be asserted — that production agrees there is nothing to charge — and that ng's
-    /// producer returns `None` is [`summarise_condition`](super::inference::summarise_condition)'s
-    /// own test.
-    #[test]
-    fn a_locus_with_no_alternative_reads_keeps_its_baseline_on_both_sides() {
-        let samples: Vec<SampleReads> = (0..10)
-            .map(|_| SampleReads {
-                reference: (20, 10, 10),
-                alternative: (0, 0, 0),
-                genotype: 0,
-            })
-            .collect();
-        assert_eq!(production_corrected_quality(&samples, 743.25), 743.25);
+        let (ng, _) = correct_site_quality(
+            Phred::try_new(20.0).expect("a baseline quality"),
+            &ng_summary(&samples),
+        );
+        assert_eq!(ng.get(), 0.0, "ng floors the corrected quality at zero");
     }
 }
