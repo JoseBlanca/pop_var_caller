@@ -30,6 +30,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use pop_var_caller::bam::alignment_input::CigarOp;
 use pop_var_caller::ng::alignment::left_align_repeated::{ConvergenceReport, RepeatedLeftAligner};
 use pop_var_caller::ng::alignment::left_align_structured::{
     FixpointLeftAligner, StructuredLeftAligner,
@@ -41,7 +42,6 @@ use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::ref_seq::{RefSeq, WindowedRefSeq};
 use pop_var_caller::ng::reference_info::{ReferenceSource, read_reference_info};
 use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
-use pop_var_caller::pileup::walker::CigarOp;
 
 /// Everything the screen counts across the whole run.
 ///
@@ -311,7 +311,7 @@ fn report(tally: &Tally) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pop_var_caller::pileup::walker::CigarOp::{Deletion, Insertion, Match};
+    use pop_var_caller::bam::alignment_input::CigarOp::{Deletion, Insertion, Match};
 
     fn alignment(cigar: Vec<CigarOp>) -> Alignment {
         Alignment {

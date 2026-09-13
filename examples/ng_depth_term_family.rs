@@ -77,7 +77,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use pop_var_caller::genetics::lgamma;
+use pop_var_caller::ng::genetics::lgamma;
 use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
 use pop_var_caller::ng::locus_generation::{
     GeneratorSet, GeneratorSlot, LocusKind, SampleLocusObservationsIterator, UnhandledReason,

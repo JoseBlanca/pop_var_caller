@@ -503,13 +503,13 @@ listed.** Two facts about the tree made that order uncompilable:
 
 Measured on the tree at `9746cee6`, by `pop_var_caller::<production module>` in each file:
 
-- ☐ **D1. Everything outside the library that runs production.** `src/main.rs` and the
+- ✅ **D1. Everything outside the library that runs production.** `src/main.rs` and the
   `[[bin]] pop_var_caller` entry; the seven integration tests `tests/{cohort_cli,
   cohort_vcf_writer,contamination_estimation,pileup_cli,posterior_engine,psp_to_pileup,
   thread_budget}_integration.rs` and `tests/common/`, which only three of them used; the six
   benches `{baq_perf,cohort_var_calling_perf,paralog_scoring_perf,pileup_walker_scaling,
   psp_reader_perf,psp_writer_perf}` and their `[[bench]]` entries; the twenty examples that import
-  only production (`blocksize_rewrite`, `dhat_{baq,paralog,pileup,psp_reader,psp_writer,
+  production and nothing of ng (`blocksize_rewrite`, `dhat_{baq,paralog,pileup,psp_reader,psp_writer,
   var_calling}`, `dump_sample_summary`, `het_baseline`, `paralog_fit_probe`,
   `profile_{cohort_e2e,posterior_engine}`, `psp_{block_stats,rechunk,record_stream_compression,
   row_stream_roundtrip}`, `ssr_{psp_dump,psp_seqdump,slip_dump}`, `tomato2_sigma0`). The four ng
@@ -519,7 +519,8 @@ Measured on the tree at `9746cee6`, by `pop_var_caller::<production module>` in 
   since B5), `ng_window_coverage_probe` to `ng::paralog::coverage_model::DEFAULT_MAX_OVERFLOW_FRACTION`
   (0.20 in both). The plan first counted 22 and 8; C14 deleted four of the examples and B and C
   repointed the rest.
-  *Depends:* C.
+  *Depends:* C. Done 2026-09-13: the suite drops from 6,351 to 6,301, the seven integration tests'
+  12 + 6 + 5 + 11 + 11 + 4 + 1; `src/main.rs` carried none.
 - ☐ **D2. The command surface, the calling engine, the VCF writer and the STR caller** — the
   import loop above: `src/pop_var_caller/`, `src/var_calling/`, `src/vcf/`, `src/ssr/`, and
   `lib.rs`'s four `pub mod` lines. Intra-doc links from kept modules into them are rewritten as
@@ -542,7 +543,8 @@ Measured on the tree at `9746cee6`, by `pop_var_caller::<production module>` in 
 - ☐ **D6. `Cargo.toml` and the gates.** Remove the two clippy `allow`s and fix what fires in ng
   (`as_chunks::<N>()` for `chunks_exact`, per the comment that asked for it); `precommit-check.sh`
   step 1 (production must not import ng) and B9's mirror both become vacuous — replace them with
-  nothing, and empty the step's oracle exemption list, whose files no longer import production.
+  nothing, and empty the step's oracle exemption list, whose files no longer import production. The
+  dev-dependency `serial_test` lost its only user at D1 (`cohort_cli_integration.rs`) and goes too.
   *Depends:* D4. *Source:* `Cargo.toml` `[lints.clippy]` comment ("Drop both `allow`s when
   production is retired").
 - ☐ **D7. `src/ng/mod.rs`'s header** — the freeze paragraph and the oracle inventory describe a

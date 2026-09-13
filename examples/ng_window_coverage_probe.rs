@@ -142,6 +142,7 @@ use std::path::{Path, PathBuf};
 
 use pop_var_caller::fasta::ContigList;
 use pop_var_caller::ng::locus_generation::{LocusKind, ReadWitness, SampleLocusObservations};
+use pop_var_caller::ng::paralog::coverage_model::DEFAULT_MAX_OVERFLOW_FRACTION;
 use pop_var_caller::ng::psp::{PspReader, RecordHead};
 use pop_var_caller::ng::ref_seq::{RefSeq, WindowedRefSeq};
 use pop_var_caller::ng::reference_info::{
@@ -157,7 +158,6 @@ use pop_var_caller::ng::window_coverage::{
     self, CoverageByGcHistogram, SampleHistogram, WindowCoverage, WindowCoverageAccumulator,
     WindowCoverageConfig,
 };
-use pop_var_caller::paralog::coverage_model::DEFAULT_MAX_OVERFLOW_FRACTION;
 
 #[cfg(test)]
 use pop_var_caller::ng::locus_generation::{LocusLen, SequenceObservation, SsrDetail};

@@ -209,7 +209,7 @@ zstd = "0.13"
 # how long it took — which is what `examples/ng_cram_decode_layers.rs` prints
 # and the only way to tell one codec's cost from another's.
 cram-perf-counters = ["noodles-cram/perf-counters"]
-# Enable in `cargo run --example dhat_pileup --features dhat-heap` to swap
+# Enable in `cargo run --example dhat_ng_psp --no-default-features --features dhat-heap` to swap
 # the global allocator for `dhat::Alloc` and produce `dhat-heap.json`.
 # Off by default so production builds carry no dhat code.
 dhat-heap = ["dep:dhat"]
@@ -220,7 +220,7 @@ dhat-heap = ["dep:dhat"]
 # 8 threads and from 451 and 453 to 270 and 270 on one, while the most
 # memory the process ever holds falls from 5.66 GB to 5.12 GB and from
 # 5.45 to 5.09. The production `var-calling` path had already measured the
-# same 9% off peak resident (`src/main.rs`). What it costs is a vendored C
+# same 9% off peak resident (production's `src/main.rs`, since deleted). What it costs is a vendored C
 # allocator compiled into every build; `--no-default-features` opts out.
 #
 # The reason it pays is what the merge does to memory rather than how much
@@ -277,10 +277,6 @@ criterion = "0.8.2"
 proptest = "1"
 serial_test = "3"
 
-[[bin]]
-name = "pop_var_caller"
-path = "src/main.rs"
-
 # The ng experiment binary: ng's command surface, kept separate from the
 # production `pop_var_caller` CLI so ng's experiment knobs never grow it
 # (see doc/devel/ng/spec/typed_regions_cli.md §2). Same crate, same library.
@@ -289,31 +285,7 @@ name = "pop_var_caller_exp"
 path = "src/main_exp.rs"
 
 [[bench]]
-name = "pileup_walker_scaling"
-harness = false
-
-[[bench]]
 name = "freebayes_bookkeeping"
-harness = false
-
-[[bench]]
-name = "baq_perf"
-harness = false
-
-[[bench]]
-name = "psp_writer_perf"
-harness = false
-
-[[bench]]
-name = "psp_reader_perf"
-harness = false
-
-[[bench]]
-name = "cohort_var_calling_perf"
-harness = false
-
-[[bench]]
-name = "paralog_scoring_perf"
 harness = false
 
 [[bench]]
