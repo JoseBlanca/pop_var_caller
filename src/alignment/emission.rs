@@ -13,18 +13,15 @@
 //! base and throwing it away to align the read would discard information we paid for
 //! (spec §4.1); the second is the quality-blind end of the comparison.
 //!
-//! ## The scores must stay bit-equal to production
+//! ## The scores must not move by a bit
 //!
-//! [`PerQualityEmission`]'s table is ported from `EMISSION_LN`
-//! ([src/ssr/pileup/alignment.rs](../../../ssr/pileup/alignment.rs)), and the repeat-aware
-//! aligner built on it has to reproduce production's measured repeats **byte for byte** —
-//! that parity is this module's only hard oracle (spec §10.3). So these are not merely
-//! "close enough" numbers: reformulating the arithmetic in a way that moves the last bit
-//! moves every downstream score. `per_quality_table_is_bit_exact` exists to make such a
-//! change fail loudly instead of silently.
+//! The repeat-aware aligner built on [`PerQualityEmission`]'s table breaks ties on its values,
+//! so these are not merely "close enough" numbers: a table that moves the last bit of one entry
+//! can move a measured repeat by a byte. The table's bits are written out rather than computed,
+//! so they are the same on every platform, and `per_quality_table_matches_the_dindel_model`
+//! checks them against the formula.
 
 use crate::types::{BaseQual, DomainError};
-use std::sync::LazyLock;
 
 /// What a base is worth at one quality: the score if it agrees with the reference, and
 /// the score if it does not. Both are natural logarithms.
@@ -155,48 +152,300 @@ const UNIFORM_BASE_LN: f64 = -1.386_294_361_119_890_6;
 /// so no quality a BAM can hold can index out of range.
 ///
 /// The Dindel base-quality model: with `ε = 10^(−Q/10)`, a match scores `ln(1 − ε)` and a
-/// mismatch `ln(ε / 3)`, the error split evenly across the three other bases. Ported from
-/// production's `EMISSION_LN`
-/// ([src/ssr/pileup/alignment.rs](../../../ssr/pileup/alignment.rs)) **including its
-/// quality-zero floor**, which is the whole reason this is a table and not a formula at
-/// the call site.
+/// mismatch `ln(ε / 3)`, the error split evenly across the three other bases, each probability
+/// floored at [`PROBABILITY_FLOOR`] before its logarithm. The floor binds only at quality zero,
+/// where `1 − ε` is exactly zero; the mismatch floor never binds (the smallest `ε / 3` any `u8`
+/// quality gives is about `1.05e-26`, at Q255), which
+/// `mismatch_floor_never_binds_over_the_quality_domain` asserts.
 ///
-/// **One deliberate difference from the source, which changes no value.** Production
-/// floors the *match* term only; this floors the mismatch term too, so the trait's
-/// totality contract holds by construction rather than by arithmetic accident. The
-/// mismatch floor can never bind: the smallest `ε / 3` any `u8` quality produces is about
-/// `1.05e-26` (at Q255), roughly 282 orders of magnitude above `f64::MIN_POSITIVE`. The
-/// two tables are therefore bit-identical, which
-/// `mismatch_floor_never_binds_over_the_quality_domain` asserts rather than assumes.
-static PER_QUALITY_LN: LazyLock<[BaseScores; 256]> = LazyLock::new(|| {
-    let mut table = [BaseScores {
-        match_ln: 0.0,
-        mismatch_ln: 0.0,
-    }; 256];
-    for (quality, entry) in table.iter_mut().enumerate() {
-        let error_rate = 10f64.powf(-(quality as f64) / 10.0);
-        *entry = BaseScores {
-            match_ln: (1.0 - error_rate).max(PROBABILITY_FLOOR).ln(),
-            mismatch_ln: (error_rate / 3.0).max(PROBABILITY_FLOOR).ln(),
-        };
+/// **Written out as bits, not computed, so every platform scores alike.** `f64::powf` and
+/// `f64::ln` call the platform's maths library, and those are not required to round alike: at
+/// Q4 macOS's gives a match score two units in the last place away from glibc's
+/// (`0xbfe03ee1794fdd29` against `…27`). One such difference was enough for a repeat-tract
+/// delimitation to break a tie the other way on macOS — the tract measured one byte longer than
+/// on Linux (`alignment::delimit_parity`, seed `0x5eed0001`, case 287). These are the bits
+/// glibc produced on aarch64 Linux with Rust 1.98, the values every run had used on Linux
+/// before; `per_quality_table_matches_the_dindel_model` re-derives them from the formula, to
+/// within rounding everywhere and bit for bit on Linux.
+static PER_QUALITY_LN: [BaseScores; 256] = [
+    scores(0xc086232bdd7abcd2, 0xbff193ea7aad030b), // Q0
+    scores(0xbff94db76c25f264, 0xbff5430e069e140f), // Q1
+    scores(0xbfefe62362284804, 0xbff8f231928f2513), // Q2
+    scores(0xbfe641bc893e144c, 0xbffca1551e803618), // Q3
+    scores(0xbfe03ee1794fdd27, 0xc000283c5538a38e), // Q4
+    scores(0xbfd8540e7db6ff76, 0xc001ffce1b312c10), // Q5
+    scores(0xbfd2835eb6f3768d, 0xc003d75fe129b492), // Q6
+    scores(0xbfcc7c916d63a729, 0xc005aef1a7223d14), // Q7
+    scores(0xbfc6165572aff83d, 0xc00786836d1ac596), // Q8
+    scores(0xbfc138ffa686c7d3, 0xc0095e1533134e19), // Q9
+    scores(0xbfbaf8e8210a415c, 0xc00b35a6f90bd69b), // Q10
+    scores(0xbfb5301b5c35244b, 0xc00d0d38bf045f1d), // Q11
+    scores(0xbfb0af412e6f7610, 0xc00ee4ca84fce79f), // Q12
+    scores(0xbfaa537efbd9b517, 0xc0105e2e257ab811), // Q13
+    scores(0xbfa4ccc792ac9150, 0xc01149f70876fc51), // Q14
+    scores(0xbfa073cfd310c471, 0xc01235bfeb734093), // Q15
+    scores(0xbf9a0cdf371d5393, 0xc0132188ce6f84d4), // Q16
+    scores(0xbf94a3588615a7bd, 0xc0140d51b16bc915), // Q17
+    scores(0xbf905bfa6fc24d66, 0xc014f91a94680d56), // Q18
+    scores(0xbf89f24b3db557eb, 0xc015e4e377645197), // Q19
+    scores(0xbf8495453e6fd4bc, 0xc016d0ac5a6095d8), // Q20
+    scores(0xbf8055322655bf0f, 0xc017bc753d5cda19), // Q21
+    scores(0xbf79ed071c97f2ba, 0xc018a83e20591e5b), // Q22
+    scores(0xbf74948af0a9857d, 0xc01994070355629b), // Q23
+    scores(0xbf7056c9ab3d0327, 0xc01a7fcfe651a6dc), // Q24
+    scores(0xbf69f248eb25b279, 0xc01b6b98c94deb1d), // Q25
+    scores(0xbf649a6f506e2570, 0xc01c5761ac4a2f5f), // Q26
+    scores(0xbf605c8c62163836, 0xc01d432a8f4673a0), // Q27
+    scores(0xbf59fccc17b83728, 0xc01e2ef37242b7e0), // Q28
+    scores(0xbf54a3a4773eb613, 0xc01f1abc553efc22), // Q29
+    scores(0xbf5064670d979b73, 0xc02003429c1da031), // Q30
+    scores(0xbf4a09f4bd4ebbc3, 0xc02079270d9bc252), // Q31
+    scores(0xbf44ae86395c96fa, 0xc020ef0b7f19e473), // Q32
+    scores(0xbf406d5130d1fa42, 0xc02164eff0980693), // Q33
+    scores(0xbf3a1875b8ae5a61, 0xc021dad4621628b4), // Q34
+    scores(0xbf34ba42b4ef63d1, 0xc02250b8d3944ad4), // Q35
+    scores(0xbf3076c686f7678e, 0xc022c69d45126cf5), // Q36
+    scores(0xbf2a27a84952ef96, 0xc0233c81b6908f15), // Q37
+    scores(0xbf24c670c82e428c, 0xc023b266280eb136), // Q38
+    scores(0xbf208084c54d40d0, 0xc024284a998cd356), // Q39
+    scores(0xbf1a3738d2cf1cc2, 0xc0249e2f0b0af577), // Q40
+    scores(0xbf14d2dbb7c60f02, 0xc02514137c891797), // Q41
+    scores(0xbf108a6aa997a821, 0xc02589f7ee0739b8), // Q42
+    scores(0xbf0a46fd609d729e, 0xc025ffdc5f855bd8), // Q43
+    scores(0xbf04df690d1e7575, 0xc02675c0d1037df9), // Q44
+    scores(0xbf00946782bfa4ba, 0xc026eba54281a019), // Q45
+    scores(0xbefa56e0e44eec72, 0xc0276189b3ffc23a), // Q46
+    scores(0xbef4ec0b805b93be, 0xc027d76e257de45b), // Q47
+    scores(0xbef09e72f086842d, 0xc0284d5296fc067b), // Q48
+    scores(0xbeea66d8cd676e03, 0xc028c337087a289c), // Q49
+    scores(0xbee4f8bc681df714, 0xc029391b79f84abc), // Q50
+    scores(0xbee0a888bfb56e51, 0xc029aeffeb766cdc), // Q51
+    scores(0xbeda76dfd05491c0, 0xc02a24e45cf48efe), // Q52
+    scores(0xbed505786e135f35, 0xc02a9ac8ce72b11e), // Q53
+    scores(0xbed0b2a6d608dde0, 0xc02b10ad3ff0d33f), // Q54
+    scores(0xbeca86f347105d68, 0xc02b8691b16ef55f), // Q55
+    scores(0xbec5123de7675c5d, 0xc02bfc7622ed177f), // Q56
+    scores(0xbec0bccc26f4b525, 0xc02c725a946b39a0), // Q57
+    scores(0xbeba9711dff4578d, 0xc02ce83f05e95bc0), // Q58
+    scores(0xbeb51f0c0005d7d2, 0xc02d5e2377677de2), // Q59
+    scores(0xbeb0c6f82d74d230, 0xc02dd407e8e5a002), // Q60
+    scores(0xbeaaa73af4594ad2, 0xc02e49ec5a63c222), // Q61
+    scores(0xbea52be24fbea82e, 0xc02ebfd0cbe1e443), // Q62
+    scores(0xbea0d12aa8840e2a, 0xc02f35b53d600663), // Q63
+    scores(0xbe9ab76e3378b960, 0xc02fab99aede2884), // Q64
+    scores(0xbe9538c0a48b8597, 0xc03010bf102e2552), // Q65
+    scores(0xbe90db6379650e1f, 0xc0304bb148ed3662), // Q66
+    scores(0xbe8ac7ab77d2a8d4, 0xc03086a381ac4773), // Q67
+    scores(0xbe8545a6e7c8053e, 0xc030c195ba6b5883), // Q68
+    scores(0xbe80e5a2929824dd, 0xc030fc87f32a6993), // Q69
+    scores(0xbe7ad7f2b1049b9f, 0xc031377a2be97aa3), // Q70
+    scores(0xbe755295103538be, 0xc031726c64a88bb4), // Q71
+    scores(0xbe70efe7eef6ee83, 0xc031ad5e9d679cc4), // Q72
+    scores(0xbe6ae843db50020b, 0xc031e850d626add4), // Q73
+    scores(0xbe655f8b1c2341eb, 0xc03223430ee5bee5), // Q74
+    scores(0xbe60fa338e80ebe9, 0xc0325e3547a4cff5), // Q75
+    scores(0xbe5af89ef5aee37c, 0xc03299278063e105), // Q76
+    scores(0xbe556c890b95f8ff, 0xc032d419b922f216), // Q77
+    scores(0xbe5104857243339b, 0xc0330f0bf1e20325), // Q78
+    scores(0xbe4b090402dae72a, 0xc03349fe2aa11436), // Q79
+    scores(0xbe45798ee5cd2b2a, 0xc03384f063602546), // Q80
+    scores(0xbe410edd9d22fa4c, 0xc033bfe29c1f3656), // Q81
+    scores(0xbe3b1973096f3066, 0xc033fad4d4de4766), // Q82
+    scores(0xbe35869ca8e7ae3e, 0xc03435c70d9d5877), // Q83
+    scores(0xbe31193c10922e3b, 0xc03470b9465c6988), // Q84
+    scores(0xbe2b29ec10b877aa, 0xc034abab7f1b7a98), // Q85
+    scores(0xbe2593b26074641f, 0xc034e69db7da8ba8), // Q86
+    scores(0xbe2123a0d0497014, 0xc035218ff0999cb8), // Q87
+    scores(0xbe1b3a6f205cac19, 0xc0355c822958adc9), // Q88
+    scores(0xbe15a0d0003a78e5, 0xc03597746217bed9), // Q89
+    scores(0xbe112e0be024e4bc, 0xc035d2669ad6cfe9), // Q90
+    scores(0xbe0b4afc402e8e73, 0xc0360d58d395e0f9), // Q91
+    scores(0xbe05adf5c01d6008, 0xc036484b0c54f209), // Q92
+    scores(0xbe01387d401288d2, 0xc036833d4514031a), // Q93
+    scores(0xbdfb5b938017638f, 0xc036be2f7dd3142a), // Q94
+    scores(0xbdf5bb23000ec1e4, 0xc036f921b692253a), // Q95
+    scores(0xbdf142f500094fb0, 0xc0373413ef51364a), // Q96
+    scores(0xbdeb6c35000bc004, 0xc0376f062810475a), // Q97
+    scores(0xbde5c859000769ee, 0xc037a9f860cf586b), // Q98
+    scores(0xbde14d730004ad83, 0xc037e4ea998e697c), // Q99
+    scores(0xbddb7ce00005e728, 0xc0381fdcd24d7a8c), // Q100
+    scores(0xbdd5d5960003b97a, 0xc0385acf0b0c8b9c), // Q101
+    scores(0xbdd157f80002599a, 0xc03895c143cb9cac), // Q102
+    scores(0xbdcb8d940002f72c, 0xc038d0b37c8aadbd), // Q103
+    scores(0xbdc5e2dc0001df01, 0xc0390ba5b549becd), // Q104
+    scores(0xbdc1628400012e3b, 0xc0394697ee08cfdd), // Q105
+    scores(0xbdbb9e5800017d64, 0xc039818a26c7e0ed), // Q106
+    scores(0xbdb5f0280000f0a4, 0xc039bc7c5f86f1fd), // Q107
+    scores(0xbdb16d10000097d5, 0xc039f76e9846030e), // Q108
+    scores(0xbdabaf200000bf9a, 0xc03a3260d105141e), // Q109
+    scores(0xbda5fd80000078e5, 0xc03a6d5309c4252e), // Q110
+    scores(0xbda177b000004c47, 0xc03aa8454283363e), // Q111
+    scores(0xbd9bc00000006042, 0xc03ae3377b42474e), // Q112
+    scores(0xbd960ae000003cbc, 0xc03b1e29b4015860), // Q113
+    scores(0xbd91824000002652, 0xc03b591becc06970), // Q114
+    scores(0xbd8bd0c00000305b, 0xc03b940e257f7a80), // Q115
+    scores(0xbd86184000001e83, 0xc03bcf005e3e8b90), // Q116
+    scores(0xbd818d0000001340, 0xc03c09f296fd9ca0), // Q117
+    scores(0xbd7be1800000184b, 0xc03c44e4cfbcadb1), // Q118
+    scores(0xbd76258000000f54, 0xc03c7fd7087bbec1), // Q119
+    scores(0xbd719780000009ac, 0xc03cbac9413acfd1), // Q120
+    scores(0xbd6bf30000000c35, 0xc03cf5bb79f9e0e1), // Q121
+    scores(0xbd663300000007b3, 0xc03d30adb2b8f1f1), // Q122
+    scores(0xbd61a200000004dc, 0xc03d6b9feb780302), // Q123
+    scores(0xbd5c040000000622, 0xc03da69224371412), // Q124
+    scores(0xbd564000000003de, 0xc03de1845cf62522), // Q125
+    scores(0xbd51ae0000000271, 0xc03e1c7695b53632), // Q126
+    scores(0xbd4c140000000314, 0xc03e5768ce744742), // Q127
+    scores(0xbd465000000001f2, 0xc03e925b07335854), // Q128
+    scores(0xbd41b8000000013a, 0xc03ecd4d3ff26964), // Q129
+    scores(0xbd3c28000000018c, 0xc03f083f78b17a74), // Q130
+    scores(0xbd365800000000fa, 0xc03f4331b1708b84), // Q131
+    scores(0xbd31c0000000009e, 0xc03f7e23ea2f9c94), // Q132
+    scores(0xbd2c3000000000c7, 0xc03fb91622eeada5), // Q133
+    scores(0xbd2670000000007e, 0xc03ff4085badbeb5), // Q134
+    scores(0xbd21d0000000004f, 0xc040177d4a3667e2), // Q135
+    scores(0xbd1c400000000064, 0xc04034f66695f06a), // Q136
+    scores(0xbd1680000000003f, 0xc040526f82f578f3), // Q137
+    scores(0xbd11e00000000028, 0xc0406fe89f55017b), // Q138
+    scores(0xbd0c400000000032, 0xc0408d61bbb48a03), // Q139
+    scores(0xbd06800000000020, 0xc040aadad814128b), // Q140
+    scores(0xbd02000000000014, 0xc040c853f4739b13), // Q141
+    scores(0xbcfc800000000019, 0xc040e5cd10d3239b), // Q142
+    scores(0xbcf6800000000010, 0xc04103462d32ac24), // Q143
+    scores(0xbcf200000000000a, 0xc04120bf499234ac), // Q144
+    scores(0xbcec00000000000c, 0xc0413e3865f1bd34), // Q145
+    scores(0xbce7000000000008, 0xc0415bb1825145bc), // Q146
+    scores(0xbce2000000000005, 0xc041792a9eb0ce44), // Q147
+    scores(0xbcdc000000000006, 0xc04196a3bb1056cc), // Q148
+    scores(0xbcd6000000000004, 0xc041b41cd76fdf54), // Q149
+    scores(0xbcd2000000000003, 0xc041d195f3cf67dc), // Q150
+    scores(0xbccc000000000003, 0xc041ef0f102ef065), // Q151
+    scores(0xbcc8000000000002, 0xc0420c882c8e78ed), // Q152
+    scores(0xbcc4000000000002, 0xc0422a0148ee0175), // Q153
+    scores(0xbcc0000000000001, 0xc042477a654d89fd), // Q154
+    scores(0xbcb8000000000001, 0xc04264f381ad1285), // Q155
+    scores(0xbcb0000000000001, 0xc042826c9e0c9b0d), // Q156
+    scores(0xbcb0000000000001, 0xc0429fe5ba6c2395), // Q157
+    scores(0xbca0000000000000, 0xc042bd5ed6cbac1e), // Q158
+    scores(0xbca0000000000000, 0xc042dad7f32b34a6), // Q159
+    scores(0xbca0000000000000, 0xc042f8510f8abd2e), // Q160
+    scores(0xbca0000000000000, 0xc04315ca2bea45b6), // Q161
+    scores(0xbca0000000000000, 0xc04333434849ce3e), // Q162
+    scores(0x0000000000000000, 0xc04350bc64a956c6), // Q163
+    scores(0x0000000000000000, 0xc0436e358108df4e), // Q164
+    scores(0x0000000000000000, 0xc0438bae9d6867d7), // Q165
+    scores(0x0000000000000000, 0xc043a927b9c7f05f), // Q166
+    scores(0x0000000000000000, 0xc043c6a0d62778e7), // Q167
+    scores(0x0000000000000000, 0xc043e419f287016f), // Q168
+    scores(0x0000000000000000, 0xc04401930ee689f7), // Q169
+    scores(0x0000000000000000, 0xc0441f0c2b46127f), // Q170
+    scores(0x0000000000000000, 0xc0443c8547a59b08), // Q171
+    scores(0x0000000000000000, 0xc04459fe6405238f), // Q172
+    scores(0x0000000000000000, 0xc04477778064ac18), // Q173
+    scores(0x0000000000000000, 0xc04494f09cc4349f), // Q174
+    scores(0x0000000000000000, 0xc044b269b923bd28), // Q175
+    scores(0x0000000000000000, 0xc044cfe2d58345b0), // Q176
+    scores(0x0000000000000000, 0xc044ed5bf1e2ce38), // Q177
+    scores(0x0000000000000000, 0xc0450ad50e4256c1), // Q178
+    scores(0x0000000000000000, 0xc045284e2aa1df48), // Q179
+    scores(0x0000000000000000, 0xc04545c7470167d1), // Q180
+    scores(0x0000000000000000, 0xc04563406360f059), // Q181
+    scores(0x0000000000000000, 0xc04580b97fc078e1), // Q182
+    scores(0x0000000000000000, 0xc0459e329c200169), // Q183
+    scores(0x0000000000000000, 0xc045bbabb87f89f1), // Q184
+    scores(0x0000000000000000, 0xc045d924d4df1279), // Q185
+    scores(0x0000000000000000, 0xc045f69df13e9b02), // Q186
+    scores(0x0000000000000000, 0xc04614170d9e2389), // Q187
+    scores(0x0000000000000000, 0xc046319029fdac12), // Q188
+    scores(0x0000000000000000, 0xc0464f09465d3499), // Q189
+    scores(0x0000000000000000, 0xc0466c8262bcbd22), // Q190
+    scores(0x0000000000000000, 0xc04689fb7f1c45aa), // Q191
+    scores(0x0000000000000000, 0xc046a7749b7bce32), // Q192
+    scores(0x0000000000000000, 0xc046c4edb7db56ba), // Q193
+    scores(0x0000000000000000, 0xc046e266d43adf42), // Q194
+    scores(0x0000000000000000, 0xc046ffdff09a67cb), // Q195
+    scores(0x0000000000000000, 0xc0471d590cf9f053), // Q196
+    scores(0x0000000000000000, 0xc0473ad2295978db), // Q197
+    scores(0x0000000000000000, 0xc047584b45b90163), // Q198
+    scores(0x0000000000000000, 0xc04775c4621889eb), // Q199
+    scores(0x0000000000000000, 0xc047933d7e781273), // Q200
+    scores(0x0000000000000000, 0xc047b0b69ad79afc), // Q201
+    scores(0x0000000000000000, 0xc047ce2fb7372383), // Q202
+    scores(0x0000000000000000, 0xc047eba8d396ac0c), // Q203
+    scores(0x0000000000000000, 0xc0480921eff63493), // Q204
+    scores(0x0000000000000000, 0xc048269b0c55bd1c), // Q205
+    scores(0x0000000000000000, 0xc048441428b545a4), // Q206
+    scores(0x0000000000000000, 0xc048618d4514ce2c), // Q207
+    scores(0x0000000000000000, 0xc0487f06617456b5), // Q208
+    scores(0x0000000000000000, 0xc0489c7f7dd3df3c), // Q209
+    scores(0x0000000000000000, 0xc048b9f89a3367c5), // Q210
+    scores(0x0000000000000000, 0xc048d771b692f04d), // Q211
+    scores(0x0000000000000000, 0xc048f4ead2f278d5), // Q212
+    scores(0x0000000000000000, 0xc0491263ef52015d), // Q213
+    scores(0x0000000000000000, 0xc0492fdd0bb189e5), // Q214
+    scores(0x0000000000000000, 0xc0494d562811126d), // Q215
+    scores(0x0000000000000000, 0xc0496acf44709af6), // Q216
+    scores(0x0000000000000000, 0xc049884860d0237d), // Q217
+    scores(0x0000000000000000, 0xc049a5c17d2fac06), // Q218
+    scores(0x0000000000000000, 0xc049c33a998f348d), // Q219
+    scores(0x0000000000000000, 0xc049e0b3b5eebd16), // Q220
+    scores(0x0000000000000000, 0xc049fe2cd24e459e), // Q221
+    scores(0x0000000000000000, 0xc04a1ba5eeadce26), // Q222
+    scores(0x0000000000000000, 0xc04a391f0b0d56af), // Q223
+    scores(0x0000000000000000, 0xc04a5698276cdf36), // Q224
+    scores(0x0000000000000000, 0xc04a741143cc67bf), // Q225
+    scores(0x0000000000000000, 0xc04a918a602bf047), // Q226
+    scores(0x0000000000000000, 0xc04aaf037c8b78cf), // Q227
+    scores(0x0000000000000000, 0xc04acc7c98eb0157), // Q228
+    scores(0x0000000000000000, 0xc04ae9f5b54a89df), // Q229
+    scores(0x0000000000000000, 0xc04b076ed1aa1267), // Q230
+    scores(0x0000000000000000, 0xc04b24e7ee099af0), // Q231
+    scores(0x0000000000000000, 0xc04b42610a692377), // Q232
+    scores(0x0000000000000000, 0xc04b5fda26c8ac00), // Q233
+    scores(0x0000000000000000, 0xc04b7d5343283487), // Q234
+    scores(0x0000000000000000, 0xc04b9acc5f87bd10), // Q235
+    scores(0x0000000000000000, 0xc04bb8457be74599), // Q236
+    scores(0x0000000000000000, 0xc04bd5be9846ce20), // Q237
+    scores(0x0000000000000000, 0xc04bf337b4a656a9), // Q238
+    scores(0x0000000000000000, 0xc04c10b0d105df30), // Q239
+    scores(0x0000000000000000, 0xc04c2e29ed6567b9), // Q240
+    scores(0x0000000000000000, 0xc04c4ba309c4f041), // Q241
+    scores(0x0000000000000000, 0xc04c691c262478c9), // Q242
+    scores(0x0000000000000000, 0xc04c869542840151), // Q243
+    scores(0x0000000000000000, 0xc04ca40e5ee389d9), // Q244
+    scores(0x0000000000000000, 0xc04cc1877b431261), // Q245
+    scores(0x0000000000000000, 0xc04cdf0097a29aea), // Q246
+    scores(0x0000000000000000, 0xc04cfc79b4022371), // Q247
+    scores(0x0000000000000000, 0xc04d19f2d061abfa), // Q248
+    scores(0x0000000000000000, 0xc04d376becc13481), // Q249
+    scores(0x0000000000000000, 0xc04d54e50920bd0a), // Q250
+    scores(0x0000000000000000, 0xc04d725e25804593), // Q251
+    scores(0x0000000000000000, 0xc04d8fd741dfce1a), // Q252
+    scores(0x0000000000000000, 0xc04dad505e3f56a3), // Q253
+    scores(0x0000000000000000, 0xc04dcac97a9edf2a), // Q254
+    scores(0x0000000000000000, 0xc04de84296fe67b3), // Q255
+];
+
+/// One row of [`PER_QUALITY_LN`], from the bit patterns of its two scores.
+const fn scores(match_ln_bits: u64, mismatch_ln_bits: u64) -> BaseScores {
+    BaseScores {
+        match_ln: f64::from_bits(match_ln_bits),
+        mismatch_ln: f64::from_bits(mismatch_ln_bits),
     }
-    table
-});
+}
 
 /// Scores each base with the read's own quality — the default, and production's model.
 ///
-/// Holds a borrow of the shared table rather than reaching for it per call, so constructing
-/// one costs a single [`LazyLock`] resolution and holding one costs a pointer. That is what
-/// lets an aligner take it by value as a type parameter.
+/// Holds a borrow of the shared table rather than reaching for it per call, so holding one
+/// costs a pointer. That is what lets an aligner take it by value as a type parameter.
 ///
 /// **Why the borrow is a field.** [`Self::scores_for`] is called from inside the delimiters'
-/// innermost DP loop, and a `LazyLock` deref there is not just a load: it is an acquire-load
-/// of the once-guard plus a *live call site* to the initialiser. `cargo asm` on
-/// `classify::delimit` showed seven of each inside one function, and because LLVM must treat
-/// the loop's live values as call-clobbered at every one of them, the per-row constants —
-/// including the read base — were re-read from the stack on every cell. Resolving the table
-/// once per aligner turns that into a register-resident pointer. The table and its values are
-/// untouched; `per_quality_table_is_bit_exact` still pins them.
+/// innermost DP loop. While the table was a `LazyLock`, a deref there was an acquire-load of the
+/// once-guard plus a *live call site* to the initialiser — `cargo asm` on `classify::delimit`
+/// showed seven of each inside one function, and the per-row constants were re-read from the
+/// stack on every cell — and holding the borrow turned that into a register-resident pointer.
+/// The table is a plain `static` now, so the guard is gone either way; the borrow stays because
+/// it is still the cheapest thing to carry.
 ///
 /// `Default` is written out rather than derived, deliberately: a derived `Default` is the
 /// one construction path that would keep compiling if this gained a field, silently
@@ -207,7 +456,7 @@ pub struct PerQualityEmission {
 }
 
 impl PerQualityEmission {
-    /// Build the per-quality model. One [`LazyLock`] resolution; the table itself is shared.
+    /// Build the per-quality model. The table itself is shared.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -348,14 +597,17 @@ mod tests {
         10f64.powf(-f64::from(quality) / 10.0)
     }
 
-    /// **Bit-exactness over the whole quality domain.** The repeat-aware aligner built on
-    /// this table has to reproduce production's measured repeats byte for byte, so a
-    /// reformulation that is merely *close* — `ln_1p`, `powi`, splitting the division —
-    /// would move every downstream score while a tolerance test waved it through.
-    /// `assert_eq!` on `f64` is deliberate here for that reason. The expectation is
-    /// re-derived from the published model rather than hardcoded, so it stays portable.
+    /// **The written-out table is the Dindel model.** Re-derived from the formula with the running
+    /// platform's `powf` and `ln`, spelled independently of the table: on Linux, where the table's
+    /// bits were produced, every entry must be bit-identical; elsewhere, whose maths library may
+    /// round the last place differently, every entry must agree to within `4 · f64::EPSILON` of its
+    /// magnitude, or of 1.0 where the magnitude is smaller — high qualities' match scores are near
+    /// zero but are computed from `1 − ε`, whose rounding step is about `1.1e-16` in absolute
+    /// terms. That still catches a wrong row (adjacent rows' mismatch scores differ by about 0.23),
+    /// a transposed pair or a changed floor. `assert_eq!` on `f64` is deliberate on Linux: the repeat-aware aligner
+    /// breaks ties on these values, so a table that is merely close moves measured repeats.
     #[test]
-    fn per_quality_table_is_bit_exact() {
+    fn per_quality_table_matches_the_dindel_model() {
         let emission = PerQualityEmission::new();
         for quality in 0..=u8::MAX {
             let error_rate = error_probability(quality);
@@ -363,18 +615,31 @@ mod tests {
                 match_ln: (1.0 - error_rate).max(f64::MIN_POSITIVE).ln(),
                 mismatch_ln: (error_rate / 3.0).max(f64::MIN_POSITIVE).ln(),
             };
-            assert_eq!(
-                emission.scores_for(BaseQual(quality)),
-                expected,
-                "table diverged from the Dindel model at Q{quality}"
-            );
+            let written = emission.scores_for(BaseQual(quality));
+            if cfg!(target_os = "linux") {
+                assert_eq!(
+                    written, expected,
+                    "table diverged from the Dindel model at Q{quality}"
+                );
+            } else {
+                for (name, got, want) in [
+                    ("match", written.match_ln, expected.match_ln),
+                    ("mismatch", written.mismatch_ln, expected.mismatch_ln),
+                ] {
+                    assert!(
+                        (got - want).abs() <= 4.0 * f64::EPSILON * want.abs().max(1.0),
+                        "table's {name} score diverged from the Dindel model at Q{quality}: \
+                         {got:e} against {want:e}"
+                    );
+                }
+            }
         }
     }
 
     /// The published Dindel model at qualities where the arithmetic is checkable by hand:
     /// Q10 → ε = 0.1, Q20 → 0.01, Q30 → 0.001. Tolerance is appropriate here — these are
     /// decimal literals a human can verify, not the bit-level contract, which
-    /// `per_quality_table_is_bit_exact` carries.
+    /// `per_quality_table_matches_the_dindel_model` carries.
     #[test]
     fn per_quality_emission_reproduces_the_dindel_model() {
         let emission = PerQualityEmission::new();

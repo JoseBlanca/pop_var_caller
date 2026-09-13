@@ -22,7 +22,19 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-13):** **the project has one caller.** The older caller is
+> - **Last completed task (2026-09-13):** **macOS and Linux measure repeat tracts alike.** The
+> aligner's per-quality score table was computed with `f64::powf` and `f64::ln`, which call the
+> platform's maths library; at quality 4 macOS's match score sat two units in the last place away
+> from glibc's, and that flipped a tie, so on macOS one generated read's tract measured a byte longer
+> than the recorded answer (`alignment::delimit_parity`, the one failing test of 4,787 on a native
+> macOS run). The table is now the 256 score pairs written out as the bits glibc produced
+> (`src/alignment/emission.rs`), so Linux output is unchanged — the identity oracle's five digests are
+> byte-identical — and macOS runs the whole suite green: 4,786 passed, 0 failed, 4 ignored (one
+> test, `psp::writer`'s failed-flush check, is Linux-only). **Not done:** 340 other `ln`/`exp`/`powf`
+> calls in 40 files can still round differently across platforms; the five `ln` constants of the
+> flat-gap aligner's transition costs are the closest to this one.
+>
+> - **Earlier (2026-09-13):** **the project has one caller.** The older caller is
 > deleted, ng's modules sit at the crate root, and its binary is `pop_var_caller` (branch
 > `promote-ng`; [plan](doc/devel/implementation_plans/promote_ng_to_production.md),
 > [report](doc/devel/reports/implementations/promote_ng_to_production_2026-09-13.md)).
