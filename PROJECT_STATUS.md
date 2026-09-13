@@ -4,3195 +4,89 @@
 ABOUT-PARAGRAPH-START — do not edit this paragraph.
 Skills and agents are instructed to leave it untouched.
 -->
-> **About this project.** Multi-sample SNP caller:
-> per-sample pileup → `.psp` artefact → DUST filter → variant grouping →
-> per-group merger → posterior engine. The authoritative design document is
-> [doc/devel/specs/calling_pipeline_architecture.md](doc/devel/specs/calling_pipeline_architecture.md);
-> read it before anything else. Companion design context is in
-> [doc/devel/specs/design_principles.md](doc/devel/specs/design_principles.md).
-> All work below is graded against that spec. For the AI assistant's
-> per-skill instructions on reading and
-> updating this file, see [doc/devel/ia/skills/](doc/devel/ia/skills/) —
-> every skill defines a "Project status protocol" section.
+> **About this project.** A population variant caller: SNPs, indels and repeat tracts, from
+> aligned reads to one VCF, for one sample to thousands of samples and from a few reads a
+> position to several hundred. It is the `pop_var_caller` binary; its subcommands build a
+> reference's repeat catalog, call a cohort straight from alignment files, or store each sample's
+> evidence as a psp file, fit the run's parameters from those files and call from them. The design
+> is under [doc/devel/ng/](doc/devel/ng/) — start with
+> [spec/ng_proposal.md](doc/devel/ng/spec/ng_proposal.md); the caller was written under the name
+> "ng", which the design documents and many names in the code still carry. The principles every
+> design is judged against, above all that a method must degrade gracefully across that whole
+> range of cohort sizes and depths, are in
+> [doc/devel/specs/design_principles.md](doc/devel/specs/design_principles.md). For the AI
+> assistant's per-skill instructions on reading and updating this file, see
+> [ai/skills/](ai/skills/) — every skill defines a "Project status protocol" section.
 <!-- ABOUT-PARAGRAPH-END -->
 
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Standing sequencing note for `ng-psp-mode` (2026-09-04, DISCHARGED):** a second plan ran
-> inside the psp-mode plan and had to land before its Milestone F —
-> [psp_head_compared_reads.md](doc/devel/ng/impl_plan/psp_head_compared_reads.md), one milestone
-> lettered H, which adds the keep rule's denominator to the psp record head. A head layout
-> change costs nothing while no psp exists and a format version afterwards, and F is where the
-> psps people keep start being written. Sequence: A–E, then H, then F–G. **All three of H's steps
-> are committed as of 2026-09-04, so the constraint is met and Milestone F is free to start.**
->
-> - **Last completed task (2026-09-11):** **ng has one route to its parameters, and the
-> whole-genome histogram route is deleted** (branch `census-audit`;
-> [plan](doc/devel/ng/impl_plan/remove_histogram_route.md),
-> [the measurement behind the decision](doc/devel/reports/ng_census_inbreeding_budget_2026-09-11.md)).
->
-> **34,685 lines and 548 tests went**, out of 61,536 under `src/ng/parameter_estimation/` — the two
-> per-sample accumulators, the coupled error-rate and genotype-frequency fit, the per-sample STR
-> fit, the search seam both used, and the runs-of-homozygosity estimator of the inbreeding
-> coefficient. **No shipped command had ever run any of it**: `generate-psps`,
-> `estimate-parameters`, `call-from-psps` and `regenerate-census` all read censuses, and
-> `RunParameters::from_prepass` — the join that would have handed histogram results to the caller —
-> had no caller outside its own tests.
->
-> **Four things were rehomed first, because the census route and calling read them**: the depth
-> ladder and the base-quality calibration's denominator (now
-> `parameter_estimation::{depth_bins, calibration}`), the defaulted error rate, and how a repeat
-> tract's stratum is named (now `parameter_estimation::repeat_strata`).
->
-> **The oracle is byte identity.** `estimate-parameters` over four tomato accessions' psps writes a
-> parameters file identical to the one the pre-removal binary wrote — md5
-> `bcc95d64d20d3edc7c6ee9c4ccc09933`, 96,373 bytes both times — because the removal touches no code
-> the census route executes.
->
-> **What was given up, knowingly.** ng can no longer estimate autozygosity from the genomic
-> *distribution* of heterozygosity, which `parameter_prepass_generic.md` §6.3 preferred precisely
-> because it carries no dependence on the diversity it corrects. The coefficient a caller reads is
-> the cohort fit's per-sample homozygote excess, which **is** circular; `joint::census_moments`
-> states that in the run's output rather than correcting it.
->
-> **The census budget stayed at two million**, and that was measured rather than assumed: tripling
-> it to six million moved the parameters the census was already fitting by under 1% — the genotype
-> prior's reference concentration by 0.15%, the four read groups' error multipliers by at most 0.3%
-> — while costing 4.86 MB a sample on disk and 2.78× the fit's peak memory. Six million was enough
-> for the runs estimator at a typical accession (worst error 0.086 against a realised 0.78, against
-> 0.105 at two million) and refused three samples in five at the panel's least heterozygous end.
-> **It bought that one estimator and nothing else, which is why it was not kept.**
->
-> **And the follow-up landed the same day: `estimate-parameters` now writes the coefficient it
-> fitted.** The parameters file is the only way one reaches a calling run — the calling commands
-> take no flag for it — so the three things it can be are resolved once and the warrant on each row
-> says which: **`supplied`** where `--inbreeding` was given, which overrides the fit (owner,
-> 2026-08-27: a user who knows how their material was bred knows it whatever the cohort size);
-> **`fitted_here`** where the cohort's own fit measured each sample's homozygote excess; and
-> **`defaulted`** at zero where neither. `--inbreeding` became an option rather than a default of
-> zero, because *these plants are not inbred* and *use what you measured* are different
-> instructions.
->
-> On the four tomato accessions over 8 Mb the fit writes 0.9128, 0.9836, 0.9822 and 0.9464 over
-> about 1.9 million covered positions each, and calling with them rather than with zero changes
-> **4,497 genotypes of 191,752 (2.35%)**, cutting the heterozygous call rate from 6.77% to 2.61%.
-> The two psps that are one plant sequenced twice come back 0.0015 apart.
->
-> **⚠ Those coefficients are a four-sample artefact, not tomato's biology** — the 63-accession fit
-> put the panel at 0.23 to 0.90, median 0.78, and at four samples the allele-frequency curve is
-> barely constrained so the excess absorbs what the curve cannot hold. **What is verified is the
-> plumbing.** Whether a fitted coefficient *improves* calling is still open: the replicate pair's
-> agreement rises from 95.04% to 98.07%, but "both heterozygous" collapses from 1,230 pairs to 172,
-> so most of that is a prior that has nearly forbidden heterozygotes rather than one that has found
-> the right ones. **The GIAB trio, where truth exists and the right coefficient is zero, is what
-> would settle it, and it has not been run.**
->
-> - **Earlier (2026-09-11):** **a homozygous insertion is no longer genotyped
-> heterozygous — the record now covers the ground the insertion could occupy** (branch
-> `ng-indel-gt`;
-> [report](doc/devel/reports/reviews/ng_indel_genotypes_vs_giab_2026-09-11.md)).
->
-> **A record's reference positions are the only ground a read is compared over, and an
-> insertion had one of them.** A read shows the anchor base whether or not it carries the
-> insertion, because the inserted sequence sits after it — so the only question ever put to a
-> read was one it could not fail. Two populations answered *reference* with no evidence for
-> it: reads that stopped at the anchor with no bases left to show the insertion, and reads the
-> mapper laid flat across a tandem repeat because substitutions were cheaper than a gap.
->
-> At the 12 homozygous insertions ng genotyped heterozygous at 30×, **it put 71 reads on the
-> reference allele; realigning every read against both chromosomes, one of the 71 fits the
-> reference better than the insertion**, 24 fit the two equally and 46 fit the insertion. At
-> 16 of the 17 wrong sites no read at all fits the reference better. The genotype model was
-> doing what its input said — `AD` and the read likelihood are the same number, summed from
-> the same merge rows — so the defect was the input.
->
-> **`record_span` gives an insertion its own length of ground, and nothing is realigned**
-> (owner, 2026-09-11: realignment stays on the repeat-tract path). Reads put on the reference
-> at truth-homozygous insertions, by inserted length: 0.040 → 0.033 at one base, 0.060 →
-> 0.015 at two or three, 0.133 → 0.045 at four to six, 0.154 → 0.022 at seven to twelve,
-> **0.388 → 0.161 above thirteen**, against freebayes' 0.010 / 0.003 / 0.000 / 0.000 / 0.210.
-> The length trend is gone, which is the signature to look for.
->
-> **On ordinary sequence ng and freebayes now find exactly the same 185 indels of 196 and miss
-> exactly the same 11.** Every one of the six indels freebayes finds that ng does not is on
-> repeat ground. Over all ground, indel genotypes right go from 276 of 297 to 283 of 295
-> against freebayes' 292 of 301, and precision from 0.983 to 0.990. SNPs keep their 2,006 with
-> three fewer false calls. **330 truth indels over 1.5 Mb of three human samples is a small
-> board** — a six-indel difference is six events, not a rate — and more data is owed before
-> the ng-against-freebayes gap is called.
->
-> **Two defects it exposed, both fixed here.** A read pair left one observation per *position*
-> where it should leave one per *record*, so widening insertion records made overlapping mates
-> count twice; the losing mate is now barred from the records the contest's position affected.
-> Not specific to insertions — a deletion's record has always been several positions wide. And
-> an alternative no sample's genotype named still reached the file (9 records of 2,290); those
-> are now trimmed, with the reads moving into `DP − ΣAD`, which already means *reads no written
-> allele explains*, and the total depth unchanged to the byte.
->
-> **The two whole-output differentials against production's walker are retired** (owner: *"our
-> objective is to improve over what production does"*). ng's records are deliberately no longer
-> production's, so the harness's premise fails rather than one of its six classes.
->
-> - **Earlier (2026-09-10):** **a sample is one file — the census a parameters fit
-> reads is inside its psp** (branch `census-vs-psp-perf`, Checkpoint E of
-> [psp_census_pair.md](doc/devel/ng/impl_plan/psp_census_pair.md);
-> [report](doc/devel/reports/implementations/ng_psp_census_pair_2026-09-10.md)).
->
-> The pipeline is three commands and a repair, and no step of it writes a census file:
->
->     generate-psps        alignments        ->  <sample>.psp, census sealed inside
->     estimate-parameters  psps              ->  cohort.parameters.toml, or a refusal naming every stale sample
->     call-from-psps       psps + that file  ->  the VCF
->     regenerate-census    psps              ->  each psp's trailer replaced, for the samples the fit refused
->
-> **A census used to be a second file beside each psp, and it could be copied alone, deleted, or
-> paired with a psp it was not built from.** Each one carried a digest of its psp's header and that
-> psp's record count so the mismatch could be caught. A census that *is* the psp's tail cannot come
-> apart from it, so the naming is deleted: there is nothing left to check.
->
-> **Nothing the caller produces moved.** On the first six tomato accessions of
-> `benchmarks/tomato1/crams` over the first two 100 kb intervals of its `regions.bed`, at about
-> three reads a position, the whole pipeline gives the same census total to the byte (1,545,479),
-> the same parameters file size (38,124 bytes) and the same VCFs as the run of 2026-09-09 recorded
-> in [Milestone A's report](doc/devel/reports/implementations/ng_psp_census_pair_milestone_a_2026-09-09.md)
-> — 2,275 records with the compiled-in defaults against 2,082 with the fitted numbers, 113
-> genotypes differing of 12,474 compared. That comparison spans the change that matters: that run's
-> fit read census files and this one's reads psp trailers. **And a psp whose census is rebuilt is
-> the walked file byte for byte, whole**: header, blocks, index, trailer, footer, on all six.
->
-> **The psps themselves came back 36 bytes larger over the six**, which is not the caller: a psp's
-> header stores the run's command line verbatim, so the total depends on how long the arguments
-> were.
->
-> - **Earlier (2026-09-09):** **the calling pass is no longer one thread, and
-> `call-from-psps` is 3.8× faster for a tenth more memory** (branch `ng-psp-vcf-perf-2`;
-> [review](doc/devel/reports/reviews/perf_ng-psp-to-vcf_2026-09-09.md)).
->
-> On 63 tomato accessions over the whole 8 Mb of SL4.0 at about three reads a position, the
-> command went from **87.3 s to 23.2 s and from 527 MB to 607 MB of peak resident**, interleaved
-> on an idle machine, with the VCF body identical — 199,641 records, at 1, 4 and 18 threads.
-> Instructions retired fell 9.6%.
->
-> **The calling pass was 90% of the run and it was one thread.** A sampling profile of the real
-> command found 1.57 of 18 cores busy — the calling thread at 96%, all eighteen workers together
-> at 0.61 — with 91.7% of every sample taken being a thread asleep. Building a locus and
-> genotyping it are pure functions of that locus, so a round of building regions is now built
-> *and called* on the pool and the records fold back in genome order; the pass fell from 79 s to
-> 14 s.
->
-> **The memory is a tenth and not a multiple because the round divides the ground rather than
-> multiplying it.** A round holds `regions in flight × region width` bases, so the two knobs are
-> one lever: the round is cut out of the width one region held before — fifteen regions of 529
-> bases at 63 accessions where the old driver held one of 7,936. Peak resident rises between 4%
-> and 13% at every cohort size from one accession to 63, and the speedup grows with the cohort
-> (1.02× at one sample, 1.3× at eight, 2.6× at 32, 3.4× at 63).
->
-> **Above about a thousand samples the rule hands back one region and today's behaviour**, because
-> the width is already at its 500-base floor there. A large cohort keeps its memory and gives up
-> the parallelism rather than the other way round. **That end is arithmetic, not a measurement,
-> and it is the review's largest gap.**
->
-> **A correctness defect was found in code no production caller reached.**
-> `merge_cohort_in_parallel` could not have produced a correct answer over stored psps: a locus's
-> members are numbered inside the window the cache hands out and `build_at` indexes the whole held
-> list, so every region after a round's first would have built its members from the region before
-> it. **The merge's byte-for-byte oracle battery was green on it** because every fixture in that
-> module hands its records over whole, which is the one shape that never calls `build_at`. There
-> is now a fixture that defers its bodies; removing the fix fails three of the four new tests.
->
-> Four other changes, all with the VCF identical: the genotype prior spells a term as one
-> logarithm of a rising product instead of two `lgamma` subtracted (−6.7% instructions, and the
-> *more* accurate of the two spellings — the owner ruled on the bit-parity test it costs); the
-> site quality's count prior is built once a run rather than once a locus (−3.2%); the locus walk
-> lends its member vector instead of minting one for every locus it closes, 98 in 100 of which
-> are thrown away (−37% allocations, −52% bytes); and the body decoder takes the live identifiers
-> rather than a set built to hold them.
->
-> **Where the time goes now**, at 63 accessions: calling 14.1 s, the hidden-duplication filter's
-> scoring 6.4 s, startup 2.3 s, writing 0.4 s. Scoring was 7% of the run and is 31%; startup was
-> 3% and is 10%, and is 93% one thread reading and hashing the reference.
->
-> - **Earlier (2026-09-08):** **calling a cohort from stored psps is twice as fast on
-> a sixtieth of the memory, and writes the same VCF** (branch `ng-psp-vcf-perf`;
-> [review](doc/devel/reports/reviews/perf_ng-psp-to-vcf_2026-09-07.md)).
->
-> On 63 tomato accessions over 2 Mb of SL4.0 at about three reads a position, `call-from-psps`
-> went from **44.3 s and 22.9 GB of peak resident memory to 22.6 s and 0.40 GB** — three
-> interleaved rounds each on an idle machine, with the VCF body identical.
->
-> **The memory was a defect, not a tuning question.** Each sample's reader appended every
-> record's evidence to a buffer and never released any of it, so peak memory grew with samples ×
-> ground until the run ended. Over the full 8 Mb region set the same cohort now peaks at 573 MB;
-> the old binary passed 45.6 GB after 48 seconds and was still rising when it was stopped, on a
-> machine with 64 GB. **A whole-genome cohort was not reachable before and is now bounded** by
-> the merge's window — about 3 MB a sample over a 190 MB floor.
->
-> **Half the wall clock was one pass that ran alone.** The hidden-duplication filter scored every
-> record on the main thread while seventeen workers slept — 18.2 s of a 41.6 s span — and scoring
-> a record is a pure function of that record, so it now runs on the pool in batches and folds
-> back in order: **18.21 s to 1.57 s**. Threads went from buying 11% to buying 2.0×.
->
-> Six changes in all; the other four are a per-record clone, a per-record read-set allocation
-> (together 35.1 million allocations a calling pass down to about 5 million), the per-sample
-> coverage measurement moved onto the pool, and a reference's two MD5s hashed side by side
-> instead of one after the other.
->
-> **Two things the review found and did not fix, both on `main` rather than on this branch.** The
-> integration test `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele` fails at
-> `cfad6b71` — it expects a heterozygote at a contaminated tract and gets a homozygous reference
-> — and three examples no longer compile against the API they call, which stops `cargo test` from
-> reaching the end.
->
-> - **Earlier (2026-09-05):** **the fit stage is finished — the four commands compose,
-> and fitted numbers change the calls** (branch `ng-psp-mode`, Checkpoint D of
-> [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
-> [report](doc/devel/reports/implementations/ng_fit_stage_d_2026-09-05.md)).
->
-> `generate-psps` → `generate-census` → `estimate-parameters` → `call-from-psps` runs end to end
-> on six tomato accessions over the two 100 kb intervals, and the two routes to a census still
-> agree byte for byte on real reads. _(The pipeline of that day; `generate-census` became
-> `regenerate-census` and the census moved inside the psp — see the entry at the head of this
-> block.)_
->
-> **Calling with numbers fitted from the cohort's own data rather than the compiled-in constants
-> removes 82 of 599 records and changes 115 genotypes in 3,102.** The 82 are the marginal ones —
-> median QUAL 5.5 against 125.3 for the 517 records both runs called, and the highest QUAL among
-> the dropped, 88.9, sits below the median of the kept.
->
-> **Read it narrowly.** The comparison is a tomato cohort called with a *human* heterozygosity —
-> the defaults' prior is `stated_heterozygosity`, which the parameters file itself calls "the one
-> that rests on nothing this run measured" — against the same cohort called with its own fitted
-> curve. On a human cohort the two would sit closer and nothing here says how much. And 599
-> records over 200 kb at three reads a position is a small corner: on this ground the census keeps
-> 198,182 of 200,000 bases, where on a whole tomato genome the same budget keeps about 1 in 400.
->
-> **Contamination was not fitted and the file says so.** Six samples is below what that estimator
-> needs, so no `[contamination]` section is written — which the file distinguishes from a measured
-> zero. It reports 5 of its 7 groups of numbers as fitted, and names the two that were not.
->
-> - **Earlier (2026-09-05):** **a parameters file produced from data, for the first
-> time in this tree** (branch `ng-psp-mode`, Checkpoint C of
-> [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
-> [report](doc/devel/reports/implementations/ng_fit_stage_c_2026-09-05.md)).
->
-> `estimate-parameters` fits a cohort from its census files and writes the file a calling run
-> scores with. Before this a run had two sources for its numbers and neither was a fit: the
-> constants compiled into the binary, or a file somebody handed it. One cohort fitted twice writes
-> the same bytes.
->
-> **Two things had to be built that the plan did not see, and both were found by running.** A
-> cohort of censuses could not be assembled at all — every census numbers its read groups from
-> zero, because a walk sees one sample, so two of them collide by construction. The owner's ruling
-> was to put the `@RG ID` and the library in the census and merge on those. And
-> `RunParameters::assemble` refuses a fitted error rate with no minted read-error total, where the
-> plan had assumed a defaulted calibration; **Milestone E came forward to meet it**, so the census
-> now accumulates the totals as its loci go past and the calibration is fitted.
->
-> The accumulation went into `CensusWriter` rather than into `generate-census`, which is better
-> than the step asked for: **both producers feed that writer**, so the byte-for-byte agreement
-> between the walk-time census and the psp-built one now checks the totals too.
->
-> **What the fit still needs besides the censuses**: each census's psp beside it — not read, only
-> its header, for the digest the census names it by and the ground the walk covered — and the
-> reference and catalog, because a census stores a tract by its index within its stratum and the
-> selection has to be rebuilt. That rebuild is checked against a digest every census carries.
->
-> **What it declares rather than fits**: the inbreeding coefficient, which comes from the other
-> pre-pass route. The file records it as `supplied`.
->
-> - **Earlier (2026-09-05):** **`generate-census` exists, and building a census
-> during the walk is the cheaper of the two routes** (branch `ng-psp-mode`, Checkpoint B of
-> [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
-> [report](doc/devel/reports/implementations/ng_fit_stage_b_2026-09-05.md)).
->
-> The command builds each stored psp's census without opening a single alignment file, and on the
-> six tomato accessions over the two 100 kb intervals all six are byte-identical to the ones the
-> walk wrote. **1.28 s against 1.40 s over the work, and 192 MB peak resident against 188 MB**,
-> across three repetitions that moved by 0.02 s and 1 MB.
->
-> **That is measured where the selection keeps 198,182 of 200,000 bases.** The budget is two
-> million positions and this BED is 200 kb, so the census carries a share of the walk here it
-> would not carry on a whole genome, where the same budget keeps about 1 base in 400. The same
-> caveat applies to the file sizes — 1.31 MB of census against 3.59 MB of psp is a fact about a
-> 200 kb BED, not about the format.
->
-> **The comparison's first run reported all six censuses different, and the harness was at
-> fault**: it recorded the route word into each psp's provenance, so the two psps' headers
-> differed by one character and each census correctly named a different file — sixteen bytes, in
-> the digest. `scripts/ng_census_route_cost.sh` compares the files as well as timing them for
-> exactly this reason: a timing comparison between two different outputs measures nothing, and
-> this failure looked exactly like a defect in the second producer.
->
-> - **Earlier (2026-09-04):** **a census built from a stored psp is the same census**
-> (branch `ng-psp-mode`, Checkpoint A of
-> [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md);
-> [report](doc/devel/reports/implementations/ng_fit_stage_a_2026-09-04.md)).
->
-> One sample's census built while its reads are walked, and built again afterwards from the psp
-> that walk wrote, are the same file byte for byte — on both samples of the fixture cohort with
-> a ten-copy `GT` tract and three read groups. **That is a statement about the psp**, not about
-> the new code: a record format that dropped a read's read group, its per-position witness or
-> its length at a tract would still read back, still call, and still produce a census, one that
-> differs only here.
->
-> **Both producers now build their writer through `CensusPlan::writer_for`**, so the comparison
-> cannot degrade into a test of whether two hand-copied constructor call sites were kept in step.
->
-> **Four deliberate defects were run against the comparison**
-> (`scripts/ng_census_agreement_mutations.sh`): skipping repeat-tract loci fails all three tests,
-> losing one read at every locus fails two, crediting every read to read group 0 fails one — the
-> sample with a single read group cannot see it — and **changing a read's minted error fails
-> none.** The last is a fact about the format rather than a hole in the test: a census holds a
-> depth code per position per read group and the non-reference allele counts, and no per-read
-> quality at all. So the per-read-group minted-error totals `RunParameters::assemble` needs
-> cannot be read out of a census as it stands, which is what plan step E2 has to settle.
->
-> - **Earlier (2026-09-04):** **the fit stage has a plan, and psp mode is on `main`**
-> ([parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md); branch
-> `ng-psp-mode` fast-forwarded onto `main` at `e7eeab1c`, 6,229 lib tests green in the container).
->
-> The plan's route is four files on disk: alignments → psp → census → parameters file → VCF, so
-> any stage can be re-run without repeating the one before it. Five milestones — a census built
-> from a stored psp and §7.12's byte-for-byte agreement with the walk-time one; `generate-census`;
-> the fit and the parameters file it writes; the four commands end to end; the base-quality
-> calibration.
->
-> **Two rulings by the owner shaped it (2026-09-04).** `generate-psps` keeps writing the census it
-> already writes — the second producer is added beside it, not in place of it, and the two are
-> measured against each other on wall time and peak memory. And the fit reads census files rather
-> than fitting during the walk, so nothing else reaches the estimates for now.
->
-> **What the plan found before it was written:** `RunParameters::assemble` is called 36 times in
-> this tree and 35 are inside test modules, so **no program has ever produced a fitted parameters
-> file**; a run today scores with the compiled-in defaults or a file somebody hands it. It also
-> takes a per-read-group sum of `ln P(read is wrong)` that the joint fit does not produce, so the
-> first parameters files this route writes carry a **defaulted** base-quality calibration and say
-> so. Milestone E closes that: a stored psp decodes back to exactly the observations the
-> accumulator sums, with `q_sum` held in integer steps, so the totals can be taken on a pass that
-> is already being made.
->
-> - **Earlier (2026-09-04):** **the psp-mode plan is finished — `generate-psps`
-> writes the census beside each psp from one pass over the reads** (branch `ng-psp-mode`,
-> Checkpoint G; [report](doc/devel/reports/implementations/ng_psp_mode_g_2026-09-04.md)).
-> Measured on the six tomato accessions over the two 100 kb intervals: **3,592,149 bytes of psp
-> and 1,305,915 bytes of census, in 5 s**, both named per sample in the run's report. The census
-> is fed at the walk's yield point rather than by the psp writer, so it records what the walk saw
-> and not what was stored.
->
-> **The seed behind the census selection is a compiled-in constant, and that is load-bearing.**
-> This command's own advice is one invocation a sample; two invocations that seeded differently
-> would keep **disjoint** sets of positions and their samples could not be pooled at all. The two
-> counts beside it are the design's own figures — about two million positions, five thousand
-> tracts a stratum. **Ruled by the owner (2026-09-04): these three, the read filters and the five
-> locus-generator knobs all stay constants until the fit stage exists** — nothing can read a
-> census yet, so a knob added now is one whose effect nobody can check, and a `--seed` flag in
-> particular is a way to break a cohort that walks perfectly and is refused hours later at the
-> fit.
->
-> **A defect the milestone's own test caught before it shipped**: `PspWriter::create` records the
-> compression level into the header before encoding it, so a census built from the header the
-> gatherer *holds* names a psp that does not exist — one line of TOML, every byte of the digest
-> different — and every freshness check would have said *rebuild* for ever, silently. `WriteStats`
-> now carries the digest of the header as written.
->
-> **Next: execute [parameter_prepass_runs.md](doc/devel/ng/impl_plan/parameter_prepass_runs.md)**
-> — reading a census back, building one from a psp, and §7.12's byte-for-byte census-equality
-> oracle. Two of the psp-mode plan's own gaps close there: nothing yet reads a census, and the
-> mode-equivalence oracle cannot see the stored fields only a fit reads.
->
-> - **Earlier (2026-09-04):** **Milestone F is complete — psp mode exists, equals
-> direct mode, and every run-level invariance spec §12 asks of it holds** (branch `ng-psp-mode`,
-> Checkpoint F; [F3 report](doc/devel/reports/implementations/ng_psp_mode_f3_2026-09-04.md)).
-> The order the psps are named in does not change the calls; a cohort walked one sample at a time
-> calls what one invocation calls; ground a sample analysed and found empty is not ground it
-> never looked at. **The thread sweep is a script and the flag is why** — `--threads` builds
-> rayon's *global* pool, which a process may build once, so a test sweeping thread counts would
-> run every later count at the first one's width while reporting a sweep it did not do.
-> `scripts/ng_psp_concurrency_invariance.sh` gives **599 records at 1, 2, 4 and 8 threads,
-> byte-identical apart from `##commandline`**, which carries `--threads N`. **Next: Milestone G**,
-> the census written beside the psp.
->
-> - **Earlier (2026-09-04):** **the oracle that justifies psp mode is a test, and it
-> can see four kinds of defect it could not see when it was written** (branch `ng-psp-mode`, plan
-> step F2; [report](doc/devel/reports/implementations/ng_psp_mode_f2_2026-09-04.md)). One cohort
-> called two ways gives one VCF: on **six tomato accessions over the two 100 kb intervals, 599
-> records byte-identical apart from the `##commandline` line**, parameters file identical too
-> (`scripts/ng_mode_equivalence_oracle.sh`, now in the repository so the run reproduces from a
-> fresh checkout); and in the suite, comparing the two routes' VCFs **whole** with nothing
-> filtered out, because inside one process both routes record the same command line.
->
-> **The fixture had to be built for it.** The cohort the commands' own tests use has an all-`A`
-> reference, so the catalog routes every base to the repeat-tract path and a run over it writes
-> no record — two empty files are equal for the wrong reason. Each of the new fixture's four
-> discriminating properties closes a defect **measured surviving** without it: two samples
-> varying in different places (one sample's observations given to the other), a repeat tract with
-> a length variant (every stored locus written as `Generic`), alternative reads leaning to one
-> strand (the stored forward-read count zeroed), and a second comparison under parameters whose
-> three read groups carry multipliers of 0.25, 2.5 and 4.0 (the read-group renumbering deleted —
-> under `--defaults` every group scores alike, so identity reaches no genotype).
->
-> **Where the oracle stops, stated rather than assumed**: it compares VCFs, so a stored locus
-> that produces no record is not compared — 578 of the 581 a sample; and neither route fits, so
-> what only a fit reads can be destroyed on write with both comparisons green. **Next: F3**, the
-> remaining run-level invariances — file order, a separately-walked cohort, analysed-but-empty,
-> and concurrency.
->
-> - **Earlier (2026-09-04):** **psp mode calls from the command line, and what it
-> writes is direct mode's VCF** (branch `ng-psp-mode`, plan step F1;
-> [report](doc/devel/reports/implementations/ng_psp_mode_f1_2026-09-04.md),
-> [review](doc/devel/reports/reviews/ng_psp_mode_f1_2026-09-04.md)). `call-from-psps` opens a
-> cohort of stored psps — one `--psp` a sample, or a directory of them — and writes the VCF, the
-> parameters file and the run report `call-from-alignments` writes. **Measured on six tomato
-> accessions over the first two 100 kb intervals of `benchmarks/tomato1/regions.bed`: 599
-> records, and every byte but the `##commandline` line is direct mode's own** (sha256
-> `fd677c91…` on both sides once that line is removed), with the parameters file identical too.
-> That is F2's oracle passing early; F2 owns pinning it.
->
-> **There is no `--regions` and that is spec §5.3**: a psp records the ground its walk covered,
-> the cohort is refused unless the files agree about it, and that agreed ground is what the run
-> calls over.
->
-> **The owner's ruling on what a run over stored files says about each sample is built.** A psp
-> carries no count of what its walk kept or dropped, so the report states what this run drew —
-> how many stored loci it read out of each file, and how many reads went into the comparison at
-> one of them — plus a line, printed only where the cohort's psps disagree, naming the files
-> whose walk applied other read filters. **That average is not depth and the line does not call
-> it depth**: the head's count excludes filtered reads, depth-capped reads, and reads that
-> covered a locus without anchoring it.
->
-> **Three lifts were made rather than a second copy written, all recorded**: the numbers both
-> calling commands score with (`src/pop_var_caller_exp/calling_run.rs` — parameters, the `NG_*`
-> switches, the round width, the output refusals, the VCF header, the report printer); the
-> on-disk cohort fixture, which closes a Milestone C carry-forward and turned out to matter,
-> since direct mode's private copy gave both samples no reads at all; and the read filters' key
-> prefix. **Direct mode is byte-identical across all of it.** Two reviews ran fifteen deliberate
-> defects; four survived and all four are now caught. **⚠ One integration test still fails and it
-> is main's, not this work's**: `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele`.
-> **Next: F2**, the mode-equivalence oracle as a test, then F3's run-level invariances.
->
-> - **Earlier (2026-09-04):** **the owner's four rulings on Checkpoint H are built,
-> and the branch is merged into main** (`main` at the merge; the rulings' own report is
-> [ng_psp_head_rulings_2026-09-04.md](doc/devel/reports/implementations/ng_psp_head_rulings_2026-09-04.md)).
-> **The locus kind came back out of the record head** — it is a function of the coordinate, being
-> the kind of the typed region the locus falls in, and every psp records the segmentation inputs
-> its typing used, so a reader holding a coordinate can look it up; the head keeps
-> `reads-compared-with-reference` alone, which costs +3.86 % of the compressed file at 10.25 reads
-> a position and +8.50 % at 280.32. **One sample may not declare an `@RG ID` twice**, refused where
-> the alignment files are opened and again when a stored cohort is opened; scoped to one sample
-> rather than the whole run, because a collision across samples merges nothing and the run-wide
-> rule failed 88 of this repository's own tests, 76 of them different samples sharing an id
-> incidentally. **The compared-read count already excluded filtered and depth-capped reads**, and
-> now says so with a test. **The `@RG ID` rule was then widened to the whole run on the owner's
-> word** — no two read groups anywhere in a cohort may share one, whether they are one sample's or
-> two, refused when the alignment files are opened and again when stored files are; across samples
-> nothing merges, and it is refused for provenance, since every report and every error message
-> names a lane by its id. It cost 69 fixtures, all of them cohorts whose samples named their read
-> group alike. **And the parameters file identifies samples by name and read groups by
-> the sample and `@RG ID` together, never by position** — the same cohort's files passed in another
-> order used to turn a good file into a refusal. **⚠ One integration test fails and it is main's,
-> not this work's**: `a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele`, confirmed
-> by running it against main alone; likely main's own adoption of the outlier weight at 0.20, with
-> the test not moved to match. **Next: psp-mode Milestone F**, whose one open question is what a run
-> over stored files says about each sample in its report.
->
-> - **Earlier (2026-09-04):** **Milestone H is complete — the head answers the keep
-> rule at every depth, the specs say so, and the cost is a number** (branch `ng-psp-mode`, at
-> Checkpoint H; [H2 report](doc/devel/reports/implementations/ng_psp_head_h2_2026-09-04.md),
-> [H3 report](doc/devel/reports/implementations/ng_psp_head_h3_2026-09-04.md)). **The two new head
-> fields cost 3.9 % of the compressed file at 10.25 reads a position and 8.5 % at 280.32.** The
-> raw cost is what the spec predicted — one byte a record at low depth, two at high — and what it
-> did not predict is how little compression removes at depth: 81 % of the added bytes disappear at
-> ten reads a position and only 30 % at 280, because the compared-read count tracks depth where the
-> non-reference count is almost always zero. So the field is cheapest where the flat floor already
-> answered the rule and dearest exactly where it is needed. **Two things the plan did not
-> anticipate.** The cost probe had not been updated since the chain ids joined the head at E4, so
-> its own byte-for-byte check against the shipped writer failed on first run and every head-cost
-> figure in the specs was stale for two reasons rather than one. And **the 9.2 % / 5.8 % the plan
-> asked to re-take cannot be re-taken**: they compare against a format whose bodies code coverage
-> and chain ids as cross-record differences, which nothing has implemented. What replaced them is
-> exact and narrower — the same bodies with and without the head's own bytes — and the spec says
-> which denominator is which. Also re-taken: **the skipping walk is 2.930× on a store ng wrote
-> itself**, against the 2.06× on record, so the shallow end of that figure is no longer an upper
-> bound. **⛦ Owner's at this checkpoint:** whether an unknown locus-kind tag should refuse a walk
-> that would have *skipped* the record (it does now; it is a choice, not a consequence of the move),
-> plus the two rulings recorded at Checkpoint E. **Next: psp-mode Milestone F.**
->
-> - **Earlier (2026-09-04):** **the psp record head carries the keep rule's
-> denominator, and the locus kind's tag** (branch `ng-psp-mode`, plan step H1 of
-> [psp_head_compared_reads.md](doc/devel/ng/impl_plan/psp_head_compared_reads.md);
-> [report](doc/devel/reports/implementations/ng_psp_head_h1_2026-09-04.md)). The cohort merge
-> keeps a locus when some single sample shows at least `max(floor, share × its compared reads)`
-> non-reference reads, and the head carried the numerator alone — enough at three reads a
-> position, where the floor decides, and useless at three hundred, where the share does. The
-> derivation already computed both numbers and the writing line dropped one; it is now written.
-> The `locus-kind` tag moves in from the body at the same time, because the width bound and the
-> never-mix assertion both read a record's kind before any evidence is assembled. A move and not
-> a copy: the tract's motif and flanks stay body-side, and the body decoder takes the kind from
-> the head it is handed. `ng::psp` 417 → 421; library 6,153 → 6,157. **Two reviewers, no
-> Blockers, and the correctness one found two tests that passed with the feature broken** — the
-> head-only check exempting a zero denominator, and the numerator's head-against-body check
-> provoked in one direction only; both mutations left 421 tests green and both are now killed.
-> The head's pinned byte string was also not pinning the three bytes this step added, its fixture
-> making all of them a literal zero. **⛦ One ruling owed at Checkpoint H**: an unknown kind tag
-> now refuses a walk that would have *skipped* the record, which reading it out of the body did
-> not — a choice, not a consequence of the move, argued at `read_locus_kind_tag`. **Next:** H2,
-> the owning specs, then H3, the head's cost re-measured.
->
-> - **Earlier (2026-09-04):** **psp-mode Milestone E is complete — a cohort of
-> stored files calls** (branch `ng-psp-mode`, at Checkpoint E; steps E2–E4:
-> [E2 report](doc/devel/reports/implementations/ng_psp_mode_e2_2026-09-04.md),
-> [E3+E4 report](doc/devel/reports/implementations/ng_psp_mode_e3_e4_2026-09-04.md)). Each drawn
-> record is renumbered from its own file's read-group numbering into the run's — the failure
-> that prevents is silent, since unrenumbered every sample's first group is identifier 0 and a
-> cohort of two would score four libraries against two calibrations with every number in range.
-> The caller then drives the loop Milestone D lifted, over one source per open psp, and returns
-> the calling tallies alone: a walker knows what its walk saw and a psp source knows none of it,
-> so what a run over stored files says about each sample is F1's question. `ng::run` 475 → 499
-> across the milestone; 24 mutations, 23 killed. **Two rulings owed by the owner, recorded at
-> Checkpoint E**: §6.2 asks for a duplicate-`@RG ID` refusal the psp format's own validator
-> declares legal and direct mode accepts, and §6.2's by-name parameters match cannot live in E1
-> because `RunParameters` carries no names. **Next: not Milestone F.**
-> [psp_head_compared_reads.md](doc/devel/ng/impl_plan/psp_head_compared_reads.md)'s Milestone H
-> lands first — see the standing sequencing note above.
->
-> - **Earlier (2026-09-04):** **psp mode's calling stage opens its cohort and
-> refuses one it cannot call** (branch `ng-psp-mode`, plan step E1;
-> [report](doc/devel/reports/implementations/ng_psp_mode_e1_2026-09-04.md),
-> [review](doc/devel/reports/reviews/ng_psp_mode_e1_2026-09-04.md),
-> [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-04_v3.md)). Every psp is opened, every
-> header read, and every refusal spec §6.2 asks for is made before a block is decoded — the
-> ground the files agree they were walked over (read out of the headers, not asked for), one
-> individual per file, one run-wide read-group numbering merged from the files' own, and each
-> file checked against the run's segmentation and reference. The review's most valuable findings
-> were checks that were *missing*: the file-descriptor refusal spec §7.1a names, direct mode's
-> catalog-against-reference refusal, and the psp header's own whole-assembly digest — the
-> field's one documented consumer, which nothing was consuming. It also caught tests that could
-> not tell a loop from its first step: with every per-file refusal pinned on a one-file cohort, a
-> mutant that checked `psps[0]` and stopped passed all 490 tests. 18 mutations, 17 killed;
-> `ng::run` 475 → 496. **Two questions for the owner at Checkpoint E**: §6.2 asks for a
-> duplicate-`@RG ID` refusal that the psp format's own validator declares legal and that direct
-> mode calls without complaint (not made, with the reasoning recorded), and §6.2's by-name
-> parameters match cannot live here because `RunParameters` carries no names (it is F1's). Next:
-> E2's read-group remap in the source, then E3 driving the lifted calling loop.
->
-> - **Earlier (2026-09-04):** **psp-mode Milestone D is complete — two sources, one
-> calling loop, direct mode provably untouched** (branch `ng-psp-mode`, at Checkpoint D; step D2:
-> [report](doc/devel/reports/implementations/ng_psp_mode_d2_2026-09-04.md),
-> [review](doc/devel/reports/reviews/ng_psp_mode_d2_2026-09-04.md),
-> [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-04_v2.md)). The calling loop is no
-> longer a method on the alignment-file caller: it is a free function over any observation
-> source, and `AlignedFilesVariantCaller` now adds only what alignment files add — opening the
-> walkers, and turning them, spent, into the per-sample tallies a run report states. **The
-> oracle the step exists for is green: direct mode's VCF is byte-identical across the lift** —
-> six tomato accessions over 200 kb of SL4.0, 598 records, sha256 `5f0903cf…`, with the
-> parameters file and the whole run report matching too. Both reviewers proved the body itself
-> unchanged by mechanical diff (four hunks, all intended), and one settled Milestone E's
-> interface question by writing `PspVariantCaller`'s method as E will have to write it and
-> type-checking it. What the review found instead was a rule with no test — that a refused
-> record outranks a source failing afterwards — which the lift is what made writable, since the
-> loop now takes a `Vec`'s iterator as a source. Next: Milestone E, `PspVariantCaller` — every
-> header read and every §6.2 refusal fired before a block is decoded.
->
-> - **Earlier (2026-09-04):** **psp mode has its second source — a stored sample
-> now answers the merge the way an open CRAM does** (branch `ng-psp-mode`, plan step D1;
-> [report](doc/devel/reports/implementations/ng_psp_mode_d1_2026-09-04.md),
-> [review](doc/devel/reports/reviews/ng_psp_mode_d1_2026-09-04.md),
-> [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-04_v1.md)). `PspObservationSource`
-> decodes one sample's psp behind the same trait direct mode's walker implements, so nothing
-> above it can tell which it is holding — spec §3.1's "the two callers differ only in what a
-> source is". Failures name the sample, read from the file's own header, and how far the read
-> had got. Three things a psp can be wrong about are refused rather than asserted or passed on:
-> records out of coordinate order (arch §8's owed item, discharged for the psp path), a record
-> whose body a selective walk never built, and any draw made after one of those — because
-> without that last one the next draw hands back the record *after* the refused one and the
-> stream goes on looking sound, one observation short. Both reviewers found that silent drop
-> independently; it was measured, not argued. The module is 15 tests, `ng::run` 459 → 474, and
-> a second mutation pass ran 8 and killed 7 — the survivor being an error arm no fixture can
-> reach through a `PspReader`, now marked uncovered where it sits. Next: D2, lifting the
-> calling loop out of `AlignedFilesVariantCaller` so both modes drive one body, with direct
-> mode's VCF byte-identical across the commit.
->
-> - **Earlier (2026-09-03):** **psp-mode Milestone C is complete — a cohort of
-> psps from the command line** (branch `ng-psp-mode`, at Checkpoint C; steps C2+C3:
-> [report](doc/devel/reports/implementations/ng_psp_mode_c2_c3_2026-09-03.md),
-> [review](doc/devel/reports/reviews/ng_psp_mode_c2_c3_2026-09-03.md),
-> [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-03_v6.md)). `generate-psps` now says
-> what each walk produced and what ground it could speak for — on a tomato accession,
-> *193,603 loci stored, 914,715 bytes; 311 of 318 typed regions, 199,672 of 200,000 bases
-> walked, 99.8%*, with the 328 bases it could not store named as clusters of repeats too close
-> together to have clean flanks — and refuses to replace a psp without `--force`, checking
-> every sample before walking any. The review (20 mutations, 15 surviving) caught three claims
-> that were wrong rather than untested: the report called loci "observations", which the crate
-> reserves for what a locus *contains*; it took its shares over the ground asked for rather
-> than the ground walked, the same arithmetic `run/report.rs` records printing 200.0% once;
-> and the split that was supposed to make the report a value a test can hold was undone by a
-> bare `println!` inside it. The report now reuses the sibling's own `describe`/`share_of`
-> wording and arithmetic. Next: Milestone D — the psp-backed source, and lifting the calling
-> tail so both modes drive one body.
->
-> - **Earlier (2026-09-03):** **psp mode has a command line — `generate-psps`
-> walks each sample once and writes its psp** (branch `ng-psp-mode`, plan step C1;
-> [report](doc/devel/reports/implementations/ng_psp_mode_c1_2026-09-03.md),
-> [review](doc/devel/reports/reviews/ng_psp_mode_c1_2026-09-03.md),
-> [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-03_v5.md)). On a tomato slice it
-> writes one psp of 914,715 bytes in 3.0 s. The eight-checklist review ran **41 mutations and
-> 21 survived**, finding two live defects: the psp's file name was built from the `@RG SM`
-> tag with nothing checking it (a sample called `../elsewhere` would write outside
-> `--output-dir`), and a re-walk of a failed sample truncated the psp it was replacing before
-> writing — so a second failure destroyed the good file too. Both fixed: names are refused at
-> the door, and each walk goes to `<sample>.psp.partial` and is renamed only once whole.
-> Command tests went from 12 to 24. Two prerequisites landed first: `ng::run`'s shared test
-> fixtures, and the ground assembly (which stretch of genome a run walks, cut into segments)
-> lifted out of `call-from-alignments` so both modes compute it from one copy — which is what
-> makes psp mode's cohort-agreement check meaningful. Next: C2's per-sample report and C3's
-> refusal to overwrite a finished psp.
->
-> - **Earlier (2026-09-03):** **psp-mode Milestone B is complete — the walk stage
-> is provably the walk, in bytes** (branch `ng-psp-mode`, at Checkpoint B;
-> [B2+B3 report](doc/devel/reports/implementations/ng_psp_mode_b2_b3_2026-09-03.md),
-> [review](doc/devel/reports/reviews/ng_psp_mode_b2_b3_2026-09-03.md),
-> [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-03_v4.md)). B2's oracle on real
-> reads: one tomato accession over 200 kb of SL4.0 through the real catalog gives **183,807
-> records equal field for field between the psp and the walk** (1,217 of them repeat tracts),
-> header equal; B3: **a second gather is byte-identical**, 948,689 bytes
-> ([`examples/ng_psp_gather_oracle.rs`](examples/ng_psp_gather_oracle.rs), whose module doc
-> records the run). The six-agent review's Majors: a gatherer stamping its own clock passed
-> byte-identity vacuously (the two gathers land in one second) — now pinned by asserting the
-> file carries the caller's timestamp; and the harness itself panicked on a mistyped
-> `NG_SAMPLES` and could drop a sample from its own oracle through a failing directory entry.
-> Next: Milestone C, `generate-psps`.
->
-> - **Earlier (2026-09-03):** **psp-mode step B1 is built, reviewed and committed —
-> `SampleObservationGatherer`, psp mode's walk stage** (branch `ng-psp-mode`;
-> [B1 report](doc/devel/reports/implementations/ng_psp_mode_b1_2026-09-03.md),
-> [review](doc/devel/reports/reviews/ng_psp_mode_b1_2026-09-03.md),
-> [fixes](doc/devel/reports/reviews/fixes_applied_2026-09-03_v3.md)). One sample's alignment
-> files through the exact direct-mode chain as an iterator; the psp header built at `open` —
-> the first production header builder — recording the configured reach ceiling, the walk-local
-> read-group table and the read filters; `write_psp` drains the walk into the store and hands
-> back the write totals beside the walk tally. The nine-agent review's Blocker (a swallowed
-> walk error seals a psp every reader accepts) and the applied-settings gap (walking with
-> default filters while recording the configured ones passed all tests) are both closed by
-> tests; the bundle-threshold rule now has one copy, derived inside
-> `generic_path_generators` from the segmentation's own record. Milestone B continues with B2
-> (file-equals-the-walk oracle, fixtures + real CRAM) and B3 (byte identity). **Also landed
-> before B1, per Checkpoint A's rulings (owner, 2026-09-03):** the `SegmentationInputs` lift
-> to its own module + the recorded no-version-bump ruling (`a1fdab11`), and the standing
-> `psp_writer_perf` bench panic fixed forward (`cba10a0b`).
->
-> - **Earlier (2026-09-03):** **psp-mode Milestone A built, reviewed and
-> committed — the psp header records everything a calling run will check** (branch
-> `ng-psp-mode`, commits 114efe24 + 918eec89;
-> [A1 report](doc/devel/reports/implementations/ng_psp_mode_a1_2026-09-03.md),
-> [A2–A4 report](doc/devel/reports/implementations/ng_psp_mode_a2_a3_a4_2026-09-03.md)).
-> Spec §6.1 is complete in `Header` minus the deliberately dropped record count: the analysed
-> regions + catalog identity + routing criteria as one typed `SegmentationInputs` field
-> (recorded whole, so a §6.2 refusal names the field that differs), the read-group table
-> (`@RG ID`, library, walk-local number — what lets separately-walked samples join one
-> cohort), the observation reach ceiling, and the read filters as provenance parameters
-> (`ReadFilterConfig::provenance_parameters`, exhaustively destructured so a new filter cannot
-> go unrecorded). `format_version` stays (1,0) — nothing written outside tests predates the
-> fields. Each step ran the full implement→review→fix loop: 2 nine-agent reviews, 21
-> mutations run / 11 survived / all closed; the A1 review also caught the step editing frozen
-> `src/regions.rs` (ruling 2026-07-16) — reverted byte-identical, the constructor moved into
-> ng's own `GenomeRegions`, which now owns its span storage. Measured: 30,000 digest-carrying
-> scaffolds encode to 10,798,518 bytes of the 16,777,187-byte header ceiling (headroom halved;
-> ~46,000 scaffolds fit). **At Checkpoint A, paused for the owner** — pending there: the
-> typed-fields confirmation, `SegmentationInputs`' module home once psp and run become
-> mutually dependent (Milestone B), and recording the no-version-bump ruling.
->
-> - **Earlier (2026-09-03):** **the psp-mode wiring plan is written**
-> ([impl plan](doc/devel/ng/impl_plan/run_driver_psp_mode.md)) — the build order for
-> `SampleObservationGatherer` + `generate-psps` (walk to psp + census, one file per sample) and
-> `PspVariantCaller` + `call-from-psps`, seven milestones A–G ending at spec §12.3's mode
-> equivalence: the psp route's VCF **byte-identical** to direct mode's. Grounded in a code
-> survey: the store (`src/ng/psp/`, plan A–H ✅) and direct mode are done and **the wiring is
-> the whole gap** — nothing outside `src/ng/psp/` calls `PspWriter`/`PspReader`; the plug
-> points are the blanket `ObservationSource` impl for any observation iterator
-> (`observation_cache.rs:98`), `PspWriter::push` taking exactly the walker's record type, and
-> the source-agnostic calling tail (`callers.rs:705+`) to be lifted off
-> `AlignedFilesVariantCaller` (plan step D2, its own byte-identity-guarded commit).
-> **Three questions routed upstream, none blocking step 1**: spec §6.1 lists the record count
-> in a header the format writes before the first record (recommend: route it to the footer or
-> drop it); §6.3's no-digest decision still awaits the owner's ruling; §11 q2 has no
-> samples-in-flight default, so `generate-psps` takes an explicit flag with a provisional
-> default flagged at Checkpoint C. **A real header gap the survey found**: the built `Header`
-> carries none of §6.1's run-checkable fields — no analysed regions, no segmentation inputs,
-> no read-group table, no reach ceiling — so Milestone A grows them *before* any file is
-> written anywhere, while extending the header is still free. The fit stage, census-from-psp,
-> §7.12's census equality and `generate-census` hand to a named follow-on plan; the
-> cheap-numbers read, contig-list sharing and leasing go to a psp-mode performance plan after
-> the first measured run.
->
-> - **Earlier (2026-09-03):** **where a parallel calling run's time goes — and the
-> merge-timing feature un-broken**
-> ([finding](doc/devel/ng/research/cohort_merge_parallel_cost_2026-09-03.md), on branch
-> `ng-merge-parallel-cost`; widens the 2026-08-28 merge-only finding to the whole run).
-> At 8 threads a 63-sample run over 200 kb of tomato ground is **84.5% decoding reads, 8.0%
-> genotyping, 6.2% assembling loci** — the pool belongs to the decode, and a genotyping pool
-> stays unbuilt on a third measurement. The decode's cap now has sizes: spread across samples it
-> returns 2.00×, because **its own CPU swells ×2.56 when eight copies run at once** (17.5 s
-> alone, 44.6–44.9 s summed over eight threads, twice) and the per-sweep wait for the slowest of
-> 63 samples costs **×1.48** on top. Refuted by measurement: the *choice* of allocator (glibc
-> and mimalloc identical at 1 and 8 threads), the cover's fixpoint re-sweeps (14 extra in 414),
-> and the merge's frees in isolation (254 against 281 ms). What remains — cache/memory
-> contention against allocation traffic against the Mac VM's scheduling — **needs `perf` on the
-> Linux box**, which is the named next step; the inflation is ×1.08 at 2 threads and ×2.3+ from
-> 4 up.
-> **⚠ And the timing feature had been throttling what it measured since G2 (2026-09-01)**: the
-> two per-record counters G2 added share one cache line across every worker, so an instrumented
-> parallel merge read **1.40×** where a build without the feature gives **2.25×** — numerically
-> the stale 1.4× figure the spec still quoted, by coincidence. Fixed by sharding
-> (`timing.rs::ShardedCounter`, 16 padded cells by rayon worker) and verified: instrumented
-> 545 ms against bare 552 at 8 threads, 63 samples. Whole-run figures never needed retracting —
-> a record arrives every ~4 µs per thread there, so the line never ping-ponged and E1's
-> 1.8×/1.5× stands. The merge's machinery itself parallelises at 3.75× when records are made
-> outside its clock; buffer reuse (leasing) reads 12% at 8 threads; 16-sample merges are
-> fastest at **two** threads and degrade beyond. `run_streaming.md` §11 question 7's
-> direct-mode half is answered in place, and the psp half stays open until the format exists.
->
-> - **Earlier (2026-09-03):** **the repeat-tract genotype comparison was wrong in two
-> ways at once, and every number resting on it is re-measured**
-> ([research handoff](doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md) §3.4b–§3.4c).
-> **No change to the caller** — the callsets are the same files; the scorer is not.
-> The comparison rebuilds each side's two chromosome copies from the reference and its VCF lines,
-> and two settings govern that. **It collected lines from only one base out**, so a truth set that
-> describes one event with several lines — at `chr1:150,329,038` GIAB writes four, from five bases
-> before the tract — had its own haplotype rebuilt from a fragment and ng was scored wrong for a
-> call that reconstructs the identical DNA; 173 of the 648 wrong tracts have a truth line within
-> ten bases that was left out, against 208 of the 5,410 right ones. **And it compared one base
-> past the tract's end**, so at `chr1:9,955,404` ng reproduced the truth's insertion exactly, also
-> called a SNP one base outside, and was charged for it — 46 of the 648 errors. **The rule now:
-> collect from ten bases out, compare over the tract's own bases**, with a second column scoring
-> the tract plus ten bases of flank because only that can see a boundary variant ng genuinely
-> misses. Two alternatives were measured and rejected: refusing every tract where a change reaches
-> outside it raises the headline 4.7 points and **corrects not one verdict**, and comparing over a
-> real flank breaks 62 tracts for every 13 it fixes at ten bases, because it charges a tract for
-> the caller's neighbouring SNPs.
-> **What moved.** Genotype accuracy at 30× is **0.877 at homopolymers and 0.867 at period 2+**
-> against the 0.886 and 0.903 last reported, on 6,687 comparable tracts against 6,058 — every rule
-> that compares more tracts gives a lower number, because the tracts the old rule refused are the
-> ones ng gets wrong. Uncomparable tracts fall from 245 in 6,303 to **7 in 6,694**. The two
-> parameter changes are worth +0.5 points rather than +0.6. **HipSTR reverses**: ng is 1.9 points
-> ahead at 30× (0.8998 against 0.8806) where it was level, and level at 50× where it was 0.9
-> behind — ng was the arm the old rule penalised, because ng writes SNP-path records beside a
-> tract and HipSTR writes none. **The QUAL half is untouched**: calibration and sweep re-derive
-> byte-identically, 68 and 52 rows, so Checkpoint D's answer stands as measured.
-> **⚠ And the diagnosis that started this was itself wrong — the fifth wrong measurement of this
-> quantity, and the first to err *for* the caller.** The previous entry's §3.4b named two tracts as
-> instrument artefacts and sized the class at 111. Both descriptions were wrong: at
-> `chr1:14,722,151` **ng is genuinely wrong**, deleting two bases inside the tract where the truth
-> deletes one inside and one outside. And the 111 reproduce exactly as a count but **at most 10 of
-> them turn right under any of six candidate rules** — they are real disagreements, so §4's "never
-> offered" count was not overstated. **The standing check this leaves**: treat any proposed
-> correction that raises the headline as suspect until it is shown to correct verdicts rather than
-> to drop tracts.
-> **Seven hand-checkable shapes now pin the scorer** — `benchmarks/lib/tract_qual_experiment.py
-> --self-test`, run by the experiment driver before it scores anything, each checked against a
-> mutation of the code it covers. `RESCORE_ONLY=1` on the driver re-derives every published number
-> from the callsets already on disk, generating nothing.
->
-> - **Earlier (2026-09-03):** **the repeat-tract outlier weight ships at 0.05, not
-> 0.01** (owner's decision). It is the share of a tract's reads the stutter model cannot explain,
-> and what it really does is put a floor under every read's emission — **a cap on how far one read
-> may pull a genotype**, the job freebayes does with a read-dependence factor and GATK with a
-> Phred-45 cap, and the only thing in ng doing it at a tract. At 0.01 the floor sat *below* the
-> chance of a read slipping two whole repeats, so two-repeat slip products scored as real evidence
-> for a second allele; at 0.05 they do not. Measured end to end through `--defaults` on GIAB's
-> HG002 tandem-repeat benchmark at 30×: genotype accuracy **0.8771 → 0.8796** at homopolymers and
-> **0.8665 → 0.8692** at period 2+, with spurious heterozygotes down from 141 to 129
-> (re-scored 2026-09-03; the figures first published here were 0.8856 → 0.8881 and 0.9033 →
-> 0.9059, from the comparison the entry above corrects).
-> **Its warrant stays `Defaulted`** — read literally, the share it is named for measures 1 in 2,300
-> at homopolymers and 1 in 209 at period 2+, so this is a stated constant chosen by a sweep and not
-> an estimate. **It owes a per-period sweep and a check at three reads a position on the tomato
-> panel**, neither of which one human sample at 30× and 50× can give.
->
-> - **Earlier (2026-09-03):** **the research handoff for repeat-tract accuracy**
-> ([doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md](doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md)).
-> Written to be read by somebody starting fresh: how the numbers are produced and on which ground,
-> **the genotype-coding trap that has now produced five wrong measurements** (GIAB writes a
-> two-allele heterozygote as two phased records where ng writes one multi-allelic record — 1,412
-> tracts of 6,303 — and four other ways the comparison goes wrong, each measured), every lever
-> tried with what it was worth, what the six investigations found, and what to do next.
-> **Both decisions it raised are now settled** (entry above): a tract genotype is scored letter for
-> letter with the repeat length beside it — the 3-point gap that made this a live question was the
-> comparison reaching one base past the tract, and with that fixed the two answers differ by 0.4
-> points. Checkpoint D remains uncleared.
->
-> - **Earlier (2026-09-02):** **two parameter values, no code, and ng's repeat-tract
-> genotypes get better by 0.6 points**
-> ([report](doc/devel/reports/ng_tract_genotype_improvement_2026-09-02.md); six parallel
-> investigations behind it in
-> [tract_genotype_investigation/](doc/devel/reports/tract_genotype_investigation/)).
-> On GIAB's HG002 tandem-repeat benchmark, fitting the slippage from HG002's own reads **and**
-> raising the repeat-tract outlier weight from 0.01 to 0.10 takes genotype accuracy from 0.8771
-> to **0.8823** at homopolymers and 0.8665 to **0.8725** at period 2+ at 30×, and from 0.8916 to
-> 0.8954 and 0.8767 to 0.8788 at 50× (re-scored 2026-09-03). Both changes are parameters a run can already be given.
-> **⚠ And the recommendation that started this work was wrong.** I said fitting the slippage was
-> the lever, on the strength of a simulator. On real reads a *flat* change to any of the three
-> stutter numbers is worth nothing — the shipped values already sit at the optimum, and over a
-> twenty-fold range of the slip share accuracy moves half a point while the two error classes
-> swing nine-fold and three-fold in opposite directions. It is a dial that trades one error for
-> the other. What the fit is worth is its per-stratum shape, a third of the gain; the larger half
-> is **the outlier weight, which nobody was looking at** — the bound on how far one read may pull
-> a genotype, inherited at 0.01 and never measured.
-> **Ruled out with numbers:** fitting the genotype prior (reaches 10 of the old comparison's 648
-> errors, risks 77 correct calls), a stricter candidate bar, a GQ floor, an allele-balance rule,
-> and every other constant in the read model. **HipSTR, which fits its stutter model per locus, is
-> 1.9 points behind ng at 30× and level at 50×** on the tracts both reach (re-scored 2026-09-03;
-> first published as 0.3 behind and 0.9 ahead), and its own median fitted slip level is 0.04
-> against ng's fixed 0.05 — the median locus does not need fitting.
-> **Where the accuracy actually is: 464 of 852 errors are a sequence ng never offered.** The
-> follow-through — 434 missing sequences, of which 268 carried by no read and 46 an alignment loss
-> — **has not been re-derived** and its script carries two known defects, so read it as a shape;
-> the three alignment losses verified by hand do stand, having been read off the reads and the
-> candidate table rather than off the genotype comparison.
->
-> - **Earlier (2026-09-02):** **the genotypes at a repeat tract, measured three
-> times wrong before they were measured right**
-> ([report](doc/devel/reports/ng_tract_qual_experiment_2026-09-02.md) §5). **No change to the
-> caller.** Where the truth set and ng both call a tract on GIAB's tandem-repeat benchmark at
-> 30×, ng's genotype is right **0.877 of the time at homopolymers and 0.867 at period 2 and
-> above** (0.892 and 0.877 at 50×; re-scored 2026-09-03, first published as 0.886 and 0.903); the
-> existing repeat-tract caller reaches under half as many tracts, 1,230 against ng's 2,823.
-> **⚠ An earlier version of this entry said 0.771 and 0.628, and that was the instrument and
-> not the caller**: comparing allele strings makes two records describing one event over
-> different spans read as a disagreement, and 324 tracts in 6,303 were counted as genotype
-> errors that were only a difference of spelling. Two further attempts were also wrong; §5
-> records all three, because each gave a plausible number.
-> **Five of every ten remaining errors are an allele ng never put on the table** — 245 of 475
-> comparable homopolymer errors — which is the ceiling on what a wider candidate set can buy:
-> 6.3 points at homopolymers and 7.8 at period 2+. Over the same ground the selection dump says
-> where the missing sequences go: of 434, **268 were carried by no read at all**, 61 were cut by
-> the per-sample top-`ploidy` rule (what a discovery round is aimed at), 59 sat at a tract the
-> merge refused, 46 were refused by the support bar.
-> **And the second-largest class is a warning for Milestone E**: 141 homopolymer errors are ng
-> calling a heterozygote where the truth is homozygous, which a discovery round can only enlarge.
-> **The slippage numbers move genotypes where they moved nothing else** — on the simulator at a
-> true slippage of 0.25 against the assumed 0.10, supplying the true model takes period-2+
-> genotype accuracy from 0.932 to 0.990.
->
-> - **Earlier (2026-09-02):** **is ng's quality score worth believing at a repeat tract? —
-> step D2, and Checkpoint D**
-> - **Earlier (2026-09-02):** **the instrument for the tract QUAL experiment —
-> step D1**
-> (step D1 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
-> [report](doc/devel/reports/implementations/ng_ssr_loop_d1_2026-09-02.md)). **No change to the
-> caller.** A scorer that bins a caller's records by QUAL against the share that really are at a
-> variant tract and sweeps a QUAL threshold for precision and recall, split by motif period; a
-> simulator that writes repeat tracts whose genotypes we chose, sequenced under a slippage we
-> set; and the drivers that build the tract ground and run the arms.
-> **Two things the build already settles about the runs.** The benchmark the plan names is too
-> small to answer the calibration question — ng writes **149 repeat-tract records pooled over
-> the three GIAB samples at 30×** — so the experiment also runs on GIAB's HG002 tandem-repeat
-> benchmark, 50,000 Tier intervals with 36,497 assembly-based truth records, where ng writes
-> **6,351 tract records at 30×**. And the fitted-against-defaulted split has one side on any
-> benchmark, because no command fits a parameters file: on the simulator it has two, since the
-> simulator writes the stutter model it drew the reads under as parameters-file rows.
-> **Two defects in the first version of the scorer, both fixed and both found by reading the
-> records it called false at high QUAL** — masking before left-alignment, and scoring a record
-> against its own span rather than its tract's. Together they put **105 records above QUAL 200
-> in the wrong column; the scorer as it stands puts 7 there**. Numbers are the instrument's own
-> validation; the experiment's answer is D2.
->
-> - **Earlier (2026-09-02):** **an insertion at a region's last base belongs to
-> whatever follows, not to the SNP/indel path**
-> ([report](doc/devel/reports/implementations/ng_edge_insertion_2026-09-02.md)), which fixes the
-> duplication C4 measured. **Owner's ruling**: an insertion's anchor base is unchanged — it is
-> there because a record needs a base — and its inserted bases sit past the region's end, so the
-> bound that already truncates a deletion's tail leaves nothing of it. An indel that genuinely
-> starts inside the generic ground, removing the last base and continuing into the tract, is
-> untouched. **Duplicated indel records: 62 at 30× and 66 at 50×, now 0 at both.** Indel
-> precision comes back from 0.816 to 0.983 at 30× (0.987 before tracts were called at all) and
-> recall settles at 0.900 against the duplicated run's 0.915 and the baseline's 0.673 — the five
-> true indels it costs are edges where the tract path wrote nothing. **Still open:** a run whose
-> analysed ground ends at a region boundary loses an insertion there, because the walk is given
-> one region at a time; and ng's indel recall is 4.6 points short of its own pre-clip 0.946.
->
-> - **Earlier (2026-09-02):** **what calling repeat tracts is worth, measured —
-> step C4, and Checkpoint C**
-> (step C4 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
-> [report](doc/devel/reports/implementations/ng_ssr_loop_c4_2026-09-02.md)).
-> Pooled over the three GIAB samples on their own confident regions, **indel recall goes from
-> 0.673 to 0.915 at 30× and from 0.676 to 0.939 at 50×**; SNP recall from 0.974 to 0.980 and
-> 0.979 to 0.984. The bar is the production caller's 0.987 SNP / 0.930 indel at 30×.
-> **⚠ And the same variant is now written twice.** Indel precision falls from 0.987 to 0.816 at
-> 30×, and **62 of the 68 new false calls are a record the file already holds**: the SNP/indel
-> path emits an insertion anchored at the base beside a tract and the tract path emits the same
-> insertion as a length change, one base apart, identical once left-aligned. Counted once,
-> precision is 0.981. **The duplication is a design question spanning this plan and the typed
-> regions' — the recommendation is to fix it in the routing**, by giving a tract's region the
-> anchor base beside it, so the generic mint never opens the second record. About a third of
-> what the region clip cost in indels is also still missing (0.946 before the clip, 0.915 now).
->
-> - **Earlier (2026-09-02):** **the run report says what became of the repeat
-> tracts — step C3**
-> (step C3 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
-> [report](doc/devel/reports/implementations/ng_ssr_loop_c3_2026-09-02.md)).
-> One count became five and the five are a partition: called, refused as `notPeriodic`, called
-> over fewer sequences than segregate (`tooManyAlleles`), refused for a candidate carrying no
-> whole motif copy, and set aside as a repeat cluster. **Three of the five are visible only
-> here**, because a refused tract leaves no record — `notPeriodic` narrows to the reference
-> alone, so every sample is homozygous reference and the locus is left out of the file, where it
-> is indistinguishable from a tract nobody varied at. On HG002 at 30× over 200 Tier intervals
-> the run now prints `repeat tracts: 24 built, of which 24 called`. **Next: C4, the end-to-end
-> measurement against the zeros.**
->
-> - **Earlier (2026-09-02):** **a repeat tract's record says so — step C2**
-> (step C2 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
-> [report](doc/devel/reports/implementations/ng_ssr_loop_c2_2026-09-02.md)).
-> The motif reaches the record from the called locus's own candidate table, so `STR`, `RU`,
-> `PERIOD` and each called allele's `REPCN` are written; selection's verdict reaches `FILTER`
-> as `notPeriodic` or `tooManyAlleles`, with a loop that did not settle outranking both because
-> `assemble_record` asserts they cannot be carried together. **`lowDepth` is declared and never
-> written** — ng does not port the cohort-summed depth gate, and spec §6 says there is no depth
-> verdict on this path. **`REPCN` needed no wiring**: the encoder derives it from the record's
-> own bases, which leaves two producers of one integer, and a test now holds them to the same
-> floor division. Round-trip measured on a real run — HG002 at 30× over 200 Tier intervals, 78
-> records of which 17 are tracts: through `bcftools view` the tract fields are byte-identical,
-> and the only bytes that move are Float trailing zeros on every record, tract or not.
->
-> - **Earlier (2026-09-02):** **ng calls a repeat tract through its own model —
-> step C1 of the STR calling loop**
-> (step C1 of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
-> [report](doc/devel/reports/implementations/ng_ssr_loop_c1_2026-09-02.md)).
-> Both drivers now branch on the observation's kind: the SNP/indel arm is what it was, and a
-> repeat tract runs `select_ssr` → `shape_ssr_locus` → the same genotyper. The guard that set
-> every tract aside is gone and the count it fed holds bundles alone. **The design's one gap was
-> the join in front of evidence shaping**: `shape_ssr_locus` reads the STR generator's own
-> observation rows and the merge does not carry them, so they are rebuilt from its allele table
-> and its per-sample rows — exactly, because a repeat tract is one record per sample, and the
-> four counters a partial loses on the way through the merge are four the tract model does not
-> read. **A candidate carrying no whole motif copy stops the locus**, counted: 1 of 17,315 kept
-> candidates at 30× on HG002 and none at 50× or 300×. Five mutations run, five killed — the
-> fourth only because of an assertion added after predicting it would survive, which says *which
-> model* called the tract rather than that something did. **Next: C2, the record's motif, repeat
-> counts and FILTER.**
->
-> - **Earlier (2026-09-02):** **what the shipped repeat-tract selector offers
-> HG002, measured — step E2 and Checkpoint E**
-> (step E2 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md), which is
-> Milestone B of [the STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md);
-> [report](doc/devel/reports/implementations/ng_ssr_selection_e2_2026-09-02.md)).
-> HG002 alone over the whole 50,000-region Tier set at 30×, 50× and 300×, through ng's own
-> repeat catalog and the shipped `select_ssr`, scored against the phased truth set.
-> **Spec §4.1 reproduces and spec §5 does not**: both true repeat *lengths* of an
-> adjacent-length heterozygote are offered at 97.8% / 98.9% / 98.9% against the spec's 97–98%,
-> while both *spellings* of one length are offered at 70.1% at every depth against its 86.1%.
-> **Two thirds of that shortfall is upstream of selection** — of 387 missing true sequences at
-> 300×, 233 were never in the merge's allele table because no read carried them, 28 are tracts
-> the merge refused, 69 the support bar refused at a median 9 reads in 100 against a 10-in-100
-> bar, and 57 cleared the bar and were dropped by the per-sample top-`ploidy` rung cut. **The
-> candidates-per-tract figure was a denominator**: 1.615 counts only the tracts the merge built,
-> and over the whole catalog it is 1.415 at 300× and 1.422 at 30× and 50× — flat with depth,
-> where the built-only figure swings from 1.971 to 1.615. **The remaining question — what ng's
-> tract aligner assigns a read to when a substitution sits inside a repeat — belongs with the
-> STR generator, not with step 6.**
->
-> - **Earlier (2026-09-02):** **the existing caller's replaced rules switched back
-> in, and reproduced on 269 real tomato tracts — step E1**
-> (step E1 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
-> [report](doc/devel/reports/implementations/ng_ssr_selection_e1_2026-09-02.md)).
-> Three of the existing caller's rules are replaced on purpose, so a byte-identical parity test
-> has no failing state; what exists instead is a test-only re-implementation of those three —
-> clear-peak nomination, the cohort-summed depth gate, the same-length sibling bar — driving ng's
-> own fold and ladder, and required to reproduce the existing caller's candidate set. **The
-> comparison runs against that caller's own code rather than against frozen expectations**, so
-> nothing in the fixture can go stale. On the 51-accession tomato panel the two rules narrow 184
-> of 269 tracts differently, to 602 candidate sequences against 668 — the replacement stays the
-> cheaper one at three reads a position as well as at 300×. **Three of the five rules cannot be
-> seen on a 51-accession panel at all** — the depth gate, the three-accession recurrence term and
-> the periodicity gate each survived a deliberate mutation — so three further tests reach them:
-> the same tracts with one accession (where the depth gate then refuses every one of them), and
-> two hand-built loci.
->
-> - **Also on 2026-09-02, from the parallel plan:** **a run now produces repeat-tract observations, and
-> nothing scores them yet** — the whole of the
-> [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), all twelve steps,
-> merged to `main`. Every sample's walk emits tract observations beside its SNP/indel ones, the
-> merge unifies them across the cohort and each carries its motif, and the driver sets each one
-> aside and counts it until the calling loop's dispatch lands.
-> **⚠ Two things to carry forward.** Filling the slot exposed a defect the plan did not
-> anticipate and only a real genome could find: a run **aborted**, because the SNP/indel
-> generator lets an indel's footprint reach past the region it was walked for, and a generic
-> region's neighbour is always a typed one. A record now stops at its region's end (the owner's
-> ruling) — and **that costs 90 of 312 true indels on the GIAB benchmark, indel recall 0.9455 →
-> 0.6727, with SNPs unchanged at 2,008 true positives**. Merged on the owner's ruling rather
-> than held. Whether those calls come back once tracts are scored is the open question, and it
-> is not obvious that they do under allele concordance.
-> [Report](doc/devel/reports/ng_tract_slot_mixed_kind_2026-09-02.md).
->
-> - **Earlier (2026-09-02):** **ng's own repeat-tract candidate selection is built,
-> and proven on hand-built loci — Checkpoint D**
-> (step D3 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
-> [report](doc/devel/reports/implementations/ng_ssr_selection_d3_2026-09-02.md)).
-> Given a repeat tract's merged evidence, `select_ssr` now returns the tract sequences worth
-> calling over and, beside them, each one's repeat count — the integer the genotype prior indexes
-> its length spectrum by. **That integer has exactly one producer in the calling path**: the
-> ladder keys its rungs through it and the prior's slice is filled through it, so the two cannot
-> come to disagree about which length an allele sits at, which would put a candidate's prior mass
-> on the wrong length with nothing failing. **What the module does not return is the cohort's
-> commonest repeat length**, which the plan asks for: the prior stopped taking it in August, and
-> the periodicity grid — its last reader anywhere — was moved onto the reference tract's length
-> the same day, so it would be a field with no reader. The ladder still computes it.
-> **Still unrun in this plan: the differential on real data** — reproducing the existing caller's
-> candidate set on tomato with its three replaced rules switched in, and the measured HG002
-> improvement with them switched out.
->
-> - **Earlier (2026-09-02):** **ng can narrow a repeat tract end to end — and the
-> refusal rule's grid got moved onto the reference tract**
-> (step D2 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
-> [report](doc/devel/reports/implementations/ng_ssr_selection_d2_2026-09-02.md)).
-> A stretch the catalog called a repeat tract, whose reads sit at lengths the motif cannot explain,
-> is refused — the reference tract alone comes back and no other length is called there. **What
-> "cannot explain" is measured from was the decision**, and the design documents' own words turned
-> out to refuse real tracts: they anchor the grid at zero, and a tract with a length-changing
-> interruption late enough to clear the catalog's purity floor has a reference length that is not a
-> whole number of motif copies, so every read at its own reference length would count as
-> unexplained. Measured on the catalog's own trimming and purity code: 49 bases of an `AT` repeat
-> with one extra base 40 bases in, purity 0.816, admitted by the catalog and refused by the caller.
-> The grid is now anchored on the reference tract's length — a property of the locus rather than of
-> the reads, so it cannot move with depth — and both design documents carry a dated note saying so.
->
-> - **Earlier (2026-09-02):** **every spelling of a promoted repeat length now stands
-> on its own reads**
-> (step D1 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
-> [report](doc/devel/reports/implementations/ng_ssr_selection_d1_2026-09-02.md)).
-> A promoted length says the length is worth calling over; it does not say which sequences at that
-> length are. Each one now faces the same support bar the SNP/indel path asks, with no privileged
-> representative — where the existing STR caller promotes the length's best-supported sequence
-> unconditionally and makes any sibling clear three further gates, one of which demands **three
-> distinct samples with no cohort-size clamp**, so below three samples a second spelling can never
-> be promoted at all. The reference tract is admitted first and asked nothing.
->
-> - **Earlier (2026-09-02):** **nomination is complete — ng decides which repeat
-> lengths a tract is worth calling over**
-> (step C2 and Checkpoint C of
-> [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
-> [report](doc/devel/reports/implementations/ng_ssr_selection_c2_2026-09-02.md)).
-> A sample that resolved fewer lengths than it has copies also puts forward the lengths one repeat
-> either side of what it did resolve — a second allele hidden under the first by stutter — **but
-> only lengths some sample's reads actually reached**, which is what stops it offering a length
-> nothing in the run has seen. That rescue is the one part of the existing STR caller's nomination
-> ng keeps. The cohort's set is then the **union** of what each sample put forward, not a vote: an
-> allele one accession of sixty-three carries is still an allele, and the cost of a union is
-> candidates, which the cap exists to bound.
->
-> - **Earlier (2026-09-02):** **each sample now says which repeat lengths it carries**
-> (step C1 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
-> [report](doc/devel/reports/implementations/ng_ssr_selection_c1_2026-09-02.md)).
-> A sample puts a repeat length forward when its own reads at that length reach the same bar the
-> merge and the SNP/indel path already use — two reads, or a tenth of that sample's reads across
-> the tract, whichever is more — and the best two of those survive, three in a triploid region,
-> ties going to the shorter length. **The existing STR caller cannot make this call at the case
-> that matters most**: it requires a length's reads to exceed both neighbouring lengths by more
-> than three, so at a heterozygote whose two copies differ by one repeat neither length is a peak
-> and the sample resolves nothing. ng reads no neighbour, and a sample with 150 reads at ten
-> repeats and 150 at eleven now puts both forward — the case the spec measures the old rule losing
-> two tracts in three to.
->
-> - **Earlier (2026-09-02):** **the tract path's settings and the per-sample length
-> histogram — Milestone B of ng's own STR candidate selection is complete**
-> (step B2 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md);
-> [report](doc/devel/reports/implementations/ng_ssr_selection_b2_2026-09-02.md)).
-> The path's configuration has **no default ploidy** — a constant there would write a diploid
-> assumption where a polyploid region is in scope, and ploidy is the one thing that changes how
-> many rungs a sample promotes — and its cap is **32 tract sequences against the ordinary path's
-> six**. The histogram counts one sample's spanning reads onto the ladder's rungs, pooling its
-> read groups through the same helper the ordinary path's fold uses, so the two cannot come to
-> disagree about what "a sample's reads for this sequence" means. **One departure moves a number
-> the plan checks against**: the support share is the ordinary path's 10 in 100 where the spec
-> writes 5, because the spec's own reason for 5 is that one number should govern both paths and
-> the ordinary path's moved to 10 the same day. It costs 0.3 points of same-length recall at 300×
-> — 85.8% against 86.1% — and buys 0.04 fewer candidate sequences per tract; at 30× and below the
-> two are the same rule. **The mutation that decided the tests was the one predicted to survive**:
-> counting a rung by overwrite instead of by addition is invisible on every fixture except a
-> sample carrying two spellings of one length, which is the interrupted repeat this path exists to
-> offer both of.
->
-> - **Earlier (2026-09-02):** **the repeat ladder — the first piece of ng's own STR
-> candidate selection**
-> (step B1 of [the STR selection plan](doc/devel/ng/impl_plan/candidate_alleles_ssr.md), run on
-> the [STR loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md)'s branch;
-> [report](doc/devel/reports/implementations/ng_ssr_selection_b1_2026-09-02.md)).
-> A repeat tract's alleles are ordered where a SNP's are not, and the ladder is that ordering made
-> explicit: every sequence in the merge's table placed on the rung named by its length divided by
-> the motif's period, floored — the same integer the genotype prior must agree with — with the
-> rungs ascending and the cohort's most-supported rung recorded. Nomination, admission and the
-> periodicity test all read it. **It did not wait for the merge's `LocusKind` field**, which the
-> parallel observations plan delivered later the same day: the tract's motif is an argument, which
-> the architecture had already chosen as the shape that survives the merge fix, so the whole
-> selector was built and proven on hand-built loci before that field existed. **Five mutations run, and
-> the one that survived was the finding**: `build_ladder`'s own `clear()` could not fail, because
-> the fold's `reset_for` already empties the ladder — so it is now an assertion that the ladder is
-> empty, and appending two loci's sequences onto one ladder is a named panic instead of silence.
->
-> - **Earlier (2026-09-02):** **a cohort observation now states what kind of
-> ground it sits on** — step A1 of the
->
-> - **Earlier (2026-09-02):** **routing on ng's own floors cut the truth variants
-> this caller misses from 195 to 71, and the caller was not touched to do it** — step
-> B4, which completes Milestone B of the
-> [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
-> `ng-ssr-observations`. On the GIAB per-sample benchmark at 30×, pooled over the three samples:
-> **SNP recall 0.935 → 0.974, indel recall 0.818 → 0.946, for one extra false positive in
-> total**. At 50× it is 0.940 → 0.979 and 0.818 → 0.949. The loss report's upper bound was
-> ≈0.97 and ≈0.94 and the measurement lands on it. **ng's indel recall now exceeds the
-> production caller's here** — 0.946 against its 0.930 — while its SNP recall is still below,
-> 0.974 against 0.987. Same reads, same catalog file, same `--defaults` model; what changed is
-> which stretches of reference go to a locus generator that does not exist yet.
-> [Report](doc/devel/reports/ng_str_routing_recovery_2026-09-02.md).
->
-> - **Earlier (2026-09-02):** **the routing change is pinned from both sides** —
-> step B3 of the [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
-> `ng-ssr-observations`. The run's ground partition is what `ng_typed_region_dump` computes for
-> the same reference at the same floors, which is what every routing number quoted from that
-> tool rests on; and where the routing did not move, one cohort called at both settings of the
-> switch writes **identical VCFs byte for byte**. Tests only, no source change.
-> [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b3_2026-09-02.md).
->
-> - **Earlier still (2026-09-02):** **a run now writes down what it counted as a repeat**
-> — step B2 of the [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on
-> branch `ng-ssr-observations`. Since B1 made that a knob, two runs over the same reference and
-> the same catalog can analyse different ground, and nothing a run wrote said so. The parameters
-> file beside every VCF now carries a `[repeat_routing]` section — all eight thresholds, not
-> only the five with flags. A supplied file that recorded different ones gets a `note:` naming
-> the axis and **nothing is refused or demoted**: those numbers were fitted where they were
-> fitted, and only the ground they are applied to has moved (the owner's ruling, spec §2.3).
-> Settled in [`parameters_file.md`](doc/devel/ng/spec/parameters_file.md) §3.9 before it was
-> coded. [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b2_2026-09-02.md).
->
-> - **Earlier still (2026-09-02):** **a calling run now decides for itself what counts
-> as a repeat, and the answer is ng's measured floors rather than the catalog file's storage
-> floors** — step B1 of the
-> [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
-> `ng-ssr-observations`. Five flags say it (`--min-copies`, `--min-period`, `--max-period`,
-> `--max-str-len`, `--min-purity`), named as `type-regions` names them. The file is built below
-> every calling floor on purpose so a caller can put its line inside that gap by filtering; the
-> run asked with the file's own floors, so everything in it became an STR locus and went to a
-> generator that does not exist yet — on the human benchmark about seven times more reference
-> than ng's floors would route. A candidate the run turns down is generic sequence, not a hole,
-> and that is what the step's end-to-end test measures on a fixture built to straddle the gap.
-> **Not yet measured on real data**: the recovery this predicts is B4's.
-> [Impl report](doc/devel/reports/implementations/ng_ssr_observations_b1_2026-09-02.md).
->
-> - **Earlier still (2026-09-02):** **a cohort observation now states what kind of
-> ground it sits on, and Milestone A is on `main`** — step A1 of the
-> [observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md), on branch
-> `ng-ssr-observations`. The merge closed repeat-tract loci deliberately and then dropped the
-> tract's motif as it assembled the cohort's evidence, so nothing downstream could tell a
-> repeat tract from ordinary sequence; `ClosedLocus` and `CohortObservation` now carry the
-> kind, the closed one borrowing it and only a *built* locus paying the clone. Nothing reads
-> either field yet — the branch on the kind is the calling-loop plan's, and this plan's
-> Milestone A exists to unblock it.
-> [Impl report](doc/devel/reports/implementations/ng_ssr_observations_a1_2026-09-02.md).
->
-> - **Earlier (2026-09-02):** **the calling path's first performance review, and the run it
-> measured is 1.8× faster**
-> ([review](doc/devel/reports/reviews/perf_ng-calling_2026-09-02.md)).
-> Five category reviews over `call-from-alignments`, against two sampling profiles of the
-> real command on the 63-accession tomato cohort. **Three findings applied and measured, two
-> built and reverted for showing nothing.** The two that carried it: `src/main_exp.rs` never
-> declared a `#[global_allocator]`, so every calling run this project had ever timed used the
-> system allocator while every probe under `examples/` used mimalloc; and how much reference
-> one round of locus building covers was fixed at 500 bases — a number measured on the merge
-> reading pre-built `.psp` files, where a round does no reading — when a calling run's rounds
-> are where the cohort's reading is overlapped across threads. It is a flag now, and its
-> default comes from the cohort's size, because what costs memory is `width × samples`.
-> **The whole 8 Mb benchmark at 63 accessions: 212.0 s → 116.8 s on a quiet machine,
-> 320.7 s → 214.4 s on a loaded one, writing a byte-identical VCF, at 1,113 MB → 1,897 MB of
-> peak resident.** The review ranks what is left, largest first: decoding and calling never
-> overlap, and noodles re-MD5s the reference span of every CRAM slice it decodes.
->
-> - **Earlier (2026-09-02):** **record leasing built, measured, and reverted — Milestone G
-> closed by measurement rather than by assumption**
-> ([report](doc/devel/reports/implementations/ng_run_driver_g1_2026-09-02.md)).
-> The walk fills **48% of its records** — 18,424,572 of 38,384,881 draws, counted — into ones
-> the merge handed back rather than allocating them. The run gets no faster at one thread or
-> at eighteen and holds about **13% more memory**, for a mechanism that is inherent rather
-> than a defect: a refilled record's observation vector keeps the capacity it doubled to,
-> four, where the `collect` it replaced sized it to the one or two a locus at three reads a
-> position carries, over half a million records live in the merge's window.
-> **The milestone's premise had expired.** G was written on a cross-thread `free` taking a
-> locked path — the system allocator's lock, which the binary was taking only because of the
-> missing declaration above. Two of the numbers G was written around must not be quoted again
-> without naming the allocator they were measured under.
->
-> - **Earlier (2026-09-02):** **the STR path's two implementation plans are
-> written, for parallel execution on separate branches and worktrees**
-> ([observations plan](doc/devel/ng/impl_plan/run_ssr_observations.md);
-> [loop plan](doc/devel/ng/impl_plan/calling_loop_ssr.md)).
-> Each turns its same-named spec into milestones with checkpoints, oracles and checkboxes.
-> **The parallel-work contract is explicit**: branch `ng-ssr-observations` in worktree
-> `../pop_var_caller-ssr-observations` against branch `ng-ssr-calling-loop` in
-> `../pop_var_caller-ssr-calling-loop`, a file-ownership table shared by both plans, changes
-> crossing only through `main`, and two named seams owned by the observations plan — the
-> `CohortObservation.kind` field (its Milestone A, merged to `main` first because the loop
-> plan's selection reads it) and the driver's temporary set-aside guard (its Milestone C,
-> replaced by the loop plan's dispatch after that checkpoint merges).
-> **Observations plan**: A the merge kind (the seam, alone, merged at once); B routing from
-> user flags with parity + no-regression pins and the measured GIAB recovery against the
-> predicted ≈0.97/≈0.94; C the tract slot filled with the two accounting debts paid and E2
-> invariance re-proven. **Loop plan**: A–B execute the existing selection plan's milestones
-> by reference (one set of checkboxes, there); C the dispatch, the record's tract inputs and
-> the first measured tract recall against the stated bar; D the QUAL experiment ending in a
-> report the owner reads before `calling_quality_ssr.md` is written; E discovery built,
-> pinned, measured, its default set by the report.
-> **Two design closures made upstream first, not in the plans**: the CLI spelling resolved in
-> spec 1 §9 (flat flags, `type-regions`' names), and the old selection plan's Milestone A and
-> branch notes marked superseded so nothing is built twice.
->
-> - **Earlier (2026-09-02):** **the STR path's two closing specs are written —
-> observations through the run, and the calling loop's inventory**
-> ([spec 1](doc/devel/ng/spec/run_ssr_observations.md);
-> [spec 2](doc/devel/ng/spec/calling_loop_ssr.md)).
-> Both follow from the same session's loss attribution (next entry) and from three owner
-> rulings: **the catalog is a source of candidate STR loci only — an STR locus is what clears
-> the thresholds the user gives the caller**; the merge dropping the tract's motif is to be
-> fixed; and ng gets **its own STR caller — not a port** — on ng's likelihoods and priors.
-> **Spec 1** (`run_ssr_observations.md`) settles three changes in dependency order: the run
-> routes on user-set criteria defaulting to the measured calling floors (one line of plumbing —
-> `segments_over` already takes the criteria type; shippable first, recovers ~4 in 5 of the
-> lost truth variants with no new calling code); the walk's tract slot is filled with the
-> built `SsrGenerator` plus two accounting debts (the `read_filter_counts` override the F3
-> report booked, and the run report's wording surviving a filled slot); and `ClosedLocus`/
-> `CohortObservation` carry `LocusKind` — one field, not a second type (owner-confirmed).
-> Asking the catalog below its storage floors stays a refusal (built — those rows were never
-> written); **routing criteria that differ from a fitted parameters file's are the user's
-> decision, not a refusal** (owner's ruling) — the run records both sets and calls on, with
-> the per-cell warrants labelling what was scored from strata the fit never selected.
-> **Spec 2** (`calling_loop_ssr.md`) is the inventory with obligations: **the run already
-> instantiates the whole STR scoring machinery** — the genotyper is
-> `SummariseConditionLoop<StutterSubstitutionEmission, _>` (`call_from_alignments.rs:627`) and
-> the loop genotypes a tract end to end in its own tests given hand-supplied candidates
-> (`summarise_condition.rs:7623`) — so what is missing is exactly: `allele_candidates/ssr.rs`
-> (selection — the one unbuilt statistic, design settled in `candidate_alleles_ssr.md`), the
-> driver's branch on the observation's kind plus two unwired record inputs (`TractAnnotation`,
-> the tract FILTER verdicts), and the tract-QUAL decision — **which the owner ruled may only be
-> taken after an experiment observes the options** (spec 2 §3.3 states the risk: the fold's
-> QUAL leans entirely on the stutter model, and both the SNP path's depth inflation and
-> production's own bake-off say the naive answer has failed here before; the experiment's
-> arms, data, measurements and decision rule are specified, and it is parked in
-> `calling_bakeoffs.md`'s next-plans list until the STR loop's own plan carries it).
-> ⚑ `calling_quality.md` §8's "nothing in ng can score a tract yet" was half stale and now
-> carries a correction note. **STR allele discovery is in scope by the owner's ruling — built
-> and measured as part of this work** (spec 2 §3.5: how often it fires, alleles admitted and
-> surviving, and off-against-on accuracy on GIAB, the simulator and tomato at three reads; it
-> ships built-but-off and the measurement sets the default); the per-locus slippage re-fit
-> stays with the bake-offs plan; the fit-mode command is deferred future work by the owner's
-> ruling — no step of either spec or its plan — so first tract calls are `--defaults` with
-> `Defaulted` warrants.
->
-> - **Earlier (2026-09-02):** **where ng loses the variants inside repeats — two
-> faults, and the bigger one is routing, not the missing repeat caller**
-> ([report](doc/devel/reports/ng_str_path_losses_2026-09-02.md)).
-> Measured at 30× and 50× on the GIAB per-sample benchmark, three samples pooled: 2,061 truth
-> SNPs and 330 truth indels, each placed in the typed region a run routes it to.
-> **⚑ On ordinary ground ng is the best of the three at indels and level with production at
-> SNPs** — indel recall 0.982 at both depths against production's 0.945/0.953 and freebayes'
-> 0.931/0.938; SNPs 0.984/0.989 against production's 0.987/0.988. **On repeat-routed ground it
-> is 0.000, exactly, at both depths**, where production is 0.855–0.990. So the whole deficit is
-> the ground it never builds a locus over, and it is not an evidence problem: the repeat locus
-> generator already reads 18–29 length-pinning reads a tract at 30×.
-> **⚑ The run classifies its ground with the floors the catalog FILE was stored at**
-> (`[5,5,4,4,4,3]`, 500 bp cap — `call_from_alignments.rs:845`) rather than ng's own calling
-> floors (`[8,6,6,6,5,4]`, 100 bp, measured as where a repeat starts to stutter). That puts
-> **about seven times too much reference sequence on the unbuilt path** — 32,577 bases of
-> HG002's 572,037 against 4,930, and 6.6/7.3/7.0× across the three samples — and about four
-> and a half times too many truth variants: **81 of the 103 lost SNPs and 42 of the 55 lost
-> indels sit in sequence the calling floors would leave on the working path**, and 45 of the 55
-> lost indels are in *bundles* — clusters that only collide because sub-threshold repeats were
-> admitted. Re-routing alone, an upper bound, is 0.935 → ~0.97 on SNPs and 0.818 → ~0.94 on
-> indels at 30×.
-> **Two thirds of what is lost is not a repeat-length variant at all**: 103 of the 158 are SNPs
-> beside a repeat.
-> **The rest of the chain, stage by stage**: region typing built; the repeat locus generator
-> built and working; **its slot in a run's generator set unfilled** (`walker.rs:1615,1617`) —
-> this is where the loci are lost; `CohortObservation` carries no locus kind
-> (`cohort_merge/build.rs:974`), so no motif reaches selection; repeat candidate selection
-> unwritten (`allele_candidates/ssr.rs` does not exist); evidence shaping, read likelihood,
-> genotyping and VCF emission all built. **Bundles have no path at all** and carry most of the
-> loss. New probe: `examples/ng_typed_region_dump.rs`.
->
-> - **Earlier (2026-09-02):** **ng's calls scored against the production caller and
-> freebayes for the first time, on three benchmarks**
-> ([report](doc/devel/reports/ng_first_calling_benchmark_2026-09-02.md)).
-> ng runs with `--defaults` in every arm below — no command writes a fitted parameters file
-> yet — and **it does not build loci inside tandem repeats**, which is 6 bases in every 100 of
-> the GIAB confident regions and 5 in every 100 of the tomato benchmark.
-> **On human data, allele concordance against GIAB, three samples over seven depths, everything
-> gated at QUAL ≥ 30**: ng's SNP recall beats freebayes at every depth to 30× (0.664 against
-> 0.585 at 5×, 0.935 against 0.927 at 30×) and is level with it from 50× on; the production
-> caller is ahead of both by about five points from 30× (0.987). Indel recall puts ng last
-> everywhere and flat at 0.82 from 30×, where the other two reach 0.94 and 0.95. Precision is
-> within seven parts in a thousand across all three at every depth.
-> **⚑ The recall ceiling is the unbuilt repeat-tract path, and that is measured rather than
-> assumed.** Handing ng exactly the truth sites it missed at 300× and reading its own run
-> report: **of 128 missed SNPs it builds a locus at 11, and of 53 missed indel sites at 1.** On
-> the ground it does build it recovers 1,933 of the 1,944 truth SNPs within reach.
-> **⚑ Indel genotypes are wrong about one time in five** at sites ng found and the truth set
-> carries (78–81% concordant at 30×) — the production caller sits at the same place (77–80%)
-> and freebayes at one in fifty (95–99%). A defect shared with production, not introduced.
-> **The 63-accession tomato cohort ran**: one process, 295 s, 206,873 records at QUAL ≥ 30
-> against the production caller's 189,933 on the same samples and ground, sharing 178,464 ALT
-> alleles — 89.7% of production's set, 77.5% of ng's. **⚑ ng calls heterozygotes 23% more
-> often** (1.23 per kb per sample against 1.00, same accessions and ground), which on a largely
-> inbred panel is the direction to distrust; there is no truth set to settle it.
-> **freebayes has no tomato arm**: one process advances at about 33 kb of reference a minute on
-> 63 accessions, so the 8 Mb is a four-hour run, and splitting it twelve ways OOM-killed four
-> shards in the 16 GB container — every shard opens every CRAM. `run_freebayes.sh` now fails a
-> run with a dead shard instead of concatenating the survivors.
-> **Harness added**: `benchmarks/lib/run_ng.sh`, `benchmarks/giab/src/run_ng_per_sample.sh`,
-> `benchmarks/giab/src/ng_missed_sites_probe.sh`, ng wired into `compare_to_truth.sh` and into
-> the GIAB, shared and tomato dashboards.
->
-> - **Earlier (2026-09-01):** **the run driver's plan is finished — ng calls a cohort
-> from the command line, and Milestone G is dropped**
-> ([plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
-> [G2 report](doc/devel/reports/implementations/ng_run_driver_g2_2026-09-01.md)).
-> Milestones A–F are built, Checkpoint E is met, and **G — the one optimisation — is closed
-> unbuilt on the owner's ruling**: "we'll work on the performance in future sessions, the
-> critical objective right now is to have a first working variant caller to improve upon".
-> **G2 was run first and is what ruled G1 out.** The per-sample records a leasing walker would
-> recycle are **20.7% of a calling run's allocations at three accessions and 23.9% at
-> sixty-three** — flat across the range, so no cohort size rescues it. The 92% the milestone was
-> written around was measured on a probe whose denominator held the merge's own allocations
-> alone; a calling run decodes reads, and three quarters of the allocation is read sequences,
-> qualities and CIGARs that leasing never touches. Two further ceilings, both restated from
-> retracted or misread sources: the merge is **1.4–10%** of walk-plus-merge (the research note
-> withdrew its own 2.6–18% in §3), and the frees sit inside the 88% "drawing the readers" column
-> of E1's split, not the 0.8% eviction column. **No wall-clock figure exists and none was
-> claimed** — this machine cannot sample allocator time.
->
-> - **Earlier (2026-09-01):** **E2 of the run driver — concurrency invariance, and
-> Checkpoint E met**
-> (step E2 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
-> [report](doc/devel/reports/implementations/ng_run_driver_e2_2026-09-01.md)).
-> The record path's VCF is **byte-identical at pools of 1, 2, 4, 8 and 16, across two
-> building-region widths**, on a cohort whose loci differ in kind — a shared SNP, a private
-> SNP, an insertion, a called-but-not-written locus, a sample with only reference reads —
-> over ground with a repeat tract interleaved; every count a run report is built from agrees
-> too, and a second test ties it to the plan's named oracle, the serial `call_cohort`.
-> **⚑ What it reaches is measured, by three mutations to the parallel cover**: dropping a
-> sample from the sweep fails both new tests; inverting the reduction and stopping the fixpoint
-> after one iteration both pass, and are killed by six existing `cohort_merge` tests. So the
-> oracle has real power over *who* the sweep draws and none over *how far* it keeps drawing —
-> the fixture reference is a hundred identical bases, so no observation reaches past a building
-> region into another sample's and a cover that stops early loses nothing. The fixpoint stays
-> pinned a layer down; this step is the end-to-end tie. The one-position locus width is
-> asserted so that stays true.
-> **Spec §8's calling-scratch trap cannot fire yet** — nothing reorders the loci a scratch
-> sees — so the oracle predates the arrangement that would arm it.
-> **The review found one real hole and it is closed**: reversing the sample-name list before
-> it is paired with the walkers passed all 437 tests on the path the command runs, and was
-> killed by two tests on the oracle path — so a run report could have carried one sample's
-> read-drop rates under another sample's name, a wrong report rather than a crash. Each
-> sample's admitted reads are now asserted under that sample's own name. A determinism agent
-> failed to make the output differ in about 19,000 comparisons, including 810 whole runs to
-> VCF bytes and repeats under full CPU saturation.
->
-> - **Earlier (2026-09-01):** **E1 of the run driver — the calling run's cover goes
-> parallel across samples**
-> (step E1 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
-> [report](doc/devel/reports/implementations/ng_run_driver_e1_2026-09-01.md)).
-> **5,905 tests in the lib** — 3 added by this step, 17 by the pre-pass handover merge that
-> landed on main mid-session.
-> **Measured before built, at the cohort size the plan demanded.** On the whole 63-accession
-> tomato benchmark — both grounds, D3's 200 kb and the full 8 Mb — decoding reads is
-> **87.9–88.1% of `call_cohort` and runs on one thread**; genotyping, which the plan's pool of
-> callers would parallelise, is **5.3–5.9%**, so that pool's ceiling is 1.06× and it was not
-> built. `ObservationCache::cover_in_parallel` — built for the merge's parallel driver, same
-> fixpoint by any schedule — is what reaches the 88%, so the run's record path now covers each
-> building region with the samples swept concurrently, and eviction, assembly and genotyping
-> stay on the merge thread in genome order. Output identical at every thread count (spec §12.2;
-> pinned at the driver, and end to end at E2). **Measured on alternated arms, quiet machine, 8
-> threads: 1.8× on the 200 kb slice (12.1–12.3 s → 6.6–6.7 s calling) and 1.5× on the whole
-> 8 Mb benchmark (473.6 s → 308.8 s), at about half again the CPU** — the residue is per-cover
-> scheduling and cross-thread frees, which is Milestone G's territory.
-> **Getting a walker across a thread took three `Send` widenings** — two at sites whose docs
-> had reserved the change, one that had not: `GeneratorSlot`'s box gained `+ Send`; the pileup
-> generator's read-preparation cell traded `Rc<RefCell<_>>` for `Arc<Mutex<_>>`;
-> `WindowedRefSeq`'s window traded `RefCell` for `Mutex`, making it `Sync` (its doc had only
-> recorded the per-worker ownership that makes the swap safe). Ownership is unchanged — one
-> walker, one thread at a time — so every lock is uncontended; 19 now-dead
-> `arc_with_non_send_sync` waivers went with it (7 `#[expect]`, 12 `#[allow]`).
-> **`call_cohort` keeps the serial cover on purpose**: it is the oracle.
->
-> - **Earlier (2026-09-01):** **F3 — the run report: what the run refused, and why**
-> (step F3 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
-> [report](doc/devel/reports/implementations/ng_run_driver_f3_2026-09-01.md)).
-> **5,885 tests in the lib** — 17 added.
-> **Why a run has to say anything at all**: a VCF cannot distinguish ground the caller examined
-> and found nothing at from ground it never spoke for, which is `cohort_merge.md` §3.3's argument
-> for the failed-locus count being *counted* and not merely dropped. F1's implementation report records what
-> that costs — a run over a 60-base `AT` tract at 24 reads a sample **printed six zeros and
-> exited successfully**, indistinguishable from a clean genome.
-> **The report states every count as a share of a stated whole**: the analysed ground partitions
-> into what was called and the two kinds of what was not, each with its percentage. A refusal
-> that did not happen gets a count and no advice; one that did shows a handful of spans and what
-> to do about them, which is what §3.3 says a non-zero count should lead a reader to. A filter
-> reason that did not fire is not printed. And the groups of numbers that were **not** fitted are
-> named rather than counted — a run whose contamination is a compiled-in constant is a different
-> claim from one whose base-quality calibration is, and *five of seven* says neither.
-> **⛦ Three of the four things Checkpoints C and D recorded as owed to F3 are built**, because the
-> report cannot state its arithmetic without them.
-> **The per-read-group read-filter tallies**, recorded as needing "a change to the generator, not
-> an accessor" — right, and the change is the one the generator already makes for the aggregate
-> cursor counts, one axis finer: take the retiring cursor's at each contig boundary, sum the live
-> one in when asked. Until now a walk had lost every contig but its last, so a run over twelve
-> chromosomes reported the twelfth's drop rates as its own. Spec §8's finish-time tally, and its
-> named failure — drop rates under-report "silently, since every number stays plausible".
-> **`LocusCounts::regions_handled_bp`**, so the ground partitions in bases as it already did in
-> regions: typed regions differ in length by orders of magnitude, so half the regions can be a
-> twentieth of the ground.
-> **And contigs named rather than numbered** — `GenomeRegion`'s `Display` writes `contig 0:15-15`
-> because a region carries no reference; a run carries one, so `RunReport` names every span it
-> shows. The `Display` is unchanged.
-> **⚑ The fourth is not built**: `RunError::RecordNotWritten` still renders its locus through that
-> `Display`, so the one message whose job is to say how far a partial file got prints `contig 0`,
-> whose chromosome a reader cannot match against the VCF they hold — the coordinates are
-> 1-based, as everything in ng is. It is an error type
-> reached from a path with no contig table in hand.
-> **The report is lines, not printed output**, which is what makes it testable — F2's report
-> records its correctness pass finding the summary the one part of this command a mutation could
-> change with the whole suite green.
-> **⚑ The review found the report telling a false thing about the VCF.** A sample the caller could
-> not use was printed as "each still carries a genotype, from the prior alone" — what the *loop*
-> does, not what the *file* writes. `vcf_output.md` §7.1 no-calls a sample whose likelihoods are
-> flat, F1 implemented it, and every such sample is `./.`. It also found "no reads here"
-> collapsing three problems and false for two (a sample whose 720 reads were all duplicates was
-> called *no reads* four lines above the line saying it had 720); a share reading **200.0%**,
-> because a repeat tract is walked whole where a BED asks for part of it and the denominator was
-> the part; and advice naming `--max-cohort-locus-span`, **which was not a flag this command
-> accepted**. Both bounds are flags now, and the advice quotes the value in force beside each
-> refused span's length.
-> **⚑ And the step's hardest change had no test: five mutations along the read-filter chain
-> survived all 5,880.** Deleting the live sum alone means *every single-contig run reports zero
-> drops*, since the last cursor never retires. Two tests close it, one measured against the
-> mutation. The pass also found `other_sample` counted as a dropped read against its own field's
-> documentation — "counting it as a drop would make a shared file look like a low-quality one" —
-> which on a cohort sharing one multi-sample BAM would have dominated every sample's drop count.
-> **⚑ One thing recorded and not acted on, because it will bite whoever fills a tract slot**:
-> `SsrGenerator` keeps a reader and its own retired counts and does not override
-> `read_filter_counts`, so the moment a repeat-tract slot is filled the report under-reports by
-> whatever share of the ground is tracts, silently. Both slots are unfilled today.
->
-> - **Previously (2026-09-01):** **F2 — every run writes the parameters it used, beside
-> its VCF** (step F2 of
-> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
-> [report](doc/devel/reports/implementations/ng_run_driver_f2_2026-09-01.md)).
-> `call-from-alignments` now writes two files, and nothing turns the second off — spec §7's
-> unconditional rule, on the ground that the run most needing its parameters recorded is the one
-> whose operator did not think to ask. **5,868 tests in the lib** — 11 added.
-> **Almost all the machinery existed**; what F2 built is the wiring and the two decisions the
-> code's own documentation left to a run driver.
-> **The file is assembled before the first read is decoded and written after the last record.**
-> `ParametersFile::of_run` holds its checks in release and says a panic there would discard a
-> cohort's calling work — every one of them is a startup question, and nothing about the file
-> changes while the run calls. It goes to disk after the VCF is renamed into place, because §7's
-> three purposes are all about a run that finished.
-> **And a run may not write its parameters over the file it was handed.** §7 invites the
-> collision by telling a user to copy the file their run wrote and change a line, so
-> `--parameters calls.parameters.toml --output calls.vcf.gz` is the natural next command and
-> would destroy the edit. Refused before anything is read, with both directories resolved.
-> **§7's first purpose is now an assertion**: a defaults run's file reads back through the
-> binding door into the ploidy, the counts, every coefficient and every multiplier the run scored
-> with. `##parametersFile` is filled, by name rather than by path.
-> **The review drove it end to end** on a 4.6 kb reference with two 24× samples: the round trip
-> gave a byte-identical VCF *and* a byte-identical parameters file, and a hand-edited inbreeding
-> coefficient of 0.9 moved exactly one field — that sample's homozygote from **GQ 63 to GQ 76**.
-> **Four defects it found were fixed.** The summary's count claimed a fit this command never
-> runs (`call-from-alignments` fits nothing; the number is the file's own claim, and the label now
-> says so). **The parameters file was written mode `0600` beside a VCF at `0644`** — a colleague
-> on a shared directory could read the calls and not what they rest on, which is §7 defeated for
-> everyone but the launcher; `write_beside_the_vcf` now creates its temporary the way the VCF's
-> own sink does, so both take their mode from `umask`. A plain `--defaults` re-run destroyed a
-> hand-edited file in silence, and now says it is replacing one. And a run whose VCF was complete
-> exited 1 without naming the VCF, which a `set -e` pipeline would have thrown away.
-> **⚑ The correctness pass found one real defect and a large hole.** A `--parameters` run wrote a
-> file saying it had **no census**, against `of_run`'s explicit contract that a run writing its
-> parameters out again writes back the terms it read. Not a wrong number — a silent loss of
-> provenance one hop through direct mode: a psp fit's file re-run in direct mode keeps its
-> `fitted_here` warrants and loses its census, so a later psp run over the same cohort finds a
-> disagreement and demotes every number to `supplied`. That is the two-mode divergence spec §2.1
-> exists to prevent. The census now travels with the counts and the warrants.
-> **And nine of fourteen mutations survived for one reason: nothing called
-> `run_call_from_alignments`.** Deleting the refusal's call site, or naming `calls.vcf` in
-> `##parametersFile` on every VCF, or handing `of_run` an axis of the wrong length — which panics
-> at startup on any real run — all left the suite green. Two tests now drive the command itself
-> over a reference, a catalog and two samples built on disk. A symlinked `--parameters` also
-> slipped past the refusal (probed) and an absent one was refused with the wrong message; both
-> fixed.
-> **⚑ And the parameters file stated a rule about itself that it did not follow**: of
-> `fallback_length_spectrum_concentration` it said a run handed the file marks it `supplied`,
-> where the round trip writes back `defaulted`. **The code is right** — spec §2.1 settles that a
-> supplied file keeps its warrants, since demoting on every read is demoting on every direct-mode
-> run under another name and would break the two-mode oracle — so the sentence was corrected and
-> the golden `every_shape_as_written.toml` regenerated, its diff being that sentence alone.
->
-> - **Earlier (2026-09-01):** **F1 — `call-from-alignments`: a cohort of CRAMs in, a
-> VCF out** (step F1 of
-> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
-> [report](doc/devel/reports/implementations/ng_run_driver_f1_2026-09-01.md)). A person can now
-> run ng from the command line: reference, catalog, one `--alignment` per sample, an optional
-> BED, `--parameters` or `--defaults`, and an output VCF. **5,857 tests in the lib, 406 in
-> `ng::run`** — 39 added.
-> **The run gained a second entry point and `call_cohort` is unchanged.**
-> `call_cohort_handing_each_record_over` hands each finished `VcfRecord` over and keeps none,
-> which is what `arch/run_streaming.md` §3.4 already gave a caller; `call_cohort` keeps a
-> genome of called loci and stays the oracle every Milestone D test is written against. To build
-> a record without the locus outliving its evidence, `call_one_generic_locus` now takes a closure
-> and is handed the inference, the allele remapping and candidate selection's leftover while all
-> three are still in scope.
-> **The padding base is fetched from a reference accessor the run holds for its output** — minted
-> from the same `WalkReference` the walkers' come from, one byte per record with an empty allele,
-> releasing what it has passed. A base it cannot read stops the run naming the locus; the letter
-> `N` production's tract writer invents there is **not** ported (`vcf_output.md` §5).
-> **Not every called locus becomes a record** (`vcf_output.md` §9): one no written genotype
-> carries an alternative at establishes no variant and is counted rather than written.
-> **The command was driven end to end in review** — a 4.6 kb two-contig reference, its catalog,
-> two 24× samples in BAM and in CRAM — and `bcftools view`, `query`, `stats`,
-> `norm -f ref.fa -c e` and `index -t` all accept the output with exit 0, both planted genotypes
-> right, contigs named by name.
-> **⚑ The padding base is built and, on today's path, never fetched.** The generic mint anchors
-> its indels — an insertion's reference span is its anchor base alone, a deletion's is the anchor
-> plus the deleted run — so a deletion's alternative is one base and **no allele a generic locus
-> is called over is ever empty**. The empty allele `vcf_output.md` §5 was written for is the
-> repeat-tract path's full-tract deletion, which is unbuilt. It cannot be left out: `VcfRecord`
-> asserts a padding base is carried exactly when some allele is empty.
-> **⚑ A refused record stops the sink but not the walk.** `merge_cohort_handing_each_locus_over`
-> takes a sink that returns nothing, so the merge runs to the end of the analysed ground before
-> the error surfaces — on a cohort whose disk fills at chromosome 1, the rest of the genome
-> decoded for nothing. `arch/run_streaming.md` §3.4's *"iteration ends at the first `Err`"* is
-> corrected there. The fix is one `ControlFlow` through the merge's two drivers and its region
-> builder, which is the merge's interface and not F1's.
-> **The correctness pass ran 19 mutations and killed 14; every survivor was a missing test, not
-> wrong code**, and five tests were added to close them — the leftover's numbering against the
-> merge's covering list, `AD` summed over a sample's read groups, the contig-start branch being
-> exactly one position wide, and two `DP` sources. **And no fixture drove an indel through the
-> command**: discarding the fetched padding base passed all 5,845 tests. That is now an
-> insertion of two bases end to end — `REF A` against `ALT ACC`, no padding base — which turns
-> the claim above into an assertion. An insertion and not a deletion because the shared fixture
-> reference is a hundred `A`s, where left-alignment slides a deletion off the record (D1's
-> measurement).
-> **⚑ One reading of `vcf_output.md` §7 was taken and is the owner's to overturn.** `DP` now
-> includes `SampleSupport::reads_removed_as_evidence` — reads named at some of a sample's records
-> inside a locus and not at all of them. §7 says `DP` is "every read observation the sample had at
-> the locus, whether or not a written allele explains them", and those reads were observed there;
-> leaving them out understates the depth at exactly the loci spanning several of a sample's
-> records. The three sources of an unexplained read are disjoint by construction.
-> **Four defects the review found were fixed in the step**: `--ploidy` above 16 panicked after the
-> whole cohort was open (now refused first, naming the ceiling); `--ploidy` was silently discarded
-> when a parameters file was given (now refused if it disagrees, and the flag is an `Option` so a
-> default cannot contradict a file); `--output` naming a directory or a missing directory was
-> discovered after the run (now refused first); a contig longer than a `u32` was narrowed by an
-> `as` cast. **And the summary now prints how much ground the run could not speak for** — measured
-> in review, a run over a 60-base `AT` tract printed six zeros and exited successfully, which no
-> reader could tell from a clean genome.
-> **⚑ Two things are owed to the owner's documents.**
-> **`doc/devel/ng/spec/typed_regions_cli.md` still does not record the four subcommand names** —
-> `generate-psps`, `generate-census`, `call-from-psps`, `call-from-alignments`, agreed
-> 2026-08-28 and written nowhere. F1 built under them and pins the one it added; the spec is the
-> owner's to edit. And the correction below to `arch/candidate_alleles.md` §4.1 still stands.
-> **⚑ And one measurement worth the owner's eye, from the review's own fixture rather than a
-> benchmark**: on 24 reads a sample a clean homozygous-reference call (`AD 24,0`) came back at
-> **GQ 74** beside a heterozygote (`AD 12,12`) at **GQ 99**, and at `--ploidy 4` the same reads
-> gave GQ 9, 13 and 29 — so a routine `GQ>=20` filter would discard nearly every tetraploid call.
->
-> - **Earlier (2026-09-01):** **A locus nobody can be called at is counted, not
-> fatal** — the owner's ruling at Checkpoint D
-> ([report](doc/devel/reports/implementations/ng_locus_with_nobody_to_call_2026-09-01.md)).
-> The allele cap cuts a sequence rather than refusing a locus, on the ground that most samples
-> stay callable; where it cuts one **every** covering sample had reads on, none of them is — and
-> that hit an assertion, so one hard locus ended a whole cohort's run. D1's wiring is what made
-> it reachable from real data. Now `LocusEvidence::callable_sample_count` is asked before a
-> locus is offered to a genotyper and `CalledCohort::loci_with_nobody_to_call` carries the
-> ground of those loci so a run says **where**. 376 tests in `ng::run`, 5,816 in the lib.
-> **The fixture reaches the old panic**: removing the guard makes it fire, so the case is
-> provoked rather than described. **On real data it does not fire** — six tomato accessions over
-> 400 kb, 8,411 loci called, **0** where the cap left nobody callable, printed on every run.
-> **⚑ A correction is owed to `doc/devel/ng/arch/candidate_alleles.md` §4.1**, which is the
-> owner's to make: its ruling covers *most samples stay callable* and not the case where none
-> does, which the code now answers.
-> **⛦ And Milestone E is deferred** (owner: *"we just want a working caller, don't fret too much
-> about the parallel performance, we'll improve it later"*). Its two arrangements parallelise
-> 2.2–4.9% of `call_cohort` while the 94–97% that remains is one thread whose parallel form
-> already exists. **The next milestone is F, the command.**
->
-> - **Earlier (2026-09-01):** **Milestone D of the run driver — ng calls genotypes
-> from CRAM files**, at Checkpoint D (steps D1–D3 of
-> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
-> [D3's report](doc/devel/reports/implementations/ng_run_driver_d3_2026-09-01.md)). Six tomato
-> accessions over 400 kb of SL4.0, through the real repeat catalog: **8,411 loci called in 4.8
-> seconds**, the assembly check comparing 78 of 78 contig checksums against real CRAM headers for
-> the first time, and 6.0% of the analysed ground counted as repeat tracts this caller has not
-> built yet rather than called wrongly.
-> **⚑ The measurement Milestone E was waiting for contradicts its premise.** Decoding reads is
-> **94–97% of `call_cohort`**; assembling and genotyping together are 2.2% at three samples and
-> 4.9% at twenty-four — and those two are exactly what Milestone E as written parallelises. **The
-> 94–97% is one thread**: a calling run drives `ObservationCache::cover`, while
-> `cover_in_parallel`, which sweeps the cohort's samples concurrently, exists and is reached only
-> by the merge's parallel driver. Measured at three samples, 3.199 s of user CPU against 3.313 s
-> elapsed, on a nine-thread container.
-> **⛦ Two rates are stable and the share is not**: reading about 5 ms per compressed megabyte,
-> calling about 1 µs per locus per sample, both flat across 3 to 24 samples. Calling's share grows
-> only because more accessions segregate more sites (3,291 loci to 8,825), and that curve must
-> flatten. A first draft fitted exponents and claimed "a fifth at a thousand samples"; the review
-> showed three defensible models give a tenth, a fifth and a third, so **no extrapolation from
-> these cohorts is worth acting on** — the answer is to run the probe at a thousand.
-> **⛦ And 2.7 seconds of every run falls before the first read is decoded** — the 795 MB
-> reference, the catalog, the segments — constant in cohort and ground, and more than half of what
-> a person waits for at the probe's defaults.
->
-> - **Previously (2026-09-01):** **D2 of the run driver — the sample-order join**
-> (step D2 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
-> [report](doc/devel/reports/implementations/ng_run_driver_d2_2026-09-01.md)). Tests and fixtures
-> only: the join was built with the calling loop, and what it lacked was a cohort that could tell
-> a correct join from a wrong one. 373 tests in `ng::run`, 5,813 in the lib.
-> **⛦ The first draft separated two of the three numberings and the review caught it.** A
-> sample's scratch row differs from its run index only where some sample is **uncallable**, which
-> happens only where the allele cap cuts a sequence that sample's own reads earned — and with one
-> alternative against a cap of six, nothing was cut, so a third of the plan's oracle was
-> untested. The cohort is now four samples at a cap of one alternative.
-> **⛦ That fixture caught two defects nothing else in the crate could see**: the calling loop
-> reading a sample's coefficient by its scratch row rather than its run sample, and the per-sample
-> evidence views emitted in reverse run order. Both survive on any cohort where every sample is
-> callable, which every fixture before this one was.
-> **⛦ And a claim of the step's own was wrong by about five orders of magnitude** — that two reads
-> each way leave a heterozygote and a homozygote "almost equally loudly", so the prior decides. At
-> Q30 the reads decide the genotype and the prior moves only the confidence: `0/1` at 55.4 Phred
-> outbred against `0/1` at 33.4 nearly fully inbred.
-> **⚑ The plan's oracle wording is owed a ruling**: it asks that swapping two samples change a
-> called *genotype*, and at real depth it changes the *call*. Making the genotype flip would need
-> evidence contrived to be ambiguous.
->
-> - **Previously (2026-09-01):** **D1 of the run driver — calling, joined to the merge**
-> (step D1 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
-> [report](doc/devel/reports/implementations/ng_run_driver_d1_2026-09-01.md)).
-> `AlignedFilesVariantCaller::call_cohort` walks every sample's alignment files at the merge
-> frontier and genotypes each cohort locus **where it is built** — the three-call chain arch §3.2
-> names had no caller anywhere in the tree before this. 369 tests in `ng::run`, 5,809 in the lib.
-> **Both of Checkpoint C's open questions landed here, as the owner ruled**: the walk's tallies and
-> the assembly-check outcome now survive the merge, and a run can set its locus generator's five
-> settings, checked at `open`. **⛦ The read-filter tallies are still unreachable, and not for want
-> of an accessor** — each contig boundary drops the retiring cursor's read-group counts, so a walk
-> has already lost every contig but its last; F3's.
-> **⛦ The mutation pass found five ways to be wrong with the suite green, and all five now die**:
-> the run's candidate selection, its calling-loop settings, its merge parameters and its generator
-> settings could each be replaced by the shipped defaults inside `call_cohort` — an operator's own
-> thresholds silently ignored — and every sample's walk tallies could be permuted across samples.
-> All five survived for one reason: the fixtures made the distinctions coincide. **⛦ One mutation
-> is still alive and the fixture reference is why** — a run's refused-span list can be emptied
-> undetected, because pinning it needs a locus wider than one base and this module's reference is a
-> hundred `A`s, so every deletion in it is inside one homopolymer (measured: a five-base deletion
-> produces no cohort locus at all, at either bound).
-> **⛦ And nine claims in the new prose were wrong**, the worst being this step's own: a
-> `positions_short_of_cap` of zero was written as *the run's depth settings shaped no evidence*,
-> and it means only that the **read-hold ceiling** cost no coverage — a run can have zero there and
-> millions of per-position truncations.
-> **⚑ One thing waits on the owner, and D3 is where it bites:** a locus where the allele cap has
-> ruled every covering sample uncallable aborts the run with a panic, and `call_cohort` is the
-> first thing that can reach it from real data. Spec §4.1's ruling does not cover the case. It is
-> unmeasured; D3 is the first run that can answer it with a number.
->
-> - **Previously (2026-08-31):** **Milestone C of the run driver — alignment files to
-> cohort loci**, at Checkpoint C (steps C1 and C2 of
-> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
-> [report](doc/devel/reports/implementations/ng_run_driver_c_2026-08-31.md)).
-> `AlignedFilesVariantCaller::merge_cohort` drives the single-threaded merge over one walker per
-> sample; until now the merge had only ever been fed vectors. Checked against two of its own
-> oracles — the same observations fed from memory, and the undivided `merge_cohort_serially`.
-> 361 tests in `ng::run`, 5,801 in the lib.
-> **⚑ The descriptor refusal was wrong in the unsafe direction, and this milestone is what made it
-> so.** A locus generator holds two reference accessors per sample on top of what its files cost —
-> one for the walk's REF fetches, one for the read preparer, each opening a FASTA reader it keeps.
-> Re-measured on the 63 tomato accessions: a walking run holds **253** descriptors for 63 files
-> where the refusal budgeted **158**, so a run could pass the check and die at `EMFILE`, which is
-> the failure the check exists to prevent. The arithmetic now has a per-file and a per-sample term.
-> **⛦ And the fixture the run's tests were built on modelled a reference shape no run holds** — a
-> bare `.fai` read with no `fasta_path`, so it could be checked against a cohort's headers and
-> never read from. **⛦ The mutation pass left six survivors and five now die**: nothing pinned that
-> the run's own merge parameters were used at all (a user's threshold could have been silently
-> ignored), nothing pinned the refusal ordering, and the two kinds of refusal — *not built yet* and
-> *never will be* — were interchangeable. The sixth is not a defect: swapping the analysed regions
-> for the segments changes no answer, by design, and costs 34× the work; recorded rather than
-> papered over. **⛦ And a test asserted an invariant the merge does not hold** — one row per sample
-> per locus, where a sample with no observations over a locus gets no row at all.
-> **⚑ Two things wait on the owner**: `merge_cohort` drops every walker's tallies and the
-> assembly-check outcome the run report will need, and a run still cannot set its locus generator's
-> settings, the depth caps among them.
->
-> - **Previously (2026-08-31):** **Milestone B of the run driver — a walker is
-> indistinguishable from any other source**, at Checkpoint B (steps B1 and B2 of
-> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
-> [report](doc/devel/reports/implementations/ng_run_driver_b2_2026-08-31.md)). B2 is the
-> differential B1 could not run: the real generic locus generator over a real indexed BAM, walked
-> twice — once through the iterator that existed before this step, once through the walker behind
-> the merge's trait — and compared whole. 62 loci over four generic segments, a satellite, a gap,
-> a contig change and one analysed-but-empty stretch. **⚑ Spec §12's fourth oracle is not
-> literally true and that is the owner's to settle**: it asks that a segment walked alone emit
-> *exactly* what the same span emits inside a whole walk, and everything is equal but the chain
-> ids — the type's own documentation says "an id names a read within one walk", so no walk-scoped
-> id can satisfy "exactly". The test compares the grouping instead. **The same question is owed to
-> §12's first oracle**, byte-identical psps across worker counts, once chain ids reach a file.
-> **⛦ The review found the differential comparing the walker with itself** — the
-> segment-independence test drew both arms through the walker, so three mutations that mangled
-> every yielded observation passed it — **and walking the one segment where nothing is carried
-> over**, since the generator mints a fresh cursor at every contig change; the case with carried
-> state is a later segment on a contig already entered. Both fixed. 6 tests; `ng::run` at 349.
->
-> - **Previously (2026-08-31):** **B1 of the run driver — one sample's alignment files
-> behind the cohort merge's source interface** (step B1 of
-> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
-> [report](doc/devel/reports/implementations/ng_run_driver_b1_2026-08-31.md)).
-> `AlignmentFilesWalker` wraps the existing `SampleLocusObservationsIterator` and adds the two
-> things the trait asks for that a plain iterator cannot give: a failure naming the sample and how
-> far the walk got (`RunError::SourceFailed`), and an implementation of the reuse hook that a later
-> step can specialise — the blanket implementation covers every iterator, so it can never be
-> specialised for one. The spare is taken and dropped, which the trait permits. 14 tests;
-> `ng::run` at 343. **⛦ The mutation pass killed 20 of 21 defects, and the survivor is the one
-> this step cannot pin**: a walker that stashed every offered record for ever passes all fourteen
-> tests, because what they assert is that the spare does not come back out *as an observation*,
-> not that it is released. There is no pool to count while the walker drops, so the test is
-> recorded against G1, where one first exists. **⛦ And the reviews found three wrong claims in the
-> prose**, one of them wrong three times over: the justification for printing contigs by index said
-> the names were unreachable (a run's `Segmentation` carries the catalog's contig table), that a
-> lookup would cost a table per walker (one `&Segmentation` is shared by all of them), and that
-> `contig 0:13` is ng's usual spelling (ng prints a *position* as `contig N position P`; that form
-> is a *region*). **⚑ One finding was the owner's and landed on C1; they ruled the same day and it
-> is applied.** `RunSegments` borrowed the segmentation while `AlignedFilesVariantCaller` owned
-> one, so a run holding a walker per sample beside it would have been a self-referential struct.
-> The segments are shared now — `Arc<Segmentation>` in both, one reference count a sample rather
-> than one copy of a genome-sized list — and the walker type carries no lifetime, which is what
-> lets a run store it. `Arc` and not `Rc`, because what makes a walker `!Send` is the generator
-> set's unbounded trait object one layer down, and an `Rc` would add a second blocker to remove if
-> that one is ever lifted.
->
-> - **Previously (2026-08-31):** **Milestone A of the run driver — the object a
-> direct-mode run is, constructed and checked** (steps A1 and A2 of
-> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md)), at Checkpoint A.
-> **⛦ A2 found two of its three planned checks already answered elsewhere.** The sample-name
-> match cannot be done at the caller at all — the assembled parameters carry no names, and a
-> supplied file's names are matched at that file's own door — so what is left is an arity check.
-> And the contig agreement is the open gate's, which compares names, lengths, order **and the
-> checksums whenever the reference carries them**; what A2 adds covers the one case it cannot, a
-> reference read from a `.fai`, whose checksums exist only once the background FASTA read has
-> finished. **Both things that waited on the owner are now settled (rulings of 2026-08-31).** The
-> empty-cohort refusal stays, and the command line will refuse the same shape again when F1 lands
-> — fail as early as a run can be known to be wrong. And the descriptor count was **measured
-> rather than argued**: `examples/ng_open_cohort_descriptors.rs` opens the 63 tomato accessions
-> and counts `/proc/self/fd`. **The constant of 2 a file is right and spec §7.1a's reason for it
-> is not.** Sixty-three open alignment files cost **one** descriptor between them — an index is
-> parsed into memory and an open `AlignmentFile` holds no handle — so "a CRAM and its index are
-> two descriptors each" describes neither half. What costs 2 a file is a **cursor**: one for the
-> file's reader and one for the per-file reference accessor, which opens the FASTA (63 cursors
-> took the process from 4 descriptors to 130, exactly 2.00 a file). A run holds one cursor per
-> file for the whole walk, so the arithmetic the refusal prints is sound; only its explanation
-> was wrong, and `callers.rs` now says what was counted. **The spec is not edited** — this is the
-> correction recorded against §7.1a. Milestone E can still move it: nobody has counted what
-> several callers in flight open. **⛦ And A2's own review found a gap in its remit**: nothing checked that the repeat
-> catalog was built on the run's reference, and the catalog's own check is blind on the `.fai`
-> path — so a catalog from another build of the same assembly would have routed every repeat
-> tract to the wrong position, genome-wide, silently. Refused now. 40 tests across the two files;
-> `ng::run` at 329 passing. **Checkpoint A's other half is now evidence rather than an
-> expectation**: the fixtures top out at three samples, and the same probe opens the real
-> 63-accession tomato cohort — 63 files, 100,171 segments over 80 BED regions, and an assembly
-> check that compared **819 of 819** contig checksums and found every one agreeing. The catalog
-> comes from an explicit path rather than the sibling convention, because the reference lives on
-> the container's read-only `$HOME/genomes` mount and no catalog can be written beside it.
->
-> - **Previously (2026-08-31):** **the object a direct-mode run is** — step A1 of
-> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md). Every sample's
-> alignment files open at once, the ground to analyse, the numbers to call with; no iteration
-> yet. **The architecture document had to be amended before any code could be written**: it
-> still specified the pool of per-segment workers that spec §3.5 retired, and two later
-> documents had recorded that divergence on their own pages while nobody came back to the
-> original. **⛦ The review then found a test suite that could not fail** — six deliberate defects
-> survived it, every one the same shape, a fixture that passed a default and asserted the default
-> back. The worst of them raised neither a test failure nor a compiler warning: a run would have
-> called every position under the shipped thresholds while a person read their own numbers off
-> the command line. Every fixture now differs from its type's default and all seven re-injected
-> defects are caught. **⛦ And a doc comment carried a wrong number** — 11–15 MiB of live heap is
-> per open alignment *file*, not per sample, so a cohort sequenced across lanes costs a multiple
-> of what it claimed. **The one decision A1 makes** is that the run's sample order is the
-> read-group table's first-seen order, defined in exactly one place, which is what step D2 exists
-> to protect. 19 tests; `ng::run` at 308 passing.
->
-> - **Previously (2026-08-30):** **ng writes a VCF, and bcftools reads it** (Milestones
-> A, B and C of [the VCF module's plan](doc/devel/ng/impl_plan/vcf_output.md), merged to `main`;
-> the format is settled in [vcf_output.md](doc/devel/ng/spec/vcf_output.md), written the same
-> day). `src/ng/vcf/` turns a called locus into a record, a record into a line, and a stream of
-> them into a file that appears whole or not at all. **The gate is an outside tool rather than
-> our own tests**: `bcftools 1.16` reads a fixture holding every shape the format can write —
-> both locus kinds interleaved, a multi-allelic site, both padding cases, a refused locus, an
-> unconverged one, no-calls beside calls — plain and bgzf, exit zero and nothing on stderr;
-> `view -i 'STR=1'` and `-e` partition it exactly; and **the file indexes, with a region query
-> returning both records of the one legal position tie**, which is the only way that rule could
-> be checked at all. Reproduce with `scripts/ng_vcf_parser_gate.sh`.
-> **⛦ The plan told the implementation to compute `AF` wrongly and the check it demanded caught
-> it**: normalising expected copies over `AN` makes frequencies sum to more than one, because the
-> loop's copies span every sample it scored while `AN` counts only samples the file calls — and
-> since the no-call ruling those differ. **⛦ And the no-call ruling itself is settled and
-> recorded** ([spec §7.1](doc/devel/ng/spec/vcf_output.md)): a sample is no-called when its own
-> **likelihood** is flat, never on its posterior, because a read-less sample is scored from the
-> prior alone and at a low-frequency locus that posterior is sharply peaked. A survey of
-> freebayes, bcftools, GATK, HipSTR, GangSTR and dumpSTR found **nobody gates a genotype on the
-> best-versus-next-best margin** — HipSTR publishes exactly that margin as `GLDIFF` and nothing
-> thresholds it — and whether ng should add a `GQ` floor is left open as §14 Q4, leaning no.
-> **Milestone D is half-landed against an assumed interface** (owner's call, while the streaming
-> work runs): the mapper is built and the one input it cannot recover downstream — whether a
-> sample's reads said anything — is named at its field. 132 tests in the module.
->
-> - **Previously (2026-08-30):** **what one line of ng's VCF carries** (step A1 of
-> [the VCF module's plan](doc/devel/ng/impl_plan/vcf_output.md), branch `ng-vcf-output`).
-> ng writes **one** file where production writes two — SNP/indel loci and repeat tracts
-> interleaved, a tract record marked by an `STR` flag beside `RU` and `PERIOD` — and this step
-> builds the type a record becomes once its locus and its reads have been released. **The
-> review found two columns of the format with nowhere to live, and both would have stopped the
-> next milestone rather than produced a wrong number.** `AF` must be the calling loop's fitted
-> frequency and the loop's own doc forbids re-deriving it from called genotypes, so a record
-> without it leaves the encoder a choice between omitting a required field and writing a quietly
-> wrong one. And the anchor rule pads an empty allele with a reference base that lies *outside*
-> the record's span, which nothing downstream holds — `ReferenceInfo` carries geometry and
-> digests, not bases — so the encoder could not have written a full-tract deletion at all except
-> by inventing production's `N`, which the spec does not port. Both now travel on the record.
-> **⛦ And the no-call had to become the module's own**: the calling loop's `Missing` means one
-> narrow thing — candidate selection cut an allele this sample's reads had earned, on the
-> SNP/indel path only — while a sample with *no reads at all* is deliberately **called** from the
-> prior. The file's `./.` is wider than that, and a refused tract locus writes every sample as
-> one, which the loop's type refuses to represent. **Which called samples become `./.` is not
-> settled** and is put to the owner at Checkpoint A. 31 tests; thirteen refusals, each pinned by
-> a test carrying that refusal's own message.
->
-> - **Previously (2026-08-30):** **the psp store is on `main`** — 116 commits, and
-> `main`'s own 71 merged into it first. The store is what one sample's reads showed at every
-> position a run analysed, written once and read back by the cohort gather; nothing in the run
-> writes or reads one yet, and that wiring waits for the caller to work end to end from BAM to
-> VCF. **One rename did not merge on its own**: this branch made the summed per-read log-error a
-> whole number of 1/4,096ths of a nat rather than an `f64`, so a run reading observations from
-> memory and one reading them back from a file agree on a number rather than on a tolerance — and
-> six fixtures in code `main` wrote meanwhile still built one from a float. All six are test
-> fixtures; no production code on either side needed changing. ⚠ **The merge commit itself does
-> not compile**: the resolved files were never staged, and the commit after it is the other half.
-> Before the merge, the four defects the milestone reviews had recorded and left were fixed — a
-> walk whose predicate panicked could report a sound file corrupt, "write a block and give it its
-> index entry" existed twice, a refusal said *manifest* for a failure in the header's writer
-> parameters, and a failed trailer replacement could not tell *nothing happened* from *the file is
-> torn*. `ng::psp` is **402 tests**, the library 4,936, and `clippy --all-targets --all-features
-> -D warnings` is clean.
->
-> - **Previously (2026-08-30):** **the documents said an open psp costs tens of kilobytes;
-> it costs 480 kB, and three quarters of that is the reference's contig list** (branch
-> `ng-psp-encoding`, status `implemented`). [`run_streaming.md`](doc/devel/ng/spec/run_streaming.md)
-> §7.2 was headed *an open psp costs tens of kilobytes, not megabytes* and cited again in §5.3; it
-> was written before anything had been measured. It now carries the 500 kB budget and the measured
-> split — **357 kB for the open file before a block is touched, 123 kB for the cursor walking it**
-> — on a human reference, against **7 kB and 101 kB** on tomato. The cursor costs near enough the
-> same on corpora **27× apart in depth**, which is the *does not grow with the depth* half of the
-> requirement; the header is the whole of the difference, at about **138 bytes a contig**, so 2,580
-> contigs cost 357 kB where 13 cost 7 kB. **§7.1's arithmetic moved with it**: it estimated 26 kB a
-> sample and priced three thousand samples at look-ahead 8 as 620 MB, and that run is **4.0 GB** —
-> the look-ahead is the term that decides whether psp mode fits, at **0.37 GB a unit**. §10 gains
-> the lever the owner routed to the run: one contig list per run rather than one per open sample,
-> worth 357 kB of the 480. **The psp format does not change.**
-> [`module_layout.md`](doc/devel/ng/arch/module_layout.md) said ng had no `.psp`; its tree now has
-> `psp/` and a section says what the store does, what it costs, and that nothing in `pipeline.rs`
-> writes or reads one yet. **Four further documents quoted the old sentence and now follow it** —
-> the psp format spec (goal 1, §4.4, §5.2, §7 and its deferred list), the record-encoding spec in
-> three places, the encoding-experiments plan and the psp store's own plan. Separately, the psp
-> architecture doc's question on what the record head is worth at depth is marked **narrowed**
-> rather than open — 2.40× to 3.11×, every figure an upper bound until a store written from ng's
-> own locus generation exists.
->
-> - **Previously (2026-08-30):** **the head-driven skip is worth about 3×, and depth costs
-> it 5 %, not the collapse the architecture feared** (step H5 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). arch §7 asked how much of the prototype's 2.06× survives at depth, because the
-> chain-id changes ride in the head — 0.432 bytes a position at 11.4 reads, **6.42 at 293** — so
-> the head grows while the body the skip avoids does not. Confirmed in the encoder: the changes sit
-> **after** `body_bytes`, so a skipping reader never avoids them. Measured on the spec's own two
-> corners, checked rather than taken from a filename — **10.3 and 280.0 reads a record**, against
-> the spec's 11.4 and 293:
->
-> | keeping one record in | tomato, 10.3 reads | HG002, 280.0 reads | depth costs |
-> |---|---:|---:|---:|
-> | 10 | 2.513× | 2.399× | −4.5 % |
-> | 100 | 3.038× | 2.869× | −5.6 % |
-> | 1,000 | 3.111× | 2.927× | −5.9 % |
->
-> Every reading is above the prototype's 2.06×, and the flat end says **decoding heads is about a
-> third of a full walk** at both depths. ⚠ **These corpora cannot close arch §7, and the reason is
-> exact**: they are built from a production `.psp`, which names about **3.4 %** of the reads ng
-> will name, so these heads are far lighter than ng's. The bias is one-directional — a bigger head
-> makes the skip worth *less*, never more — so **every figure above is an upper bound**, and the
-> question stays open until an ng-written store exists. **No projection is offered**, because
-> turning the spec's 6.42 bytes into a predicted ratio would need the head's decode *time*, and an
-> arithmetic guess would read like a measurement. ⚠ **The number moved under me twice before it
-> settled**: three timing rounds gave an 8 % spread where seven give 3 %, and running the two arms
-> in separate phases rather than interleaved shifted the centre from 2.84 to 3.25 under a
-> background build. Both are designed out of the harness and written into its own doc.
-> [H5](doc/devel/reports/implementations/ng_psp_h5_2026-08-30.md).
->
-> - **Previously (2026-08-30):** **H3 reviewed — the precondition that says the sweep can
-> tell a coordinate cut from a shard cut was itself the thing that broke quietly** (step H3 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `fixes-applied`). Nine mutations across three checklists and the numbers pass; **one survived**.
-> The mid-block precondition divided by a literal `1_000` while the grid was supplied separately as
-> `a_header(1_000)`, and nothing made the two agree: writing the fixture on a **40 bp** grid gives
-> every record its own block — 1,000 instead of 40 — so **every** shard boundary lands on a grid
-> line, the exact condition the assertion exists to refuse, **and the test still passed**.
-> Reproduced here first; one named constant now drives both ends. **The second Major is a
-> format-level finding, and it is raised rather than taken**: spec §7's byte-identity holds only
-> while every timestamp renders to the same width, and nothing enforces that. `created` is a
-> `toml::value::Datetime`, so `…T11:22:33.5Z` is two characters wider than `…T00:00:00Z`; measured,
-> the file grows by exactly two bytes and **every offset past the header moves**. ng has no
-> production header writer yet, and a future `pileup` using `to_rfc3339` — which prints sub-second
-> digits only when non-zero — would give stamps of varying width run to run. A test pins that limit
-> now; **normalising the stamp, refusing it, or amending §7 are all the owner's call**. ⚠ **Two of
-> my own claims were wrong**: "three mutations, three killed" over a table holding two, and "no
-> mutation kills the file comparison and not one of the others" — disproved by a writer
-> nondeterminism gated at sixteen blocks, which F3's eight-block fixture passes and this one's forty
-> catches.
-> [H3](doc/devel/reports/implementations/ng_psp_h3_2026-08-30.md);
-> [the review](tmp/review_2026-08-30_ng-psp-h3/findings.md).
->
-> - **Previously (2026-08-30):** **an open sample costs 480 kB against a 500 kB budget,
-> and three quarters of it is not the reader** (step H4 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). Measured at 1, 2, 4, 8, 16, 32, 62, 125, 250, 500, 1,000 and **5,000** open
-> samples, one process each because `VmHWM` is a high-water mark and two counts in one process
-> would both report the larger — the slope would come back zero and the claim would pass by
-> construction. Least squares, **R² = 0.99999**. **The reader's own cost is 123 kB on the human
-> corpus and 101 kB on tomato** — near enough the same on two corpora whose depth and contig count
-> differ by two orders of magnitude, which is what spec §1.1 claims and the evidence for it.
-> **What is not the same is the header: 357 kB a sample against 7 kB, and the difference is 2,580
-> contigs against 13.** So **74 % of the human per-sample cost is a contig list identical in every
-> sample of the cohort**, at about 138 bytes a contig, retained N times over. The budget is met
-> with 19.7 kB — 4 % — to spare, and on a reference with about 3,700 contigs it would not be met at
-> all. **Sharing that list would take 480 kB to 123 kB**; it is the largest memory lever the store
-> has, it is not in any plan, and it belongs with `run_streaming.md`, which owns the run objects.
-> ⚠ **Two spec figures do not survive the port and are recorded rather than explained**: §5.2's
-> 257 kB and §5.4's 338 kB are prototype numbers with no contig list in them, so they do not
-> predict 480 kB; and §5.3's 190 kB zstd floor is not visible in a reader measured at 123 kB.
-> At 5,000 samples: **2.40 GB, measured rather than extrapolated.**
-> [H4](doc/devel/reports/implementations/ng_psp_h4_2026-08-30.md).
->
-> - **Previously (2026-08-30):** **the same sample gathered at any worker count gives the
-> same file, and the timestamp is the only thing allowed to differ** (step H3 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). ⚠ **What this can prove is narrower than the plan's sentence, and the report says
-> so first**: ng's writer is serial, so byte-identity across worker counts rests on the writer being
-> a function of the record sequence alone — already held by an F3 test — and on the *sharding*
-> giving back the same sequence, which is the run's job and is what this reproduces. The file
-> comparison itself is close to a tautology given those two. ⚠ **The first version's shards split
-> exactly on the grid and the test refused itself**: two equal contigs split evenly put the
-> two-worker boundary on the second contig's first record, and 250 records at 40 bases is 10,000 —
-> a whole number of 1 kb cells — so every four-worker boundary was a grid line too. A sweep whose
-> boundaries all sit on grid lines cannot tell a cut that follows the coordinate from one that
-> follows the shards, which is the only thing it is for; the split is skewed now and the count of
-> boundaries falling *inside* a block is asserted per worker count. **The second half of spec §7
-> had nothing holding it at all** — that a timestamp may differ *and only inside the header*. It is
-> a claim about width: the stamp goes into the header's TOML, so one character more moves the
-> header's length and with it every offset in the footer, the index and the blocks. Three
-> mutations, three killed.
-> [H3](doc/devel/reports/implementations/ng_psp_h3_2026-08-30.md).
->
-> - **Previously (2026-08-30):** **H2 reviewed — the killed writer was not writing when
-> it was killed** (step H2 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
-> `ng-psp-encoding`, status `fixes-applied`). Seven checklists and a numbers pass across three
-> agents. **The test did not do what its own doc said, and the doc's claim was the reason it
-> existed.** Measured independently by two agents: the child's 80,000 pushes take about **5 ms**
-> while the parent kills at about **12 ms**, so in **25 runs out of 25** the child had finished and
-> was asleep when the signal arrived; the file it leaves ends **on a block boundary**, never inside
-> one, because each block reaches the `BufWriter` in one `write_all` and the blocks here average 57
-> bytes against an 8 kB buffer; and a writer given 58,251 pushes and then simply **dropped** leaves
-> a **byte-identical** file. So *the state is unreachable from inside the process* was false in
-> both halves. ⚠ **And the mutation I had recorded as a no-op is not one** — it fails 40 of 40
-> standalone runs. I ran it once, saw it pass, and wrote that down as a property; that is what a
-> flaky test looks like from inside. The child now **pushes until it is killed** and touches a
-> marker only if it stops on its own, which the parent requires to be absent — so *the writer was
-> still writing* is asserted rather than assumed. **A second Major**: the truncation sweep folded
-> *wrong kind of file* into its *unfinished* counter, so a defect flipping **3,694 of 3,742** cuts
-> still passed, while the sibling test added in the same commit exists to forbid that
-> misdiagnosis. **A third**: every way the child can fail reached the parent as an ordinary exit,
-> so a stale test-name filter fired the signal assertion with a message about destructors.
-> [H2](doc/devel/reports/implementations/ng_psp_h2_2026-08-28.md);
-> [the review](doc/devel/reports/reviews/ng_psp_h2_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **a writer killed for real leaves a file every reader
-> refuses, and a failing read is not damage** (step H2 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). **Dropping a writer in-process was never the same test**, and the difference is
-> the point: `BufWriter` flushes on `Drop`, so an in-process drop puts everything on disk cut at a
-> record boundary, while `SIGKILL` runs no destructor and the buffer is simply lost — the file can
-> end part-way through a compressed block or part-way through the header, which is unreachable from
-> inside the process and is what a killed pileup actually leaves. The child is this test binary
-> re-executed; **its death by signal 9 is asserted**, because an ordinary exit would run the very
-> flush the test exists to prevent. **And `refuse`'s `Io` arm finally has a genuine `read(2)`
-> failure**: the walk is handed a descriptor opened *write-only* on a sound psp, so seeking works
-> and every read fails with `EBADF` — no `unsafe`, and not the closed-descriptor trick, which is a
-> flaky-test generator once the harness runs tests on parallel threads. A contrast test holds the
-> other half, because `Io` and `CorruptBlock` could otherwise be swapped and both would pass.
-> ⚠ **The header sweep asserted something false and failed on its first run**: a cut inside the
-> four-byte magic does *not* come back as `NotAnNgPsp`, on any of 3,136 cuts, because the magic is
-> compared only after a twelve-byte read succeeds — so a truncated ng psp is never reported as the
-> wrong kind of file, which is the better answer. Both sweeps are exhaustive now: **3,742 cuts in
-> 0.19 s**, against 234. Three mutations on the kill test, two killed and **one proved to be a
-> no-op** — the one a reader would reach for first.
-> [H2](doc/devel/reports/implementations/ng_psp_h2_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **H1 reviewed — the oracle could not fail on eighteen
-> of its twenty-six comparisons, and a store with every region a base too long passed it** (step H1
-> of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `fixes-applied`). Ten checklists across five agents, **three Blockers, and the first two were
-> reproduced here before anything was changed**. The cross-encoder arm — the whole reason this step
-> is not a round-trip test — never compared `placed_left`, the reference bases or the record's
-> extent, and its doc said the opposite: a store written with `placed_left` one too high **and**
-> every region a base too long **passed all 74,623 hg002 records with a clean report**. Both
-> defects are in the harness's own mapping, which the round-trip arm carries on both sides and
-> cannot see. **And eighteen of the twenty-six field comparisons had no test that they could
-> fail** — neutered one at a time, they left all 23 tests green. The fix for both is structural:
-> **both arms destructure with no `..`**, so a field added to the record is a compile error rather
-> than a field the oracle stops comparing, and two table-driven tests hold every comparison by
-> name. **The third Blocker is not H1's doing and is worth knowing**: CI runs `clippy
-> --all-targets` under `-D warnings`, and the measuring prototype has failed it since `b0e1a54a` —
-> four milestones — because the local gate is `--lib --tests`. Moving two lints onto the
-> prototype's own items makes CI's command clean. **Everything the store holds that is not a record
-> was written and never read back**: a contig length one too long, an index whose every first
-> position was a base too far, and a truncated trailer all passed a 100,000-record run. All three
-> are caught now — and ⚠ **the index check had to be strengthened twice**, because entering blocks
-> by *ordinal* never reads the coordinate `records_from` searches on. **Three of my numbers were
-> wrong again**, against forty-nine right: seven declarations is eight, two allowed lints is three
-> suppressing twenty-four findings, and a module doc saying two synthesised fields where four are —
-> the last inverting the very point the step exists to make.
-> [H1](doc/devel/reports/implementations/ng_psp_h1_2026-08-28.md);
-> [the review](doc/devel/reports/reviews/ng_psp_h1_2026-08-28.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_h1_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **the store gives back what it was handed, and an
-> encoder that is not it agrees** (step H1 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). Milestone H is the milestone of numbers, and H1 is the first of them measured on
-> this code rather than on the prototype the specs quote. One production `.psp` is the source;
-> every record in it becomes an ng record, **both** stores are written from that same sequence, and
-> all three streams are walked in lockstep. **7,687,686 records on tomato and 74,623 on hg002,
-> every field of every observation compared, and both pass.** The second arm is the point: a
-> round-trip through one codec proves self-consistency, and a defect planted in the harness's own
-> mapping — reading `mapq_sum` one too high out of the source — leaves the round-trip passing and
-> fails against the prototype. **The prototype is asked for ng's own 1/4,096-of-a-nat step**, so
-> the summed log-error is compared as an *equality* across the two stores rather than inside a
-> tolerance wide enough for both; the step appears once, against the source, where the worst
-> distance is 0.000122064 against a half-step of 0.000122070. ⚠ **The corpus synthesises the four
-> fields production has no equivalent of** — the read witness, the read group and the two counts of
-> reads that showed nothing — and that is not tidiness: with the two counts left at zero, an
-> encoder writing a constant 0 for `reads_discarded_by_cap` **passed** a 3,000-record run, the only
-> one of six injected defects that did. Seven defects now, seven caught — **but two of them never
-> reach the comparison**: rewriting every witness as `Complete` and dropping a chain id are both
-> refused by the reader's own guards, because the head's non-reference read count is derived
-> through the witness and the residual list is derived from the live set. No file under `src/`
-> changed.
-> [H1](doc/devel/reports/implementations/ng_psp_h1_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **G4 reviewed, and Milestone G is complete — a footer
-> with an empty block index let `append` truncate the header away and report success** (step G4 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `fixes-applied`). **This is Checkpoint G: all five operations exist** — open, walk, walk from a
-> coordinate, replace the trailer, append. Nine checklists across two agents, one Blocker,
-> reproduced here first. **It is G3's Blocker one operation over, and the reason it survived is
-> exact**: the rule tying the block index to the header is written per *entry*, and **on an empty
-> index there are no entries to check**. A footer saying the index sits at byte 4 and holds
-> nothing passed every check the reader makes — so `append`, which truncates at that offset, cut a
-> 3,742-byte psp down to 109 bytes and returned `Ok`. The fix is in the reader, as a rule about the
-> file, so every operation that starts from `open` gets it. **Five Majors**, of which two are the
-> same shape: a level recorded as a *string* fell into the same arm as *absent* and the append
-> wrote level-9 blocks into a file claiming level 1 — the file §2.4 says must not exist, produced
-> without a word — and a level outside an `i32` was refused for a number that is not in the file.
-> **And the seam test could not tell the last record from the last block's first**: an
-> implementation keeping the wrong one passed all 381 tests. **Three of my numbers were wrong
-> again**, all about my own work: a defect table claiming eight rows with seven, an assertion I
-> said was worth nothing that is worth sixteen failing tests, and a stale figure from Milestone F
-> still standing in the code. A 7,484-mutant hostile sweep found no panic and left every refused
-> file byte-identical.
-> [G4](doc/devel/reports/implementations/ng_psp_g4_2026-08-28.md);
-> [the review](doc/devel/reports/reviews/ng_psp_g4_2026-08-28.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_g4_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **a finished psp is reopened and extended, and the
-> order runs across the seam** (step G4 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). The footer says where the blocks end, so appending is truncating at the index
-> offset and carrying on: the header and every block stay where they are, and `finish` writes a
-> new index made of the entries already there and the ones this writer adds. **It opens the file
-> as a reader first** — an append writes a fresh footer onto whatever it finds, which is the
-> lesson G3's review taught the trailer replacement at the cost of a Blocker. **The last record
-> already in the file comes from the last block's heads**, which is what G2's selective walk is
-> for, and it seeds the order check; a builder that started blank would accept a record behind
-> the seam. **And the manifest is checked before the file is walked** — the other order made a
-> manifest this writer cannot honour arrive as a *reader's* refusal, which is the wrong class for
-> the thing spec §6.4 names. Milestone F's last two owed items land here: the byte counter is
-> checked against the footer, and the per-block copy in `push` is gone. **The third — splitting
-> the writer in two — is not done, and writing `append` is the reason**: it reuses `push` and
-> `finish` unchanged, so the split does not pay twice after all. ⚠ **One test's first fixture
-> could not fail**: it compared an appended block against a fresh block at the level the file
-> records, which is this build's own, so an append ignoring the record entirely passed. Eight
-> defects injected, eight caught.
-> [G4](doc/devel/reports/implementations/ng_psp_g4_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **G3 reviewed — a damaged footer made the trailer
-> replacement overwrite the whole file and report success** (step G3 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `fixes-applied`). Nine checklists across two agents, **two Blockers, and both were reproduced
-> here before anything was changed**. The first: the only lower bound on the byte the rewrite
-> seeks to was a four-byte magic, so a footer claiming the trailer starts at byte 4 passed every
-> check — and **a 3,742-byte psp that the reader already refuses became 56 bytes, returning
-> `Ok(())`**. It now reads the header for its length alone, which reverses the step's own decision
-> not to; that decision was defended by spec §6.7's table, and the table should gain a row for the
-> class the check earns. The second: **my ⚠ saying an interruption leaves a file every reader
-> refuses was false.** Overwriting in place and trimming afterwards left the old footer intact and
-> consistent until a write passed the old trailer's end — replacing `a per-sample summary` with
-> `short` and stopping gave a file that **opened**, with the trailer `short-sample summary`. Twenty
-> of the twenty-one torn states were accepted; truncating first makes it one. Five Majors,
-> including the F4 Blocker recurring in the rule this operation had copied from the reader — the
-> copy is now the reader's own function, shared. **Two of my numbers were wrong**: nine
-> construction sites is ten, and a defect table row described a mutation I had not run. ⚠ **One
-> agent's worktree was auto-cleaned before its findings could be lifted out and it could not be
-> resumed** — everything of its is recorded from its summary and was reproduced here first.
-> [G3](doc/devel/reports/implementations/ng_psp_g3_2026-08-28.md);
-> [the review](doc/devel/reports/reviews/ng_psp_g3_2026-08-28.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_g3_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **a finished psp's trailer is replaced without a byte
-> of its blocks or its index moving** (step G3 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). It is the cheap operation, and the reason the index sits *before* the trailer:
-> the trailer's offset is where the rewrite starts. **It reads the fixed tail and deliberately
-> neither the header nor the block index** — spec §6.7 names only two refusals for it, reading the
-> index would cost a decode per call, and every field written back except the trailer's length is
-> the file's own. **The file is trimmed afterwards, and a shorter trailer is why**: a reader takes
-> the last forty-eight bytes for its footer, so leaving the file at its old length would put the
-> tail of the old trailer past the new footer and the file would be refused. The blocks-untouched
-> claim is compared **as bytes**, not as a decode. **And the write-side errors carry their causes
-> now**, carried forward from F3 and F4: two variants take the error itself and drop their
-> sentence, one takes a typed two-way cause, and one keeps a sentence naming which structure with
-> the decoder's own account underneath. Six defects injected; ⚠ **one survived the first run** —
-> nothing covered the rule that stands between a footer with nonsense offsets and a fresh footer
-> blessing them — and the test that now catches it was written because of that.
-> [G3](doc/devel/reports/implementations/ng_psp_g3_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **G2 reviewed — nothing held the one claim the type
-> exists for** (step G2 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
-> `ng-psp-encoding`, status `fixes-applied`). Nine checklists across two agents, no Blocker, five
-> Majors — **and every one of them was about what the tests do not hold rather than what the code
-> does**. All seven new tests checked only that a declined record's body came back empty, which an
-> implementation that decodes the body and then throws it away satisfies exactly as well; the
-> mutant left all 355 tests green. **A second finding is a property that is correct and was
-> unwritten**: a walk that declines bodies is a materially weaker reader of damage than a full
-> one, because the two agreements between a record's head and its body are checked while the body
-> is decoded. Measured here rather than quoted: on a three-record block of 102 payload bytes, every
-> byte flipped in turn, a full walk refuses 93 and a walk declining every body accepts **72 of
-> those 93**. The cohort's first pass is exactly a walk that declines most bodies, so *it walked
-> without an error* does not mean the sample read back sound. **And one of my tests could not fail
-> on the half it names**: the fixture's records all read zero for the field the predicate reads,
-> so the predicate was constant-false. Six tests added, four of them the agents' own bodies; two
-> renames — `only_where` and `SelectiveIter` were named for the filter the doc spends two
-> paragraphs denying. ⚠ **One suggested fix did not compile as written and was reported green**:
-> its replacement comment contained a path the guard test forbids, comments included.
-> [G2](doc/devel/reports/implementations/ng_psp_g2_2026-08-28.md);
-> [the review](doc/devel/reports/reviews/ng_psp_g2_2026-08-28.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_g2_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **a walk that hands over every record's head and
-> builds only the bodies a predicate asks for** (step G2 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). **It is not a filter, and the type's doc says so first**: every record of every
-> block still arrives, in order, and what the predicate decides is whether the body was built — a
-> caller reading it as a filter would take the walk's length for the number of records it kept,
-> so the fixture makes the two differ (40 heads, 20 bodies). **The predicate is a builder on the
-> walk rather than a fourth entry point**: `records_from(at)?.only_where(…)` is the shape a
-> cohort reading one region of every sample writes, and spec §6.2's `records_where` is the
-> whole-file case of it. **The live set is exact after a declined record too**, which is the
-> whole reason the chain-id changes ride in the head and not the body — the test declines the
-> record where one id departs and another arrives. Four defects injected, four caught. ⚠ **The
-> mutation harness misreported one as a survivor**, its "0 failed" check matching the `10 failed`
-> in the line it read; the line it printed showed the truth and the check is now `; 0 failed`.
-> [G2](doc/devel/reports/implementations/ng_psp_g2_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **G1 reviewed — asking for a coordinate two blocks
-> begin on lost the records of the earlier one, silently** (step G1 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `fixes-applied`). Nine checklists across three agents, and **the Blocker was found twice
-> independently**. The index search read *the last block starting at or before the coordinate*,
-> which enters a run of blocks sharing one first position at its **end** — and `index.rs`
-> documents that run as a shape the index exists to accept, produced whenever a byte ceiling
-> closes a block. On a three-record file `records()` gives three records and `records_from` at
-> the shared position gave two, with no error. **Neither agent's proposed fix was taken**,
-> because both left a second hole: even with no run at all, a block's last record may begin on
-> the base the next block begins on, so a block starting strictly *below* the coordinate can
-> still hold a record at it. The rule that misses nothing is *the block before the first block
-> starting at or after the coordinate*, and it costs one extra block only when the coordinate
-> falls exactly on a block's first position. **A second finding was a message that told an
-> operator to raise a ceiling no reader had**: the error's own doc said it withheld that
-> instruction, and the cause underneath said it anyway — the knob now exists. **And one of my
-> own tests was the failure the review names**: `live_reads` tested against a fixture whose every
-> chain-id list is empty, where an accessor answering about the wrong record passes exactly as
-> the right one does. Eight Majors, ten Minors; eleven tests added, four of them the agents' own
-> bodies. `ng::psp` is 348 tests against 324 before the step.
-> [G1](doc/devel/reports/implementations/ng_psp_g1_2026-08-28.md);
-> [the review](doc/devel/reports/reviews/ng_psp_g1_2026-08-28.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_g1_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **a coordinate becomes a block with one binary search,
-> and the walk that follows it stops where the blocks stop** (step G1 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). `records`, `records_from_block` and `records_from` each hand back a lazy
-> `RecordIter` that borrows the reader and holds nothing that grows with the file. **The design
-> question the step was handed is settled by the documents, and in the same direction twice**:
-> spec §6.2 says the coordinate is matched against where records *start*, and arch §4.1 says
-> reading begins at the chosen block's first record — so `records_from` is block selection, not an
-> overlap query, and **a deletion that begins in the block before and covers the coordinate asked
-> for is not in the walk**. The container cannot offer more: an index entry carries a block's
-> first position and nothing else, §3.3 having removed the only field that could say how far a
-> block's records reach. A test pins both halves — that the file really holds a record starting at
-> 900 and covering 1,100, and that asking for 1,100 does not return it. **The walk is a new file
-> rather than more of `reader.rs`, and F4's own guard test is why**: it reads `reader.rs`'s imports
-> to say opening cannot reach any block-decoding code, and building the walk there would have added
-> exactly that import. **A psp does not end with its blocks**, so the walk gets the file bounded at
-> the index offset and the blocks' end arrives as an end of file; unbounded, it takes the index's
-> first four bytes for a block length. Three read-error classes rather than one, because *rebuild
-> the file*, *raise the ceiling* and *upgrade the reader* are different instructions — each tested
-> through a real file, including a genuine 400,000-base record refused by name. Twelve defects
-> injected, twelve caught.
-> [G1](doc/devel/reports/implementations/ng_psp_g1_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **F4 reviewed, and Milestone F is complete — the
-> sections rule was tested on one side only, and relaxing it opened 62 of 384 single-bit footer
-> corruptions** (step F4 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
-> `ng-psp-encoding`, status `fixes-applied`). **This is Checkpoint F: a psp can be written,
-> closed, reopened and read end to end.** Eight checklists across three agents, 14 mutations and a
-> **1,004-file hostile-input sweep that produced no panic**. **The Blocker was mine and it was a
-> fixture**: the test for "the file's sections end exactly where the footer begins" only ever
-> claimed a trailer *shorter* than it was, so weakening the rule from an equality to a
-> less-than kept all fifteen tests green while 62 corrupted footers in 384 started opening
-> instead of being refused. **A block offset pointing into the header also opened**, because the
-> range was bounded above and not below — the refusal then arrived as a corrupt block at read
-> time, after a cohort had committed to the sample. **And a number I shipped a refusal threshold
-> on was derived wrongly twice**: the reader refuses a compression window over 256 kB, and the
-> arithmetic behind it cited the wrong spec section for one figure and double-charged the window
-> in another. The corrected arithmetic gives 310 kB where I wrote 278, and 2^18 is the largest
-> power of two under both — **a wrong derivation for a right number**, which is the kind that
-> survives by looking finished. Three of my own counts were wrong too. **The ten-defect table was
-> right**, the first in this milestone to survive re-scoring intact.
-> [F4](doc/devel/reports/implementations/ng_psp_f4_2026-08-28.md);
-> [the review](doc/devel/reports/reviews/ng_psp_f4_2026-08-28.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f4_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **F3 reviewed — a write that failed and then recovered
-> produced a file every reader accepts, with a thousand bases missing from the middle** (step F3
-> of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `fixes-applied`). Eight checklists across three agents, 17 mutations, **two Blockers**. **The
-> first is the worst defect this milestone has produced.** The block builder hands a closed block
-> over and reopens in the same call, so once the writer holds it nothing can offer it again — and
-> everything after that point can still fail. Nothing marked the writer unusable, so `finish`
-> stayed callable: with one write failure injected, `finish` returned **success** and wrote a file
-> with a valid footer, a matching index checksum, entries in ascending order, and contig 0
-> jumping from position 1,001 to 3,001. **That is worse than the unreadable stump a killed run
-> leaves, because every reader takes it.** My own comment argued the opposite — that an I/O
-> failure is terminal — which holds only while the failure holds. **The second: the test named for
-> checking that each index entry points at the block it names never decoded a block.** Shifting
-> every entry 100 bases past its block survived all twelve tests. **And the gap I had recorded as
-> untestable was testable**: `/dev/full` fails every write, and the fixture is small enough that
-> nothing reaches the device until `finish` flushes — so the durability contract is pinned here
-> rather than deferred. Also: the compression level never reached the file, though the block
-> module's own doc assigns that to this step by name. Seven defects re-injected, seven caught.
-> [F3](doc/devel/reports/implementations/ng_psp_f3_2026-08-28.md);
-> [the review](doc/devel/reports/reviews/ng_psp_f3_2026-08-28.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f3_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **a psp is opened without touching a block, and a
-> killed run is refused rather than read short** (step F4 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). **This closes Milestone F: a file can be written, closed, reopened and read end
-> to end.** Opening reads the footer, the index it points at, and the plain-text header — three
-> reads at fixed places, which is what a cohort pays per sample before it reads anything. **That
-> no block is touched is shown rather than asserted**: a test overwrites every byte of the blocks
-> region with rubbish and the file still opens and still reports the same header, blocks and
-> trailer. **A writer killed before it finished is refused as incomplete** — the file holds a
-> header and blocks, which is exactly why reading it short would be so easy and so wrong — **and
-> a file that was never an ng psp is told apart from it by the head magic**, read only on the
-> failure path, because only one of the two can be fixed by re-running the pileup. `open` adds
-> the three checks the footer could not make about itself, having the file's length: the sections
-> must end where the footer begins, the index must not start inside the header, and every block
-> offset must land in the blocks. ⚠ **One number is derived, not measured**: the reader refuses a
-> compression window wider than 256 kB, which is arithmetic on the spec's own figures — an open
-> file at 227–346 kB against a 500 kB budget, less zstd's 190 kB context and two 16 kB buffers —
-> and eight times what this build writes. H4 is where it is confirmed or moved, and that is
-> written on the constant. Ten defects injected, ten caught.
-> [F4](doc/devel/reports/implementations/ng_psp_f4_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **a psp is written to a real file, and a writer that
-> is dropped leaves one no reader will touch** (step F3 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). `create` writes the header, `push` writes each block as the cut rule closes it,
-> and `finish` writes the last block, the index, the trailer and the footer and makes the file
-> durable. **`finish` reads back what it is about to write** — the index and the footer, decoded
-> by the very functions a reader will use — which is the obligation F1 and F2 both raised and
-> both routed here, because each of those modules' own tests must be able to *write* the bytes
-> that prove the reader refuses them. **Nothing touches the filesystem until the header is
-> accepted**, so a header this writer cannot honour leaves no file at all rather than an empty one
-> refused for a different reason. **And the durability step turned out to be one call, not
-> three**: the spec asks for flush, surface, sync, and the first draft wrote flush-then-surface —
-> where a successful flush empties the buffer, so the surfacing step could not fail and deleting
-> its error arm changed nothing. Twelve defects injected, eleven caught; **the twelfth is a real
-> gap and is recorded rather than papered over** — no test here can make a real file's flush
-> fail, so a swallowed flush error survives, and H2 is where a writer is killed for real.
-> [F3](doc/devel/reports/implementations/ng_psp_f3_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **F2 reviewed — every footer the tests accepted had an
-> empty trailer, which is the one shape a finished psp never has** (step F2 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `fixes-applied`). Eight checklists across three agents, **51 mutations** and a 200,000-draw
-> hostile-input sweep that found nothing. **The Major: the trailer is the writer's closing
-> payload, so every real finished file has one — and every fixture that reached an accepted
-> footer had `trailer_bytes: 0`**, the round-trip shapes, the widest-value shape and the three
-> refusal cases that spread the same helper. Two wrong rules for where the index ends passed the
-> whole suite because of it. **The second: the guard the commit advertised does not hold.**
-> Adding a seventh field to the footer gives six compile errors, but rustc's own suggested repair
-> — ignore the field — leaves clippy clean and every test green, with a field that reaches no
-> file and decodes as zero from every file; nothing tied the 48-byte constant to the field *set*
-> until one test started destructuring. **And a wrong mechanism of mine, not just a wrong
-> number**: the claim that moving the magic check later is caught by three tests came from a
-> mutation that *deleted* the check instead of moving it, so a ten-row defect table described
-> nine defects. It is caught by one. **That is the third mutation in this milestone that was not
-> the defect I labelled it**, and two more silent no-ops turned up during the fix pass itself,
-> where a replacement string had never matched and both the fix and its verification were
-> nothing. Anchors are asserted before every run now. Seven defects re-injected, seven caught.
-> [F2](doc/devel/reports/implementations/ng_psp_f2_2026-08-28.md);
-> [the review](doc/devel/reports/reviews/ng_psp_f2_2026-08-28.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f2_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **F1 reviewed — the ordering check was only ever
-> exercised on its first pair, and a refusal panicked while printing itself** (step F1 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `fixes-applied`). Eight checklists across six agents in their own worktrees, **41 mutations**,
-> two Blockers and six Majors. **The first Blocker: every fixture that could fail was two entries
-> long**, so the scan over consecutive pairs ran exactly one iteration — cutting it to one pair
-> deliberately left all thirteen tests green while the decoder accepted an index whose third
-> entry went backwards, which on a 154-entry index is 152 of 153 pairs unchecked. **The second:
-> two refusals worked out the earlier entry's number as `entry - 1` inside the message template**,
-> so rendering one whose entry is zero panicked — a panic inside `Display`, on the path that
-> reports a damaged file, from the one type whose contract is that a damaged file is never a
-> panic. **A third of the numbers in my own comments were wrong**: the widest entry is 23 bytes
-> and I wrote 18, because a position is a 64-bit number and I carried the arithmetic across from
-> production where every index field is 32-bit. Nothing was corrupt — a buffer grows — but
-> nothing could have caught it either, since no test can see a reservation, so the constants are
-> now asserted against the bytes the encoder actually produces. **Eighteen of the nineteen
-> numbers the review re-derived were right**, and no test took its expectation from the function
-> it tested — the previous step's Blocker shape did not recur. Seven defects re-injected, seven
-> caught. [F1](doc/devel/reports/implementations/ng_psp_f1_2026-08-28.md);
-> [the review](doc/devel/reports/reviews/ng_psp_f1_2026-08-28.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f1_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **F0 reviewed — the key went in under production's word
-> for a different thing, and the tests proved the code agreed with itself rather than that it was
-> right** (step F0 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
-> `ng-psp-encoding`, status `fixes-applied`). The owner ruled on 2026-08-28 that a psp header
-> should say, for every field of a record, whether the file holds one value of it or a counted run
-> of them — the one thing spec §4.5 asks for that the manifest did not carry, taken now because
-> **from F1 a manifest change costs a format version**. Eight checklists, eight agents in their own
-> worktrees, **46 mutations**, one Blocker and three Majors. **The Blocker: nothing said what any
-> encoding's answer *is*.** Every test asked the code what a scheme lays down and then checked the
-> file agreed, so a wrong answer applied consistently passed all of them — measured, moving the
-> signed varint, the fixed-width integer and the float into the *list* arm left the suite green at
-> 255 while the header wrote `list` beside a 4-byte integer and an 8-byte float, and those three
-> are exactly what the two queued fields will use. **The largest Major was the word itself**:
-> production's frozen store already splits this idea into `Cardinality` (how often a field
-> appears) and `Shape` (what one appearance looks like) and writes both keys; ng had built `Shape`
-> and called it `Cardinality`, in a format sharing the `.psp` extension — so `head` on two files
-> would show one key meaning two things. Renamed to `shape`, with production's `scalar`/`list`
-> tokens. That word had also produced a doc comment contradicting the code: `mapq-sum` is one
-> value, yet a record with five observations holds five of them. **And the key is no longer stored
-> on the type** — three checklists reached that independently and one proved it, so a `FieldSpec`
-> cannot hold a contradiction and the check lives where two accounts genuinely exist, on the read
-> side. Six defects re-injected, six caught. **Every one of the twenty numbers the review
-> re-derived from the report and commit message was correct**, which against this project's
-> history is the exception worth naming.
-> [F0](doc/devel/reports/implementations/ng_psp_f0_2026-08-28.md);
-> [the review](doc/devel/reports/reviews/ng_psp_f0_2026-08-28.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f0_2026-08-28.md).
->
-> - **Previously (2026-08-28):** **E4 reviewed — a change made in that very step removed
-> a guard rather than adding one, and the fixtures never reached the step at all**
-> (the eight-checklist review of step E4 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `fixes-applied`). **Milestone E is complete and this is Checkpoint E.** Three agents, 29
-> mutations, **14,720,000 fuzzed inputs**, two Blockers. **The first was mine, made an hour
-> earlier.** A read list goes on the wire as ascending gaps; a list that is not ascending used to
-> produce bytes the reader *refused by name*, and I made that arithmetic saturate instead — after
-> which the same list is accepted and names **different reads**: `[3, 3]` reads back as `[3, 4]`.
-> An observation gains a read nothing folded, silently, which is exactly the failure the spec
-> names. All three agents found it. Fixed by removing the precondition rather than documenting it:
-> the codec makes the list a set itself. **The second: the residual index bound had no test** —
-> deleting it left all 241 tests green while a body claiming observation 200 of a one-observation
-> record flipped from refused to accepted. **And the fixtures never derived anything.** The
-> multi-record fixture gave reads to two observations but left the read count at 137, so two
-> identifiers against 137 reads failed the writer's own check and not one of twelve records ever
-> derived a residual — a probe that panics on that path fired in 8 tests of 241, and in 20 after
-> the fix. **One design change came out of it**: the guard was an inequality whose slack is
-> exactly the number of read pairs whose two mates both cover a record — the shape paired-end data
-> has — so a live set carrying two reads nobody named passed it. The record carries the residual's
-> *length* now, one varint, and the check is an equality. Ten defects re-injected, nine caught and
-> the tenth reported as unreachable.
-> [the review](doc/devel/reports/reviews/ng_psp_e4_2026-08-28.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_e4_2026-08-28.md).
->
-> - **Previously (2026-08-27, merged to main 2026-09-01):** **what the parameter pre-pass
-> measured is now what calling reads** (branch `ng-prepass-handover`, plan
-> [prepass_calling_handover.md](doc/devel/ng/impl_plan/prepass_calling_handover.md)). The pre-pass
-> reports a run three ways — per sample from the SNP/indel path, per sample from the repeat tracts,
-> and once over the whole cohort — and calling reads one object. **Nothing built that object**: its
-> constructor was called from 29 places and every one was its own tests, each handing it values
-> written by hand. One function now does it, and it gathers rather than fits: every per-library and
-> per-sample number it hands on is a pre-pass output unchanged, and the one derived value is the
-> genotype prior's seed. **A sample whose inbreeding coefficient was never fitted stops the run and
-> is named** — not defaulted, and not taken from the cohort fit's homozygote excess, which is
-> measured by the very fit whose diversity the coefficient exists to correct.
-> **⛦ The second step's premise turned out to be false and the step is smaller than planned**: the
-> repeat-tract substitution-rate gather already existed, already omitted a stratum that compared no
-> bases rather than calling it zero, and its records already carried the rate — what was missing
-> was only the shape calling asks for, so what shipped is a projection rather than a second copy of
-> numbers that could drift from the first.
-> **⛦ Three reviews found two ways the seam could lose every number it carried and still finish**,
-> both now refused: a repeat-tract rate fitted at a ploidy other than the run's is unreachable at
-> every locus, so every tract would be called on the model's stated constant; and a library the run
-> declared that no sample carries a rate for shortens the read-group axis silently, which defers
-> the failure to a locus. The second is reachable from data — a library whose reads were all
-> refused at admission. **⛦ The owner ruled on it 2026-09-01: "if the user gave no default and a
-> library did not manage to estimate a parameter, that's a hard fail to be reported to the user."**
-> So the refusal stands, and it is now an *error* rather than the assertion it was —
-> `ParameterEstimationError::ErrorRateNotFittedForReadGroup`, naming the library, saying there is
-> no default to fall back on, and giving the two ways out (leave the library out of the run, or
-> supply a rate for it in the parameters file). A panic naming a source file is a hard fail but
-> not a report, which is the defect F1's review found in `--ploidy`. The sample-side twin,
-> `InbreedingNotFittedForSample`, had been that shape all along.
-> **⛦ Eight of 24 planted defects passed every test, and four mattered.** Three of the four
-> library-ownership checks had no test at all — only the error-rate one did, and deleting each of
-> the others left the file green. The seed's fitted diversity could be halved unseen, because the
-> tracing test read the seed's mean frequency and that ratio is exactly the frequency for **any**
-> total, so the diversity cancels. A filter dropping every non-diploid key from the tract
-> projection left all 4,928 tests passing, since every fixture here is diploid. And two samples
-> shared a batch, so that axis could not see them exchanged. Six survivors now fail; one is benign
-> and one is not a defect — an equivalent mutant the review misread.
-> **⛦ They also found eleven wrong claims, four of them the stated reason for a design or a
-> test** — including that a missing minted-error total lets a run finish, which the assembly
-> refuses, and that a permuted per-sample list silently mis-assigns coefficients, which the
-> library-ownership check stops. All corrected; no defect was found in the seam's arithmetic.
-> **⛦ And a thousand samples cost 1.14 GB, of which the per-sample results are 97.7%.** Per sample:
-> 1,114,632 bytes of per-sample pre-pass results against 26,596 bytes of the run-wide maps built
-> from them, the latter a lower bound. The difference is the repeat-tract records, 3,366 bytes a
-> stratum of which 2,496 is the allele-length genotype table, and calling reads one number off each
-> record — **a finding for the run driver's plan**, which can project each sample's rates as that
-> sample finishes and release the rest, peaking at 1/43rd of that.
-> The library's own test suite at the time, 4,920 → **4,937** passing.
-> [What was built](doc/devel/reports/implementations/ng_prepass_calling_handover_2026-08-27.md).
->
-> - **Previously (2026-08-27):** **one observation's reads are not stored — they are the
-> live set minus every other observation's** (step E4 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). **Milestone E is complete and this is Checkpoint E.** The changes in a record's
-> head already carry the union of the reads that record names, so storing every observation's own
-> list beside them writes that union twice; the largest list is left out and derived instead.
-> That is where this column's saving is, and where it fails silently — derive one read too many
-> and the reference allele gains a read that does not exist, which the cohort merge composes an
-> allele for without complaint. **The guard is an inequality against a number the record already
-> carries**: a list of identifiers is at most the observation's read count and at least half of
-> it, because an identifier names one read or two. **Two things the spec assumed away and the
-> code does not.** A chain id names a read *pair*, so if both mates cover one record and show
-> different sequences the same identifier is in two observations — and the subtraction would drop
-> it from the residual. The writer derives, compares, and **falls back to storing every list when
-> the two differ**, because Checkpoint E asks for chain ids that round-trip *exactly*. And the
-> writer checks the reader's own inequality before it derives, so it can never produce a record
-> its own reader refuses. Eight defects injected, eight caught. **The format changed** — two body
-> fields — and the golden-bytes fixture with it; the version did not rise, because no psp file
-> exists yet to be incompatible with.
-> [E4](doc/devel/reports/implementations/ng_psp_e4_2026-08-27.md).
->
-> - **Previously (2026-08-27):** **E3 reviewed — the live set moved before the record
-> could still be refused, which is E1's defect one level up** (the eight-checklist review of step
-> E3 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`,
-> status `fixes-applied`). Three agents, 35 mutations, **12,000,000 fuzzed inputs**, two Blockers.
-> **The first: the head applied a record's chain-id changes and only then checked the body was
-> there.** A body that stops early means *fetch more bytes and read this record again from its
-> first byte* — and the reader does exactly that, under a comment saying the restart resumes
-> against state it has not touched. It had. Measured two ways: a well-formed file of 1,999 records
-> in blocks larger than the reader's buffer is **rejected as damaged at record 149**, because the
-> second attempt meets a read the first already added; and a record that only *loses* reads
-> retries to success with the wrong set, `[1, 2]` where the truth is `[1, 2, 4]`, silently, for
-> the rest of the block. All three agents found it. **The second Blocker is why the suite was
-> silent about both: every fixture on that path named no reads at all**, so each record's changes
-> were two zero bytes and applying them twice is applying them never — and a writer that named
-> only the *first* observation's reads passed all 4,770 tests, because no fixture had ever put
-> reads on two observations. A record's observations split by allele, by witness and by read
-> group, so a locus with two alleles from two lanes is four of them. Both fixed, with fixtures
-> that name reads on the retry path; six defects re-injected, five caught and the sixth reported
-> as a defensive guard rather than counted.
-> [the review](doc/devel/reports/reviews/ng_psp_e3_2026-08-27.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_e3_2026-08-27.md).
->
-> - **Previously (2026-08-27):** **the chain ids' changes move into the record head,
-> because a reader that skips a record's body must still see them** (step E3 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). Two things the format wants pull against each other: a reader may skip a
-> record's body without decoding it, which is what makes a walk 2.06× faster; and the chain ids
-> are stored as *changes* a reader carries forward, which is what takes them from 43.78 bytes a
-> position to 6.42 at three hundred reads. **A reader that skipped a body would never see that
-> record's changes**, so its set would go stale and every later record it did want would be
-> wrong — silently, because a stale set is still a plausible set. The column is split across the
-> skip: the changes go in the head, where every reader decodes them, and the exception lists stay
-> in the skippable body, which is E4's. **Two things fell out of the wiring.** Starting a block is
-> now a *different method* rather than a call to remember beside the ordinary one — so the
-> failure E2's report named, a writer forgetting to reset at a boundary, has no way to happen.
-> And the writer's cut path lost its rollback: it used to reset to the new block, try the record,
-> and put the coordinate base back if the codec refused it — **a coordinate base can be put back,
-> a live set cannot**, and the open block still needed it, so every refusal is now made before
-> anything is reset. Five defects injected, five caught, including the one the head placement
-> exists to prevent.
-> [E3](doc/devel/reports/implementations/ng_psp_e3_2026-08-27.md).
->
-> - **Previously (2026-08-27):** **E2 reviewed — the test named for the block boundary
-> could not see a block boundary** (the eight-checklist review of step E2 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `fixes-applied`). Three agents, 33 mutations, **3,000,000 fuzzed inputs** across two independent
-> harnesses, no Blocker, four Majors — and three of them are one test, which **all three agents
-> reached independently**. Its fixture was a read pair whose two mates fell either side of the
-> cut, so nothing was live *at* the cut — the test asserted so itself — and it read the second
-> block with a fresh reader, which has no state to carry. Neither half of what its docstring
-> claimed could show up: not a read still covering being restated, not a reader that failed to
-> reset. Measured: of 22 mutations it caught exactly one, and fourteen other tests caught that one
-> too. It now has a read spanning the cut and carries the *same* reader across, and kills three
-> cross-block defects where it killed none. **The fixture generator could not tell two of its four
-> arguments apart** — transposing the mate length with the gap between mates gives the same 800
-> reads, the same 660 covering two stretches and the same 1,460 stretches, because a mate starts
-> at the sum either way, so "30-base mates, a 40-base hole" was a claim nothing checked. And the
-> **adversarial sortedness test asserted an invariant in a regime where it cannot break**: the set
-> can only stop being sorted when an arrival sorts below a live read, and uniform random bytes
-> never build a set for one to sort under — zero such cases in 600. It feeds damaged real streams
-> now, of which 113 in 600 get past the first count. **⚠ And one of my own edits silently deleted
-> three tests** by cutting a slice of the file between two markers; the suite stayed green, and
-> what caught it was the test *count* falling from 29 to 26.
-> [the review](doc/devel/reports/reviews/ng_psp_e2_2026-08-27.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_e2_2026-08-27.md).
->
-> - **Previously (2026-08-27):** **a read goes live, stops, and goes live again — and
-> most of them do** (step E2 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
-> `ng-psp-encoding`, status `implemented`). A chain id names a read *pair* with its mates
-> collapsed onto one identifier, and a pair's mates rarely overlap, so the identifier covers two
-> stretches of reference with an unsequenced hole between them. On real alignments that is **83 %
-> of identifiers on the human sample and 91 % on tomato**, and a stream that assumed one stretch
-> per identifier would lose the second mate of nine reads in ten — silently, because the merge
-> would simply see a read that was not there. **E1's encoding already handles it**: an identifier
-> that departed at one record and arrives at a later one is an ordinary arrival, since nothing in
-> the codec remembers what has been named. So this step adds no bytes; what it owes is the
-> oracle, and the oracle is not "the walk came out right" — a walk agrees with itself under a
-> writer that loses every second mate. It asserts three things: that the fixture **contains**
-> re-entry, counted (660 of 800 identifiers cover two stretches, 82.5 %); that the writer emitted
-> **one arrival per stretch and not one per identifier** (1,460 stretches against 800 identifiers,
-> so a one-stretch stream would lose 660 second mates); and that every record's set reads back.
-> Four defects injected, four caught — including one in the oracle's own measuring instrument,
-> which is the way an oracle passes for the same reason the code would.
-> [E2](doc/devel/reports/implementations/ng_psp_e2_2026-08-27.md).
->
-> - **Previously (2026-08-27):** **E1 reviewed — a short read left the live set
-> half-advanced, and the retry it instructs silently dropped a read** (the eight-checklist review
-> of step E1 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
-> `ng-psp-encoding`, status `fixes-applied`). Three agents, 19 mutations, **1,500,000 fuzzed
-> inputs**, one Blocker and four Majors. **The Blocker is a decision E1's own report calls
-> deliberate.** The reader applied a record's departures before it read the arrivals, so a buffer
-> that stopped in the arrival half returned *this record stopped early* — whose whole contract is
-> *fetch more bytes and re-parse it from its first byte* — with the set already moved. Measured
-> over a record that departs one read and gains one, **five of its six cut points retried to
-> success with a read silently gone from the live set for the rest of the block**; on another
-> fixture seven of nine cuts turned a good record into damage. Two of the three agents found it
-> independently, one with a generated-input test that failed on its first case. The rationale in
-> the code was not even true of the code: the departure loop had already finished, and both sides
-> resolve a position against the same earlier set anyway. **The test that should have caught it
-> structurally could not** — it built a fresh reader for each cut, so it checked the fault's class
-> and never the state the fault left behind, which is the only thing the class split protects.
-> **A second gap of the same shape: no fixture ever made an arriving read sort below one already
-> live**, so both interleaving arms of the module's two merges were dead code under test — and
-> that shape is precisely a read coming back, which is 83 % of reads on the human sample and 91 %
-> on tomato. **Two figures of mine were wrong**, both in prose: the raw-identifier baseline quoted
-> for both depths is the deep one's alone (the real savings are 2.4× and 6.8×, not a hundredfold),
-> and the block restatement's 12 % was measured at blocks sixty-seven times smaller than the one
-> that ships. Fifteen defects re-injected, fifteen caught.
-> [the review](doc/devel/reports/reviews/ng_psp_e1_2026-08-27.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_e1_2026-08-27.md).
->
-> - **Previously (2026-08-27):** **which reads are live at a record, written as what
-> changed since the last one** (step E1 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). A chain id names the read that produced a piece of evidence, and since the
-> owner's ruling of 2026-08-17 ng names every read it folds rather than only the ones that
-> disagreed — which is what lets the cohort merge tell a read that covered a position and agreed
-> from one that never reached it. **That makes this the field that decides the file's size at
-> depth**: measured on real alignments, the ids are 16 % of the file at eleven reads a position
-> and **89 % of it at three hundred**. A read of length L is named at every one of the L positions
-> it covers, so this step stores only what changed — which reads started covering a record and
-> which stopped — and lets a reader carry the set forward. **A block restates the whole set, and
-> that is the reset rather than a field**: `start_block` empties it, so a block's first record has
-> nothing to depart and its arrivals are the entire set, which is what lets a reader begin at any
-> block. **A departure is written as its position in the live set, not as its identifier** — one
-> byte against four — and identifiers and positions never meet outside the codec, which is the
-> transposition the architecture names as this field's hazard. On a fixture at the top of the
-> committed depth range the changes are **3,257 bytes against 106,166**, 32.6 times smaller than
-> writing each record's list as ascending gaps — and that is the *cheapest* alternative, not the
-> naive one. Ten defects injected, ten caught, and the count-bound test had to cover both counts
-> rather than one. **Re-entry is E2's and nothing here assumes one stretch per id**; the wiring
-> into the record head — and the silent failure of a writer that forgets to restart at a block —
-> is E3's.
-> [E1](doc/devel/reports/implementations/ng_psp_e1_2026-08-27.md).
->
-> - **Previously (2026-08-27):** **Milestone D reviewed and hardened — the reader's
-> record ceiling was measured against the wrong thing, and the type that makes a per-block reset
-> unforgettable could not hold the field it was built for** (the eight-checklist review of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md)'s steps D4 and D5, branch
-> `ng-psp-encoding`). Three agents, 21 mutations, **1,523,400 fuzzed inputs**, no Blocker, nine
-> Majors, and **one mutation that survived the whole suite**: the ceiling written against the
-> rolling buffer's *capacity* instead of what it *holds* passes all 81 tests and refuses a
-> well-formed 2 MB block. Nothing caught it because **no reader test decoded a block past the
-> ceiling at all**, though at the shipped 100 kb block size a fully covered block is about 1.76 MB
-> decompressed — the ordinary case, untested. Two tests now come at it from both sides, and the
-> killer is three records that each grow the buffer to the ceiling without reaching it. **The
-> ceiling also moved from 1 MiB to 512 KiB**: at three thousand samples — the top of the range
-> this caller is committed to — 1 MiB each is 3.07 GB against spec §1.1's 1.5 GB, and 512 KiB is
-> 1,572,864,000 bytes, the budget to within 5 %. It is a settable field now rather than a
-> constant, because two documents called it a knob and there was no knob. **And `Copy` is gone
-> from both per-block state types**: Milestone E's chain-id difference is a live *set*, and a
-> `Copy` derive turns adding it into `error[E0204]` whose cheapest answer is to put the field
-> where nothing resets it — measured, it compiles there and 197 tests pass. **Seven numbers of
-> mine were wrong**, including a fixture described as "blocks" that was one block; all corrected
-> forward.
-> [the review](doc/devel/reports/reviews/ng_psp_d4d5_2026-08-27.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d4d5_2026-08-27.md).
->
-> - **Previously (2026-08-27):** **every running difference resets at a block boundary,
-> and the property turned out to be held already** (step D5 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`) —
-> **Milestone D is complete.** The defect the step exists to catch is a
-> difference that survives a block boundary *on both sides at once*, so a sequential read stays
-> self-consistent and only a reader starting mid-file sees anything wrong: the silent, plausible
-> failure the spec names. Injected exactly that — the writer keeping the previous block's
-> coordinate and the reader carrying its own forward to match — and **eleven tests failed, eight
-> of them already there**, because the module anchors every check to a block's own declared first
-> position. So the step closes no hole; it states the property in its strongest form for the
-> difference that arrives next. **There is exactly one running difference today** — the position
-> offset. The coverage difference is computed nowhere in ng, and the chain-id difference is
-> Milestone E, which is what the new tests are there to meet: a block read *alone*, with no
-> history at all, must give what it gives in the middle of a file.
-> [D5](doc/devel/reports/implementations/ng_psp_d5_2026-08-27.md).
->
-> - **Previously (2026-08-27):** **a record cut in half by the reader's buffer is
-> retried from its first byte, and the oracle for that caught itself being useless** (step D4 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). The
-> retry loop was already there — a reader cannot work without one — so what this step owes is the
-> proof, and the plan names it: a decode forced to refill at every possible boundary. The obvious
-> reading is to hand the reader one byte at a time, then two, and so on to the whole file, and
-> require the same records every time. That sweep passes at all 837 schedules **and retried a
-> record exactly zero times**: zstd decodes in internal blocks and emits one whole, so a block
-> that fits a single emission arrives in one piece however slowly its input did. Slowing the
-> input moves *when* the data arrives, not whether a record is cut in half. What cuts one is the
-> buffer running out — so the real sweep uses blocks larger than the buffer, which is what data at
-> depth looks like, and **counts the retries as part of the test**: 58,778 of them at one byte a
-> read over 1,999 records, and sixteen even when the whole file arrives at once. Spec §8's exact
-> defect — advancing the coordinate before asking for more bytes — failed one test before this
-> step and fails four now.
-> [D4](doc/devel/reports/implementations/ng_psp_d4_2026-08-27.md).
->
-> - **Previously (2026-08-27):** **a run of blocks streams back a record at a time,
-> holding two 16 kB buffers and nothing that grows with them** (step D3 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). That is
-> the half of the design that gets lost: a reader can decompress a block perfectly and then gather
-> every record into an array before returning, at which point the memory is exactly where it was —
-> and in production's cohort run those assembled per-sample columns are the largest single mass of
-> the heap, larger than the decompression buffers they came from. **The line that makes the buffer
-> roll was asserted by nothing**: removing it left all sixteen other tests green while the buffer
-> grew to the whole block. It now has a test that reads a file whose blocks are several times the
-> buffer and asserts the reader never holds more than it budgeted for, and the number it asks is
-> public, because it is the one Milestone H measures against the 500 kB per-open-sample budget.
-> **A reader can already start at any block and gets exactly the tail of a full read** — the
-> property the next step but one owes, available early because the reader takes any byte source
-> and knows nothing about files. Thirteen deliberate defects were injected: seven died, three
-> changed no behaviour and are reported as that rather than as survivors, and **three were real
-> survivors that now have tests** — a refused stream that kept going, a decoder fed past its
-> block's declared end, and the buffer that never rolled.
-> **⛦ Eight review checklists then found 1 Blocker, 7 Majors and three more of my numbers wrong —
-> and the Blocker is the defect this step's own commit message said it had fixed.** A refused
-> stream did not end: nothing marked the reader as having refused, so what stopped one was its
-> next read hitting the end of the file, which holds only while the whole file fits in a single
-> 16 kB read. Past that it read on from wherever it stood, took four arbitrary bytes for a block
-> length, and carried on — measured on a 69,769-byte file with one bit flipped, it **reported the
-> file damaged and then handed back 3,585 more records**; on a smaller one it handed back 5,681
-> and ended cleanly. Four of the five agents found it independently. Every test that claimed to
-> hold the property used a fixture two orders of magnitude too small to reach it.
-> **The reader itself came out sound under 1,473,500 fuzzed inputs** — no hang, no panic, and
-> nothing ever sized from a length a file declares, which is the property the whole error design
-> exists for.
-> **⛦ Two owner rulings, both taken 2026-08-27, both now in the code.**
-> **A reader's buffer has a ceiling of 1 MiB for one record, and it is raisable.** Spec §8 says a
-> record larger than the buffer must make it grow and that a maximum record size is not safe to
-> assume; spec §1.1 puts an open sample at 500 kB. On a *corrupt* file those cannot both hold —
-> measured, a 4,132-byte block drove the reader to hold 67 MB, because a block's decompressed
-> size is not bounded by its size on disk and the buffer doubles until the frame runs out. The
-> ceiling is the **reader's** budget rather than a maximum record size the format fixes, with its
-> own refusal naming the number to raise — the pattern spec §4.2 already uses for a look-back
-> window wider than a reader budgeted for. *⚠ Corrected by the D4/D5 review: a real record at
-> three hundred reads a position measures **18,292 bytes** over a 50-base span and 48,693 over
-> 150, not "about 30 kB"; and the ceiling itself has since moved from 1 MiB to **512 KiB**,
-> because 1 MiB × three thousand samples is 3.07 GB against spec §1.1's 1.5 GB budget.*
-> **And near-empty blocks are not merged.** Spec §4.1 offers a second cut rule — accumulate
-> across empty stretches so a patchy sample gets one large block instead of several thin ones —
-> and spec §12 question 3 says it ships. The ruling is against it: **merging would complicate the
-> alignment between samples**, which is the one thing the coordinate grid exists to give. Merge,
-> and one sample's block may begin ninety cells before its neighbour's, so which block holds a
-> position differs from sample to sample. *⚠ Corrected by the D4/D5 review: what merging would
-> have saved was never measured. The "about 7 %" quoted here compares two **block sizes** on the
-> same non-merging writer, which prices a different change; no merging writer has been built.*
-> *Separately, and already true: a grid cell holding no
-> records has never produced a block — the cut decides where a block ends, not that one is owed
-> per 100 kb — and that now has a test rather than being implied.* **✅ The spec now records this:
-> §4.1 and §12 question 3 carry the ruling instead of the withdrawn rule, §6.7 and §7 have the
-> record-ceiling row that Milestone F4's `PspReadError` mapping reads them for, §4.4 has the
-> ceiling's two measured numbers, and §8's trap says where the bound belongs.**
-> [D3](doc/devel/reports/implementations/ng_psp_d3_2026-08-27.md);
-> [the review](doc/devel/reports/reviews/ng_psp_d3_2026-08-27.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d3_2026-08-27.md).
->
-> - **Previously (2026-08-27):** **a block is compressed with its look-back window
-> capped at what the file declares** (step D2 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). That cap
-> is the format's whole design in one parameter: without it zstd sizes its window from the data,
-> so a reader would have to hold a whole block to resolve a back-reference — which is what ties
-> production's block size to its memory. **The step also settles the measurement the architecture
-> document had been asking for since the design was written**: are the four fields at the front of
-> every record cheaper as variable-length integers or as fixed-width ones, compared *after*
-> compression rather than in the abstract. **Variable-length wins on both samples and at every
-> width tried** — on the tomato accession at three reads a position, 4.676 compressed bytes a
-> record against 4.913 with sixteen-byte fixed heads, and on the 279-reads-a-position human sample
-> 15.669 against 16.257. The spec's intuition was right and the conclusion still goes the other
-> way: compression removes 98 % of what a fixed-width head adds, and the 2 % that survives is 5 %
-> of a file that is only 4.7 bytes a record to begin with. **And the narrow widths that would have
-> made fixed width competitive cannot encode the human sample at all** — 15 of its records have a
-> within-block position offset over 65,535, the largest 90,467. So the head stays as it was
-> written, and switching it is no longer an open question. **⚠ What the two corpora cover is 10
-> to 280 reads a position, not 3 to 279** — the tomato accession measures 10.25, and the "three
-> reads a position" label the specs give it is not a fact about the file. The 3× end of this
-> caller's committed range is covered by neither, so the conclusion holds at 10× and at 280× and
-> thinner data has not been tried.
-> Two defects this step made were caught by its own tests rather than by review: zstd writes into
-> a buffer from its *start*, so the four bytes reserved for a block's length were being overwritten
-> with the frame's own magic; and nothing tested that a frame declines to say how large it inflates
-> to — the mutation turning that back on passed every other test in the module, and it is the trap
-> the spec names by name.
-> **⛦ Eight review checklists then found 1 Blocker, 8 Majors and five numbers of mine measured
-> wrong, and the Blocker is the same shape D1's was**: the compressor's four settings each had one
-> test, and none of those tests used the configuration a writer ships with. The window cap — the
-> format's central decision — was proved only at a 1 kB window and level 1, and every shipped-path
-> test compressed a payload *under* the 32 kB window, where zstd narrows the frame's own
-> declaration to fit and the cap is inert. Guarding it with `if level < 9` passed all 42 tests
-> while making every file need a wider window than its own manifest declares. Four agents
-> independently found that the compression level reached zstd untested, and four that a block's
-> declared length was believed without being checked against the bytes actually present.
-> [D2](doc/devel/reports/implementations/ng_psp_d2_2026-08-27.md);
-> [the review](doc/devel/reports/reviews/ng_psp_d2_2026-08-27.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d2_2026-08-27.md).
->
-> - **Previously (2026-08-27):** **blocks are cut on the genomic grid** (step D1 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). A block
-> ends when a record's *start* crosses into the next multiple of the genomic block size, never
-> crosses a contig, and closes early once it has reached the declared byte ceiling. `src/ng/psp/block.rs`
-> holds the cut, the three fields a block opens with, and the payload a compressor will be handed;
-> nothing compresses and nothing writes a file yet.
-> **⛦ Eight review checklists found 2 Blockers and 9 Majors, and neither Blocker was a defect in
-> the cut** — both were properties the code has that no test held. *Nothing held the cut to a
-> record's start*: changing one identifier to `region.end` passed all 21 tests, because no fixture
-> had a record whose span crossed a grid multiple. That matters because a span is
-> sample-dependent — a deletion widens a locus in one sample and not another — so a cut taken from
-> the end makes a block boundary depend on which sample is being written, which is the one thing
-> the grid exists to prevent, and every file still reads back self-consistently. The second: a
-> caller holding a whole block was told *fetch more bytes* about a head that stopped early, which
-> is a retry that never ends. **The parsers themselves came out sound under 1.4 million fuzzed
-> inputs and half a million builder pushes** — no panic, no overflow, and nothing ever sized from a
-> declared length. Two of my own claims failed on their first run and are corrected: a fixture
-> asserted to reach three grid cells reached two, and a 200-byte ceiling asserted to fire never
-> did. **And a fixture property the review asked me to make true turned out to be unachievable** —
-> over a four-letter alphabet two one-base records must sometimes carry the same base — so the
-> claim is withdrawn rather than repaired.
-> **⛦ One departure is waiting at Checkpoint D:** spec §12 question 3 says the rule that
-> accumulates blocks across empty spans **ships**, leaving only its threshold open. It is not
-> built — `Manifest` has no field for it and the plan's D1 does not list it — and what omitting it
-> costs is measured in the spec: about 10 % of the file on a patchy sample at a 5 kb grid, and
-> most of that recovered at the 100 kb default.
-> [D1](doc/devel/reports/implementations/ng_psp_d1_2026-08-27.md);
-> [the review](doc/devel/reports/reviews/ng_psp_d1_2026-08-27.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d1_2026-08-27.md).
->
-> - **Previously (2026-08-26):** **a psp record's body now goes to bytes and back
-> exactly** (step C1 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
-> `ng-psp-encoding`), on top of a psp module, a header that round-trips, and a summed log-error
-> that is an integer where it is computed (A1–A3, B3). **The open question C1 had to close is
-> whether a record carries its own reference bases**: the spec leans to dropping them and
-> re-fetching, on a measurement that needs a writer and a reader in one walk and so cannot be
-> taken before Milestone F. They are stored and declared in the manifest, which keeps C1's round
-> trip exact with no reference on hand and leaves dropping them a manifest change rather than a
-> format break. **A file that renames, reorders or drops a field is refused instead of decoding
-> into plausible values** — 56 such files, one per way. And **a field a later writer adds after the
-> ones this reader knows is walked past**, which is how the owner's ruling on the two window
-> statistics is honoured without a version bump: every encoding in the closed set measures its own
-> length.
-> **⛦ Eight review checklists then found 1 Blocker and 13 Majors, and the Blocker was found
-> independently by five of the eight.** *The manifest and the codec are one list* — the sentence the
-> commit led with — **was not true**: the array is what a writer declares and what a reader checks a
-> file against, and the encoder is a second, hand-written list that agreed with it by inspection.
-> Six mutations proved it: renaming a declared field, swapping two entries, declaring one field an
-> 8-byte float while the codec writes a variable-length integer, adding a twentieth entry nothing
-> writes, and swapping two fields in *both* halves of the codec — every one of them passed all 22
-> tests. It is closed by the two assertions in the module that do not come from the code they test:
-> the fixture's exact bytes and the nineteen names longhand. **The first of those failed on its
-> first run, on a byte I had worked out by hand** — which is the argument for having it. Two more
-> claims of the commit's were measured wrong and are corrected rather than dropped: a repeated field
-> added by a later writer is **accepted and misparsed**, not refused, and cannot be refused while
-> the manifest carries no cardinality; and "dropping the reference bases later is a manifest change"
-> holds for a writer and not for a reader. **The parse itself came out sound under 600,492 fuzzed
-> decodes** — no panic, no overflow, no allocation sized by a declared length — so every finding was
-> about what the tests and the prose claimed. [C1](doc/devel/reports/implementations/ng_psp_c1_2026-08-26.md);
-> [the review](doc/devel/reports/reviews/ng_psp_c1_2026-08-26.md);
-> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_c1_2026-08-26.md).
->
-> *What came before, on the same branch.* The store exists because an open file's cost is multiplied by the cohort
-> size: **2.6 MB per open sample on production's `.psp` is 7.7 GB at three thousand samples**,
-> and the measuring prototype's shape gets that to 0.34 MB with the file 35 % smaller and the
-> read 1.8× faster. A1 is declarations only — the plan's own "pure-scaffold step" — so it was
-> committed with A2 rather than reviewed alone. **The validation rules are written once and run
-> from both sides**, so the writer cannot produce a header its own reader would refuse; fourteen
-> broken headers are checked twice each. **The format version is read from a bare TOML table
-> before the body is deserialised**, which is what lets a file from a newer major come back as
-> *upgrade the reader* instead of as unparseable TOML.
-> **⛦ Four departures from the architecture document are waiting at Checkpoint A**, and the first
-> is the one to look at: the arch gives the header a `ReferenceInfo`, and the real type carries
-> each contig's `.fai` byte offsets and the FASTA's absolute path — so a parsed header would have
-> to invent geometry it never stored, and a written one would carry the producer's directory
-> layout to everyone the file reaches. It is a name and a whole-assembly digest instead. The other
-> three: the manifest carries no cardinality (arch against spec §4.5, and the cost is that an
-> unrecognised *list* field cannot be skipped); a fifth read-error class the spec's table of four
-> does not list; and a head magic of `NGP\n` rather than production's `PSP\n`, because both
-> formats use the extension `.psp`.
-> **⛦ Eight review checklists then found 1 Blocker and 14 Majors, all now fixed, and three of them were found by two or three agents each.** The two that matter most both falsified the property the work led with — *the writer cannot produce a header its own reader would refuse*. It could, twice: a contig length above what a TOML integer can hold is written and then rejected by the same parser, and the writer's list of encoding names and the reader's were two separate lists. The Blocker was a number nothing could tell was wrong: the offset that says where the first block begins was only ever checked against buffers that held nothing after the header, so returning the buffer's length instead passed all 26 tests. **The parser itself came out clean under about 341,000 adversarial inputs across two agents** — no panic, no overflow, no unbounded allocation — but nothing in the suite protected that, and now something does.
-> **Milestone B then hit a wall the plan did not anticipate, and one of its three steps carried real weight.** **B3** made the summed per-read log-error — production's `q_sum` — an integer count of steps of 1/4,096 of a natural log, rounded once where the sum is finished. That is what lets a run reading observations from memory and a run reading them back from a file agree on a number rather than on a tolerance. **It deleted more fragility than it added:** the differential that checks ng's walk against production's had already been redesigned twice because `f64` addition is not associative, and after this change the count of loci that agree *only* because of a tolerance went from 103 in 216,203 to **0 in 145,108**. **B1 and B2 could not be built at all: the two quantities they name — a window's GC fraction and its mean coverage — are computed nowhere in ng.** They exist only in the frozen production tree, as the per-window statistic step 4's spec *proposes* and has not built. My recommendation is to record the rounding rule against that future accumulator rather than mint two types nothing constructs. **And B3's own oracle — the same records called before and after, counting changed genotypes — cannot be run, because ng cannot call a genotype yet.**
-> [A1+A2](doc/devel/reports/implementations/ng_psp_a1_a2_2026-08-26.md); [the review](doc/devel/reports/reviews/ng_psp_a1_a2_2026-08-26.md); [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_a1_a2_2026-08-26.md); [A3](doc/devel/reports/implementations/ng_psp_a3_2026-08-26.md); [B3](doc/devel/reports/implementations/ng_psp_b3_2026-08-26.md).
-> - **Previously (2026-08-26):** **the SNP/indel prior's two numbers stop being one
-> fitted pair** (branch `ng-seed-shrinkage`, spec
-> [ordinary_site_seed.md](doc/devel/ng/spec/ordinary_site_seed.md) §3 and §4). They are an expected
-> allele frequency and a total conviction in other clothes, and the total is now solved from the
-> run's own fitted heterozygosity rather than taken from the search — so the seed reproduces that
-> measurement exactly at every panel size, where the old fit lost 9.9% of it at 63 individuals on a
-> tomato-like density and 18.6% on a human-like one. **⛦ And the measurement that was to set the
-> blend's one constant says the blend points the wrong way**: the panel's own fitted shape is exact
-> at one individual and degrades monotonically as the panel grows, so every arm puts the best
-> half-weight panel size at zero — the ramp deleted. What ships is a quarter of an individual, a
-> hedge against a pathological small-panel fit that the sweep cannot price, and **§8 of
-> [the report](doc/devel/reports/implementations/ng_seed_shrinkage_2026-08-26.md) puts two rulings
-> to the owner.** See the feature block below.
->
-> - **Previously (2026-08-26):** **ng calls genotypes** (step E3a of
-> [the calling loop](doc/devel/ng/impl_plan/calling_loop.md), branch `ng-calling-loop`). A cohort
-> locus goes in as what each sample's reads showed, and genotypes come out — the merge unifies the
-> alleles, candidate selection decides which are worth calling over, and the loop scores them, with
-> nothing in between built for the occasion. Three samples showing 20 reads of the alternative, 10
-> of each, and 20 of the reference are called `1/1`, `0/1` and `0/0`. **This is what the plan was
-> for.** The repeat tract's half is next and is not the same kind of work — see the ⚑ below.
-> **⛦ Two reviews found two tests that could not fail, and both were the same accident in
-> different clothes: the fixture could not tell two indexes apart.** Every sample covered the
-> locus, so the merge's numbering and the run's were the same list — an input edge that confused
-> them passed all seven tests. And nothing was ever dropped by selection, so the allele
-> numbering it produces was identical to the merge's — deleting that renumbering entirely left
-> the suite green. Both fixtures were rebuilt so the two numberings differ, and **six mutations
-> that had survived now fail.** A third fixture turned out to be a locus no run can produce: it
-> asked what happens to an allele one stray read supports, at a depth where the merge would have
-> thrown the whole locus away first.
-> **⛦ The loop had never iterated in this fixture, because every sample had twenty reads.** At
-> that depth the reads decide everything on the first pass, so a pass cap of one and a convergence
-> threshold a hundred times looser both left the suite green. There is now a fixture at **three
-> reads a sample** — where the tomato cohort actually sits — which takes four passes and calls the
-> same three genotypes.
-> **⛦ And a sample with no reads at all is called heterozygous**, not homozygous reference: its own
-> reads say nothing, so what decides it is what its neighbours showed, and at a locus where one
-> neighbour is `1/1` and the other `0/0` the heterozygote wins — **by two parts in ten thousand**,
-> about 2 Phred. Pinned by a test rather than changed. **Twenty-four of sixty-four of this step's
-> own claims were wrong and every counted figure was right.**
->
-> - **Previously (2026-08-26):** **a repeat tract's scoring parameters, assembled at
-> last** (step E2c of [the calling loop](doc/devel/ng/impl_plan/calling_loop.md), branch
-> `ng-calling-loop`). The repeat-tract read likelihood has been merged for a while and **nothing
-> could build what it asks for**: one set of scoring parameters per (library, candidate allele) —
-> how often a read of that allele slips a repeat, how often a base reads wrong inside the tract —
-> plus the set of tract lengths a read from nowhere is spread over. All of it existed in the
-> parameter fit and none of it had ever been read out. Now it is, and **the numbers a run cannot
-> supply are named rather than guessed**: a candidate whose repeat count the fit never saw takes a
-> stated constant and the call says so, and the share of reads that came from nowhere the model can
-> explain stays the 0.01 inherited from the existing caller, out of the per-cell warrant on purpose
-> — folding one run-wide guess into it would mark **every** tract's call as resting on a guess and
-> lose the distinction the warrant exists for.
-> **⛦ Three reviews found one wrong answer and two tests that could not fail, and both test
-> failures were one accident each.** The wrong answer: the contexts took the tract's repeat unit
-> twice and never compared the two, so a one-base tract scored as a two-base one reported a
-> discarded probability mass 1.7 × 10¹² times off the model beside it, with no crash. The two
-> tests: the repeat unit is two bases in *every* fixture and two is also the candidate count, so a
-> lookup that ignored the motif entirely passed all nineteen tests — on a three-base tract it
-> defaults every cell of the table; and the buffer-reuse test gathered the fitted tract first, in
-> which order three separate dropped resets are invisible. Seven mutations that survived now fail.
-> **Eleven of seventy-one of this step's own claims were wrong and every counted figure was
-> right** — the failures were all explanations. Library target 4,786 → **4,815** passing.
->
-> - **Previously (2026-08-26):** **the caller can be told some of its reads are somebody
-> else's** (step E2a of [the calling loop](doc/devel/ng/impl_plan/calling_loop.md), branch
-> `ng-calling-loop`). A cohort whose parameter fit found contamination is now called rather than
-> refused. **The piece with a consequence is a split**: how often a read of somebody else's DNA
-> would show this allele *here* is the caller's own per-locus estimate, so it moves on every pass —
-> and the table the loop reads can no longer stand still. The half that answers *how did one copy of
-> one allele produce this read* reads no frequency and is still computed once per locus; only the
-> per-genotype row is put together again, once a pass, and only where a fraction was fitted. **A
-> clean run's numbers do not move at all.**
-> **Two things were settled that the design had left open.** A sample whose libraries ran on
-> different plates is **refused by name** — the contaminating population is the plate, and picking a
-> majority would score half a sample's reads against the wrong neighbours in silence; under the
-> shipped default, one plate holding everything, it cannot arise. And the very first pass, which has
-> no estimate to read yet, **scores the reads alone**. The alternative — every allele equally likely
-> in the contaminant — is not the neutral answer it looks like: it puts a floor under every
-> observation that no genotype can lower, which makes four odd reads **28 Phred cheaper** to blame on
-> a neighbour, on the one pass whose whole job is to let the reads speak.
-> **⛦ The reviews found seven deliberate defects that all 4,776 tests passed, and five were one
-> accident**: every contamination fixture gave one library to one sample, which makes the two
-> batchings the same list of numbers *and* makes a scratch row's index equal its sample's. Copies
-> scattered onto the wrong axis, a sample subtracting the first sample's alleles instead of its own,
-> the two batchings swapped either way — none of it visible. Three fixtures were rebuilt with the
-> accident removed, and the swap is now a **type error** rather than a number. Library target
-> 4,733 → **4,786** passing.
->
-> - **Previously (2026-08-26):** **the pre-pass's outputs, gathered once for a run**
-> (step E2 of [the calling loop](doc/devel/ng/impl_plan/calling_loop.md), branch
-> `ng-calling-loop`). Four rules, each with a failure attached: a read group the fit could not
-> measure gets a scale of one and says so, because a *fitted zero* would charge every read of
-> that library the error floor; contamination is absent or measured and never a fitted zero,
-> and only the evidence counts tell an unmeasured library from a clean one. **The review's
-> Blocker was a mechanism stated in six places and true in none** — a gap in the read-group ids
-> does not misattribute anything, it drops the highest read group and defers the failure to a
-> locus. The check stays, for that reason rather than the stated one.
->
-> - **Previously (2026-08-26):** **the input edge — the merge's output shaped into what the
-> loop reads** (step E1 of [the calling loop](doc/devel/ng/impl_plan/calling_loop.md),
-> branch `ng-calling-loop`). Three joins that no type enforces: the merge lists only the samples
-> that covered a locus while the loop wants one entry per sample of the run; the narrowed rows
-> must be ascending on the candidate key; and the pooled error mass of the reads selection
-> dropped has two producers. **The interface says to add those two, and they are the same
-> number** — following it doubles every sample's leftover, which is invisible in the genotypes
-> and visible in the data likelihood that emission and the site quality read.
->
-> - **Previously (2026-08-26):** **the loop is paid for once, and that is now counted** (step D2
-> of [the calling loop](doc/devel/ng/impl_plan/calling_loop.md), branch
-> `ng-calling-loop`; **Milestones A through D are complete**). Both invariants it pins fail
-> silently — a likelihood table rebuilt every pass gives identical genotypes, only slower, and a
-> `Vec` allocated inside a pass changes no number — so the instrument is the test. The emission
-> count is asserted as the formula over samples whose observation counts differ, because a
-> fixture whose samples match is the one shape that hides the bug. **And the allocation count is
-> measured rather than inferred**: the first draft said a counting allocator was impossible under
-> the crate's `forbid(unsafe_code)`, and that was wrong — `#[global_allocator]` is a safe
-> attribute and dhat's allocator is already a dependency.
->
-> - **Previously (2026-08-26):** **the driver — reads in, genotypes out** (step D1 of
-> [the calling loop](doc/devel/ng/impl_plan/calling_loop.md), branch `ng-calling-loop`). One
-> locus's evidence and the run's frozen parameters go in and a called locus comes out: the
-> genotype-likelihood table built **once**, the frequency loop, the final pass. The two outer
-> rounds of the design's three are written as loops whose bodies run once, so what fills them
-> later has somewhere to re-enter. **A sample the candidate step ruled uncallable now gets no
-> scratch row at all** — the rows are the run's sample order with the gaps closed up, which is
-> what keeps the cohort's frequencies, the convergence threshold and the site quality over one
-> cohort without any of them being told to skip anything. **The review's one Blocker was that
-> join**: every fixture put the uncallable sample last, where a row's index and its sample's are
-> the same number, so a table filled by row passed all of them.
->
-> - **Previously (2026-08-25):** **ng calls genotypes at a locus** — the final pass
-> (step C3b of [the calling loop](doc/devel/ng/impl_plan/calling_loop.md), branch
-> `ng-calling-loop`; **Milestones A, B and C are complete**). Once the frequency loop stops,
-> every sample is scored once more against the settled frequencies and its genotype and its
-> confidence are taken in the same walk — they have to be, because the posterior row is one
-> reused buffer and by the end it holds only the last sample's. The same pass folds the whole
-> likelihood table into the site quality and pools the nine read counts the artifact
-> correction will consume, for the same reason: **their inputs stop existing when the locus is
-> released.** A sample the candidate step ruled uncallable comes out missing, with no quality
-> beside it. **Both of the review's Blockers were tests that could not fail**, and both were
-> the same fixture habit — every fixture asserting a genotype quality had exactly one sample,
-> so giving every sample the first one's quality left 4,666 tests green.
->
-> - **Previously (2026-08-25):** **the calling seam, and every switch of the loop as a
-> value that can be refused** (step A2 of
-> [the calling loop](doc/devel/ng/impl_plan/calling_loop.md), branch `ng-calling-loop` —
-> **Milestone A is complete, at Checkpoint A**). One boundary that every way of handling a
-> cohort crosses, and the configuration of the three nested loops, two of which ship switched
-> off. **The part with a consequence is the refusal.** The slippage re-fit and allele
-> discovery have no implementations yet, so a run that asks for one is stopped rather than
-> quietly given the default — and the message says what accepting it would have cost, because
-> a measurement harness that switched the re-fit on and got the frozen loop's answers back
-> would find the two arms agreeing exactly, which reads as a finding rather than as a bug.
-> **The review made that refusal unskippable**, which it was not: an agent built a
-> configuration with three faults, watched `validate()` refuse it, and then handed the same
-> value to the loop — it compiled and ran. `validate` is now the only way to make the type the
-> seam takes.
-> **Two more findings were built rather than argued.** A convergence threshold of 1.0 passed
-> validation, and would have stopped every locus in a run after one pass and flagged each as
-> settled: the loop's movement is already divided by the cohort's chromosomes, so it cannot
-> exceed 1, and production's own validator caps at 0.1 for exactly this reason. And a
-> sixteen-mutation battery found eight survivors, of which seven were real — three of the nine
-> shipped values were compared against the constants they were built from, which is an
-> identity that holds for any value. All seven are now killed, each re-checked against the
-> mutation it was written for.
-> **The best outcome was deleting checks rather than adding them.** Retyping three counts as
-> `NonZeroU32` and reusing the merge's own `MinAltReads` for discovery's evidence bar removed
-> three range checks and three error variants — the values they refused are no longer
-> expressible. The error enum is five variants where it was eight. Library target 4,488 →
-> **4,528** across the milestone.
-> [What A2 built](doc/devel/reports/implementations/ng_calling_loop_a2_2026-08-25.md),
-> [what the review found](doc/devel/reports/reviews/ng_calling_loop_a2_2026-08-25.md),
-> [what was done about it](doc/devel/reports/reviews/fixes_applied_2026-08-25_v2.md).
-> - **Previously (2026-08-25):** **the calling loop's shared types, and a way for a
-> locus to say a sample has no call** (step A1 of
-> [the calling loop](doc/devel/ng/impl_plan/calling_loop.md), branch `ng-calling-loop`). The
-> two arguments the calling seam takes — one locus's reads per sample, and everything the
-> parameter pre-pass froze — plus the buffers a worker reuses at every locus. **The piece with
-> a consequence beyond plumbing is the last one:** candidate selection can cut a sequence a
-> sample's own reads had earned, and the spec rules that such a sample is set aside before the
-> first pass and emitted as missing rather than given an invented genotype — but
-> `SampleGenotypeCall` was a genotype and a quality, with nowhere to put *no call*. It is now
-> an enum, so a missing genotype has no quality beside it either, and emission cannot conflate
-> *never scored* with *scored and came out weak*.
-> **The review was the expensive half and it earned its keep.** Four category agents in
-> isolated worktrees returned one Blocker and fourteen Majors on code whose tests were all
-> green: two cells of the path-agreement check that no fixture reached, where one surviving
-> mutation routes a repeat bundle to the SNP/indel read model; a scratch that was never sized
-> answering six of its eight accessors with an empty slice, so the cohort's expected copies
-> come back as a plausible `0.0`; and the first of the three caller bugs the spec names as
-> assertions — a genotype table that disagrees with the allele count — asserted nowhere,
-> because no function held both objects. **One measurement is worth keeping:** downgrading all
-> sixteen of the module's release-held checks to `debug_assert!` and running under `--release`
-> fails a test for fifteen of them, which says the property is real — and that CI, which runs
-> only in debug, verifies none of it. Library target 4,488 → 4,517 passing.
-> [What was built](doc/devel/reports/implementations/ng_calling_loop_a1_2026-08-25.md),
-> [what the review found](doc/devel/reports/reviews/ng_calling_loop_a1_2026-08-25.md),
-> [what was done about it](doc/devel/reports/reviews/fixes_applied_2026-08-25.md).
-> - **Previously (2026-08-25):** **candidate selection is done on the SNP/indel path, and
-> the two true alleles it was said to lose were never lost** (Milestone D of
-> [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
-> `ng-candidate-alleles`, merged to main). **D1** put the measurement onto the shipped code: the
-> probe called its own copy of the rule, and that copy had drifted from the module three ways, not
-> the two anyone had written down — the third being the cap's last tie-break, which a trace then
-> showed cannot decide anything on this panel. It reproduces every figure the spec quotes, the
-> truth-set column included. **The support share moved from 5 in 100 to 10** (owner's ruling): it
-> costs two true alleles at 300× that 5 keeps, and ships anyway, because recall is one side of the
-> trade and the count of admitted candidates is the other and nothing has measured the second yet.
-> **D2** is the standing check: a 68 kB and 95 kB fixture cut from HG002 at both depths, four
-> tests, each one killed by mutating the module rather than trusted after reading it — 23
-> mutations tried, 15 caught.
-> **⚠ And the reviews found the benchmark is not what every document called it.** Every "GIAB
-> trio" figure in this step's spec is **HG002 alone**: HG003 and HG004 are sliced to their own
-> benchmark regions, so over HG002's BED they contribute 0 reads and 0 loci, and a three-file walk
-> is byte-identical to a one-file walk. The measurements stand; the label did not. It also means
-> the trio runs were the *single-sample* end of the committed range all along, and that four
-> mutations of the per-sample rule survive this fixture — a sum over one sample is that sample's
-> own count. The module's multi-sample unit tests are what cover that half; **no benchmark here
-> pairs a real cohort with a truth set**.
-> **⛦ The finding that mattered came from the owner asking why a real allele would sit below a
-> tenth of a sample's reads at 300×.** It would not. Of the four the 10-in-100 share drops, two
-> were a scoring artefact: at `chr1:90667287-90667293` HG002 carries a homozygous 2-base deletion
-> *and* a heterozygous substitution, the caller keeps both haplotypes at 162 and 127 reads, and the
-> join was looking for the substitution without the deletion — a sequence no read carries. With
-> truth built as haplotypes the genotypes admit, the count-only bar loses **zero** true alleles at
-> 300×, where the spec's table had said two at every setting.
-> **⚠ And "300×" is a run average, not a per-locus fact** — across that fixture a sample's compared
-> reads at a locus run from 8 to 428 — so the floor is *not* inert at depth, which two documents
-> had claimed. **D3 was stopped short deliberately:** at the shipped bar the cap binds at 16 tomato
-> loci in 53,935 and at none of the trio's, and what would choose its value is a memory cost the
-> calling loop has to exist to measure.
-> - **Previously (2026-08-24):** **the stutter model says *repeats*, because *frame*
-> meant something else here** (step E1 of
-> [the read likelihoods](doc/devel/ng/impl_plan/calling_read_likelihoods.md), branch
-> `ng-calling-likelihoods`; the first step of the STR path, after **Checkpoint C/D** completed the
-> generic one). The seven numbers that say how often a read shows a length other than its
-> allele's were named after HipSTR's fields — `in_up`, `out_geom` — and those names carry *in
-> frame* and *out of frame*, which the read-likelihood spec bans: *frame* is borrowed from coding
-> sequence, and in this repository it was read as meaning *inside the tract* against *in the
-> flanks*. They are now `whole_repeat_longer_share`, `part_repeat_one_step_share` and so on, with
-> HipSTR's names kept in the doc comments for whoever reads the two side by side. **No arithmetic
-> moved:** every numeric literal in the module's test code is identical before and after, and the
-> library target holds the same 4,354 passing tests. The fixtures that hold the rename are the
-> ones that were already there — `all_distinct()` gives all six rates different values, so a
-> longer/shorter or whole/part transposition fails a published-formula test rather than passing
-> silently. Alongside it, the alignment spec's §5.2 stopped restating the distribution and now
-> points at the read-likelihood spec's §4.2, which owns it.
-> [What was renamed, what stayed, and why the tests did not need to change](doc/devel/reports/implementations/ng_calling_likelihood_e1_2026-08-24.md).
->
-> _Older entries are trimmed rather than kept: this log accumulated 44 of them,
-> some 580 lines. Every one is in git history — `git log -p PROJECT_STATUS.md`,
-> and the last untrimmed copy is at `9a29811f`._
+> - **Last completed task (2026-09-13):** **the project has one caller.** The older caller is
+> deleted, ng's modules sit at the crate root, and its binary is `pop_var_caller` (branch
+> `promote-ng`; [plan](doc/devel/implementation_plans/promote_ng_to_production.md),
+> [report](doc/devel/reports/implementations/promote_ng_to_production_2026-09-13.md)).
+>
+> **The calls did not move.** At every checkpoint the same four tomato accessions over the same
+> 20 regions were called both ways — straight from their CRAMs, and through psp files — and the
+> two VCFs (with `##commandline` removed), the fitted parameters file and the window-coverage
+> files hashed identically to the baseline taken before the work began.
+>
+> **What changed, in sizes.** Rust under `src/` went from 409,119 lines to 314,430. `cargo test
+> --lib --tests` went from 6,370 tests (6,358 passed, 1 failed, 11 ignored) to 4,791 (4,787
+> passed, 0 failed, 4 ignored): the older caller's own tests went with it (1,568), the tests that
+> compared ng against it were turned into comparisons against recorded answers or deleted (63 net),
+> and Milestone B, which copied into ng what it used from the older caller, added 52. There is one binary, 62
+> examples and 6 benches.
+>
+> **Left for later, recorded in the plan's §8:** a check of the aligner's band margin that needs
+> no other caller, since the long randomised run that validated it compared against the deleted
+> one; why a cohort of confident homozygous-variant samples has its site quality corrected from 900
+> to 0 by a step documented as skipping it; three tests that expect a debug-only panic and so fail
+> under `--release`, which keep CI's release-mode step scoped to `calling::`; pruning `bam`,
+> `fasta` and `regions` of items nothing calls any more, the largest being `bam::segment_reader`
+> and `bam::segment_merge`; and moving `doc/devel/ng/` up into `doc/devel/`, with the `ng_` prefix
+> renamed off examples and scripts.
+>
+> _Older entries are trimmed rather than kept. This log held 134 of them, about 3,100 lines,
+> written while ng was developed beside the older caller; every one is in git history —
+> `git log -p PROJECT_STATUS.md` — and the last untrimmed copy is at `3dacbb73`._
 
 ---
 
-## The production caller — complete and frozen
+## The caller — status by component
 
-**`src/var_calling/` (SNP/indel) and `src/ssr/` (STR) are finished production code and are
-frozen.** They are not being extended, and their remaining deferred review findings will not be
-worked: `ng` is the caller under development, and it re-derives what it needs rather than editing
-either tree (`CLAUDE.md`).
-
-What they are, in one line each. The SNP/indel pipeline runs per-sample pileup (BAM/CRAM → `.psp`)
-→ DUST filter → variant grouping → per-group merger → posterior engine → cohort VCF, and its
-authoritative description is
-[calling_pipeline_architecture.md](doc/devel/specs/calling_pipeline_architecture.md). The STR
-caller is an independent pipeline — `ssr-catalog` builds a repeat catalogue from the reference,
-`ssr-pileup` extracts per-sample evidence to `.ssr.psp`, and `ssr-call` genotypes the cohort.
-
-**They stay in the repository as reference implementations, and `ng`'s specs cite them
-constantly** — the per-group merger and `ssr/cohort/candidate_set.rs` are named as the nearest
-equivalents of `ng`'s own steps, and every claim `ng` makes about "what production does" is a
-statement about this code.
-
-*This section replaced roughly a thousand lines of per-stage status, review links and deferred
-findings on 2026-08-25. All of it is in git history at `9a29811f`; go there for a stage's review
-trail or its open minors, which the freeze has retired in practice.*
-
-## ng — next-generation step-decomposed caller (experimental)
-
-A single-phase, in-memory research lab that decomposes SNP/indel/STR calling
-into swappable steps; winning steps port back into the production two-phase
-engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
+The project's SNP/indel/STR caller, which decomposes calling into swappable
+steps; the blocks below give each component's status. It was developed under
+the name "ng", which the design documents and many names in this section still
+use. Design:
+[doc/devel/ng/](doc/devel/ng/) (start with
 [spec/ng_proposal.md](doc/devel/ng/spec/ng_proposal.md)).
+
+**Some tests check the caller against recorded answers** — answers recorded from an older caller at
+commit `d9e7b076`, before it was deleted, and held in `testdata/` files or constants; the files whose
+names say so are listed by `git ls-files src | grep -i 'parity\|production'`. A change that moves
+one of those answers fails its test. The component blocks below no longer describe those
+comparisons one by one.
 
 #### Foundations — `RefSeq` reference accessor + shared vocabulary
 - **Status:** shipped (Milestones A–C on `main`)
 - **Plan:** [foundations.md](doc/devel/ng/impl_plan/foundations.md); **Spec:** [ref_seq.md](doc/devel/ng/spec/ref_seq.md)
-- **Code:** [src/ng/ref_seq.rs](src/ng/ref_seq.rs) (`RefSeq`/`RawRefSeq` traits; `InMemoryRefSeq`, `ResidentRefSeq`, `WindowedRefSeq`), [src/ng/types.rs](src/ng/types.rs) (`ContigId`), [src/ng/mod.rs](src/ng/mod.rs).
+- **Code:** [src/ref_seq.rs](src/ref_seq.rs) (`RefSeq`/`RawRefSeq` traits; `InMemoryRefSeq`, `ResidentRefSeq`, `WindowedRefSeq`), [src/types.rs](src/types.rs) (`ContigId`), [src/lib.rs](src/lib.rs).
 - **Commits:** `6474d19` (A — traits + InMemoryRefSeq), `6da4030` (B — ResidentRefSeq + `fetch_raw_into`), `8ab92c7` (C — WindowedRefSeq streaming/evictable).
 - **Open:** none.
 
 #### Step 1 — read filtering
 - **Status:** implemented — **Step 1 complete** (Milestones A–D + CRAM, plan-driven per-milestone loop). Two tracked follow-ups (below); no whole-feature re-review yet.
 - **Plan:** [read_filtering.md](doc/devel/ng/impl_plan/read_filtering.md); **Spec:** [spec](doc/devel/ng/spec/read_filtering.md); **Arch:** [arch](doc/devel/ng/arch/read_filtering.md).
-- **Code:** [src/ng/read/filtering.rs](src/ng/read/filtering.rs) (types + `verdict_*` cascade + the `RawRecord`/`RecordSource` seam + `NoodlesRawRecord`/`BamRecordSource`/`CramRecordSource`), [src/ng/read/mod.rs](src/ng/read/mod.rs), [src/ng/types.rs](src/ng/types.rs). Reuses `record_buf_to_mapped_read` ([src/bam/alignment_input.rs](src/bam/alignment_input.rs), visibility lifted `pub(super)`→`pub(crate)`).
+- **Code:** [src/read/filtering.rs](src/read/filtering.rs) (types + `verdict_*` cascade + the `RawRecord`/`RecordSource` seam + `NoodlesRawRecord`/`BamRecordSource`/`CramRecordSource`), [src/read/mod.rs](src/read/mod.rs), [src/types.rs](src/types.rs). Reuses `record_buf_to_mapped_read` ([src/bam/alignment_input.rs](src/bam/alignment_input.rs), visibility lifted `pub(super)`→`pub(crate)`).
 - **Impl reports:** [A (types)](doc/devel/reports/implementations/ng_read_filtering_a_2026-07-14.md), [B (cascade)](doc/devel/reports/implementations/ng_read_filtering_b_2026-07-14.md), [C (seam)](doc/devel/reports/implementations/ng_read_filtering_c_2026-07-14.md), [CRAM source](doc/devel/reports/implementations/ng_read_filtering_cram_source_2026-07-14.md), [D (iterator)](doc/devel/reports/implementations/ng_read_filtering_d_2026-07-14.md)
 - **Latest reviews:** [A](doc/devel/reports/reviews/ng_read_filtering_a_2026-07-14.md) (0/0/4), [B](doc/devel/reports/reviews/ng_read_filtering_b_2026-07-14.md) (0/1/6), [C](doc/devel/reports/reviews/ng_read_filtering_c_2026-07-14.md) (0/2/6), [CRAM](doc/devel/reports/reviews/ng_read_filtering_cram_source_2026-07-14.md) (1/2, fixed), [D](doc/devel/reports/reviews/ng_read_filtering_d_2026-07-14.md) (1 Bl/1 Maj, mitigated/fixed) — all Approve-with-changes.
 - **Latest fixes-applied:** [A](doc/devel/reports/reviews/fixes_applied_2026-07-14.md), [B](doc/devel/reports/reviews/fixes_applied_2026-07-14_v2.md), [C](doc/devel/reports/reviews/fixes_applied_2026-07-14_v3.md), CRAM + D (folded into their review reports).
-- **Milestone A done (types + scaffold):** `read/` scaffold; scalar newtypes; `ReadFilterConfig`/`FilterVerdict`/`DropReason`/`ReadFilterCounts`. `Default` = production `AlignmentMergedReaderConfig` filtering subset (the port anchor).
-- **Milestone B done (the cascade, pure):** `verdict_pre_decode` (#1–#6, order identical to production `classify_pre_decode`) + `verdict_post_decode`, unit-tested against `InMemoryRefSeq`. **Post-decode order settled with the owner as too-short (#7) → bad-CIGAR (#9) → high-mismatch (#8)** — cheapest/no-reference first, the one reference-touching filter last (spec §3's own "cheapest-first" principle). Reorders the spec's #7/#8/#9 table: keep/drop set unchanged, a both-failing read charged to `BadCigar` (root cause) not `HighMismatchFraction`. #8 runs on the original CIGAR (left-alignment deferred to `pileup/`, spec §6; tally invariant under legal left-shifts). **M1 error model settled with the owner: fatal** — an `OutOfBounds` #8 fetch aborts the run, it does not skip-and-keep as production does.
+- **Milestone A done (types + scaffold):** `read/` scaffold; scalar newtypes; `ReadFilterConfig`/`FilterVerdict`/`DropReason`/`ReadFilterCounts`.
+- **Milestone B done (the cascade, pure):** `verdict_pre_decode` (#1–#6) + `verdict_post_decode`, unit-tested against `InMemoryRefSeq`. **Post-decode order settled with the owner as too-short (#7) → bad-CIGAR (#9) → high-mismatch (#8)** — cheapest/no-reference first, the one reference-touching filter last (spec §3's own "cheapest-first" principle). Reorders the spec's #7/#8/#9 table: keep/drop set unchanged, a both-failing read charged to `BadCigar` (root cause) not `HighMismatchFraction`. #8 runs on the original CIGAR (left-alignment deferred to `pileup/`, spec §6; tally invariant under legal left-shifts). **M1 error model settled with the owner: fatal** — an `OutOfBounds` #8 fetch aborts the run, it does not skip the read and keep it.
 - **Milestone C done (the record seam) + CRAM:** `RawRecord`/`RecordSource` traits + a test fake + `NoodlesRawRecord` (wraps a noodles `RecordBuf`; flag/MAPQ pre-decode reads, `decode` reuses `record_buf_to_mapped_read`) + **two `RecordSource` impls**: `BamRecordSource<R>` (`read_next` via `read_record_buf`, true buffer reuse) and `CramRecordSource<R>` (container-buffered: decodes one CRAM container's records against its own `fasta::Repository`, yields them across containers, `exhausted`-latched idempotent EOF). 26 tests incl. an in-memory-BAM round-trip and a **CRAM equivalence-vs-noodles across ≥ 2 containers** (10,241 records) + byte-exact substitution decode. **Deviation:** `decode` is `io::Result` (reused decoder is fallible; a decode Err is fatal like the #8 fetch). *(CRAM was deferred at Checkpoint C, then added at the owner's request — a sibling source, no seam change.)*
-- **Milestone D done — Step 1 complete:** the `ReadFilter` iterator: `new` (fail-fast — every source-header `@SQ` contig must resolve in the reference), `Iterator<Item = MappedRead>` chaining `read_next` → `verdict_pre_decode` → decode survivors → `verdict_post_decode` → running `ReadFilterCounts`, `counts()` + `finish()`; fatal errors (`ReadFilterError::{Source,Decode,Reference}`) latched, surfaced by `finish` (`#[must_use]` + `Drop` guard). `DropReason`↔counts enforced by an exhaustive-`match` `record_drop`. 35 tests incl. **BAM + CRAM fixture drop-count port anchors** whose exact counts discriminate the #9-before-#8 order. 8-category review = 1 Blocker (finish-bypassable) + 1 Major, mitigated/fixed.
+- **Milestone D done — Step 1 complete:** the `ReadFilter` iterator: `new` (fail-fast — every source-header `@SQ` contig must resolve in the reference), `Iterator<Item = MappedRead>` chaining `read_next` → `verdict_pre_decode` → decode survivors → `verdict_post_decode` → running `ReadFilterCounts`, `counts()` + `finish()`; fatal errors (`ReadFilterError::{Source,Decode,Reference}`) latched, surfaced by `finish` (`#[must_use]` + `Drop` guard). `DropReason`↔counts enforced by an exhaustive-`match` `record_drop`. 35 tests incl. **BAM + CRAM fixture drop-count tests** whose exact counts discriminate the #9-before-#8 order. 8-category review = 1 Blocker (finish-bypassable) + 1 Major, mitigated/fixed.
 - **Fatal-error surface — resolved (owner decision, 2026-07-14): `Item = Result`.** The D review's Blocker (a bare `for`-loop that never calls `finish` silently loses a latched fatal error) is closed by making the iterator `Iterator<Item = Result<MappedRead, ReadFilterError>>` — a fatal condition yields `Some(Err(_))` once then `None`, so `read?` makes it un-ignorable in all build profiles (matches noodles' `records()`). `finish()`/`Drop`-guard/`#[must_use]` removed; the iterator is fused; `counts()` stays the running tally. Revises spec §5/§7 (docs updated inline); the reorder note (#7→#9→#8) is also recorded there.
 - **Open (tracked follow-ups):**
   - **`record_source.rs` submodule split** — move the `RawRecord`/`RecordSource` traits + the three noodles adapters (~264 lines) out of `filtering.rs`; a pure-move refactor.
@@ -3200,41 +94,42 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **Step 2 (read preparation)** — the `read/` sibling; now has its own plan and block (below).
 
 #### Step 2 — read preparation (generic path only)
-- **Status:** implemented — **STEP 2 COMPLETE** (Milestones A–C, plan-driven per-step loop). v1 read preparation ships: pass-through + left-alignment → production's `PreparedRead`, byte-parity-anchored against production's `--no-baq` fold. Design settled and reviewed before any code. No whole-feature re-review yet; two `OPEN:` items below.
+- **Status:** implemented — **STEP 2 COMPLETE** (Milestones A–C, plan-driven per-step loop). v1 read preparation ships: pass-through + left-alignment → `PreparedRead`. Design settled and reviewed before any code. No whole-feature re-review yet; two `OPEN:` items below.
 - **Plan:** [read_preparation.md](doc/devel/ng/impl_plan/read_preparation.md); **Spec:** [spec](doc/devel/ng/spec/read_preparation.md); **Arch:** [arch](doc/devel/ng/arch/read_preparation.md).
-- **Code:** [src/ng/read/mod.rs](src/ng/read/mod.rs) (`ReadPreparer` trait + `ReadPrepError`), [src/ng/read/left_align.rs](src/ng/read/left_align.rs) (v1 impl, from A2).
+- **Code:** [src/read/mod.rs](src/read/mod.rs) (`ReadPreparer` trait + `ReadPrepError`), [src/read/left_align.rs](src/read/left_align.rs) (v1 impl, from A2).
 - **Impl reports:** [A1](doc/devel/reports/implementations/ng_read_prep_a1_2026-07-26.md), [A2+B1+B2](doc/devel/reports/implementations/ng_read_prep_a2_b1_b2_2026-07-26.md), [C1–C3](doc/devel/reports/implementations/ng_read_prep_c1_c3_2026-07-26.md) (combined impl + review + fixes per step).
-- **Milestone C done — parity, measured:** [left_align_parity.rs](src/ng/read/left_align_parity.rs), `#[cfg(test)]`, the `delimit_parity` shape. **C1** byte-parity vs production's `process_read(read, None, …)` with `max_read_mismatch_fraction: None` (ng moved `F1` to step 1; leaving it on diverges the keep-sets for unrelated reasons) — every field, eight reads. **C2** the soft-mask measurement (above). **C3** `F1`'s verdict invariant across left-alignment at six thresholds, which discharges spec §5's ordering argument — that argument had rested on a production `debug_assert` that compiles out of release *and* counts a different quantity than `F1` does. **The vacuity check paid for itself:** the first fixture passed byte-parity while exercising almost nothing (one read shifting of eight; three reads malformed — one with a CIGAR consuming 9 read bases against a 10-base `seq`, which makes `left_align_cigar` bail safe and normalize nothing). It now asserts the rewritten reads **by name**, since a numeric floor would still have admitted two of the three.
-- **A2+B1+B2 done — the v1 transform:** `LeftAlignPreparer<R: RefSeq, N: AlignmentNormalizer = DefaultAlignmentNormalizer>` (reference and normalizer both visible type parameters, so which normalizer runs stays at the use site), `LeftAlignScratch` (the reference window; untouched by reads with no indel), `cigar_has_indel` (**exactly** production's `is_indel` — anything narrower silently skips normalization for a read production would shift), and `canonicalize` (uppercased window → `Alignment { reference_offset: 0 }` → normalize → back). `into_prepared` delegates the whole field build to production's `prepare_passthrough`. 9 tests, incl. **a reference whose `fetch_into` panics** — that is how "a no-indel read never fetches" is pinned as behaviour rather than as a doc claim — and `TAAAAG`/`TAAAG` `M4 D1 M1` → `M1 D1 M4`. **Plan deviation:** the plan's A2/B1/B2 split does not compile under `-D warnings` (every field's first reader lives a step later), so the three merged into one commit; B2's bisect isolation is preserved in that the commit holds only step-2 code (report §7).
+- **Milestone C done — measured:** **C2** the soft-mask measurement (below). **C3** `F1`'s verdict invariant across left-alignment at six thresholds, which discharges spec §5's ordering argument.
+- **A2+B1+B2 done — the v1 transform:** `LeftAlignPreparer<R: RefSeq, N: AlignmentNormalizer = DefaultAlignmentNormalizer>` (reference and normalizer both visible type parameters, so which normalizer runs stays at the use site), `LeftAlignScratch` (the reference window; untouched by reads with no indel), `cigar_has_indel`, and `canonicalize` (uppercased window → `Alignment { reference_offset: 0 }` → normalize → back). 9 tests, incl. **a reference whose `fetch_into` panics** — that is how "a no-indel read never fetches" is pinned as behaviour rather than as a doc claim — and `TAAAAG`/`TAAAG` `M4 D1 M1` → `M1 D1 M4`. **Plan deviation:** the plan's A2/B1/B2 split does not compile under `-D warnings` (every field's first reader lives a step later), so the three merged into one commit; B2's bisect isolation is preserved in that the commit holds only step-2 code (report §7).
 - **Spec review:** [ng_read_preparation_spec_2026-07-25.md](doc/devel/reports/reviews/ng_read_preparation_spec_2026-07-25.md) (2 Blocker / 7 Major / 6 Minor, all resolved in the spec before any code).
-- **Settled with the owner (2026-07-25/26):** read preparation is **generic-path only** because the STR path *throws the mapper's line-up away* (it re-aligns every spanning read); the signature is `prepare_read(&self, read: MappedRead, scratch) -> Result<Option<PreparedRead>, ReadPrepError>` — by value, `Result` around `Option` because a decline and a broken run are different outcomes; the reference is a **field of the impls that need one**, never an `Option<R>`; **alignments work on uppercase sequences** — production's raw-byte left-alignment does nothing at all on a soft-masked reference (its shift loop compares `A` against `a`), a real defect ng fixes, **demonstrated** by the parity fixture (production returns the mapper's own CIGAR unshifted) but **latent in practice**: full scans on 2026-07-26 found **0** lowercase bases in the GRCh38 no-alt analysis set and **227,170** in tomato SL4.0 (~0.03%, ch01/03/05–12). So it does **not** explain production's indel deficit, which was measured on GRCh38; it would bite UCSC `hg38.fa` or a RepeatMasker-masked plant genome. Note also that the 2026-07-24 normalizer screen does **not** bear on this: it fetched the *canonical* view and compared ng's three normalizers **to each other**, never against production's raw-byte behaviour — "which normalizer" and "does production's normalization work" are different questions; the fetch is **conditional on the CIGAR carrying an indel** (left-alignment is the reference's only consumer here, and ng moved `F1` to step 1); one preparer + one reference accessor **per worker, never shared**.
-- **Open:** `Ok(None)` carries no reason, so the by-reason tally spec §7 wants arrives with the first decline reason (BAQ or re-align), together with a two-variant outcome; call-vs-port `prepare_passthrough` (leaning: call, port if its `qual.clone()` profiles).
+- **Settled with the owner (2026-07-25/26):** read preparation is **generic-path only** because the STR path *throws the mapper's line-up away* (it re-aligns every spanning read); the signature is `prepare_read(&self, read: MappedRead, scratch) -> Result<Option<PreparedRead>, ReadPrepError>` — by value, `Result` around `Option` because a decline and a broken run are different outcomes; the reference is a **field of the impls that need one**, never an `Option<R>`; **alignments work on uppercase sequences** — a raw-byte left-alignment does nothing at all on a soft-masked reference (its shift loop compares `A` against `a`). Full scans on 2026-07-26 found **0** lowercase bases in the GRCh38 no-alt analysis set and **227,170** in tomato SL4.0 (~0.03%, ch01/03/05–12); the case would bite UCSC `hg38.fa` or a RepeatMasker-masked plant genome; the fetch is **conditional on the CIGAR carrying an indel** (left-alignment is the reference's only consumer here, and ng moved `F1` to step 1); one preparer + one reference accessor **per worker, never shared**.
+- **Open:** `Ok(None)` carries no reason, so the by-reason tally spec §7 wants arrives with the first decline reason (BAQ or re-align), together with a two-variant outcome.
 
 #### Step 4 — the parameter pre-pass (both paths)
-- **Status:** design complete, **no code on this branch**. There is no `src/ng/parameter_estimation/` yet; the generic half is being built in a parallel effort, and the STR half is gated on its Milestones A and D (the `fitting/` module, `NoiseModel`, `fit_mixture_weights`, and the shared scalar newtypes). Step 4 estimates a sample's noise parameters **without ever calling a genotype** — production's estimator classifies each genotype before counting it and skips every column with no alternative allele, which are the two biases this step exists to remove, so agreeing with production would be the bug.
+- *Deleted 2026-09-11 with the whole-genome histogram route ([plan](doc/devel/ng/impl_plan/remove_histogram_route.md)); this block is kept for its findings. The run's parameters now come only from the census route, `parameter_estimation::joint`.*
+- **Status:** design complete, **no code on this branch** when written. There was no `parameter_estimation` module yet; the generic half is being built in a parallel effort, and the STR half is gated on its Milestones A and D (the `fitting/` module, `NoiseModel`, `fit_mixture_weights`, and the shared scalar newtypes). Step 4 estimates a sample's noise parameters **without ever calling a genotype** — classifying each genotype before counting it, and skipping every column with no alternative allele, are the two biases this step exists to remove.
 - **Specs:** shared framing [parameter_prepass.md](doc/devel/ng/spec/parameter_prepass.md); the SNP/indel path [parameter_prepass_generic.md](doc/devel/ng/spec/parameter_prepass_generic.md); the STR path [parameter_prepass_ssr.md](doc/devel/ng/spec/parameter_prepass_ssr.md); the two censuses [parameter_prepass_census_sites.md](doc/devel/ng/spec/parameter_prepass_census_sites.md); the cohort gather [parameter_prepass_cohort.md](doc/devel/ng/spec/parameter_prepass_cohort.md).
-- **Arch:** [parameter_prepass_generic.md](doc/devel/ng/arch/parameter_prepass_generic.md), [parameter_prepass_ssr.md](doc/devel/ng/arch/parameter_prepass_ssr.md), and — new 2026-08-12 — the per-site route's three: [joint_loci](doc/devel/ng/arch/parameter_prepass_joint_loci.md) (`KeptLoci`, `SelectionIdentity`, the kept-loci digest), [joint_records](doc/devel/ng/arch/parameter_prepass_joint_records.md) (`SampleRecords`, the five-bit depth code sharing `DepthBinEdges` with the histogram route, the STR difference list, a `RecordWriter` whose `add_locus`/`merge` mirror `GenericAccumulators`') and [joint_fit](doc/devel/ng/arch/parameter_prepass_joint_fit.md) (`JointFit`, three site classes, `HomozygoteExcess` as a **new type beside** `InbreedingF` rather than a rename of it, contamination as a value or a stated reason there is none, and a recorded note that the ladder scans are deliberately *not* reused because a rung here is a pass over the data). Module home `src/ng/parameter_estimation/joint/`, a fourth sub-unit beside `fitting/`, `generic/`, `ssr/`. **The cohort gather still has a spec and no architecture document** — that is what blocks it, not the code.
+- **Arch:** [parameter_prepass_generic.md](doc/devel/ng/arch/parameter_prepass_generic.md), [parameter_prepass_ssr.md](doc/devel/ng/arch/parameter_prepass_ssr.md), and — new 2026-08-12 — the per-site route's three: [joint_loci](doc/devel/ng/arch/parameter_prepass_joint_loci.md) (`KeptLoci`, `SelectionIdentity`, the kept-loci digest), [joint_records](doc/devel/ng/arch/parameter_prepass_joint_records.md) (`SampleRecords`, the five-bit depth code sharing `DepthBinEdges` with the histogram route, the STR difference list, a `RecordWriter` whose `add_locus`/`merge` mirror `GenericAccumulators`') and [joint_fit](doc/devel/ng/arch/parameter_prepass_joint_fit.md) (`JointFit`, three site classes, `HomozygoteExcess` as a **new type beside** `InbreedingF` rather than a rename of it, contamination as a value or a stated reason there is none, and a recorded note that the ladder scans are deliberately *not* reused because a rung here is a pass over the data). Module home `src/parameter_estimation/joint/`, a fourth sub-unit beside `fitting/`, `generic/`, `ssr/`. **The cohort gather still has a spec and no architecture document** — that is what blocks it, not the code.
 - **Plans:** [parameter_prepass_generic.md](doc/devel/ng/impl_plan/parameter_prepass_generic.md) (A–G, 21 steps), [parameter_prepass_ssr.md](doc/devel/ng/impl_plan/parameter_prepass_ssr.md) (A–G, 24 steps). Both were reviewed for cross-document consistency on 2026-08-09; the fixes applied were six drifted `segment_criteria.rs` line anchors in the STR spec and one contradiction over which error type the two STR entry points return.
-- **What it can be checked against, because it is unlike every earlier ng step:** neither parity with production nor a legible fixture is available — every number is the argmax of a sum over hundreds of thousands of loci. **The oracle is the estimator's bias computed exactly**: replace each cell's observed count with its probability under a known truth, maximise, and the answer is what an infinite genome returns with no sampling noise in it. [examples/ng_str_stutter_harness.rs](examples/ng_str_stutter_harness.rs) does this and is green. The one anchor that does **not** generate its data from the model it fits is HG002's known-homozygous loci — 2.0% slippage at ≥6 repeats and a 3.4× direction split — and it is the test production's estimator fails, by 2.4-fold with the direction reversed.
+- **What it can be checked against, because it is unlike every earlier ng step:** no legible fixture is available — every number is the argmax of a sum over hundreds of thousands of loci. **The oracle is the estimator's bias computed exactly**: replace each cell's observed count with its probability under a known truth, maximise, and the answer is what an infinite genome returns with no sampling noise in it. [examples/ng_str_stutter_harness.rs](examples/ng_str_stutter_harness.rs) does this and is green. The one anchor that does **not** generate its data from the model it fits is HG002's known-homozygous loci — 2.0% slippage at ≥6 repeats and a 3.4× direction split.
 - **Working code already standing outside the module**, built by the copy-floor survey and to be ported rather than re-derived: [examples/shared/stutter_model.rs](examples/shared/stutter_model.rs) (the slip kernel, the marginal end-bucket scoring with its wrong twin as a control, the genotype-frequency climb, the multi-start search, the three algebraic gates) and [examples/shared/stutter_table.rs](examples/shared/stutter_table.rs) (`LocusShape`, the sparse per-stratum table, the allele support with its low-end clip). Drivers: [examples/ng_str_stutter_rate.rs](examples/ng_str_stutter_rate.rs), [examples/ng_str_stutter_by_library.rs](examples/ng_str_stutter_by_library.rs), [examples/ng_str_table_memory.rs](examples/ng_str_table_memory.rs).
 - **Research:** [parameter_estimator_experiments_2026-08-06.md](doc/devel/ng/research/parameter_estimator_experiments_2026-08-06.md) — the measurements that moved the STR accumulator's key (an entry is a locus, not a read), its offset origin (the reference tract length, not each locus's mode) and its end-bucket scoring.
 - **Open:** the per-period copy floors. The archive survey of 2,457 tomato libraries measures them at `[6, 6, 7, 6, 5, 4]` against ng's `[6, 4, 4, 3, 3, 3]`; adopting them re-routes 15.2% of ng's STR loci to the generic path and roughly nine in ten of every non-mononucleotide one. **The number is measured; the decision is not made**, and nothing in step 4 waits on it — the floors decide which tracts arrive, not what is done with them.
-- **⛦ Spec review, 2026-08-12 — five amendments applied to the census and joint-fit documents, four of them corrections and one a proposed design change.** (1) **A third class of site is proposed** for the duplicated loci the generic spec's §2.1 refuses — two of five real alignments ask for a population at 0.42% and 0.49% of sites, which is six to thirty times the heterozygous population on tomato's least heterozygous sample, and refusing sends it to heterozygosity. **The discriminator has to be local relative coverage, not the alternative-read fraction, because the caller must work on one sample** and one sample cannot tell a duplication from a heterozygote by read counts; production settled the same question the same way ([hidden_paralog_filter.md](doc/devel/specs/hidden_paralog_filter.md) §2), and its constraint carries — per-base coverage at 6× has no power, so the class is conditioned on the window. **Cost: the first new accumulator step 4 would add**, a per-sample GC-corrected coverage-by-window summary, single-digit MB. **Recorded in [spec/parameter_prepass_joint_fit.md](doc/devel/ng/spec/parameter_prepass_joint_fit.md) §2.2 and nowhere else** — the finding was made on the histogram route, but that route is implemented and is not being changed for it (owner, 2026-08-12: do not edit the specs of shipped work while planning the per-site route), so the class is designed where it would be built. (2) **The "scattered so no two are inherited together" claim was false and is gone** — at one position in 400 the gaps are geometric, so ~442,000 of two million kept positions have a neighbour within 100 bases; unbiasedness survives, the precision figures do not, and [joint_loci.md](doc/devel/ng/spec/parameter_prepass_joint_loci.md) §4.2's intervals widen by a factor between 3 and 16 (unmeasured, and measurable from existing cohort calls). A clustered budget is recorded as the instrument for anything distance-dependent, not built. (3) **The STR record keeps the mismatching bases as a sparse difference list**, not two counters — same cost, because mismatches are rare, and it is what an interrupted-repeat model would read. (4) **Four states at an STR locus, not two**, and the one with no field is *reads reached it but none crossed the tract* — a censored lower bound the locus generator records deliberately, with censoring that runs along repeat count. (5) One badly-written passage rewritten. **Also settled in the same pass:** the census budget's knob is a **position count**, not a count of variable sites — the old target was the `positions = target / min(Hobs)` rule that [joint_loci](doc/devel/ng/spec/parameter_prepass_joint_loci.md) §4.2 already rejects, and the two counts now split per parameter (the error rate and the per-sample rates rest on positions, the spectrum, contamination and relatedness on segregating sites, which are an outcome the run reports); and **a digest of the loci actually kept travels with every sample**, computed as the records are written and blocked per megabase, because the seven identity values check what a run was asked for and nothing checks what it produced.
+- **⛦ Spec review, 2026-08-12 — five amendments applied to the census and joint-fit documents, four of them corrections and one a proposed design change.** (1) **A third class of site is proposed** for the duplicated loci the generic spec's §2.1 refuses — two of five real alignments ask for a population at 0.42% and 0.49% of sites, which is six to thirty times the heterozygous population on tomato's least heterozygous sample, and refusing sends it to heterozygosity. **The discriminator has to be local relative coverage, not the alternative-read fraction, because the caller must work on one sample** and one sample cannot tell a duplication from a heterozygote by read counts; per-base coverage at 6× has no power, so the class is conditioned on the window. **Cost: the first new accumulator step 4 would add**, a per-sample GC-corrected coverage-by-window summary, single-digit MB. **Recorded in [spec/parameter_prepass_joint_fit.md](doc/devel/ng/spec/parameter_prepass_joint_fit.md) §2.2 and nowhere else** — the finding was made on the histogram route, but that route is implemented and is not being changed for it (owner, 2026-08-12: do not edit the specs of shipped work while planning the per-site route), so the class is designed where it would be built. (2) **The "scattered so no two are inherited together" claim was false and is gone** — at one position in 400 the gaps are geometric, so ~442,000 of two million kept positions have a neighbour within 100 bases; unbiasedness survives, the precision figures do not, and [joint_loci.md](doc/devel/ng/spec/parameter_prepass_joint_loci.md) §4.2's intervals widen by a factor between 3 and 16 (unmeasured, and measurable from existing cohort calls). A clustered budget is recorded as the instrument for anything distance-dependent, not built. (3) **The STR record keeps the mismatching bases as a sparse difference list**, not two counters — same cost, because mismatches are rare, and it is what an interrupted-repeat model would read. (4) **Four states at an STR locus, not two**, and the one with no field is *reads reached it but none crossed the tract* — a censored lower bound the locus generator records deliberately, with censoring that runs along repeat count. (5) One badly-written passage rewritten. **Also settled in the same pass:** the census budget's knob is a **position count**, not a count of variable sites — the old target was the `positions = target / min(Hobs)` rule that [joint_loci](doc/devel/ng/spec/parameter_prepass_joint_loci.md) §4.2 already rejects, and the two counts now split per parameter (the error rate and the per-sample rates rest on positions, the spectrum, contamination and relatedness on segregating sites, which are an outcome the run reports); and **a digest of the loci actually kept travels with every sample**, computed as the records are written and blocked per megabase, because the seven identity values check what a run was asked for and nothing checks what it produced.
 - **⛦ Naming, owner 2026-08-12: no step-4 document writes a bare `F` any more.** The two inbreeding coefficients are `F_autozygosity` (the fraction of *this* genome where both copies descend from one ancestral copy — what the caller's genotype prior multiplies, fitted from runs of homozygosity in the per-sample walk; `F_ROH` in the literature) and `F_hom_excess` (how much less heterozygous an individual is than random mating in the panel predicts, `1 − Hobs/Hexp`, fitted by the per-site route; `F_IS`). A bare `F` meant whichever the author had in mind, which is the failure the two names exist to prevent. Renamed in [joint_fit](doc/devel/ng/spec/parameter_prepass_joint_fit.md), [joint_loci](doc/devel/ng/spec/parameter_prepass_joint_loci.md) and [cohort](doc/devel/ng/spec/parameter_prepass_cohort.md); **not in [spec/parameter_prepass_generic.md](doc/devel/ng/spec/parameter_prepass_generic.md), whose 81 occurrences all mean `F_autozygosity`** — that path is built and is not reopened for a rename, and §5 of the joint fit says so. **The rename immediately caught a real defect**: two passages in joint_loci §4.2 and §6 argued from `F_hom_excess` and then concluded about what the caller's prior multiplies, which is `F_autozygosity` — true only because the two run together on an autogamous panel, which the text now says instead of sliding between them.
 - **⛦ Contamination gets an estimator, and it lives in the per-site route's generic path — owner, 2026-08-12** ([spec/parameter_prepass_joint_fit.md](doc/devel/ng/spec/parameter_prepass_joint_fit.md) §3.4). **Three signatures identify it** (owner): a contaminant allele sits in **few** reads where a real heterozygote's two alleles are balanced; it appears **only at loci variable in the population**, the contaminant being another individual of the same species; and **the allele it shows is the population's allele**, where an error's is one of three at random. All three need the locus and the allele, so **neither histogram can hold the evidence** — both key a site by its alternative count — which is why this is a per-site parameter and the histogram route emits four numbers, not five. The per-locus allele frequencies the last two signatures need are **fitted by the same route over the same loci in the same pass**, so nothing is supplied from outside. **The estimator is `verifyBamID`'s** (Jun 2012, `10.1016/j.ajhg.2012.09.004`): a two-genotype mixture, sequence-only arm, both genotypes summed over — symmetric in `α`, so a sample swap is invisible and the search is capped at ½. **And `verifyBamID2`'s change is the one this cohort needs** (Zhang 2020, `10.1101/gr.246934.118`): a single pooled allele frequency per marker breaks when the contaminant's population is not the panel's — African frequencies on East Asian samples returned **2.9% for a true 10%**, under any flagging threshold — so each individual gets its own frequency, a linear function of its coordinates in a principal-component space, with `α` and both individuals' coordinates maximised jointly. **Tomato has exactly that structure**: it is landraces from several regions, the same Wahlund effect that makes homozygote excess a bad measure of autozygosity, so a pooled spectrum would read structure as contamination. Components to be derived from this cohort's own kept loci — the same matrix the relatedness estimator already builds. **Correction to an earlier draft: `α` is not depth-limited the way I wrote.** No site is classified; the information pools over markers and verifyBamID2 runs on 4× genomes. What governs is the number of *segregating* markers, and their error against it (MSE at 1%/2%/5% contamination) is 0.69/0.25/0.11 at 1,000 markers, 0.11/0.04/0.01 at 10,000, 0.02/0.01/0.01 at 100,000. **The census is sized for about 10,000 segregating sites, the middle row**; the top row would need ~20 M kept positions at a 1-in-200 segregating rate — ten times the budget and ten times the memory for a factor of **2.3** in the error of `α`. **Owner, 2026-08-12: do not size the budget for contamination.** These are priors, not a laboratory measurement of a mixture; the standard is [joint_loci](doc/devel/ng/spec/parameter_prepass_joint_loci.md) §4.1's — precision keeps improving and *usefulness* plateaus — and 10× memory for 2.3× on one prior fails it. **Instead, re-estimate `α` from the final calls and report both** (§3.4.4): verifyBamID's strongest mode is the one where the intended sample's genotypes are known, and called genotypes are exactly that input, so the post-hoc estimate uses every site with only the contaminant's genotype summed over — a stronger measurement of the same quantity for one pass over existing output. A gap between the two is the user's call (raise the budget and re-run, or report the post-hoc number); **the pipeline must not loop on it**, since re-running the caller under a corrected `α` is the burn-in [cohort](doc/devel/ng/spec/parameter_prepass_cohort.md) §1 forbids. It also doubles as a check on the whole per-site route, contamination being the only step-4 parameter that can be re-measured this cheaply after calling. **Fitted on the generic loci; the STR question is settled per stratum rather than in general** (§4.1 there). Two objections, and the decisive one is not about size: stutter moves a read by one repeat unit, which is exactly the step between genuine STR alleles, so the wrong length it produces *is* a segregating length — where a sequencing error's wrong base matches the population's allele about one time in three. That plus "nearly every locus segregates, so there are no quiet loci to contrast against" kills the two population-based signatures **at long tracts**. **The owner's refinement: both objections weaken together at short tracts** — below four repeats many loci are monomorphic across a cohort, restoring the contrast, and slippage there is 9 reads in 10,000 against 2 in 100 at six and above, so a 1% contamination is ten times the background rather than half of it. Two cheap per-stratum numbers decide it: what fraction of a stratum's loci segregate, and what fraction of its stutter products land on a segregating length. Leaning: the short-tract strata may be usable and the long-tract ones are not — the reverse of their standing everywhere else in the STR path.
 
 #### The STR locus generator — the per-locus read path (cohort walk)
 - **Status:** implemented (Milestones A–E landed across the STR generator plan); **first performance review done 2026-07-26**, no correctness re-review of the whole feature yet. The path: region typing (`TypedRegionIterator`) → `SsrGenerator::next_locus` → `fetch_capped_reads` → `SampleReads::reads_in_region` → `SsrUnitRobustAligner` (4u, the default since `c98796e`).
 - **Plan:** [locus_generation_ssr.md](doc/devel/ng/impl_plan/locus_generation_ssr.md); **Spec:** [locus_generation_ssr.md](doc/devel/ng/spec/locus_generation_ssr.md); **Arch:** [locus_generation_ssr.md](doc/devel/ng/arch/locus_generation_ssr.md).
-- **Code:** [src/ng/locus_generation/ssr.rs](src/ng/locus_generation/ssr.rs), [src/ng/region_typing/mod.rs](src/ng/region_typing/mod.rs), [src/ng/read/input/](src/ng/read/input/mod.rs) (`region_query.rs`, `open_bam.rs`), [src/ng/ref_seq.rs](src/ng/ref_seq.rs), [src/ng/alignment/ssr_unit_robust.rs](src/ng/alignment/ssr_unit_robust.rs). Drivers: [examples/ng_ssr_cohort_stutter.rs](examples/ng_ssr_cohort_stutter.rs) (uncommitted at review time), [examples/ng_ssr_aligner_bakeoff.rs](examples/ng_ssr_aligner_bakeoff.rs).
+- **Code:** [src/locus_generation/ssr.rs](src/locus_generation/ssr.rs), [src/region_typing/mod.rs](src/region_typing/mod.rs), [src/read/input/](src/read/input/mod.rs) (`region_query.rs`, `open_bam.rs`), [src/ref_seq.rs](src/ref_seq.rs), [src/alignment/ssr_unit_robust.rs](src/alignment/ssr_unit_robust.rs). Drivers: [examples/ng_ssr_cohort_stutter.rs](examples/ng_ssr_cohort_stutter.rs) (uncommitted at review time), [examples/ng_ssr_aligner_bakeoff.rs](examples/ng_ssr_aligner_bakeoff.rs).
 - **Latest reviews:** [perf_ng-ssr-locus-observations_2026-07-26.md](doc/devel/reports/reviews/perf_ng-ssr-locus-observations_2026-07-26.md) (perf, **the current one** — the observation-generation core re-measured post-H2; 7 Hot-path / 13 Likely / 9 Speculative, verdict *Apply the listed wins*), and [perf_ng-ssr-cohort-stutter_2026-07-26.md](doc/devel/reports/reviews/perf_ng-ssr-cohort-stutter_2026-07-26.md) (perf, the same morning, from the cohort-walk end; 4 Hot-path / 17 Likely / 11 Speculative — **read its *Applied* section, not just its findings**).
 - **Fixes applied (2026-07-26, same day as the review — full numbers in the report's *Applied* section):**
-  - **✅ H2 applied — CRAM 174.2 s → 1.35 s (129×), output byte-identical, +34 MB peak RSS.** The decoded CRAM container now travels with the pooled reader (`DecodedContainer` in [region_query.rs](src/ng/read/input/region_query.rs), `ReaderHandle::container` in [open_bam.rs](src/ng/read/input/open_bam.rs)), keyed on the `.crai` offset — **per worker, no new lock**, the shape arch §7 anticipated. CRAM is now as fast as BAM for identical output and the BAM path is untouched. **Cohort projection: ~21 h → ~10 min** (23.9 s walk once + 11.6 s × 51 samples). New test `a_stale_container_is_not_reused` (three queries through one pooled reader, cold-reader oracle) **mutation-verified**; `readers_opened()` widened to `pub(super)` for it. 2431 tests green, fmt + clippy clean, verified in the container too (2.34 s).
+  - **✅ H2 applied — CRAM 174.2 s → 1.35 s (129×), output byte-identical, +34 MB peak RSS.** The decoded CRAM container now travels with the pooled reader (`DecodedContainer` in `region_query.rs`, `ReaderHandle::container` in [open_bam.rs](src/read/input/open_bam.rs)), keyed on the `.crai` offset — **per worker, no new lock**, the shape arch §7 anticipated. CRAM is now as fast as BAM for identical output and the BAM path is untouched. **Cohort projection: ~21 h → ~10 min** (23.9 s walk once + 11.6 s × 51 samples). New test `a_stale_container_is_not_reused` (three queries through one pooled reader, cold-reader oracle) **mutation-verified**; `readers_opened()` widened to `pub(super)` for it. 2431 tests green, fmt + clippy clean, verified in the container too (2.34 s).
   - **✗ H1 refuted in the proposed form, deferred.** The 32 kb grouped query was prototyped in the probe: **2.2× faster on the BED-restricted workload (0.74 s → 0.33 s, exactly the `samtools view -c` floor) but 4.7× SLOWER untargeted** (7.02 s → 32.89 s), because the bucket window is rescanned per segment. Residual win on the intended workload ≈1.4× end-to-end — not worth a new `LocusGenerator` entry point plus a coordinate-order invariant and a bucket-sizing policy. Revisit with a position cursor if the cohort grows an order of magnitude.
   - **✗ H4 experiment shows no gain, reverted.** A one-entry locus cache measured **zero** at 8 samples (64.0/62.6 s vs 65.0/61.7 s, interleaved A/B) where its hit rate is 87.5% and the win should peak. So the 6.2% profile attribution for `SsrLocus::fetch` is not the reference read. Not worth a cache whose stale hit is a silently wrong measurement.
   - **✗ L2 experiment shows no gain, reverted.** Dropping the reservoir's 164 KiB pre-size moved nothing on host *or* in the container (checked in case glibc differed from macOS's allocator).
 - **✅ Fixes applied (2026-07-26, same day as the second review — six changes, each measured, full numbers in the report's *Applied* section): the shallow tomato cohort is 1.51× faster and the deep HG002 sample 1.19×, output byte-identical on all twelve final runs** (`md5 9409dc94…` / `699d50d5…`), peak RSS unchanged (5,457 → 5,415 MB), **system time 8.15 s → 1.04 s**, suite 2,450 passed / 0 failed, fmt + clippy clean.
-  - **✅ M1' — [benches/ng_ssr_delimiter_perf.rs](benches/ng_ssr_delimiter_perf.rs) built first**, `src/ng/`'s first committed benchmark. Two groups (frame shapes × depth 1…412), with `black_box` both ways, a measured-length assertion in the timed body, and multi-frame sweeps. It calibrates against reality (24.9 µs/read at the HG002 median shape) and **its depth axis refuted L3 for free**: per-read cost is flat from depth 1 to 412, so nothing is amortized across a locus's reads and the per-locus prepared frame was never written.
+  - **✅ M1' — [benches/ng_ssr_delimiter_perf.rs](benches/ng_ssr_delimiter_perf.rs) built first**, ng's first committed benchmark. Two groups (frame shapes × depth 1…412), with `black_box` both ways, a measured-length assertion in the timed body, and multi-frame sweeps. It calibrates against reality (24.9 µs/read at the HG002 median shape) and **its depth axis refuted L3 for free**: per-read cost is flat from depth 1 to 412, so nothing is amortized across a locus's reads and the per-locus prepared frame was never written.
   - **✅ H4' — `PerQualityEmission` holds the resolved table** instead of dereferencing a `LazyLock` per cell: **`ldapr` 7 → 0, `Once::call` 7 → 0** in `delimit`, which is what let the register allocator keep the per-row constants (including the read base) out of the stack. Bit-identical.
   - **✅ H6' — the whole-unit slip emission resolved per row**, indexed by motif phase, with the phase *carried forward* instead of divided (`udiv` 11 → 6). The naive modulo form was a **+0.5% regression at period 1** — 66% of tomato's reads — and carrying it made that −2.2%. `k`-ascending summation preserved, so bit-identical.
   - **✅ H2' — per-record footprints resolved once per decode** (`DecodedContainer.footprints`), removing a CIGAR re-walk per record per query from the container-cache *hit* path: **−15.5% on CRAM**, BAM untouched. No new invariant — the linear scan stays, only the walk is hoisted, so the cursor variant (and its `max_span` trap) was not needed.
@@ -3249,12 +144,12 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **PGO is now indicated** (M11's revisit condition is met — inflate has collapsed to 115 of 38,054 samples); **the allocator A/B is not** (single-threaded, ~2.8% allocator self-time, zero allocations per `align`).
   - **H3 — 51 samples are serialized by one shared `SsrGenerator`** (`&mut self` over scratch, not a data dependency; measured: 100% cpu on an 8-core box). Confirmed by the second review, **but its recommended shape is now wrong**: post-H2 the per-process fixed cost (~3.3 s walk + ~2.4 s digest) exceeds the ~1.55 s of per-sample work, so one-process-per-sample triples cohort CPU (~247 s) for ~34 s wall, against **~13 s for 8 workers each batching ~6–7 samples** — which is also a peak-RSS win (8 open CRAMs and containers instead of 51). Fan out over *batches*. Two hazards to clear first (L16 output lock per *row*, L17 one whole-genome digest per process) plus, new, the decoded container being keyed to an anonymously-pooled handle.
   - **H1 (deferred, above)** — the ceiling is measured; the implementation needs a position cursor, not a rescan.
-  - **M1 — `src/ng/` has no committed benchmark at all** (all 7 registered benches cover production paths). Prerequisite: `src/ng/read/input/test_fixtures.rs` is `#[cfg(test)] pub(crate)`, so a bench cannot reach the synthetic indexed-BAM builder. The review's own harness was **deleted at the owner's request** (M2 closed won't-fix), so its mode/`--dump` design is recorded in the report's §3 for a bench to pick up — until then this path has no repeatable measurement in the tree.
+  - **M1 — ng's code had no committed benchmark at all** (every registered bench covered the older caller). Prerequisite: `src/read/input/test_fixtures.rs` is `#[cfg(test)] pub(crate)`, so a bench cannot reach the synthetic indexed-BAM builder. The review's own harness was **deleted at the owner's request** (M2 closed won't-fix), so its mode/`--dump` design is recorded in the report's §3 for a bench to pick up — until then this path has no repeatable measurement in the tree.
   - **Two driver doc-comment corrections** (out of scope for the review, wrong in the source): the "~8 minutes per sample" walk-waste rationale for `--regions` was the `cargo run` harness (the walk is 2.44 s), and the claim that restriction "cannot change what a covered locus is" is false — whole ch01 finds 6,489 covered loci, the ch01 BED finds 5,534.
   - **`--regions` cannot make the walk cheaper** — `scan_set` types every contig end to end by design (owner decision 2026-07-17); the review quantifies the price (~27 s per genome pass) rather than reopening it, and files the actionable part as L1 (`emit_into`'s per-region linear scan of all requested spans).
 
 #### The locus witness representation — a witness is a set of positions
-- **Status:** `fixes-applied` — **MILESTONES A–D COMPLETE AND REVIEWED, at Checkpoint D.** Milestone D gave the witnessed set its constructors, its surfaces and its regression anchor: `e46d089` (D3, `from_witnessed_runs` — the plan's `from_run`, reshaped by the owner into the one constructor that may answer `Complete`), `e95d9a2` (D4, the dumps' labels, one shared derivation, and the retired `observed` vocabulary out of the output), `c631e3b` (D5, the census's hole counters), `86f60c2` (D6, the spliced fixture and its one-deleted-base knife-edge). Suite **2,847**; `ng::locus_generation` **312**; the STR dump byte-identical to the C0 baseline at every step. [Milestone D review](doc/devel/reports/reviews/ng_locus_witness_representation_d_2026-07-31.md) (4 categories, sequential agents, **0 Blocker / 7 Major / 11 Minor**, all applied) — the earlier milestones' entries below are kept for their findings.
+- **Status:** `fixes-applied` — **MILESTONES A–D COMPLETE AND REVIEWED, at Checkpoint D.** Milestone D gave the witnessed set its constructors, its surfaces and its regression anchor: `e46d089` (D3, `from_witnessed_runs` — the plan's `from_run`, reshaped by the owner into the one constructor that may answer `Complete`), `e95d9a2` (D4, the dumps' labels, one shared derivation, and the retired `observed` vocabulary out of the output), `c631e3b` (D5, the census's hole counters), `86f60c2` (D6, the spliced fixture and its one-deleted-base knife-edge). Suite **2,847**; `locus_generation` **312**; the STR dump byte-identical to the C0 baseline at every step. [Milestone D review](doc/devel/reports/reviews/ng_locus_witness_representation_d_2026-07-31.md) (4 categories, sequential agents, **0 Blocker / 7 Major / 11 Minor**, all applied) — the earlier milestones' entries below are kept for their findings.
 - **⛦ The B review's headline: the property test asserted the canonical form's *shape* and never its *content*.** Mutating the merge's `open_end.max(end)` to `end` — which truncates a containing run and loses witnessed positions — left the property test green and both reference-axis tests with it, because sorting precedes merging so both orderings lose the same positions and order-independence still holds. One fixture line caught it. It now compares the **position sets** of input and output. Two more mutations that used to survive: `one_run`'s `checked_add` → `saturating_add` (the only boundary case, `u16::MAX + 1`, is rejected by `start >= end` whatever the addition does, so it never discriminated), and `LocusLen::from_positions` — which had **no test at all**, and truncating instead of saturating turns a 65,536-position region into `LocusLen(0)`, every witness flush-right and zero-long, no panic.
 - **⛦ The API could not do what arch §2 promises.** "A buffer the caller owns and the callee clears… so a fold allocates nothing per read" — but the only constructor collected into a fresh `SmallVec`, measured spilling at three runs, per (read × widen) since `refold_live_reads` rebuilds every live read's witness. `take_from` / `refill_from` added, the latter swapping so the buffer inherits the old storage. Three runs is the two-junction RNA-seq case the milestone exists for.
 - **⚠ `start()` / `end_exclusive()` were deleted before they could be used.** Two reviewers converged: they name the *enclosing span* on the type whose whole point is that the span lies, and `witness_of`'s `witnessed.end.saturating_add(1)` against the inclusive `RefSpan` makes `end_exclusive()` the cheapest C1 substitution — type-checks, adds a position to every witness, reinstates span-swallows-the-hole silently. C1/C2's plan steps now carry both off-by-one traps in writing.
@@ -3269,7 +164,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **⚠ The milestone's own record was wrong in four places**, all found by the reviewers and corrected in the reports: A2 said "no expectation was edited" (one was — the STR dump's header literal, which is a *string*, so no rename tool moves it); the impl report said one output header moved (two did, and the generic dump's was pinned by no test); A6 under-counted its own hand-rewrites and claimed a string it never touched.
 - **⚠ A6 renaming comments but not identifiers left ~40 sites where a doc contradicts the item it documents** — `/// **Class 5** — observation order:` over `row_order: bool`. Finished in `89030aa`, together with the last `Coverage` on ng's public API (`RecordSpanExceedsCoverageRun`, in the message an operator sees) and ~40 prose sites still calling a witness "coverage".
 - **What it is for:** a locus observation cannot say a read witnessed **two** stretches of it, so such a read is discarded whole. On DNA-seq that never happens (0 holed witnesses in 225 million event-folds); on RNA-seq a spliced read whose junction falls inside a record widened across it loses everything it saw. Milestone C makes the witness a set of positions. The sibling gap — a reference base appearing in an observation's `bases` as though the read sequenced it — is **deferred on its measurement**, 8 occurrences in 225 million folds, design in spec §6.
-- **⚠ `scripts/dev.sh` is per-worktree, and the wrong one tests the wrong code.** It derives the project directory from its own path, so the *main* repo's wrapper mounts and builds the *main* worktree wherever it is invoked from — where `cargo test --release --lib ng::locus_generation` reports **202** tests with no `generator.rs` tests at all, against **275** in this tree. Found while confirming the plan's precondition 2.
+- **⚠ `scripts/dev.sh` is per-worktree, and the wrong one tests the wrong code.** It derives the project directory from its own path, so the *main* repo's wrapper mounts and builds the *main* worktree wherever it is invoked from — where `cargo test --release --lib locus_generation` reports **202** tests with no `generator.rs` tests at all, against **275** in this tree. Found while confirming the plan's precondition 2.
 - **⚠ `cargo test --all-targets` is red for a pre-existing reason.** `benches/psp_writer_perf.rs:386` panics with "index out of bounds: the len is 3300000 but the index is 3300000", verified failing on the unmodified `HEAD`. The per-step gate is `--lib --bins --tests --examples`.
 - **Open:** six ng docs (`arch/locus_generation.md`, `arch/locus_generation_pileup.md`, `arch/locus_generation_ssr.md`, `arch/module_layout.md`, `arch/ng_step_interfaces.md`, `ng/README.md`) still use the pre-A vocabulary (~19 occurrences) and now read stale against the code; the comment re-wrap the substitution owes (~46 lines past the files' wrap — an automated pass touched 233 and was reverted, so it goes with B); Mi11/Mi13 deferred into B1 and Mi15 into D4, all three written into the plan; the identifiers `observation_rows` / `reference_row()` / the local `rows` still say "row" (fold into C/D, which rewrite those functions); the `Partial` variant's "revisit when the generic path mints its first run" note is discharged at D3.
 - **⏸ Checkpoint A — pause for review.** Next: Milestone B, the two witnessed-set types (`witness.rs`, `WitnessedLocusPositions`, `WitnessedRefPositions`), types first and nothing wired.
@@ -3278,30 +173,30 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Status:** `fixes-applied` — ✅ **MILESTONES A AND B COMPLETE AND REVIEWED; MILESTONE C IN PROGRESS (C1 landed).** Each step goes implement → review → apply → commit. Step 1 stops being one type doing three jobs: `ReadFilter` today rejects on flag and MAPQ, converts the survivors, then rejects on length/CIGAR/mismatch, and only two of the three are filtering. This plan splits them, moves the loop into `AlignmentCursor`, and deletes `ReadFilter`, `FilterState`, the `RecordSource` trait and its two doubles, `with_validated_contigs` and `ReadFilterBuffers`. Follows [the alignment cursor](#the-alignment-cursor--reading-a-sorted-bamcram-forwards-once), whose Milestone F left the two vestiges this one removes.
 - **Spec:** [read_filtering_stages.md](doc/devel/ng/spec/read_filtering_stages.md) (what and why); **Arch:** [read_filtering_stages.md](doc/devel/ng/arch/read_filtering_stages.md) (types and interfaces); **Plan:** [read_filtering_stages.md](doc/devel/ng/impl_plan/read_filtering_stages.md). The filters themselves — which nine run, their thresholds, their order — are [read_filtering.md](doc/devel/ng/spec/read_filtering.md)'s and are **unchanged**.
 - **Commits:** `5438927` (A1), `db3057a` (A2), A3 below. **Impl reports:** [A1](doc/devel/reports/implementations/ng_read_filtering_stages_a1_2026-08-03.md), [A2](doc/devel/reports/implementations/ng_read_filtering_stages_a2_2026-08-03.md), [A3](doc/devel/reports/implementations/ng_read_filtering_stages_a3_2026-08-03.md); **reviews:** [A1](doc/devel/reports/reviews/ng_read_filtering_stages_a1_2026-08-03.md) (5 categories, one isolated worktree each — **2 Blocker / 1 Major / 8 Minor**), [A2](doc/devel/reports/reviews/ng_read_filtering_stages_a2_2026-08-03.md) (4 categories — **0 Bl / 1 Maj / 7 Min**), [A3 + milestone close-out](doc/devel/reports/reviews/ng_read_filtering_stages_a3_2026-08-03.md) (3 categories — **0 Bl / 0 Maj / 5 Min**); **fixes applied:** [A1](doc/devel/reports/reviews/fixes_applied_2026-08-03.md), [A2](doc/devel/reports/reviews/fixes_applied_2026-08-03_v2.md), [A3](doc/devel/reports/reviews/fixes_applied_2026-08-03_v3.md).
-- **⛦ All eight of arch §2's rename rows landed, under the names the design specified**, and `grep -rnw` for the eight old names across `src/ng` is empty. A3's own hazard was that **`region_records` is also a live production API** — `PspReader::region_records`, 19 occurrences in the frozen `.psp` reader plus two in a bench — so a repo-wide substitution would have renamed production inside a milestone whose whole claim is that it changes nothing. Scoped to eight ng files; production verified untouched.
-- **⛦ Two of the review's findings were objections to names the *architecture* prescribed, so they went to the owner rather than being absorbed — and both were decided at Checkpoint A (2026-08-03).** **(1) `RawReadIndex` → `PackedReadEntry`, done** (`arch §2` amended). The old name failed twice: "Index" named the container's *field* rather than one entry — the surrounding code already calls a single one an `entry` — and `RawRead` was a second, shorter name for `RawAlignedRead`, minted inside the very milestone that existed to make that vocabulary consistent (93 occurrences of the full name in `src/ng`; the short form existed only inside this one type name, 5 times, one file). **(2) `fill_raw_read` keeps its name and gains a signature change, scheduled as B2.** It takes `&mut RecordBuf`, so it fills only the record half of a raw aligned read and its one caller stamps the read group on the next line — the record-versus-read confusion Milestone A removed everywhere else. It will take `&mut NoodlesRawAlignedRead` and set both halves. A signature change, not a rename, so it could not travel with A3.
-- **⛦ A2's review found the limit of the step's own verification, which is more useful than a bug.** The evidence A2 rested on was `grep -rn "RecordReader\|record_reader" src` returning empty — and it **cannot see the type's name written with a space**. Ten sites had it, including a runtime `unreachable!` message naming a type that no longer exists. The widened check is `grep -rniE "record[ -]readers?" src/ng`, and **A3 inherits it**. Separately the reviewer proved the substitution pure by *inverting* it — reverse-substituting all twelve files and diffing against the base, which returns `filtering.rs` and `test_fixtures.rs` byte-identical and leaves only the added doc blocks and rustfmt's re-sorting. On that evidence byte-identical dumps are a consequence, not a coincidence.
+- **⛦ All eight of arch §2's rename rows landed, under the names the design specified**, and `grep -rnw` for the eight old names across ng's tree was empty.
+- **⛦ Two of the review's findings were objections to names the *architecture* prescribed, so they went to the owner rather than being absorbed — and both were decided at Checkpoint A (2026-08-03).** **(1) `RawReadIndex` → `PackedReadEntry`, done** (`arch §2` amended). The old name failed twice: "Index" named the container's *field* rather than one entry — the surrounding code already calls a single one an `entry` — and `RawRead` was a second, shorter name for `RawAlignedRead`, minted inside the very milestone that existed to make that vocabulary consistent (93 occurrences of the full name in `src/`; the short form existed only inside this one type name, 5 times, one file). **(2) `fill_raw_read` keeps its name and gains a signature change, scheduled as B2.** It takes `&mut RecordBuf`, so it fills only the record half of a raw aligned read and its one caller stamps the read group on the next line — the record-versus-read confusion Milestone A removed everywhere else. It will take `&mut NoodlesRawAlignedRead` and set both halves. A signature change, not a rename, so it could not travel with A3.
+- **⛦ A2's review found the limit of the step's own verification, which is more useful than a bug.** The evidence A2 rested on was `grep -rn "RecordReader\|record_reader" src` returning empty — and it **cannot see the type's name written with a space**. Ten sites had it, including a runtime `unreachable!` message naming a type that no longer exists. The widened check is `grep -rniE "record[ -]readers?" src`, and **A3 inherits it**. Separately the reviewer proved the substitution pure by *inverting* it — reverse-substituting all twelve files and diffing against the base, which returns `filtering.rs` and `test_fixtures.rs` byte-identical and leaves only the added doc blocks and rustfmt's re-sorting. On that evidence byte-identical dumps are a consequence, not a coincidence.
 - **⚠ And the module's contract list held a universal one arm breaks.** "Records come out raw — `read_group` is cleared, never stamped" is the list a new arm's author checks their arm against, and the **CRAM arm stamps it** (a CRAM stores the read group as a container-level number, so it is decided at decode). Pre-existing text, but A2's new "what every arm yields" paragraph is what made the list read as complete. Now states the rule, the exception, and why the exception is written there.
 - **⛦ A1's review found the branch's recurring defect again, and this time in an invariant nobody had ever tested.** The whole `Option<ReadGroupId>` mechanism — `Default` handing out `None`, the accessor reporting it, `decode` refusing it — could be replaced by the exact silent fallback it exists to prevent, **with all 2,837 tests green**. Two agents independently wrote in `read_group: Some(ReadGroupId(0))`, the value its own eight-line doc calls "the trap", and neither the suite nor any of the four dumps noticed. The gap is **pre-existing** (the moved impl is byte-identical to `8cf6f03`, proved by `sed`-and-diff); A1 is just the commit that re-homes it beside the tests meant to guard it.
 - **⚠ And the test that looked like the guard was a test that could not fail.** `..._decode_errors_on_a_record_with_no_position` drove a *defaulted* buffer, so `decode` returned at the read-group guard and never reached `decode_record` at all — while its name, its comment and the impl report all said it exercised the missing-position path. It asserted only `err.kind() == InvalidData`, which **both** paths produce, so it passed either way, and the path it was named for was exercised by nothing. Repurposed to stamp the buffer, and it now asserts the message.
 - **⚠ The suite count moved +2, and the two tests stay in A1** (decided 2026-08-03; the owner left the call to the implementer). The rename itself was count-neutral (1,538 → 1,538); A1's two Blocker fixes took it to **1,540**. Moving them to C2 would mean one commit deleting mutation-verified tests and a later one re-adding them, and it would put unrelated test churn into **the one step whose failure is silent** — C2 moves the tally, where a wrong fold changes no output and no dump. The rule the plan states is that *a rename that changes a number is not a rename*; its purpose is to catch **unexplained** movement, and this movement is named, dated, mutation-verified and written up in three places. Keeping them costs the letter of the rule and keeps its intent; moving them would cost the intent to buy the letter.
 - **⛦ Milestone A is renames, which is exactly why it gets its own milestone.** Three steps, ~200 call sites, no behaviour change at all — so that when B and C change behaviour, the diff *is* the behaviour. The bar: the suite count must not move and the four dumps must be byte-identical. **A rename that changes a number is not a rename**; a moved count means something else came along with it.
-- **The oracle is this code before the change** — there is no second implementation. Every step is measured against the four acceptance dumps (`ng_generic_loci_dump` / `ng_ssr_loci_dump` on HG002 `chr21` at 251,792 and 4,406 lines, and on tomato `SL4.0ch01` at 1,718,914 and 11,945) plus `ng_generic_walk_probe`'s `loci=236081 observations=251786 reads_admitted=54709`. **All five held at every step of A1, A2 and A3** — the dumps compared with `cmp`, not by line count. The suite is **2,839** / `ng::` **1,540**: unchanged by all three renames, +2 from A1's review (below).
+- **The oracle is this code before the change** — there is no second implementation. Every step is measured against the four acceptance dumps (`ng_generic_loci_dump` / `ng_ssr_loci_dump` on HG002 `chr21` at 251,792 and 4,406 lines, and on tomato `SL4.0ch01` at 1,718,914 and 11,945) plus `ng_generic_walk_probe`'s `loci=236081 observations=251786 reads_admitted=54709`. **All five held at every step of A1, A2 and A3** — the dumps compared with `cmp`, not by line count. The suite is **2,839** / ng's own tests **1,540**: unchanged by all three renames, +2 from A1's review (below).
 - **Both of the spec's open questions were resolved by the owner (2026-08-03)** before any code: the cursor holds the reference bases and the fetch buffer and **both filters stay plain functions** (§9 Q1), and the up-front contig check becomes a **comparison of two contig tables** rather than ~2,580 window fetches — which is cheaper *and* proves more, since it compares lengths as well as names (§9 Q2).
 - **⚠ The tally is the silent surface, and it gets its own commit (C2).** A wrong fold changes no output and no dump, so none of the five anchors can see it; its oracle is `a_walk_charges_every_drop_reason_by_hand_count`, green before *and* after, plus the `other_sample` rider still landing on the first entry.
 - **⚠ Deleting the source trait takes three fatal-error tests with it if nobody notices**, which is why C1 gives the in-memory reader a scripted error *before* C3 deletes the doubles — the error path then runs the real chain instead of a fake that bypasses two layers.
-- **Open, and two of these are Checkpoint A decisions.** **(1) The visibility questions both moves raised, batched deliberately rather than taken piecemeal:** whether `NoodlesRawAlignedRead` narrows from `pub` to `pub(crate)` and its dead re-export goes (a **crate public-API change**, and the trait beside it cannot narrow until Milestone C deletes `pub trait RecordSource`, so doing the struct alone now touches those lines twice), and whether `aligned_reads_reader/`'s four `pub(crate) mod` become plain `mod` (nothing outside the directory names them; verified to compile and test clean). **(2) One design-doc sweep for all three renames** — `README.md`, `spec/`+`arch/read_filtering.md`, `arch/alignment_file.md`, `arch/read_groups.md`, `arch/`+`spec/alignment_cursor.md` still name `RawRecord` / `RecordReader` / `record_reader/` and cite `filtering.rs` line numbers A1 invalidated, and the renamed module's own doc cites *back* into them, so the round trip lands on a directory that is not there. Three partial passes would be worse than one. Also open, not for the checkpoint: `AlignedRead.mapq: u8` against the trait's `MapQual`, with the `0xFF` rule now written twice at two result types (B or C, whichever first edits the struct); `use crate::pileup::walker::CigarOp` — ng's read data model importing from production's pileup stage, ~19 ng files deep, for `module_layout.md`'s open items. Plus, from the plan: the file owning its reference (spec §10), the parallel fan-out, and the per-chromosome reference registry `spec/alignment_cursor.md` §12 defers, whose trigger is the first parallel run over CRAM (CRAM peaks at 228 MB on tomato ch01, ~91 MB of it the chromosome's bases).
+- **Open, and two of these are Checkpoint A decisions.** **(1) The visibility questions both moves raised, batched deliberately rather than taken piecemeal:** whether `NoodlesRawAlignedRead` narrows from `pub` to `pub(crate)` and its dead re-export goes (a **crate public-API change**, and the trait beside it cannot narrow until Milestone C deletes `pub trait RecordSource`, so doing the struct alone now touches those lines twice), and whether `aligned_reads_reader/`'s four `pub(crate) mod` become plain `mod` (nothing outside the directory names them; verified to compile and test clean). **(2) One design-doc sweep for all three renames** — `README.md`, `spec/`+`arch/read_filtering.md`, `arch/alignment_file.md`, `arch/read_groups.md`, `arch/`+`spec/alignment_cursor.md` still name `RawRecord` / `RecordReader` / `record_reader/` and cite `filtering.rs` line numbers A1 invalidated, and the renamed module's own doc cites *back* into them, so the round trip lands on a directory that is not there. Three partial passes would be worse than one. Also open, not for the checkpoint: `AlignedRead.mapq: u8` against the trait's `MapQual`, with the `0xFF` rule now written twice at two result types (B or C, whichever first edits the struct). Plus, from the plan: the file owning its reference (spec §10), the parallel fan-out, and the per-chromosome reference registry `spec/alignment_cursor.md` §12 defers, whose trigger is the first parallel run over CRAM (CRAM peaks at 228 MB on tomato ch01, ~91 MB of it the chromosome's bases).
 - **⚠ A grep-shaped check missed prose twice, in two different shapes, and both times it was the reviewers who noticed.** A2's verification was `grep -rn "RecordReader\|record_reader" src` returning empty — which cannot see the type's name written **with a space**; ten sites had it, one a runtime `unreachable!` message naming a type that no longer exists. A3 inherited the widened check and it still missed the renamed type's **own summary sentence**, "The records of one region of one file" — the old name spelled out in a different word order. A rename verified only by grep is verified only against the shapes the grep was written for.
 - **✅ Checkpoint A held and is closed. All four questions answered (2026-08-03), in three follow-up commits.** `093ae96` — `RawReadIndex` → **`PackedReadEntry`**, arch §2 amended (and it surfaced a dangling intra-doc link to `DecodedContainer::fill`, which A3's own review had collapsed away; rustdoc does not check links on private items, so nothing else would have caught it). `57ba5ed` — **visibility narrowed to what has callers**. `f13aba1` — **the design-doc sweep**, nine live documents, 78 references. The `fill_raw_read` signature change became **plan step B2**. The **+2 tests stay in A1** (above).
 - **⛦ "Less visibility is better" turned two review findings into a chain, and the chain is the finding.** `RawAlignedRead` looked un-narrowable — A1's review had rustc blaming `pub trait RecordSource`. It was really blocked by `read/mod.rs` **re-exporting** it; once that went the blocker moved to `RecordSource`, then to `ReadFilter`, each only `pub` because the one below it was. Of the five names `read/mod.rs` re-exported, **four had no caller outside the crate at all**. Now `pub(crate)`: `NoodlesRawAlignedRead`, `RawAlignedRead`, `RecordSource`, `ReadFilter`, `ReadFilterError`, and `aligned_reads_reader/`'s four submodules. **`ReadFilterConfig` is the one exception and stays `pub`** — four examples build one, 12 use sites; the first pass deleted its re-export on the assumption the whole block was dead, and only the examples failing to compile said otherwise. `ReadFilterCounts`/`ReadGroupCounts` stay `pub` too: they are the return type of `AlignmentCursor::read_group_counts`, which spec §7 makes public.
 - **⛦ The doc sweep's rule was which documents *instruct*.** Swept: the nine live spec/arch/README documents. **Not** swept, deliberately — the four completed impl plans (a build order records what was done at the time, like a commit message), this plan's own rename tables (whose left column *is* the old name), and `doc/devel/reports/**` plus this file's narrative entries. Eight lines needed hand-editing on top of the substitution, all of them things a substitution cannot know: two docs cited `filtering.rs` as the home of types A1 moved to `aligned_read.rs`, so renaming alone would have left them pointing confidently at the wrong file; and `arch/alignment_cursor.md`'s module tree was missing `container.rs` and `region_raw_aligned_reads.rs` — the latter renamed by A3, so a reader would have found it under neither name.
-- **✅ B1 done and reviewed** — [impl](doc/devel/reports/implementations/ng_read_filtering_stages_b1_2026-08-03.md), [review](doc/devel/reports/reviews/ng_read_filtering_stages_b1_2026-08-03.md) (3 categories — **1 Blocker / 3 Major / 8 Minor**, all applied), [fixes](doc/devel/reports/reviews/fixes_applied_2026-08-03_v4.md). Suite **2,841** / `ng::` **1,542**; four dumps byte-identical, anchor exact.
+- **✅ B1 done and reviewed** — [impl](doc/devel/reports/implementations/ng_read_filtering_stages_b1_2026-08-03.md), [review](doc/devel/reports/reviews/ng_read_filtering_stages_b1_2026-08-03.md) (3 categories — **1 Blocker / 3 Major / 8 Minor**, all applied), [fixes](doc/devel/reports/reviews/fixes_applied_2026-08-03_v4.md). Suite **2,841** / ng's own tests **1,542**; four dumps byte-identical, anchor exact.
 - **⛦ B1 shipped as one check and ends as three, because a table comparison and a fetch prove different things.** The first version replaced the ~2,580-contig loop with one contig-table comparison — and thereby **removed a guarantee it claimed to strengthen**. `ResidentRefSeq` and `WindowedRefSeq` take their `ContigList` as a **constructor argument independent of the bytes**, so a matching table can front a FASTA that cannot serve the contig at all — a stale `.fai`, or one whose FASTA was replaced. The reviewer measured it: the old probe rejected that accessor, the new comparison accepted it, and the fault surfaced mid-walk under a message naming the *BAM*. The check is now **argument → description → ability**: the contig is one the file declares, the tables are equal *order included*, and one zero-length fetch proves the accessor can serve **this cursor's** contig — one `open(2)` instead of ~2,580, fail-fast intact.
 - **⚠ The Blocker was the plan's fourth test-that-cannot-fail, and the first whose surviving mutation was a *plausible future optimisation*.** Order-sensitivity is the entire reason the check is an equality — a permuted table resolves on every fetch and then feeds filter #8 the wrong contig's bases, silently — and nothing tested it. Rewriting the ordered walk as a name→length hash lookup, the obvious move on a 2,580-entry comparison **on a perf branch**, passed all 1,538 tests. Now pinned by a permutation test, verified against a message-preserving sorted-comparison mutation that it alone kills.
 - **⚠ And the check found that every cursor test had been lying.** Applying it turned **23 tests red at once**: every cursor fixture used `InMemoryRefSeq::from_contigs`, which names contigs `contig0`, `contig1`, … against files declaring `chr1`, `chr2`. All 23 had been handing `cursor()` an accessor disagreeing on **every name**, and nothing noticed for the life of the fixture. They now derive from one `fixture_reference_bases()`, with a standing guard test pinning it.
 - **⚦ The ~130 ms estimate does not survive measurement, and its arithmetic is wrong in a checkable way.** Clean A/B, six runs each: **1.861 s → 1.834 s, ≈27 ms per cursor (~1.4 %)** — consistent (slowest *after* beats fastest *before*), not the ~130 ms predicted. Spec §9 Q2 multiplies "52 µs per open with a shared index" by 2,580, but read in place that 52 µs is the cost of **constructing a `WindowedRefSeq`** — 34 µs of it cloning the 2,580-entry contig table — and the loop constructed no accessors. At run scale (one cursor per file per chromosome) 50 samples × 25 chromosomes ≈ **25–34 s**, an order of magnitude below the estimate but real.
 - **⏸ Two things for the owner at Checkpoint B**, both **applied** rather than deferred, because the code is right and it is the design docs that need reconciling. **(1)** B1 adds `AlignmentFileError::CursorAccessorContigTable`. **The design authority turns out to be *silent* on this, not against it** — an earlier draft of this entry said "against spec §1's *adds no new error*", and B2's review checked: spec §1 says "change the meaning of any error", which adding a variant does not do, and the only "no new error type" sentence is arch §4, scoped to a **different enum** (`ReadFilterError`). Only §9 Q2's illustrative snippet reuses `ContigReconcile`, and arch's preamble calls its signatures illustrative. So this is a gap filled, not a rule broken — a materially smaller thing to rule on. It was applied because reusing the gate's variant produced a message whose headline is *false* once `open` has passed. **(2)** Spec §9 Q2's cost paragraph should be corrected; a second reviewer confirmed the misreading independently in `ref_seq.rs`.
-- **✅ B2 done and reviewed** — [impl](doc/devel/reports/implementations/ng_read_filtering_stages_b2_2026-08-03.md), [review + milestone close-out](doc/devel/reports/reviews/ng_read_filtering_stages_b2_2026-08-03.md) (2 categories — **0 Blocker / 2 Major / 8 Minor**), [fixes](doc/devel/reports/reviews/fixes_applied_2026-08-03_v5.md). `fill_raw_read` takes a whole `NoodlesRawAlignedRead` and sets **both** halves, so the CRAM arm no longer stamps the read group on the line after the call; `DecodedContainer::read_group(i)` went with the split it existed for. Suite **2,842** / `ng::` **1,543**.
+- **✅ B2 done and reviewed** — [impl](doc/devel/reports/implementations/ng_read_filtering_stages_b2_2026-08-03.md), [review + milestone close-out](doc/devel/reports/reviews/ng_read_filtering_stages_b2_2026-08-03.md) (2 categories — **0 Blocker / 2 Major / 8 Minor**), [fixes](doc/devel/reports/reviews/fixes_applied_2026-08-03_v5.md). `fill_raw_read` takes a whole `NoodlesRawAlignedRead` and sets **both** halves, so the CRAM arm no longer stamps the read group on the line after the call; `DecodedContainer::read_group(i)` went with the split it existed for. Suite **2,842** / ng's own tests **1,543**.
 - **⚠ B2's "no tests needed" was drawn from the one mutation that could not survive.** `read_group = None` trips `decode`'s `Option` guard, so it proves the stamp is *present*, not *right*. Two real gaps sat behind it. **(1) No CRAM fixture combined >1 container with >1 read group** — the only multi-read-group CRAM is three records (one container), and the only multi-container CRAM declares one `@RG` opened as `Sole`, an arm that never asks a record which group it is in. So **nothing reached the per-record read-group arm past a container boundary**, and a stale group from the second container onwards left all 1,542 tests green. That is the failure `cram.rs` itself names as the worst on this arm: a library's reads silently attributed to another group. **(2) The group's *value* rested on one test** — the second test credited for it collected `(qname, read_group)` pairs and threw the group away. Both closed, both mutation-verified.
 - **⛦ The review corrected an error in its own brief, and it changes what Checkpoint B is asking.** I had recorded B1's new error variant as going "against spec §1's *adds no new error*". **There is no such sentence** — §1 says "change the meaning of any error", which adding a variant does not do, and the only "No new error type" statement is arch §4, scoped to a *different* enum. Corrected in all three places. The fan-out is worth its cost only if the agents will contradict the orchestrator, and here one did.
 - **⛦ Three shipped claims were stale and are fixed:** the spec still said **"no code yet"** after five code commits; its §1 bullet described the probe loop B1 deleted, citing a line that is now an unrelated function; **§11's reuse map — the table Milestone C executes against — had drifted by up to 120 lines** (`RecordSource` 366 → 338, `ReadFilter::next` 895 → 776); and `with_validated_contigs`'s doc still asserted the comparison "proves strictly more", the exact claim B1's review overturned.
@@ -3312,7 +207,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **⚠ C1's own justification was factually wrong in three comment blocks, and three reviewers said so.** It claimed these properties had been pinned only by doubles bypassing two layers. Two pre-existing tests say otherwise: `t10_a_truncated_file_fails_once_and_then_refuses_later_regions` truncates a real indexed BAM, and `a_cursor_whose_file_failed_refuses_later_regions_instead_of_answering_short` already drove the reference failure over the **identical** `overruns` fixture thirty lines above the new test. **What C1 genuinely buys is narrower and is now stated:** no test anywhere pinned *which* `ReadFilterError` a fault is charged to, because both of those match `Err(_)`. Charging a read failure to `Decode` kills exactly one test in the tree — the new one; charging a reference failure to `Source` kills exactly one — the other. On a branch whose recurring defect is a test claiming more than it proves, a comment claiming a gap that did not exist is the same failure of the record.
 - **⚦ The plan's D2 is refuted, and by more than C1 first reported.** D2 proposes proving the conversion is not hoisted by using "a read that would fail to convert: unmapped, with no alignment start". No such read reaches filter #5 — with no alignment start it has no footprint, so the narrowing drops it first, uncounted; an unmapped read that *does* reach #5 has a start and a contig and converts cleanly. So D2 would pass under the mutation it names. A reviewer then hoisted the conversion above the pre-decode filters and ran everything: **2,845 passed, 0 failed** — the hoist is invisible to the *entire suite*. → **Checkpoint C**, before Milestone D.
 - **✅ C1b done and reviewed** (owner-added step, between C1 and C2) — [impl](doc/devel/reports/implementations/ng_read_filtering_stages_c1b_2026-08-03.md), [review](doc/devel/reports/reviews/ng_read_filtering_stages_c1b_2026-08-03.md) (2 categories — **0 Blocker / 3 Major / 8 Minor**), [fixes](doc/devel/reports/reviews/fixes_applied_2026-08-03_v7.md). `container.rs` gets its first test module, closing B2's deferred finding. Suite **2,860** / four dumps byte-identical / anchor exact.
-- **⚠ B2's deferral said these findings were latent because "every caller passes a fresh buffer today". That is false, and it inverts what the step is worth.** `ReadFilter::next` refills **one** `NoodlesRawAlignedRead` for a whole pass, so every read after the first has arrived at `fill_raw_read` with a history since B2 — measured by instrumenting the function and running the CRAM cursor walk (read 0 arrives empty, every read after it with 30 bases in place); asserting freshness turns **three existing tests red**. Nothing was waiting on C2. The real reason the gap survived is that **no test anywhere compares a served read's content against an independent expectation**: deleting `sequence.clear()` grows sequences past 300,000 bases while the rest of the suite — CRAM-versus-BAM oracle included — still passes. A regression in these clears would corrupt production reads **today**. Corrected in the module doc, in `fill_raw_read`'s doc, and at the source in `fixes_applied_2026-08-03_v5.md` §5.
+- **⚠ B2's deferral said these findings were latent because "every caller passes a fresh buffer today". That is false, and it inverts what the step is worth.** `ReadFilter::next` refills **one** `NoodlesRawAlignedRead` for a whole pass, so every read after the first has arrived at `fill_raw_read` with a history since B2 — measured by instrumenting the function and running the CRAM cursor walk (read 0 arrives empty, every read after it with 30 bases in place); asserting freshness turns **three existing tests red**. Nothing was waiting on C2. The real reason the gap survived is that **no test anywhere compares a served read's content against an independent expectation**: deleting `sequence.clear()` grows sequences past 300,000 bases while the rest of the suite — CRAM-versus-BAM oracle included — still passes. A regression in these clears would corrupt the reads of real runs **today**. Corrected in the module doc, in `fill_raw_read`'s doc, and at the source in `fixes_applied_2026-08-03_v5.md` §5.
 - **⚠ Four more mutations survived the whole suite, and the review found them.** `flags` (and five of the seven scalars) read from `self.index[0]` — the fixture gave every record identical scalars, so the module pinned *span* per-entry-ness and not *scalar* per-entry-ness; `Span::new` truncating instead of refusing, whose doc names the silent wrong-read it prevents; `shrink_to_fit` emptied, quantified at 1.6 MiB of 5.4 MiB per open file and observable only from inside the module; and the name replaced wholesale rather than cleared and refilled — **behaviourally identical**, and it deletes the allocation reuse the whole packed form exists for. Each now killed by exactly one test. Suite 2,847 → 2,860: 9 as built, **4 from the review**.
 - **⛦ The 47-mutation pass also confirmed what not to change.** No test is strictly dominated: `records_read_their_own_slices_of_the_shared_buffers` has no unique kill and looked deletable, but it survives a mutation serving every read as the *next* one (clamped), which the two-record tests pass — "three records instead of two" is exactly the test that looks redundant and is not. And the four clears are each independently load-bearing: `quality_scores.clear()` and `cigar.clear()` do not ride along on the sequence clear.
 - **✅ C2 done and reviewed — the milestone's central change** — [impl](doc/devel/reports/implementations/ng_read_filtering_stages_c2_2026-08-03.md), [review](doc/devel/reports/reviews/ng_read_filtering_stages_c2_2026-08-03.md) (3 categories — **1 Blocker / 3 Major / 8 Minor**), [fixes](doc/devel/reports/reviews/fixes_applied_2026-08-03_v8.md). `AlignmentCursor::next_filtered_read` is the step-1 loop; `ReadFilter`, `FilterState`, `restart_after_end_of_input`, `has_failed`, `source_mut`, `with_validated_contigs` and `ReadFilterBuffers` are gone. Suite **2,857** / four dumps byte-identical / anchor exact / `cargo doc` at the 12-link baseline.
@@ -3334,13 +229,13 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **✅ Checkpoint C answered by the owner (2026-08-03), four decisions.** **(1) `ReadFilterError` gains a fourth variant** — done, below. **(2) D2 deferred to Milestone D**, where its fixture will be rewritten. **(3) `ReadFilterError::Decode` stays** as recorded defence in depth; nothing owed. **(4) The specs and the arch were amended** to `reset_read_group_counts` and to what C3 and C4 actually built.
 - **⛦ `ReadFilterError::Source` named two unrelated fatal conditions, and now does not.** `resolve_read_group`'s failure left `RegionRawAlignedReads::read_next` through the same `?` as an I/O failure, so an unresolvable `` rendered as *"reading the next alignment record failed"* — sending an operator to look for a truncated file when the fault is in the header. The split is **at the source**, because an `io::Result` cannot carry it: `read_next` returns `Result<bool, RegionReadError>` and the cursor maps its two arms to `Source` and the new `ReadGroup`. Pinned by `an_unresolvable_read_group_is_fatal_and_charged_to_its_own_condition`, mutation-verified by re-conflating the two. Arch §4's "three variants name the three pieces" is corrected.
 - **⛦ Arch §3.3 was wrong three ways, §3.4 two, and both are fixed.** §3.3 listed a `header()` that went at B1, spelled `other_sample_records` as `other_sample_reads`, and gave `read_next` an `io::Result` it no longer returns. §3.4 lacked the tally field under its real name (`read_group_tally`) and the window baseline C4 added. **The fusing change is now written down too**: the old filter stopped on a clean end of input as well as a failure, the cursor's guard is `failed` alone, and that is behaviour-preserving only because all three reader arms latch their own done-state and the narrowing re-holds its early-stop record — a guarantee the cursor used to make itself and now assumes of two layers below. Flagged as undecided rather than blessed. `resolve_read_group`'s failure leaves `read_next` through the same `?` as an I/O read failure, so an unresolvable `RG` tag renders as *"reading the next alignment record failed"* — verified against a real BAM. There are **four** fatal conditions, not three, so **arch §4's table is wrong** where it says the three variants name the three pieces. Splitting them is a design change and arch §4 forbids a new variant in the same sentence that mis-describes the enum, so both code and doc need a ruling.
-- **✅ D1 done and reviewed — the first filter runs with no reference** — [impl](doc/devel/reports/implementations/ng_read_filtering_stages_d1_2026-08-04.md), [review](doc/devel/reports/reviews/ng_read_filtering_stages_d1_2026-08-04.md) (**4 Major / 8 Minor / 8 nits**, three agents in isolated worktrees), [fixes](doc/devel/reports/reviews/fixes_applied_2026-08-04_v1.md). New `#[cfg(test)]` file `src/ng/read/reference_free_first_filter.rs`. Suite **2,867** / four dumps byte-identical / anchor exact.
-- **⚠ D1 was built twice, and the first build had zero unique detection power — measured, by three reviewers independently.** It followed the plan's sentence literally: a test module inside `filtering.rs` whose whole mechanism was its import list. **The checkpoint mutation was already caught by `cursor.rs:706` — production code, so `cargo build` fails on it with the module deleted** — and the two assertions were a strict subset of `filtering.rs`'s own. Worse, one reviewer **broke spec §5's property outright with the module green**: a working `&dyn RawRefSeq` on `ReadFilterConfig` behind `Default`, read by the first filter on every call, gave 2,867 passed / 0 failed. `ReadFilterConfig::default()` launders exactly the requirement the test existed to forbid.
-- **⚦ What replaced it, and the one alarm nothing else in the tree raises.** A `#[cfg(test)]` **sibling** file under `read/` (not a child of `filtering`, which would see `pub(in crate::ng::read)` items however private they became), holding a signature coercion, a config built **field by field**, and a whole reference-free **pass** — reader → narrowing → first filter → tally, the shape spec §5's three named callers would write. Measured: with a reference field on the config, `Default` supplying it and `filtering.rs`'s `post_config` repaired the way its author would repair it, the new file is the **sole remaining compile failure**. Two tests the author wrote were then deleted for being padding, one of them proven so by mutation.
+- **✅ D1 done and reviewed — the first filter runs with no reference** — [impl](doc/devel/reports/implementations/ng_read_filtering_stages_d1_2026-08-04.md), [review](doc/devel/reports/reviews/ng_read_filtering_stages_d1_2026-08-04.md) (**4 Major / 8 Minor / 8 nits**, three agents in isolated worktrees), [fixes](doc/devel/reports/reviews/fixes_applied_2026-08-04_v1.md). New `#[cfg(test)]` file `src/read/reference_free_first_filter.rs`. Suite **2,867** / four dumps byte-identical / anchor exact.
+- **⚠ D1 was built twice, and the first build had zero unique detection power — measured, by three reviewers independently.** It followed the plan's sentence literally: a test module inside `filtering.rs` whose whole mechanism was its import list. **The checkpoint mutation was already caught by `cursor.rs:706` — non-test code, so `cargo build` fails on it with the module deleted** — and the two assertions were a strict subset of `filtering.rs`'s own. Worse, one reviewer **broke spec §5's property outright with the module green**: a working `&dyn RawRefSeq` on `ReadFilterConfig` behind `Default`, read by the first filter on every call, gave 2,867 passed / 0 failed. `ReadFilterConfig::default()` launders exactly the requirement the test existed to forbid.
+- **⚦ What replaced it, and the one alarm nothing else in the tree raises.** A `#[cfg(test)]` **sibling** file under `read/` (not a child of `filtering`, which would see `pub(in crate::read)` items however private they became), holding a signature coercion, a config built **field by field**, and a whole reference-free **pass** — reader → narrowing → first filter → tally, the shape spec §5's three named callers would write. Measured: with a reference field on the config, `Default` supplying it and `filtering.rs`'s `post_config` repaired the way its author would repair it, the new file is the **sole remaining compile failure**. Two tests the author wrote were then deleted for being padding, one of them proven so by mutation.
 - **⏸ Spec §5 overclaims, and D1 is where it showed. For Checkpoint D.** *"The reference stops being a precondition for filtering at all"* is true of the filter, the reader and the narrowing — and **false of `AlignmentCursor<R: RawRefSeq>` and `AlignmentFile::cursor`**, whose bound is unconditional. So a coverage histogram still cannot reach a *file's* reads without producing a reference; the capability stops at `AlignedReadsReader`. Recorded in the new module's doc; no design doc edited.
 - **⛔ D2 could not be built as the plan specifies it.** The plan's fixture — an unmapped read with no alignment start, dropped by filter #5 before a conversion that would fail — **cannot exist**: `RegionRawAlignedReads::read_next` yields a record only after proving contig, footprint (both `alignment_start` and `alignment_end`) and read group, which is exactly the three things `decode` refuses. Measured: **hoisting the conversion above the first filter left 2,866 passed, 0 failed.** The ordering spec §2 calls "the whole design" was pinned by nothing. Options put to the owner, who chose the counted-conversion mechanism (2026-08-04) and lifted the bar on editing the design docs.
 - **✅ D2 done and reviewed — MILESTONE D COMPLETE, at Checkpoint D** — [impl](doc/devel/reports/implementations/ng_read_filtering_stages_d2_2026-08-04.md), [review](doc/devel/reports/reviews/ng_read_filtering_stages_d2_2026-08-04.md) (**4 Major / 12 Minor / 12 nits**, three agents in isolated worktrees), [fixes](doc/devel/reports/reviews/fixes_applied_2026-08-04_v2.md). The conversion is a named step, `AlignmentCursor::convert_buffered_read`, incrementing the new `CursorCounts::reads_converted`. Suite **2,869** / four dumps byte-identical / anchor exact.
-- **⚦ D2 touches production code, and the counter ships — deliberately.** The count must live **inside** the conversion, because an increment beside the call is left behind by a hoist and then reports **the number the test expects** (not zero, as the first draft claimed — reproduced twice), so the test keeps passing while every read is converted. The first build used a `#[cfg(test)]` thread-local; two reviewers independently built `CursorCounts::reads_converted` instead, measured identical detection power, and refuted the thread-local's justification with one grep — `AlignmentCursor` has exactly **one** struct literal and already holds a `CursorCounts`. The field needs no reset, is per-cursor, folds free through the exhaustive-destructure `AddAssign`, and costs **0.7 %** on the walk probe (six runs a side, ranges overlapping: noise).
+- **⚦ D2 touches non-test code, and the counter ships — deliberately.** The count must live **inside** the conversion, because an increment beside the call is left behind by a hoist and then reports **the number the test expects** (not zero, as the first draft claimed — reproduced twice), so the test keeps passing while every read is converted. The first build used a `#[cfg(test)]` thread-local; two reviewers independently built `CursorCounts::reads_converted` instead, measured identical detection power, and refuted the thread-local's justification with one grep — `AlignmentCursor` has exactly **one** struct literal and already holds a `CursorCounts`. The field needs no reset, is per-cursor, folds free through the exhaustive-destructure `AddAssign`, and costs **0.7 %** on the walk probe (six runs a side, ranges overlapping: noise).
 - **⚠ D2's first test covered three of the first filter's six reasons, and the gap was reachable.** A reviewer converted just the `Unmapped` and `LowMapq` drops before rejecting them and **all 2,869 tests stayed green** — a per-reason hoist is one `match` arm, and #2 is the highest-volume drop on real data. The fixture is now eight records, one per reason, asserted against a whole-struct `ReadFilterCounts`. **Two tests, because the ordering breaks in two directions**: hoisting the conversion up, and hoisting filter #7 down onto the raw record — the second changes no output whatsoever and is caught by nothing else.
 - **⏸ A compile-time pin exists and was not taken — for Checkpoint D.** A reviewer built a zero-sized witness minted by the first filter's `Keep` arm and required by the conversion, which makes the hoist a **build error**. Rejected on two grounds, recorded on the method: spec §1 says the design "does not … add a type", and it pins only *half* the property — no type can forbid a second copy of the length rule, which is what the second test catches. Adopting it would shrink the counter's justification, not remove the counter.
 
@@ -3378,8 +273,8 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **⚠ Three sub-agents caught a `Cargo.toml` comment of mine claiming a cargo behaviour and saying it was checked.** `--all-targets` *does* run example tests; my measurement had been aborted by a **pre-existing panic in `benches/psp_writer_perf.rs:386`** (`index out of bounds`, untouched by this branch) that ends an `--all-targets` run before any example. Invisible in CI, which does not run `--all-targets`. **Worth its own fix.**
 - **⚠ THREE THINGS FOR THE OWNER, ALL FOUND BY BUILDING RATHER THAN READING.** **(1) One accessor does not solve the filter seam.** `ReadFilter` fuses on a **clean** end of input — which is how *every* region ends, since a sorted early stop answers `Ok(false)` — and `source_mut` touches neither that flag nor anything else. A reviewer drove two regions through one filter exactly as arch §2.3 spells it and got **2 reads, then 0**. Spec §3's "the filter seam — **solved**, at the price of one accessor" is false as written; B1 must decide how the flag is cleared (a reset, a source that reports a region boundary as something other than end-of-input, or a cursor that never drains). **(2) Spec §10 and arch §2.2 contradict each other** on whether a cursor is consumed when it rejects a region — and arch's own `move_to_region(&mut self)` signature *cannot* consume, so B1 will land arch's shape and leave the spec sentence actively contradicted. **(3) "The reference's own list" is wrong** in arch §2.1 and spec §8: `contigs()` is the **file's** `@SQ` list, reconciled against the reference under a rule that treats an absent `M5` as a wildcard. Proved twice — the file's digests survive into it against a `.fai`-only reference, and a mutation making the field literally the reference's left the test named after the claim passing.
 - **⚦ Every step's tests failed their own review, and that is the milestone's finding.** A1's nine tests passed while the typed-region stream could be truncated to **one region** — 68 % of the loci lost, and a *shorter* wall time, which is what the win this branch chases also looks like. A3's oracle-arm tests let **six of thirteen** mutations through, three because one helper compared read *names*: a clone dropping `alignment_start` — the one field the forget rule compares — passed everything. A2's `contigs()` test could not fail in either direction. All now caught; the four milestone-A steps added 21 library tests and took the probe from 9 to 19.
-- **⚠ Two pre-existing faults surfaced, neither this branch's.** `benches/psp_writer_perf.rs:386` panics (`index out of bounds`) under `cargo test --all-targets`, which aborts the run before any example — it invalidated one of my own measurements. And `cargo doc --no-deps --lib --all-features` fails with **12 unresolved-link errors** in `ssr.rs`, `region_typing/`, `tandem_repeat.rs`, `types.rs` and five `src/ssr/` files, so **CI's doc step is red independently of this work**.
-- **Open:** whether keeping `AlignedRead`s costs more memory than raw records — unmeasured on both sides, revisit trigger recorded. Whether `parity.rs` converts or retires (owner's call, 4,233 lines). Whether the probe's `compile_error!`-to-runtime-refusal swap for the two allocator features is the right call (it had to change: `compile_error!` turns CI red under `--all-features`).
+- **⚠ Two pre-existing faults surfaced, neither this branch's.** `benches/psp_writer_perf.rs:386` panics (`index out of bounds`) under `cargo test --all-targets`, which aborts the run before any example — it invalidated one of my own measurements. And `cargo doc --no-deps --lib --all-features` fails with **12 unresolved-link errors**, so **CI's doc step is red independently of this work**.
+- **Open:** whether keeping `AlignedRead`s costs more memory than raw records — unmeasured on both sides, revisit trigger recorded. Whether the probe's `compile_error!`-to-runtime-refusal swap for the two allocator features is the right call (it had to change: `compile_error!` turns CI red under `--all-features`).
 
 #### The CRAM decode against a window of the reference, not a chromosome
 - **Status:** `implemented` — **A1 and A2 of Milestone A landed; A1 reviewed twice**; A2 (the decode switches to the window) and A3 (the repository is deleted) follow, then B1's measurement on the real whole-genome CRAM. Branch `ng-cram-window`.
@@ -3389,7 +284,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **What it is for.** noodles holds a whole contig at about two bytes a base — `Repository::get` clones it into a cache that never evicts, so the peak holds both — which is **198 MB for tomato chromosome 1 and 493 MB for human chromosome 1**, against a decode that never needs more than one slice's span at a time. A slice states its contig and its first and last position in its header, before any block is decoded.
 - **⚦ The per-cursor window won over the shared cohort window the research note proposed, on a measurement the note did not have.** Its human figure — 2.5 Mb slice spans — comes from `HG002_reads_selected_1000_rg.cram`, a region subset, which is the artefact the note's own §2 documents for the tomato fixture. Spans out of the `.crai` of every CRAM here: the whole-genome tomato file has **112,140 slices, mean 7,075 bp, max 349,769**; the two subset files have means of 2.48 Mb and 8.23 Mb. Only the first is a real coordinate-sorted input, and **a real whole-genome human CRAM has not been measured** — spec §12 keeps the shared window against that case.
 - **⚠ A1's first draft was built, discarded and rewritten, and the reversal is the record worth keeping.** It threaded the cursor's own accessor down `read_next` into the CRAM arm. That compiled and its tests passed, and it put a reference bound on `AlignedReadsReader` and `RegionRawAlignedReads` — which [read_filtering_stages.md](doc/devel/ng/spec/read_filtering_stages.md) §5 corrected itself on 2026-08-04 to forbid, so that a pass filtering on flag and mapping quality with no reference in scope stays constructible, and which `read/reference_free_first_filter.rs` exists to pin. **The owner's ruling was the house rule: a reference reader is an open file position plus a resident window, and every consumer of bases gets its own rather than sharing** (`run_streaming.md` §9). So the CRAM decode mints a second reader from the cursor factory, `AlignmentFile::cursor` takes the factory in place of one accessor, and nothing below it changes. Spec §10 point 5 records both shapes and why.
-- **⚠ And the second reader was minted unchecked at first.** The contig-table comparison was applied to the cursor's reader only; the decode's got the zero-length probe alone, which **cannot** see a permuted table — every name and length is present, so the fetch succeeds against the wrong chromosome, and a CRAM decodes reads as differences from the reference, so the sequences themselves would come out corrupted with nothing failing. Minting and checking are now one operation (`checked_reference`), pinned by `a_cram_cursor_checks_the_second_reference_reader_it_mints` and mutation-verified: dropping the CRAM arm's check leaves `cargo test --lib ng::read` at 300 passed, 1 failed.
+- **⚠ And the second reader was minted unchecked at first.** The contig-table comparison was applied to the cursor's reader only; the decode's got the zero-length probe alone, which **cannot** see a permuted table — every name and length is present, so the fetch succeeds against the wrong chromosome, and a CRAM decodes reads as differences from the reference, so the sequences themselves would come out corrupted with nothing failing. Minting and checking are now one operation (`checked_reference`), pinned by `a_cram_cursor_checks_the_second_reference_reader_it_mints` and mutation-verified: dropping the CRAM arm's check leaves `cargo test --lib read` at 300 passed, 1 failed.
 - **⚠ The review's Major, and it is the kind a test suite cannot see.** The run's `RLIMIT_NOFILE` refusal (`run_streaming.md` §7.1a) priced a cursor at **two** descriptors a file — the file's reader and the mismatch filter's reference reader. A CRAM's is now **three**: the servability check fetches through the decode's reader, and a fetch is what opens the FASTA. A guard left at two passes a CRAM cohort that then meets `EMFILE` mid-genome, which is the failure it exists to prevent and which its own doc records happening once before. Split by format rather than raised — `DESCRIPTORS_A_BAM_NEEDS` 2, `DESCRIPTORS_A_CRAM_NEEDS` 3 — because rounding a BAM up to three would demand a thousand descriptors nothing opens at a thousand samples. **The BAM figure is measured; the CRAM figure is arithmetic**, and `examples/ng_open_cohort_descriptors.rs` on a CRAM cohort is what would replace it.
 - **Open:** A2, A3, B1. Two figures that are arithmetic rather than measurement — a CRAM cohort's descriptor count, and a real whole-genome human CRAM's slice spans.
 
@@ -3397,21 +292,21 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Status:** ✅ **MILESTONES A, B AND C COMPLETE, at Checkpoint C** (`fixes-applied`). ng mints generic loci end to end: the walk no longer fabricates, emits ng's own `SampleLocusObservations`, and is now wrapped in a region walk wired into the dispatcher. Milestone D (prove it, then measure it) remains.
 - **Latest perf review:** [perf_ng-generic-walk_2026-08-05.md](doc/devel/reports/reviews/perf_ng-generic-walk_2026-08-05.md) (5 hypotheses in parallel worktrees, verdict **Apply the listed wins — the first two need an owner decision**; 5 Hot-path / 7 Note). The **structural** round: four changes built, gated and measured, composed into one stack worth **−28.5 % at the 30× target and −42.5 % at ~130×**. Measurements kept in [doc/devel/ng/research/experiments/generic_walk_performance/](doc/devel/ng/research/experiments/generic_walk_performance/), including the reports that refuted a change. Previous: [perf_ng-generic-walk_2026-08-04.md](doc/devel/reports/reviews/perf_ng-generic-walk_2026-08-04.md) (6 categories in parallel worktrees, verdict **Apply the listed wins**; 5 Hot-path / 1 Likely / 4 Speculative / 11 Note), the first review after the alignment cursor; and [perf_ng-generic-pileup_2026-07-31.md](doc/devel/reports/reviews/perf_ng-generic-pileup_2026-07-31.md) (9 Hot-path / 4 Likely / 5 Speculative), the first profiled measurement of this generator.
 - **⏸ Open (perf, 2026-08-05) — two owner decisions gate half the stack, and neither is a performance question:**
-  - **⚠ DECISION 1 — ng's mate-overlap tie-break diverges from production once contributors are reordered.** After quality, mate role and alignment start all tie, `pick_agree_keeper` / `pick_overlap_loser` fall back to *which contributor came first in the list*. Restoring admission order changes that, and two `parity::` tests fail. It cannot fire on real data (a genuine pair has opposite mate roles); the synthetic fixtures tie all the way down. **A divergence outside the six named classes — naming it, or making the tie-break order-independent, is a spec call.**
+  - **⚠ DECISION 1 — ng's mate-overlap tie-break depends on the order of contributors.** After quality, mate role and alignment start all tie, `pick_agree_keeper` / `pick_overlap_loser` fall back to *which contributor came first in the list*, so restoring admission order changes the result. It cannot fire on real data (a genuine pair has opposite mate roles); the synthetic fixtures tie all the way down. **Making the tie-break order-independent is a spec call.**
   - **✅ DECISION 2 RESOLVED (owner, 2026-08-05) — the cap itself was wrong and is fixed; the divergence it caused is now zero.** Owner: *"Ideally we should cap all positions at the same capped depth… what it is wrong is to leave positions with less coverage because we have discarded reads that cover it"*, and *"still with a high enough cap, otherwise we could run out of memory"*. Three caps existed and only the wrong one worked: `max_snp_column_depth`=8,000 could never fire (the walk held at most 4,096 reads), and `max_active_reads`=4,096 **refused reads at admission**, so a refused read contributed at no position. Fixed: hold ceiling 4,096 → **32,768** (deepest real column needs 10,747; 16,384 already loses nothing), the allocator's fatal pending-mate ceiling 10,000 → 1,000,000 (peak 11,384), a per-read sampling key replacing `truncate`, and **fair eviction at the ceiling — measured free**, because an eviction is exactly an early expiry, which `refold_live_reads` already handled. **Positions left short of the cap while reads covering them exist: 351 → 0 on the whole ~130× tomato contig, recovering 834,832 read-positions.** Fairness at 300×: of reads beginning exactly at a capped position, the old rule kept 85 where a fair draw predicts 1,540; the new rule keeps 1,555. Cost 0.37–0.84 %; typical peak RSS unchanged, worst case +46 MB. **⚠ The "88,351 of 341,094 rows" figure this review reported is inflated three orders of magnitude by chain-id renumbering — it is 88 loci of 240,912 plus 244 present in one dump — and with the cap fix in the tree first the ordered active set changes ZERO loci at 300×.**
-  - **✅ ALL FIVE LANDED** (`75fe42d`, `e1c121c`, `28a5498`, `0293764`, `f952581`; merged to `main` at `1e5ffa8`) — assembly and commit sequence recorded in [landing.md](doc/devel/ng/research/experiments/generic_walk_performance/landing.md), which used a five-commit sequence that lands the behaviour change **fourth** so the last commit changes no emitted evidence anywhere. **10× −20.7 %, 30× −28.2 % (target), ~130× −42.2 %, 300× −17.3 %**; peak RSS neutral at every depth; no locus line moves on any gate fixture; `cargo test --lib` 2,893 pass / **1** fail (`every_divergence_from_production_is_one_of_the_six_named_classes`, on `record_widen_events` differing by one on an **uncapped** case — Decision 1's divergence). `cargo fmt --check` is red with 14 differences against 7 at `6fbbd09`; left unformatted so the tree is exactly what the numbers describe, listed as an optional sixth commit.
+  - **✅ ALL FIVE LANDED** (`75fe42d`, `e1c121c`, `28a5498`, `0293764`, `f952581`; merged to `main` at `1e5ffa8`) — assembly and commit sequence recorded in [landing.md](doc/devel/ng/research/experiments/generic_walk_performance/landing.md), which used a five-commit sequence that lands the behaviour change **fourth** so the last commit changes no emitted evidence anywhere. **10× −20.7 %, 30× −28.2 % (target), ~130× −42.2 %, 300× −17.3 %**; peak RSS neutral at every depth; no locus line moves on any gate fixture; `cargo test --lib` 2,893 pass / **1** fail (`record_widen_events` differing by one on an **uncapped** case). `cargo fmt --check` is red with 14 differences against 7 at `6fbbd09`; left unformatted so the tree is exactly what the numbers describe, listed as an optional sixth commit.
   - **✅ READY TO LAND, byte-identical, no decision needed** — specialising the ordinary column (−23.8 % at 30×, −34.4 % at ~130×; it fires on 74 % of columns), skipping the mate-overlap sort when no pair is present (−1.7 % / −4.7 %), the eight lines that make those two compose (worth 1.1–2.5 points), and carrying the active read into the fold instead of hashing for it (−2.0 % / −2.9 % / −3.3 %). Together **−25.2 % at the 30× target**, all four dumps `cmp`-identical.
   - **⛦ The 2026-05-12 `folded_reads` revert is explained, not merely recorded.** The same rewrite without the ordering reproduces it (−3.2 % at 30×, **+23 % at 300×**); with the ordering the same code is −6.5 % / −8.8 % / −10.3 %. **A 33-point swing at high depth from arrival order alone.**
-  - **⚠ 3.6 % of the walk is in a file that cannot be edited.** `ChainIdAllocator::evict_stale_pending` sweeps its whole pending-mate map on **every read admission** — a term that grows as the square of depth, and 40 % of the profile's largest unattributed line. `chain_id_allocator.rs` is pinned byte-identical to production by `copy_fidelity.rs`; production has the same waste.
+  - **⚠ 3.6 % of the walk is one sweep.** `ChainIdAllocator::evict_stale_pending` sweeps its whole pending-mate map on **every read admission** — a term that grows as the square of depth, and 40 % of the profile's largest unattributed line.
   - **⛦ The headroom is now priced.** One read at one position costs **1,300 instructions on a BAM and 1,800 on a CRAM** against 300–600 for the work it does, and the whole column fits in an eighth of L1 at 30× — so the gap is executed instructions, not cache. That also closes struct-narrowing as a lever after three null attempts.
   - **⚠ A start-up floor has been quoted wrong in three briefs:** `PVC_PROBE_MAX_LOCI=1` on human **chr1** is **0.349 G** instructions, not 1.900 G (which is a **chr21** floor). Three agents measured it independently.
   - **⚠ The acceptance dumps cannot see a walk that stops early.** Two of the four changes were caught by tests *after* all four dumps were `cmp`-identical — a one-step emission delay is visible only to a walk that aborts or is abandoned.
 - **⏸ Open (perf, 2026-08-04), none blocking correctness:**
   - **⛦ H3/H4 are CLOSED by the alignment cursor** — the region-grain penalty fell from **3.33× to 1.08×** and BGZF decode from 43 % of self time to **0.8 %**, `loci=256391` identical at every grain. The 2026-07-31 deferral paid.
-  - **✅ H1 APPLIED (owner, 2026-08-04) — the reference FASTA was re-read once per locus: 289,308 reads moving 18.96 GB to deliver 53 MB of bases, a 357× amplification.** Counted, not inferred. `BufReader` + logical-offset fix landed; re-measured after landing at **chr21 walk 1.836 → 1.281 s, −30.2 %**, four dumps byte-identical. **⛦ Owner chose to diverge from production rather than fix it** (*"we are betting for the ng caller"*): `raw_chrom_reader.rs` no longer claims to be a diffable copy of `ManualEvictChromRefFetcher`, and its header now names both divergences and warns that production has the same waste **by decision, not by oversight**.
+  - **✅ H1 APPLIED (owner, 2026-08-04) — the reference FASTA was re-read once per locus: 289,308 reads moving 18.96 GB to deliver 53 MB of bases, a 357× amplification.** Counted, not inferred. `BufReader` + logical-offset fix landed; re-measured after landing at **chr21 walk 1.836 → 1.281 s, −30.2 %**, four dumps byte-identical.
   - **✅ H2 APPLIED — the typed-region scanner was asked for intervals its consumer's copy floor discards** (the 34.6 % site). Intervals materialised 9,659,219 → 2,694,953. **⚠ The patch's safety argument was overstated and is now corrected:** it claimed `prefilter` is the only reader of `detections`, but `RegionScanner` reads them raw with no floor — true only on the changed path. Restated as path-scoped, with a warning against moving the raised floor into `scan_window`, and pinned by two tests (the second is the positive control that stops the first passing vacuously; a new micro-repeat fixture was needed because the module's existing fixtures contain no short intervals for the floor to drop).
   - **✅ H3 RESOLVED (owner, 2026-08-04) — the review's proposed fix was rejected and a better one built.** The FASTA md5 verification is a fixed ~207 G instructions / ~11.3 s and had become the binding constraint (after H1, chr1's walk falls 11.62 → 6.93 s while its wall falls only 11.63 → 10.64 s). The review proposed a persisted digest keyed on `(len, mtime)` — a **real weakening**. The owner instead specified a **configuration parameter on the reader: check by default, skippable on request**, which removes the weakening rather than trading it down, drops the extra-file/spec-§3.11 conflict and the stale-state rule, and targets the only case that hurts (short measurement runs; a fixed cost rounds to nothing on a real pipeline run). Built as **`ReferenceCheck::{VerifyAgainstIndex (Default), TrustIndexWithoutChecking}`** on `read_reference_verifying_or_creating_fai`, a `--trust-reference-index` CLI flag, and one shared `PVC_TRUST_REFERENCE_INDEX` rule for the dev tools (**default still checks**; a typo is exit 2, not a silent default). The probe now prints `reference_check=` so a timing is attributable. **chr21 whole-run wall 10.42 → 1.26 s (−88 %), walk untouched**; suite 2869 → **2872**, the decisive test proving a skip *skipped* by using a `.fai` that lies about the wrapping, with the same fixture as its negative control.
-  - **⚠ H5 BUILT, APPLIED, THEN REVERTED (`5d35490`) — the sorted `folded_reads` is a 3.2 % win at 30× and a 16.4 % LOSS at 300×.** Measured on the GIAB depth sweep, which the applying commit had not run. Same mechanism production recorded when it reverted the same shape (`perf_pileup_2026-05-12.md` H1): the insert shift — `_platform_memmove` is **second overall at 300×** with 1,188 samples against 205 at 30×. The applying commit reasoned the shift away (reads are admitted in ascending `read_id`, so inserts should land at the end); the profile says they do not. **Not worth a 16 % cliff for a 3 % gain on a shape that has now failed twice for the same reason.** The open-record table **stays** a sorted `Vec` — it holds at most two entries at any depth, so it has no depth term.
+  - **⚠ H5 BUILT, APPLIED, THEN REVERTED (`5d35490`) — the sorted `folded_reads` is a 3.2 % win at 30× and a 16.4 % LOSS at 300×.** Measured on the GIAB depth sweep, which the applying commit had not run. The mechanism is the insert shift — `_platform_memmove` is **second overall at 300×** with 1,188 samples against 205 at 30×. The applying commit reasoned the shift away (reads are admitted in ascending `read_id`, so inserts should land at the end); the profile says they do not. **Not worth a 16 % cliff for a 3 % gain on a shape that has now failed twice for the same reason.** The open-record table **stays** a sorted `Vec` — it holds at most two entries at any depth, so it has no depth term.
   - **✅ H4 and L1 APPLIED** (the two-entry `BTreeMap` → sorted `Vec`; the per-region `RecordBuf` deep clone → a two-buffer swap, which also deletes 11.9 % of the walk's allocations).
   - **⛦ SHIPPED STATE, re-measured across the GIAB depth sweep on chr21 — a win at every depth, no crossover:** 5× **−43.5 %**, 30× **−40.4 %**, 50× **−37.0 %**, 300× **−16.5 %**. The benefit falls with depth because most of it is fixed cost (reference reads, repeat scan) that deeper coverage amortises against more per-read work. Also chr1 **−42.9 %**, tomato CRAM **−60.7 %**, chr21 peak RSS **−12.7 %**. Output byte-identical on all four dumps at every step; suite **2,874**; the cross-process determinism test run explicitly and green.
   - **⚠ The measurement instruments need work before the next round:** `cargo test --release` is red with **nine** failures in three root causes (2026-07-31 under-counted *and* misclassified one as a `debug_assert` when it is a float-tolerance bug); `benches/psp_writer_perf.rs` `flush_block_one` **has never produced a number**; **criterion's `change:` line is not admissible as cross-commit evidence on this host** (four of six points "significant" on an *identical binary*); the dhat `--target-dir` hazard is still undocumented and the newly-committed probe now propagates it; a typed-region bench was written this round and is ready to adopt.
@@ -3423,23 +318,23 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **H3/H4 — the largest unrealised lever, not built.** The per-region BAM query re-decodes the same records **30.3×**: 82 % of BGZF seeks target the block the reader already holds, and `PileupWalker::new`'s first-read peek is 50.6 % of the walk. Measured ceiling ~3.4×; a 10 kb query window recovers 72 % of it. Fix is to widen the *query*, not the *region* — caller-side coalescing is refuted (generic regions are not adjacent; it would break spec §2 disjointness).
   - **H5 — `folded_reads` as a sorted `Vec`** (−3.9 % measured) is not in the applied patch; it touches `open_record.rs` alongside H6/H7 and needs a rebase.
   - **H9 — the FASTA md5 is a fixed ~11 s tail**, ~0 % of a whole-genome run but ~50 % of any run under 11 s, including every future fan-out worker.
-  - **L3 — the chain-id allocator's cross-region dependency is cheap to break now and expensive later**; the constructor that would do it is `#[cfg(test)]` in a copy-fidelity-locked file.
+  - **L3 — the chain-id allocator's cross-region dependency is cheap to break now and expensive later**; the constructor that would do it is `#[cfg(test)]`.
   - **The bench does not reproduce the shape that matters** (finest grain 100 regions; the real run gets 613,682) and `sample_size(10)` cannot gate any finding; the typed-region stream — 18 % of self time, 41 % of all bytes — has **no bench at all**.
   - **`cargo test --release` is red on a clean tree** — four tests assert on `debug_assert!` messages release compiles out. It cost this review a false alarm against a good patch.
   - **The dhat build hazard is documented nowhere**: `--features dhat-heap` overwrites `target/release/examples/`, so a later plain run silently executes the instrumented binary. It destroyed this review's first per-contig measurement set.
 - **Milestone C done — four commits + the review's fixes:** `a5c0203` (C1, config + counts + the `max_record_span` ceiling), `d23e2b0` (C2, the region walk — the halo queried **and** stopped), `c89d596` (C3, one chain-id allocator across regions with its counters folded as **deltas**), `52d99c5` (C4, the generic slot filled + the drop-order FIXME it was addressed to); fixes in `94758d7`. Suite 2684 → **2718**. [Impl report](doc/devel/reports/implementations/ng_locus_generation_pileup_generator_c_2026-07-29.md), [review](doc/devel/reports/reviews/ng_locus_generation_pileup_generator_c_2026-07-29.md) (5 categories, **2 Bl / 6 Maj**).
-- **⛦ `max_record_span` is the one knob that is not simply production's.** A `ReadCoverage` run is two `u16`s minted through a **saturating** cast, and production's flag is an unbounded `u32` — so inheriting it by name would inherit a silent truncation at exactly the long-deletion loci this generator exists to fix. Capped at 65,535 and rejected at construction (owner); production's default staying inside the ceiling is a **`const` assertion**, because a runtime assert comparing two constants is a test that cannot fail.
+- **⛦ `max_record_span` is capped at 65,535 and rejected at construction (owner).** A `ReadCoverage` run is two `u16`s minted through a **saturating** cast, so an unbounded `u32` span would bring a silent truncation at exactly the long-deletion loci this generator exists to fix. The default staying inside the ceiling is a **`const` assertion**, because a runtime assert comparing two constants is a test that cannot fail.
 - **⛦ The halo must be stopped, not just queried — and the stop is worth 8.7× wall.** Querying `[start, end + max_record_span]` is what keeps a record anchored inside the region from losing the support lying beyond it. Walking that halo out costs **19× the per-region constant and 8.7× total at 500 regions while changing not one emitted locus**; the stop rule's second half (nothing anchored at or before `region.end` still open) is what makes stopping safe.
 - **Measured, not asserted:** `T(k) ≈ 81.5 ms + 0.12 ms × k` over a 200 kb contig — **a region costs ~290 loci of walking to set up**, so regions under ~300 bp cost more to open than to walk. Peak bytes **flat** at 257,621 from 400 bp to 200 kb (the depth-shaped footprint). Tiling verified at scale: 199,990 loci, identical across 1/2/10/50/200/500 regions.
 - **⚠ Both review Blockers were about the generator's *ending*, not its walking.** A shed stream error outlived the region that shed it — reported against the next, healthy region *after it had emitted all thirty of its loci*, or never reported at all. And neither `Ok(None)` nor `Err` was terminal: the next call re-opened the query and re-walked, admitting every read twice and handing one fragment **two chain ids** — the corruption the run-lifetime allocator exists to prevent, reached from the other direction. `GeneratorSet` shielded both, so they were latent through the dispatcher and live through the generator's own public API.
-- **⚠ Five load-bearing properties were pinned by nothing** — each mutation passed the whole suite: the halo's **width** (half-width passed every test); the stop rule's **comparison** (`>=` drops the locus anchored exactly at `region.end` — a one-base hole at every boundary); two of the fold's three rules; `end_walk` on the error path; and spec §7's **lazy read stream** — an agent collected the query into a `Vec` and the entire library, parity included, stayed green.
+- **⚠ Five load-bearing properties were pinned by nothing** — each mutation passed the whole suite: the halo's **width** (half-width passed every test); the stop rule's **comparison** (`>=` drops the locus anchored exactly at `region.end` — a one-base hole at every boundary); two of the fold's three rules; `end_walk` on the error path; and spec §7's **lazy read stream** — an agent collected the query into a `Vec` and the entire library stayed green.
 - **⚠ Two more tests that could not fail**, bringing the branch's count to nine — and one of them was the replacement written *for the review's own finding*: it passed with half the stop rule deleted, because the rule's other half covers for the mutation whenever coverage runs on into the boundary.
 - **⏸ Checkpoint C — nine open items, none blocking**, headed by: no generator error carries the region it fired in (which is what let Blocker 1 go unnoticed, and whose fix widens a **shared** enum `ssr.rs` also returns through — the owner's call); `PileupGeneratorCounts` is unreachable once the generator is boxed into a `GeneratorSlot`; and the read-query accessor factory is called **per region**, which is spec §8's ~564k-opens trap shape in the one accessor the generator cannot hold for the run.
 - **Milestone B done — three commits:** `51347ec` (B1, the row identity, re-derived per read), `86b20b5` (B2, the type swap, the per-read chain-id rule, the cross-process determinism test), `54b8eb6` (B3, `reads_discarded_by_cap`); review fixes in `f810547`. [Impl report](doc/devel/reports/implementations/ng_locus_generation_pileup_generator_b_2026-07-29.md), [review](doc/devel/reports/reviews/ng_locus_generation_pileup_generator_b_2026-07-29.md) (5 categories, **3 Bl / 5 Maj / 6 Min**).
-- **⛦ Production's positional chain-id rule does not survive rows that split.** `allele_index == 0` named a unique row only while there was one row per allele; rows now split by coverage and by read group, so a reference-matching read can sit in a *partial* row whose bases are a **prefix** of `reference_bases` and never compare equal to them. Restated per read — "a read that agreed with the reference across everything it witnessed carries no chain id" — decidable at fold time, stable under every split, identical to production's when the rows are one-per-allele.
-- **⛦ B3: the obvious per-record count is the wrong quantity.** Production counts truncated *positions*, run-wide. A read capped at one position of a footprint may survive at another, and if it folds at all it folds with its **whole window** — so a per-record truncation count flags records whose support is complete. The quantity is "reads truncated at every position where they had events, so folded nowhere": a membership list resolved at `finalise`, not a counter at the cap.
+- **⛦ A positional chain-id rule does not survive rows that split.** `allele_index == 0` named a unique row only while there was one row per allele; rows now split by coverage and by read group, so a reference-matching read can sit in a *partial* row whose bases are a **prefix** of `reference_bases` and never compare equal to them. Restated per read — "a read that agreed with the reference across everything it witnessed carries no chain id" — decidable at fold time, stable under every split.
+- **⛦ B3: the obvious per-record count is the wrong quantity.** A read capped at one position of a footprint may survive at another, and if it folds at all it folds with its **whole window** — so a per-record truncation count flags records whose support is complete. The quantity is "reads truncated at every position where they had events, so folded nowhere": a membership list resolved at `finalise`, not a counter at the cap.
 - **⚠ One real defect, found by the review.** `reads_discarded_by_cap` counted a read in **both** per-record counters when it survived the cap, folded, then lost its row to an interior hole — **240 records in ~506,000**. The two counters tell a model different things: one says the support is a subsample of the depth, the other says a read covered the locus and said nothing usable.
-- **⚠ Three Blockers, all one mechanism — the measured price of the back-projection.** `to_pileup_record` merges rows back by bases and discards `region.end`, so three properties of the emitted type were asserted nowhere: **rows never merging left the suite *and the 20,000-case soak* green**; the emitted region could be anything; the per-read chain-id rule could be replaced wholesale with production's. Routing the inherited suite through one projection was the owner's decision and it did save 65 edits — this is its cost, **D1's forward projection removes it**, and three tests now assert those properties on ng's own type.
+- **⚠ Three Blockers, all one mechanism — the measured price of the back-projection.** `to_pileup_record` merges rows back by bases and discards `region.end`, so three properties of the emitted type were asserted nowhere: **rows never merging left the suite *and the 20,000-case soak* green**; the emitted region could be anything; the per-read chain-id rule could be replaced wholesale with the positional one. Routing the inherited suite through one projection was the owner's decision and it did save 65 edits — this is its cost, **D1's forward projection removes it**, and three tests now assert those properties on ng's own type.
 - **⛦ Milestone A's fan-out flaw is fixed.** Nine agents against one shared worktree overwrote each other's mutations; five retreated to private worktrees mid-run and both Blockers needed serial re-verification. Milestone B gave every agent its own worktree: **zero collisions, every result first-hand, nothing re-verified.** Do this from now on.
 - **⚠ Two findings were tests I had written**, both "the test that cannot fail": `placed_left_is_per_record` asserted `num_obs - placed_left == 1` right after asserting `num_obs == 2` and `placed_left == 1` — arithmetic on the two lines above it, introduced *while removing* a real assertion — and B3's end-to-end cap test asserted `> 0` summed, which survives an off-by-one. My first positive control for the determinism digest was also inadequate; it now rewrites every read's MAPQ.
 - **Measured, not asserted:** **+15.1 % wall, +24.5 % allocations, B1 alone +12.5 %**, *not* depth-driven (+11.0 % at ~90 reads/case). The costs the code named were the wrong ones — the `Vec<u32>`+sort is 2.2 % **and is the determinism guarantee**, the linear `find` 0 %, hash-keying the rows *worse*; the real one was a `bases.clone()` once per read instead of once per row, now fixed. Spec §7: a bad number is a performance problem to solve, not a design to reconsider — **D3 decides**, from this baseline.
@@ -3447,53 +342,48 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 
 ##### Milestone A (complete, reviewed)
 - **Status:** ✅ **COMPLETE.** ng's walker no longer fabricates: **nothing is written into an observation that its read did not witness**.
-- **Plan:** [locus_generation_pileup_generator.md](doc/devel/ng/impl_plan/locus_generation_pileup_generator.md) (plan 1: [prerequisites](doc/devel/ng/impl_plan/locus_generation_pileup_prerequisites.md), plan 2: [the port](doc/devel/ng/impl_plan/locus_generation_pileup_port.md)); **Spec:** [locus_generation_pileup.md](doc/devel/ng/spec/locus_generation_pileup.md) §4, §6, §7, §8; **Arch:** [locus_generation_pileup.md](doc/devel/ng/arch/locus_generation_pileup.md) §1.2.
+- **Plan:** [locus_generation_pileup_generator.md](doc/devel/ng/impl_plan/locus_generation_pileup_generator.md) (plan 1: [prerequisites](doc/devel/ng/impl_plan/locus_generation_pileup_prerequisites.md), plan 2: [the walker](doc/devel/ng/impl_plan/locus_generation_pileup_port.md)); **Spec:** [locus_generation_pileup.md](doc/devel/ng/spec/locus_generation_pileup.md) §4, §6, §7, §8; **Arch:** [locus_generation_pileup.md](doc/devel/ng/arch/locus_generation_pileup.md) §1.2.
 - **Impl reports:** [Milestone A](doc/devel/reports/implementations/ng_locus_generation_pileup_generator_a_2026-07-29.md) (A0–A5), [Milestone B](doc/devel/reports/implementations/ng_locus_generation_pileup_generator_b_2026-07-29.md) (B1–B3). **Reviews:** [Milestone B](doc/devel/reports/reviews/ng_locus_generation_pileup_generator_b_2026-07-29.md) (5 categories, **3 Bl / 5 Maj / 6 Min**), [Milestone A](doc/devel/reports/reviews/ng_locus_generation_pileup_generator_a_2026-07-29.md) (9 categories, **2 Bl / 8 Maj / 15 Min**). Audit trails in gitignored `tmp/review_2026-07-29_ng-generic-milestone-{a,b}/`.
-- **Milestone A done — six commits:** `da778ab` (A0, the reference adaptor **deleted**, `copy_fidelity` narrowed to five files — first, because it changes no behaviour and is the last step the full differential can prove free), `b47bd3b` (A1, `RefSpan` + `witnessed`/`read_group` + ng's own `AlleleSupportStats`), `a760ab5` (A2, the builder stops filling), `36b2626` (A3, REF-only widen + live re-fold + eviction), `592f25d` (A4, `coverage_of` at `finalise`), `942d59f` (A5, the no-observation set).
-- **⚠ Spec §4's own sentence was false, and the owner took option (b).** "A live read re-folds against the wider window" does not hold for a live read with **no event anchored at the widening position** — a read sitting inside its own deletion, the ordinary state at exactly the long-deletion loci this port exists to fix. Production hides it by appending reference bases to every bucket; with REF-only widening the read's `witnessed` stays pinned to the pre-widen footprint and A4 resolves coverage from that — **a wrong depth, with no error**. So `widen` takes the active set and re-places every live folded read. Two corrections on top, both found by the differential: contributors are **skipped** (the fold loop replays the mate-overlap decision a moment later), and the re-placement **carries** the read's contribution rather than recomputing it, because `q_sum` encodes walk decisions from earlier positions.
-- **⚠ Both review Blockers were in the milestone's own verification apparatus, not in the walk.** The **permanent anchor** omitted `placed_start` from its evidence check — six of production's seven support scalars, read field-by-field rather than destructured — and `placed_start` is the field A1 made fragile by dropping it from ng's stats and reconstructing it at the boundary. Injecting a real defect left the anchor **green**, moving its tolerated class from 264 records (0.15 %) to 2,806 (1.58 %): **2,542 wrong records absorbed**, while the census line printed "same support totals" and "Every other record is identical, field for field". Only an *inherited* test from production's suite noticed. Separately, **nothing asserted that an emitted record carries no unsupported allele bucket**, so moving A3's eviction before the fold loop left all 150 tests green — a structural blindness, since `comparable` drops empty non-REF buckets on **both** sides precisely so ng's eviction is not read as a divergence. Both re-verified serially at a clean tree, both fixed, both now fail under their own injections.
-- **⛦ A result fell out of fixing the first.** Requiring chain-id *equality* fails, and correctly: production folds a read into its REF bucket — id dropped by the `allele_index == 0` rule — having **missed an insertion it never re-folded**, where ng emits the nine bases the read actually witnessed and keeps chain id `6`. The invariant that holds is directional: **ng's chain-id set is a superset of production's**, an id production has that ng lacks meaning ng lost a read's identity.
-- **Measured, not asserted.** Spec §7's predicted allele-list growth is real and **contained**: longest list per record 8→13, 13→26, 18→41, but total alleles only **+0.8–2.3 %** and wall **+2.3–6.4 %**, *not* depth-driven (+2.7 % at 200×); `match_only` byte-identical to production over 199,991 records. The largest single cost component is A1's transitional `vec![0; alleles.len()]` (deleting only it moves the overhead to +0.7–3.4 %) — recorded rather than optimised, because B2 deletes that code. **Determinism verified**: five processes, five different `AHash` seeds, a canary proving the seed varied, byte-identical digests. A 24,000-case debug soak (3.9 M records) reached no `debug_assert` in A1–A5.
+- **Milestone A done — six commits:** `da778ab` (A0, the reference adaptor **deleted**), `b47bd3b` (A1, `RefSpan` + `witnessed`/`read_group` + ng's own `AlleleSupportStats`), `a760ab5` (A2, the builder stops filling), `36b2626` (A3, REF-only widen + live re-fold + eviction), `592f25d` (A4, `coverage_of` at `finalise`), `942d59f` (A5, the no-observation set).
+- **⚠ Spec §4's own sentence was false, and the owner took option (b).** "A live read re-folds against the wider window" does not hold for a live read with **no event anchored at the widening position** — a read sitting inside its own deletion, the ordinary state at exactly the long-deletion loci this plan exists to fix. With REF-only widening the read's `witnessed` stays pinned to the pre-widen footprint and A4 resolves coverage from that — **a wrong depth, with no error**. So `widen` takes the active set and re-places every live folded read. Two corrections on top: contributors are **skipped** (the fold loop replays the mate-overlap decision a moment later), and the re-placement **carries** the read's contribution rather than recomputing it, because `q_sum` encodes walk decisions from earlier positions.
+- **⚠ A review Blocker was in the milestone's own verification, not in the walk.** **Nothing asserted that an emitted record carries no unsupported allele bucket**, so moving A3's eviction before the fold loop left all 150 tests green. Re-verified serially at a clean tree, fixed, and the new test fails under its injection.
+- **Measured, not asserted.** Spec §7's predicted allele-list growth is real and **contained**: longest list per record 8→13, 13→26, 18→41, but total alleles only **+0.8–2.3 %** and wall **+2.3–6.4 %**, *not* depth-driven (+2.7 % at 200×). The largest single cost component is A1's transitional `vec![0; alleles.len()]` (deleting only it moves the overhead to +0.7–3.4 %) — recorded rather than optimised, because B2 deletes that code. **Determinism verified**: five processes, five different `AHash` seeds, a canary proving the seed varied, byte-identical digests. A 24,000-case debug soak (3.9 M records) reached no `debug_assert` in A1–A5.
 - **⚠ A method flaw in the review, recorded so it is not repeated:** all nine agents ran in parallel against **one shared worktree** and several mutate files by design. They collided — edits overwritten mid-run, `src/` reverted three times under one agent, one build hitting a truncated file. Five agents detected it and moved to private detached worktrees. **Future milestone reviews must give each mutating agent its own worktree.**
-- **Code:** [open_record.rs](src/ng/locus_generation/pileup/open_record.rs), [parity.rs](src/ng/locus_generation/pileup/parity.rs), [genome_walk.rs](src/ng/locus_generation/pileup/genome_walk.rs), [copy_fidelity.rs](src/ng/locus_generation/pileup/copy_fidelity.rs), [mock_reference.rs](src/ng/locus_generation/pileup/mock_reference.rs).
+- **Code:** [open_record.rs](src/locus_generation/pileup/open_record.rs), [genome_walk.rs](src/locus_generation/pileup/genome_walk.rs), [mock_reference.rs](src/locus_generation/pileup/mock_reference.rs).
 - **⏸ Checkpoint A — seven open items, none blocking:**
-  - **✅ Resolved (owner, 2026-07-29): cap the knob.** A `ReadCoverage` run is a `u16` narrowed through a **saturating** cast, while production's `--max-record-span` is an unbounded `u32` (default 5,000), so a wider footprint would make a partial witness report a truncated `positions_covered` — a wrong number, no error. `PileupGeneratorConfig` will **reject `max_record_span > u16::MAX`**, written into the plan's **C1** step. It constrains nothing real: *"even 5000 is madness — a locus should be, at most, around 100 bp; 5000 bp would be, with Illumina data, impossible"*, so the default is generous fifty-fold and the ceiling six hundred-fold, where widening the run to `u32` would touch the shared locus type and the STR generator to buy a range no data can occupy. **⛦ This makes `max_record_span` the one knob where ng's constant is not simply production's**, against C1's otherwise-"by name" mandate. A4's `debug_assert` stays as the invariant's statement; C1 is its enforcement.
-  - **✅ Resolved (owner, 2026-07-29): B2's sort is the guarantee, not Milestone A.** Two mechanisms have no observable effect but the order rows are *created* in — `refold_live_reads`' `ids.sort_unstable()` and its contributor skip — and neither is pinnable from inside one process, because `ahash`'s seed is fixed *within* a process and every parity test compares ng against production in that same one, never one ng run against another. Deleting the sort leaves all 151 tests green, in four separate processes too. Both stay comments; **B2 gains the determinism test and it must run the walk in separate processes**, which is the property spec §7/§13 actually claim and one no Milestone A test could have made. Written into the plan's B2 step.
+  - **✅ Resolved (owner, 2026-07-29): cap the knob.** A `ReadCoverage` run is a `u16` narrowed through a **saturating** cast, while a `u32` `--max-record-span` (default 5,000) is unbounded, so a wider footprint would make a partial witness report a truncated `positions_covered` — a wrong number, no error. `PileupGeneratorConfig` will **reject `max_record_span > u16::MAX`**, written into the plan's **C1** step. It constrains nothing real: *"even 5000 is madness — a locus should be, at most, around 100 bp; 5000 bp would be, with Illumina data, impossible"*, so the default is generous fifty-fold and the ceiling six hundred-fold, where widening the run to `u32` would touch the shared locus type and the STR generator to buy a range no data can occupy. A4's `debug_assert` stays as the invariant's statement; C1 is its enforcement.
+  - **✅ Resolved (owner, 2026-07-29): B2's sort is the guarantee, not Milestone A.** Two mechanisms have no observable effect but the order rows are *created* in — `refold_live_reads`' `ids.sort_unstable()` and its contributor skip — and neither is pinnable from inside one process, because `ahash`'s seed is fixed *within* a process and no test compared one run against another. Deleting the sort leaves all 151 tests green, in four separate processes too. Both stay comments; **B2 gains the determinism test and it must run the walk in separate processes**, which is the property spec §7/§13 actually claim and one no Milestone A test could have made. Written into the plan's B2 step.
   - **`coverage_of` takes two positional `u32` record coordinates** and transposing them compiles — the hazard that made plan 1 introduce `LocusLen`. A `debug_assert` catches it in debug; a footprint newtype is the real fix.
-  - **ng's fork of `DEFAULT_MAX_ACTIVE_READS` is indistinguishable by name from production's**, while C1's mandate is "production's `pub const`s by name".
   - **Nothing in `benches/` can drive ng's walker** — this milestone's cost needed a throwaway probe.
   - **The arch doc's *Module home* inventory is stale** (`mock_reference.rs` missing, `mod.rs` described as holding the deleted shim, "eight of those are copies" now five).
   - **✅ Plan 2's four Checkpoint-A questions are closed** (2026-07-30). Three in `f749ed5` — no
     copy banner, the "46 tests" corrected to 113 in five places, the *Module home* inventory fixed;
     the fourth by **deletion**: plan 3's A0 (`da778ab`) removed `RefSeqFetcher` rather than renaming
-    it, an adapter having nothing to adapt once the two walkers diverge on purpose. Plan 2 carries
+    it. Plan 2 carries
     nothing.
 
-#### The generic locus generator — the port (plan 2 of 3)
-- **Status:** ✅ **PLAN 2 COMPLETE (Milestones A and B), at Checkpoint B.** Production's pileup walker exists inside ng with **production edited zero times**, its own suite green against the copy (A), and the stage-1 differential proves the copy **computes** what production computes — 1.5 M synthetic records and 437 k real ones, **zero divergences**, over a harness shown to fail six ways (B). **⛦ Plan 3 (the generator) is unblocked, and the baseline it measures against is banked** — plan 3's first commit makes the two walkers differ on purpose, so this could not have been done later. ✅ **All five owner decisions across the two checkpoints are settled** (2026-07-30): the production defect fixed (`5f32a62`), and Milestone A's four closed — three in `f749ed5`, the fourth by plan 3's A0 deleting `RefSeqFetcher` (`da778ab`) instead of renaming it. **This plan carries nothing.**
+#### The generic locus generator — the walker (plan 2 of 3)
+- **Status:** ✅ **PLAN 2 COMPLETE (Milestones A and B), at Checkpoint B.** The pileup walker exists in `src/locus_generation/pileup/` with its inherited suite green (A). **⛦ Plan 3 (the generator) is unblocked.** ✅ **All five owner decisions across the two checkpoints are settled** (2026-07-30): the walker defect fixed (`5f32a62`), and Milestone A's four closed — three in `f749ed5`, the fourth by plan 3's A0 deleting `RefSeqFetcher` (`da778ab`) instead of renaming it. **This plan carries nothing.**
 - **Plan:** [locus_generation_pileup_port.md](doc/devel/ng/impl_plan/locus_generation_pileup_port.md) (plan 1: [prerequisites](doc/devel/ng/impl_plan/locus_generation_pileup_prerequisites.md), plan 3: [the generator](doc/devel/ng/impl_plan/locus_generation_pileup_generator.md)); **Spec:** [locus_generation_pileup.md](doc/devel/ng/spec/locus_generation_pileup.md) §3, §6, §8, §12, §13.1; **Arch:** [locus_generation_pileup.md](doc/devel/ng/arch/locus_generation_pileup.md) *Module home*, §1.3.
 - **Impl reports:** [Milestone A](doc/devel/reports/implementations/ng_locus_generation_pileup_port_a_2026-07-28.md) (A1–A4), [Milestone B](doc/devel/reports/implementations/ng_locus_generation_pileup_port_b_2026-07-29.md) (B1–B3). **Latest reviews:** [Milestone B](doc/devel/reports/reviews/ng_locus_generation_pileup_port_b_2026-07-29.md) (6 categories, **0 Bl / 5 Maj / 10 Min**, all applied), [Milestone A](doc/devel/reports/reviews/ng_locus_generation_pileup_port_a_2026-07-28.md) (9 categories, 0 Bl / 3 Maj / 19 Min). Audit trails in gitignored `tmp/review_2026-07-2{8,9}_ng-pileup-port-{a,b}/`.
-- **Milestone B done — the differential:** `0a77b2e` (B1, [parity.rs](src/ng/locus_generation/pileup/parity.rs) — one `PreparedRead` stream to both walkers, records *and* `RunSummary` compared, byte-identity well defined because ng's copy still emits production's `PileupRecord` whose `PartialEq` compares `f32`s by bits), `f39f125` (B2, **its own commit** — the mutation exercise), `fcf0c3e` (B3, real reads).
-- **⚠ The harness found a production defect on its first run, on exactly the path the port exists to fix.** `apply_events_to_ref_into` asserts in debug that every event is anchored at or after its record; spec §8 already records that `events_overlapping` **does not clip a deletion to the window**, but not that production asserts the opposite. It is **reachable on a legal read stream** — shrunk to three reads and pinned: a mate's deletion anchored at 17 spanning 18–22, mate-overlap reconciliation in the indel regime collapsing the pair and removing the indel-carrying contributor so **no record opens at 17**, another read's deletion opening a record at 19 *inside that deletion's footprint*, and the first mate later folding in with its deletion anchored two positions before `record_pos`. **Debug panics; release `saturating_sub`s the offset to 0 and applies the deletion at the record's first base** — wrong allele bytes, no error, at long-deletion loci. ~4.2% of generated cases, and it fires on real GIAB HG002 data at chr1:106,324,863. Raised at Checkpoint B and **fixed** — see below. Rather than excluding the class (which would have cut the very inputs the port cares about), the differential requires the two walkers to agree on *which* inputs stop them **and on the panic message**.
-- **⚠ The review found the recurring pattern again — this time in a claim I had written into the module doc.** Two reviewers went past reading: one **re-ran two of B2's five mutations** and reproduced the table to the seed, case index and stream item, then ran a **sixth the table did not cover** — replacing ng's copy of that `debug_assert!` with an unrelated `panic!` — and **the whole parity suite stayed green**, because `WalkOutcome.panicked` was a `bool` and "both stopped" counted as agreement. `open_record.rs` carries eight distinct `debug_assert!`s. The other **re-implemented the generator** and measured 18,077 reads: only **5 of 9 `CigarOp` variants** were ever emitted (`=`/`X`/`H`/`P` never), `reads_with_live_adaptor_boundary` was exactly `is_some()` (4542 = 4542, of which 126 silence nothing — the one assertion written to prevent "a test that cannot fail" *was* one), the real-data test could print "1 records compared, zero divergences" and pass, and the `Err` half of the stream had **zero inputs behind it**. All five Majors and ten Minors applied; every mutation re-run against the fixed harness, all six now fail. Suite 2644 → **2648**.
-- **Code:** [parity.rs](src/ng/locus_generation/pileup/parity.rs), [prepared_read.rs](src/ng/read/prepared_read.rs) (`into_production`).
-- **Milestone A done — four commits:** `9bfd483` (A1, ng's own `PreparedRead`/`MateRole`/`ReadLengthError` + `read_group`; the per-field wiring stays production's `prepare_passthrough` and `from_production` re-attaches the group by exhaustive destructure), `8b6307d` (A2, the seven files verbatim, `driver.rs` → `genome_walk.rs`), `6e44051` (A3, `RefSeqFetcher`, the `RefSeq` → `MultiChromRefFetcher` shim), `8fdba95` (A4, `walker/tests.rs` copied and green against the copy).
-- **⚠ The plan's test count was wrong, and the honest answer is three numbers.** `walker/tests.rs` holds **44**, not 46 — all 44 pass unmodified against the copy, and the two suites are **identical name for name** (checked by diffing `cargo test -- --list`). The seven copies carry **70 `#[test]` markers, 69 in any one profile** (`subtract_contribution`'s debug/release pair is mutually exclusive by `cfg`); **both** profiles were run. So the gate reads **113 inherited tests green in debug, 114 counting the release-only sibling**. The plan (`:50`, `:75`, `:114`) and the spec (`:1050`, `:1054`) still say 46 — a checkpoint question, since this skill does not edit design docs.
-- **⚠ All three review Majors were the seams being weaker than their own documentation — the branch's recurring pattern, now four milestones running.** **`assert_same_prepared_read` claimed a field added to production would force it to be updated and did not** (twelve independent asserts; meanwhile `from_production`'s destructure *would* have carried the field into ng's type, so it would have escaped the very test the module calls "the port anchor") — both sides now destructure exhaustively. **The shim was never driven through the walker it exists to feed**, so the 113 inherited tests proved the walk only over `MockFasta`; the new differential runs the same reads through both fetchers with a deletion, so `widen`'s exclusive-end-as-1-based-start is on the path — mutation-verified (`+1` on the start fails 6 of 10 tests). And **the verbatim property had no check that survived the branch**: the only evidence was a `diff` into a gitignored directory. [copy_fidelity.rs](src/ng/locus_generation/pileup/copy_fidelity.rs) now compares all eight pairs textually on every `cargo test` — and **found a real divergence on its first run**, A2's `cigar_cursor.rs` import order, silently corrected by A3's `cargo fmt` and recorded nowhere. Five mutations, five failures; a sixth passed correctly (it moved an ng-*added* line, whose position is not part of the copy). Suite 2504 → **2641**.
-- **Also applied:** the `super::` vocabulary demoted `pub` → `pub(crate)` (it was minting public ng-flavoured aliases for frozen production types); `RefSeqFetcher` narrowed to match arch §1.3, its inert `Copy` dropped; **two overstated compile-time-enforcement claims corrected** (each conversion checks only the *matched* side — one is now true both ways via a `#[cfg(test)]` reverse conversion, the other is a wording fix because an into-mapping owes no coverage); `MateRole`'s predicates made exhaustive, this being the enum ng owns *in order to extend*; `length()` pinned against production's own method, it being the one hand-transcribed function in the milestone; and `PLACEHOLDER_READ_GROUP` named, because `ReadGroupId(0)` is the run's *first* read group and reads identically to a defaulted field.
-- **Code:** [pileup/mod.rs](src/ng/locus_generation/pileup/mod.rs) (the shim + the vocabulary facade), [copy_fidelity.rs](src/ng/locus_generation/pileup/copy_fidelity.rs), the eight copies, [src/ng/read/prepared_read.rs](src/ng/read/prepared_read.rs), [left_align.rs](src/ng/read/left_align.rs), [left_align_parity.rs](src/ng/read/left_align_parity.rs).
-- **✅ Checkpoint B's question resolved: the production defect is FIXED** (owner, 2026-07-29 — *"we should fix the production bug"*), in `5f32a62`, **the one deliberate edit to frozen production in this whole plan.** `offset = anchor.saturating_sub(record_pos)` was wrong twice: it emitted `ref_seq[0]`, a base the read had deleted, and skipped one position too many. The skip is now computed from **absolute coordinates** and the anchor base is emitted only when the anchor is inside the record — arithmetically **identical** for a deletion anchored within its record, which is why nothing else moved. Applied to production *and* ng's copy in the same commit, so `copy_fidelity` stays green and the differential verifies the fix landed identically in both. **Blast radius measured, not estimated: the entire suite passed except the one test written to pin the defect**, failing with the message written for exactly this moment. **Verified both ways** — unfixed release silently emits `GAAA`, a 4-base allele beginning with a `G` the read deleted; fixed it is `AAA`. The debug soak goes 415 panics → **0**, comparing 13,755 *more* records; HG002 300× walks cleanly in debug where it used to panic. Production owns two new unit tests on `apply_events_to_ref`; the walk-level regression names **both** spellings, since "the right bases are present" and "the wrong bases are gone" are different claims.
-- **⚑ One doc fold-in the owner may want:** spec §8's trap note records that `events_overlapping` does not clip a deletion, but not that production asserted the opposite — that assertion is now relaxed to permit a `Deletion`, and only a `Deletion`, anchored before its record.
-- **✅ Checkpoint A.s four questions — three resolved by the owner (2026-07-29), one open:** **no banner** on the copies (it would widen the plan.s sanctioned edit set and cost `genome_walk.rs`/`errors.rs` their byte-identity; `copy_fidelity.rs` answers the same worry by failing the build, and the reason is recorded in that file); the **"46 tests" corrected** to 113 across plan `:50`/`:75`/`:114` and spec `:1050`/`:1054`, each with a dated note; the **arch *Module home* inventory fixed** — `tests.rs` and `copy_fidelity.rs` added, the count corrected to eight copies. **✅ And the fourth is resolved too: `RefSeqFetcher` is *deleted*, not renamed** (owner, 2026-07-29) — written into plan 3 as **A0**, its first step. The shim was only ever a consequence of the verbatim copy (production.s signatures ask for `MultiChromRefFetcher`), not a design choice, and it stops being true the moment the walkers diverge. A0 has `open_record.rs` take a `RefSeq` directly, which also removes the error translation, both its lossy spots, and ng.s imports of `MultiChromRefFetcher`/`ChromRefFetchError`, and switches to `fetch_into` (arch §4.s allocation note). **It goes first because it changes no behaviour, so the stage-1 differential can still prove it free — every later step deliberately breaks that differential.** Nothing was ever functionally wrong: the shim wraps ng.s own `RefSeq`, it does not bypass it.
+- **⚠ Milestone B's test harness found a walker defect on its first run, on exactly the path plan 3 exists to fix.** `apply_events_to_ref_into` asserts in debug that every event is anchored at or after its record; spec §8 already records that `events_overlapping` **does not clip a deletion to the window**, but not that the walker asserts the opposite. It is **reachable on a legal read stream** — shrunk to three reads and pinned: a mate's deletion anchored at 17 spanning 18–22, mate-overlap reconciliation in the indel regime collapsing the pair and removing the indel-carrying contributor so **no record opens at 17**, another read's deletion opening a record at 19 *inside that deletion's footprint*, and the first mate later folding in with its deletion anchored two positions before `record_pos`. **Debug panics; release `saturating_sub`s the offset to 0 and applies the deletion at the record's first base** — wrong allele bytes, no error, at long-deletion loci. ~4.2% of generated cases, and it fires on real GIAB HG002 data at chr1:106,324,863. Raised at Checkpoint B and **fixed** — see below.
+- **Code:** [prepared_read.rs](src/read/prepared_read.rs).
+- **Milestone A done — four commits:** `9bfd483` (A1, ng's own `PreparedRead`/`MateRole`/`ReadLengthError` + `read_group`), `8b6307d` (A2, the seven walker files, `driver.rs` → `genome_walk.rs`), `6e44051` (A3, `RefSeqFetcher`, the `RefSeq` → `MultiChromRefFetcher` shim), `8fdba95` (A4, `walker/tests.rs` brought in and green).
+- **⚠ The plan's test count was wrong, and the honest answer is three numbers.** `walker/tests.rs` holds **44**, not 46 — all 44 pass unmodified. The seven walker files carry **70 `#[test]` markers, 69 in any one profile** (`subtract_contribution`'s debug/release pair is mutually exclusive by `cfg`); **both** profiles were run. So the gate reads **113 inherited tests green in debug, 114 counting the release-only sibling**. The plan (`:50`, `:75`, `:114`) and the spec (`:1050`, `:1054`) still say 46 — a checkpoint question, since this skill does not edit design docs.
+- **⚠ A review Major: a seam weaker than its own documentation — the branch's recurring pattern, now four milestones running.** **The shim was never driven through the walker it exists to feed**, so the 113 inherited tests proved the walk only over `MockFasta`; the new differential runs the same reads through both fetchers with a deletion, so `widen`'s exclusive-end-as-1-based-start is on the path — mutation-verified (`+1` on the start fails 6 of 10 tests). Suite 2504 → **2641**.
+- **Also applied:** the `super::` vocabulary demoted `pub` → `pub(crate)`; `RefSeqFetcher` narrowed to match arch §1.3, its inert `Copy` dropped; `MateRole`'s predicates made exhaustive, this being the enum ng owns *in order to extend*; and `PLACEHOLDER_READ_GROUP` named, because `ReadGroupId(0)` is the run's *first* read group and reads identically to a defaulted field.
+- **Code:** [pileup/mod.rs](src/locus_generation/pileup/mod.rs) (the shim + the vocabulary facade), the eight walker files, [src/read/prepared_read.rs](src/read/prepared_read.rs), [left_align.rs](src/read/left_align.rs).
+- **✅ Checkpoint B's question resolved: the walker defect is FIXED** (owner, 2026-07-29), in `5f32a62`. `offset = anchor.saturating_sub(record_pos)` was wrong twice: it emitted `ref_seq[0]`, a base the read had deleted, and skipped one position too many. The skip is now computed from **absolute coordinates** and the anchor base is emitted only when the anchor is inside the record — arithmetically **identical** for a deletion anchored within its record, which is why nothing else moved. **Blast radius measured, not estimated: the entire suite passed except the one test written to pin the defect**, failing with the message written for exactly this moment. **Verified both ways** — unfixed release silently emits `GAAA`, a 4-base allele beginning with a `G` the read deleted; fixed it is `AAA`. The debug soak goes 415 panics → **0**, comparing 13,755 *more* records; HG002 300× walks cleanly in debug where it used to panic. The walk-level regression names **both** spellings, since "the right bases are present" and "the wrong bases are gone" are different claims.
+- **⚑ One doc fold-in the owner may want:** spec §8's trap note records that `events_overlapping` does not clip a deletion, but not that the walker asserted the opposite — that assertion is now relaxed to permit a `Deletion`, and only a `Deletion`, anchored before its record.
+- **✅ Checkpoint A's questions — resolved by the owner (2026-07-29):** the **"46 tests" corrected** to 113 across plan `:50`/`:75`/`:114` and spec `:1050`/`:1054`, each with a dated note; the **arch *Module home* inventory fixed** — `tests.rs` added. **✅ And `RefSeqFetcher` is *deleted*, not renamed** (owner, 2026-07-29) — written into plan 3 as **A0**, its first step. A0 has `open_record.rs` take a `RefSeq` directly, which also removes the error translation, both its lossy spots, and ng.s imports of `MultiChromRefFetcher`/`ChromRefFetchError`, and switches to `fetch_into` (arch §4.s allocation note). Nothing was ever functionally wrong: the shim wraps ng.s own `RefSeq`, it does not bypass it.
 - **Open:**
-  - **Plan 3 — [the generator](doc/devel/ng/impl_plan/locus_generation_pileup_generator.md) — is next and now unblocked.** It opens with **A0**, a pure refactor (delete the reference adaptor, narrow `copy_fidelity` file by file) placed first so the stage-1 differential can still prove it free. From **A2** the two walkers differ on purpose and `parity.rs` dies by design; what survives is narrower and is plan 3's to build — on loci where every folded read witnessed the whole footprint, the two must agree forever.
-  - **The reproducible real-data invocations are in `parity.rs`'s doc comment.** The HG002 BAMs (`benchmarks/ssr_hg002/bam/`) and tomato CRAMs (`benchmarks/tomato1/crams/`) live in the main repo and need `DEV_EXTRA_MOUNT`; both references are already under `~/genomes`, which the container mounts. The test wants `--release`: in debug it hits the production defect above on ordinary paired-end data and measures almost nothing.
-  - **§4's defect is a gift to plan 3's `read_coverage` work**, not only a defect report: a concrete, reproducible case where production's fold reaches for bases a read did not witness, with the mechanism traced.
-  - **`ReadLengthError` implements neither `Display` nor `std::error::Error`** and is not `#[non_exhaustive]`, unlike every other ng error type. Faithful to production, so deferred rather than fixed — filing it against the transcription would attack the property the milestone exists to establish.
+  - **Plan 3 — [the generator](doc/devel/ng/impl_plan/locus_generation_pileup_generator.md) — is next and now unblocked.** It opens with **A0**, a pure refactor that deletes the reference adaptor.
+  - **§4's defect is a gift to plan 3's `read_coverage` work**, not only a defect report: a concrete, reproducible case where the walker's fold reaches for bases a read did not witness, with the mechanism traced.
+  - **`ReadLengthError` implements neither `Display` nor `std::error::Error`** and is not `#[non_exhaustive]`, unlike every other ng error type.
   - Two project-wide validation commands are red for unrelated reasons — see Standing items.
 
 #### The generic locus generator — prerequisites (plan 1 of 3)
-- **Status:** ✅ **PLAN 1 COMPLETE (Milestones A and B), at Checkpoint B.** `src/ng/read/input/` returns an **owned** region stream (A), and the shared locus type is settled (B): `ReadCoverage` is `Complete` + one `Observed` run, and `ObservedSequence` carries the read group and `placed_left`. **⛦ Plan 2 (copy the walker, prove it identical) is unblocked** — Checkpoint B's gate was "the type plan 2 fills is settled", and it now is. ⚑ Four owner decisions recorded below, none blocking.
+- **Status:** ✅ **PLAN 1 COMPLETE (Milestones A and B), at Checkpoint B.** `src/read/input/` returns an **owned** region stream (A), and the shared locus type is settled (B): `ReadCoverage` is `Complete` + one `Observed` run, and `ObservedSequence` carries the read group and `placed_left`. **⛦ Plan 2 (the walker) is unblocked** — Checkpoint B's gate was "the type plan 2 fills is settled", and it now is. ⚑ Four owner decisions recorded below, none blocking.
 - **Impl reports:** [Milestone A](doc/devel/reports/implementations/ng_locus_generation_pileup_prereq_a_2026-07-28.md) (A1–A3), [Milestone B](doc/devel/reports/implementations/ng_locus_generation_pileup_prereq_b_2026-07-28.md) (B1–B3).
 - **Latest reviews:** [Milestone B](doc/devel/reports/reviews/ng_locus_generation_pileup_prereq_b_2026-07-28.md) (**1 Blocker / 8 Major**, Request-changes — all applied in `934ea0f`), [Milestone A](doc/devel/reports/reviews/ng_locus_generation_pileup_prereq_a_2026-07-28.md) (0 Bl / 1 Maj / 11 Min, Approve-with-changes).
 - **Milestone B done (the shared locus type) — `6750d73` (B1, `ReadCoverage` → `Complete` + one `Observed { offset_in_locus, positions_covered }` run; prefix-vs-suffix becomes a derivation, and the `from_left`/`from_right` constructors **clamp the reach before deriving the offset** — deriving first would wrap, and a saturating subtraction would silently relabel a right-anchored read as left-anchored), `5054515` (B2, `ObservedSequence` gains `read_group` — joining the dedup **and** sort keys, the latter load-bearing because `HashMap` order is seeded per process — and `placed_left`; `placed_start` deliberately not carried), `45dab6b` (the dump fixture made able to fail, below), `e76fe2a` (B3, doc fold-ins as dated notes preserving the original arguments). **Oracles:** the STR dump byte-identical across all three delimiters at B1 *and* at B2's single-group case; at two read groups the rows split 3→4 and collapsing the group axis reproduces the single-group dump exactly.
@@ -3504,24 +394,25 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **Sealing `ReadCoverage::Observed` behind private fields — declined, with the reason recorded on the variant** (owner: no opinion, implementer's call). It would prove only that a run had been clamped against *some* `LocusLen`, and nothing ties that length to the locus the run ends up on — the type cannot know its own locus — so the real check must live where the region is in hand, which is `num_obs_along_locus`. That function's comment claiming the bound was "a producer invariant, enforced at the mint" was **overstated on both counts** and is corrected. **Revisit when the generic path mints its first run**: it needs runs flush with neither border, which neither constructor expresses, so the constructor set — and the case for sealing — is only knowable then.
   - **The expanded-allele merge — left as is** (owner: *"no need to change something that we are not using right now"*). Preventing it means restoring a side tag, i.e. the encoding the spec rejected; keeping the expansion magnitude means a field whose only consumer is hypothetical. Tested and documented, with the cost stated: the left/right provenance of a saturating partial is gone, and so is how far past the tract it reached.
   - **A read-group column on the two dashboard dumps — owner will do it later.** Documented at the top of each meanwhile.
-- **Plan:** [locus_generation_pileup_prerequisites.md](doc/devel/ng/impl_plan/locus_generation_pileup_prerequisites.md) (plans 2–3: [the port](doc/devel/ng/impl_plan/locus_generation_pileup_port.md), [the generator](doc/devel/ng/impl_plan/locus_generation_pileup_generator.md)); **Spec:** [locus_generation_pileup.md](doc/devel/ng/spec/locus_generation_pileup.md); **Arch:** [locus_generation_pileup.md](doc/devel/ng/arch/locus_generation_pileup.md).
-- **Code:** Milestone A — [src/ng/read/input/open_bam.rs](src/ng/read/input/open_bam.rs), [region_query.rs](src/ng/read/input/region_query.rs), [merge.rs](src/ng/read/input/merge.rs), [mod.rs](src/ng/read/input/mod.rs), [read_groups.rs](src/ng/read/input/read_groups.rs). Milestone B — [src/ng/locus_generation/mod.rs](src/ng/locus_generation/mod.rs), [ssr.rs](src/ng/locus_generation/ssr.rs), and six `examples/ng_ssr_*.rs`.
-- **Background:** the production defect the port exists to fix — [pileup_partial_coverage_ref_fill_2026-07-27.md](doc/devel/reports/research/pileup_partial_coverage_ref_fill_2026-07-27.md).
+- **Plan:** [locus_generation_pileup_prerequisites.md](doc/devel/ng/impl_plan/locus_generation_pileup_prerequisites.md) (plans 2–3: [the walker](doc/devel/ng/impl_plan/locus_generation_pileup_port.md), [the generator](doc/devel/ng/impl_plan/locus_generation_pileup_generator.md)); **Spec:** [locus_generation_pileup.md](doc/devel/ng/spec/locus_generation_pileup.md); **Arch:** [locus_generation_pileup.md](doc/devel/ng/arch/locus_generation_pileup.md).
+- **Code:** Milestone A — [src/read/input/open_bam.rs](src/read/input/open_bam.rs), `region_query.rs`, `merge.rs`, [mod.rs](src/read/input/mod.rs), [read_groups.rs](src/read/input/read_groups.rs). Milestone B — [src/locus_generation/mod.rs](src/locus_generation/mod.rs), [ssr.rs](src/locus_generation/ssr.rs), and six `examples/ng_ssr_*.rs`.
+- **Background:** the partial-coverage reference-fill defect the generator exists to fix — [pileup_partial_coverage_ref_fill_2026-07-27.md](doc/devel/reports/research/pileup_partial_coverage_ref_fill_2026-07-27.md).
 - **Milestone A done (an owned region stream) — three borrows became `Arc`s**, each its own commit: `d1db8dd` (A1, `AlignmentFile.header` → `Arc<sam::Header>`, an *independent* `Arc` rather than a reference into an `Arc`'d file, which is what keeps the sources from being self-referential), `60acd15` (A2, `resolution` → `Arc<ReadGroupResolution>` — **the third borrow, which arrived with the read-group merge and the arch doc's first draft missed** — plus `RegionReads`/`SampleReads.files` → `Arc<AlignmentFile>` and `reads_in_region(self: &Arc<Self>)`; `RegionSource`, `MergedRegionReads` and `SampleRegionReads` lose their lifetime parameter). `SampleReads::reads_in_region` still takes `&self`; only the *returned type* stops borrowing. **The milestone's oracle is that nothing moved** — a representational change moves no read — and it holds: the BAM/CRAM parity oracle (`t8_…`), the indexed-vs-linear-scan oracle (`t5_…`) and the whole read-input suite pass **unmodified**, 2487 → 2489 tests (the two A3 additions and nothing else). A3's two tests are the only new property: the stream is drained after the `SampleReads` is **dropped**, and it is held in a **lifetime-free struct** across separate `&SampleReads` borrows — `LocusGenerator::next_locus` in miniature, and a compile-time anchor, since a borrowed stream forces a lifetime onto the struct.
 - **Recorded deviations (all three minor, all in the impl report §6):** `BorrowedReader` keeps its borrow (it never escapes `reads_in_region`, so an `Arc` clone per query would buy nothing); the receiver is `&Arc<Self>` rather than `&self` — a real narrowing (a bare `&AlignmentFile` can no longer query), documented on the method; and `RegionSource` holds the header/resolution rather than the file, which serves the same end while keeping `region_query.rs` ignorant of `AlignmentFile`, as its unit tests require.
 - **Superseded by the checkpoint decisions below, so read the two bullets above as history:** A2's `Arc<ReadGroupResolution>` is gone (the type clones cheaply instead), and `open` now returns `Arc<Self>`, so the deviation note's "the only shape that does not force `open` to return an `Arc`" no longer applies — the owner chose exactly that.
-- **Design is settled — no open questions** (spec §11 lists 14 resolved decisions and an empty *Open* section). Production is edited **zero times**: ng copies the walker rather than lifting its visibility, and the two earlier drafts that would have touched frozen code (a visibility lift, a `read_group` field on production's `PreparedRead`) are both **withdrawn**.
+- **Design is settled — no open questions** (spec §11 lists 14 resolved decisions and an empty *Open* section).
 - **✅ Checkpoint A's three decisions — all taken by the owner (2026-07-28), each its own commit:**
   - **`AlignmentFile::open` returns `Arc<Self>`** (`47e07f5`). The `Arc`-ness was an invariant of *using* the type that ten call sites each had to remember by chaining `.map(Arc::new)`; the constructor now states it once, un-skippably. The four sites that only inspect the error are unaffected, and the failure path allocates no `Arc`.
   - **The `Arc<ReadGroupResolution>` wrapper is gone — the type was modified instead** (`d233a32`), which was the sharper reading: *"I don't like the idea of an `Arc` in a struct that will have millions of objects."* A region source is built **per query**, ~10⁶ times a run, so the wrapper charged a pointer chase and an atomic pair to every one — including the common `Sole` case, which has nothing to share. `PerRecord(Box<[…]>)` → `PerRecord(Arc<[…]>)` (settled at open, read but never written) makes the enum cheap to clone by value, and `AlignmentFile.resolution` plus both region sources now hold it **directly**. `Arc<sam::Header>` stays, and the contrast is the justification: noodles' type, not ours to reshape, and no cheap-clone form — the case an `Arc` is actually for.
   - **Both spec fold-ins landed**: [spec/alignment_file.md](doc/devel/ng/spec/alignment_file.md) §3.4 carries the `&Arc<Self>` receiver and the `Arc<AlignmentFile>` return, and [spec/sample_reads.md](doc/devel/ng/spec/sample_reads.md) §3.4 records that only the *returned type* stopped borrowing, plus the tally caveat a caller has to know. Written as dated fold-in notes that preserve the original arguments — the *shared, not `&mut`* case is unchanged — rather than overwriting them. *(`arch/alignment_file.md:51-66` is stale too — `path: PathBuf`, `header: sam::Header`, a `sample_name` field — but from earlier work, not this diff; left alone.)*
-- **⚠ One hazard handed to plan 3, now a marker in the code:** `SampleLocusObservationsIterator` ([locus_generation/mod.rs](src/ng/locus_generation/mod.rs)) declares `reads: SampleReads` **before** `generators`, and Rust drops fields in declaration order — so once a generator holds a region stream, the sample dies first and that stream's step-1 tally becomes unobservable at drop (a silent under-report of drop rates, not a crash). Latent today; **live the moment Milestone A's capability is used**, which is what plan 3 does. A `FIXME(pileup-generator)` on the field states the mechanism, the two cheap fixes (declare `generators` first, or drop the held stream per segment), the test shape it needs, and **that the comment is to be deleted once fixed**. Also documented on `AlignmentFile::counts` and `SampleReads::reads_in_region`.
+- **⚠ One hazard handed to plan 3, now a marker in the code:** `SampleLocusObservationsIterator` ([locus_generation/mod.rs](src/locus_generation/mod.rs)) declares `reads: SampleReads` **before** `generators`, and Rust drops fields in declaration order — so once a generator holds a region stream, the sample dies first and that stream's step-1 tally becomes unobservable at drop (a silent under-report of drop rates, not a crash). Latent today; **live the moment Milestone A's capability is used**, which is what plan 3 does. A `FIXME(pileup-generator)` on the field states the mechanism, the two cheap fixes (declare `generators` first, or drop the held stream per segment), the test shape it needs, and **that the comment is to be deleted once fixed**. Also documented on `AlignmentFile::counts` and `SampleReads::reads_in_region`.
 - **Open (plan):**
-  - **Plan 2 — [the port](doc/devel/ng/impl_plan/locus_generation_pileup_port.md) — is next and now unblocked.** Copy production's seven walker files into `src/ng/locus_generation/pileup/` verbatim, plus `PreparedRead` into `src/ng/read/`, and prove the copy emits `PileupRecord` streams byte-identical to production's before a line is edited. The lesson from three previous ports applies and the spec states it: *a differential that passes immediately is more likely to have an inadequate generator than a correct port* — so the fixture must be shown to exercise mate overlap, adaptor masking, widening, re-folds and the column cap, by mutating each and watching it fail. This milestone earned that warning twice over.
+  - **Plan 2 — [the walker](doc/devel/ng/impl_plan/locus_generation_pileup_port.md) — is next and now unblocked.**
   - **The STR path's rows now split by read group** on any multi-group sample — a real output change for that path. Whether the STR cohort work then replaces its inferred sample groups with declared ones is that work's call; plan 1 only made it expressible.
   - Two project-wide validation commands are red for unrelated reasons — see Standing items.
 
 #### Step 4a — the generic noise model's second site class (NEW MILESTONE, approved 2026-08-10)
+- *Deleted 2026-09-11 with the whole-genome histogram route ([plan](doc/devel/ng/impl_plan/remove_histogram_route.md)); this block is kept for its findings. The run's parameters now come only from the census route, `parameter_estimation::joint`.*
 - **Status:** ✅ **EVERY STEP LANDED — N1, N2, N3a–c, N4, N5 — AND CHECKPOINT N IS THE OWNER'S REVIEW.** [Plan](doc/devel/ng/impl_plan/noise_model_extension.md), [evidence](doc/devel/ng/research/noise_model_overdispersion_2026-08-10.md), [N5 report](doc/devel/reports/implementations/ng_noise_model_extension_n5_2026-08-10.md). Sits **between Milestone F and Milestone G** of the step-4 plan; **G1 is held** until it lands, because the anchors G1 asserts are the ones this changes. **N5 was run before N4 on the owner's call (2026-08-10)** — the two steps share nothing and the real-alignment numbers are the milestone's point.
 - **⛦ THE DEFECT N5 FOUND IS FIXED, AND IT WAS ONE MISSING ARGUMENT** ([fix report](doc/devel/reports/implementations/ng_noise_model_extension_n5_fix_2026-08-10.md)). `fit_read_group_error_rates` — the block that picks each read group's error rate, and the **only** place the fit's rate ever comes from — was never handed the sample's second class of site. It built each rung's noise with `SampleLibraryNoise::single`, which carries none, so every candidate rate was scored under the one-class rule against a table whose tail belongs to the other class. The scan therefore returned the tail-inflated rate whatever pair sat beside it, and the outer loop's *settle the rates again with the class held* was re-deriving the number it already had. **⚠ The diagnosis in the entry below is incomplete and its emphasis is wrong, and is kept for the record**: the missing argument is the larger half and has nothing to do with coordinate ascent. **The profile scan it recommended is the smaller half and is kept, on a measurement that only a real alignment could make.** With the argument restored, the fixture passes in 0.5 s with no profile, and so does a synthetic world shaped like a tomato sample — every fixture said the profile was free to delete, and it was deleted. Real tomato SRR7279481 said otherwise: the argument alone scores **−1,504,289.10** and the profile **−1,504,079.98, 209 nats higher**, reporting 1.42% of sites noisy at 6.310 × 10⁻² against 1.07% at 7.079 × 10⁻². Both HG002 arms are identical either way. **The lesson N4 then confirmed:** both measurement programs build simulated samples, and a simulated sample shaped like the real one did *not* separate these two fits — only the alignment did. **What the fix buys, measured on all five alignments:** the clean rate now moves two to three rungs off the one-class rung on every one of them, where before it moved on none. On HG002 30x the emitted marginal is **2.333 × 10⁻³ against the model-free 2.263 × 10⁻³ — 3.1% high, half a rung**, where the plan predicted +3.6% and the blind fit gave +13.8%; heterozygosity is **1.085×** the benchmark against the research note's predicted 1.091. **⛦ And two implementations sharing no code now agree**: the note's Python fit gave `ε_clean` 1.895 × 10⁻³, `ε_noisy` 5.29 × 10⁻², `w` 0.88% at 30x, and this fit gives 1.884 × 10⁻³, 5.309 × 10⁻² and 0.877% — every pair inside one rung, at both depths, which is less than the note's own convergence error. **⚠ Two things do not survive the measurement.** The two deeper tomato samples still rail their noisy class at the ladder's coarsest rung (0.1), unchanged by the fix — the fit wants a class noisier than a ladder chosen for chemistry can express, and a duplication absent from the reference shows about half its reads non-reference, five times that rung. **✅ DECIDED (owner, 2026-08-10): treat those two as outliers.** A best second class on the ladder's coarsest rung is **refused outright** and the sample is fitted with one rate, carrying `site_noise_off_the_ladder` so the refusal is not read as *no second class was needed*. The owner's reasoning is the rule worth keeping: *"there will always be some things that won't be well covered, and we'll have to live with that. What we don't want is to create a model so flexible that it won't serve appropriately the libraries that follow the assumptions the model does. That would be a regression."* **Widening the ladder was rejected on a concrete hazard**: as the noisy rate approaches a half, a noisy site and a heterozygous site are the same distribution, so the class that exists to take mass *away* from heterozygosity would begin taking real heterozygotes. Taking the next rung down was rejected too — an answer inside the range carrying none of the evidence that the sample is outside it. Measured: SRR7279482 falls back to 2.371 × 10⁻³ and heterozygosity 1.525 × 10⁻³, its pre-milestone values, and reports itself an outlier; SRR7279481, which asks for 6.3 × 10⁻², is untouched. And **this milestone's "halves the error rate's drift across depth, +6.1% → +3.0%" is not reproducible**: measured, the single rate drifts +5.90% and `ε_clean` +5.89%, which are both **exactly one ladder rung**, and a rung is 5.925% — the note's Python fit had a continuous rate and this one does not. What does reproduce is the heterozygosity drift, +9.7% on one rate against +6.0% on two classes (the note said +9.0% and +5.3%).
 - **⛦ WHAT N5 MEASURED, AND THE DEFECT IT FOUND** *(the account of the cause below is superseded by the entry above; the measurements stand).* **The extension does what it exists to do**: heterozygosity on HG002 30x fell from **1.41 to 1.06 times the benchmark count** (1.407 × 10⁻³ → 1.061 × 10⁻³ against 9.9666 × 10⁻⁴), and at 300x by the same 27%. That is better than the 1.09 this plan predicted, which is consistent with the research note's own correction that its figures were upper bounds from an unconverged optimiser. **But the fit that produces them stops 351 nats short of the maximum.** A new fixture generates a world at the note's own HG002 30x parameters — clean 1.8836 × 10⁻³, 0.88% of sites noisy at 5.29 × 10⁻², over the measured depth distribution — and runs the whole coupled fit: it returns a clean rate of 2.2387 × 10⁻³, **three rungs (19%) above the generating value and the same rung it returns on the real alignment**, while the generating parameters score −147,552.77 against the fit's −147,903.98. **The cause is the order the loop fits in.** It settles the rates with one class (that answer is the tail-inflated rate this whole milestone exists to correct), fits the pair at those rates, then re-settles the rates with the pair held — and each block is then exhaustive and neither can move. N3b's oracles cannot see it because they hand `fit_site_noise` the *true* clean rate; the loop hands it a wrong one, which the file's own `a_wrong_clean_rate_rails_the_second_class` test already says it cannot survive. **The consequence at the emitted surface:** the marginal rate is now **13.8% above** the model-free count (2.575 × 10⁻³ against 2.263 × 10⁻³, 2.25 ladder rungs) where the one-rate fit was 1.1% below it — the plan predicted +3.6%, from the note's parameters, which this fit does not return. **⛦ A second and separate finding, caught by a check N5 added: on tomato SRR7279482 and SRR7279483 the noisy class rails at the ladder's *coarsest* rung, 0.1** — so the fit wants a class **noisier than the ladder can express**, and the ladder is Phred 10–50 because it was chosen for chemistry. This one is not the stall and no better search fixes it: a duplication the reference does not carry shows about **half** its reads non-reference, which is five times the coarsest rung, so a class holding such sites cannot land inside a ladder of sequencing-error rates. Whether that is what these two samples hold is unmeasured; that the fit asks for a rate above the range and is clamped to it is measured. **⚠ Recommended fix, unmeasured, and the owner's call because the plan's N3b explicitly ruled out its shape** (*"no multi-start, because the surface has no trap"* — this is a trap): make the clean-rate scan a **profile** scan over the whole inner model, re-climbing the genotype frequencies and re-fitting the pair at each rung and keeping the best-scoring, which is what `fit_by_profile_scan` already does for the one-class model. The fixture is committed `#[ignore]`d with the numbers in its reason string; it runs in 0.3 s and fails.
@@ -3537,19 +428,20 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **⚠ For the owner:** the plan does not edit `spec` §2 or §5.1, `arch` §5.1, §2.4 or §8, all of which describe the one-rate model. Listed at the foot of the plan.
 
 #### Step 4 — the parameter pre-pass, the SNP/indel path
-- **Status:** ✅ **MILESTONES A–E COMPLETE; Milestone F begun, F1–F3 landed.** All four parameters are fitted, each proven against the answer it has to reproduce rather than against itself — and **still nothing has read a locus**, which is the plan's own principle: an accumulator bug and a fit bug cannot then hide each other. `fit_by_fixed_frequency_scan` is the `ε` half of the alternation the harness measured; `fit_coupled` alternates it against the frequency climb and lands on the truth from a start at three times the true rates; `fit_inbreeding` is the two-state HMM over windows, recovering a drawn genome's **realised** autozygous fraction; and `resolve_error_rates` walks the fallback ladder so `CoupledFit` stops claiming every rate was fitted here. **F1 has landed and step 4 now reads loci**: `estimate_generic_parameters(loci, config)` and `GenericAccumulators::estimate(config)`, the first being *literally* the second over an accumulator fed by the stream rather than a parallel implementation, so "the two cannot diverge" is structural. **It discharges all three debts Milestone E recorded** — `fit_coupled` and `take_supplied_inbreeding` have production callers, and `fallback_error_rates` is exercised non-empty, which took a specific shape to reach: the ladder consults a supplied rate only when a group is too thin to fit **and** no sibling qualifies to lend, so it needs three read groups covering disjoint thirds of the sites, each one site below the floor, while their union clears the floor the genotype frequencies are checked against. **⚠ Two recorded deviations.** A new error variant `LocusGeneration { sample, cause }`, because arch §1.1 mandates both the return type and that a walk failure propagates — and its cause is a rendered `String`, not the error, since `LocusGenerationError` is neither `Clone` nor `PartialEq` and this enum is both; what is lost is `source()` chaining, and the field is deliberately not named `source`. And a new file `generic/estimate.rs` rather than a sixth job for `generic/mod.rs`, which Milestone C's review already flagged as doing four — the arch module table has no entry-point row either way, so it is `depth_bins.rs`'s shape again. [Impl report](doc/devel/reports/implementations/ng_parameter_prepass_generic_f1_2026-08-09.md). **⛦ Its review found three Majors, two of them real bugs, and one wrong claim of mine.** **Fixed: the runs model was handed library shares pooled across ploidies.** `library_shares` sums `total_reads()` over `(group, ploidy)` ignoring the ploidy, while the runs model walks the **diploid windows only** — so on a genome whose haploid and diploid arms come from different libraries it was told half its reads came from a library that contributed none of them, putting the share-weighted rate 5.5× above the truth at Phred 20 against Phred 30. Now restricted to the ploidy being fitted, via `library_shares_over`. **Fixed: `LocusGeneration` carries the walk's own error rather than a rendered string**, which cost the enum its `Clone` and `PartialEq` — and my stated reason for not doing that was wrong. I claimed the tests relied on those derives; a reviewer measured it and removing them compiles with **zero** errors across `--all-targets`. What the string was costing is that five of `LocusGenerationError`'s six variants name the region where the walk broke, and a caller could only get at it by parsing prose. **Also fixed:** `take_supplied_inbreeding`'s doc claimed its warrant is what a fitted value's would have been — on mixed ploidy it is larger, 20,002 against 10,001 on an equal-armed fixture — and `fallback.rs`'s comment still asked the owner to settle the ladder order *when F1 names the configuration field*, which F1 did. **⛦ F1's review found two Blockers and both were fixtures that could not see the step** ([synthesis](doc/devel/reports/reviews/ng_parameter_prepass_generic_f1_2026-08-09.md), 2 agents). **The whole `Fitted` inbreeding arm was dead**: all four F1 tests supplied `F` to keep the runs model out of the way, so replacing that arm with `unreachable!()` left 297 tests green, as did suppressing the runs model with a bare `Ok((None, None))` — a build reporting no `F` for every fitted sample would have shipped. Same fault as E2's twenty-reads world, three milestones later. **And `covered_positions` could be pointed at the wrong table with nothing to notice** — the very error its own doc says the two tables exist to prevent. Every fixture gave each site one read group, including the three-group test whose groups cover *disjoint* thirds, so the two tables agreed everywhere the suite looked; the new fixture puts both libraries on one site and reads 20,002 against the correct 10,001. Two Majors beyond the ones above: nothing read `coupled_fit`'s termination (a fit out of iterations would report as converged), and `accumulators()`'s edges-sharing contract had nothing executable behind it — no test merged two shards, which is the whole reason the second entry point exists. F1's tests 4 → **8**. **⚠ Recorded rather than fixed, for F2**: the `library_noise` transposition — shares paired with rates in reverse — survives even a two-library fitted test, because `fit_inbreeding` refuses on the window count before touching the noise; consuming it needs 300 Mb of windows. And a reviewer's probe found that two read groups on the same sites, one supplying every alternative read and the other none, return **equal** parameters whether `multi_library` is true or false — worth settling before F2 picks its fixtures. **F2 has landed**: `generic/recovery.rs` fills a table cell by cell from a known truth and asks the fit to find its way back, at ploidy 2 and 4 crossed with 3 reads a site and the ladder's cap — [impl report](doc/devel/reports/implementations/ng_parameter_prepass_generic_f2_2026-08-09.md). **⛦ Three of the four arms failed on first run, and the defect was in the fixture generator every fit's tests share.** The top dosage came back at **0.0000** against a generating 0.020, in *both* ploidies at depth 124: `table_generated_at` built its binomial term up from `(1 − p)^depth`, which for a homozygous non-reference genotype at 124 reads is about **10⁻⁴³¹** and underflows to exactly zero — so the class was never generated and the fit was right about the table it was given. That is the failure `expected_counts.rs` exists to prevent, in the one file two fixtures could drift apart in. Fixed in logs; every existing user re-run and none moved, the previous uses topping out at depth 40, below the cliff. **⛦ And a measured rule worth carrying to the polyploid work: a ploidy-`P` sample needs depth ≥ `P` before its genotype frequencies are identified at all.** A depth-`d` table has `d + 1` cells summing to one, so `d` independent numbers against `P` free frequencies; at `d = 3, P = 4` the likelihood has a ridge and the climb lands on it — dosage 1 at 0.158 against 0.150, **with the error rate on the right rung throughout**. Pinned by its own test, because that corner is where a later reader would blame the fit. Tomato clears the rule at three reads only because tomato is diploid. **⚠ Deviation: the plan's "300×" is built at 124.** A directly-filled table cannot hold a site above the ladder's cap, and a 300× sample does not reach a table at 300 either — C2's cap subsamples it to 124 first, and what happens to the reads above is C2's own oracle. The plan's *reason* for a deep arm survives: at three reads every site is in a one-per-depth bin where a binning fault cannot show, and at 124 the row is 27 cells wide and shared. **⛦ F2's review then corrected the finding itself, and the cause was a fixture again.** The tables were generated at rung 80 — Phred 30, which is `DEFAULT_ERROR_RATE`, which is exactly **where the coupled fit starts**. So an arm whose error rate is not identified returned rung 80 by never moving, and passed; the doc claiming *the error rate is still recovered exactly* was **false**, the rate having been untouched rather than found. Generating ten rungs away changed the answer and not just the test: **a tetraploid at four reads no longer recovers**, its frequencies coming back **7.2%** away rather than 0.001%. So the `depth ≥ ploidy` rule is the condition for the frequencies **given** the rate, and this fit must find the rate too — both are identified at eight reads, not four. Three *and* four reads are now pinned as not-identified. **⚠ And the tolerance had to become per-arm**: three arms recover the rung exactly and land within 0.0024%, while the shallow diploid arm lands one rung off and its frequencies absorb that as 0.334% — the coupling doing what it is for. One number for all four was 200× slack, and the cost was measured rather than theoretical: **at 1% the fixture underflow this milestone exists to have fixed passes the whole suite.** The 0.3% binning bias the old tolerance cited was measured on a *mixed-depth* world and does not apply to tables that put every site at one exact depth. **⚠ Correction to `7a207bac`'s message**: it says three of four arms failed on first run without separating the causes — two failed on the underflow and the third on identifiability. Module 307 → **308 tests**. **F3 has landed and step 4 has now read real alignments**: `generic/real_alignments.rs`, four `#[ignore]`d tests driven by `PVC_PREPASS_{FASTA,READS,BED}` on parity.rs's convention, run over **five alignments — HG002 at 30x and at 300x, and three tomato CRAMs** — [impl report](doc/devel/reports/implementations/ng_parameter_prepass_generic_f3_2026-08-09.md), reviewed by three agents in worktrees. **All twenty test instances are green.** The folded windowed table equals the read-group one **cell for cell**; the catalog's regions walked as one stream and as **sixteen shards of whole typed regions** give identical tables; `loci_overlapping_previous` is **zero everywhere**, counted twice — once by the accumulator and once outside it; and the coupled fit returns a rate **fitted from the sample's own sites** on every alignment, nowhere near an end of the ladder. **⛦ THE DESIGN DECISION THIS STEP PRODUCED — owner, 2026-08-09: _"Once we start parallelizing we will send whole segments to each worker, never a segment shall be cut"_.** It came from a measurement. The sharding arm originally cut each generic region into thirds to manufacture boundaries, and **that lost 17 positions of 7,429,336** on tomato SRR7279481, in one run at `SL4.0ch01:32,931,592–32,931,608`: read `SRR7279481.13095921` is aligned at 32,931,402 with CIGAR `116M91D22M5S`, so its 91-base deletion spans 32,931,518–32,931,608, a cut landed 74 bases inside it, and the deletion's span past the cut was emitted by no region. It is the cutting and not the merge — one stream over the same pieces loses the same seventeen. **The measurements separate what is avoidable from what is not.** The genome is divided from the reference alone, never consulting a read, so a deletion can cross any boundary that division makes; where it crosses into a repeat tract the generic path **should** drop those bases, because they are the STR path's — **81 of the 87 read-deletion crossings on that sample are ordinary↔repeat**. What is avoidable is a boundary invented inside territory wholly the generic path's own, and the catalog never makes one: over 41,823 typed regions the adjacencies are 17,192 ordinary→repeat, 17,187 repeat→ordinary, 3,651 and 3,653 ordinary↔bundle, 30 and 30 to other, and **zero ordinary→ordinary**. Whole segments remove the case by construction, so the test now shards that way and the parallel driver must too. **⚠ Residue recorded, not chased:** three sites where a deletion starts in one ordinary region, jumps a tract and ends in a later one (`SL4.0ch03:34,016,779`, `SL4.0ch08:36,087,969`, `SL4.0ch11:6,851,413`) — untested, at most a few tens of positions in 7.4 M, and no repeat generator exists yet (`PileupGenerator` is `LocusGenerator`'s only implementor). **⚠ For the arch doc to absorb:** the whole-segment rule belongs in the driver's design when that plan is written; recorded here per the project rule rather than edited in. **⛦ The review's Blocker: identity 2 passed over an empty walk**, demonstrated by mutation. It guarded its *regions* and never its *loci*, so two empty accumulators satisfied every comparison in it, and `WalkTally` did not rescue it because the tally is built outside the accumulator. Gutting `add_locus` failed the other three and left this one green — **and the same green comes with no mutation at all, from a BED whose spans hold no reads**, which is what a new cohort gives on the first try. It now asserts the walk entered something, and that mutation fails all four. **Two more real findings:** the end-to-end test **asserted a property of a fit without asserting a fit happened** — a read group falling back to `DEFAULT_ERROR_RATE` = 0.001 sits comfortably inside the ladder, so a wholly `Defaulted` sample passed the rail check while nothing was fitted; it now asserts `Provenance::FittedHere`. And `cut_into_pieces`/`deal_into_shards` are pure functions **whose every caller is `#[ignore]`d**, so `cargo test` compiled them and ran neither; five unit tests now cover them, and their first run **caught an off-by-one in the thirds rule I had just written** (at `ceil(L/3)` a four-base region comes back in two pieces, not three). **⚠ Recorded for the owner rather than fixed:** `argmax_at_ladder_end` is dropped between the fit and `GenericSampleParameters`, so no caller can read the bit arch §9 calls one of the two ways this estimator returns a confident wrong number. The end-to-end test reconstructs it by comparing against the ladder's ends, which is exact only for a fitted rate. Carrying it changes a public type and reaches past this step. **⛦ Three wrong claims of mine, all corrected.** The one that mattered: **the 300x arm's whole justification was a code path the run never takes.** I wrote that above the cap the two tables are filled by *different draws* — but `count_whole_site_by_library` is reached only when `multi_library` is set, and F3 never enters the attributed arm, as the same document said forty-five lines earlier. At one read group both tables end in `CountedSite::capped(depth, alt, cap, seed_at(region))` with the same four arguments: **one draw, evaluated twice**. And *"untested by any shallower run"* was false — `accumulators.rs`'s `the_two_tables_agree_cell_for_cell_above_the_cap_too` already pins it at synthetic depths 300–963, with the correct mechanism in its own doc. What the deep arm genuinely carries is **identity 2's** property: `seed_at` draws from position alone, so a capped site must keep the same reads however the genome is cut. Also wrong: *"the only alignment that reaches the cap"* (tomato SRR7279483 reaches it at 9,273 sites, in the same sentence's own figures), and *"two of the six kills belong to existing tests"* (one does). **⛦ And the `--release` justification was copied from `parity.rs` and is false here**: that file needs release because real data trips a reachable `debug_assert!` in *production's* walker, and F3 runs no production code — the debug build passes, at 128.7 s against 12.4 s. A reviewer asked me to restore the copied story; the measurement stands. **⚠ An observation for Milestone G, asserted nowhere.** The 30x BAM is the 300x CRAM downsampled with seed 42 over the same spans, so the pair is two rungs of G2's coverage sweep early: the error rate moves **one ladder rung** (66 → 65, Phred 26.50 → 26.25), the homozygous-non-reference rate **falls** 1.3% — which the design does *not* cover, since it accepted a ladder costing 0.3% of that rate and rejected one costing 1.8% — and **heterozygosity moves 9.7% upward with depth** (0.001407 → 0.001543), the direction a shallow arm losing heterozygotes gives. Module 307 → **313 tests**, four `#[ignore]`d; library target 3,209 → **3,211 passed**, ignored 5 → 9 (earlier reports on this plan have quoted the library line as though it were the command's total across eleven binaries, which is larger). **⚠ Correction: F2's report and its handoff both say the module held 308 before F3, and it held 307** — `git grep -c '#[test]'` over `src/ng/parameter_estimation/` at `5d7c9a6e` gives 307. Next: **Checkpoint F** — the owner's call on the locus-generation defect above.
+- *Deleted 2026-09-11 with the whole-genome histogram route ([plan](doc/devel/ng/impl_plan/remove_histogram_route.md)); this block is kept for its findings. The run's parameters now come only from the census route, `parameter_estimation::joint`.*
+- **Status:** ✅ **MILESTONES A–E COMPLETE; Milestone F begun, F1–F3 landed.** All four parameters are fitted, each proven against the answer it has to reproduce rather than against itself — and **still nothing has read a locus**, which is the plan's own principle: an accumulator bug and a fit bug cannot then hide each other. `fit_by_fixed_frequency_scan` is the `ε` half of the alternation the harness measured; `fit_coupled` alternates it against the frequency climb and lands on the truth from a start at three times the true rates; `fit_inbreeding` is the two-state HMM over windows, recovering a drawn genome's **realised** autozygous fraction; and `resolve_error_rates` walks the fallback ladder so `CoupledFit` stops claiming every rate was fitted here. **F1 has landed and step 4 now reads loci**: `estimate_generic_parameters(loci, config)` and `GenericAccumulators::estimate(config)`, the first being *literally* the second over an accumulator fed by the stream rather than a parallel implementation, so "the two cannot diverge" is structural. **It discharges all three debts Milestone E recorded** — `fit_coupled` and `take_supplied_inbreeding` have non-test callers, and `fallback_error_rates` is exercised non-empty, which took a specific shape to reach: the ladder consults a supplied rate only when a group is too thin to fit **and** no sibling qualifies to lend, so it needs three read groups covering disjoint thirds of the sites, each one site below the floor, while their union clears the floor the genotype frequencies are checked against. **⚠ Two recorded deviations.** A new error variant `LocusGeneration { sample, cause }`, because arch §1.1 mandates both the return type and that a walk failure propagates — and its cause is a rendered `String`, not the error, since `LocusGenerationError` is neither `Clone` nor `PartialEq` and this enum is both; what is lost is `source()` chaining, and the field is deliberately not named `source`. And a new file `generic/estimate.rs` rather than a sixth job for `generic/mod.rs`, which Milestone C's review already flagged as doing four — the arch module table has no entry-point row either way, so it is `depth_bins.rs`'s shape again. [Impl report](doc/devel/reports/implementations/ng_parameter_prepass_generic_f1_2026-08-09.md). **⛦ Its review found three Majors, two of them real bugs, and one wrong claim of mine.** **Fixed: the runs model was handed library shares pooled across ploidies.** `library_shares` sums `total_reads()` over `(group, ploidy)` ignoring the ploidy, while the runs model walks the **diploid windows only** — so on a genome whose haploid and diploid arms come from different libraries it was told half its reads came from a library that contributed none of them, putting the share-weighted rate 5.5× above the truth at Phred 20 against Phred 30. Now restricted to the ploidy being fitted, via `library_shares_over`. **Fixed: `LocusGeneration` carries the walk's own error rather than a rendered string**, which cost the enum its `Clone` and `PartialEq` — and my stated reason for not doing that was wrong. I claimed the tests relied on those derives; a reviewer measured it and removing them compiles with **zero** errors across `--all-targets`. What the string was costing is that five of `LocusGenerationError`'s six variants name the region where the walk broke, and a caller could only get at it by parsing prose. **Also fixed:** `take_supplied_inbreeding`'s doc claimed its warrant is what a fitted value's would have been — on mixed ploidy it is larger, 20,002 against 10,001 on an equal-armed fixture — and `fallback.rs`'s comment still asked the owner to settle the ladder order *when F1 names the configuration field*, which F1 did. **⛦ F1's review found two Blockers and both were fixtures that could not see the step** ([synthesis](doc/devel/reports/reviews/ng_parameter_prepass_generic_f1_2026-08-09.md), 2 agents). **The whole `Fitted` inbreeding arm was dead**: all four F1 tests supplied `F` to keep the runs model out of the way, so replacing that arm with `unreachable!()` left 297 tests green, as did suppressing the runs model with a bare `Ok((None, None))` — a build reporting no `F` for every fitted sample would have shipped. Same fault as E2's twenty-reads world, three milestones later. **And `covered_positions` could be pointed at the wrong table with nothing to notice** — the very error its own doc says the two tables exist to prevent. Every fixture gave each site one read group, including the three-group test whose groups cover *disjoint* thirds, so the two tables agreed everywhere the suite looked; the new fixture puts both libraries on one site and reads 20,002 against the correct 10,001. Two Majors beyond the ones above: nothing read `coupled_fit`'s termination (a fit out of iterations would report as converged), and `accumulators()`'s edges-sharing contract had nothing executable behind it — no test merged two shards, which is the whole reason the second entry point exists. F1's tests 4 → **8**. **⚠ Recorded rather than fixed, for F2**: the `library_noise` transposition — shares paired with rates in reverse — survives even a two-library fitted test, because `fit_inbreeding` refuses on the window count before touching the noise; consuming it needs 300 Mb of windows. And a reviewer's probe found that two read groups on the same sites, one supplying every alternative read and the other none, return **equal** parameters whether `multi_library` is true or false — worth settling before F2 picks its fixtures. **F2 has landed**: `generic/recovery.rs` fills a table cell by cell from a known truth and asks the fit to find its way back, at ploidy 2 and 4 crossed with 3 reads a site and the ladder's cap — [impl report](doc/devel/reports/implementations/ng_parameter_prepass_generic_f2_2026-08-09.md). **⛦ Three of the four arms failed on first run, and the defect was in the fixture generator every fit's tests share.** The top dosage came back at **0.0000** against a generating 0.020, in *both* ploidies at depth 124: `table_generated_at` built its binomial term up from `(1 − p)^depth`, which for a homozygous non-reference genotype at 124 reads is about **10⁻⁴³¹** and underflows to exactly zero — so the class was never generated and the fit was right about the table it was given. That is the failure `expected_counts.rs` exists to prevent, in the one file two fixtures could drift apart in. Fixed in logs; every existing user re-run and none moved, the previous uses topping out at depth 40, below the cliff. **⛦ And a measured rule worth carrying to the polyploid work: a ploidy-`P` sample needs depth ≥ `P` before its genotype frequencies are identified at all.** A depth-`d` table has `d + 1` cells summing to one, so `d` independent numbers against `P` free frequencies; at `d = 3, P = 4` the likelihood has a ridge and the climb lands on it — dosage 1 at 0.158 against 0.150, **with the error rate on the right rung throughout**. Pinned by its own test, because that corner is where a later reader would blame the fit. Tomato clears the rule at three reads only because tomato is diploid. **⚠ Deviation: the plan's "300×" is built at 124.** A directly-filled table cannot hold a site above the ladder's cap, and a 300× sample does not reach a table at 300 either — C2's cap subsamples it to 124 first, and what happens to the reads above is C2's own oracle. The plan's *reason* for a deep arm survives: at three reads every site is in a one-per-depth bin where a binning fault cannot show, and at 124 the row is 27 cells wide and shared. **⛦ F2's review then corrected the finding itself, and the cause was a fixture again.** The tables were generated at rung 80 — Phred 30, which is `DEFAULT_ERROR_RATE`, which is exactly **where the coupled fit starts**. So an arm whose error rate is not identified returned rung 80 by never moving, and passed; the doc claiming *the error rate is still recovered exactly* was **false**, the rate having been untouched rather than found. Generating ten rungs away changed the answer and not just the test: **a tetraploid at four reads no longer recovers**, its frequencies coming back **7.2%** away rather than 0.001%. So the `depth ≥ ploidy` rule is the condition for the frequencies **given** the rate, and this fit must find the rate too — both are identified at eight reads, not four. Three *and* four reads are now pinned as not-identified. **⚠ And the tolerance had to become per-arm**: three arms recover the rung exactly and land within 0.0024%, while the shallow diploid arm lands one rung off and its frequencies absorb that as 0.334% — the coupling doing what it is for. One number for all four was 200× slack, and the cost was measured rather than theoretical: **at 1% the fixture underflow this milestone exists to have fixed passes the whole suite.** The 0.3% binning bias the old tolerance cited was measured on a *mixed-depth* world and does not apply to tables that put every site at one exact depth. **⚠ Correction to `7a207bac`'s message**: it says three of four arms failed on first run without separating the causes — two failed on the underflow and the third on identifiability. Module 307 → **308 tests**. **F3 has landed and step 4 has now read real alignments**: `generic/real_alignments.rs`, four `#[ignore]`d tests driven by `PVC_PREPASS_{FASTA,READS,BED}`, run over **five alignments — HG002 at 30x and at 300x, and three tomato CRAMs** — [impl report](doc/devel/reports/implementations/ng_parameter_prepass_generic_f3_2026-08-09.md), reviewed by three agents in worktrees. **All twenty test instances are green.** The folded windowed table equals the read-group one **cell for cell**; the catalog's regions walked as one stream and as **sixteen shards of whole typed regions** give identical tables; `loci_overlapping_previous` is **zero everywhere**, counted twice — once by the accumulator and once outside it; and the coupled fit returns a rate **fitted from the sample's own sites** on every alignment, nowhere near an end of the ladder. **⛦ THE DESIGN DECISION THIS STEP PRODUCED — owner, 2026-08-09: _"Once we start parallelizing we will send whole segments to each worker, never a segment shall be cut"_.** It came from a measurement. The sharding arm originally cut each generic region into thirds to manufacture boundaries, and **that lost 17 positions of 7,429,336** on tomato SRR7279481, in one run at `SL4.0ch01:32,931,592–32,931,608`: read `SRR7279481.13095921` is aligned at 32,931,402 with CIGAR `116M91D22M5S`, so its 91-base deletion spans 32,931,518–32,931,608, a cut landed 74 bases inside it, and the deletion's span past the cut was emitted by no region. It is the cutting and not the merge — one stream over the same pieces loses the same seventeen. **The measurements separate what is avoidable from what is not.** The genome is divided from the reference alone, never consulting a read, so a deletion can cross any boundary that division makes; where it crosses into a repeat tract the generic path **should** drop those bases, because they are the STR path's — **81 of the 87 read-deletion crossings on that sample are ordinary↔repeat**. What is avoidable is a boundary invented inside territory wholly the generic path's own, and the catalog never makes one: over 41,823 typed regions the adjacencies are 17,192 ordinary→repeat, 17,187 repeat→ordinary, 3,651 and 3,653 ordinary↔bundle, 30 and 30 to other, and **zero ordinary→ordinary**. Whole segments remove the case by construction, so the test now shards that way and the parallel driver must too. **⚠ Residue recorded, not chased:** three sites where a deletion starts in one ordinary region, jumps a tract and ends in a later one (`SL4.0ch03:34,016,779`, `SL4.0ch08:36,087,969`, `SL4.0ch11:6,851,413`) — untested, at most a few tens of positions in 7.4 M, and no repeat generator exists yet (`PileupGenerator` is `LocusGenerator`'s only implementor). **⚠ For the arch doc to absorb:** the whole-segment rule belongs in the driver's design when that plan is written; recorded here per the project rule rather than edited in. **⛦ The review's Blocker: identity 2 passed over an empty walk**, demonstrated by mutation. It guarded its *regions* and never its *loci*, so two empty accumulators satisfied every comparison in it, and `WalkTally` did not rescue it because the tally is built outside the accumulator. Gutting `add_locus` failed the other three and left this one green — **and the same green comes with no mutation at all, from a BED whose spans hold no reads**, which is what a new cohort gives on the first try. It now asserts the walk entered something, and that mutation fails all four. **Two more real findings:** the end-to-end test **asserted a property of a fit without asserting a fit happened** — a read group falling back to `DEFAULT_ERROR_RATE` = 0.001 sits comfortably inside the ladder, so a wholly `Defaulted` sample passed the rail check while nothing was fitted; it now asserts `Provenance::FittedHere`. And `cut_into_pieces`/`deal_into_shards` are pure functions **whose every caller is `#[ignore]`d**, so `cargo test` compiled them and ran neither; five unit tests now cover them, and their first run **caught an off-by-one in the thirds rule I had just written** (at `ceil(L/3)` a four-base region comes back in two pieces, not three). **⚠ Recorded for the owner rather than fixed:** `argmax_at_ladder_end` is dropped between the fit and `GenericSampleParameters`, so no caller can read the bit arch §9 calls one of the two ways this estimator returns a confident wrong number. The end-to-end test reconstructs it by comparing against the ladder's ends, which is exact only for a fitted rate. Carrying it changes a public type and reaches past this step. **⛦ Three wrong claims of mine, all corrected.** The one that mattered: **the 300x arm's whole justification was a code path the run never takes.** I wrote that above the cap the two tables are filled by *different draws* — but `count_whole_site_by_library` is reached only when `multi_library` is set, and F3 never enters the attributed arm, as the same document said forty-five lines earlier. At one read group both tables end in `CountedSite::capped(depth, alt, cap, seed_at(region))` with the same four arguments: **one draw, evaluated twice**. And *"untested by any shallower run"* was false — `accumulators.rs`'s `the_two_tables_agree_cell_for_cell_above_the_cap_too` already pins it at synthetic depths 300–963, with the correct mechanism in its own doc. What the deep arm genuinely carries is **identity 2's** property: `seed_at` draws from position alone, so a capped site must keep the same reads however the genome is cut. Also wrong: *"the only alignment that reaches the cap"* (tomato SRR7279483 reaches it at 9,273 sites, in the same sentence's own figures), and *"two of the six kills belong to existing tests"* (one does). **⛦ And the `--release` justification was false here**: the debug build passes, at 128.7 s against 12.4 s. **⚠ An observation for Milestone G, asserted nowhere.** The 30x BAM is the 300x CRAM downsampled with seed 42 over the same spans, so the pair is two rungs of G2's coverage sweep early: the error rate moves **one ladder rung** (66 → 65, Phred 26.50 → 26.25), the homozygous-non-reference rate **falls** 1.3% — which the design does *not* cover, since it accepted a ladder costing 0.3% of that rate and rejected one costing 1.8% — and **heterozygosity moves 9.7% upward with depth** (0.001407 → 0.001543), the direction a shallow arm losing heterozygotes gives. Module 307 → **313 tests**, four `#[ignore]`d; library target 3,209 → **3,211 passed**, ignored 5 → 9 (earlier reports on this plan have quoted the library line as though it were the command's total across eleven binaries, which is larger). **⚠ Correction: F2's report and its handoff both say the module held 308 before F3, and it held 307** — `git grep -c '#[test]'` over `src/parameter_estimation/` at `5d7c9a6e` gives 307. Next: **Checkpoint F** — the owner's call on the locus-generation defect above.
 - **Plan:** [parameter_prepass_generic.md](doc/devel/ng/impl_plan/parameter_prepass_generic.md); **Spec:** [spec](doc/devel/ng/spec/parameter_prepass_generic.md) + [shared framing](doc/devel/ng/spec/parameter_prepass.md); **Arch:** [arch](doc/devel/ng/arch/parameter_prepass_generic.md).
-- **Code:** [src/ng/parameter_estimation/](src/ng/parameter_estimation/) (`mod.rs` = the step's surface; `fitting/` = the mathematics; `generic/` = the SNP/indel path, holding `WindowIndex`, `INBREEDING_WINDOW_BP` and the error-rate ladder), [src/ng/types.rs](src/ng/types.rs) (`ErrorRate`, `GenotypeFrequency`, `InbreedingF`, `Ploidy` + `checked_probability`).
+- **Code:** [src/parameter_estimation/](src/parameter_estimation/) (`mod.rs` = the step's surface; `fitting/` = the mathematics; `generic/` = the SNP/indel path, holding `WindowIndex`, `INBREEDING_WINDOW_BP` and the error-rate ladder), [src/types.rs](src/types.rs) (`ErrorRate`, `GenotypeFrequency`, `InbreedingF`, `Ploidy` + `checked_probability`).
 - **Impl reports:** [A1+A2+A3](doc/devel/reports/implementations/ng_parameter_prepass_generic_a1a2a3_2026-08-06.md), [A4](doc/devel/reports/implementations/ng_parameter_prepass_generic_a4_2026-08-06.md), [A5+A6](doc/devel/reports/implementations/ng_parameter_prepass_generic_a5a6_2026-08-06.md), [Milestone B](doc/devel/reports/implementations/ng_parameter_prepass_generic_b_2026-08-06.md), [Milestone C](doc/devel/reports/implementations/ng_parameter_prepass_generic_c_2026-08-06.md), [D1](doc/devel/reports/implementations/ng_parameter_prepass_generic_d1_2026-08-06.md), [D2](doc/devel/reports/implementations/ng_parameter_prepass_generic_d2_2026-08-06.md), [D3](doc/devel/reports/implementations/ng_parameter_prepass_generic_d3_2026-08-06.md), [Milestone E](doc/devel/reports/implementations/ng_parameter_prepass_generic_e_2026-08-09.md).
 - **Latest reviews:** [A1+A2+A3](doc/devel/reports/reviews/ng_parameter_prepass_generic_a1a2a3_2026-08-06.md) (6 categories; 0/4/16/10; Approve-with-changes), [A4](doc/devel/reports/reviews/ng_parameter_prepass_generic_a4_2026-08-06.md) (7 categories; 0/3/10/4; Request-changes → resolved), [A5+A6](doc/devel/reports/reviews/ng_parameter_prepass_generic_a5a6_2026-08-06.md) (8 categories; 0/6/10/4; Request-changes → resolved), [Milestone B](doc/devel/reports/reviews/ng_parameter_prepass_generic_b_2026-08-06.md) (three rounds, 11 agents, ~80 mutations; 5 Blockers / 17 Majors; all Request-changes → resolved), [Milestone C](doc/devel/reports/reviews/ng_parameter_prepass_generic_c_2026-08-06.md) (3 agents, 11 categories, ~60 mutations of which **20 survived**; 3 Blockers / 11 Majors; Request-changes → resolved), [D1](doc/devel/reports/reviews/ng_parameter_prepass_generic_d1_2026-08-06.md) (3 agents, 10 categories, 17 mutations of which **7 survived**; 3 Blockers / 5 Majors; Request-changes → resolved), [D2](doc/devel/reports/reviews/ng_parameter_prepass_generic_d2_2026-08-06.md) (3 agents, 10 categories, **33 mutations of which 2 survived**; 1 Major / 8 Minors; the reliability agent stalled and its harness was recovered and re-run; Request-changes → resolved), [D3](doc/devel/reports/reviews/ng_parameter_prepass_generic_d3_2026-08-06.md) (3 agents, 10 categories, **28 mutations, 28 killed**; 4 Majors; Request-changes → resolved), [Milestone E](doc/devel/reports/reviews/ng_parameter_prepass_generic_e_2026-08-09.md) (7 agents over 4 rounds, **≥120 mutations of which 41 survived**; 3 Blockers / 2 code defects / 15 wrong numbers; all Request-changes → resolved except the one recorded below).
 - **Latest fixes-applied:** [A1+A2+A3](doc/devel/reports/reviews/fixes_applied_2026-08-06.md) (28 applied, 4 deferred), [A4](doc/devel/reports/reviews/fixes_applied_2026-08-06_v2.md) (16 applied, 1 deferred), [A5+A6](doc/devel/reports/reviews/fixes_applied_2026-08-06_v3.md) (18 applied, 4 deferred).
-- **Research:** [parameter_estimator_experiments_2026-08-06.md](doc/devel/ng/research/parameter_estimator_experiments_2026-08-06.md) — the two harnesses in `examples/` that are Milestones D and E's oracle. This step has no parity oracle and no legible fixture; its evidence is the estimator's bias computed exactly.
+- **Research:** [parameter_estimator_experiments_2026-08-06.md](doc/devel/ng/research/parameter_estimator_experiments_2026-08-06.md) — the two harnesses in `examples/` that are Milestones D and E's oracle. This step has no legible fixture; its evidence is the estimator's bias computed exactly.
 - **Validation note:** `cargo doc --no-deps --lib` belongs in this feature's gate — `Cargo.toml` denies broken intra-doc links and `fmt`/`clippy`/`test` do not cover rustdoc.
 - **Open:**
   - **✅ FIXED (2026-08-09) — the runs model refuses a fit whose two states never separated.** A genome drawn with **no runs at all** was coming back at `F` = 0.9995, converged and unflagged. Research note §3.1 is a *proof* rather than a measurement: at coincident states every window's emission is the same under either, so the likelihood is **exactly flat in `F`** and what a fit returns is an accident of where it started. Measured over eight such genomes at 3,600 windows: five returned `F` between 0.0013 and 0.0100 (below their 0.029 resolution), one fired the collapsed-search check, and **two returned 0.9995 and 0.8475** — and those two are exactly the fits whose states coincided, at **0.968 and 0.929** of each other, where every legitimate fit measured sits at **0.842 or below** (0.036–0.045 with no false heterozygotes, 0.842 under a floor five times the real rate, which is the extreme spec §6.2 asks it to survive). The old criterion could not see it: "some window's posterior favoured each state" tests whether the *assignment* used both states, and on coincident states it happily does — it is splitting noise. `separated_states` is now **two** conditions: both states were used (the collapsed search, §3.4's fingerprint) **and** the two states differ, at `MAX_IDENTIFIED_STATE_RATIO = 0.9`. That is spec §6.1's own identifying constraint `h << Hout` given a number — strictly stronger than the `h <= Hout` the relabelling imposes. **The asymmetry settles the threshold**: refusing costs an error the caller answers by supplying `F`; accepting costs `F` = 0.9995 on an outcrosser, and a cohort's diversity divides by `1 − F`. Costs the suite ~40 s, because a fit whose states never separate runs to the 300-iteration cap from all nine starts. **Swept over 24 seeds afterwards** — 23 drew no runs, of which **9 are now refused and 14 answered, the largest `F` being 0.042** against a reported resolution of 0.029 and in line with §3.6's own floor at this window count. Nothing comes back near one.
   - **⚠ What that changes for G3, which is not a defect but is a change.** On a genome with no runs the two states genuinely coincide, so `F` is not identified and nine outbred genomes in twenty-three now return `InbreedingStatesNotSeparated` rather than a small number — which is spec §6.1's own *fail rather than emit*, and the message says *supply `F`*. **G3 expects `F` ≈ 0 on HG002 and should now expect either that or the refusal**, and either answer is the right one; what would be wrong is a confident 0.99. Whether a real human genome at 100,000 sites a window lands on the answering side or the refusing one is unmeasured — the fixture behind these numbers carries 400.
   - **✅ DECIDED (owner, 2026-08-09) — a sample whose `F` cannot be fitted fails whole, and the reason is downstream.** F1's review raised it: `estimate` settles the error rates and the genotype frequencies, then `?`s out of the runs model and drops all three with the local that held them — after a whole-genome walk on the streaming entry point. **The owner's call is to keep it**, because **`F` is a prior the calling step needs**: a sample with the other three and no `F` cannot be called anyway, so returning it would only move the failure somewhere with less context. What was genuinely missing was the *rationale*, and `estimate`'s `# Errors` now carries it along with what it costs — on a genome with no runs the refusal rate is about **nine in twenty-three**, and the two floors are far apart (10,000 sites against 3,000 windows, i.e. 300 Mb that must hold sites), so a region-restricted run and an outcrossing cohort run without a supplied `F` will both meet it. The answer in both cases is `InbreedingMode::Supplied`, which is per-sample.
-  - **✅ FIXED (owner's call, 2026-08-09) — `InbreedingMode::Supplied` no longer overflows the windowed table's `u32` counters.** F1's review reproduced a panic at **143,165,576 sites at depth 30 in one cell**. The `u32` width is justified by a window holding at most 100,000 sites, but `Supplied` drops the window key and pours the whole genome into one table — tomato's ~800 Mb at 30× puts well over 300 M sites in the modal-depth zero-alternative cell. It panicked loudly rather than wrapping, which is B4's overflow guard working, so no wrong number was ever produced; but every supplied-`F` run on a real genome died there. Pre-existing from Milestone C, and **F1 is what made `InbreedingMode` a production config field and turned it from latent into reachable**. The fix is the cheap one the owner chose: a **separate `u64` table keyed by ploidy alone** for the collapsed arm, leaving `by_window` at `u32` for the windows. It costs nothing — in `Supplied` mode there is one table per ploidy, a few kB, where `by_window` holds about 8,000 of them, which is the 37 MB that mode exists to save. Widening `by_window` outright would have doubled spec §9's per-sample figure to 74 MB. The two maps are never both populated (`add_locus` routes by mode, `merge` refuses differing modes), and `GenericAccumulators::ploidies()` is new because the coupled fit derived its ploidies from `windowed_histograms().keys()`, which is empty in that mode — it would have fitted no sample at all.
+  - **✅ FIXED (owner's call, 2026-08-09) — `InbreedingMode::Supplied` no longer overflows the windowed table's `u32` counters.** F1's review reproduced a panic at **143,165,576 sites at depth 30 in one cell**. The `u32` width is justified by a window holding at most 100,000 sites, but `Supplied` drops the window key and pours the whole genome into one table — tomato's ~800 Mb at 30× puts well over 300 M sites in the modal-depth zero-alternative cell. It panicked loudly rather than wrapping, which is B4's overflow guard working, so no wrong number was ever produced; but every supplied-`F` run on a real genome died there. Pre-existing from Milestone C, and **F1 is what made `InbreedingMode` a real config field and turned it from latent into reachable**. The fix is the cheap one the owner chose: a **separate `u64` table keyed by ploidy alone** for the collapsed arm, leaving `by_window` at `u32` for the windows. It costs nothing — in `Supplied` mode there is one table per ploidy, a few kB, where `by_window` holds about 8,000 of them, which is the 37 MB that mode exists to save. Widening `by_window` outright would have doubled spec §9's per-sample figure to 74 MB. The two maps are never both populated (`add_locus` routes by mode, `merge` refuses differing modes), and `GenericAccumulators::ploidies()` is new because the coupled fit derived its ploidies from `windowed_histograms().keys()`, which is empty in that mode — it would have fitted no sample at all.
   - **✅ FIXED (2026-08-09) — the runs model refuses a fit whose starting points scored alike and answered differently**, which is the third failure and the one the other two are blind to. [Impl report](doc/devel/reports/implementations/ng_runs_model_across_start_criterion_2026-08-09.md); the measurement is [research §6](doc/devel/ng/research/inbreeding_resolution_2026-08-09.md). **⛦ The research note's own recommendation is what the work had to reject, and the reason is a shape the harness cannot draw.** §4 recommends a bare threshold near 0.05 on the across-start spread, and that is right on every genome the harness draws — 160 fits now, over twenty run shapes crossed with the twelve window-count ones, since the harness gained short runs (300 kb) and sparse ones (5% and 10% of the genome) — and every one of the 160 puts all nine starts on the same `F` to four decimals. **But every genome in the harness is drawn without a floor of false heterozygotes, and Milestone E3's own fixtures are not.** Applied as recommended it refused three of `runs.rs`'s tests, **all three of which assert a fit that recovers its genome** — including the 5× floor that is spec §6.2's own robustness requirement. **⛦ Dumping the nine starts is what explains it, and the explanation is a *score* gap and not a marginal fit.** At the 5× floor six starts land on `F` = 0.3157 against a realised 0.3122 and three collapse to zero — and the three that collapsed score **1,473 nats worse**, so the data has already rejected them. The failure looks nothing like that: on a genome with no runs at five heterozygotes a window the nine starts return `F` from 0.0003 to 0.8497 while scoring **within 0.91 nats of each other** — which is research note §3.1's proof showing through, since at coincident states the likelihood is exactly flat in `F` and every answer scores the same. **The score separates the two populations by a factor of 1,600 where the spreads themselves overlap** (0.30–0.33 legitimate against 0.0004–0.998 not). So the criterion is the spread over the **tied** starts: `MAX_TIED_START_LOG_LIKELIHOOD_GAP = 10` nats (11× above the measured tie, 147× below the measured rejection) and `MAX_IDENTIFIED_START_SPREAD = 0.05` on the `F` range among them. **An absolute number of nats, and the reason is the opposite of the obvious one**: a log-likelihood difference between two genuinely different fits *does* grow with the genome, while the failure case's gap does not, because there the two fits are the same distribution and their difference is sampling noise. Four `const _: () = assert!` blocks hold the measured bounds, so moving either constant outside its measurement is an `error[E0080]` — but **the spread's upper bound is deliberately weak**, because an uncensored sweep of 24 no-runs seeds gives a *continuum* of spreads from 0.0213 to 0.2749 with no gap at a twentieth or anywhere else. That threshold is not separating two clusters; it chooses how aggressively to refuse a population unidentified at every point in it, and what makes any choice safe is that the legitimate side is not merely small but **exactly 0.0000**. Measured on `runs.rs`'s own fixtures at five heterozygotes a window — a quarter of what its other genomes carry — **seven of eight no-runs seeds are refused and the eighth is answered**: it drew a run covering 0.28% of the genome and comes back at `F` = 0.0028 against a realised 0.0028 with all nine starts agreeing, which is what says five heterozygotes a window is not *too little evidence to fit*. A fifth error variant, `InbreedingStartsDisagree`, rather than a reuse of `InbreedingStatesNotSeparated`: that one says the search never found a second state and this one says it found a different one from every start. **⛦ The sweep re-run with it in place is the end-to-end confirmation**: the two catastrophic cells now refuse all five seeds, refusals across the no-runs grid go from 14 of 60 to 48 of 60, **the largest `F` any genome with no runs returns anywhere falls from 0.9922 to 0.0152** — below its own reported resolution of 0.0409, which is the property that was missing — and all **160** with-runs fits still answer, with the same values and a worst recovery error of 0.0100. Module 287 → **293 tests**; suite 3,189 → **3,195**. **⛦ Three review agents, Approve-with-changes each, and they found one Blocker and four Majors** ([synthesis](doc/devel/reports/reviews/ng_runs_model_across_start_criterion_2026-08-09.md)). **The Blocker: the new error's message and payload were entirely untested** — garbling all five fields and replacing the whole `#[error]` string left 291 tests green, on the one message that exists to stop a consumer reading a refusal as `F` = 0. **The threshold's own justification was the worst finding, and it was mine**: the `0.1147` it was asserted against was the narrowest spread among the fits *this threshold had already refused*, so the sample was censored by the number it was justifying. Re-measured uncensored over 24 no-runs seeds, the spreads form a **continuum** — 0.0213, 0.0264, 0.0323, 0.0337, 0.0483, 0.0521 … 0.2749 — with no gap at a twentieth or anywhere else; the reviewer's proposed replacement (that accepted no-runs fits sit below their own resolution) was checked too and is false here, three of five sitting above it. **Neither constant was behaviourally constrained anywhere in its legal range** — the spread survived 0.001 *and* 0.1146, the tie gap 0.92 *and* 1400 — because every fixture sits either nine orders of magnitude below or twenty times above. **Four wrong numbers and two wrong stories**, every number the author's own claim about their own fixture's reach: *twenty shapes* for twenty crossed with twelve, *two of three* refused tests recovering their genome where all three do, a 0.02/0.30 pair attributed to a fixture that produces 0.0000/0.0000, seven values called nine starts — and the absolute-nats argument stated **backwards** (a likelihood difference between different fits *does* grow with the genome; it is the failure case's gap that does not) plus state ratios of 0.31/0.62 attached to a fixture whose winning start sits at 0.086. **⛦ One reviewer suggestion was measured and rejected**: taking the spread over the *separated* starts is a mutation the agents had already run, and it is killed — on the no-runs fixture the disagreeing starts are the non-separated ones, so filtering them accepts the fit. **⛦ And the question that mattered most came back clean**: a selfing landrace is not refused at any evidence level or false-heterozygote floor — 108 fits to a realised `F` of 0.9719, every one at a tied-start spread of exactly 0.0000, which is structural rather than lucky. All six surviving mutations were re-run against the fixes and all six now fail.
   - **⚠ Design-doc drift that creates, for the owner — five locations.** **arch §5.4 and the plan's A6 name four `ParameterEstimationError` variants**; there are **six** (this commit adds one and `GenotypeFrequenciesOffSimplex` predates it, also absent there; the enum is `#[non_exhaustive]`, so nothing breaks). The same arch block is stale three further pre-existing ways: two variants gained a `floor` field and `Domain` is a struct variant now. **arch §5.3's contract** rejects a fit "when no start left posterior mass on both states" — there are now three refusals and it names one, as does **the plan's E3**. And **spec §6.5** twice: its third emitted quantity calls the spread a report where it is now a criterion, and *best-and-second-best* is the wrong pair (on the unit test's written-down outcomes it reports 0.02 where the tied range is 0.30); and its second bullet, *"a run where every start returned the same `F` at the same score has not measured zero autozygosity"*, now states the inverse of the criterion as prose, since every legitimate fit measured is exactly that.
   - **✅ DECIDED (owner, 2026-08-09) — `resolution` is demoted to a reference point and `MIN_WINDOWS_TO_FIT_INBREEDING` stands.** `resolution_at` interpolates four points measured at 100,000 sites a window, and its doc claimed *an `F` below it means nothing detected*. **That is not a property it has.** Measured at a fifth of that evidence — 3,600 windows of 400 sites — three of the five fits this module accepts on genomes with **no runs at all** return `F` = 0.0322, 0.0359 and 0.0505 against the 0.0291 it reports, so a consumer using it as a floor would call all three detections. And no second argument repairs it: research note §1 shows the floor is not smooth in the window count *or* in the evidence per window — 3,000 × 5 fails where 6,000 × 5 does not — because what varies is whether a rare catastrophic mode fires, not a magnitude. **The number is kept** (spec §6.5 names it as one of three things that go out with `F`, and nothing reads it yet) with its docs saying what it is good for — comparing runs at the same window count — and what now answers the question it was standing in for: `spread_across_tied_starts`, measured on both populations and a property of the fit rather than an interpolation from another regime. **The window floor stands unchanged**: it is cheap, neither cohort comes near it (tomato 8,004 windows, human 31,000), and the evidence-based replacement §1 gestures at cannot exist in that form. **⚠ Drift:** spec §6.5 still calls an `F` below the floor *nothing detected*.
@@ -3558,7 +450,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **✅ FIXED (2026-08-09) — the design-doc drift Milestone E created is corrected**, in `arch/parameter_prepass_generic.md`, `impl_plan/parameter_prepass_generic.md`, `spec/parameter_prepass.md` and `spec/parameter_prepass_cohort.md`: arch §5.2's step order and its two dependent claims, both amended signatures, arch §5.1's opening, arch §5.3's per-base direction, the module tree (five files → eleven, plus why the two scans share one), `GenericEstimationConfig`'s new field, arch §2.4's observation-count note, arch §5.4's misplaced tie sentence, the plan's E1 and E2 wording and its scope list, spec §3.1's "coarsely at first", and the two-borrows taxonomy in both specs — which was missing the within-sample cross-read-group borrow entirely and sent it to the cohort gather. The list as found: [review synthesis](doc/devel/reports/reviews/ng_parameter_prepass_generic_e_2026-08-09.md) §7. **Superseded:**
     - **⚠ Fifteen design-doc locations Milestone E makes wrong.** The load-bearing ones: **arch §5.2 describes a different estimator in three places** — step 1's re-climbing, the single-library one-iteration claim, and the `MAX_COUPLED_FIT_ITERATIONS` note that rests on it — and **the plan's own E2 step description states the reverse order of what was built**, so the plan now marks ✅ a step whose description the code contradicts. Also: arch §5.2's and §5.3's signatures (both gained parameters); arch §5.3 says the transition rates are fitted *per base* where they are fitted per window and converted for reporting, as the harness does; **spec `parameter_prepass.md` §1043-1050 and `parameter_prepass_cohort.md` §317-319 put the read-group borrow at the cohort gather** where arch §5.4 puts it within the sample, and the code follows arch — spec and arch disagree; the arch module tree and the plan's scope list still name five files under `generic/` where there are eleven; and arch §5.4's "ties resolve to the lower error rate" sits three paragraphs below the fallback ladder while being about the *rung* ladder, with "ladder" triple-loaded in that document.
   - **⚠ What Milestone E's tests are proven **not** to be able to say**, recorded so a later round does not spend itself re-finding it. The runs model's **contig restarts change no answer** — the cross-boundary transition term is normalised by the wrong contig's total and underflows to exactly zero, and an absent window has zero covered positions so it cannot move `F` whatever the chain believes. **Summing the runs model's log-likelihood at every window** instead of once per contig — a ~300-fold error — survives, because nothing asserts a log-likelihood *value* and every start is scaled alike. **The coupled loop's block order** cannot be told from the architecture's: the two share a fixed point. And **keep-the-best-scoring *start*** cannot be separated from keep-the-first by any fixture, because a collapsed fit is a one-state model — a constrained special case — so its likelihood cannot exceed the two-state maximum; the comment claiming otherwise was wrong and is corrected.
-  - **⚠ Three things E4 built that nothing can reach until F1.** `GenericEstimationConfig` has no supplied-error-rates field and does not exist in code, so the `Supplied` rung has no source; `take_supplied_inbreeding` has no production caller; and `fit_coupled` itself is called only by its own test.
+  - **⚠ Three things E4 built that nothing can reach until F1.** `GenericEstimationConfig` has no supplied-error-rates field and does not exist in code, so the `Supplied` rung has no source; `take_supplied_inbreeding` has no non-test caller; and `fit_coupled` itself is called only by its own test.
   - **✅ RESOLVED (owner, 2026-08-06) — the read-group histogram is `DepthAltHistogram<u64>`, and `DepthAltHistogram` no longer has a default width at all.** Arch §3 sketches `BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram>`; that table accumulates genome-wide and the fold widens *windows*, which it is not keyed by, so at `u32` its busiest cell's depth sum passes 4.29e9 about a third of the way through a human sample. The site count survives; the depth sum does not — this module's own widening argument, applied to the one table the fold cannot reach, and Tomato hides it (2.4e9 of depth in total). Rather than record the decision and hope C3 reads it, the `= u32` default is **gone**: a default fires in exactly one place, a field or signature written bare, which is where the choice is least visible and most easily wrong. Every declaration now states its width. C3 writes `DepthAltHistogram<u64>` for the read-group table and `<u32>` for the windows, and cannot omit either.
   - The six steps the plan marks *own commit, do not bundle* (A4 ✅, B3 ✅, C2 ✅, D2, E2, E3) — each returns a plausible number nobody can check. **All three isolated so far have earned it**: A4's degeneracy guard fired zero times and was backwards, B3's bin-mean identity needed a second test to bite at all, and C2's own oracle caught a fast-path bug pre-commit.
   - **⚠ Deferred from Milestone C's review, none blocking D** (detail in the [C review](doc/devel/reports/reviews/ng_parameter_prepass_generic_c_2026-08-06.md) §4). `AccumulationCounts` is one type with two meanings — the stored value's `shard_spans_overlapping` is always zero, only `adjustments()`'s is real; a stored/reported split would say it in the type, and `merge`'s exhaustive destructure closes the concrete hazard meanwhile. `CountedSite` means three slightly different things across its three producers; on the by-group path it is a *group's slice* of a site, so summing `subsampled_from()` there would count groups under a name that says sites — no consumer does. `generic/mod.rs` now does four jobs and splits `WindowIndex` from `WindowKey` across files. And a reviewer built the split-borrow rewrite of `add_locus`, which passes and removes both `mem::take`s and the per-locus `Arc::clone` for 1–2 ns a locus — worth taking when that function is next touched.
@@ -3584,20 +476,21 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **`DomainError` now carries six variants**, against "one error type per fallible operation". A deliberate ng-wide convention worth a decision now the enum has doubled.
   - **✅ CLOSED — the "29% covered by runs" item was already stale when Milestone B began.** `5d13beff`, the branch point, is titled "correct 29% to 26%" and did correct both design docs as well as the code: `arch:1128` reads "26% covered by runs" and `spec:785` "26% of its length in runs", with `spec:789` now naming the realised 0.2629 the figure comes from so the two can be checked against each other. The entry survived here through Milestone A's checkpoint and was reported open again at Checkpoint B; it never was.
   - **⚠ Owner call: `ParameterEstimationError::Domain` breaks three error rules** — `#[error(transparent)]` names neither sample nor operation, `#[from] DomainError` collapses five origin constructors into one variant, and `Domain` is a mechanism name. Inherited verbatim from arch §5.4, so fixing it amends the architecture.
-  - **⚠ `cargo test --all-targets` is red on this branch and it is not step 4's.** `benches/psp_writer_perf.rs:386` panics with `index out of bounds: the len is 3300000 but the index is 3300000`, in its own `flush_block_one` priming loop, which walks `phase_records` until a projected block size crosses a threshold and runs off the end when it never does. That bench and all of `src/psp/` are byte-identical to `5d13beff` and reference nothing under `parameter_estimation`. Milestone B was validated with `--lib --bins --tests`, which is the whole test suite — benches carry no tests.
+  - **⚠ `cargo test --all-targets` is red on this branch and it is not step 4's.** `benches/psp_writer_perf.rs:386` panics with `index out of bounds: the len is 3300000 but the index is 3300000`, in its own `flush_block_one` priming loop, which walks `phase_records` until a projected block size crosses a threshold and runs off the end when it never does. That bench is byte-identical to `5d13beff` and references nothing under `parameter_estimation`. Milestone B was validated with `--lib --bins --tests`, which is the whole test suite — benches carry no tests.
   - **✅ RESOLVED (owner, 2026-08-06) — the design docs now list `depth_bins.rs`.** A4 put the binning rule in its own file under `generic/`, where [arch](doc/devel/ng/arch/parameter_prepass_generic.md)'s module table named four files and mapped §2.2 to `histogram.rs`, as did the plan's A1 and scope list. All three A4 reviewers judged the placement right, and the arch's table now carries the fifth file with a paragraph saying why: the rule fits neither side of `generic/`'s data-shaping-versus-mathematics split, §2.2 names three consumers for it inside `generic/`, and it has none outside step 4. Keeping it separate is also what lets `DepthBinEdges` refuse `PartialEq` and `Clone` without those refusals reading as restrictions on the table.
 
 #### Step 4 — the parameter pre-pass, the STR path
+- *Deleted 2026-09-11 with the whole-genome histogram route ([plan](doc/devel/ng/impl_plan/remove_histogram_route.md)); this block is kept for its findings. The run's parameters now come only from the census route, `parameter_estimation::joint`.*
 - **Status:** fixes-applied (**Milestone C complete, at Checkpoint C**, 2026-08-12). The object a stratum's evidence lives in — one locus's reads across the offset buckets (`LocusShape`), the sparse table keyed on it (`StratumTable`), its exact merge and its two diagnostics — and, from Milestone C, **the loci that fill it**: which stratum a locus belongs to, how one read group's reads fall across the buckets, the read cap's position-seeded draw, how those reads read against the tract, and the accumulator that files them. **A walk cut into shards and merged now equals the uncut walk**, entry for entry and counter for counter, which is the property the parallel design rests on. Nothing fits anything yet — that is Milestone D, and the plan's rule is that the mathematics is proven against the harness before a locus is read.
 - **Plan:** [parameter_prepass_ssr.md](doc/devel/ng/impl_plan/parameter_prepass_ssr.md); **Spec:** [spec](doc/devel/ng/spec/parameter_prepass_ssr.md) + [shared framing](doc/devel/ng/spec/parameter_prepass.md); **Arch:** [arch](doc/devel/ng/arch/parameter_prepass_ssr.md).
-- **Code:** [src/ng/parameter_estimation/ssr/](src/ng/parameter_estimation/ssr/) (`mod.rs` = the vocabulary, what a fit emits, and from C5 `SsrAccumulators`; `stratum_table.rs` = `LocusShape`, `BaseComparison`, `StratumEntry` and `StratumTable`; `locus_offsets.rs` = `stratum_of`, `tally_of`, `shape_of` and `base_comparison_of`; `slippage.rs` = module docs only until D). Shared with the SNP/indel path since C3: [subsample.rs](src/ng/parameter_estimation/subsample.rs), the position-seeded selection walk both read caps draw from, **lifted out of `generic/depth_and_alt_reads.rs` unchanged**. `SsrPeriod`, `Motif::ssr_period()` and two `DomainError` variants in [src/ng/types.rs](src/ng/types.rs).
+- **Code:** `src/parameter_estimation/ssr/` (`mod.rs` = the vocabulary, what a fit emits, and from C5 `SsrAccumulators`; `stratum_table.rs` = `LocusShape`, `BaseComparison`, `StratumEntry` and `StratumTable`; `locus_offsets.rs` = `stratum_of`, `tally_of`, `shape_of` and `base_comparison_of`; `slippage.rs` = module docs only until D). Shared with the SNP/indel path since C3: `subsample.rs`, the position-seeded selection walk both read caps draw from, **lifted out of `generic/depth_and_alt_reads.rs` unchanged**. `SsrPeriod`, `Motif::ssr_period()` and two `DomainError` variants in [src/types.rs](src/types.rs).
 - **Impl reports:** [A1+A2+A3](doc/devel/reports/implementations/ng_parameter_prepass_ssr_a1a2a3_2026-08-11.md), [A4](doc/devel/reports/implementations/ng_parameter_prepass_ssr_a4_2026-08-11.md) (carries its own review and fixes — 4 agents, 24 mutations, **1 Blocker: the model's first column was never tested**, so an unchecked construction there left every test green while a `NaN` level passed as `Ok`), [A5+A6](doc/devel/reports/implementations/ng_parameter_prepass_ssr_a5a6_2026-08-11.md) (3 agents, 19 mutations, **3 Majors** — no failure named the read group though every fit is keyed on one; `NoFittableStratumAtPeriod` named the floor but never the shortfall, and pointed at a "supply the parameters" door that does not exist; and the sample's output type derived `Default`, so `.unwrap_or_default()` would report a never-fitted sample as an empty one), [B1](doc/devel/reports/implementations/ng_parameter_prepass_ssr_b1_2026-08-11.md) (5 agents, 33 mutations, **2 Blockers and a Major, all three tests that could not fail** — no fixture put a read into either saturating end bucket's arithmetic, the key-identity test reached 2 of the 10 places a shape can differ, and the shallowest fixture held three reads), [B2+B3](doc/devel/reports/implementations/ng_parameter_prepass_ssr_b2b3_2026-08-11.md) (4 agents, 35 mutations, **3 Majors** — the plan's own acceptance oracle for the substitution rate could not fail, none of the three overflow guards had a test though all three are reachable in about thirty merges, and the base-count guard's boundary was untested), [C1](doc/devel/reports/implementations/ng_parameter_prepass_ssr_c1_2026-08-11.md) (**Blocker: the divisor was unpinned across two-thirds of the STR scope** — clamping it at 2 left every test green while filing a tetranucleotide tract at eight copies instead of four), [C2](doc/devel/reports/implementations/ng_parameter_prepass_ssr_c2_2026-08-11.md) (**Blocker: nothing pinned that a bucket accumulates** — every fixture put at most one observation in a bucket, so `+=` could become `=`), [C3](doc/devel/reports/implementations/ng_parameter_prepass_ssr_c3_2026-08-12.md) (**two Blockers, both tests that appeared to check something they did not**: the helper meant to move a locus never moved it, so a draw seeded from the tract's *length* passed everything; and the variance tolerance was wider than the whole difference between the model asserted and the one it excludes), [C4+C5](doc/devel/reports/implementations/ng_parameter_prepass_ssr_c4c5_2026-08-12.md) (**two Blockers**: `merge` could drop a stratum only one shard saw, and nothing checked that a table gets its own library's base counts), [D1](doc/devel/reports/implementations/ng_parameter_prepass_ssr_d1_2026-08-12.md) (3 agents, 29 mutations, **two Blockers**: the sums-to-one gate was false over a band of legal fall-offs, because the reference's closed-form renormaliser `(1 − f)/(1 − f⁸)` subtracts two nearly equal numbers there — 3,500× the asserted tolerance at `1 − f = 1e-9` — and the sweep stepped straight over the band; and `i32::MIN` wraps past the truncation guard in a release build, charging a slip of two billion copies whatever a one-copy slip costs, with the test asserting `i32::MIN + 1` as the tell), [D2](doc/devel/reports/implementations/ng_parameter_prepass_ssr_d2_2026-08-12.md) (4 agents, 27 mutations, **Blocker: `WeightedCell::sites()` was exercised by nothing** — replacing the locus count with the shape's read depth left all 567 tests of the path green, and that substitution is exactly the keying spec §4.1 rejects at a 333-fold spread in the fitted level; plus a heterozygote test that could not tell an average from a sum, because at one read the identity it asserted holds for any constant multiple), [D3](doc/devel/reports/implementations/ng_parameter_prepass_ssr_d3_2026-08-12.md) (1 agent, 6 mutations, **Major: nothing pinned that the climb reads its start** — on a concave surface "arrived from the skewed start" and "never looked at it" are the same output, so a climb that validated its argument and discarded it left the module green), [D4](doc/devel/reports/implementations/ng_parameter_prepass_ssr_d4_2026-08-12.md) (1 agent, **two Blockers**: a warm start I had documented as load-bearing was measured to fire **zero times in 668 climbs**, because a stratum's unused allele lengths underflow to exactly zero and the previous answer is then not the interior start the climb requires; and the spread across starts is near one *by construction*, since every axis is line-searched over its whole range before a start's own value is read — which is exactly the reading the module's own preamble warns against).
 - **Latest review:** [A1+A2+A3](doc/devel/reports/reviews/ng_parameter_prepass_ssr_a1a2a3_2026-08-11.md) — 8 agents in isolated worktrees, 46 mutations of which **4 survived**; 0 Blockers, 4 Majors, 12 Minors; Request-changes → resolved. **Latest fixes-applied:** [A1+A2+A3](doc/devel/reports/reviews/fixes_applied_2026-08-11.md) (15 applied, 4 declined with reasons).
 - **Design docs revised 2026-08-11, before any code:** the loci now arrive from a repeat catalog built once per reference rather than from a scan run while a sample is read (spec §5.3), the copy floors `[8, 6, 6, 6, 5, 4]` the code has applied since 2026-08-10 are recorded as adopted (spec §5.1.1), and **the plan gained Milestone H** — what a locus that is not the tract its stratum thinks it is does to the four numbers (spec §4.6), the STR twin of the generic path's second class of site.
 - **Open:**
   - **⛦ OWNER CALL AT CHECKPOINT A — several load-bearing STR numbers cite a research-note section that says the opposite.** The spec, arch and plan attribute "0.43 entries a locus", "12,727 entries for 29,811 HG002 loci", "70,305 over 1.73 M tomato loci", "88.9% of loci at the reference length" and "the end buckets take 0.89% of reads" to [research §6.8](doc/devel/ng/research/parameter_estimator_experiments_2026-08-06.md) — **which is titled "What is not measured"** and states that the harness is exact only to 12 reads a locus and that HG002 at 300× "needs a coarsening of the per-locus cell that nothing here has priced". Four other citations name a §6.4.1 that does not exist. The figures appear nowhere else under `doc/`; their stated source is `examples/ng_str_table_memory.rs`, whose run was never written up. The code's own doc comments now cite the spec sections that hold the numbers rather than the note. **The question is not the citation — it is whether the read cap and the allele support rest on a measurement anyone can re-run.**
   - **⚠ Two gates are red on this branch and neither is step 4's.** `cargo clippy --all-targets` fails with **8** errors in four files under `examples/` (`ng_str_stutter_rate.rs`, `ng_generic_loci_dump.rs`, `shared/stutter_model.rs`, `shared/stutter_table.rs`) — a given run may print 7, because `-D warnings` aborts at the first failing example; all 8 reproduce with this work's patch not applied. `cargo doc --no-deps --lib` reports 13 unresolved intra-doc links, none in the files this step wrote. Validated with `--lib --bins --tests`.
-  - **⚠ `Stratum` has a twin upstream that cannot be unified.** [repeat_catalog/strata.rs](src/ng/repeat_catalog/strata.rs) keys its per-stratum counts and its sample on a raw `(u8, u64)` pair and its module doc says it exists to serve this fit; the catalog is a peer module, so it can never import step 4's checked `Stratum` without a back-reference into a pipeline stage. Every hand-off converts, through one fallible check and one narrowing. Recorded in `Stratum`'s doc comment; the trigger to lift the type into `types.rs` is the milestone where a driver first calls `sample_loci_per_stratum`.
+  - **⚠ `Stratum` has a twin upstream that cannot be unified.** [repeat_catalog/strata.rs](src/repeat_catalog/strata.rs) keys its per-stratum counts and its sample on a raw `(u8, u64)` pair and its module doc says it exists to serve this fit; the catalog is a peer module, so it can never import step 4's checked `Stratum` without a back-reference into a pipeline stage. Every hand-off converts, through one fallible check and one narrowing. Recorded in `Stratum`'s doc comment; the trigger to lift the type into `types.rs` is the milestone where a driver first calls `sample_loci_per_stratum`.
   - **⚠ Two numbers in the design documents are wrong, found by checking the code that quotes them.** `spec/parameter_prepass_ssr.md` §4.5 and `arch/parameter_prepass_ssr.md` §2.4 say a stratum "can clear `MIN_LOCI_TO_FIT` by four orders of magnitude and still put five reads behind the fall-off's gaining arm" — the worked example is 100,000 loci against a 1,000-locus floor, which is **two** orders; at four the gaining arm holds about 503 reads, so the sentence contradicts its own example. And "the level and the two shares starve at rates 20,000 apart" is a ratio of **loci to reads** (100,000 ÷ 5); level against fall-off in the same unit is 100,000, and against the direction share 1,099. The code says both correctly now; the two documents do not. Also: spec §4.2 cites "a genome 29% covered by runs" where the research note's realised `F` is 0.2629 and the generic spec says 26%.
   - **⚠ Recorded deviation, A2: `RepeatCount` and `Stratum` live in `parameter_estimation/ssr/`, not in `types.rs`.** Arch §2.1's code block sits under a heading that says "extend `types.rs`" while its own prose says the rest are step-4's own, and `module_layout.md` names only `SsrPeriod` for the shared file. The narrower reading was taken; widening it later is a re-export.
 
@@ -3605,28 +498,28 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Status:** implemented (**Milestones A–D complete; Milestone E through its third step — all three slippage numbers are now smoothed the same way and the copy rule is gone; the cohort measurement is outstanding**, 2026-08-20), branch `ng-str-slippage-curve`, worktree `../pop_var_caller-slippage-curve`. The repeat-tract slippage *level* stops being an independent per-cell number that thin cells borrow and becomes a curve in repeat count, with the line's two coefficients per slippage group and its shape number shared across groups at each motif period. Milestone A builds and proves the curve as a pure function; nothing in the pipeline calls it yet.
 - **Plan:** [str_slippage_level_curve.md](doc/devel/ng/impl_plan/str_slippage_level_curve.md); **Spec:** [spec](doc/devel/ng/spec/str_slippage_level_curve.md); **Research plan:** [str_slippage_across_repeat_count.md](doc/devel/ng/impl_plan/str_slippage_across_repeat_count.md).
 - **Measurements it rests on:** [str_slippage_shape_2026-08-20.md](doc/devel/ng/reports/str_slippage_shape_2026-08-20.md) — both cohorts refitted with borrowing off, 6 fitted cells on tomato and 55 on HG002, and the held-out comparison of seven curve families. And, for the two shares, [str_slippage_share_families_2026-08-20.md](doc/devel/ng/reports/str_slippage_share_families_2026-08-20.md): **all three candidate shapes are needed** — over ten cases (four motif periods on HG002, one on tomato, two parameters each) a flat value wins twice, a logit-line three times and a logit-quadratic five — and the copy-from-a-neighbour rule they replace is beaten in 8 of the 10 even when scored more generously than it can actually run. **Two answers wanted before code:** which precision weights a stratum (the design's relative-error formula and its logit-scale blend disagree by `1/(1 − p)²`, which ranks two of HG002's dinucleotide strata in opposite orders), and whether a curve that bends twice may be drawn through four strata.
-- **Code:** [src/ng/parameter_estimation/joint/slippage_curve.rs](src/ng/parameter_estimation/joint/slippage_curve.rs) for the level and [share_curve.rs](src/ng/parameter_estimation/joint/share_curve.rs) for the two shares — three shapes on the logit scale (flat, sloping, turning), chosen per motif period by leaving each stratum out, each stratum weighted by the inverse variance of its logit, and **a curve always coming back**: a thin period gets a flat mean, an empty one the run's other periods, a run that fitted nothing a built-in default, each recorded. Fixtures under `tests/data/slippage_cells/`; integration tests [tests/slippage_curve_on_real_cells.rs](tests/slippage_curve_on_real_cells.rs) and [tests/share_curve_on_real_cells.rs](tests/share_curve_on_real_cells.rs). **⚠ Those fixtures were the ±4 window's until 2026-08-20 and every number they pin moved when they were refreshed** — the two cohorts' shape numbers go 0.00 and 1.00 to 0.65 and 0.35. `StratumEvidence` gained the two counts behind a stratum's substitution rate and the reads sitting off the reference length; the walk writes a per-cell table under `SSR_CELL_TABLE` and a borrowed one under `SSR_CELL_TABLE_BORROWED`.
+- **Code:** [src/parameter_estimation/joint/slippage_curve.rs](src/parameter_estimation/joint/slippage_curve.rs) for the level and [share_curve.rs](src/parameter_estimation/joint/share_curve.rs) for the two shares — three shapes on the logit scale (flat, sloping, turning), chosen per motif period by leaving each stratum out, each stratum weighted by the inverse variance of its logit, and **a curve always coming back**: a thin period gets a flat mean, an empty one the run's other periods, a run that fitted nothing a built-in default, each recorded. Fixtures under `tests/data/slippage_cells/`; integration tests [tests/slippage_curve_on_real_cells.rs](tests/slippage_curve_on_real_cells.rs) and [tests/share_curve_on_real_cells.rs](tests/share_curve_on_real_cells.rs). **⚠ Those fixtures were the ±4 window's until 2026-08-20 and every number they pin moved when they were refreshed** — the two cohorts' shape numbers go 0.00 and 1.00 to 0.65 and 0.35. `StratumEvidence` gained the two counts behind a stratum's substitution rate and the reads sitting off the reference length; the walk writes a per-cell table under `SSR_CELL_TABLE` and a borrowed one under `SSR_CELL_TABLE_BORROWED`.
 - **Impl report:** [Milestone A](doc/devel/reports/implementations/ng_slippage_curve_milestone_a_2026-08-20.md). Milestones B–D are carried by their commit messages.
 - **⛦ Milestone E, approved by the owner 2026-08-20, supersedes D's rule and is now built through its third step.** D measured what the floor-and-copy rule delivered: **13 furnished strata on HG002 and none on tomato**, because only one motif period of six has a stratum clearing 4,000 slipped reads. The two shares now get the level's own treatment — a curve a period fitted from every stratum weighted by the inverse variance of its logit, each stratum departing from it by how much evidence it has — and the floor, the lenders and the copy rule are deleted, along with the `SSR_SHARES_FLOOR` knob. **The hand-over the floor was trying to name lands two orders of magnitude lower**: at HG002's homopolymer direction split a stratum's own answer outweighs the curve above about 160 slipped reads, and one with the old floor's 4,000 keeps 97% of it. **⛦ Fixed on the way:** `derive_thin_strata` drew its own copy of the level's curves *after* every level had been blended, so a thin stratum was furnished from a curve fitted to once-smoothed levels — a curve fitted to a curve's output. All three curves are drawn once now, before either blend runs. **⚠ The only refusal a populated stratum can still hit is the level's four-stratum floor**, since the shares always have a curve to give; whether the level should get the same treatment is the open question E5 will put. **⛦ E4 done: the refusal floor moves 50 → 8 tracts.** The gate spec §11 asked for was measured on drawn strata at both ends of the range ([examples/ng_ssr_thin_stratum_gate.rs](examples/ng_ssr_thin_stratum_gate.rs)): the level collapses to below a tenth of the truth in **27%** of a single deep sample's 3-tract fits and 20% of its 5-tract ones, against **3%** at 8 and none from 12 up; on a 63-sample cohort at three reads it collapses in 3% of 3-tract fits and never below. A collapsed fit excludes itself — no slipped reads means no weight — so the tail that costs is the other one, and at 8 tracts one fit in ten comes back 1.67× the truth against 1.15× at 50. **On the real tables the floor takes tomato from 15 of its 49 populated strata carrying a full parameter set to 38**, its dinucleotides reaching four contributing strata for the first time; HG002's count does not move but its trinucleotide curve is drawn through 10 strata rather than 4. *Convergence turned out to be no alarm at all*: at 400 tracts on a 63-sample cohort only 83% of climbs settle within their rounds, and that row's median level is 1.5% from the truth. Spec §5.1, plan Milestone E. **⛦ E5 measured both cohorts end to end, and the milestone's worth is not what it was expected to be** ([report](doc/devel/ng/reports/str_slippage_curves_on_both_cohorts_2026-08-21.md)). **On HG002 it is a wrong parameter corrected at 31% of the repeat loci**: the copy rule had been overwriting the two shares of 11 of the 55 well-fitted strata, and those hold 8,363 of the 26,769 loci in fitted strata — the 8-repeat homopolymer stratum alone is 4,194 loci, its own 3,666 slipped reads measuring a direction split of 0.5095 to within 1.6% of itself, and the rule reported 0.6919. **On tomato it is the smoothing itself**: at three reads a position the curve carries a median 34% of the weight for the level and 49% for the direction split, against 3.9% and 3.4% on HG002 — the same formula at both ends of the depth range, neither end chosen. **Coverage is the small part**: strata carrying a full parameter set go 68 → 117 on HG002 and 6 → 39 on tomato, but in loci that is +529 of 27,399 (2%) and +280 of 3,965 (7%), because a thin stratum is thin exactly because few loci sit in it. **The parity oracle is green on both** — every stratum fitted before the milestone comes back with all three numbers identical to the last digit (165 numbers on HG002, 18 on tomato). **No stratum on either cohort is furnished from nothing**; `Derived` is used by 38 strata on HG002 and 22 on tomato and stays. Fitting costs 366.1 → 421.0 s on HG002 and 549.2 → 665.0 s on tomato. **⛦ The specifications now match the code (plan step C2, done 2026-08-21).** [spec/parameter_prepass_ssr.md](doc/devel/ng/spec/parameter_prepass_ssr.md) §4.3 and §4.5 — borrowing, the monotonicity merge, and the 4,000-slipped-read floor — carry a *superseded on the joint route* banner and stand as the **per-sample** route's record, which still does all three; §4.4's summary gains the counts that replace "how many borrowed, how many merged"; the [architecture](doc/devel/ng/arch/parameter_prepass_ssr.md)'s fit steps 3 and 4 and its two `fitted_over` fields say the joint route does not fill them. **That spec's open question 7 is closed by measurement** — fitted with nothing linking them, 10 of 50 steps between neighbouring strata run downhill on HG002 and none on tomato, and no dip is deeper than 1.31-fold, which a curve absorbs without a rule. **And [spec/str_slippage_level_curve.md](doc/devel/ng/spec/str_slippage_level_curve.md) §2, §6, §7, §7.1 and §7.2 are remeasured at ±8**: the two cohorts fit 0.65 and 0.35 rather than the opposite ends; a narrow-window exponential says 149 at 30 repeats rather than 205; the curve is 135% and 87% above the 8- and 9-repeat cells where it was 27% and 55%, so §7.2's knee strengthened rather than dissolved; and the figures not rerun are marked ±4 rather than left looking current. **⚠ What is left: the level's four-stratum floor is the only thing still refusing a populated stratum** — 15 strata holding 36 loci on HG002, 10 holding 24 on tomato — and whether the level should get the shares' always-answers ladder is the design question the milestone leaves open.
-- **⚠ The census's recorded offset range moved 4 → 8** ([census.rs](src/ng/parameter_estimation/joint/census.rs)) because ±4 under-measured slippage by **2.26× at 30-repeat homopolymers**; ±12 agrees with ±8 within 1.8%, so it has converged. Costs 18.2 → 34.2 bytes a locus a read group, accepted by the owner. **Every fitted number measured before 2026-08-20 was taken at ±4 and is distorted**; [the shape report](doc/devel/ng/reports/str_slippage_shape_2026-08-20.md) has been remeasured throughout and its **§7 lists what the correction overturned**, so read that before trusting an older number found elsewhere.
+- **⚠ The census's recorded offset range moved 4 → 8** ([census.rs](src/parameter_estimation/joint/census.rs)) because ±4 under-measured slippage by **2.26× at 30-repeat homopolymers**; ±12 agrees with ±8 within 1.8%, so it has converged. Costs 18.2 → 34.2 bytes a locus a read group, accepted by the owner. **Every fitted number measured before 2026-08-20 was taken at ±4 and is distorted**; [the shape report](doc/devel/ng/reports/str_slippage_shape_2026-08-20.md) has been remeasured throughout and its **§7 lists what the correction overturned**, so read that before trusting an older number found elsewhere.
 - **Open:**
   - **✅ RULED (owner, at Checkpoint A 2026-08-20) — the held-out score continues the line where a deployed curve holds it flat.** The two disagree at one period: HG002's dinucleotides fit 0.80 continuing and 0.70 holding flat. Continuing keeps every cell in the score, since holding flat would predict an end cell with its neighbour's value. Written into spec §4.3.
   - **✅ ANSWERED (measured 2026-08-20) — the flattening was the recording window, not the polymerase.** At ±4 the step-to-step rise fell to 1.02 by 20 repeats and the fitted shape number was 1.00; at ±8 the rise is still 1.09–1.32 at the top and the shape is 0.35. [Shape report](doc/devel/ng/reports/str_slippage_shape_2026-08-20.md) §7. **Spec §11 still lists this as open and needs the correction.**
   - **⚠ The four-cell floor for drawing a curve is arithmetic, not measurement.** HG002's trinucleotides clear it with exactly four cells and predict a held-out cell to 31.10%, against 3.79% at the twenty-cell dinucleotides; a test asserts that ratio.
-  - **⚠ The cohort cannot tell libraries apart, so "per slippage group" is coarser than it sounds.** A read group is an index within one sample ([types.rs:210](src/ng/types.rs)) and the cohort's list is the union of those indices ([census.rs:1670](src/ng/parameter_estimation/joint/census.rs)), so tomato's 63 declared libraries all arrive as read group 0. Spec §3 records it; the fix belongs to the census spec.
-  - **⚠ The aggregate `cargo clippy --all-targets --all-features` gate is red and pre-dates this branch**, in three files this work does not touch: `src/ng/run/cohort_merge/observation_cache.rs`, `examples/ng_joint_duplicated_in_fit.rs`, `examples/shared/synthetic_alignment.rs`.
+  - **⚠ The cohort cannot tell libraries apart, so "per slippage group" is coarser than it sounds.** A read group is an index within one sample ([types.rs:210](src/types.rs)) and the cohort's list is the union of those indices ([census.rs:1670](src/parameter_estimation/joint/census.rs)), so tomato's 63 declared libraries all arrive as read group 0. Spec §3 records it; the fix belongs to the census spec.
+  - **⚠ The aggregate `cargo clippy --all-targets --all-features` gate is red and pre-dates this branch**, in three files this work does not touch: `src/run/cohort_merge/observation_cache.rs`, `examples/ng_joint_duplicated_in_fit.rs`, `examples/shared/synthetic_alignment.rs`.
 
 #### Step 4 — the census: the joint route's vocabulary and its encoding
 - **Status:** in-flight (milestone A, step A2 committed). Renames the joint route's records to the **census** vocabulary, deletes the coverage-by-window summary, and makes four changes to how a position's evidence is encoded. Milestone A must not move a fitted number; milestone B moves them only where the specification predicts.
 - **Plan:** [census_rename_and_encoding.md](doc/devel/ng/impl_plan/census_rename_and_encoding.md); **Specs:** [joint_records](doc/devel/ng/spec/parameter_prepass_joint_records.md), [joint_loci](doc/devel/ng/spec/parameter_prepass_joint_loci.md), [generic](doc/devel/ng/spec/parameter_prepass_generic.md); **Arch:** [joint_records](doc/devel/ng/arch/parameter_prepass_joint_records.md), [joint_loci](doc/devel/ng/arch/parameter_prepass_joint_loci.md).
-- **Code:** [src/ng/parameter_estimation/joint/census.rs](src/ng/parameter_estimation/joint/census.rs) (was `records.rs`), [loci.rs](src/ng/parameter_estimation/joint/loci.rs), [fit.rs](src/ng/parameter_estimation/joint/fit.rs), [ssr_fit.rs](src/ng/parameter_estimation/joint/ssr_fit.rs), [contamination.rs](src/ng/parameter_estimation/joint/contamination.rs); harness [examples/ng_joint_records_walk.rs](examples/ng_joint_records_walk.rs).
+- **Code:** [src/parameter_estimation/joint/census.rs](src/parameter_estimation/joint/census.rs) (was `records.rs`), [loci.rs](src/parameter_estimation/joint/loci.rs), [fit.rs](src/parameter_estimation/joint/fit.rs), [ssr_fit.rs](src/parameter_estimation/joint/ssr_fit.rs), [contamination.rs](src/parameter_estimation/joint/contamination.rs); harness [examples/ng_joint_records_walk.rs](examples/ng_joint_records_walk.rs).
 - **Impl reports:** [A2](doc/devel/reports/implementations/census_rename_a2_2026-08-14.md), [A2 fixes applied](doc/devel/reports/implementations/census_rename_a2_fixes_2026-08-14.md).
 - **Latest reviews:** [perf 2026-08-15](doc/devel/reports/reviews/perf_ng-census-joint-fit_2026-08-15.md) — the first measurement this module has ever had: a `sample(1)` profile and six timed runs. The repeat-tract fit is 70% of a small run and its cost is linear in **tracts fitted** at ~0.14 s a tract at 8 samples, which puts the 63-accession cohort at days; the two knobs that would bound it (`ssr_cap`, the borrowing floor) are both effectively off. 7 Hot-path, 15 Likely, 9 Speculative. **Seven were applied and measured in the same run, one change at a time: the repeat-tract fit is 70.1% faster at 6 spans (47.1 s → 14.1 s) and 68.9% at 12 (79.1 s → 24.6 s), and the ordinary-position half 10.4 s → 9.9 s.** The largest single win was the 91-element dot product, rewritten as four running sums and then as `wide::f64x4` lanes (19.7 s → 14.1 s) — Rust 1.98's `algebraic_*` operators would do the same job but are unstable on this repo's pinned 1.95, and the pin is deliberate. An eighth change was tried and refuted (no gain, reverted, reason recorded at the site). 644 `parameter_estimation` tests green, `clippy --lib` clean. Every fitted quantity agrees with the pre-review baseline to the four decimals the harness prints; the last of the five replaces a sum of logarithms with a rescaled product, so agreement is not bit-for-bit, and the owner has ruled four decimals sufficient (2026-08-15). Verdict *Apply the listed wins*, after one owner decision recorded in its §2.
   [A2](doc/devel/reports/reviews/census_rename_a2_2026-08-14.md) — 4 agents in isolated worktrees; the rename proved behaviour-preserving by normalising both sides and enumerating the residual diff (27 hunks, 14 prose-only, 13 non-comment, none an expression); 12 mutations run, 3 killed, 9 survived, of which 5 changed no behaviour on any fixture — so **4 true survivors** — two now covered by new tests, two by exhaustive destructures that make a field dropped from a comparison a compile-time complaint; 2 Blockers (both pre-existing), 9 Majors, 6 Minors; Approve-with-changes.
 - **How it is checked:** the tomato 63-accession cohort and the GIAB trio on real reads, run through `examples/ng_joint_records_walk.rs`, against the A1 baseline recorded before the first edit. Not fixtures.
 - **Open:**
   - **⛦ OWNER CALL — how many tracts may one repeat-tract fit read?** The per-stratum cap `ssr_cap` is set to 1,000,000 in the harness and so never fires, and a stratum under the 1,000-tract borrowing floor pools its neighbours until it reaches the floor. Measured: turning borrowing off cut one run from 1,036.8 s to 155.5 s. Nothing here is a code defect — both are policy, and bounding them spends statistical precision. See the perf review's §2.
-  - **Measurement gap — there is no benchmark seam for `fit_strata`/`fit_stratum`**, which own 70% of the run; the only way to run them is a harness that opens CRAMs. Both are already `pub` and take plain data, so the bench needs no production change. Every code-level perf finding is unfalsifiable until it exists.
+  - **Measurement gap — there is no benchmark seam for `fit_strata`/`fit_stratum`**, which own 70% of the run; the only way to run them is a harness that opens CRAMs. Both are already `pub` and take plain data, so the bench needs no change to the library code. Every code-level perf finding is unfalsifiable until it exists.
   - **Measurement gap — the repeat-tract half has never been run from a census file.** `refit_from_files` calls `fit_jointly` only, so `gather_strata`'s file path — the one the by-section memory bound exists for — is covered by unit tests and nothing else.
   - **⛦ OWNER CALL AT CHECKPOINT A — a repeat tract's difference reads are numbered per observation, so two reads read as one.** `add_ssr` restarts its read counter at every observation, so two distinct read sequences each carrying one interruption both come back as read 0 — the exact confusion the read index exists to prevent. Pre-existing, demonstrated by a test that fails against unmodified code, and out of this plan's scope: fixing it changes what the census records, which milestone A may not do.
   - **⛦ OWNER CALL AT CHECKPOINT A — the STR difference list's flank offsets have no producer.** `TractDifference::offset` promises negative offsets in the left flank; `add_ssr` can only emit `0..tract_len`. The test that stands for spec §7.3's flank-against-interior assertion asserts only over its own literals. The repair needs a design answer first: are flank bases in scope for the difference list?
@@ -3636,7 +529,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 #### Step 4 — contamination: the fraction is a library's, not a plant's
 - **Status:** ✅ **implemented** (2026-08-20, branch `ng-contamination-grain`). What a second plant's DNA gets into is a **library** — it enters at library preparation or on the sequencing machine — so two libraries of one plant can carry different amounts of it and one number for the plant is an average wrong for both. The estimator fitted one fraction per sample; it now fits one **per read group**, with both grains selectable in one build (`ContaminationGrain`) so they can be compared on one drawn panel. **This repairs a divergence rather than choosing a direction**: [parameter_prepass.md](doc/devel/ng/spec/parameter_prepass.md) §1's table has said read group all along, under its §1.1 principle that noise is chemistry (owner, 2026-08-19). **Only the read counts change grain.** Which positions are markers, the allele frequency at each, every plant's coordinates on the panel's axes, the line fitted through them, the leverage refusal and the homozygote excess are all still computed from a plant's reads pooled over its libraries — a genotype and an ancestry belong to the individual — **so the +0.015 that partitioning a *panel* costs does not apply**, and the decomposition is written down parameter by parameter with the code behind each row. **Measured:** a plant with two libraries, one carrying 6% stray reads and one clean, returns **0.0628 and 0.0008** per library against **0.0307 for both** at the old grain; and the accuracy follows the *plant's* depth rather than the library's — a library holding three reads a position returns 0.026 as a plant's only library, 0.046 as half of a six-read plant and 0.057 as a quarter of a twelve-read plant, against a planted 0.060 — because what limits the estimate is how well the plant's genotype and the panel's frequencies are known, and neither changes grain. **A plant sequenced from one library returns the identical number at either grain**, asserted as equality rather than closeness, and every sample of tomato1, tomato2 and the GIAB trio is one — so no benchmark here can tell the grains apart and the correct result there is no change at all. **The split also repaired a second approximation for free:** the joint fit has always produced the error rate per read group and this module took the plant's *first* read group's rate for all of them. **A library with too little evidence returns a fraction near zero rather than a refusal** — the likelihood barely moves and the search keeps zero, which is the right default — and each fraction now travels with how many markers that read group had a read at, how many reads it had there, and whether it was fitted from that library's reads or the whole plant's, so *measured clean* and *nobody could measure it* are distinguishable.
 - **Plan:** [contamination_read_group_grain.md](doc/devel/ng/impl_plan/contamination_read_group_grain.md); **Spec:** [joint_fit §3.4](doc/devel/ng/spec/parameter_prepass_joint_fit.md) + [shared framing §1.1](doc/devel/ng/spec/parameter_prepass.md); **Arch:** [joint_fit](doc/devel/ng/arch/parameter_prepass_joint_fit.md).
-- **Code:** [src/ng/parameter_estimation/joint/contamination.rs](src/ng/parameter_estimation/joint/contamination.rs), [fit.rs](src/ng/parameter_estimation/joint/fit.rs), [src/pop_var_caller_exp/estimate_contamination.rs](src/pop_var_caller_exp/estimate_contamination.rs) (one report row per library), [examples/ng_joint_contamination_control.rs](examples/ng_joint_contamination_control.rs) (`LIBRARIES`, `LIBRARY_ALPHAS`, `LIBRARY_DEPTHS`, `SEED`, `SWEEP`).
+- **Code:** [src/parameter_estimation/joint/contamination.rs](src/parameter_estimation/joint/contamination.rs), [fit.rs](src/parameter_estimation/joint/fit.rs), [src/cli/estimate_contamination.rs](src/cli/estimate_contamination.rs) (one report row per library), [examples/ng_joint_contamination_control.rs](examples/ng_joint_contamination_control.rs) (`LIBRARIES`, `LIBRARY_ALPHAS`, `LIBRARY_DEPTHS`, `SEED`, `SWEEP`).
 - **Reports:** [what splits, parameter by parameter](doc/devel/ng/reports/contamination_grain_decomposition_2026-08-20.md), [the grain and what splitting costs](doc/devel/ng/reports/contamination_read_group_grain_2026-08-20.md).
 - **Open:**
   - **⚠ `doc/devel/ng/spec/read_likelihoods.md` §3.6 is not amended, and the reason is branch topology** — it is not linked here because it is not on this branch. It is the consumer, it still says per sample, it still records the approximation this removes, and it still raises the +0.015 objection that does not apply. The file was an untracked draft here and is now committed on `ng-str-slippage-curve`, so copying it across would have two branches add the same 154 kB file independently — a whole-file merge conflict. The three required changes are written into the second report; apply them when that branch lands.
@@ -3645,30 +538,30 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **⚠ Nothing measures what the number does to calls.** It exists to change genotypes and no run yet reads it through to a VCF.
 
 #### Step 5 — the cohort merge: per-sample observations into cohort observations, in parallel
-- **Status:** `fixes-applied` — ✅ **MILESTONES A TO E COMPLETE, at Checkpoint E** on branch `ng-cohort-merge`. **⚡ The merge walk is no longer quadratic in cohort size** (owner's call at Checkpoint D): picking the next sample was a scan over the whole cohort and is now a tournament tree, which took one 20-base region at 3,000 samples from **101 ms to 2.31 ms** and at 63 samples from 57 µs to 15.9 µs — about 25 hours of walking for an 800 Mb genome at 3,000 samples where it was 57 days, single-threaded. **The merge now runs on one forward reader per sample instead of holding the whole stretch**, and gives the same answer byte for byte. D1 is the window one builder is handed — drawn forward until a region's ground is covered and until the chain of overlapping observations a locus opening there can reach has ended; D2 is the driver that reads through it, dividing each analysed region into the short regions single builders own. It removes the prefix a builder pays when handed the whole stretch — 3.3 µs per prefix base at 63 samples (C1's review) — which is what makes those short regions affordable at all. Next is milestone E, the organiser and the builders in parallel. Below, the state as of Checkpoint C. The merge now runs end to end on one thread: `merge_cohort_serially` walks a run's analysed regions, `build_region` owns and builds each locus, and **a cohort observation has been built from observations the generic generator actually minted** — two samples' BAMs on disk, chained into one locus by a deletion covering another sample's substitution. Next is milestone D, the observation cache. **One thing waits on the owner** (whether the read-group axis should survive into a cohort observation; below). Turns k samples' locus observations into one stream of cohort observations, on several threads — the stage that ran single-threaded in production and was the wall floor there.
+- **Status:** `fixes-applied` — ✅ **MILESTONES A TO E COMPLETE, at Checkpoint E** on branch `ng-cohort-merge`. **⚡ The merge walk is no longer quadratic in cohort size** (owner's call at Checkpoint D): picking the next sample was a scan over the whole cohort and is now a tournament tree, which took one 20-base region at 3,000 samples from **101 ms to 2.31 ms** and at 63 samples from 57 µs to 15.9 µs — about 25 hours of walking for an 800 Mb genome at 3,000 samples where it was 57 days, single-threaded. **The merge now runs on one forward reader per sample instead of holding the whole stretch**, and gives the same answer byte for byte. D1 is the window one builder is handed — drawn forward until a region's ground is covered and until the chain of overlapping observations a locus opening there can reach has ended; D2 is the driver that reads through it, dividing each analysed region into the short regions single builders own. It removes the prefix a builder pays when handed the whole stretch — 3.3 µs per prefix base at 63 samples (C1's review) — which is what makes those short regions affordable at all. Next is milestone E, the organiser and the builders in parallel. Below, the state as of Checkpoint C. The merge now runs end to end on one thread: `merge_cohort_serially` walks a run's analysed regions, `build_region` owns and builds each locus, and **a cohort observation has been built from observations the generic generator actually minted** — two samples' BAMs on disk, chained into one locus by a deletion covering another sample's substitution. Next is milestone D, the observation cache. **One thing waits on the owner** (whether the read-group axis should survive into a cohort observation; below). Turns k samples' locus observations into one stream of cohort observations, on several threads.
 - **Plan:** [cohort_merge.md](doc/devel/ng/impl_plan/cohort_merge.md); **Spec:** [cohort_merge.md](doc/devel/ng/spec/cohort_merge.md); **Arch:** [cohort_merge.md](doc/devel/ng/arch/cohort_merge.md); the run it sits inside: [run_streaming.md](doc/devel/ng/spec/run_streaming.md).
-- **Code:** [src/ng/run/cohort_merge/mod.rs](src/ng/run/cohort_merge/mod.rs) (the three parameters), [close.rs](src/ng/run/cohort_merge/close.rs) (the reach walk and the verdicts), [build.rs](src/ng/run/cohort_merge/build.rs) (projection onto the locus span, and the allele table the samples' reads unify into), [src/ng/run/mod.rs](src/ng/run/mod.rs); the two derivations live on the observation types in [src/ng/locus_generation/mod.rs](src/ng/locus_generation/mod.rs).
-- **D1 done (the observation cache):** [organise.rs](src/ng/run/cohort_merge/organise.rs) — `ObservationCache::cover` / `with_observations` / `evict_before`, and the two coordinate accessors it shares with the closer now live on `SampleLocusObservations` (`start_position`, `reach_position`), replacing a private copy in each file. **The one piece of real algorithm is a fixpoint across samples**: one sample's deletion is what makes another sample's later observation part of the locus, so the samples are swept until a whole sweep moves the chain's reach no further — three samples can need three sweeps. **The review's own differential test is the milestone's evidence**: a real `build_region` driven through the cache over 200 seeded random layouts agrees with the same builder handed the whole stretch, region for region. [Impl report](doc/devel/reports/implementations/ng_cohort_merge_d1_2026-08-17.md), [review](doc/devel/reports/reviews/ng_cohort_merge_d1_2026-08-17.md), [fixes](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_d1_2026-08-17.md).
-- **The walk order done (owner's call, 2026-08-18):** [close.rs](src/ng/run/cohort_merge/close.rs) — `PendingHeads`, a tournament tree with one leaf per **covering** sample, replacing the scan over all k samples' heads. A binary heap was built and measured first and is recorded in the report rather than shipped: the tournament exploits what the merge has and a heap does not — **k is fixed for the whole walk** — so the tree is built once and only its values change, one comparison a level. Measured medians (release, one 20-base region, every sample covering every position): scan → heap → tournament of 56.9 → 19.2 → **15.9 µs** at 63 samples, 793 → 119 → **81.9 µs** at 250, 11.6 ms → 773 → **391 µs** at 1,000, 101 ms → 3.10 → **2.31 ms** at 3,000. The output is unchanged and that is what the work went on: a randomised differential against an oracle written a different way (every observation sorted into one list, then chained) over 300 cohorts sweeping 1 to 400 samples, an identity check that each sample gets its own observations back once each in order, and **19 mutations, all killed**. [Impl report](doc/devel/reports/implementations/ng_cohort_merge_walk_order_2026-08-18.md), [review](doc/devel/reports/reviews/ng_cohort_merge_walk_order_2026-08-18.md), [fixes](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_walk_order_2026-08-18.md).
-- **D2 done (the merge read through the cache):** [serial.rs](src/ng/run/cohort_merge/serial.rs) — `merge_cohort_through_cache` beside the oracle it must reproduce: per building region, evict at its first base, cover it, hand the window to `build_region`, gather. **Byte-identical to the oracle**, on five hand-written fixtures — one of them two samples' reads on disk through the real generator — and on 200 random layouts; the review's own differential ran 600 with no disagreement. **Two properties the merge's output cannot show** are pinned against the cache instead: that the ground is divided at all (60 observations held when the whole stretch is one region, 2 at twenty-base regions) and that the driver evicts (the window at the moment a merge fails, not merely at the end). [Impl report](doc/devel/reports/implementations/ng_cohort_merge_d2_2026-08-17.md), [review](doc/devel/reports/reviews/ng_cohort_merge_d2_2026-08-17.md), [fixes](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_d2_2026-08-17.md).
-- **E1 done (the organiser's ordered release):** [organise.rs](src/ng/run/cohort_merge/organise.rs) — `Organiser::submit` / `drain_ready` / `failed_locus_count` / `is_finished` / `finish`, keyed by `RegionIndex`, releasing along an unbroken run of region indexes: production's `BTreeMap` reorder map drained on `next_expected` (`var_calling/vcf_writer.rs:168-176`), carried whole. Every region delivers exactly one outcome, empty ones included, because a missing index would silently truncate both the output and the failed-locus total (spec §6.3, §3.3). **The review found the step's own contract missed in one shape**: a gap at the *tail* of a run left both buffers empty and finished `Ok`, so a run that lost its last regions looked exactly like one that finished — `is_finished` and `finish` now take how many regions the run handed out. It also found the module's only insert into the reorder map sitting inside an `assert!` condition, where one edit to `debug_assert!` would have dropped every outcome in the shipped binary and in no test. `MissingRegionResults` became `RunEndedShort`, a three-variant enum: arch §5's single count told a run that had merely stopped draining that a gap had stalled it. 21 tests; 15 mutations, 15 killed.
-- **E2 done (overlap resolution, and it is a safety net):** [organise.rs](src/ng/run/cohort_merge/organise.rs) — of two loci that overlap the earlier start stands, whether it was emitted or failed, resolved at the release point over the region's loci and failed spans **merged into one genome-ordered sequence** (spec §6.1). **Under `build_region`'s input contract two loci owned by different building regions cannot overlap at all**, so the rule is a safety net: a builder is handed everything reaching into its ground, so any member of an earlier locus that starts inside this region chains back unbroken to one starting before it, and the builder skips the whole chain as an earlier region's. The review attacked that argument with **120,000 randomised layouts through the real merge — 0 displacements, 0 overlaps** — and it held. What did not hold was the evidence: the disjointness guard sat after the byte-identity comparison, where the cached output is already the oracle's and nothing can overlap, so on a deliberately broken driver eight tests failed and none was the guard. It now runs before the comparison, and `refuse_displaced_loci` drives the builders' own outcomes into a real `Organiser` — six of `serial.rs`'s twenty-eight tests plus the 305–330 deletion the plan named. **The eviction point is the discipline the argument really rests on, and E3 rewrites it.** Also: `finish` returns a `MergeTally` of the failed and displaced counts; an inverted span no longer walks the frontier backwards. 209 tests in the module; 21 mutations, 21 killed.
-- **E3 done (the builders run at the same time), and the owner ruled on the shape:** [parallel.rs](src/ng/run/cohort_merge/parallel.rs) — `merge_cohort_in_parallel`, working the genome in **rounds**: evict at the round's first base, cover every region of the round, run the round's builders concurrently over the shared cache, submit in region order, drain. **The spec contradicted itself and the owner settled it (2026-08-18):** §6.2 said each builder owns k readers and explicitly rejected a shared window because "every builder's progress would couple through the window's trailing edge"; §6.4, decided a day later, chose the shared window anyway and D1/D2 built it. The ruling is **build the round and amend §6.2 to say the coupling was accepted and why** — the reason §6.2 had not weighed is that a reader per builder per sample is 48,000 open cursors at 3,000 samples and 16 builders, against 3,000; the coupling is now a bounded frontier of one round (320 bases at 16 in flight on 20-base regions) where production's watermark spanned the whole run. §6.2 is amended, with the `RwLock` and owned-window alternatives named and deferred **until the round's tail is measured, which nothing yet does**. The review could not break the concurrency — 400 random layouts, rayon pools of 1 to 8 threads, 200 repeats, 4,096 builders, no disagreement — but found **the round invisible to the suite**: its size was pinned by an inequality a doubled round also passes, and `.par_iter()` could become `.iter()` with everything green. The memory table is now asserted exactly (2/4/4/12/29 records held at 1/2/4/8/16 in flight) and dropping `par_iter` is a compile error. The builder count became the module's fourth run parameter, `CohortLocusBuilderRegionsInFlight`, defaulting to one per rayon worker thread. 224 tests in the module; 13 mutations, 11 killed and 2 documented safety nets.
-- **E4 done (the milestone asserted) — ✅ MILESTONE E COMPLETE, at Checkpoint E:** [parallel.rs](src/ng/run/cohort_merge/parallel.rs) — `the_parallel_merge_is_the_oracles_at_every_width_and_count`, five counts of regions in flight by five region widths against **the oracle**, on ground carrying both a locus that reaches across a region boundary and one the width bound refuses, with the oracle's 50 observations and the per-width division counts (26/9/2/2/1 regions over the deletion) asserted so the sweep cannot pass by comparing nothing. **The parallel driver also runs through `serial.rs`'s shared driver-agreement helper**, so it is compared with the oracle on the two hundred random layouts and on the locus built from observations the generic generator actually minted — breaking the driver's eviction point by one line now fails 11 tests across two files where before E4 it failed 7 in one. The review's Major was that the sweep's own fixture-shape assertions were made against the oracle, which divides nothing, so neither could fail if the widths stopped dividing the fixture. 226 tests in the module, 3,849 in the library.
+- **Code:** [src/run/cohort_merge/mod.rs](src/run/cohort_merge/mod.rs) (the three parameters), [close.rs](src/run/cohort_merge/close.rs) (the reach walk and the verdicts), [build.rs](src/run/cohort_merge/build.rs) (projection onto the locus span, and the allele table the samples' reads unify into), [src/run/mod.rs](src/run/mod.rs); the two derivations live on the observation types in [src/locus_generation/mod.rs](src/locus_generation/mod.rs).
+- **D1 done (the observation cache):** [organise.rs](src/run/cohort_merge/organise.rs) — `ObservationCache::cover` / `with_observations` / `evict_before`, and the two coordinate accessors it shares with the closer now live on `SampleLocusObservations` (`start_position`, `reach_position`), replacing a private copy in each file. **The one piece of real algorithm is a fixpoint across samples**: one sample's deletion is what makes another sample's later observation part of the locus, so the samples are swept until a whole sweep moves the chain's reach no further — three samples can need three sweeps. **The review's own differential test is the milestone's evidence**: a real `build_region` driven through the cache over 200 seeded random layouts agrees with the same builder handed the whole stretch, region for region. [Impl report](doc/devel/reports/implementations/ng_cohort_merge_d1_2026-08-17.md), [review](doc/devel/reports/reviews/ng_cohort_merge_d1_2026-08-17.md), [fixes](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_d1_2026-08-17.md).
+- **The walk order done (owner's call, 2026-08-18):** [close.rs](src/run/cohort_merge/close.rs) — `PendingHeads`, a tournament tree with one leaf per **covering** sample, replacing the scan over all k samples' heads. A binary heap was built and measured first and is recorded in the report rather than shipped: the tournament exploits what the merge has and a heap does not — **k is fixed for the whole walk** — so the tree is built once and only its values change, one comparison a level. Measured medians (release, one 20-base region, every sample covering every position): scan → heap → tournament of 56.9 → 19.2 → **15.9 µs** at 63 samples, 793 → 119 → **81.9 µs** at 250, 11.6 ms → 773 → **391 µs** at 1,000, 101 ms → 3.10 → **2.31 ms** at 3,000. The output is unchanged and that is what the work went on: a randomised differential against an oracle written a different way (every observation sorted into one list, then chained) over 300 cohorts sweeping 1 to 400 samples, an identity check that each sample gets its own observations back once each in order, and **19 mutations, all killed**. [Impl report](doc/devel/reports/implementations/ng_cohort_merge_walk_order_2026-08-18.md), [review](doc/devel/reports/reviews/ng_cohort_merge_walk_order_2026-08-18.md), [fixes](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_walk_order_2026-08-18.md).
+- **D2 done (the merge read through the cache):** [serial.rs](src/run/cohort_merge/serial.rs) — `merge_cohort_through_cache` beside the oracle it must reproduce: per building region, evict at its first base, cover it, hand the window to `build_region`, gather. **Byte-identical to the oracle**, on five hand-written fixtures — one of them two samples' reads on disk through the real generator — and on 200 random layouts; the review's own differential ran 600 with no disagreement. **Two properties the merge's output cannot show** are pinned against the cache instead: that the ground is divided at all (60 observations held when the whole stretch is one region, 2 at twenty-base regions) and that the driver evicts (the window at the moment a merge fails, not merely at the end). [Impl report](doc/devel/reports/implementations/ng_cohort_merge_d2_2026-08-17.md), [review](doc/devel/reports/reviews/ng_cohort_merge_d2_2026-08-17.md), [fixes](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_d2_2026-08-17.md).
+- **E1 done (the organiser's ordered release):** [organise.rs](src/run/cohort_merge/organise.rs) — `Organiser::submit` / `drain_ready` / `failed_locus_count` / `is_finished` / `finish`, keyed by `RegionIndex`, releasing along an unbroken run of region indexes: a `BTreeMap` reorder map drained on `next_expected`. Every region delivers exactly one outcome, empty ones included, because a missing index would silently truncate both the output and the failed-locus total (spec §6.3, §3.3). **The review found the step's own contract missed in one shape**: a gap at the *tail* of a run left both buffers empty and finished `Ok`, so a run that lost its last regions looked exactly like one that finished — `is_finished` and `finish` now take how many regions the run handed out. It also found the module's only insert into the reorder map sitting inside an `assert!` condition, where one edit to `debug_assert!` would have dropped every outcome in the shipped binary and in no test. `MissingRegionResults` became `RunEndedShort`, a three-variant enum: arch §5's single count told a run that had merely stopped draining that a gap had stalled it. 21 tests; 15 mutations, 15 killed.
+- **E2 done (overlap resolution, and it is a safety net):** [organise.rs](src/run/cohort_merge/organise.rs) — of two loci that overlap the earlier start stands, whether it was emitted or failed, resolved at the release point over the region's loci and failed spans **merged into one genome-ordered sequence** (spec §6.1). **Under `build_region`'s input contract two loci owned by different building regions cannot overlap at all**, so the rule is a safety net: a builder is handed everything reaching into its ground, so any member of an earlier locus that starts inside this region chains back unbroken to one starting before it, and the builder skips the whole chain as an earlier region's. The review attacked that argument with **120,000 randomised layouts through the real merge — 0 displacements, 0 overlaps** — and it held. What did not hold was the evidence: the disjointness guard sat after the byte-identity comparison, where the cached output is already the oracle's and nothing can overlap, so on a deliberately broken driver eight tests failed and none was the guard. It now runs before the comparison, and `refuse_displaced_loci` drives the builders' own outcomes into a real `Organiser` — six of `serial.rs`'s twenty-eight tests plus the 305–330 deletion the plan named. **The eviction point is the discipline the argument really rests on, and E3 rewrites it.** Also: `finish` returns a `MergeTally` of the failed and displaced counts; an inverted span no longer walks the frontier backwards. 209 tests in the module; 21 mutations, 21 killed.
+- **E3 done (the builders run at the same time), and the owner ruled on the shape:** [parallel.rs](src/run/cohort_merge/parallel.rs) — `merge_cohort_in_parallel`, working the genome in **rounds**: evict at the round's first base, cover every region of the round, run the round's builders concurrently over the shared cache, submit in region order, drain. **The spec contradicted itself and the owner settled it (2026-08-18):** §6.2 said each builder owns k readers and explicitly rejected a shared window because "every builder's progress would couple through the window's trailing edge"; §6.4, decided a day later, chose the shared window anyway and D1/D2 built it. The ruling is **build the round and amend §6.2 to say the coupling was accepted and why** — the reason §6.2 had not weighed is that a reader per builder per sample is 48,000 open cursors at 3,000 samples and 16 builders, against 3,000; the coupling is now a bounded frontier of one round (320 bases at 16 in flight on 20-base regions). §6.2 is amended, with the `RwLock` and owned-window alternatives named and deferred **until the round's tail is measured, which nothing yet does**. The review could not break the concurrency — 400 random layouts, rayon pools of 1 to 8 threads, 200 repeats, 4,096 builders, no disagreement — but found **the round invisible to the suite**: its size was pinned by an inequality a doubled round also passes, and `.par_iter()` could become `.iter()` with everything green. The memory table is now asserted exactly (2/4/4/12/29 records held at 1/2/4/8/16 in flight) and dropping `par_iter` is a compile error. The builder count became the module's fourth run parameter, `CohortLocusBuilderRegionsInFlight`, defaulting to one per rayon worker thread. 224 tests in the module; 13 mutations, 11 killed and 2 documented safety nets.
+- **E4 done (the milestone asserted) — ✅ MILESTONE E COMPLETE, at Checkpoint E:** [parallel.rs](src/run/cohort_merge/parallel.rs) — `the_parallel_merge_is_the_oracles_at_every_width_and_count`, five counts of regions in flight by five region widths against **the oracle**, on ground carrying both a locus that reaches across a region boundary and one the width bound refuses, with the oracle's 50 observations and the per-width division counts (26/9/2/2/1 regions over the deletion) asserted so the sweep cannot pass by comparing nothing. **The parallel driver also runs through `serial.rs`'s shared driver-agreement helper**, so it is compared with the oracle on the two hundred random layouts and on the locus built from observations the generic generator actually minted — breaking the driver's eviction point by one line now fails 11 tests across two files where before E4 it failed 7 in one. The review's Major was that the sweep's own fixture-shape assertions were made against the oracle, which divides nothing, so neither could fail if the widths stopped dividing the fixture. 226 tests in the module, 3,849 in the library.
 - **Impl reports:** [E4](doc/devel/reports/implementations/ng_cohort_merge_e4_2026-08-18.md), [E3](doc/devel/reports/implementations/ng_cohort_merge_e3_2026-08-18.md) + [E3 fixes](doc/devel/reports/implementations/ng_cohort_merge_e3_fixes_2026-08-18.md), [E2](doc/devel/reports/implementations/ng_cohort_merge_e2_2026-08-18.md) + [E2 fixes](doc/devel/reports/implementations/ng_cohort_merge_e2_fixes_2026-08-18.md), [E1](doc/devel/reports/implementations/ng_cohort_merge_e1_2026-08-18.md) + [E1 fixes](doc/devel/reports/implementations/ng_cohort_merge_e1_fixes_2026-08-18.md), [D2](doc/devel/reports/implementations/ng_cohort_merge_d2_2026-08-17.md), [D1](doc/devel/reports/implementations/ng_cohort_merge_d1_2026-08-17.md), [A1](doc/devel/reports/implementations/ng_cohort_merge_a1_2026-08-17.md), [A2](doc/devel/reports/implementations/ng_cohort_merge_a2_2026-08-17.md), [A3](doc/devel/reports/implementations/ng_cohort_merge_a3_2026-08-17.md), [A4](doc/devel/reports/implementations/ng_cohort_merge_a4_2026-08-17.md), [B1](doc/devel/reports/implementations/ng_cohort_merge_b1_2026-08-17.md), [B0](doc/devel/reports/implementations/ng_cohort_merge_b0_2026-08-17.md), [B2](doc/devel/reports/implementations/ng_cohort_merge_b2_2026-08-17.md), [B3](doc/devel/reports/implementations/ng_cohort_merge_b3_2026-08-17.md), [C1](doc/devel/reports/implementations/ng_cohort_merge_c1_2026-08-17.md), [C2](doc/devel/reports/implementations/ng_cohort_merge_c2_2026-08-17.md).
-- **Latest reviews:** [E4](doc/devel/reports/reviews/ng_cohort_merge_e4_2026-08-18.md) — Approve-with-changes; nine mutations, none survived, and six now reach `serial.rs`. [E3](doc/devel/reports/reviews/ng_cohort_merge_e3_2026-08-18.md) — two agents in isolated worktrees, Approve-with-changes; the concurrency held under every attack, and both agents found the round itself untested. [E2](doc/devel/reports/reviews/ng_cohort_merge_e2_2026-08-18.md) — three agents in isolated worktrees, Approve-with-changes; the safety-net argument survived 120,000 randomised layouts, **its evidence did not**, and four of the step's own documentation claims were wrong. [E1](doc/devel/reports/reviews/ng_cohort_merge_e1_2026-08-18.md) — three agents in isolated worktrees, Approve-with-changes; **all three found the trailing-gap hole independently**, and every finding was applied bar two raised for the owner at Checkpoint E (splitting `organise.rs`, and whether arch §5 adopts `RunEndedShort`). [D2](doc/devel/reports/reviews/ng_cohort_merge_d2_2026-08-17.md) — three checklists in isolated worktrees, Approve-with-changes, **7 Majors, and the first of them is a hole in the step's own claim**: an analysed region whose ends are the wrong way round was read one way by the division and another by the builder, so the oracle built nothing where the cached driver built everything — and with a second region after it, the same locus came back **twice**, which is the corruption the neighbouring guard exists to prevent. **The two properties this step was built to make testable were both pinned too weakly**: the division test called the divider directly, so mutating the driver's own call site left it green, and covering the whole analysed region instead of each building region — the cache's entire purpose undone — survived all 154 tests, because the only eviction test read the window after the merge rather than during it. **A failed merge advances the cache**, so the obvious retry returns `Ok` with 32 of 60 loci — now documented, and unrepresentable is milestone E's to make it. **The reviewer's randomised differential is the milestone's strongest evidence**: 600 layouts, no disagreement, and 600 of 600 containing a record that straddles an analysed region's right edge — the regime no fixture reached. **Five claims in my own D2 report were wrong, every one about my own fixtures**, including the mechanism behind the eviction test's number. **Fixes:** [D2](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_d2_2026-08-17.md) — ten tests added, the mutation battery rewritten to thirteen and all thirteen killed, and `build.rs`'s and `close.rs`'s test fixtures named as the next two to fold into the module's new shared `fixtures`. [D1](doc/devel/reports/reviews/ng_cohort_merge_d1_2026-08-17.md) — seven checklists in isolated worktrees, Approve-with-changes, **2 Blockers and 7 Majors, and both Blockers were properties nothing pinned.** **The file's one real algorithm was guarded by no test**: capping the sample sweeps at two passed all 131 tests and disagreed with a whole-stretch builder on **410 of 600 random layouts** — the first disagreement turning a locus the oracle refuses into one the cache-fed builder emits. **The second Blocker is the state after a failure**: latching a sample as spent on `Err` also passed everything, and would leave one sample in k recorded as uncovered for the rest of the genome — a legitimate-looking fact, no panic. **The most valuable single artefact is the reviewer's differential test**, now permanent: a real `build_region` driven through the cache against the same builder handed everything, which is the property the file exists for and which nothing had asserted. **Four categories converged on one API defect**: `with_observations` took a `GenomeRegion` and never read its end — replacing the end with zero left the suite green — and `cover` and the trim disagreed about an inverted region; both are fixed by making the end load-bearing, checked against how far a *successful* cover reached. **And five claims in my own D1 report were wrong, every one about my own fixtures** (which test kills which mutation, and a claim that a case needed three samples when two suffice), against about a dozen figures quoted from the design documents that were all correct. **Fixes:** [D1](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_d1_2026-08-17.md) — eleven tests added, the cache's own count 16 → 27, and the mutation battery rewritten: fifteen mutations run, fourteen killed, the one survivor proved unreachable on legal input. [C2](doc/devel/reports/reviews/ng_cohort_merge_c2_2026-08-17.md) — two passes in isolated worktrees, Approve-with-changes, 5 Majors and both reviewers converging on four of them. **The end-to-end fixture's quality assertion could not fail**: every one of the substitution sample's minted records carried the same quality sum, because every base was Q30 and `q_sum` does not depend on whether the base matched — so "the weakest of six" equalled the strongest and flipping the rule left the test green. One bad base fixes it. **No partition-invariance test existed in the file whose header calls itself the oracle** (spec §15's own regression anchor); now pinned at 1, 6, 60 and 120 regions. **Overlapping analysed regions duplicated observations silently** — now refused. **And the driver is quadratic in region count**: the same 20,000 observations cost 5.4 ms in one region and 184 ms in a thousand, which is what the observation cache exists to remove. **⛦ The fixture's most valuable finding is about a doc**: the generic mint writes a record at *every covered position* (thirty for a thirty-base read), so B2's explanation of the gap between a sample's records — "where this sample minted nothing, because none of its reads departed from the reference" — named the wrong cause, and the case is in fact unreachable on that path. **Fixes:** [C2](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_c2_2026-08-17.md). [C1](doc/devel/reports/reviews/ng_cohort_merge_c1_2026-08-17.md) — three checklists, **3 Blockers, all tests that could not fail and the code right in all three**: no locus opened on a region's first base, so widening that comparison passed all 104 tests while losing about one locus in twenty from a run; the other-contig fixture put both loci at the same position, leaving the break's contig terms unexercised; and `min_alt_obs` was never passed at a value of its own. **A Major that E2 should have before it builds overlap resolution**: under `build_region`'s own input contract two loci owned by different regions cannot overlap, so the failed spans' displacement job has nothing to do — what keeps them is the count. **Fixes:** [C1](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_c1_2026-08-17.md). [B3](doc/devel/reports/reviews/ng_cohort_merge_b3_2026-08-17.md) — six checklists in isolated worktrees, Approve-with-changes, **2 Blockers and 4 Majors**. **Both Blockers were tests that could not fail, and the second is the one that matters:** replacing "the sequence this read was sighted at" with "the record's first sequence" left all 94 tests green, because no fixture had a record with two sequences on the composed path — **so the case the whole division exists for, one observation's reads splitting onto two alleles, had no test at all**. The quality fixtures likewise all put the weakest sighting last, so "keep the last one" passed too. One new fixture closes both, and each mutation was re-run against it. **The sign question was checked independently and the answer holds**: `q_sum` is `Σ ln P(error)`, ng's own pileup already reduces two error terms with `max` for the same reason (`ln_bq.max(mq_log_err)`), and production's `min` picks the *best* constituent against its own plan's words. **The Major that needs the owner is a measurement:** the dense per-sample × per-allele row costs **614 MB for one cohort observation at 4,000 samples** each showing a distinct allele, against 41 MB at 1,000 — while spec §8 prices a survivor with no sample-count factor at all. B3 is otherwise cheap (1.6 → 3.1 µs at 63 samples × 3 reads; +11% on the cross-record shape). **The refactor was proved over 844 generated loci** — B2's builder restored under a second name, alleles, order, emission sequence and removal count identical, the differentials themselves mutation-tested — and **determinism three ways**, including six separate processes agreeing on the table's hash, since `ahash` seeds per process. **Fixes:** [B3](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_b3_2026-08-17.md) — three tests added, both Blocker mutations killed, and **a wrong mechanism in one of my own comments corrected**: the zero-read guard claimed a division "would come back as an infinity, silently", where measurement shows the `-inf` is *discarded* by the `max` and the allele reports a plausible quality over reads that were never counted. [B2](doc/devel/reports/reviews/ng_cohort_merge_b2_2026-08-17.md) — six checklists in isolated worktrees, Approve-with-changes, **2 Blockers and 7 Majors**. **Both Blockers were untested classes the mutation pass found:** no cross-record fixture contained an indel, so closing a composed allele on `composed.len()` instead of on the reference it consumed left all 80 tests green — a six-base allele over a five-base locus came back five; and no locus had two samples each holding several records, so dropping the per-sample reset of the working buffer was invisible. **The second fixture's first version did not kill its own mutant either**, because its two samples used different read ids — the easy case, where stale sightings recompose the same allele. Chain ids are a per-file space, so two samples sharing id 7 is the ordinary case, and with that the carried-over buffer makes a read look sighted at four records out of two. **The best Major is the same shape as B1's**: the overlap guard fired only when one read was named at both overlapping records, so with different reads the sample's whole evidence vanished silently — now a structural per-sample check, disjoint and ascending, before any read is consulted. **Two of my own claims were wrong and are corrected:** the doc said the fast path "is the same answer the rule gives whenever ids are present" (it is not, for a fragment whose mates disagree — measured on the same data through both branches), and both the module header and `AlleleTable` said a qualifying read "is known to have covered the whole locus", where what is decided is presence at every record *that sample* minted. **The refactor was proved rather than argued**: the pre-B2 `project_into` restored under a second name agreed with the new one over **859 shapes**, zero disagreements. **Fixes:** [B2](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_b2_2026-08-17.md) — six tests added, both Blocker mutations re-run and killed. [B0](doc/devel/reports/reviews/ng_cohort_merge_b0_2026-08-17.md) — two checklists in isolated worktrees, Approve-with-changes, **1 Blocker**: the property B0 exists to establish — every read is named — was pinned only as *some* read is named, and truncating each observation's ids to the first one left the whole suite green. Now asserted as a count (twice the ids must cover the reads, since at most two mates share one), and the mutation dies in each mint path. **1 Major**: the new two-walk comparison rebuilt its renaming map per locus, so a walk that renumbered its reads mid-region passed — the merge's read-linking broken inside a segment, which is the one thing the helper exists to catch. **The claim-verification pass found no wrong numbers and supplied one nobody had cited**: production records that the REF ids it drops are ~96.6% of all chain ids on real cohorts, which is the measured size of the cost this step accepts. **Fixes:** [B0](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_b0_2026-08-17.md). [B1](doc/devel/reports/reviews/ng_cohort_merge_b1_2026-08-17.md) — five checklists, one agent mutation-testing in its own worktree (17 mutants, 5 survivors, 0 changed-no-behaviour), Approve-with-changes, 7 Major. **Three categories converged on one API defect**: the projection took the member and the sequence as two loose arguments, so any member of a locus could be paired with another member's sequence — padded at the wrong offset, a well-formed allele, no panic. Now one handle. **The other Majors were all coverage**: the ceiling test pinned the gather but not the projection while its doc claimed both, the sentinel's one property was untested, the projection's own contig guard was untested (the only mutant that produced no panic at all), and no fixture ever gave a sample two observations in one locus — which is the case spec §4.2 and B3 are written around. **Fixes:** [B1](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_b1_2026-08-17.md) — nine tests added, and every surviving mutant re-run and killed. [A4](doc/devel/reports/reviews/ng_cohort_merge_a4_2026-08-17.md) — three checklists, one agent mutation-testing in a worktree (8 mutants, 4 survivors, 0 changed-no-behaviour), Approve-with-changes, **1 Blocker in a test's own claim about itself**: the test named for spec §3.2's "what matters is how wide the locus ended up, not how it got there" had a member 11 bases wide against a bound of 10, so the member-wise rule it named failed the locus too and the mutant passed all 31 tests. **Fixes:** [A4](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_a4_2026-08-17.md). [A3](doc/devel/reports/reviews/ng_cohort_merge_a3_2026-08-17.md) — five checklists, two agents mutation-testing in worktrees, Approve-with-changes, 5 Major. **The walk was checked against production's rather than argued to match it:** an agent ported `CohortSpanFold` + `derive_is_kept`'s grouping into a test and ran it against `LocusCloser` over 5,000 random cohorts — loci and membership identical in all 5,000, with 5,025 members joining at exactly the running reach, so the shared `<=` boundary is genuinely exercised. **Fixes:** [A3](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_a3_2026-08-17.md). [A2](doc/devel/reports/reviews/ng_cohort_merge_a2_2026-08-17.md) — four checklists, two agents mutation-testing in isolated worktrees (12 + 5 mutants, 3 + 1 survivors, 0 changed-no-behaviour), Approve-with-changes, 4 Major. The headline: **no fixture anywhere compared observation bases of a different length from the reference**, so three containment mutants passed 58 census and 360 `locus_generation` tests while silently reclassifying every indel as reference — and `non_reference_reads` is what the keep rule sums. [A1](doc/devel/reports/reviews/ng_cohort_merge_a1_2026-08-17.md) — six checklists, Approve-with-changes, 2 Major. **Fixes:** [A2](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_a2_2026-08-17.md), [A1](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_a1_2026-08-17.md).
+- **Latest reviews:** [E4](doc/devel/reports/reviews/ng_cohort_merge_e4_2026-08-18.md) — Approve-with-changes; nine mutations, none survived, and six now reach `serial.rs`. [E3](doc/devel/reports/reviews/ng_cohort_merge_e3_2026-08-18.md) — two agents in isolated worktrees, Approve-with-changes; the concurrency held under every attack, and both agents found the round itself untested. [E2](doc/devel/reports/reviews/ng_cohort_merge_e2_2026-08-18.md) — three agents in isolated worktrees, Approve-with-changes; the safety-net argument survived 120,000 randomised layouts, **its evidence did not**, and four of the step's own documentation claims were wrong. [E1](doc/devel/reports/reviews/ng_cohort_merge_e1_2026-08-18.md) — three agents in isolated worktrees, Approve-with-changes; **all three found the trailing-gap hole independently**, and every finding was applied bar two raised for the owner at Checkpoint E (splitting `organise.rs`, and whether arch §5 adopts `RunEndedShort`). [D2](doc/devel/reports/reviews/ng_cohort_merge_d2_2026-08-17.md) — three checklists in isolated worktrees, Approve-with-changes, **7 Majors, and the first of them is a hole in the step's own claim**: an analysed region whose ends are the wrong way round was read one way by the division and another by the builder, so the oracle built nothing where the cached driver built everything — and with a second region after it, the same locus came back **twice**, which is the corruption the neighbouring guard exists to prevent. **The two properties this step was built to make testable were both pinned too weakly**: the division test called the divider directly, so mutating the driver's own call site left it green, and covering the whole analysed region instead of each building region — the cache's entire purpose undone — survived all 154 tests, because the only eviction test read the window after the merge rather than during it. **A failed merge advances the cache**, so the obvious retry returns `Ok` with 32 of 60 loci — now documented, and unrepresentable is milestone E's to make it. **The reviewer's randomised differential is the milestone's strongest evidence**: 600 layouts, no disagreement, and 600 of 600 containing a record that straddles an analysed region's right edge — the regime no fixture reached. **Five claims in my own D2 report were wrong, every one about my own fixtures**, including the mechanism behind the eviction test's number. **Fixes:** [D2](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_d2_2026-08-17.md) — ten tests added, the mutation battery rewritten to thirteen and all thirteen killed, and `build.rs`'s and `close.rs`'s test fixtures named as the next two to fold into the module's new shared `fixtures`. [D1](doc/devel/reports/reviews/ng_cohort_merge_d1_2026-08-17.md) — seven checklists in isolated worktrees, Approve-with-changes, **2 Blockers and 7 Majors, and both Blockers were properties nothing pinned.** **The file's one real algorithm was guarded by no test**: capping the sample sweeps at two passed all 131 tests and disagreed with a whole-stretch builder on **410 of 600 random layouts** — the first disagreement turning a locus the oracle refuses into one the cache-fed builder emits. **The second Blocker is the state after a failure**: latching a sample as spent on `Err` also passed everything, and would leave one sample in k recorded as uncovered for the rest of the genome — a legitimate-looking fact, no panic. **The most valuable single artefact is the reviewer's differential test**, now permanent: a real `build_region` driven through the cache against the same builder handed everything, which is the property the file exists for and which nothing had asserted. **Four categories converged on one API defect**: `with_observations` took a `GenomeRegion` and never read its end — replacing the end with zero left the suite green — and `cover` and the trim disagreed about an inverted region; both are fixed by making the end load-bearing, checked against how far a *successful* cover reached. **And five claims in my own D1 report were wrong, every one about my own fixtures** (which test kills which mutation, and a claim that a case needed three samples when two suffice), against about a dozen figures quoted from the design documents that were all correct. **Fixes:** [D1](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_d1_2026-08-17.md) — eleven tests added, the cache's own count 16 → 27, and the mutation battery rewritten: fifteen mutations run, fourteen killed, the one survivor proved unreachable on legal input. [C2](doc/devel/reports/reviews/ng_cohort_merge_c2_2026-08-17.md) — two passes in isolated worktrees, Approve-with-changes, 5 Majors and both reviewers converging on four of them. **The end-to-end fixture's quality assertion could not fail**: every one of the substitution sample's minted records carried the same quality sum, because every base was Q30 and `q_sum` does not depend on whether the base matched — so "the weakest of six" equalled the strongest and flipping the rule left the test green. One bad base fixes it. **No partition-invariance test existed in the file whose header calls itself the oracle** (spec §15's own regression anchor); now pinned at 1, 6, 60 and 120 regions. **Overlapping analysed regions duplicated observations silently** — now refused. **And the driver is quadratic in region count**: the same 20,000 observations cost 5.4 ms in one region and 184 ms in a thousand, which is what the observation cache exists to remove. **⛦ The fixture's most valuable finding is about a doc**: the generic mint writes a record at *every covered position* (thirty for a thirty-base read), so B2's explanation of the gap between a sample's records — "where this sample minted nothing, because none of its reads departed from the reference" — named the wrong cause, and the case is in fact unreachable on that path. **Fixes:** [C2](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_c2_2026-08-17.md). [C1](doc/devel/reports/reviews/ng_cohort_merge_c1_2026-08-17.md) — three checklists, **3 Blockers, all tests that could not fail and the code right in all three**: no locus opened on a region's first base, so widening that comparison passed all 104 tests while losing about one locus in twenty from a run; the other-contig fixture put both loci at the same position, leaving the break's contig terms unexercised; and `min_alt_obs` was never passed at a value of its own. **A Major that E2 should have before it builds overlap resolution**: under `build_region`'s own input contract two loci owned by different regions cannot overlap, so the failed spans' displacement job has nothing to do — what keeps them is the count. **Fixes:** [C1](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_c1_2026-08-17.md). [B3](doc/devel/reports/reviews/ng_cohort_merge_b3_2026-08-17.md) — six checklists in isolated worktrees, Approve-with-changes, **2 Blockers and 4 Majors**. **Both Blockers were tests that could not fail, and the second is the one that matters:** replacing "the sequence this read was sighted at" with "the record's first sequence" left all 94 tests green, because no fixture had a record with two sequences on the composed path — **so the case the whole division exists for, one observation's reads splitting onto two alleles, had no test at all**. The quality fixtures likewise all put the weakest sighting last, so "keep the last one" passed too. One new fixture closes both, and each mutation was re-run against it. **The sign question was checked independently and the answer holds**: `q_sum` is `Σ ln P(error)`, ng's own pileup already reduces two error terms with `max` for the same reason (`ln_bq.max(mq_log_err)`). **The Major that needs the owner is a measurement:** the dense per-sample × per-allele row costs **614 MB for one cohort observation at 4,000 samples** each showing a distinct allele, against 41 MB at 1,000 — while spec §8 prices a survivor with no sample-count factor at all. B3 is otherwise cheap (1.6 → 3.1 µs at 63 samples × 3 reads; +11% on the cross-record shape). **The refactor was proved over 844 generated loci** — B2's builder restored under a second name, alleles, order, emission sequence and removal count identical, the differentials themselves mutation-tested — and **determinism three ways**, including six separate processes agreeing on the table's hash, since `ahash` seeds per process. **Fixes:** [B3](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_b3_2026-08-17.md) — three tests added, both Blocker mutations killed, and **a wrong mechanism in one of my own comments corrected**: the zero-read guard claimed a division "would come back as an infinity, silently", where measurement shows the `-inf` is *discarded* by the `max` and the allele reports a plausible quality over reads that were never counted. [B2](doc/devel/reports/reviews/ng_cohort_merge_b2_2026-08-17.md) — six checklists in isolated worktrees, Approve-with-changes, **2 Blockers and 7 Majors**. **Both Blockers were untested classes the mutation pass found:** no cross-record fixture contained an indel, so closing a composed allele on `composed.len()` instead of on the reference it consumed left all 80 tests green — a six-base allele over a five-base locus came back five; and no locus had two samples each holding several records, so dropping the per-sample reset of the working buffer was invisible. **The second fixture's first version did not kill its own mutant either**, because its two samples used different read ids — the easy case, where stale sightings recompose the same allele. Chain ids are a per-file space, so two samples sharing id 7 is the ordinary case, and with that the carried-over buffer makes a read look sighted at four records out of two. **The best Major is the same shape as B1's**: the overlap guard fired only when one read was named at both overlapping records, so with different reads the sample's whole evidence vanished silently — now a structural per-sample check, disjoint and ascending, before any read is consulted. **Two of my own claims were wrong and are corrected:** the doc said the fast path "is the same answer the rule gives whenever ids are present" (it is not, for a fragment whose mates disagree — measured on the same data through both branches), and both the module header and `AlleleTable` said a qualifying read "is known to have covered the whole locus", where what is decided is presence at every record *that sample* minted. **The refactor was proved rather than argued**: the pre-B2 `project_into` restored under a second name agreed with the new one over **859 shapes**, zero disagreements. **Fixes:** [B2](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_b2_2026-08-17.md) — six tests added, both Blocker mutations re-run and killed. [B0](doc/devel/reports/reviews/ng_cohort_merge_b0_2026-08-17.md) — two checklists in isolated worktrees, Approve-with-changes, **1 Blocker**: the property B0 exists to establish — every read is named — was pinned only as *some* read is named, and truncating each observation's ids to the first one left the whole suite green. Now asserted as a count (twice the ids must cover the reads, since at most two mates share one), and the mutation dies in each mint path. **1 Major**: the new two-walk comparison rebuilt its renaming map per locus, so a walk that renumbered its reads mid-region passed — the merge's read-linking broken inside a segment, which is the one thing the helper exists to catch. **The claim-verification pass found no wrong numbers.** **Fixes:** [B0](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_b0_2026-08-17.md). [B1](doc/devel/reports/reviews/ng_cohort_merge_b1_2026-08-17.md) — five checklists, one agent mutation-testing in its own worktree (17 mutants, 5 survivors, 0 changed-no-behaviour), Approve-with-changes, 7 Major. **Three categories converged on one API defect**: the projection took the member and the sequence as two loose arguments, so any member of a locus could be paired with another member's sequence — padded at the wrong offset, a well-formed allele, no panic. Now one handle. **The other Majors were all coverage**: the ceiling test pinned the gather but not the projection while its doc claimed both, the sentinel's one property was untested, the projection's own contig guard was untested (the only mutant that produced no panic at all), and no fixture ever gave a sample two observations in one locus — which is the case spec §4.2 and B3 are written around. **Fixes:** [B1](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_b1_2026-08-17.md) — nine tests added, and every surviving mutant re-run and killed. [A4](doc/devel/reports/reviews/ng_cohort_merge_a4_2026-08-17.md) — three checklists, one agent mutation-testing in a worktree (8 mutants, 4 survivors, 0 changed-no-behaviour), Approve-with-changes, **1 Blocker in a test's own claim about itself**: the test named for spec §3.2's "what matters is how wide the locus ended up, not how it got there" had a member 11 bases wide against a bound of 10, so the member-wise rule it named failed the locus too and the mutant passed all 31 tests. **Fixes:** [A4](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_a4_2026-08-17.md). [A3](doc/devel/reports/reviews/ng_cohort_merge_a3_2026-08-17.md) — five checklists, two agents mutation-testing in worktrees, Approve-with-changes, 5 Major. **Fixes:** [A3](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_a3_2026-08-17.md). [A2](doc/devel/reports/reviews/ng_cohort_merge_a2_2026-08-17.md) — four checklists, two agents mutation-testing in isolated worktrees (12 + 5 mutants, 3 + 1 survivors, 0 changed-no-behaviour), Approve-with-changes, 4 Major. The headline: **no fixture anywhere compared observation bases of a different length from the reference**, so three containment mutants passed 58 census and 360 `locus_generation` tests while silently reclassifying every indel as reference — and `non_reference_reads` is what the keep rule sums. [A1](doc/devel/reports/reviews/ng_cohort_merge_a1_2026-08-17.md) — six checklists, Approve-with-changes, 2 Major. **Fixes:** [A2](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_a2_2026-08-17.md), [A1](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_a1_2026-08-17.md).
 - **Open:**
   - **✅ RULED AND DONE (owner, 2026-08-18) — the walk was quadratic in cohort size, and is not any more.** The owner: *"this step in the whole pipeline is critical, we need it to be as performant as possible."* A tournament tree replaced the scan; the numbers are in the block above. **What is still open is a CI guard**: the repo runs ten criterion benches and the merge walk is not among them, so nothing would notice the cost going back up — what holds it today is a structural test (one live leaf per unspent sample, one consumption per observation) that a scan-based rewrite cannot satisfy. The measurement that prompted this, for the record: `LocusCloser::sample_with_earliest_head` scans all k samples' keys for every observation consumed, so one 20-base region over a cohort covering every position costs **64 µs at 63 samples, 883 µs at 250, 13.1 ms at 1,000 and 121 ms at 3,000** — four times the cohort for fourteen times the time (C1's review, release build, every sample covering every position). A megabase is about 3 s at 63 samples and about 70 days at 3,000, single-threaded. A3's review deferred the heap "after a measurement"; this is the measurement. Nobody owns it: it belongs to `close.rs`, not to any milestone-D step.
   - **Owed by D1, both recorded rather than done:** a public count of what the cache holds, which the memory question at milestone E will want and which `-D warnings` rejects today for having no consumer; and one `#[cfg(test)]` fixture module for the four copies of `region` / `region_on` across this module's files.
   - **⛦ Two design-document items D1 surfaced:** the arch's file tree calls `organise.rs` the organiser without mentioning that the cache lives there; and arch §4's `with_observations` sketch says "observations overlapping `span`", where the code takes the start as the left edge and checks the end against the ground actually covered — trimming the right would cut the deletion the ownership rule exists to keep whole.
   - **✅ RULED AND APPLIED (owner, at Checkpoint B) — a sample lists the alleles it showed, and no others.** Support was a row per sample per allele, so its cost was samples × alleles whatever the cohort showed. **The owner's correction to the framing is worth keeping: the shape I measured it on — every sample showing a different allele — "will never happen."** What the change actually buys is proportional to how much of the table each sample missed, which at an ordinary locus of two or three alleles is one or two entries per sample instead of three. `SampleSupport::support_for(allele)` answers nothing for an allele a sample never showed, which is what the zeroed row said.
   - **✅ RULED (owner, at Checkpoint C) — the read-group axis is pooled for now, and the STR path owes its return.** A support row per allele merges a sample's read groups; `SequenceObservation` keeps them apart because a per-chemistry model needs the allele × group cross with its quality moments. **The owner named the consumer: stutter is fitted per read group, so STR calling needs the cross** — a pooled row would be scored against a stutter rate belonging to no group in particular. Left pooled deliberately (arch §4's own sketch pools it, and the generic path does not need it); the shape that restores it is one row per `(allele, read group)`, which folds to today's, so the step that brings the STR path through this merge can add it without unpicking anything. Recorded at `AlleleSupport`.
-  - **✅ RULED (owner, 2026-08-17) — how one observation's reads are split across two alleles.** Proportional to the read counts. Read counts are exact (every read is named); the five quality sums are divided, since the mint sums them per observation. **Checked against freebayes at the owner's request**: it never faces the question, holding one object per read all the way to the likelihood (`freebayes/src/Sample.h`) — the storage cost B0 declined. **And a divergence from production found in the doing**: its merger takes the `min` of the constituents' mean `q_sum`, which in log-error space is the *best* piece, against its own plan's "cannot exceed any single constituent's"; ng takes the weakest. Production is frozen; the divergence is recorded at the code and in the B3 report.
+  - **✅ RULED (owner, 2026-08-17) — how one observation's reads are split across two alleles.** Proportional to the read counts. Read counts are exact (every read is named); the five quality sums are divided, since the mint sums them per observation. **Checked against freebayes at the owner's request**: it never faces the question, holding one object per read all the way to the likelihood (`freebayes/src/Sample.h`) — the storage cost B0 declined. Of the constituents' mean `q_sum`, ng takes the weakest, so the merged value cannot exceed any single constituent's.
   - **Owed by B3:** nothing consumes the two counts it now carries — the reads removed as evidence and the reads whose sums were divided. C1 owns what a region reports and the emission step owns the run summary (spec §13).
   - **⛦ OWNER CALL — three assertions in `build.rs` instruct a later step to convert them into `RunError` variants "beside `ObservationExceedsReachCeiling` (arch §5)", and arch §5 names none of them.** An observation whose `reference_bases` do not cover its own region (B1); an observation carrying reads and no chain id (B2); two records of one sample that are not disjoint and ascending (B2). Whoever writes the psp reader will work from the arch doc and never see them. Offered to draft; a design edit, so not made here.
   - **Deferred with a measurement, at B3:** the cross-record derivation composes and hashes one allele **per read**, where the one-record branch does it per distinct sequence — 8.1 ms for one locus at 1,000 samples × 300 reads, against 33 µs for the ordinary one-record shape. Composing once per distinct read *pattern* gives the same table and removes 39% (prototyped and measured by the B2 review), and it yields the read multiplicity per allele that B3 needs anyway.
-  - **✅ RULED (owner, 2026-08-17) — spec §14 question 2, and it adds a step upstream.** What a sample's allele is when it has two changes inside one cohort locus is decided **per read**, with no third case: *either we know the read covered the whole locus and its allele is elongated with what it showed, or we know it did not and it is removed as evidence; being unable to decide is an error that must never happen.* **Today the third case is the ordinary one**, because the generic mint gives a read that agreed with the reference no chain id at all (`open_record.rs`), so "covered and agreed" and "never reached it" are the same absence. Hence **B0**, now in the plan: record an id for every read at every position, reference-matching reads included — a departure from production, whose cost in memory and in the per-sample files the owner accepts. Two things B0 must also settle or the new error fires on real data: the **depth cap** discards reads per position and leaves no identities, so a capped read is absent for a reason that is not coverage; and the **STR path** records no ids and needs none, an STR locus being one record whose `ReadWitness` already answers the question. **Spec §14 Q2 and `locus_generation`'s spec need rewriting to carry the ruling** — not done, and not this plan's to do silently.
-  - **⛦ The chain ids' file cost has a spec and an experiment waiting on the psp encoding:** [psp_chain_id_encoding.md](doc/devel/ng/spec/psp_chain_id_encoding.md) — B0 turned a column holding ~3.4% of the chain ids into one holding all of them, at every position of the genome. The spec defines a **differential** encoding (store the changes to the covering read set, and derive the reference observation's ids as the residual) and the three-arm measurement that decides whether it ships — raw as today, delta+varint, differential — on the tomato panel and HG002. **To run on a branch once [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §10's psp encoding spec lands**; nothing before that. A local read index was **rejected on production's experience** (owner, 2026-08-18): tried there, more complex, slower.
+  - **✅ RULED (owner, 2026-08-17) — spec §14 question 2, and it adds a step upstream.** What a sample's allele is when it has two changes inside one cohort locus is decided **per read**, with no third case: *either we know the read covered the whole locus and its allele is elongated with what it showed, or we know it did not and it is removed as evidence; being unable to decide is an error that must never happen.* **Today the third case is the ordinary one**, because the generic mint gives a read that agreed with the reference no chain id at all (`open_record.rs`), so "covered and agreed" and "never reached it" are the same absence. Hence **B0**, now in the plan: record an id for every read at every position, reference-matching reads included — a cost in memory and in the per-sample files the owner accepts. Two things B0 must also settle or the new error fires on real data: the **depth cap** discards reads per position and leaves no identities, so a capped read is absent for a reason that is not coverage; and the **STR path** records no ids and needs none, an STR locus being one record whose `ReadWitness` already answers the question. **Spec §14 Q2 and `locus_generation`'s spec need rewriting to carry the ruling** — not done, and not this plan's to do silently.
+  - **⛦ The chain ids' file cost has a spec and an experiment waiting on the psp encoding:** [psp_chain_id_encoding.md](doc/devel/ng/spec/psp_chain_id_encoding.md) — B0 turned a column holding ~3.4% of the chain ids into one holding all of them, at every position of the genome. The spec defines a **differential** encoding (store the changes to the covering read set, and derive the reference observation's ids as the residual) and the three-arm measurement that decides whether it ships — raw as today, delta+varint, differential — on the tomato panel and HG002. **To run on a branch once [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §10's psp encoding spec lands**; nothing before that. A local read index was **rejected** (owner, 2026-08-18) as more complex and slower.
   - **Owed to the psp step by the B1 review:** the reference-width assertion in `LocusReferenceBases::over` asserts a *producer's* guarantee, not the walk's. While the only producer is this crate's generator a panic is right; when observations are decoded from a psp file it becomes corrupt input and must become a `RunError` beside `ObservationExceedsReachCeiling` (arch §5). Recorded at the code.
   - **Two review worktrees to prune:** `../pop_var_caller-review-b1` and `../pop_var_caller-review-b1-idiomatic`, left by the B1 review's agents (they hold the mutation driver and logs).
   - **✅ RULED AND APPLIED (owner, at Checkpoint A 2026-08-17) — the width bound governs generic loci only, and a generic and an STR locus are never mixed.** The two paths are different in kind: a generic locus's width is the mapper's CIGAR taken on trust and the bound is how much of that the caller undertakes to call; an STR locus's width is its catalog-defined tract with its reads re-aligned, needs no bound (a tract too long to span has no reads covering it), and bounding it would refuse ground the reference defined. `judge` now matches on `LocusKind` exhaustively — a new kind is a compile error until someone decides — and gates only the width test; the keep threshold still applies to every locus. **The never-mixed rule is a release-level assertion**, on `std::mem::discriminant` so it stays O(1). It cannot fire on real input, and structurally: segments are the reference's own partition and no observation crosses a segment boundary, so no chain of overlapping observations can either.
@@ -3680,7 +573,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **`GenomeRegion::len` is wrong at `end == u64::MAX`** (debug panic; length 0 in release, where overflow checks are off — a region at the ceiling reporting itself empty). Documented at the method and pinned by a test; the arithmetic is untouched, being a shared type outside this plan's scope. One-line fix: `end.saturating_add(1)`.
   - **⛦ Three smaller design-document defects:** arch §1 declares `DEFAULT_MAX_COHORT_LOCUS_SPAN` twice; the arch calls the module crate-private while the code is `pub` (recorded in the module doc, with the reason); and two names fixed verbatim by spec/arch/plan would read better (`CohortLocusBuilderRegionsLen` is plural for one region's width; `MinAltObs` abbreviates *observation* for a count of *reads*).
   - **Owed by the design:** `max_cohort_locus_span`'s effective value must reach the run's output beside the failed-locus count, or two runs over the same records under different bounds are indistinguishable. The doc comment carries the obligation; the emission step owns the surface.
-  - **⚠ `cargo clippy --all-targets --all-features -- -D warnings` is red on this branch and was red identically before the first commit** — 49 errors across 20 files in `examples/`, `benches/` and other modules' test code, two of them in `src/ssr/`, which ng may not edit. `cargo clippy --lib --all-features` is clean. The same standing item the census and STR-path blocks record.
+  - **⚠ `cargo clippy --all-targets --all-features -- -D warnings` is red on this branch and was red identically before the first commit** — 49 errors across 20 files in `examples/`, `benches/` and other modules' test code. `cargo clippy --lib --all-features` is clean. The same standing item the census and STR-path blocks record.
 
 #### The psp store — one sample's evidence on disk, and what an open one costs
 - **Status:** `implemented` — ✅ **MILESTONE A COMPLETE**, **Milestone B's one buildable step done**, and **Milestone C in flight** on branch `ng-psp-encoding`. The vocabulary is fixed, a header round-trips, a header reads off a file that has no footer, the summed log-error is an integer where it is computed, and **a record's body goes to bytes and back exactly** (C1). **No record head, no block and no whole file yet**: those are C2, D and F.
@@ -3693,12 +586,12 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **⚠ A number of mine was wrong again, the same way as before.** C1's golden fixture is **77 bytes, not 75**: the C1 fixes widened it and I restated the old figure into three documents rather than re-running it. Corrected in all three. The assertion that would have caught it — the golden byte list — was in the same commit.
 - **⛦ Owed to Milestone D2, from C2:** **whether the head's four fields are fixed-width or variable-length is unmeasured**, and the spec asks for it to be pinned by measurement rather than argument. In place means after compression and nothing compresses until D2, so they are variable-length for now. **Switching them then is a format change, not just a manifest one** — this reader refuses a file declaring anything but what it knows — so it is free only while no psp exists, which is until Milestone F.
 - **⛦ Owed to Milestone D, from the C1 review:** a `RecordDecodeError` must **not** be folded into `PspReadError::CorruptBlock` — that variant means *the file is damaged*, where `Truncated` means *read more bytes and try again* and `Unsupported` means *upgrade the reader*, and its `#[source]` is a `std::io::Error` so a record's error could only reach it as a string. D adds the variants that carry the class; the hazard is recorded at `CorruptBlock` itself. Also owed: a `benches/` entry for the decode path, which measures **12.46 M records/s** on the tomato-corner shape against the 20 M/s the specs quote for the measuring prototype, hot in cache with no decompression and no I/O — the first number anyone has for it.
-- **B3 done — `q_sum` is a `SummedLogError`, an integer count of steps of 1/4,096 of a natural log**, rounded once where the sum is finished so that a run reading observations from memory and a run reading them back from a psp see the same number instead of two floats that agree to a tolerance. **It deleted a whole class of fragility rather than adding one:** `q_sum` was an `f64` running sum, and the ng-against-production differential had already been through two designs because `f64` addition is not associative — a nine-decimal grain, abandoned when HG002 at 300× produced two accumulations one grain apart, then a relative tolerance. **Measured after the change: the count of loci that agree only because of the tolerance is 0, of 145,108 in the anchor and 163,091 in the census, where it was 103 of 216,203.** The rounding absorbs the ordering difference outright. It also deletes a reachable state: a not-a-number error sum used to come back through `f64::max` as the most confident read the model can express. [What was built, what it deleted, and why B1 and B2 could not be built](doc/devel/reports/implementations/ng_psp_b3_2026-08-26.md).
-- **⛦ OWNER CALL — B1 and B2 have no subject in ng, and the plan cannot be followed as written.** They ask the window's GC fraction and mean coverage to "become an integer type"; **neither quantity is computed anywhere in ng**. Both exist only in the frozen production tree (`src/sample_summary/coverage.rs:283`). They are the per-window statistic [parameter_prepass_joint_fit.md](doc/devel/ng/spec/parameter_prepass_joint_fit.md) §2.2 *proposes* — "the first new accumulator step 4 would add" — and that accumulator is not built. **Recommendation: record the rounding requirement against that accumulator and mint the types with it, rather than minting two types nothing constructs**; the property Milestone B protects is vacuous while there is no producer, no consumer and no psp field.
+- **B3 done — `q_sum` is a `SummedLogError`, an integer count of steps of 1/4,096 of a natural log**, rounded once where the sum is finished so that a run reading observations from memory and a run reading them back from a psp see the same number instead of two floats that agree to a tolerance. **It deleted a whole class of fragility rather than adding one:** `q_sum` was an `f64` running sum, and `f64` addition is not associative, so two accumulations of the same terms in different orders could differ. The rounding absorbs the ordering difference outright. It also deletes a reachable state: a not-a-number error sum used to come back through `f64::max` as the most confident read the model can express. [What was built, what it deleted, and why B1 and B2 could not be built](doc/devel/reports/implementations/ng_psp_b3_2026-08-26.md).
+- **⛦ OWNER CALL — B1 and B2 have no subject in ng, and the plan cannot be followed as written.** They ask the window's GC fraction and mean coverage to "become an integer type"; **neither quantity is computed anywhere in ng**. They are the per-window statistic [parameter_prepass_joint_fit.md](doc/devel/ng/spec/parameter_prepass_joint_fit.md) §2.2 *proposes* — "the first new accumulator step 4 would add" — and that accumulator is not built. **Recommendation: record the rounding requirement against that accumulator and mint the types with it, rather than minting two types nothing constructs**; the property Milestone B protects is vacuous while there is no producer, no consumer and no psp field.
 - **⛦ B3's own oracle could not be run**, and the plan names it precisely: *the same records called before and after, with the count of changed genotypes and the movement in quality scores*. **ng cannot call a genotype yet** — no subcommand, no example that closes the loop. What was measured instead bounds the perturbation rather than its effect on a call: at most half a step, 1.22 × 10⁻⁴ natural logs, which the spec prices at 0.024 % of the likelihood term it enters. **The genotype comparison is owed when the calling loop closes.**
 - **Plan:** [psp_file_format.md](doc/devel/ng/impl_plan/psp_file_format.md); **Specs:** [the container](doc/devel/ng/spec/psp_file_format.md), [the record](doc/devel/ng/spec/psp_record_encoding.md), [the chain ids](doc/devel/ng/spec/psp_chain_id_encoding.md); **Arch:** [psp_file_format.md](doc/devel/ng/arch/psp_file_format.md).
-- **Why it exists:** a caller opens one file per sample and holds them all open, so what one open file costs is multiplied by the cohort size — measured at **2.6 MB per open sample on production's `.psp`**, which is 7.7 GB at three thousand. Production ties the compressor's look-back distance to the amount a reader must inflate before its first record, so every block size is a payment. Capping the window separately unties them: measured on the same records, **0.34 MB per open sample, the file 35 % smaller, the index 11× smaller and the read 1.8× faster** ([the memory review](doc/devel/reports/reviews/psp_memory_milestone_z_2026-08-25.md)).
-- **Code:** [src/ng/psp/mod.rs](src/ng/psp/mod.rs) (`PspReadError`, `PspWriteError`), [header.rs](src/ng/psp/header.rs) (`Header` and everything in it; `encode`/`decode`; the validation rules), [record.rs](src/ng/psp/record.rs) (`RecordHead`; `BODY_FIELDS` and `record_body_fields`; `RecordBodyLayout`; `encode_body`/`decode_body`), [index.rs](src/ng/psp/index.rs) (`BlockIndexEntry`), [footer.rs](src/ng/psp/footer.rs) (`Footer`). `block.rs` and `chain_ids.rs` arrive with Milestones D and E.
+- **Why it exists:** a caller opens one file per sample and holds them all open, so what one open file costs is multiplied by the cohort size. Tying the compressor's look-back distance to the amount a reader must inflate before its first record makes every block size a payment; capping the window separately unties them, and measured **0.34 MB per open sample** ([the memory review](doc/devel/reports/reviews/psp_memory_milestone_z_2026-08-25.md)).
+- **Code:** [src/psp/mod.rs](src/psp/mod.rs) (`PspReadError`, `PspWriteError`), [header.rs](src/psp/header.rs) (`Header` and everything in it; `encode`/`decode`; the validation rules), [record.rs](src/psp/record.rs) (`RecordHead`; `BODY_FIELDS` and `record_body_fields`; `RecordBodyLayout`; `encode_body`/`decode_body`), [index.rs](src/psp/index.rs) (`BlockIndexEntry`), [footer.rs](src/psp/footer.rs) (`Footer`). `block.rs` and `chain_ids.rs` arrive with Milestones D and E.
 - **Impl reports:** [A1+A2](doc/devel/reports/implementations/ng_psp_a1_a2_2026-08-26.md) (two of its own claims corrected by the review, marked inline), [A3](doc/devel/reports/implementations/ng_psp_a3_2026-08-26.md), [B3](doc/devel/reports/implementations/ng_psp_b3_2026-08-26.md), [C1](doc/devel/reports/implementations/ng_psp_c1_2026-08-26.md), [C2](doc/devel/reports/implementations/ng_psp_c2_2026-08-26.md), [C3](doc/devel/reports/implementations/ng_psp_c3_2026-08-26.md), [F0](doc/devel/reports/implementations/ng_psp_f0_2026-08-28.md), [F1](doc/devel/reports/implementations/ng_psp_f1_2026-08-28.md), [F2](doc/devel/reports/implementations/ng_psp_f2_2026-08-28.md), [F3](doc/devel/reports/implementations/ng_psp_f3_2026-08-28.md), [F4](doc/devel/reports/implementations/ng_psp_f4_2026-08-28.md).
 - **⚠ A claim in the A3 commit message is wrong and is corrected in the B3 report, not amended.** It says `cargo test --lib --bins --tests --examples` was green; `examples/ng_generic_loci_dump.rs` was already failing 11 of its 12 tests there, on a repeat catalog missing from its temporary directory. **The cause is how I read the log**, not the run: the filter matched `^test result: ok.`, which hides every failing target. Verified pre-existing by setting the B3 diff aside and re-running at the A3 commit. Not fixed — that example is a probe over real data and its fixture is its own to chase.
 - **A3 done — `read_header`:** the file's header and nothing else, for the file `PspReader::open` correctly refuses. **The declared body length is bounded before a buffer for it exists**, so a corrupt length field cannot size an allocation on its own say-so — the seam the A1+A2 review flagged in advance. Eight tests on real files; four mutations, three killed at once and the fourth after a test was added. **The survivor is the shape this project keeps finding**: dropping the zero-length check passed all 45 tests, because a zero-length body is still caught — but *further in*, where the file is refused for ending early rather than for the length it declared, which is a different thing to tell whoever is holding it.
@@ -3706,7 +599,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Previous review:** [F3](doc/devel/reports/reviews/ng_psp_f3_2026-08-28.md) — eight checklists across three agents, Request-changes: **2 Blockers, 4 Majors, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f3_2026-08-28.md)). A recovered write failure produced a file every reader accepts with records missing from the middle.
 - **Previous review:** [F2](doc/devel/reports/reviews/ng_psp_f2_2026-08-28.md) — eight checklists across three agents, Request-changes: **2 Majors and three wrong numbers of mine, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f2_2026-08-28.md)). 51 mutations. Every accepted footer had an empty trailer; and a defect table's ten rows described nine defects.
 - **Previous review:** [F1](doc/devel/reports/reviews/ng_psp_f1_2026-08-28.md) — eight checklists across six agents, Request-changes: **2 Blockers, 6 Majors, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f1_2026-08-28.md)). 41 mutations. A two-entry fixture that could only ever check one pair, and an error that panicked while rendering itself.
-- **Previous review:** [F0](doc/devel/reports/reviews/ng_psp_f0_2026-08-28.md) — eight checklists, eight agents each in its own worktree, Request-changes: **1 Blocker, 3 Majors, 10 Minors, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f0_2026-08-28.md)). 46 mutations. The Blocker was a self-referential test suite; the largest Major was a key name colliding with production's word for a different concept in a format sharing the `.psp` extension.
+- **Previous review:** [F0](doc/devel/reports/reviews/ng_psp_f0_2026-08-28.md) — eight checklists, eight agents each in its own worktree, Request-changes: **1 Blocker, 3 Majors, 10 Minors, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f0_2026-08-28.md)). 46 mutations. The Blocker was a self-referential test suite.
 - **Previous review:** [C3](doc/devel/reports/reviews/ng_psp_c3_2026-08-26.md) — eight checklists across five agents, each in its own worktree, Request-changes: **2 Blockers and 9 Majors, all applied**. **[Fixes applied](doc/devel/reports/reviews/fixes_applied_ng_psp_c3_2026-08-26.md).** 63 mutations, and every agent reproduced the step's own falsification independently. **The pairing of checklists is because a test-only commit gives three of them almost no surface** — each was told a small surface is not no surface, and each found something.
 - **Previous review:** [C2](doc/devel/reports/reviews/ng_psp_c2_2026-08-26.md) — eight checklists, each agent in its own worktree, Request-changes: **2 Blockers and 13 Majors, all applied**. **[Fixes applied](doc/devel/reports/reviews/fixes_applied_ng_psp_c2_2026-08-26.md).** Between them the agents ran **106 mutations** and **811,520 fuzzed inputs**, and took the first timing anyone has of a head-only walk against a full decode — 13.5× on 30,000 uncompressed records, which is **not** the spec's 2.06× and should be read against the 5.3× that figure becomes once its decompression is stripped out. H5 still owes the real number.
 - **Previous review:** [C1](doc/devel/reports/reviews/ng_psp_c1_2026-08-26.md) — eight checklists, each agent in its own worktree, Request-changes: **1 Blocker and 13 Majors, twelve of the Majors applied and one deferred to Milestone D with its hazard recorded at the code**. **[Fixes applied](doc/devel/reports/reviews/fixes_applied_ng_psp_c1_2026-08-26.md).** Between them the agents ran **91 mutations** (36 survived, 10 of those proved to change nothing) and **600,492 fuzzed decodes**. `cargo clippy --lib --tests --all-features -- -D warnings` was red on this branch for three errors in A1–A3 test code, which is why C1's test code had never been linted; it is green now and joins the gate.
@@ -3714,55 +607,53 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **A1+A2 done (one loop iteration, deliberately):** A1 is declarations with no function bodies — the plan's own "pure-scaffold step" — so it was committed with A2, the first code its types exist for. **The validation rules are written once and run from both sides**: the writer refuses to produce a header its own reader would refuse, over fourteen broken headers checked twice each. **The version is read from a bare TOML table before the body is deserialised**, so a file from a newer major comes back as *upgrade the reader* rather than as unparseable TOML — which is the whole reason the header is plain text.
 - **Open — for Checkpoint A, four departures from the arch doc a reader would not expect** (all argued in the impl report §2):
   - **`Header.reference` is a name and a digest, not `ReferenceInfo`.** The real `ReferenceInfo` carries `.fai` geometry and the FASTA's absolute path; a parsed header would have to invent geometry it never stored, and a stored path would carry the producer's directory layout to everyone the file reaches.
-  - ~~**The manifest carries no cardinality**, following arch §3.2 against spec §4.5's list.~~ **Closed by the owner on 2026-08-28 and built as F0**: every field now declares its **shape** — whether one appearance of it is a single value or a counted run — and a file whose shape disagrees with its encoding is refused. The key is `shape` and not `cardinality`, which is production's word for how often a field appears; ng's manifest does not carry that. [F0](doc/devel/reports/implementations/ng_psp_f0_2026-08-28.md), [review](doc/devel/reports/reviews/ng_psp_f0_2026-08-28.md).
-  - **A fifth read-error class, `MalformedHeader`**, which spec §6.7's table of four does not list. Production distinguishes about a dozen header faults; they are one variant here because they share an instruction — *the file is damaged, rebuild it*.
-  - **The head magic is `NGP\n`, not production's `PSP\n`.** Both formats use the extension `.psp` and both will sit on the same disks, so the first four bytes are what tells them apart.
+  - ~~**The manifest carries no cardinality**, following arch §3.2 against spec §4.5's list.~~ **Closed by the owner on 2026-08-28 and built as F0**: every field now declares its **shape** — whether one appearance of it is a single value or a counted run — and a file whose shape disagrees with its encoding is refused. [F0](doc/devel/reports/implementations/ng_psp_f0_2026-08-28.md), [review](doc/devel/reports/reviews/ng_psp_f0_2026-08-28.md).
+  - **A fifth read-error class, `MalformedHeader`**, which spec §6.7's table of four does not list. The header faults are one variant here because they share an instruction — *the file is damaged, rebuild it*.
+  - **The head magic is `NGP\n`.**
 - **Open — deferred with a home:** the observation reach ceiling [cohort_merge.md](doc/devel/ng/spec/cohort_merge.md) asks the header for is [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §6.1's, not this module's; `FieldEncoding::Fixed`/`Ieee` widths are validated but nothing yet **chooses** them, which arch §7 asks be settled by a measurement once a writer exists.
 
 #### The alignment module — best-path aligners (plan 1 of 3)
 - **Status:** ✅ **MILESTONES A AND B COMPLETE, at Checkpoint B.** **⛦ THE ng STR LOCUS GENERATOR IS UNBLOCKED** — `align_read` exists, and [locus_generation_ssr.md](doc/devel/ng/impl_plan/locus_generation_ssr.md) Milestone D can proceed against `BestPathAligner`. Next in this plan: Milestone C (banding), then D (the two-penalty comparison); E is gated.
 - **Plan:** [alignment_best_path.md](doc/devel/ng/impl_plan/alignment_best_path.md) (plans 2–3: [marginal](doc/devel/ng/impl_plan/alignment_marginal.md), [normalization](doc/devel/ng/impl_plan/alignment_normalization.md)); **Spec:** [alignment.md](doc/devel/ng/spec/alignment.md); **Arch:** [alignment.md](doc/devel/ng/arch/alignment.md).
-- **Code:** [src/ng/alignment/mod.rs](src/ng/alignment/mod.rs) (`Alignment`), [src/ng/mod.rs](src/ng/mod.rs).
+- **Code:** [src/alignment/mod.rs](src/alignment/mod.rs) (`Alignment`), [src/lib.rs](src/lib.rs).
 - **Impl reports:** [Milestone A](doc/devel/reports/implementations/ng_alignment_milestone_a_2026-07-23.md) (A0–A3), [Milestone B](doc/devel/reports/implementations/ng_alignment_milestone_b_2026-07-23.md) (B1–B3), [Milestone C](doc/devel/reports/implementations/ng_alignment_milestone_c_2026-07-23.md) (C1), [Milestone D](doc/devel/reports/implementations/ng_alignment_milestone_d_2026-07-23.md) (D1 + D2). **E gated out** (needs read_preparation.md §4).
 - **Latest reviews:** [A0](doc/devel/reports/reviews/ng_alignment_a0_2026-07-23.md) (0 Bl / 0 Maj / 7 Min), [A1](doc/devel/reports/reviews/ng_alignment_a1_2026-07-23.md) (0 Bl / **5 Maj**), [A2](doc/devel/reports/reviews/ng_alignment_a2_2026-07-23.md) (0 Bl / **8 Maj**), [A3](doc/devel/reports/reviews/ng_alignment_a3_2026-07-23.md) (**1 Blocker** / 5 Maj), [B1](doc/devel/reports/reviews/ng_alignment_b1_2026-07-23.md) (**3 Blockers** / 2 Maj), [B2](doc/devel/reports/reviews/ng_alignment_b2_2026-07-23.md) (0 Bl / 3 Maj), [B3](doc/devel/reports/reviews/ng_alignment_b3_2026-07-23.md) (0 Bl / 3 Maj), [C1](doc/devel/reports/reviews/ng_alignment_c1_2026-07-23.md) (0 Bl / 0 Maj / 2 Min), [D1](doc/devel/reports/reviews/ng_alignment_d1_2026-07-23.md) (0 Bl / 1 Maj), [D2](doc/devel/reports/reviews/ng_alignment_d2_2026-07-23.md) (research harness; finding validated, 1 Maj report-mechanism fixed) — all Approve-with-changes; every finding applied except the four owner decisions below.
-- **A0 done (scaffold + `Alignment`):** the module is a **folder**, holding competing implementations that get compared; it is **not a pipeline step and knows no callers** (steps 2 and 7 call it). `Alignment { reference_offset: u64, cigar: Vec<CigarOp> }` reuses production's `CigarOp` — verified fully `pub`, so unlike ng's `Motif` the reuse costs no visibility compromise.
-- **A1 done (the `Emission` component):** the trait (with a `Sized` supertrait, making arch §4's "never `dyn`" a compile error rather than a convention) + `PerQualityEmission` (production's Dindel `EMISSION_LN` table ported **including its quality-zero floor**) + `FlatEmission` (the quality-blind end of the comparison). **Arch §6's deferred signature question is settled: quality resolves per *row*, not per cell** — `scores_for(quality) -> BaseScores` is primary, `emit_ln` a provided convenience; the reason is matching production's loop shape, which Milestone B must reproduce byte for byte (structural, **unmeasured** — nothing is built yet to measure). The review's 5 Majors included two found by *executing* the code: `FlatEmission` broke its own totality contract in release (`ε = ∞` → a **`+∞` mismatch score**, which inverts the model rather than skewing it), and tolerance assertions (`< 1e-12`) were guarding a table that must stay **bit**-identical to production. Also pinned: a soft-masked (lower-case) reference mismatches at every base, so canonicalizing is the caller's job — documented as an arch §3 precondition, not silently fixed in the hot path.
-- **A2 done (the repeat-aware types + the aligner trait):** `RepeatSpan` — the **widening** over production's side-blind `Delimited`: four cases (`Between` / `FromLeft` / `FromRight` / `Unanchored`), so a caller can tell a *measurement* from a *lower bound*, which production cannot. `RepeatGeometry` (flanks **measured, never assumed equal**) + `BestPathAligner`. **Deviation recorded: `RepeatContext` moved to A3**, since it bundles a `&StutterModel` that does not exist until A3. The review's 8 Majors were mostly about making the central distinction hard to lose: `span()` returned an identical range for all three anchored variants, so `span().map(|s| s.end - s.start)` fabricated a **short allele that was never observed** for a truncated read — now split into `measured_length` / `length_lower_bound` / `observed_span`; and `is_measurement()`'s `matches!` hid an implicit `_ => false`, the one consumer a fifth variant would *not* have broken.
-- **A3 done (the stutter model):** `StutterModel` + `StutterRates` + `MAX_SLIP`, HipSTR's model, **written once and shared** with the genotyping likelihood so the two cannot drift. Two regimes (in-frame slippage sized in units; out-of-frame indels sized in rank-compressed base pairs), each split by direction. `period` is a **`NonZeroU8`** — I first wrote a `debug_assert!` plus a release fallback and a test that *could not reach the path it named*, so the illegal state was made unrepresentable instead. The review's Blocker and 5 Majors were **all about what the tests could not see, not about wrong formulas** (a reviewer re-derived every branch against spec §5.2 and production's `stutter_pmf` and found them correct): the fixtures gave paired parameters equal values, so two transpositions (`in_up`↔`in_down`, `in_geom`↔`out_geom`) and the **entire out-of-frame direction split** were invisible to all twelve tests. Also: `new` clamped 2 of 6 arguments while the doc claimed "the clamps *are* the contract" — `NaN` reported a healthy floor while poisoning every score, because `f64::max` absorbs `NaN` and `f64::clamp` passes it through. **The one-constant-two-scales cutoff is reproduced deliberately, with its cost quantified** (out-of-frame cut off ~`period − 1` times sooner; the effect vanishes at period 2) rather than silently inherited or silently fixed.
-- **D2 done (the 3-vs-4 comparison — a research report):** [`examples/ssr_delimiter_comparison.rs`](examples/ssr_delimiter_comparison.rs) + [report](doc/devel/reports/research/ssr_delimiter_3v4_comparison_2026-07-23.md). On synthetic reads with known truth, **algorithm 4 is uniformly the better delimiter** — and the result **inverts the spec's §4.2 hypothesis**: the "rounds interruptions away" fear does not materialise (algo 4 bias ~0); it is **algorithm 3** that carries a small reference-pull bias (worst −0.13 bp at period-1 foreign-base insertions, 92.6%→99.5%), the ~1.02 tract inconsistency from B1 surfacing as measurement bias — the recorded production failure. The spec's predicted period-1 cancellation does not occur (algo 4 wins both sub-cases), because mis-routing is a *scoring* concern but a delimiter measures the same *length* either way. The **adoption** decision is the genotyping's, not this module's (§10.3). The review validated the finding as real (three seeds, fair comparison) and corrected a wrong mechanism in the first draft (a left-boundary collapse, not a substitution reinterpretation) and a flank tiling-collision.
-- **D1 done (algorithm 4, the two-penalty aligner):** [`ssr_best_path_unit_slip.rs`](src/ng/alignment/ssr_best_path_unit_slip.rs) — a **new** repeat-aware best-path aligner (no production counterpart, **no parity oracle**) that prices whole-unit tract slips from the shared `StutterModel` (the geometric decomposed onto affine slip transitions) instead of as flat gaps. The model was **settled with the owner before building** (motif-scored slips; best-placement/no-divide; relative-to-no-slip pricing). Validated by a **differential against algorithm 3** (the byte-parity-validated sibling): 3666 clean cases, zero disagreements. That differential caught a real traceback bug (a contraction at the tract start deletes the first tract base = the left junction), and the review caught a per-base-quality bug in the slip emission — both invisible to property tests, both the point of cross-checking a no-oracle algorithm.
+- **A0 done (scaffold + `Alignment`):** the module is a **folder**, holding competing implementations that get compared; it is **not a pipeline step and knows no callers** (steps 2 and 7 call it). `Alignment { reference_offset: u64, cigar: Vec<CigarOp> }`.
+- **A1 done (the `Emission` component):** the trait (with a `Sized` supertrait, making arch §4's "never `dyn`" a compile error rather than a convention) + `PerQualityEmission` (the Dindel `EMISSION_LN` table **including its quality-zero floor**) + `FlatEmission` (the quality-blind end of the comparison). **Arch §6's deferred signature question is settled: quality resolves per *row*, not per cell** — `scores_for(quality) -> BaseScores` is primary, `emit_ln` a provided convenience. The review's 5 Majors included two found by *executing* the code: `FlatEmission` broke its own totality contract in release (`ε = ∞` → a **`+∞` mismatch score**, which inverts the model rather than skewing it), and tolerance assertions (`< 1e-12`) were guarding a table that must stay **bit**-exact. Also pinned: a soft-masked (lower-case) reference mismatches at every base, so canonicalizing is the caller's job — documented as an arch §3 precondition, not silently fixed in the hot path.
+- **A2 done (the repeat-aware types + the aligner trait):** `RepeatSpan` — four cases (`Between` / `FromLeft` / `FromRight` / `Unanchored`), so a caller can tell a *measurement* from a *lower bound*. `RepeatGeometry` (flanks **measured, never assumed equal**) + `BestPathAligner`. **Deviation recorded: `RepeatContext` moved to A3**, since it bundles a `&StutterModel` that does not exist until A3. The review's 8 Majors were mostly about making the central distinction hard to lose: `span()` returned an identical range for all three anchored variants, so `span().map(|s| s.end - s.start)` fabricated a **short allele that was never observed** for a truncated read — now split into `measured_length` / `length_lower_bound` / `observed_span`; and `is_measurement()`'s `matches!` hid an implicit `_ => false`, the one consumer a fifth variant would *not* have broken.
+- **A3 done (the stutter model):** `StutterModel` + `StutterRates` + `MAX_SLIP`, HipSTR's model, **written once and shared** with the genotyping likelihood so the two cannot drift. Two regimes (in-frame slippage sized in units; out-of-frame indels sized in rank-compressed base pairs), each split by direction. `period` is a **`NonZeroU8`** — I first wrote a `debug_assert!` plus a release fallback and a test that *could not reach the path it named*, so the illegal state was made unrepresentable instead. The review's Blocker and 5 Majors were **all about what the tests could not see, not about wrong formulas** (a reviewer re-derived every branch against spec §5.2 and found them correct): the fixtures gave paired parameters equal values, so two transpositions (`in_up`↔`in_down`, `in_geom`↔`out_geom`) and the **entire out-of-frame direction split** were invisible to all twelve tests. Also: `new` clamped 2 of 6 arguments while the doc claimed "the clamps *are* the contract" — `NaN` reported a healthy floor while poisoning every score, because `f64::max` absorbs `NaN` and `f64::clamp` passes it through. **The one-constant-two-scales cutoff is reproduced deliberately, with its cost quantified** (out-of-frame cut off ~`period − 1` times sooner; the effect vanishes at period 2) rather than silently inherited or silently fixed.
+- **D2 done (the 3-vs-4 comparison — a research report):** [`examples/ssr_delimiter_comparison.rs`](examples/ssr_delimiter_comparison.rs) + [report](doc/devel/reports/research/ssr_delimiter_3v4_comparison_2026-07-23.md). On synthetic reads with known truth, **algorithm 4 is uniformly the better delimiter** — and the result **inverts the spec's §4.2 hypothesis**: the "rounds interruptions away" fear does not materialise (algo 4 bias ~0); it is **algorithm 3** that carries a small reference-pull bias (worst −0.13 bp at period-1 foreign-base insertions, 92.6%→99.5%), the ~1.02 tract inconsistency from B1 surfacing as measurement bias. The spec's predicted period-1 cancellation does not occur (algo 4 wins both sub-cases), because mis-routing is a *scoring* concern but a delimiter measures the same *length* either way. The **adoption** decision is the genotyping's, not this module's (§10.3). The review validated the finding as real (three seeds, fair comparison) and corrected a wrong mechanism in the first draft (a left-boundary collapse, not a substitution reinterpretation) and a flank tiling-collision.
+- **D1 done (algorithm 4, the two-penalty aligner):** [`ssr_best_path_unit_slip.rs`](src/alignment/ssr_best_path_unit_slip.rs) — a **new** repeat-aware best-path aligner that prices whole-unit tract slips from the shared `StutterModel` (the geometric decomposed onto affine slip transitions) instead of as flat gaps. The model was **settled with the owner before building** (motif-scored slips; best-placement/no-divide; relative-to-no-slip pricing). Validated by a **differential against algorithm 3** (its sibling): 3666 clean cases, zero disagreements. That differential caught a real traceback bug (a contraction at the tract start deletes the first tract base = the left junction), and the review caught a per-base-quality bug in the slip emission — both invisible to property tests, both the point of cross-checking a no-oracle algorithm.
 - **C1 done (banding):** the delimiter is banded — `|i − j| <= |read − reference| + left_flank + right_flank + BAND_HEADROOM`, out-of-band cells written `UNREACHABLE` (which closes the scratch hazard). **Byte-identical to the unbanded delimiter across the 200,000-case soak.** The review attacked it by mutation: every band term is proven load-bearing (dropping the flank terms fails at case 1745; dropping the headroom at case 288; halving the floor panics), and the empirical minimum headroom is 2 against a shipped 8. **A spec correction fell out of it** — see the SPEC-FOLLOWUP below.
-- **B1–B3 done (algorithm 3, the parity anchor):** [`ssr_best_path_flat_gap.rs`](src/ng/alignment/ssr_best_path_flat_gap.rs) — the two-regime matrix + traceback (**unbanded, deliberately**, since only an unbanded port can be shown byte-identical), the `RepeatSpan` widening, and a **permanent differential parity harness** ([`delimit_parity.rs`](src/ng/alignment/delimit_parity.rs), test-only). **ng measures repeats byte-identically to production's `delimit_read`**: 12,000 randomized cases per run, 200,000 under `PVC_PARITY_CASES=50000`, zero divergences. **Every one of B1's 3 Blockers and B3's Majors was a test that could not fail** — found by mutating the source, not by reading it (a reversed tie-break, transposed flank lengths, an untested window edge, a transposed anchor invisible to parity by construction, and a generator that never produced the zero-length flanks where ng deliberately diverges).
-- **Post-checkpoint follow-ups — ✅ the four open decisions are DONE** (owner-delegated, 2026-07-23), each its own commit: **`Motif` lifted to `types.rs`** (closing the peer→stage back-reference that put ng step 3 on `alignment`'s public surface); **`FlatEmission::try_new`** (a real check in every profile, not one compiled out of release — arch §3's ban is justified by per-*cell* cost, which does not reach a once-per-run constructor); **`ReadBases`** (the read/quality-length precondition dissolved rather than documented; three interchangeable `&[u8]` arguments become two, and the parity oracle passing unchanged is the evidence no behaviour moved); and the **architecture doc reconciled** with what shipped, with its `Motif`-allocation error removed.
-- **✅ The recorded parity gap closed itself.** Losing the tract-aware gap-open in the **row-0 initialisation** survived 200,000 cases at review time. Row 0's `gap_open` is consulted at **column 1 only** — from column 2 the match predecessor is `UNREACHABLE`, so deletion-extend always wins — and column 1 is inside the tract only when the **left flank is empty**. That is exactly the input the generator did not produce, and exactly what the zero-flank fix added. The mutation now fails within ~100 cases. The gap was in the fixture, not the code.
+- **B1–B3 done (algorithm 3):** [`ssr_best_path_flat_gap.rs`](src/alignment/ssr_best_path_flat_gap.rs) — the two-regime matrix + traceback (unbanded until C1), and the `RepeatSpan` output. **Every one of B1's 3 Blockers and B3's Majors was a test that could not fail** — found by mutating the source, not by reading it (a reversed tie-break, transposed flank lengths, an untested window edge, a transposed anchor, and a generator that never produced zero-length flanks).
+- **Post-checkpoint follow-ups — ✅ the four open decisions are DONE** (owner-delegated, 2026-07-23), each its own commit: **`Motif` lifted to `types.rs`** (closing the peer→stage back-reference that put ng step 3 on `alignment`'s public surface); **`FlatEmission::try_new`** (a real check in every profile, not one compiled out of release — arch §3's ban is justified by per-*cell* cost, which does not reach a once-per-run constructor); **`ReadBases`** (the read/quality-length precondition dissolved rather than documented; three interchangeable `&[u8]` arguments become two); and the **architecture doc reconciled** with what shipped, with its `Motif`-allocation error removed.
 - **Open:**
-  - **Deferred refactor:** replace `ssr_best_path_flat_gap`'s `const usize` state indices with a `#[repr(u8)]` enum — removes ~15 casts and closes the traceback's silent `_ =>` arm. Declined during B1 because it refactors a port whose byte-identity had just been established; the plan's rule is transcribe first, change separately.
+  - **Deferred refactor:** replace `ssr_best_path_flat_gap`'s `const usize` state indices with a `#[repr(u8)]` enum — removes ~15 casts and closes the traceback's silent `_ =>` arm.
   - **✅ The `ViterbiScratch` grow-without-clear note is resolved by C1.** Banding writes every out-of-band cell `UNREACHABLE` rather than skipping it, so the invariant the exhaustive fill gave for free still holds on a reused scratch — pinned by `scratch_survives_an_extreme_size_drop_under_banding`.
-  - **`SPEC-FOLLOWUP(alignment §3/§9)` — owner to fold in:** C1 found the spec's banding model (floor + a constant headroom) is **insufficient and fails silently** — a read that expands the tract and runs off a flank strays past the floor by up to the flank length. The shipped band is the three-term geometry `|read − reference| + left_flank + right_flank + BAND_HEADROOM`, validated byte-identical to production across the 200,000-case soak, and the owner chose (Checkpoint C) to note the correction rather than have the step edit the spec. Marker on `BAND_HEADROOM`.
+  - **`SPEC-FOLLOWUP(alignment §3/§9)` — owner to fold in:** C1 found the spec's banding model (floor + a constant headroom) is **insufficient and fails silently** — a read that expands the tract and runs off a flank strays past the floor by up to the flank length. The shipped band is the three-term geometry `|read − reference| + left_flank + right_flank + BAND_HEADROOM`, validated byte-identical to the unbanded delimiter across the 200,000-case soak, and the owner chose (Checkpoint C) to note the correction rather than have the step edit the spec. Marker on `BAND_HEADROOM`.
   - **Two recorded divergences from arch §2.1's sketch**, both licensed by that doc's "signatures are illustrative" preamble and both recorded on the fields: `ops` → `cigar` (matches seven other crate sites), `usize` → `u64` (ng's one-width rule; `RepeatInterval.start` is the precedent). **The owner may want to fold them into arch §2.1** — this skill does not edit design docs.
   - **Which `CigarOp` variants the affine aligner emits is undecided** — the enum carries three (`Skip`, `HardClip`, `Padding`) that describe an input record, not a computed placement. Blocked with arch §6's `OPEN:` on the affine output shape; Milestone E's producing step owes the answer.
-  - **`CigarOp`'s home is a pre-existing misplacement** — crate-wide CIGAR vocabulary inside `pileup::walker`, now on ng's *public* surface. The lift to `src/cigar.rs` is a production edit and production is frozen; the port-back of this module is the natural moment.
   - **Two project-wide validation commands are red for reasons unrelated to this work** — see Standing items.
 
 #### The alignment module — marginal aligners (plan 2 of 3)
-- **Status:** ✅ **PLAN COMPLETE (Milestones A–C), at Checkpoint C.** `LogProb` + the `MarginalAligner` interface (A), **algorithm 5** (the sequence-vs-sequence marginal, a byte-identical port of `align_subst`) (B), and **algorithm 6** (the whole-read two-regime forward, new code) (C) are all landed, each proven to compute what it claims. The 5-vs-6 bake-off is handed to the genotyping (spec §10.3). Next: plan 3 ([alignment_normalization.md](doc/devel/ng/impl_plan/alignment_normalization.md)), independent of this work.
+- **Status:** ✅ **PLAN COMPLETE (Milestones A–C), at Checkpoint C.** `LogProb` + the `MarginalAligner` interface (A), **algorithm 5** (the sequence-vs-sequence marginal) (B), and **algorithm 6** (the whole-read two-regime forward, new code) (C) are all landed, each proven to compute what it claims. The 5-vs-6 bake-off is handed to the genotyping (spec §10.3). Next: plan 3 ([alignment_normalization.md](doc/devel/ng/impl_plan/alignment_normalization.md)), independent of this work.
 - **Plan:** [alignment_marginal.md](doc/devel/ng/impl_plan/alignment_marginal.md); **Spec:** [alignment.md](doc/devel/ng/spec/alignment.md) (§5, §7, §9, §10); **Arch:** [alignment.md](doc/devel/ng/arch/alignment.md) (§1, §3).
-- **Code:** [src/ng/types.rs](src/ng/types.rs) (`LogProb`), [src/ng/alignment/mod.rs](src/ng/alignment/mod.rs) (`MarginalAligner`), [src/ng/alignment/ssr_marginal_sequence.rs](src/ng/alignment/ssr_marginal_sequence.rs) (`SsrSequenceMarginal`, algorithm 5).
+- **Code:** [src/types.rs](src/types.rs) (`LogProb`), [src/alignment/mod.rs](src/alignment/mod.rs) (`MarginalAligner`), [src/alignment/ssr_marginal_sequence.rs](src/alignment/ssr_marginal_sequence.rs) (`SsrSequenceMarginal`, algorithm 5).
 - **Impl reports:** [Milestone A](doc/devel/reports/implementations/ng_alignment_marginal_milestone_a_2026-07-24.md) (A1–A2), [Milestone B](doc/devel/reports/implementations/ng_alignment_marginal_milestone_b_2026-07-24.md) (B1–B3), [Milestone C](doc/devel/reports/implementations/ng_alignment_marginal_milestone_c_2026-07-24.md) (C1–C2). Review audit trail in gitignored `tmp/review_2026-07-24_ng-marginal-*/`.
 - **A1 done (`LogProb`):** a probability held as its natural logarithm; `−∞` is a legal value (ln 0 = impossible) a caller can see, where linear space reaches 0 (indistinguishable from underflow). Unconstrained → public field + `.get()`; `PartialOrd` not `Ord`. Review: 1 Minor (`+∞`/`NaN` boundary) applied as tests.
 - **A2 done (`MarginalAligner` trait):** the summed-probability interface, twin of `BestPathAligner`, no implementations. GAT `Context<'a>: Copy` by value (so algorithm 6's borrowed `RepeatContext<'a>` is expressible; `()` for algorithm 5), `Sized` supertrait, bare `&[u8]` reads, no `Output` assoc type. Review's 2 Minors were the recurring "test that cannot fail": the anchor pinned neither the `Copy` nor the `Default` bound (concrete types compile regardless) — a generic helper now binds both.
-- **B1–B3 done (algorithm 5):** a linear-space port of `align_subst` — B1 the equal-length case, B2 the unequal-length banded forward with interior gaps forbidden (own commit; the routing, not the debug assert, is the real length guard), B3 the `.ln()` boundary + the `MarginalAligner` impl (own commit). **Recorded reconciliation:** holds ε directly, not the log-space `FlatEmission`, because the forward sums probabilities and the parity oracle is the linear source. **Byte-parity against production** pinned three ways (hand cases × ε-sweep, a proptest over random sequences × ε, end-to-end `marginal == align_subst().ln()`). The dead-until-B3 chain used `#[cfg_attr(not(test), expect(dead_code))]` on the single entry point as a **compiler backstop** that forced its own removal when B3 wired the trait. B1: 1 Major → 2 tests (+ a declined `should_panic` on a debug assert, per the project's false-confidence lesson). B2: 3 coverage tests. B3: ε-sweep + proptest + end-to-end test. All applied.
-- **C1–C2 done (algorithm 6 + the synthetic-truth proof):** `SsrWholeReadMarginal` — the whole-read **two-regime forward** (owner-chosen at Checkpoint B via AskUserQuestion, since the gap recurrence was unspecified and has no production counterpart): the sum-reduction analog of the tract delimiter, reusing `TransitionCosts` (via its `pub(super)` accessors — the accepted algorithm-4 seam) + the log-space `FlatEmission`, log-space with a stable log-sum-exp, unbanded. It **permits** soft tract gaps (marginalizing the length) — the opposite of algorithm 5's interior-gap ban. **No parity oracle**, so pinned by a hand-traced-correct recurrence + two absolute anchors (one a forward-vs-`max` distinguisher, ~0.49 nats) + a tract/flank junction test. **C2:** each marginal scores its own generating allele highest on synthetic truth, by a clear margin, stable across ε and allele length. C1's review Blocker (every test relational → a `max` masquerade passes) and C2's Major (a no-op second "error" in both tests) were the recurring pattern; both fixed.
+- **B1–B3 done (algorithm 5):** in linear space — B1 the equal-length case, B2 the unequal-length banded forward with interior gaps forbidden (own commit; the routing, not the debug assert, is the real length guard), B3 the `.ln()` boundary + the `MarginalAligner` impl (own commit). **Recorded reconciliation:** holds ε directly, not the log-space `FlatEmission`, because the forward sums probabilities. The dead-until-B3 chain used `#[cfg_attr(not(test), expect(dead_code))]` on the single entry point as a **compiler backstop** that forced its own removal when B3 wired the trait. B1: 1 Major → 2 tests (+ a declined `should_panic` on a debug assert, per the project's false-confidence lesson). B2: 3 coverage tests. All applied.
+- **C1–C2 done (algorithm 6 + the synthetic-truth proof):** `SsrWholeReadMarginal` — the whole-read **two-regime forward** (owner-chosen at Checkpoint B via AskUserQuestion, since the gap recurrence was unspecified): the sum-reduction analog of the tract delimiter, reusing `TransitionCosts` (via its `pub(super)` accessors — the accepted algorithm-4 seam) + the log-space `FlatEmission`, log-space with a stable log-sum-exp, unbanded. It **permits** soft tract gaps (marginalizing the length) — the opposite of algorithm 5's interior-gap ban. Pinned by a hand-traced-correct recurrence + two absolute anchors (one a forward-vs-`max` distinguisher, ~0.49 nats) + a tract/flank junction test. **C2:** each marginal scores its own generating allele highest on synthetic truth, by a clear margin, stable across ε and allele length. C1's review Blocker (every test relational → a `max` masquerade passes) and C2's Major (a no-op second "error" in both tests) were the recurring pattern; both fixed.
 - **Open:** none for this plan — plan 3 (normalization) is the next, independent, alignment-module plan.
 
 #### The alignment module — normalization (plan 3 of 3)
 - **Status:** ✅ **PLAN COMPLETE (Milestones A–D), at Checkpoint D.** Interface + oracle + all three normalizers 1a/1b/1c + the differ-at-all screen. **Screen result: 0 disagreement on 63,757 real reads → normalization placement is not the indel-gap lever (spec §6).** Owner decision: **1a is the default** (`DefaultAlignmentNormalizer`); 1b/1c kept as comparators. **⛦ With this, the whole ng alignment module (plans 1–3) is done.** Next: adoption of 1a is read-preparation's plan.
 - **Plan:** [alignment_normalization.md](doc/devel/ng/impl_plan/alignment_normalization.md); **Spec:** [alignment.md](doc/devel/ng/spec/alignment.md) (§6, §10); **Arch:** [alignment.md](doc/devel/ng/arch/alignment.md) (§3, §5, §Test & bench shape).
-- **Code:** [mod.rs](src/ng/alignment/mod.rs) (`AlignmentNormalizer` trait), [leftmost_property.rs](src/ng/alignment/leftmost_property.rs) (`#[cfg(test)]` oracle), [left_align_structured.rs](src/ng/alignment/left_align_structured.rs) (`StructuredLeftAligner` 1a + `FixpointLeftAligner` 1c), [left_align_repeated.rs](src/ng/alignment/left_align_repeated.rs) (`RepeatedLeftAligner` 1b). Reuse targets: `left_align_indels`/`left_align_cigar` ([indel_norm.rs](src/pileup/walker/indel_norm.rs)), `normalize_alleles` ([norm_seqs.rs](src/norm_seqs.rs)); freebayes `LeftAlign.cpp` (vendored, read-only) for 1b's shape.
+- **Code:** [mod.rs](src/alignment/mod.rs) (`AlignmentNormalizer` trait), [leftmost_property.rs](src/alignment/leftmost_property.rs) (`#[cfg(test)]` oracle), [left_align_structured.rs](src/alignment/left_align_structured.rs) (`StructuredLeftAligner` 1a + `FixpointLeftAligner` 1c), [left_align_repeated.rs](src/alignment/left_align_repeated.rs) (`RepeatedLeftAligner` 1b). Reuse targets: `left_align_indels`/`left_align_cigar` ([indel_norm.rs](src/alignment/indel_norm.rs)), `normalize_alleles` ([norm_seqs.rs](src/alignment/norm_seqs.rs)); freebayes `LeftAlign.cpp` (vendored, read-only) for 1b's shape.
 - **Impl reports:** [Milestone A](doc/devel/reports/implementations/ng_alignment_normalization_milestone_a_2026-07-24.md) (A1–A2), [Milestone B](doc/devel/reports/implementations/ng_alignment_normalization_milestone_b_2026-07-24.md) (B1), [Milestone C](doc/devel/reports/implementations/ng_alignment_normalization_milestone_c_2026-07-24.md) (C1–C2), [Milestone D](doc/devel/reports/implementations/ng_alignment_normalization_milestone_d_2026-07-24.md) (D1 + the screen result). Review audit trail in gitignored `tmp/review_2026-07-24_ng-normalizer-*/`.
 - **Latest reviews:** [A1](doc/devel/reports/reviews/ng_normalizer_a1_2026-07-24.md) (0/0/2), [A2](doc/devel/reports/reviews/ng_normalizer_a2_2026-07-24.md) (**1 Bl / 4 Maj**), [B1](doc/devel/reports/reviews/ng_normalizer_b1_2026-07-24.md) (0/2/6), [C1](doc/devel/reports/reviews/ng_normalizer_c1_2026-07-24.md) (0/**3 Maj**/3), [C2](doc/devel/reports/reviews/ng_normalizer_c2_2026-07-24.md) (0/0/5), [D1](doc/devel/reports/reviews/ng_normalizer_d1_2026-07-24.md) (**1 Bl** / 2 Maj / 3 Min) — all Approve-with-changes, every finding applied or a recorded won't-fix.
-- **B1 done (algorithm 1a — `StructuredLeftAligner`):** a **port** wrapping production's `left_align_indels` (reuse over rewrite), inheriting merge + cross-block propagation; own commit (a misplaced indel is a silent wrong variant); `remove_deletions_at_ends = false` so `reference_offset` never moves. Verified two ways: the A2 property oracle (agrees with production — no divergence) **and byte-parity** against `left_align_indels`.
-- **C1 done (algorithm 1b — `RepeatedLeftAligner`):** freebayes' repeated *simple* one-base passes, capped (`MAX_PASSES = 20`); **genuinely independent** (50k-fuzz-confirmed no corruption + no leaning on 1a/production); exhaustion is a **`#[must_use]` `ConvergenceReport`** return, not swallowed. Review 3 Maj: `#[must_use]`, canonicalize on the no-shift path, and the **documented 1a-vs-1b complex-indel trim difference** (1b does not trim a `D2 I1` overlap that 1a reduces — both still leftmost; ⚑ owner decision flagged).
+- **B1 done (algorithm 1a — `StructuredLeftAligner`):** wrapping `left_align_indels` (reuse over rewrite), inheriting merge + cross-block propagation; own commit (a misplaced indel is a silent wrong variant); `remove_deletions_at_ends = false` so `reference_offset` never moves. Verified against the A2 property oracle.
+- **C1 done (algorithm 1b — `RepeatedLeftAligner`):** freebayes' repeated *simple* one-base passes, capped (`MAX_PASSES = 20`); **genuinely independent** (50k-fuzz-confirmed no corruption + no leaning on 1a); exhaustion is a **`#[must_use]` `ConvergenceReport`** return, not swallowed. Review 3 Maj: `#[must_use]`, canonicalize on the no-shift path, and the **documented 1a-vs-1b complex-indel trim difference** (1b does not trim a `D2 I1` overlap that 1a reduces — both still leftmost; ⚑ owner decision flagged).
 - **C2 done (algorithm 1c — `FixpointLeftAligner`):** 1a applied to a fixpoint via generic `drive_to_fixpoint`, `FIXPOINT_MAX_ITERATIONS = 8`, **panics** on non-convergence rather than return a half-normalised alignment (the loud-failure contrast with 1b's report). Thin wrapper, no shifting of its own; both `#[should_panic]` cap tests confirmed genuine.
 - **D1 done (the differ-at-all screen + the decision):** [ng_normalizer_screen.rs](examples/ng_normalizer_screen.rs) over GIAB HG002 10x → **0 disagreements / 63,757 real indel reads** (0 cap-hits, 0 panics); [ng_synthesize_stress_reads.rs](examples/ng_synthesize_stress_reads.rs) → 28/64 disagreements, all from 1b's 20-pass cap (proving the screen discriminates). **1a adopted as the default** (`DefaultAlignmentNormalizer` + decision record in `alignment/mod.rs`); 1c confirmed ≡ 1a; 1b/1c kept as comparators / regression guards. `cargo test --lib` 2334 **on the host** (native verification).
 - **A1 done (the `AlignmentNormalizer` trait):** rewrite an `Alignment` into its left-most spelling **in place**; takes the whole `Alignment` (so a leading-deletion strip can move `reference_offset`) and bare `&[u8]` read/reference (quality-blind — slides gaps by matching bases); `: Sized` for the module's static-dispatch rule. **No implementation** — `#[cfg(test)]` compile anchors only (`LeadingDeletionStripper` proves the offset can move). Review Mi2 (missing `# Examples` doctest) disputed: the two sibling aligner traits carry none either.
@@ -3772,13 +663,13 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **Follow-up (other plans):** adoption of 1a on the generic read-preparation path (read-preparation's plan; D1's result is its input); a stronger real-reads screen run on a non-left-aligning aligner's output (tomato bwa CRAMs) once their reference is reachable, to move `moved_by_normalization` above 6 and re-confirm 0 disagreement with the normalizers genuinely exercised.
 
 #### Calling foundations — the `types.rs` scalars, the `calling/` vocabulary, the genotype table
-- **Status:** fixes-applied — **Milestones A and B complete, at Checkpoint B.** Branch `ng-calling-foundations`, worktree `../pop_var_caller-calling-foundations`, running in parallel with `ng-calling-prerequisites` on disjoint regions of `src/ng/types.rs`.
+- **Status:** fixes-applied — **Milestones A and B complete, at Checkpoint B.** Branch `ng-calling-foundations`, worktree `../pop_var_caller-calling-foundations`, running in parallel with `ng-calling-prerequisites` on disjoint regions of `src/types.rs`.
 - **Plan:** [calling_foundations.md](doc/devel/ng/impl_plan/calling_foundations.md); **Specs:** [calling_em_loop.md](doc/devel/ng/spec/calling_em_loop.md), [calling_priors.md](doc/devel/ng/spec/calling_priors.md), [read_likelihoods.md](doc/devel/ng/spec/read_likelihoods.md); **Arch:** [calling_em_loop.md](doc/devel/ng/arch/calling_em_loop.md) (§Module home, §2 — owns every type this plan builds), [module_layout.md](doc/devel/ng/arch/module_layout.md), [ng_step_interfaces.md](doc/devel/ng/arch/ng_step_interfaces.md) (§1).
-- **Code:** [src/ng/types.rs](src/ng/types.rs) — `AlleleId` (+ `REFERENCE`, `is_reference`), `Phred` (+ `try_new`, `from_log_prob`), `PHRED_PER_NAT`, `DomainError::Phred` and `DomainError::PhredInfinite`, `Genotype` (+ `new`, `alleles`). Reuse target and parity oracle for Milestone C: production's `GenotypeShape` ([shape.rs](src/var_calling/posterior_engine/shape.rs)).
+- **Code:** [src/types.rs](src/types.rs) — `AlleleId` (+ `REFERENCE`, `is_reference`), `Phred` (+ `try_new`, `from_log_prob`), `PHRED_PER_NAT`, `DomainError::Phred` and `DomainError::PhredInfinite`, `Genotype` (+ `new`, `alleles`).
 - **Impl reports:** [A1](doc/devel/reports/implementations/ng_calling_foundations_a1_2026-08-21.md), [A1 fixes applied](doc/devel/reports/implementations/ng_calling_foundations_a1_fixes_2026-08-21.md), [A2](doc/devel/reports/implementations/ng_calling_foundations_a2_2026-08-21.md), [A2 fixes applied](doc/devel/reports/implementations/ng_calling_foundations_a2_fixes_2026-08-21.md), [B1+B2](doc/devel/reports/implementations/ng_calling_foundations_b12_2026-08-21.md), [B1+B2 fixes applied](doc/devel/reports/implementations/ng_calling_foundations_b12_fixes_2026-08-21.md), [B3](doc/devel/reports/implementations/ng_calling_foundations_b3_2026-08-21.md), [B3 fixes applied](doc/devel/reports/implementations/ng_calling_foundations_b3_fixes_2026-08-21.md).
 - **Latest reviews:** [A1](doc/devel/reports/reviews/ng_calling_a1_2026-08-21.md) — Approve-with-changes, 0 Blockers / 4 Majors / 8 Minors, five category agents in isolated worktrees; [A2](doc/devel/reports/reviews/ng_calling_a2_2026-08-21.md) — 0 Blockers / 2 Majors / 3 Minors, three agents; [B1+B2](doc/devel/reports/reviews/ng_calling_b12_2026-08-21.md) — 0 Blockers / 4 Majors / 11 Minors, three agents; [B3](doc/devel/reports/reviews/ng_calling_b3_2026-08-21.md) — 0 Blockers / 5 Majors / 6 Minors, two agents, one recommendation disputed on the spec. Audit trails in the gitignored `tmp/review_2026-08-21_ng-calling-*/`.
 - **B3 done (`LocusInference` + `SampleGenotypeCall`):** what calling produces at one locus — the alleles it settled on, one call per sample in run order, and four things a consumer cannot reconstruct: whether the loop settled or ran out of passes, how many passes it took, the weakest warrant among the parameters that fed it, and whether the repeat prior's seed had to be bent. **The allele table and the copy counts are private with read-only accessors**, because a public allele table let `admit()` widen it against unchanged copies *after* construction — the invariant held only at the instant the constructor returned. Five checks where there were two; **15 mutations, 2 survived, both now killed**. The review also recommended asserting that a converged locus took at least two passes, which this branch **disputes on the spec**: §2's loop runs a reads-only E-step before iterating, so the first pass has a freshly computed estimate to settle against, and a first-pass convergence is a real outcome — expected exactly where the caller is weakest, at one sample with three reads a position.
-- **B1+B2 done (`src/ng/calling/` and its first two shared types), one loop iteration for two plan steps** because B1 alone is a module file with no test to carry. `CandidateAlleles` is the allele table a locus is called over — **private field where the arch sketched a public `Vec`**, because "the reference is allele 0 and is always present" is what every REF/ALT branch rests on and a public `Vec` admits `clear()`, `insert(0, …)` and `swap_remove(0)`. `ExpectedAlleleCopies` is the cohort's fractional copy counts, **built against the allele table** so a length mismatch is unrepresentable rather than detected — the two reviewers disagreed on where that check belonged and the constructor won, because the pairing is the type's definition rather than an addition to it. **20 mutations, 5 survived, all now killed**, one of which — a wrapping id cast at a full table — would have made a discovered allele *be* the reference with nothing panicking. The review also caught a wrong claim in the module doc: sideways imports between four sibling folders are not forbidden by the tree, which is exactly why three arch docs each had to write a no-import rule by hand.
+- **B1+B2 done (`src/calling/` and its first two shared types), one loop iteration for two plan steps** because B1 alone is a module file with no test to carry. `CandidateAlleles` is the allele table a locus is called over — **private field where the arch sketched a public `Vec`**, because "the reference is allele 0 and is always present" is what every REF/ALT branch rests on and a public `Vec` admits `clear()`, `insert(0, …)` and `swap_remove(0)`. `ExpectedAlleleCopies` is the cohort's fractional copy counts, **built against the allele table** so a length mismatch is unrepresentable rather than detected — the two reviewers disagreed on where that check belonged and the constructor won, because the pairing is the type's definition rather than an addition to it. **20 mutations, 5 survived, all now killed**, one of which — a wrapping id cast at a full table — would have made a discovered allele *be* the reference with nothing panicking. The review also caught a wrong claim in the module doc: sideways imports between four sibling folders are not forbidden by the tree, which is exactly why three arch docs each had to write a no-import rule by hand.
 - **A2 done (`Genotype`):** the opaque output multiset the loop mints at its last pass, `Box<[AlleleId]>` held sorted so two spellings of one genotype are one value. **The review's mutation pass found two survivors, both now killed:** an "is it already sorted?" fast path guarded on `first() > last()` leaves interior disorder in place from **three** copies up — a triploid or tetraploid heterozygote counted twice in a cohort — and a sort key narrowed to `u8` misorders any id from 256. A property test over the whole `u16` range and up to eight copies kills both; one two-entry swap in the tetraploid fixture kills the first on its own. Also: `new` now **refuses an empty multiset** — `Ploidy` refuses zero copies and the genotype's length *is* that ploidy, so the file no longer rules the same quantity legal in one type and illegal in another. Two reviewers disagreed on the remedy (`try_new` against `assert!`); the `assert!` won on this file's own convention that unconstrained newtypes over internal indices carry no checked constructor.
 - **A1 done (`AlleleId` + `Phred`):** the first two calling scalars, appended at the end of the sections they belong to so the parallel prerequisites branch cannot conflict. `Phred::from_log_prob` **rejects rather than clamps** the two values the scale cannot hold, because where to cap a `GQ` is the consumer's decision — and the two are separated by *variant*, not by the caller inspecting a float: `ln p > 0` is broken arithmetic (`DomainError::Phred`), `ln p = -∞` is a probability of exactly zero the consumer caps (`DomainError::PhredInfinite`). **The review's mutation pass found two survivors, both now killed:** `from_log_prob` stored **negative zero** for a certain call (which would print `-0` in a `QUAL` column) and the `f64`-width invariant had no test. `Phred` was also the only constrained newtype in the file without a property test; it has one now.
 - **Open:**
@@ -3786,24 +677,23 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **Follow-up (later plans):** a named quality ceiling and a capping constructor for the step that first fills a `GQ` column ([calling_loop.md](doc/devel/ng/impl_plan/calling_loop.md)); `CandidateAlleles`' accessor must return an `Option`/`Result` rather than indexing, since `AlleleId`'s doc promises an out-of-range id is caught when the table is read (step B2); a reverse `Phred` → `LogProb` conversion when a consumer needs one.
 
 #### Genotype prior (step 8) — the `genotype_prior/` folder, the seam, the row
-- **Status:** Milestone A complete and reviewed; B1 complete and reviewed; **B2 implemented but NOT reviewed — that review is the next session's first task.** Branch `ng-calling-prior`, worktree `../pop_var_caller-calling-prior`, branched from `main` with `ng-calling-foundations` merged in (fast-forward to `1742e3d6`). Runs in parallel with `ng-calling-read-likelihoods`; conflict surface is one `pub mod` line in `src/ng/calling/mod.rs`.
+- **Status:** Milestone A complete and reviewed; B1 complete and reviewed; **B2 implemented but NOT reviewed — that review is the next session's first task.** Branch `ng-calling-prior`, worktree `../pop_var_caller-calling-prior`, branched from `main` with `ng-calling-foundations` merged in (fast-forward to `1742e3d6`). Runs in parallel with `ng-calling-read-likelihoods`; conflict surface is one `pub mod` line in `src/calling/mod.rs`.
 - **Plan:** [calling_prior.md](doc/devel/ng/impl_plan/calling_prior.md); **Spec:** [calling_priors.md](doc/devel/ng/spec/calling_priors.md); **Arch:** [calling_priors.md](doc/devel/ng/arch/calling_priors.md) (§2–§5 — owns every type this plan builds), [module_layout.md](doc/devel/ng/arch/module_layout.md), [ng_step_interfaces.md](doc/devel/ng/arch/ng_step_interfaces.md) (§1).
-- **Code:** [src/ng/calling/genotype_prior/](src/ng/calling/genotype_prior/) — `mod.rs` plus the four files later milestones fill (`dirichlet_multinomial.rs`, `seed_spectrum.rs`, `seed_ssr.rs`, `plug_in.rs`); [src/ng/types.rs](src/ng/types.rs) — `ExpectedHeterozygosity` (+ `SPECIES_FALLBACK`, `try_new`, `get`) and `DomainError::ExpectedHeterozygosity`. Port targets: `dirichlet_multinomial_log_priors` and `MIN_ALT_CONCENTRATION` ([genetics.rs](src/genetics.rs)), the inbreeding mixture ([posterior_engine.rs](src/var_calling/posterior_engine.rs)).
+- **Code:** [src/calling/genotype_prior/](src/calling/genotype_prior/) — `mod.rs` plus the four files later milestones fill (`dirichlet_multinomial.rs`, `seed_spectrum.rs`, `seed_ssr.rs`, `plug_in.rs`); [src/types.rs](src/types.rs) — `ExpectedHeterozygosity` (+ `SPECIES_FALLBACK`, `try_new`, `get`) and `DomainError::ExpectedHeterozygosity`.
 - **Impl reports:** [A1](doc/devel/reports/implementations/ng_calling_prior_a1_2026-08-21.md), [A1 fixes applied](doc/devel/reports/implementations/ng_calling_prior_a1_fixes_2026-08-21.md), [A2](doc/devel/reports/implementations/ng_calling_prior_a2_2026-08-21.md), [A2 fixes applied](doc/devel/reports/implementations/ng_calling_prior_a2_fixes_2026-08-21.md), [B1](doc/devel/reports/implementations/ng_calling_prior_b1_2026-08-22.md), [B1 fixes applied](doc/devel/reports/implementations/ng_calling_prior_b1_fixes_2026-08-22.md), [B2](doc/devel/reports/implementations/ng_calling_prior_b2_2026-08-22.md) — **no review yet**.
-- **Latest reviews:** [A1](doc/devel/reports/reviews/ng_calling_prior_a1_2026-08-21.md) — Approve-with-changes, 0 Blockers / 4 Majors / 14 Minors, 27 mutations run and 14 survivors; [A2](doc/devel/reports/reviews/ng_calling_prior_a2_2026-08-21.md) — **Request-changes**, 0 Blockers / 8 Majors / 13 Minors, 25 mutations and 12 survivors. Five category agents in isolated worktrees each time. ; [B1](doc/devel/reports/reviews/ng_calling_prior_b1_2026-08-22.md) — **Request-changes**, 1 Blocker / 4 Majors / 16 Minors, 28 mutations and 3 genuine survivors, four agents including one written for this step: port fidelity and numerics. Audit trails in the gitignored `tmp/review_2026-08-2*_ng-calling-prior-*/`.
-- **B2 done, review owed (the two-branch inbreeding mixture) — and it found that the inbreeding coefficient was doing about half the work it should, in production as well as in the port.** The mixture adds two branches — with probability `F` the sample's two copies are one ancestral copy counted twice, otherwise they are independent draws — and the two have to be on the same scale. They were not. Spec §3.1 drops a genotype-independent term from the Dirichlet-multinomial row because it cancels when the row is rescaled; that is true of a row alone and **false once a second branch is mixed in**, since the identical-by-descent term `α_a / Σα` is a true probability. Measured: subtracting that term makes the row sum to exactly 1, so it is exactly what separates the two scales; the uncorrected mixture is 0.29 to 2.20 nats from the Wright formulas with the error **growing in `F`**; and at the shipping concentration — one sample at tomato1's fitted 6 in 10,000 — the het:hom-alt ratio is 0.400 where the model says 0.222 at `F = 0.8`, a heterozygote made **1.8×** too likely, about 2.6 Phred, in the direction the caller is weakest. **Production has the same defect and it is live**: its engine mixes the same two scales, its default coefficient is 0 where the branch short-circuits away, but `pipeline.rs:343` passes the cohort's fitted coefficient. Corrected in ng (owner, 2026-08-22) by adding the offset to the identical-by-descent branch, which leaves an outbred sample's row bit-identical to the primitive's and leaves B1's parity untouched. **What found it was the Wright oracle the plan asked for** — the only check that exercises both branches at once; at `F = 0` the two spellings agree exactly, so everything else passes either way. **The spec owes two sentences.**
-- **B1 done (the ported Dirichlet-multinomial primitive):** the random-mating half of the row — what a genotype would be worth if the sample's copies were independent draws from the population. **A port needs two oracles, and the plan asked for one.** The rising-factorial computation it names checks the mathematics; bit-for-bit equality against production checks that the arithmetic is performed the same way, and two mutations — removing the zero-count skip, and re-associating the fold — die only to the second, each moving a row by one unit in the last place. **Skipping a zero-count allele is not a saving but a requirement**: the fold associates as `(acc + lgamma(α + k)) − lgamma(α)`, so a skipped allele's two large logarithms would enter and leave the accumulator with a rounding in between. **The review's Blocker was that every fixture ran at a reference concentration of 1** — the leave-one-out concentration of one sample at a biallelic site, where what the caller is handed reaches 2,000 at a thousand diploid samples; three wrong implementations passed the whole module, moving a row by 9.9 nats and getting 57 of 78 genotypes wrong at twelve alleles. The parity grid now runs to 6,001 and twelve alleles. **And production turns out to have two spellings of this mathematics that disagree by an ulp**: the shared primitive has one shipping caller, the STR cohort's EM, while the SNP/indel engine runs its own copy that already fills caller buffers and associates differently — 112 of 492 genotype values differ. ng matches the shared one; the GIAB 83.6% → 94.6% measurement came from the other.
+- **Latest reviews:** [A1](doc/devel/reports/reviews/ng_calling_prior_a1_2026-08-21.md) — Approve-with-changes, 0 Blockers / 4 Majors / 14 Minors, 27 mutations run and 14 survivors; [A2](doc/devel/reports/reviews/ng_calling_prior_a2_2026-08-21.md) — **Request-changes**, 0 Blockers / 8 Majors / 13 Minors, 25 mutations and 12 survivors. Five category agents in isolated worktrees each time. ; [B1](doc/devel/reports/reviews/ng_calling_prior_b1_2026-08-22.md) — **Request-changes**, 1 Blocker / 4 Majors / 16 Minors, 28 mutations and 3 genuine survivors, four agents including one written for this step: numerics. Audit trails in the gitignored `tmp/review_2026-08-2*_ng-calling-prior-*/`.
+- **B2 done, review owed (the two-branch inbreeding mixture) — and it found that the inbreeding coefficient was doing about half the work it should.** The mixture adds two branches — with probability `F` the sample's two copies are one ancestral copy counted twice, otherwise they are independent draws — and the two have to be on the same scale. They were not. Spec §3.1 drops a genotype-independent term from the Dirichlet-multinomial row because it cancels when the row is rescaled; that is true of a row alone and **false once a second branch is mixed in**, since the identical-by-descent term `α_a / Σα` is a true probability. Measured: subtracting that term makes the row sum to exactly 1, so it is exactly what separates the two scales; the uncorrected mixture is 0.29 to 2.20 nats from the Wright formulas with the error **growing in `F`**; and at the shipping concentration — one sample at tomato1's fitted 6 in 10,000 — the het:hom-alt ratio is 0.400 where the model says 0.222 at `F = 0.8`, a heterozygote made **1.8×** too likely, about 2.6 Phred, in the direction the caller is weakest. Corrected in ng (owner, 2026-08-22) by adding the offset to the identical-by-descent branch, which leaves an outbred sample's row bit-identical to the primitive's. **What found it was the Wright oracle the plan asked for** — the only check that exercises both branches at once; at `F = 0` the two spellings agree exactly, so everything else passes either way. **The spec owes two sentences.**
+- **B1 done (the Dirichlet-multinomial primitive):** the random-mating half of the row — what a genotype would be worth if the sample's copies were independent draws from the population. The rising-factorial computation the plan names checks the mathematics. **Skipping a zero-count allele is not a saving but a requirement**: the fold associates as `(acc + lgamma(α + k)) − lgamma(α)`, so a skipped allele's two large logarithms would enter and leave the accumulator with a rounding in between. **The review's Blocker was that every fixture ran at a reference concentration of 1** — the leave-one-out concentration of one sample at a biallelic site, where what the caller is handed reaches 2,000 at a thousand diploid samples; three wrong implementations passed the whole module, moving a row by 9.9 nats and getting 57 of 78 genotypes wrong at twelve alleles.
 - **A2 done (the local types and the step-8 seam):** the seam takes **one checked bundle**, not eight parameters. Three of the five review agents found the same defect independently and each compiled the same fix: the eight-argument row function and the shape checks that no implementation could be forced to call were one fact seen from two sides, so `PriorRow::new` runs the checks and is the only way to build the trait method's argument. **The reviewers' own version of that fix did not work, and re-running their claim is what showed it**: a private field is visible to a module's *descendants*, and the four files that will hold every implementation are descendants of `genotype_prior` — a probe in `dirichlet_multinomial.rs` built a `PriorRow` field by field and ran green. One level of nesting (`mod checked`) makes them siblings instead, and the same probe now fails with `error[E0451]`. Two more gates were added because the review showed the existing ones blind: `cargo clippy --lib` never type-checks the test module (five denied lints were sitting in it), and no run anyone does can fail on the module's "held in release" invariant — downgrading its assertions leaves the debug run at 20 passed and the release run at 6 failed. Also: the seam test moved to a **triallelic** table because the biallelic row is a palindrome and a reversed walk passed it; an empty row is refused as a wiring bug; every length message now names both buffers it compared, because `out` is the yardstick and a mis-sized `out` made every message blame a correct array.
-- **A1 done (the folder and the diversity scalar):** `ExpectedHeterozygosity` is the cohort's expected heterozygosity at ordinary sites — the prior's θ — and its doc has to keep it apart from two neighbours it is easy to confuse with: the **non-reference rate**, which books the reference accession's own quirks as cohort polymorphism, and the **STR path's repeat diversity**, which is measured separately. **The species-range fallback became a value of the type rather than a bare `f64`** (`ExpectedHeterozygosity::SPECIES_FALLBACK`, following `AlleleId::REFERENCE`), because the review compiled the alternative: as a loose float it seeded `InbreedingF`, `ErrorRate` and `GenotypeFrequency` alike, in the one module the STR path imports from. **Three of the four Majors were tests that could not fail** — the new scalar was left out of the property sweep that pins the accept/reject boundary, so a constructor widened to `(-0.25..=1.25)` and one rounding to six decimals both passed; and the fallback's own test compared the constant with itself, so reading `1e-3` as a percentage (`0.1`) or per kilobase (`1.0`) passed too. **Two prose defects the review caught were mechanism errors, not wording:** the doc claimed production's STR path *substituted* a SNP diversity, where it hardcodes freebayes' population-scaled `SFS_THETA = 0.01` — a different quantity in different units; and it asserted flat that a tomato panel is more diverse than a human one, where this project's own tomato1 fit is 6 in 10,000, **below** the 1e-3 fallback.
+- **A1 done (the folder and the diversity scalar):** `ExpectedHeterozygosity` is the cohort's expected heterozygosity at ordinary sites — the prior's θ — and its doc has to keep it apart from two neighbours it is easy to confuse with: the **non-reference rate**, which books the reference accession's own quirks as cohort polymorphism, and the **STR path's repeat diversity**, which is measured separately. **The species-range fallback became a value of the type rather than a bare `f64`** (`ExpectedHeterozygosity::SPECIES_FALLBACK`, following `AlleleId::REFERENCE`), because the review compiled the alternative: as a loose float it seeded `InbreedingF`, `ErrorRate` and `GenotypeFrequency` alike, in the one module the STR path imports from. **Three of the four Majors were tests that could not fail** — the new scalar was left out of the property sweep that pins the accept/reject boundary, so a constructor widened to `(-0.25..=1.25)` and one rounding to six decimals both passed; and the fallback's own test compared the constant with itself, so reading `1e-3` as a percentage (`0.1`) or per kilobase (`1.0`) passed too. **A prose defect the review caught was a mechanism error, not wording:** the doc asserted flat that a tomato panel is more diverse than a human one, where this project's own tomato1 fit is 6 in 10,000, **below** the 1e-3 fallback.
 - **Open:**
   - **Settled by the owner, 2026-08-22, and the design documents now match the code.** The two filenames are renamed — `seed_generic.rs` (pairing with `seed_ssr.rs` on the locus class it serves, and using the crate's own word for the non-STR path) and `hardy_weinberg.rs` (named for its distribution, like its sibling `dirichlet_multinomial.rs`; the plug-in character stays in the type it holds). The seam keeps the checked bundle. `arch/calling_priors.md` §2.1, §2.2, §3.2 and §8 were updated to match, each carrying the reason and the measurement rather than only the new spelling.
-  - **The fallback has no carrier and no door.** Spec §4 requires a run that lands on the species-range guess to say so in its output; the thing that will carry it, `SeedRegime::FallbackDiversity`, arrives at A2 one module down, while the constant is `pub` from `ng::types`. Nothing overrides it either. Against production ng is currently weaker on both halves — though production's own `cli_override` has no flag behind it and its `DiversitySource` has no consumer outside its tests.
+  - **The fallback has no carrier and no door.** Spec §4 requires a run that lands on the species-range guess to say so in its output; the thing that will carry it, `SeedRegime::FallbackDiversity`, arrives at A2 one module down, while the constant is `pub` from `types`. Nothing overrides it either.
   - **Nothing converts the pre-pass's `JointFit::expected_heterozygosity` (a bare `f64`) into the newtype yet** — that crossing lands at D2 and is where the range check first meets real data. The histogram route supplies only the ingredient (each sample's observed heterozygosity); nothing computes θ's mean of `Hobs / (1 − F)` across samples.
   - **⚑ B2 has no review.** Every other step went through the fan-out before its commit; this one did not, at the owner's direction to close the session after the fix. It is the next session's first task, and the reviewers should be given the scale correction to attack rather than to confirm.
   - **⚑ `spec/calling_priors.md` owes two sentences** after B2: §3.1's "the constant cancels" holds in a row and not in a mixture, and §3.2 should say the random-mating branch enters on the probability scale. A spec edit is the owner's.
-  - **⚑ Which of production's two spellings should ng be bit-identical to?** They disagree by one unit in the last place on about one row in four. The recommendation is to stay with the shared primitive the plan names and keep the difference recorded, because the alternative is a parity test against a private function inside a frozen file — but it is worth a ruling before anyone builds the production differential, since the design's headline GIAB measurement was taken on the other path. **`spec/calling_priors.md` §9's reuse map carries the same "two callers" error the review found in the code's prose**; a spec edit is the owner's.
-  - **No criterion bench covers `ng::calling::genotype_prior`**, so the one hot-path question the review raised — `lgamma(α_a + k_a)` recomputed per genotype where only `alleles × ploidy` distinct values exist — has no evidence either way. It saves nothing at diploid biallelic and reaches about 5× at tetraploid with four alleles.
-  - **Two gates this plan added to its own step list, because the review showed the standard ones blind here.** `cargo clippy --lib --tests --all-features -- -D warnings` (plain `--lib` never type-checks a test module) and `cargo test --release --lib ng::calling::genotype_prior` (the only command that can fail on an assertion demoted from release to debug). The second is worth a CI step; CI runs one test command, in debug.
+  - **No criterion bench covers `calling::genotype_prior`**, so the one hot-path question the review raised — `lgamma(α_a + k_a)` recomputed per genotype where only `alleles × ploidy` distinct values exist — has no evidence either way. It saves nothing at diploid biallelic and reaches about 5× at tetraploid with four alleles.
+  - **Two gates this plan added to its own step list, because the review showed the standard ones blind here.** `cargo clippy --lib --tests --all-features -- -D warnings` (plain `--lib` never type-checks a test module) and `cargo test --release --lib calling::genotype_prior` (the only command that can fail on an assertion demoted from release to debug). The second is worth a CI step; CI runs one test command, in debug.
   - **⚠ The same three aggregate gates are red on `main`** as for the foundations plan, in files this branch does not touch.
 
 #### The ordinary-site prior's two numbers — off the curve, not out of a search
@@ -3818,7 +708,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **A5 landed: the projection and the search are deleted, and Milestone A is a complete repair.** `seed_generic.rs` falls from 3,440 lines to 958; the two-branch spectrum prediction, the two-parameter search, both wrapper types, `SpectrumMatch`, `FrequencyDensity::allele_count_classes` and `FittedFrequencySpectrum` are gone, each with a comment where it stood saying what it did and where its numbers now live. **⚑ Six example programs consumed it and the plan named two**: three are deleted, one is cut to the half that needs none of it, and the two measurement harnesses each lose their "what the caller gets today" arm. Deleted rather than kept against a local copy because the machinery is ~1,300 lines whose correctness rested on fifty tests that cannot follow it into `examples/` — an untested copy would make its figures facts about the copy. **⚑ Owed, and not done here: three live design documents cite `examples/ng_spectrum_panel_floor.rs`, which no longer exists** — `research/ordinary_site_prior_moments.md`, `spec/ordinary_site_seed.md` §1.2 and `spec/population_diversity.md`. Repointing them at the reports holding the same figures is a design-document edit. Library target 4,872 → **4,822**, fifty tests deleted with the code they pinned; broken doc links 27 → **25**, both of the two that went pre-existing breaks inside the deleted machinery.
 - **B1 landed: the two moments averaged over the census positions, in a new module beside the fit.** `CensusMoments::from_posteriors` forms each position's expected alternative-copy count from the fit's own per-position posteriors — nobody can count it, because at three reads a heterozygote often shows one allele and an error often looks like a third — and averages `k/2N` and `2k(2N−k)/(2N(2N−1))` over positions. **Nothing calls it yet.** As of this step its heterozygosity is knowingly high by two terms, both named on the field itself: the variance the quadratic formula needs (2.538× the truth at one sample and three reads) and the inbreeding correction (a further 80% at one individual at F = 0.8), which are steps B2 and B3. Library target 4,822 → **4,831**.
 - **⛦ Three reviews on Milestone A, and every finding was one of my own claims about my own work** — the figures quoted from the design documents and the measurement report all came back correct. **Two were wrong mechanisms, and each was the reason given for a decision.** The release assertion that replaced the "no pair reaches this heterozygosity" fallback was justified by calling `Beta(50, 50)` "the narrowest density the fit can produce": the fit clamps the two shape parameters *independently*, so `Beta(0.02, 50)` is reachable and is 316 times narrower — and absolute spread was the wrong quantity anyway. Replaced by a closed form (a bare Beta's share of its own ceiling is exactly `(a+b)/(a+b+1)`, so the solved total is exactly `a+b`, at most 100 chromosomes) **and by a test that sweeps the fit's whole box** rather than by a second argument. And "every arm of the sweep put the best half-weight panel size at zero" is contradicted by this project's own record: the headline table's three arms did, and the depth-crossed arms put it at 200 on one of the two population shapes. **One wrong number**: the swap that the sixth density fixture was added to catch is *invisible* on two of the other five, not merely consistent — they are symmetric. **One defect the deletion introduced**: the rustdoc summary line of `total_for_diversity` was the orphaned first line of the enum A4 deleted. **And one over-claimed oracle**: the test oracle for the pin is symmetric in the two concentrations, so it cannot see them swapped — the only assertion in the tree that could lived in another module, and there is now one beside it.
-- **⛦ The tree-wide grep for retired sentences found six places the step's own grep missed**, including a **release panic message** in `src/ng/calling/mod.rs` telling a user that a SNP/indel locus "seeds from a frequency spectrum". The two source files are fixed. **Three design documents now carry supersession banners rather than rewrites** — `arch/calling_priors.md` §4 and its reuse map, `spec/ordinary_site_seed.md` §2/§6/§7, `spec/population_diversity.md` §3.2/§8/§9 — because a banner saying the code no longer matches is a factual note and rewriting the design is not this loop's to do. **⚑ Still owed:** `impl_plan/calling_loop.md` step E2 still names `project_spectrum_seed`; that plan is being executed on a sibling branch and editing it here would collide.
+- **⛦ The tree-wide grep for retired sentences found six places the step's own grep missed**, including a **release panic message** in `src/calling/mod.rs` telling a user that a SNP/indel locus "seeds from a frequency spectrum". The two source files are fixed. **Three design documents now carry supersession banners rather than rewrites** — `arch/calling_priors.md` §4 and its reuse map, `spec/ordinary_site_seed.md` §2/§6/§7, `spec/population_diversity.md` §3.2/§8/§9 — because a banner saying the code no longer matches is a factual note and rewriting the design is not this loop's to do. **⚑ Still owed:** `impl_plan/calling_loop.md` step E2 still names `project_spectrum_seed`; that plan is being executed on a sibling branch and editing it here would collide.
 - **B2 landed: the curvature term the heterozygosity's formula needs.** `k` is an expectation and `2k(2N−k)` is quadratic, so substituting `E[k]` and stopping returns the answer **high by exactly `Var(k)`**. At one sample with posteriors that have barely decided — `(0.3, 0.4, 0.3)` over the three genotypes, the shape three reads a position produces — the truth is 0.400 and substituting the mean gives 1.000: **two and a half times it**, against the 2.538 ± 0.165 the report measures through a whole fit. **The oracle is exact and shares nothing with the formula**: at one individual the heterozygosity is precisely the posterior that the individual is heterozygous, because that is what the question means, and the algebra collapses to it. **The same posteriors at 63 samples put the term at 0.96% of the answer** — pinned rather than bounded, because "under 1%" is also satisfied by zero and zero is what a deleted term gives. That is why the fixture runs at one sample. Library target 4,832 → **4,835**.
 - **⛦ The tests-and-mutation review found one surviving mutation on shipped arithmetic and two fixture sets that could not fail.** `p_segregating`'s clamp at zero — the shared input to *both* integrals, so without it a density whose two point masses total above one sends both moments negative at once — **had no test at all**, and every fixture in the tree sat well below the saturation point. **Every heterozygosity fixture had `a · b = 1`**, so deleting the Beta's whole shape from the formula passed the test written to pin it. **And the six-shape list was decoration**: its only consumer asserted the seed against the same accessor that supplied its input, an identity, so the `a`-for-`b` swap the list's own twenty-five lines of justification claim to catch left it green. All three closed — the list now carries both moments as hand-computed literals in a type of its own, and the three mutations now fail 1, 5 and 3 tests. Library target 4,835 → **4,837**.
 - **B3 landed: the panel's inbreeding divided back out, and Milestone B is complete.** A pair of chromosomes drawn at random from the panel comes from the *same individual* with probability `1/(2N−1)`, and with probability `F` such a pair is one ancestral copy counted twice and cannot differ — so an inbred panel shows less variation than the population has, by `1 − F/(2N−1)`. **At one individual that factor is `1 − F`**: at tomato's fitted 0.8 the panel shows a fifth of the population's diversity, and a run without the correction reports a fifth. **At a thousand individuals it lifts the answer by 4 parts in 10,000** — which is why the fixture runs at one, and the companion at a thousand is there to say so with a number rather than a claim. The frequency is untouched, because inbreeding rearranges copies between an individual's two chromosomes without changing how many the panel holds. **⛦ The test caught a slip of its own on the way**: the *shortfall* at a thousand is `0.8/1999` and the *lift* that puts it back is `(0.8/1999)/(1 − 0.8/1999)` — the same fact from opposite sides, and not the same number. Library target 4,837 → **4,840**.
@@ -3842,7 +732,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **⛦ The measurement contradicts the spec's own premise, and the direction is the finding.** §4 assumed a panel's own fitted shape is a poor guess at a small panel and a good one at a large one. With nothing drawn and nothing estimated — the density projected exactly into each panel's allele-count classes and the shipped search run over the result — **the panel's own shape is exact at one individual and degrades monotonically from there**: 1.000× the truth's expected frequency at one individual on all five densities swept, and 1.18×, 1.14×, 0.86×, 1.22× and 0.83× at 63. The reason is that a panel of one has three allele-count classes whose only constraint is `E[2f(1−f)] ≤ 2√(E[(1−f)²]·E[f²])` — Cauchy–Schwarz — which is **exactly** the set a Dirichlet-multinomial over two draws covers, so the family reproduces them whatever density is behind them. At 63 individuals the same two parameters are fitted over 127 classes and the mass piled at *invariant* has to be traded against the spread. **This is §1.2's mechanism on the ratio of the pair rather than on its total.**
 - **⚑ Owner's, and the first is the one that matters: the ramp has no measured support and what ships is a hedge.** Every arm puts the best half-weight panel size at **zero** — a weight of one at every panel, the blend inert. What ships is **0.25 diploid individuals**, the smallest value that keeps the mechanism alive; it costs 2.7% on the held-out drawn cohorts and **26% on the arm at a real cohort's 4-in-1,000 segregating share**. What it buys is a fifth of the shape kept on the neutral side at a single genome, against a pathological fit at a small panel — §1.1's concern, which does not reach the quantity the seed reads and which no density this sweep draws from can produce. **Recommendation: keep 0.25 until one real genome has been fitted end to end, then confirm the guard or set the constant to zero and delete the ramp.**
 - **⚑ Owner's, second: the fix is a change to what the seam carries, not a retune.** The panel-size dependence exists because the shape is read back *out of* allele-count classes rather than off the density that produced them. On the joint route the density is right there — `FrequencyDensity` carries `a` and `b`, and the expected frequency is `p_segregating · a / (a + b) + p_fixed_alt`, exactly the quantity the refit loses. **Recommendation: raise it against `calling_priors.md` §4.1 as its own step**; it would retire the ramp rather than retune it.
-- **§7's first open question is answered, against its own leaning: `N₀` does not depend on depth.** The best value is 0 on the strong rare-allele pile-up at 3, 8 and 20 reads a sample and 200 on the moderate one at all three — depth moves it not at all, and the two population shapes disagree by at least two hundred-fold. **That disagreement is why no single constant is right.** New example [ng_seed_shape_weight_sweep.rs](examples/ng_seed_shape_weight_sweep.rs).
+- **§7's first open question is answered, against its own leaning: `N₀` does not depend on depth.** The best value is 0 on the strong rare-allele pile-up at 3, 8 and 20 reads a sample and 200 on the moderate one at all three — depth moves it not at all, and the two population shapes disagree by at least two hundred-fold. **That disagreement is why no single constant is right.** New example `examples/ng_seed_shape_weight_sweep.rs` (deleted since, at A5 of the prior-moments plan).
 - **⛦ The reviews found the measurement itself wrong before they found anything in the code.** The sweep scored each drawn cohort against its *density's expectation* rather than against the frequency that cohort was actually drawn with — and over 3,000 positions those differ by 8 to 10% of themselves one draw to the next, where the candidate constants are separated by less than a tenth of a per cent. Correcting it changed two conclusions: the best value stopped appearing to move with depth, and the score stopped appearing flat below a quarter of an individual and rose from zero instead. **Two further claims the same review killed:** that the blend can be worse than both ends (it cannot — per cohort it is a convex combination of the two errors, and the "one row" came of comparing three separately-taken medians), and that writing `θ` for `θ/(1+θ)` is wrong by 1 part in 10,000 at a human diversity (it is 1 part in 1,000).
 - **⛦ Fifty-seven mutations across two batteries, eleven survivors, and the two worst were tests whose band was wide enough to hold a different answer.** Squaring the blend's weight passed all 144 tests — the seed taking 0.64 of its shape from the panel while the record said 0.80 — because the ramp test bounded the share only between 0.85 and 0.99 rather than pinning it to the weight the run reports. And the survivor the first battery recorded came back **one line away from where it was fixed**: writing `θ` for `θ/(1+θ)` at the *call site* rather than in the function passed all 144, and **no test of the pin can ever see it**, because the total is re-solved from whatever the shape turns out to be. **`FittedShape::concentrations` had no test at all**, and its two readers produce the figures §1.2 rests on. **The shape all the fixtures shared, in three sentences:** every diversity was between `10⁻⁴` and `10⁻²`, so a factor of `1 + θ` hid; every expected frequency was below 0.29, so which side of a half the shape sat on was never varied; and every spectrum built from `(1, θ)` has the two ends of the blend at the same number, so on those the weight could be anything at all. All eleven survivors are closed, each with a mutation re-run to prove it. **And the step's own inheritance carried the same defect twice:** `projection_tests::project` handed the projection a hard-coded diversity whatever spectrum it was given, and three tests in `run_parameters` passed `None`; both were invisible while the diversity was not read — and the fix for the second was **itself not load-bearing** until the review put the old constant back and watched all 26 tests pass.
 - **⛦ A side effect worth having: the seed stops caring what the inbreeding coefficient is.** Told an `F` wrong by ±0.10, the search's reference concentration moves by a factor of three at one individual and the shipped pair does not move at all to five digits — a wrong `F` rescales the search's pair without moving its ratio, and the ratio is the only thing the seed keeps. At 63 individuals the same error moves the shipped number by at most 1.4% against 4% for the search's own.
@@ -3852,17 +742,11 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **A run with a spectrum but no fitted diversity now falls to the species-range guess and discards the shape**, where before it produced a fitted seed. It is the degenerate-fit path — the joint route reads its heterozygosity off the same density it projects — and it is stated rather than silent.
 
 #### The calling loop (step 9, arm A) — the shared per-locus types, the seam, and the three nested loops
-- **Status:** fixes-applied — **every milestone of this plan is complete: A through F. Arm A is done and ng calls genotypes.** All 21 steps — A1 through F2 — implemented, reviewed and fixes applied. **ng calls genotypes on both paths** — over selected candidates at a SNP or indel, over supplied ones at a repeat tract — **both priors are read off the fit rather than constructed or guessed** (E2e at a repeat tract, E2f at an ordinary site), and **a contaminated run's repeat tracts are called rather than refused** (E2d). **And the run now says what it scored its reads under** (E2b): the contamination fraction per read group under its sample, the batching those fractions were drawn against, the outlier weight stated as inherited, and — per repeat tract — which rung of the tract ladder its prior shape came from and how many of its scoring cells fell back to a stated constant. **F1 anchors the SNP/indel loop to the shipping caller's and F2 is the repeat-tract differential beside it**, so **arm A is complete**: what follows is measurement, in [calling_bakeoffs.md](doc/devel/ng/impl_plan/calling_bakeoffs.md). **Two steps the plan did not have were created here**: E2c on the owner's ruling of 2026-08-26, and E3a/E3b when E3 turned out to be a fixture and a subsystem behind one checkbox. Checkpoints C and D were not paused at: the owner's standing instruction of 2026-08-25 is to run milestone after milestone and bank any non-blocking question. **C3 was two commits and the split is recorded**: C3a is the quality arithmetic in a module of its own, C3b the final pass that calls it and fills `LocusInference`. **Checkpoint C was not paused at** — the owner's standing instruction of 2026-08-25 is to run milestone after milestone and bank any non-blocking question — so D1 follows directly. Branch `ng-calling-loop`, worktree `../pop_var_caller-calling-loop`, from `main` at `bbcf2165` and carrying main's 1.98 compiler pin. Running beside `ng-calling-likelihoods` (which owns `src/ng/calling/likelihood/`) and `ng-candidate-alleles` (which owns `src/ng/calling/allele_candidates/`); this branch consumes both and edits neither.
+- **Status:** fixes-applied — **every milestone of this plan is complete: A through F. Arm A is done and ng calls genotypes.** All 21 steps — A1 through F2 — implemented, reviewed and fixes applied. **ng calls genotypes on both paths** — over selected candidates at a SNP or indel, over supplied ones at a repeat tract — **both priors are read off the fit rather than constructed or guessed** (E2e at a repeat tract, E2f at an ordinary site), and **a contaminated run's repeat tracts are called rather than refused** (E2d). **And the run now says what it scored its reads under** (E2b): the contamination fraction per read group under its sample, the batching those fractions were drawn against, the outlier weight stated as inherited, and — per repeat tract — which rung of the tract ladder its prior shape came from and how many of its scoring cells fell back to a stated constant. **F1 and F2 close milestone F**, so **arm A is complete**: what follows is measurement, in [calling_bakeoffs.md](doc/devel/ng/impl_plan/calling_bakeoffs.md). **Two steps the plan did not have were created here**: E2c on the owner's ruling of 2026-08-26, and E3a/E3b when E3 turned out to be a fixture and a subsystem behind one checkbox. Checkpoints C and D were not paused at: the owner's standing instruction of 2026-08-25 is to run milestone after milestone and bank any non-blocking question. **C3 was two commits and the split is recorded**: C3a is the quality arithmetic in a module of its own, C3b the final pass that calls it and fills `LocusInference`. **Checkpoint C was not paused at** — the owner's standing instruction of 2026-08-25 is to run milestone after milestone and bank any non-blocking question — so D1 follows directly. Branch `ng-calling-loop`, worktree `../pop_var_caller-calling-loop`, from `main` at `bbcf2165` and carrying main's 1.98 compiler pin. Running beside `ng-calling-likelihoods` (which owns `src/calling/likelihood/`) and `ng-candidate-alleles` (which owns `src/calling/allele_candidates/`); this branch consumes both and edits neither.
 - **Plan:** [calling_loop.md](doc/devel/ng/impl_plan/calling_loop.md) (A–F, 18 steps, 6 checkpoints — E2a, E2c, E2d, E2e and E2f were added after the plan was written, and E3 split into E3a/E3b); **Specs:** [calling_em_loop.md](doc/devel/ng/spec/calling_em_loop.md) and, new 2026-08-26, [population_diversity.md](doc/devel/ng/spec/population_diversity.md) — how the caller learns how variable the population is, on both paths; **Arch:** [calling_em_loop.md](doc/devel/ng/arch/calling_em_loop.md) (§2 owns every type A1 builds).
-- **Code:** [src/ng/calling/mod.rs](src/ng/calling/mod.rs) — `LocusEvidence` + `GenericLocusSample`, `FrozenParameters`, `CallingScratch` + `UNWRITTEN_SCRATCH_VALUE`, and `SampleGenotypeCall` turned from a struct into an enum so a sample the allele cap ruled uncallable can be emitted as missing. [src/ng/calling/inference/mod.rs](src/ng/calling/inference/mod.rs) — the `LocusGenotyper` seam, `CallingLoopConfig` with `SlippageRefitConfig` and `DiscoveryConfig`, and `RunnableCallingLoopConfig`, the token the seam takes.
-- **F2 done — the repeat-tract differential, and arm A is complete (`inference/summarise_condition.rs`):** the SNP/indel path gets a parity oracle against the shipping caller; the repeat-tract path cannot, because the two loops converge on a different quantity at a different scale. What it gets instead is ng's loop run at the tolerance the existing SSR caller states and at ng's own, with **the genotypes required to match** — a differential with a failing state rather than parity with an escape clause. They match on both tracts tried: a fitted stratum, where the tighter tolerance costs **five passes against two**, and the tract ladder's bottom rung, where it costs **three against one**. Library target 4,923 → **4,925** passing.
-- **⚖ What the plan calls one rule is two, and this step delivers the tolerance rather than the rule.** Both loops take the largest per-allele change in the cohort's expected allele copies and turn it into a frequency, but the SSR caller adds its prior's pseudocounts to the copies before normalising — `em.rs`'s `run_pi_em` opens each pass with `let mut expected = g0.to_vec()` — where ng divides by the chromosomes alone. **So at one nominal number ng's test is the stricter of the two**: the other caller sees the same movement as smaller and stops sooner, which its own engine records as a real effect rather than a rounding one. Reproducing its rule exactly would mean declaring ng's prior strength the counterpart of those pseudocounts, a claim about the two models that no calling document makes. **The residual is measured instead of hidden**: absorbing a plausible pseudocount mass into the divisor stops the tight arm at four passes rather than five, and no genotype moves either way.
-- **⛦ The review found one Blocker, and it was a claim about the code rather than a defect in it — the ninth consecutive step in which the wrong things written were mechanisms, not numbers.** The step's own documentation said the two stopping tests "differ only in the tolerance". They do not, for the reason above; the draft had read `total = expected.iter().sum()` and concluded the divisor was the chromosome count **without checking where `expected` started**. Two Majors were the second fixture: its headline said the bottom rung gives the two tolerances nothing to tell apart, which was an artefact of changing the prior's shape **and** the substitution rates at once — holding the rates gives three passes against one; and its explanation named the prior's *strength* as what drives the iterating, where a sweep shows raising a fitted spectrum's concentration from 1 chromosome to 100 moves the count from 5 to 4, barely and in the opposite direction. **What separates the fixtures is the prior's shape**: an asymmetric spectrum pulls the frequencies off the point the reads alone would put them and the loop has a trajectory to walk. Eight of 19 written claims were wrong; every measured figure was right.
-- **⚑ Open, and the owner's: whether ng's prior strength is the counterpart of the existing caller's pseudocounts.** If it is, the differential could reproduce that caller's stopping rule exactly rather than run ng's at its tolerance. The difference is one pass in five here and **grows as the cohort shrinks**, the pseudocount mass being a larger share of a smaller chromosome count — at one diploid sample it could be a factor of two.
-- **F1 done — ng's loop is anchored to the shipping caller's (`calling/loop_parity.rs`):** handed the same genotype log-likelihood table, the same prior concentration, the same inbreeding coefficient and the same allele count, the two loops call the same genotypes. **The table is the fixture's and neither side computes it**, so a difference between the two emissions cannot be mistaken for a difference between the two loops; the concentrations are the same construction reading the same `ALPHA_REF`, not two numbers typed to agree. Nine fixtures, and only the first is the kind where the reads decide outright — the one that matters asserts the call is **not** the reads' own answer, so a loop that dropped its prior would fail it alone. It needed no edit to the frozen `src/var_calling/` tree. Library target 4,914 → **4,923** passing.
-- **⚖ Two differences exist, the oracle found both by failing, and both are asserted rather than excused.** **The inbreeding mixture** is the one place the port departs on purpose: production mixes its random-mating and identical-by-descent branches on two different scales, so its coefficient does a fraction of the work it should, and ng adds the missing term (owner, 2026-08-22). At `F = 0` the branch short-circuits away on both sides — which is why the other five fixtures agree exactly, and why production's own default of zero hides this — and at `F = 0.9` over ten samples the two part: a sample whose reads put its heterozygote 1.0 nat above its homozygous reference is called `0/0` by ng and `0/1` by production. **The pass count** is a difference in what is counted rather than in where either stopped: both loops begin with one E-step on the reads alone, production counts it as its first iteration and ng does not, so production's count is ng's plus one — measured 36 against 35 on the fixture that takes longest, and asserted on every fixture so that a real difference in stopping point would break it by more than one.
-- **⛦ The review found the eighth consecutive test that could not fail, and this time it was the fixture that claimed to test the concentration split.** 24 deliberate defects, 18 caught, six survived, and the survivors named one accident: every fixture ran at a diversity of 1 in 1,000 with read margins of six nats and up, so **nothing in the seed ever decided a genotype** and only the leave-one-out cohort term did. Deleting the division that splits the alternative concentration among the alternatives changed no call. All six survivors are caught by sibling tests elsewhere in ng's suite, so the suite had no hole — this file had a reach gap and a false claim about itself. **The split is now asserted by value**, `[1, θ/2, θ/2]`; **a one-sample fixture was added**, because the argument for excluding one sample was about the stopping rule and said nothing about genotypes, and at one sample production runs a *different E-step* the oracle had never executed; **a fixture with per-sample inbreeding coefficients was added**, since every other fixture gives every sample the same one; and the two loops' **threshold and cap** are now asserted equal, being two independent constant pairs that agree by coincidence of two edits. Five of 44 written claims were wrong, every one a mechanism or a location.
-- **⚑ What the oracle does not cover: a difference that only shows in the frequency trajectory.** The loop's per-sample inbreeding coefficient moves only the cohort's frequency trajectory, and over eight samples that movement does not reach a call — so a loop reading row 0's coefficient for every row passes every fixture here. `summarise_condition`'s own `each_sample_is_scored_against_its_own_inbreeding_coefficient` pins that one by reading the posterior row rather than the genotype, which is where a trajectory-only defect has to be caught.
+- **Code:** [src/calling/mod.rs](src/calling/mod.rs) — `LocusEvidence` + `GenericLocusSample`, `FrozenParameters`, `CallingScratch` + `UNWRITTEN_SCRATCH_VALUE`, and `SampleGenotypeCall` turned from a struct into an enum so a sample the allele cap ruled uncallable can be emitted as missing. [src/calling/inference/mod.rs](src/calling/inference/mod.rs) — the `LocusGenotyper` seam, `CallingLoopConfig` with `SlippageRefitConfig` and `DiscoveryConfig`, and `RunnableCallingLoopConfig`, the token the seam takes.
+- **F2 done — the repeat-tract differential, and arm A is complete (`inference/summarise_condition.rs`):** ng's repeat-tract loop run at two stopping tolerances, with **the genotypes required to match** — a differential with a failing state. They match on both tracts tried: a fitted stratum, where the tighter tolerance costs **five passes against two**, and the tract ladder's bottom rung, where it costs **three against one**. Library target 4,923 → **4,925** passing.
+- **⛦ The review found one Blocker, and it was a claim about the code rather than a defect in it — the ninth consecutive step in which the wrong things written were mechanisms, not numbers.** Two Majors were the second fixture: its headline said the bottom rung gives the two tolerances nothing to tell apart, which was an artefact of changing the prior's shape **and** the substitution rates at once — holding the rates gives three passes against one; and its explanation named the prior's *strength* as what drives the iterating, where a sweep shows raising a fitted spectrum's concentration from 1 chromosome to 100 moves the count from 5 to 4, barely and in the opposite direction. **What separates the fixtures is the prior's shape**: an asymmetric spectrum pulls the frequencies off the point the reads alone would put them and the loop has a trajectory to walk. Eight of 19 written claims were wrong; every measured figure was right.
 - **E2b done — the run says what it scored its reads under (`calling/run_report.rs`, and one field on the locus):** a genotype called at a contamination fraction of 3 in 100 and one called at zero are the same record, so the run now carries what it used beside what it called. **The run half** is one row per read group, listed under its sample, carrying the fitted fraction with the two evidence counts and the source that tell *measured and clean* from *nothing could be measured*; whether the sequencing batching was declared or assumed, which the dense per-read-group view cannot say because a declared single batch and a defaulted one are the same values; and the repeat-tract outlier weight, stated once and named as inherited rather than fitted. **The per-locus half** is what a repeat tract's parameters rested on — the rung of the tract ladder its prior shape came from, its cell counts, and whether the contaminant term was built. Library target 4,896 → **4,914** passing.
 - **⚖ The one decision this step took rather than inherited: a row is a read group, not a sample and not a library.** Spec §3.6 asks for the fraction per sample and the fit produces one per read group; a per-sample line would have to pick one of a sample's fractions or average them, and both state something the fit did not. Every sample appears with each of its read groups under it, which is what §3.6 asks for. **A read group is not a library either**, and the first draft said it was: `@RG LB` is a grouping key that the lanes of one preparation share, so a row naming only the library would have printed two identical-looking rows with two different fractions. The row carries the read group's own `@RG ID` beside the library's name, and the test constructor that could not represent that case — every read group's library named after the read group — gained a sibling that can.
 - **⛦ The reviews found no Blocker, three surviving mutations and eleven of eighty written claims wrong — the seventh step running in which every wrong claim was a mechanism and every measured figure was right.** **The three survivors are one shape: a fixture where two different rules give the same answer.** A record decided from the per-worker buffer's state rather than from the locus's own prior passed everything, because every fixture gives each call a *fresh* worker, on which *the buffer holds no cells* and *this locus has no tract prior* agree — and the one test that reuses a worker calls two tracts. A library name filled from the read group's `@RG ID` passed, because the test constructor names every read group's library after the read group. A declared batching told apart by its batch count passed, because the fixtures declared either nothing or two batches, never one. Each is closed by a fixture that separates the two rules, each mutation re-run against the fixed tree and now failing. **Sixteen deliberate defects in all, sixteen caught.** The wrong claims that mattered: a sentence saying a fixture had "four of each" where it has four and two, and a novelty claim about the fixtures contradicted by one two modules over.
@@ -3886,7 +770,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **⚑ ANSWERED by E2b — those two numbers now travel, and the second turned out to see half of what it claimed.** The outlier weight is stated once per run and named as inherited. The defaulted-cell count is on the locus, split so that *the fit does not describe this run's read groups* is counted apart from *a candidate sits off the fitted range*. **But it sees the slippage fit only**: the repeat-tract substitution rates are looked up in a plain map whose absence carries no reason, so a rate map fitted over a different set of libraries lands in the ordinary count indistinguishable from a stratum nobody fitted. Splitting that one too means giving `FrozenParameters::ssr_substitution_rate_at` a typed absence where its sibling already returns one — the same gap already banked as *the substitution-rate lookup returns a bare `Option`*.
 - **E2f done — the ordinary-site prior seeds from this cohort rather than from a species-range constant (`joint/fit.rs`, `calling/run_parameters.rs`):** the SNP/indel prior takes two numbers about how variable the population is, and **both were already fitted and neither reached the caller**. The joint fit produces the population's allele-frequency density — two point masses and a Beta over what segregates — and the expected heterozygosity read off it; `RunParameters::project_seed` has taken both as arguments since E2 with nothing supplying them. This is the adapter: the density projects into the `2N + 1` allele-count classes a panel of N diploids has, and the heterozygosity is wrapped in the type that cannot be confused for the repeat path's. **No estimator.** Library target 4,842 → **4,858** passing.
 - **⚑ The owner's, and it is a number rather than a question: the projection understates the diversity at real cohort sizes.** Turning the class weights into the prior's two concentrations loses the population's heterozygosity as the panel grows, because the two-parameter family cannot hold a point mass. At **63 individuals — the tomato cohort's size** — the pair implies a diversity **9.9% below** the measurement on a strong rare-allele pile-up, **18.6% below** on a human-like shape, and 41–54% below on flatter ones; at one individual it reproduces it to within 0.1%. **The projection into classes is exact** — the classes carry the density's own heterozygosity at every panel size — so what loses it is `project_spectrum_seed`, which `calling_priors.md` §4.1 owns and `population_diversity.md` names as a non-goal here. **It is still a large improvement**: the prior would otherwise take a human constant of 1 difference per 1,000 bases against a tomato-like density's own 6.06 per 10,000, which overstates by 65% — so 9.9% low is closer by about a factor of seven. Measured on illustrative densities, not fitted ones: no cohort's fitted density is recorded in this repository.
-- **⚖ The panel-size floor was NOT ruled, and the reason is worth keeping.** `population_diversity.md` §9's third question asks where one belongs and names the statistic to set it from — how far the fit's answer sits from the measurement — *"put the floor where it stops falling"*. **Swept across five densities, it does not fall**: it is smallest at the smallest panel, 1.5 × 10⁻⁹ nats at one individual against 6.4 × 10⁻⁴ at two hundred, because at one diploid the Beta-binomial over two draws *is* a Dirichlet-multinomial and the family lands on the measurement exactly whatever it says. **And the sweep is the wrong experiment anyway** — it projects one exact density, where a floor is about a small panel's estimate being *noisy*. The experiment that would settle it is already named in `parameter_prepass_cohort.md` §10's third question: subsample the tomato cohort and watch where the spectrum stops being stable. New example [ng_spectrum_panel_floor.rs](examples/ng_spectrum_panel_floor.rs).
+- **⚖ The panel-size floor was NOT ruled, and the reason is worth keeping.** `population_diversity.md` §9's third question asks where one belongs and names the statistic to set it from — how far the fit's answer sits from the measurement — *"put the floor where it stops falling"*. **Swept across five densities, it does not fall**: it is smallest at the smallest panel, 1.5 × 10⁻⁹ nats at one individual against 6.4 × 10⁻⁴ at two hundred, because at one diploid the Beta-binomial over two draws *is* a Dirichlet-multinomial and the family lands on the measurement exactly whatever it says. **And the sweep is the wrong experiment anyway** — it projects one exact density, where a floor is about a small panel's estimate being *noisy*. The experiment that would settle it is already named in `parameter_prepass_cohort.md` §10's third question: subsample the tomato cohort and watch where the spectrum stops being stable. New example `examples/ng_spectrum_panel_floor.rs` (deleted since, at A5 of the prior-moments plan).
 - **⛦ The reviews' Blocker was the seventh consecutive "test that cannot fail", and this one had four faces.** Swapping the Beta's two shape parameters above one individual — projecting a rare-allele pile-up as a common-allele one — passed all 175 tests, and so did the seam handing the prior the finished vector **reversed**. Four fixtures lined up: the heterozygosity check weights class `k` by `2k(2N − k)`, unchanged under `k → 2N − k`; the point-mass check ran at `a = b`; the only class-by-class check ran at **one** individual with both masses zero; and every density in the set had `b ≥ a`, so which end the pile-up sits at was never varied. A second Blocker, found by two agents independently, was a test whose both halves were identities — it passed with the function body replaced by a flat vector. **Nine mutations now tried and nine caught**, including all three survivors.
 - **⛦ And one shipped number was the wrong quantity**: the count of variable census sites was the *population's* segregating share times the positions fitted, where both the producer's and the consumer's documentation ask for positions variable **across this panel** — a 6.6-fold over-report at one individual. Nine further claims were wrong, all mechanisms or locations; **every one of the twenty measured figures was right**, which is the fourth step running.
   - [What E2f built](doc/devel/reports/implementations/ng_calling_loop_e2f_2026-08-26.md), whose §7 records what the three reviews found.
@@ -3908,34 +792,33 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **D2 done — the two cost invariants, both of which fail silently:** a genotype-likelihood table rebuilt on every pass returns exactly the same genotypes, and a `Vec` allocated inside a pass changes no number at all. So the instrument is the test. The emission count is asserted as **`candidates × Σ_s (observations in sample s)`** over a fixture whose samples show one, two and three observations — 18, where charging the first row's count for every row gives 9 and charging the locus's pooled total gives 54, and where three samples of three observations each would report 27 under all three. The same 18 at two passes and at four, on **one** scratch, which is what makes the counter's own reset load-bearing. Library target 4,691 → **4,694**.
 - **⛦ The allocation count is measured for real, and the reason it wasn't is a mistake worth remembering.** The first draft said a counting `#[global_allocator]` needs `unsafe impl GlobalAlloc`, which `src/lib.rs`'s `#![forbid(unsafe_code)]` refuses. **`#[global_allocator]` is a safe attribute** and the `unsafe impl` behind `dhat::Alloc` is dhat's own — already a dependency here. The forbid stands untouched. `tests/ng_calling_loop_allocation.rs` now counts `total_blocks` across two runs at different pass counts: **8 blocks each**, and 8 against 10 with one `Vec::with_capacity` added to the seeded pass. The real obstacle was narrower — a global allocator counts the whole process and the lib suite runs in parallel — and its answer is a test binary of its own.
 - **⛦ `benches/psp_writer_perf.rs` panics under `cargo test --all-targets`**, indexing one past the end of its own record fixture (`the len is 3300000 but the index is 3300000`). Pre-existing and untouched by this branch; recorded for its owner.
-- **D1 done — the driver: reads in, genotypes out (`SummariseConditionLoop`):** the first implementation of the calling seam, and the whole of `spec/calling_em_loop.md` §2's pseudocode. Three loops, one inside the next, with the outer two switched off: the genotype-likelihood table is built **once**, before the frequency loop, and read by every pass of it — a rebuild per pass would give identical genotypes, only slower, so a new instrument (`EmissionCost`) counts the builds. The driver also assembles what the loop needs and nothing had built: the locus's seed concentration from the run's fitted spectrum, the error-spread table once per locus, and the genotype prior as a *value* beside the emission model, because both are seams the design exists to compare across. Library target 4,672 → **4,691** passing; release `ng::calling` 626 → **645**.
+- **D1 done — the driver: reads in, genotypes out (`SummariseConditionLoop`):** the first implementation of the calling seam, and the whole of `spec/calling_em_loop.md` §2's pseudocode. Three loops, one inside the next, with the outer two switched off: the genotype-likelihood table is built **once**, before the frequency loop, and read by every pass of it — a rebuild per pass would give identical genotypes, only slower, so a new instrument (`EmissionCost`) counts the builds. The driver also assembles what the loop needs and nothing had built: the locus's seed concentration from the run's fitted spectrum, the error-spread table once per locus, and the genotype prior as a *value* beside the emission model, because both are seams the design exists to compare across. Library target 4,672 → **4,691** passing; release `calling` 626 → **645**.
 - **⛦ The ruling B2 and C3b both left open is settled: a sample the candidate step ruled uncallable gets no scratch row at all.** The scratch is prepared for the samples the locus is *called on*, and the rows are the run's sample order with the gaps closed up — so the M-step, the convergence delta's division by cohort chromosomes, the site quality's count axis and the table build all run over one cohort without any of them being told to skip anything. The alternative needs a "which samples count" list in five places, and the easiest to forget is the denominator that is load-bearing across the whole cohort range. Measured: at a locus with one callable sample and one set aside, the expected copies sum to 2.0 rather than the run's 4.0.
 - **⛦ The review's one Blocker was that join, and every fixture hid it the same way.** All of them put the uncallable sample **last**, where a row's index and its sample's index are the same number — so a table filled by row rather than by the row map passed the whole suite. With the gap **first**, that version calls the surviving sample `0/0` on reads it never saw: copies `[2.0000, 3.9e-6]` against `[0.0077, 1.9923]`, a systematic permutation with nothing failing.
 - **⛦ The record was claiming a warrant it had not earned, and the field's own doc was stale.** The driver stamped `Provenance::FittedHere` at every locus while the fixtures' calibration was `Defaulted` — the exact failure `weakest_provenance` exists to prevent. It is now the weakest calibration that reached the locus, folded with `Provenance::weaker_of`; and the doc claiming `Provenance` "defines no ordering" is corrected, because `parameter_estimation` states the ladder and implements it.
 - **⚑ Two things the driver refuses rather than approximates, both at the seam's front door.** A **repeat tract**, because the scoring context its row takes needs the STR substitution rate, which is on neither `FrozenParameters` nor `StratumFits` — the pre-pass emits it as a map of its own and gathering the pre-pass's outputs is step E2's. And a run with a **fitted contamination fraction**, whose per-locus half is E2a's. Both messages name the step that unblocks them.
 - **⚑ Open, and the owner's: what should a locus produce where *every* sample was ruled uncallable?** It is refused today. Candidate selection prefers cutting an allele over refusing a locus because most samples stay callable; where none does, that argument has nothing to rest on. Emitting it with every call missing is the other defensible answer. Nothing can reach either case until the loop is wired into a run.
-- **C3b done — ng calls genotypes at a locus (the final pass):** after the frequency loop stops, every sample is scored once more against the settled frequencies and its winner taken **in the same walk that takes its confidence**, because `CallingScratch`'s posterior row is one reused buffer and the earlier samples' rows are gone by the end. Out of it come the owned genotypes, the per-sample `GQ`, the site quality before its artifact correction, and the nine pooled read counts that correction consumes — the last built here rather than at the input edge because one of the nine needs the calls. A sample the candidate step ruled uncallable is `SampleGenotypeCall::Missing` with no quality beside it and is counted nowhere. `LocusInference` gains the two fields `spec/calling_quality.md` §10 asks for. Library target 4,644 → **4,672** passing; release `ng::calling` 598 → **626**.
+- **C3b done — ng calls genotypes at a locus (the final pass):** after the frequency loop stops, every sample is scored once more against the settled frequencies and its winner taken **in the same walk that takes its confidence**, because `CallingScratch`'s posterior row is one reused buffer and the earlier samples' rows are gone by the end. Out of it come the owned genotypes, the per-sample `GQ`, the site quality before its artifact correction, and the nine pooled read counts that correction consumes — the last built here rather than at the input edge because one of the nine needs the calls. A sample the candidate step ruled uncallable is `SampleGenotypeCall::Missing` with no quality beside it and is counted nowhere. `LocusInference` gains the two fields `spec/calling_quality.md` §10 asks for. Library target 4,644 → **4,672** passing; release `calling` 598 → **626**.
 - **⛦ Both of C3b's review Blockers were tests that could not fail, and both were one fixture habit.** No fixture asserting a genotype quality had more than one called sample, so **overwriting every sample's quality with the first sample's left the whole 4,666-test suite green** — which is exactly the defect `spec/calling_quality.md` §3.1 says the final pass exists to prevent. And the one three-allele fixture, built to defeat a hard-coded `AlleleId(1)` in the *choice* of alternative, asserted eight of the nine artifact counts but not the ninth — so hard-coding the same index in the expectation also passed everything. At a multi-allelic locus that would weigh reads of allele 2 against an expectation from copies of allele 1: on that fixture, 0 expected against 9 observed, a maximal apparent deficit at a locus with none.
-- **⚑ The plan's repeat-tract blocker was stale, and a review agent caught it by re-deriving the claim instead of re-reading it.** The plan said a tract could not be genotyped because the STR read-likelihood row was `unimplemented!()`. **The row shipped** with `calling_read_likelihoods.md`'s H1 and H2; the one `unimplemented!()` left under `src/ng/calling/` belongs to a `#[cfg(test)]` oracle. What still blocks a tract end to end is the **STR candidate path**, which is unwritten — so a tract's candidates are fixture-supplied and, with them supplied, a tract can be scored. The plan is corrected in two places.
+- **⚑ The plan's repeat-tract blocker was stale, and a review agent caught it by re-deriving the claim instead of re-reading it.** The plan said a tract could not be genotyped because the STR read-likelihood row was `unimplemented!()`. **The row shipped** with `calling_read_likelihoods.md`'s H1 and H2; the one `unimplemented!()` left under `src/calling/` belongs to a `#[cfg(test)]` oracle. What still blocks a tract end to end is the **STR candidate path**, which is unwritten — so a tract's candidates are fixture-supplied and, with them supplied, a tract can be scored. The plan is corrected in two places.
 - **⚑ Open, and D1's: does a sample the candidate step set aside get a row in the scratch at all?** C3b excludes it from the calls, from the artifact counts and from the expectation those are weighed against (`spec/calling_quality.md` §6.3), but the site quality's fold runs over the scratch's whole likelihood table, so its cohort is whichever samples the scratch was prepared for. Spec §5.0 says such a sample *leaves the loop entirely, before the first pass*. Nothing wrong reaches a run today — the loop's prior-free first pass refuses the locus on the scratch's `NaN` sentinel long before the final pass — but D1 has to choose, and the M-step carries the same open choice from B2.
-- **C3a done (the two qualities the loop must take while its inputs still exist):** a new module, `src/ng/calling/quality/`. **The per-sample genotype quality** — how much of a sample's genotype probability did not go to the genotype that won — because the posterior row is one reused buffer and the earlier samples' are gone by the time the last is scored. **The site quality before its artifact correction** — *given every sample's reads, how unlikely is it that the cohort carries no copy of any non-reference allele?* — because it reads the whole `samples × genotypes` likelihood table, which is per-worker scratch, and its fold is quadratic in cohort size, so computing it downstream would put a quadratic computation on the run's one serial thread. **The prior on the cohort's allele count is the run's own fitted frequency spectrum**, where production uses two GATK constants that its own comments say to revisit; a reviewer reproduced all fifteen cells of the spec's comparison table from an independent closed form. Library target 4,620 → **4,643** passing; release `ng::calling` 574 → **597**.
-- **⛦ The review found one Blocker and it was a live wrong answer, found three times over by three different oracles.** The fold zeroed its output buffer over the window it was about to write, and the *next* sample read `ploidy` entries further up — into slots `prepare_for_locus` fills with `NaN`. The `NaN` survived the rescaling and came out as `−∞`, so **the cohort's allele-count distribution was silently truncated to `0..=ploidy` at every cohort of two or more samples**. Against production on the same table and the same constants: 1 sample agrees to `1.3e-6` Phred, **63 samples give 46.3 against 733.7**. Against brute-force enumeration of every cohort-wide genotype assignment: 157 of 252 cases disagreed, and every one that agreed had a single sample. **The fix is one line**, `next.fill(0.0)`; with it all three oracles agree to within `1.2e-4` Phred.
+- **C3a done (the two qualities the loop must take while its inputs still exist):** a new module, `src/calling/quality/`. **The per-sample genotype quality** — how much of a sample's genotype probability did not go to the genotype that won — because the posterior row is one reused buffer and the earlier samples' are gone by the time the last is scored. **The site quality before its artifact correction** — *given every sample's reads, how unlikely is it that the cohort carries no copy of any non-reference allele?* — because it reads the whole `samples × genotypes` likelihood table, which is per-worker scratch, and its fold is quadratic in cohort size, so computing it downstream would put a quadratic computation on the run's one serial thread. **The prior on the cohort's allele count is the run's own fitted frequency spectrum**; a reviewer reproduced all fifteen cells of the spec's comparison table from an independent closed form. Library target 4,620 → **4,643** passing; release `calling` 574 → **597**.
+- **⛦ The review found one Blocker and it was a live wrong answer, found by more than one oracle.** The fold zeroed its output buffer over the window it was about to write, and the *next* sample read `ploidy` entries further up — into slots `prepare_for_locus` fills with `NaN`. The `NaN` survived the rescaling and came out as `−∞`, so **the cohort's allele-count distribution was silently truncated to `0..=ploidy` at every cohort of two or more samples**. Against brute-force enumeration of every cohort-wide genotype assignment: 157 of 252 cases disagreed, and every one that agreed had a single sample. **The fix is one line**, `next.fill(0.0)`; with it the oracles agree to within `1.2e-4` Phred.
 - **⚠ Three of my own measurements were measurements of that defect, and two of the module's tests were passing because of it.** The worst was not a number: a doc paragraph concluded the exact zero-term device never mattered and wrote *"a later step trimming it should know that the tests will not object"* — about the line that, on a working fold, is the difference between 4295.97 Phred and the ceiling at 50 samples. Of 33 claims re-derived, 25 were right and **all eight failures trace to the Blocker**.
-- **⛦ The same defect is latent in production** (`posterior_engine.rs:3624`), hidden on a freshly grown scratch because `Vec::resize` zeroes and reachable on a reused one — measured drift up to **0.59 Phred at 8 samples**. Production's only test of that path is single-sample, which is the one cohort size the defect cannot reach. **Production is frozen and this branch does not touch it**; recorded for its owner.
 - **⛦ Three mutations survived the first suite, and each was hidden by the same fixture habit.** The collapse striding by the ploidy instead of the allele count is invisible at a diploid biallelic locus, where both numbers are 2 — at three alleles it moves the quality 19.472 → 19.991. The running log scale is inert on any fixture whose rows peak at exactly zero, which all of them did. And the finite-above-ceiling cap was unreachable while the axis was truncated. All three now have a test, and the ceiling one needed 400 samples to reach about 34,690 Phred.
 - **⛦ A single `NaN` beside real probabilities was absorbed in silence.** The genotype quality checked the *winner*, and no comparison against a `NaN` is true, so a `NaN` never wins the fold: `[0.7, NaN, 0.1]` returned an ordinary-looking 5.2288 Phred. The check is now on the row's total, computed in the same walk — `NaN` survives addition — and it catches a row that does not sum to one as well.
 - **✅ Amended (owner's ruling): `spec/calling_quality.md` §5.1's justification.** It argued that the rejected `Π_s P(hom-ref)` formula grows with cohort size where the marginal stays bounded; measured on the shipped code **both grow in the same proportion**, and with thin samples the marginal grows faster (0.0019 → 831.88 Phred from 1 to 500 samples, against 1.77 → 885.11). **The growth is correct** — in a cohort of 501 thinly-covered samples, *nobody carries this* is a far stronger claim than in a cohort of one — so the section now gives the real objection instead: the product formula is not a normalised posterior at all, being a product of marginals over an event that is not their intersection, with no denominator. The old claim is kept in a dated correction box rather than deleted.
 - **✅ Settled and built (owner's ruling): the calling evidence view now carries the strand and read-position counts.** `GenericObservation` gains `forward_reads` and `placed_left_reads`, copied from the merge row `of_supported_allele` already reads — which is where `spec/calling_quality.md` §3.3 puts them, and the merge's `AlleleSupport` already had them. The view goes from 24 bytes to 32 against a merge row's 48; its width test pins that with the reason. **C3b needs no further decision on where the nine numbers come from.**
-- **C2 done (the loop stops, caps, and says which):** the passes became a loop. `run_frequency_loop` runs the prior-free pass, then seeded passes until the cohort's expected allele copies stop moving or the cap is reached, and reports `passes` and `converged` — both of which travel into the record, because a genotype from a loop that did not settle is a weaker claim than one that did and nothing downstream can tell them apart (`spec/calling_em_loop.md` §6). **The division by the cohort's chromosomes is the load-bearing half**: expected copies are a count and the threshold is a fraction, so a criterion on raw counts tightens by the cohort size across exactly the range this caller commits to. Library target 4,603 → **4,620** passing; release `ng::calling` 557 → **574**.
+- **C2 done (the loop stops, caps, and says which):** the passes became a loop. `run_frequency_loop` runs the prior-free pass, then seeded passes until the cohort's expected allele copies stop moving or the cap is reached, and reports `passes` and `converged` — both of which travel into the record, because a genotype from a loop that did not settle is a weaker claim than one that did and nothing downstream can tell them apart (`spec/calling_em_loop.md` §6). **The division by the cohort's chromosomes is the load-bearing half**: expected copies are a count and the threshold is a fraction, so a criterion on raw counts tightens by the cohort size across exactly the range this caller commits to. Library target 4,603 → **4,620** passing; release `calling` 557 → **574**.
 - **⛦ Three of four natural spellings of the convergence test falsely converge on pass 1, and the shipped one is the fourth.** `f64::max` returns the *other* argument when one side is `NaN`, and a `>` comparison against one is false — so `fold(0.0, f64::max)`, `fold(-inf, f64::max)` and a hand-written maximum all discard the scratch's `NaN` sentinel and hand back a delta below any threshold. `.all(|d| d < threshold)` returns false, which is what the scratch's own doc comment promises. All four are computed in one test against that exact row, so the reason lives in the suite rather than in a comment.
 - **⛦ The review found one Blocker and four Majors on code whose tests were all green, and two of them changed the shipped signature.** **`ploidy` was a second source of truth** beside the genotype table's own — the table is *built* for a `(ploidy, allele count)` shape — and nothing compared them: measured, a `ploidy` of 64 against a diploid table returns `passes: 2, converged: true` where the truth is `passes: 4`, identically in debug and release. The parameter is gone; the loop reads the table's. And **the stopping rule now takes a `Ploidy` and a sample count instead of their product**, which deletes a release-held check rather than testing it: an infinite or `NaN` chromosome count is no longer expressible.
 - **⛦ The `.abs()` in the stopping rule could not fail at any fixture in the file, and the reason is structural.** Expected copies sum to the cohort's chromosome total on every pass, so **at two alleles the two movements are exactly equal and opposite** and a signed comparison agrees with an absolute one whatever the numbers. Every C2 fixture was biallelic. From three alleles on the difference is the ordinary shape of a locus still moving — the reference falling by more than the threshold while every alternative rises by less, measured `[−0.0015, +0.0008, +0.0007]` against `1e-3`. **No C2 test ran the loop past two alleles at all**; one does now.
 - **⛦ The Blocker was the per-sample inbreeding pairing, untested because every fixture used one repeated coefficient.** Scoring every sample against `inbreeding_by_sample[0]` left the suite green, and it is not a no-op: on three samples with coefficients `[0.0, 0.5, 0.9]` it moves the cohort's copies of the alternative allele by **0.38 out of six chromosomes** — an allele-frequency shift of 0.064 — and the pass count from 3 to 4. The test that catches it trades two samples' coefficients *without moving the samples*, which is the one move a shared-coefficient implementation cannot tell from the original.
 - **⚠ Two sentences of mine were wrong, both explaining a mechanism rather than stating a number** — the claim that `usize` widens to `f64` exactly at every value (it does not: `9007199254740993usize as f64` is `9007199254740992.0`), and the claim that the hand-driven oracle's two sides share a threshold (one of them has no stopping rule at all, which is a better reason for the test than the one written). **Of 40 quantitative claims the diff made about its own work, 38 re-ran verbatim**; both failures were prose about *why*.
 - **⛦ All five release-held checks are reached by a test that fails under `--release` without them** — measured with all five downgraded together: `567 passed; 7 failed`. And the best outcome was the check that is now gone rather than tested, because retyping the chromosome count made the values it refused unrepresentable.
-- **Open, and left open deliberately: the pass cap still has a floor and no ceiling**, where production caps its analogue at 500. The cap is load-bearing in a way it was not before C1's review: `spec/calling_em_loop.md` §3 records that a seeded first pass costs about eight extra passes on a thin locus, so where the cap falls decides whether that delay becomes a lost call. Set it from the pass-count distribution — §12's fourth question.
+- **Open, and left open deliberately: the pass cap still has a floor and no ceiling**. The cap is load-bearing in a way it was not before C1's review: `spec/calling_em_loop.md` §3 records that a seeded first pass costs about eight extra passes on a thin locus, so where the cap falls decides whether that delay becomes a lost call. Set it from the pass-count distribution — §12's fourth question.
 - **C1 done (the flat first pass):** the first pass through a locus runs on the reads alone, because the leave-one-out prior is built from the cohort's expected allele copies and those are what a *previous* pass produces. **`PassPrior::{Flat, LeaveOneOut}` — a value, not a code path**, per `arch/calling_em_loop.md` §2.1's own rule, and the shape B1's review had already measured the need for: handing the seam a flat `GenotypePriorModel` does **not** give a prior-free pass, because step 1 still runs and reads buffers that hold the scratch's `NaN` sentinel. Library target 4,596 → **4,603** passing.
-- **⛦ The review's largest finding corrects this step's own justification: the trap is a delay, not a different answer.** Measured at 63 samples, alternative copies per sample: the seeded start sits at 0.151 at six passes, **0.633 at nine — where it flips to heterozygous** — and both starts reach **0.767332** by thirty. At three samples the flip is between passes 10 and 16, both reaching 0.549452. A rare-variant fixture (1, 3 or 6 carriers among 60 firmly homozygous-reference samples, advantage 1/2/4 nats, 50 passes) had the two starts agreeing in **every** cell. **So `spec/calling_em_loop.md` §3's claim that the seeded loop *"converges, and it converges to no-variant, having never let the reads speak"* was not reproduced on any fixture tried.** What survives untouched is the *mechanical* reason for the flat pass, which is what makes the variant necessary regardless. The delay is not nothing — production's comment records EM converging in 3 to 5 passes, so a locus needing 9 passes under one start and 1 under the other is a locus whose answer depends on where C2's cap falls. **⚑ Owner's call on §3.**
+- **⛦ The review's largest finding corrects this step's own justification: the trap is a delay, not a different answer.** Measured at 63 samples, alternative copies per sample: the seeded start sits at 0.151 at six passes, **0.633 at nine — where it flips to heterozygous** — and both starts reach **0.767332** by thirty. At three samples the flip is between passes 10 and 16, both reaching 0.549452. A rare-variant fixture (1, 3 or 6 carriers among 60 firmly homozygous-reference samples, advantage 1/2/4 nats, 50 passes) had the two starts agreeing in **every** cell. **So `spec/calling_em_loop.md` §3's claim that the seeded loop *"converges, and it converges to no-variant, having never let the reads speak"* was not reproduced on any fixture tried.** What survives untouched is the *mechanical* reason for the flat pass, which is what makes the variant necessary regardless. The delay is not nothing — a locus needing 9 passes under one start and 1 under the other is a locus whose answer depends on where C2's cap falls. **⚑ Owner's call on §3.**
 - **⛦ One defect: the flat arm bypassed two release-held shape checks.** `prior_row`'s width was `PriorRow::new`'s to check and `sample_expected_copies`' was `fill_sample_concentration`'s — and a flat pass enters neither. Measured on a 3-genotype locus given a 2-entry prior row: the seeded arm panics in release, the flat arm returns `[0.199, 0.399, 0.402]` against the right `[0.25, 0.5, 0.25]` **in silence**, the tail entry being the stale value the buffer arrived holding. Both checks lifted out of the `match`; two `should_panic` tests reach them on the flat arm.
 - **⚑ A design gap the spec does not answer: a sample with no reads votes for a 50% allele frequency on the flat pass.** `spec/calling_em_loop.md` §7 says such a sample *"scores every genotype alike, so the prior decides it alone — the right answer rather than a special case"*. **On a flat pass there is no prior to decide it**, so its posterior is the normalised genotype table and its expected copies come out as the average genotype — a full copy of the alternative at a biallelic locus, the same as a confident heterozygote and about 1,000× what the seeded start gives it. Measured at 63 samples: three silent samples put **3.0027** alternative copies into pass 1 against 0.0030 with none; six still leave 0.48 after two passes against 0.000001. **At three reads a position roughly one sample in twenty is silent at any given position, so this is the ordinary case rather than a corner.** Pinned by a test rather than changed. **Owner's call, against §3 and §7.**
 - **⚠ Two claims of mine the review found wrong, both about my own measurements.** The advantage×cohort-size window was reported **as though cohort size were not an axis** — the sweep's own output shows the two starts parting at 0.5 nats for 20 and 63 samples, where the comment said there was "nothing to lose" and that the effect bit near 1 nat "and nowhere else"; that is exactly `CLAUDE.md`'s named failure. And the rejected design's failure mode was wrong in both halves: it panics on *this function's own* release-held own-copies check, **in release as well as debug**, not on the cohort check and not silently — the bare-seed fall-through is real only when the cohort row alone is `NaN`.
@@ -3951,7 +834,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **The M-step costs 1 part in 134 of a pass**, measured: 0.40–0.50 ns an entry from 50 samples up, against an E-step at 342.9 ns a call at 6 alleles — 161 ns against 21,600 ns at the tomato cohort's 63 samples. No `panic_bounds_check` survives anywhere in it, the inner loop vectorises at four alleles and up, and the asserts cost about 0.8 ns at worst. **Nothing argues for removing any check**, which is what makes the untested-assert findings a testing matter rather than a cost one.
 - **Range, measured rather than reasoned:** against Neumaier compensated summation the worst relative error is **4 parts in 100 trillion at 1,000 samples** and 2 parts in a trillion at 100,000 — nine orders of magnitude under §6's `1e-3` threshold. One corner recorded so it is not rediscovered as a bug: one sample at 2.0 copies and 4,999 at `1e-17` returns `2.0` exactly, the 4,999 contributing nothing.
 - **B1 done (the E-step for one sample):** the first arithmetic in the loop. Given a sample's filled genotype-likelihood row, `score_one_sample` builds that sample's concentration from the locus seed plus what the **other** samples showed, fills its log-prior through the `GenotypePriorModel` seam, adds the likelihood and normalises into a posterior, and replaces the sample's expected allele copies with what that posterior implies. **No line of it branches on the cohort size** — at one sample the leave-one-out subtraction is a number minus itself, so the concentration comes back as the seed bit for bit by arithmetic (`spec/calling_em_loop.md` §7), and a new test runs a second pass to show the fixed point that follows. **Zero allocations, proved from the linked release binary rather than asserted**: the function's whole call inventory is one `fill_sample_concentration`, one vtable call, three `exp`, one `memset`, and cold panic paths — no allocator symbol, and no `panic_bounds_check` anywhere in it. Library target 4,528 → **4,540** passing.
-- **⛦ B1's review found three Blockers and one of them was a real bug in a check I had documented as doing the opposite.** `assert!(largest_score.is_finite())` **cannot see a `NaN`**: `largest_score` is assigned only through `score > largest_score`, and every comparison against a `NaN` is false, so the maximum is never itself a `NaN` — the check sees `±∞`. A `NaN` in a genotype that is not the most probable one passed straight through, and under `--release` the call returned with every posterior entry and every expected copy `NaN`, which the M-step would then sum into the cohort's copies and carry to every other sample's next prior. The shipped test that claimed to cover it filled the *whole* row with `NaN`, so what tripped the check was the `−∞` the maximum started from. **Three of the five agents found this independently.** Fixed by promoting the total-weight check to release, which is now the function's only `NaN` detector at one comparison per sample per pass. The other two Blockers were tests that could not fail: **`sample_scoring_buffers` ignoring its `sample` argument left the whole of `ng::calling` green** — the three-sample test whose `assert_ne!` is commented *"scored on sample 0's likelihood row"* passes under it, because the mutation also redirects the expected-copies row, which the scorer overwrites each call, so each sample gets a different leave-one-out term and therefore a different posterior from the same reads; and **the `posterior_row.len()` check was reached by no test in either profile**, while its removal returns copies `[1.333…, 0.667…]` against `[1.0, 1.0]` with *both* of the three-sample test's invariants still satisfied — the truncated row renormalises to one, and copies sum to the ploidy for **any** subset of genotypes whose posterior does.
+- **⛦ B1's review found three Blockers and one of them was a real bug in a check I had documented as doing the opposite.** `assert!(largest_score.is_finite())` **cannot see a `NaN`**: `largest_score` is assigned only through `score > largest_score`, and every comparison against a `NaN` is false, so the maximum is never itself a `NaN` — the check sees `±∞`. A `NaN` in a genotype that is not the most probable one passed straight through, and under `--release` the call returned with every posterior entry and every expected copy `NaN`, which the M-step would then sum into the cohort's copies and carry to every other sample's next prior. The shipped test that claimed to cover it filled the *whole* row with `NaN`, so what tripped the check was the `−∞` the maximum started from. **Three of the five agents found this independently.** Fixed by promoting the total-weight check to release, which is now the function's only `NaN` detector at one comparison per sample per pass. The other two Blockers were tests that could not fail: **`sample_scoring_buffers` ignoring its `sample` argument left the whole of `calling` green** — the three-sample test whose `assert_ne!` is commented *"scored on sample 0's likelihood row"* passes under it, because the mutation also redirects the expected-copies row, which the scorer overwrites each call, so each sample gets a different leave-one-out term and therefore a different posterior from the same reads; and **the `posterior_row.len()` check was reached by no test in either profile**, while its removal returns copies `[1.333…, 0.667…]` against `[1.0, 1.0]` with *both* of the three-sample test's invariants still satisfied — the truncated row renormalises to one, and copies sum to the ploidy for **any** subset of genotypes whose posterior does.
 - **⛦ The release-held checks now have the property the module's no-`Result` design rests on, and two of the original four did not.** Measured in one run with all six downgraded to `debug_assert` together, under `--release`: `5 passed; 6 failed` — six checks, six failing tests, one to one. A fifth check was added (the sample's own expected copies must be finite: without it the scratch's `NaN` sentinel is absorbed, because `f64::max` returns the *other* operand on a `NaN`, and the sample is scored against the bare seed with the cohort's evidence silently absent), and one went the other way to `debug_assert` because it cannot fire while every `GenotypeTableView` comes from `GenotypeTable::build`.
 - **⛦ Of 19 quantitative claims the diff makes about its own work, 17 re-ran verbatim** — the inverse of the pattern this project's earlier milestones produced, where fifteen wrong fixture numbers landed in one milestone. **Both failures were prose about *properties*, not numbers about fixtures**: *"the total is at least one, so the division cannot divide by zero"* (only if every score is finite, which the check did not establish) and *"a `NaN` … maximum"* (unreachable). Worth carrying: the standing advice says to check the author's own figures, and here the figures were right and the mechanisms were not.
 - **⛦ The `if copies != 0` guard now carries its measurement rather than being an unexplained optimisation.** 90 of the 126 copy-table entries are zero at six alleles; removing the skip cost 8–29% of the E-step's own arithmetic across twelve runs against a stub prior, and **0–4% against the prior that actually ships** — inside the run-to-run drift, because the marginalized Dirichlet prior is about 250–280 ns of a 380–405 ns call at six alleles. That is `spec/calling_em_loop.md` §2's *"the prior is not a small term … it is the part of the E-step that carries the expensive function"*, with a number against it for the first time.
@@ -3960,34 +843,34 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **A2 done (the seam, and every switch as a value):** `call_locus` is the one boundary every way of handling a cohort crosses, and `CallingLoopConfig` holds the frequency loop's two constants plus the two outer loops that ship switched off. **Their bodies are not built, and a run that asks for one is refused rather than quietly given the default** — the refusal says what accepting it would cost, because a harness that set the re-fit on and got the frozen loop's answers back would find the two arms agreeing exactly, which reads as a finding. **The refusal is not skippable:** `validate` is the only constructor of the type the seam takes. Library target 4,517 → **4,528** passing.
 - **A1 done (the three shared types + the missing genotype's carrier):** the two arguments the calling seam takes and the buffers a worker reuses at every locus, plus the enum that lets a locus say a sample has no call rather than inventing one for it. Every per-sample list is one entry per **run** sample in the run's sample order — the merge's own list holds only the covering samples, and joining the two positionally is the failure `spec/calling_em_loop.md` §5.0 names. Library target 4,488 → **4,517** passing.
 - **Open:**
-  - **✅ CI now holds this module's assertions to release** (2026-08-25). The four `#[should_panic]` tests in `src/ng/calling/likelihood/` that kept `cargo test --release --lib ng::calling` red were **not** checks anybody meant to hold in release: `GenericSampleEvidence::new`'s ordering scan is `debug_assert!` by a recorded decision (*"the check is linear in the rows and the property is the merge's to hold, not this type's to enforce at every call"*) and `fill_contaminant_allele_frequencies`' desync check is documented as debug-only in its own `# Panics`, mirroring `fill_sample_concentration`. So promoting them would have overturned two deliberate choices; instead the four tests took `#[cfg(debug_assertions)]` and the `_in_debug` name, **the convention `genotype_prior/` already uses**. `cargo test --release --lib ng::calling --all-features` is now `538 passed; 0 failed` and is a CI step. **Scoped on purpose:** crate-wide, `cargo test --release --lib` still has **8** failures of the same shape in `genetics`, `ng::alignment`, `sample_summary`, `ssr::cohort` and `var_calling` — two of them already named `_in_debug` and merely missing the `cfg` — all in the frozen caller or in modules ng may not edit, so widening the scope is their owners' work.
+  - **✅ CI now holds this module's assertions to release** (2026-08-25). The four `#[should_panic]` tests in `src/calling/likelihood/` that kept `cargo test --release --lib calling` red were **not** checks anybody meant to hold in release: `GenericSampleEvidence::new`'s ordering scan is `debug_assert!` by a recorded decision (*"the check is linear in the rows and the property is the merge's to hold, not this type's to enforce at every call"*) and `fill_contaminant_allele_frequencies`' desync check is documented as debug-only in its own `# Panics`, mirroring `fill_sample_concentration`. So promoting them would have overturned two deliberate choices; instead the four tests took `#[cfg(debug_assertions)]` and the `_in_debug` name, **the convention `genotype_prior/` already uses**. `cargo test --release --lib calling --all-features` is now `538 passed; 0 failed` and is a CI step.
   - **The measurement that was behind the old item, kept because it is what the gate is for** (`spec/calling_em_loop.md` §8). Measured during A1's review: downgrading all 16 of the module's release-held checks to `debug_assert!` and running under `--release` fails a test for 15 of them — but the only test command in `.github/workflows/ci.yml` is a debug run, where the two are indistinguishable. That is what the step above now closes.
   - **⚑ `arch/read_likelihoods.md` §2.1 describes a field that does not exist.** It puts `genotype_must_be_missing` on `GenericSampleEvidence`; the shipped type carries `supported`, `unmatched_q_sum` and `partials` only. A1 carries the ruling on `LocusEvidence` instead, because `spec/calling_em_loop.md` §5.0 sets such a sample aside **before** the first pass, so the read likelihood never sees it. Whether the architecture is amended is the owner's call.
   - **⚑ `arch/calling_em_loop.md` §2** still sketches `CallingScratch` with public fields and one `concentration: Vec<f64>`, and `SampleGenotypeCall` as a struct. The prior's real API needs three per-allele buffers at once and the missing genotype needs an enum; both divergences are recorded in A1's report §2. **B1 adds a third, and it is a consequence of A1's review rather than of the architecture**: with the fields private behind per-buffer accessors, each accessor borrows the whole scratch, so the four buffers one sample's E-step needs at once cannot be reached one at a time. `SampleScoringBuffers` hands the eight disjoint borrows out together, and `sample_scoring_buffers_mut` is the one place the flat sample-major tables are sliced. A reviewer wrote B2's M-step against the current API and got two `error[E0502]`, so **B2 needs a second bundle**; the rule belongs in arch §2 whenever it is next edited.
   - **⚑ Step 13's quality spec landed on `main` while A1 ran, and it puts two more outputs in this plan's C3** ([calling_quality.md](doc/devel/ng/spec/calling_quality.md), `0bcff1f9`; the plan's C3 and Scope are amended in place). Two of its three numbers cannot be computed downstream, because their inputs are this loop's own scratch: the per-sample **posterior row** is one reused buffer, so the earlier samples' posteriors are gone once the last is scored, and the **genotype-likelihood table** is per-worker and overwritten at the next locus. So C3 takes the genotype quality per sample as it scores, and the site quality's baseline plus a nine-number artifact summary once the loop stops; only the correction and its output stage are elsewhere. `LocusInference` gains two fields with it. **A1 needs nothing changed for this** — §3.1 and §3.2 are written against the buffers it built, and §4 confirms its missing-genotype variant: such a sample's `GQ` is *absent*, not zero.
   - **One name in that spec no longer matches the code.** §3.2 calls the table `CallingScratch.lg_table`; A1's review renamed it `genotype_likelihoods`, because `Lg` is spec notation that appears nowhere else in `src/` and because the doc comments beside it called it the *read* likelihood, which the read-likelihood spec reserves for one read against one allele. Same buffer, and worth one word in that spec when someone next edits it.
-  - **`main` is merged in at `88608ecc`, carrying the finished read-likelihood plan** (2026-08-25, on the owner's word that it had landed). Clean merge, no conflicts; library target 4,540 → **4,584** passing and `cargo clippy --all-targets --all-features -- -D warnings` still exits 0. **Two of this plan's blockers move because of it**: `censored_emission` is implemented on both shipped emission models, so the STR read-likelihood row exists and E3's repeat-tract half is no longer blocked *on the row* — only on the unwritten STR candidate path, which stays fixture-supplied; and `src/ng/calling/likelihood/` is no longer another live branch's, its plan being done.
-  - **⚠ The merge does not clear the release gate, and the four failures are unchanged.** `cargo test --release --lib ng::calling` is `538 passed; 4 failed` at `88608ecc`, failing the same four `#[should_panic]` tests in `src/ng/calling/likelihood/mod.rs` that were failing at `5843f60a` — they target `debug_assert`s, so under `--release` nothing panics. **The fix is now reachable** (that module's plan is complete), and it is a choice between promoting those four checks to `assert!` and marking the tests `#[cfg(debug_assertions)]`; it has not been taken here, because it is the other plan's code and the two answers say different things about whether those are release-held invariants. Until it is, no CI step can hold this module's release assertions — which is what `spec/calling_em_loop.md` §8's whole no-`Result` design rests on.
+  - **`main` is merged in at `88608ecc`, carrying the finished read-likelihood plan** (2026-08-25, on the owner's word that it had landed). Clean merge, no conflicts; library target 4,540 → **4,584** passing and `cargo clippy --all-targets --all-features -- -D warnings` still exits 0. **Two of this plan's blockers move because of it**: `censored_emission` is implemented on both shipped emission models, so the STR read-likelihood row exists and E3's repeat-tract half is no longer blocked *on the row* — only on the unwritten STR candidate path, which stays fixture-supplied; and `src/calling/likelihood/` is no longer another live branch's, its plan being done.
+  - **⚠ The merge does not clear the release gate, and the four failures are unchanged.** `cargo test --release --lib calling` is `538 passed; 4 failed` at `88608ecc`, failing the same four `#[should_panic]` tests in `src/calling/likelihood/mod.rs` that were failing at `5843f60a` — they target `debug_assert`s, so under `--release` nothing panics. **The fix is now reachable** (that module's plan is complete), and it is a choice between promoting those four checks to `assert!` and marking the tests `#[cfg(debug_assertions)]`; it has not been taken here, because it is the other plan's code and the two answers say different things about whether those are release-held invariants. Until it is, no CI step can hold this module's release assertions — which is what `spec/calling_em_loop.md` §8's whole no-`Result` design rests on.
   - **The compiler pin is taken** — merged from `main` (`54a0fd96`, `f3c8c797`) after A1's commit. At 1.98 this branch is green on the **wider** gate too: `cargo clippy --all-targets --all-features -- -D warnings` exits 0.
   - **⚑ `arch/calling_em_loop.md` §3.2 needs an error channel the seam does not have.** It requires calling arms B and C to *reject* a non-zero inbreeding coefficient rather than ignore it — *"a silently dropped `F` on a selfing panel is the failure this is guarding"* — and `call_locus` returns no `Result`. Those arms are [calling_bakeoffs.md](doc/devel/ng/impl_plan/calling_bakeoffs.md)'s; settle it there before either is written, because it changes the seam every arm shares.
-  - **`max_passes` has a floor and no ceiling**, where production caps its analogue at 500. Left open deliberately: the consequence is a slow locus rather than a wrong one, and picking a number now would give the bound less warrant than the value it bounds. Set it from the pass-count distribution, which is `spec/calling_em_loop.md` §12's fourth question.
+  - **`max_passes` has a floor and no ceiling.** Left open deliberately: the consequence is a slow locus rather than a wrong one, and picking a number now would give the bound less warrant than the value it bounds. Set it from the pass-count distribution, which is `spec/calling_em_loop.md` §12's fourth question.
   - **✅ Closed by C2: the convergence-delta spelling.** The warning was right and the shipped rule is `.all(|d| d < threshold)`; three fold spellings would have reported a locus settled on pass 1 against a row no pass had written. **One correction to the warning itself:** `run_frequency_loop` never hands that row over — the prior-free initialisation's M-step writes finite copies before the first swap — so the guarantee protects C3's final pass and D1's outer rounds rather than the loop that first uses it. Also as predicted, C2 needed no new borrow bundle.
   - **Follow-up (later steps):** `StratumFits` wants a named empty constructor the way `ContaminationMixture::uncontaminated` has one, in `parameter_estimation/joint/`; the prune must return its remapping, since `LocusInference::new` can only catch an out-of-range allele id and not one that stays in range after a renumber; and E1 owns the covering-samples-to-run-order conversion that `spec/calling_em_loop.md` §5.0 names as the most dangerous join in the design.
 
 #### Candidate alleles (step 6) — narrowing the merge's table to what a locus is called over
-- **Status:** **Milestone A complete, at Checkpoint A** — A1 and A2 implemented, reviewed and fixes applied. Branch `ng-candidate-alleles`, worktree `../pop_var_caller-candidate-alleles`, from `main` at `3edab4cd`. Runs beside `ng-calling-loop` and `ng-calling-read-likelihoods`; conflict surface is one `pub mod` line in [src/ng/calling/mod.rs](src/ng/calling/mod.rs).
+- **Status:** **Milestone A complete, at Checkpoint A** — A1 and A2 implemented, reviewed and fixes applied. Branch `ng-candidate-alleles`, worktree `../pop_var_caller-candidate-alleles`, from `main` at `3edab4cd`. Runs beside `ng-calling-loop` and `ng-calling-read-likelihoods`; conflict surface is one `pub mod` line in [src/calling/mod.rs](src/calling/mod.rs).
 - **Plan:** [candidate_alleles.md](doc/devel/ng/impl_plan/candidate_alleles.md) (A–D, 8 steps, 4 checkpoints); the repeat-tract path is [candidate_alleles_ssr.md](doc/devel/ng/impl_plan/candidate_alleles_ssr.md), a later session. **Spec:** [candidate_alleles.md](doc/devel/ng/spec/candidate_alleles.md); **Arch:** [candidate_alleles.md](doc/devel/ng/arch/candidate_alleles.md).
-- **Code:** [src/ng/calling/allele_candidates/](src/ng/calling/allele_candidates/) — `mod.rs` with `CandidateSelectionConfig`, `DEFAULT_ALLELE_SUPPORT` and `DEFAULT_MAX_CANDIDATE_ALLELES`; [src/ng/run/cohort_merge/mod.rs](src/ng/run/cohort_merge/mod.rs) — `MinAltReadShare::new_const` and the shared `is_a_fraction_of_one`, plus `MinAltReads::reached_by`'s widened doc. Reuse targets, all called as they are: `MinAltReads`, `CandidateAlleles`, `SampleSupport::pooled_support_for`, `AlleleSupport::q_sum`.
+- **Code:** [src/calling/allele_candidates/](src/calling/allele_candidates/) — `mod.rs` with `CandidateSelectionConfig`, `DEFAULT_ALLELE_SUPPORT` and `DEFAULT_MAX_CANDIDATE_ALLELES`; [src/run/cohort_merge/mod.rs](src/run/cohort_merge/mod.rs) — `MinAltReadShare::new_const` and the shared `is_a_fraction_of_one`, plus `MinAltReads::reached_by`'s widened doc. Reuse targets, all called as they are: `MinAltReads`, `CandidateAlleles`, `SampleSupport::pooled_support_for`, `AlleleSupport::q_sum`.
 - **Impl reports:** [A1](doc/devel/reports/implementations/ng_candidate_alleles_a1_2026-08-24.md), [A2](doc/devel/reports/implementations/ng_candidate_alleles_a2_2026-08-24.md).
 - **Latest reviews:** [A1](doc/devel/reports/reviews/ng_candidate_alleles_a1_2026-08-24.md) — Approve-with-changes, 1 Blocker / 7 Majors / 23 Minors as filed — **three distinct defects** once the convergent filings are merged, since three agents found the same two independently; 18 mutations run and 12 survivors; five category agents in isolated worktrees. [A2](doc/devel/reports/reviews/ng_candidate_alleles_a2_2026-08-24.md) — Approve-with-changes, 1 Blocker / 6 Majors / 17 Minors as filed, **four distinct defects**; four agents, one of them a **design-fidelity** pass written for this step that proved both its findings by writing code rather than prose. Audit trails in the gitignored `tmp/review_2026-08-24_candidate-alleles-a{1,2}/`.
 - **A2 done (the output vocabulary) — and the defect that would have surfaced on another branch months later.** `SelectionVerdict`, `UnmatchedSupport`, `AlleleRemap`, `LocusSelection`, `SelectionScratch` and the private `AlleleSummary`. **The remapping accepted two merge alleles onto one candidate id** — both indices in range, each written once, and no bounds check able to see it, because the id was not checked at all. The evidence hand-off re-keys the merge's rows through that map, so two different sequences' reads would land on one candidate and the read likelihood would score two alleles as one, with an ordinary-looking genotype coming out. Closed by carrying the admission count and asserting the id is the next dense one — which relates the id to nothing but how many were admitted before it, so it holds for the repeat-tract path too, where alleles are admitted in ladder-rung rather than table order. **And `reset_for` cleared its buffers by name, so adding a third would have compiled** while carrying the previous locus's values into the next — the one failure that method exists to prevent, and `arch/candidate_alleles_ssr.md` §5 commits to adding exactly such a buffer; destructuring makes it a compile error at the line that must handle it. **The Blocker was that no test built a `LocusSelection` at all**, so deleting the `- 1` from the alternative count passed all 13 tests: every answer moves by one, including 0 → 1 at a locus that selected down to the reference alone, which is 27.4% of tomato loci, and the genotype prior divides its concentration by that number. **The design-fidelity agent's most useful output was code** — a third scratch field that compiled when it should not have, and a complete `generic.rs` covering plan steps B1 through C3, which is what showed the vocabulary is sufficient before any of it was written.
 - **A1 done (the rule's two constants) — and the review found that nothing pinned the one value the fold will actually read.** All six of the step's original tests read `DEFAULT_ALLELE_SUPPORT` directly; none read `CandidateSelectionConfig::DEFAULT.support`. Writing `MinAltReads::DEFAULT` there instead — one token, both names in scope in the same file, same type, same floor — left every test green while the share dropped from 5 in 100 to the merge's 2 in 100. By spec §3.3's own GIAB measurement that is **2,308 alternatives kept against 5,596** on the trio at 300×, feeding a genotype prior that divides its concentration by the alternative count. **Second, `new_const`'s lower bound was untested and a negative share does not crash — it deletes half the rule**: `required_of` casts a negative product to `u32`, which saturates to 0, so `max(floor, 0)` is the floor at every depth and `required_of(300)` answers 2 where it should answer 15. The range check now lives in one private `const fn` both constructors call, and its tests moved beside the type they guard. **Third, the test claimed to be discriminating was half vacuous** — its equality arm stopped at 20 compared reads, where the floor still decides for every share up to 10 in 100, so doubling the share passed it, one read short of the fixture that would have caught it; it now carries 40 and 41, the exact crossover. **Every one of the six findings that mattered came from a mutation, none from reading.** Also: four measured figures were quoted under conditions they were not measured under (of 19 checked against the spec), and `cargo doc` — a `deny`-level lint in this crate — was not in the step's gate at all.
 - **Open:**
-  - **Checkpoint A's nine questions — all ruled on by the owner, 2026-08-24, and applied.** Renames: `support` → `min_allele_support` and its constant to `DEFAULT_MIN_ALLELE_SUPPORT`; `new_const` → `new_or_panic`; `SelectionScratch::ranked` → `ranked_table_indices`. Shapes: `max_candidate_alleles` is now a validated `MaxCandidateAlleles` newtype refusing anything below two, and `LocusSelection`'s fields are private behind `new` and four accessors, so the parallelism invariant cannot be written around. Corrections: arch §2.4 and plan step B2 no longer ask `AlleleSummary` for the leftover's reads and mass; the spec's `ng_step_interfaces.md` §3 citation is now §2. **And the GATK lineage was wrong and is fixed in both documents** — GATK's `--max-alternate-alleles` defaults to six *alternates* (`DEFAULT_MAX_ALTERNATE_ALLELES = 6`, "Maximum number of alternate alleles to genotype"), so GATK genotypes over seven alleles where ng genotypes over six; production's own comment equates the two and ng had inherited that. **ng's cap is the tighter by one allele — 21 genotypes against 28 at diploid.** The one question answered *against* a change: the merge-table index stays a bare `usize` on `AlleleRemap`'s surface, because the two index spaces are already different *types* — a candidate is an `AlleleId`, a merge index a `usize` — and the upstream producer `SupportedAllele::allele` is a bare `usize` too, so a newtype here alone would add a wrap at every call site to guard a confusion the compiler already refuses.
+  - **Checkpoint A's nine questions — all ruled on by the owner, 2026-08-24, and applied.** Renames: `support` → `min_allele_support` and its constant to `DEFAULT_MIN_ALLELE_SUPPORT`; `new_const` → `new_or_panic`; `SelectionScratch::ranked` → `ranked_table_indices`. Shapes: `max_candidate_alleles` is now a validated `MaxCandidateAlleles` newtype refusing anything below two, and `LocusSelection`'s fields are private behind `new` and four accessors, so the parallelism invariant cannot be written around. Corrections: arch §2.4 and plan step B2 no longer ask `AlleleSummary` for the leftover's reads and mass; the spec's `ng_step_interfaces.md` §3 citation is now §2. **And the GATK lineage was wrong and is fixed in both documents** — GATK's `--max-alternate-alleles` defaults to six *alternates* (`DEFAULT_MAX_ALTERNATE_ALLELES = 6`, "Maximum number of alternate alleles to genotype"), so GATK genotypes over seven alleles where ng genotypes over six. **ng's cap is the tighter by one allele — 21 genotypes against 28 at diploid.** The one question answered *against* a change: the merge-table index stays a bare `usize` on `AlleleRemap`'s surface, because the two index spaces are already different *types* — a candidate is an `AlleleId`, a merge index a `usize` — and the upstream producer `SupportedAllele::allele` is a bare `usize` too, so a newtype here alone would add a wrap at every call site to guard a confusion the compiler already refuses.
   - **⚑ Two owner decisions taken 2026-08-24, design recorded and only the shared type built.** **(1) A sample that loses an allele it had earned is emitted as missing, not given an invented genotype.** Keeping the cut alleles' error mass was not enough: the pooled mass is the same under every genotype and cancels, so the sample was still scored — confidently — against a set not containing what it carries, and a genotype came out. `UnmatchedSupport` now carries `earned_reads_cut_by_the_cap` beside the pool, and `genotype_must_be_missing()`. **The condition is the cap and not the bar, and that distinction is the whole rule**: the bar drops 13,166 of 15,474 alternatives on the trio at 300×, nearly all sequencing error, so a rule keyed on "has reads in the pool" would no-call almost every sample at almost every locus; the cap binds at 23 of 53,935 tomato loci and none of the trio's. Recorded in spec §4.1/§5, arch §2.3, plan C3 (which fills it, and must ask the bar again per `(sample, allele)` over the cut alleles), `arch/read_likelihoods.md` §2.1 (`GenericSampleEvidence` gains the flag) and `spec/calling_em_loop.md` §5.0/§9. **(2) The repeat-tract cap is 32, against the ordinary path's six** — a tract carries more real alleles than a SNP does, and HipSTR has no allele limit at all, admitting everything that clears a per-sample test and abandoning the locus only above 1,000 haplotypes. 32 costs 528 diploid genotypes a sample a locus against six's 21. Recorded in `spec/candidate_alleles_ssr.md` Q2 (now settled) and `arch/candidate_alleles_ssr.md`'s new `DEFAULT_MAX_CANDIDATE_ALLELES_SSR`; **the constant itself lands with the repeat-tract plan**, which owns `ssr.rs`.
   - **⚑ `OPEN:` does an uncallable sample also drop out of the loop's M-step?** Raised in `spec/calling_em_loop.md` §5.0. Its posterior is not merely uncertain — it is over the wrong allele set, and it will put its mass on whichever surviving genotype its reads mismatch least, usually the homozygous reference, so including it pulls the locus's frequencies toward the reference by exactly the samples carrying the rarest alleles. **Leaning: exclude it.** Nothing can measure it until selection is wired into the merge's builder, which is `calling_loop.md`'s work.
   - **⚑ `OPEN:` should the SNP/indel share move from 5 in 100 to 10?** Raised by the owner 2026-08-24 while comparing with HipSTR's per-sample test (2 reads **and** 20%). **Not applied, because 5% is measured free and 10% is measured to cost:** against the GIAB truth set, 2-or-5% loses 1 true allele at 30× and 2 at 300×, where 2-or-10% loses 2 and 4 (spec §3.3). **Recommendation: 10% on the repeat-tract path only, 5% kept on the SNP/indel path.** One constant either way.
-  - **⚑ The cap of six is shared with the repeat-tract path, and a tract is where it is most likely to bind — owner's decision, deferred to a measurement.** `SsrSelectionConfig` embeds `CandidateSelectionConfig` as `shared`, so the *value* is already settable per path with no code change; both default to six today. `candidate_alleles_ssr.md` §9 says plainly that a tract "genuinely carries more alleles than a SNP does", and its Q2 now carries the one piece of evidence available before the merge's tract field exists: **HipSTR allows 1,000 haplotypes** (`MAX_TOTAL_HAPLOTYPES`) and **abandons the locus** above that, and because its haplotype is left-flank × repeat block × right-flank with at most 4 options a flank, the repeat block's own budget is **1,000 tract sequences where both flanks are fixed, down to 62 where both vary** — so ng's five alternatives are **12 to 200 times tighter**, and about four times tighter than production's 24. Both of those caps are set never to bind and refuse the locus when they do, which is the behaviour spec §4.1 rejects, so they bound the question rather than answering it. **What settles it:** the tomato panel's tracts through the merge, histogramming candidates per tract at 1, 4, 16 and 63 accessions.
+  - **⚑ The cap of six is shared with the repeat-tract path, and a tract is where it is most likely to bind — owner's decision, deferred to a measurement.** `SsrSelectionConfig` embeds `CandidateSelectionConfig` as `shared`, so the *value* is already settable per path with no code change; both default to six today. `candidate_alleles_ssr.md` §9 says plainly that a tract "genuinely carries more alleles than a SNP does", and its Q2 now carries the one piece of evidence available before the merge's tract field exists: **HipSTR allows 1,000 haplotypes** (`MAX_TOTAL_HAPLOTYPES`) and **abandons the locus** above that, and because its haplotype is left-flank × repeat block × right-flank with at most 4 options a flank, the repeat block's own budget is **1,000 tract sequences where both flanks are fixed, down to 62 where both vary** — so ng's five alternatives are **12 to 200 times tighter**. HipSTR's cap is set never to bind and refuses the locus when it does, which is the behaviour spec §4.1 rejects, so it bounds the question rather than answering it. **What settles it:** the tomato panel's tracts through the merge, histogramming candidates per tract at 1, 4, 16 and 63 accessions.
   - **Three obligations handed forward to the steps that can discharge them**, each recorded in the doc comment of the thing that creates it: `select_generic` must assert a cap of at least 2 (C2), until the cap's shape question is settled; `Truncated { dropped: u16 }` over an uncapped `usize` merge table needs a saturating conversion (C2); and spec §8 names three caller bugs that must assert, of which Milestone A lands one — a non-finite `q_sum` and a sample with rows but no reads belong to B1 and C3.
   - **The two parallelism invariants are documented and half-enforced.** `AlleleRemap`'s is structural — the length is fixed at construction and both accessors assert in release. `LocusSelection`'s is checked in its constructor, which is what `select_generic` and `select_ssr` will call, but the fields remain `pub` per arch §2.4 so a struct literal can still bypass it.
   - **⚠ `cargo clippy --all-targets --all-features` is red on `main`** with 14 errors in five benches and examples, none in `src/` and none touched by this plan. This step is gated on `--lib --tests` plus `cargo doc --lib --no-deps`.
@@ -3997,9 +880,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 #### Candidate alleles at a repeat tract (step 6, STR path) — the ladder, nomination, admission
 - **Status:** fixes-applied — **Milestones B, C and D complete, at Checkpoint D**: `select_ssr`
   is built and proven on hand-built loci, including its `NotPeriodic` and reference-only outcomes.
-  What remains in this plan is Milestone E, the differential on real data — production's candidate
-  set reproduced on tomato with its three replaced rules switched in, and the measured HG002
-  numbers reproduced with them switched out. Branch
+  What remains in this plan is Milestone E, the differential on real data. Branch
   `ng-ssr-calling-loop`, worktree `../pop_var_caller-ssr-calling-loop`, from `main` at `55f9c7de`.
   Runs beside `ng-ssr-observations`, which owns the merge, the walker and the run report; this
   branch owns `calling/` and edits none of those.
@@ -4007,11 +888,11 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   its Milestones A and B execute [candidate_alleles_ssr.md](doc/devel/ng/impl_plan/candidate_alleles_ssr.md)
   B–E, whose checkboxes are the live record. **Spec:** [candidate_alleles_ssr.md](doc/devel/ng/spec/candidate_alleles_ssr.md);
   **Arch:** [candidate_alleles_ssr.md](doc/devel/ng/arch/candidate_alleles_ssr.md).
-- **Code:** [src/ng/calling/allele_candidates/ssr.rs](src/ng/calling/allele_candidates/ssr.rs) —
+- **Code:** [src/calling/allele_candidates/ssr.rs](src/calling/allele_candidates/ssr.rs) —
   `RepeatLadder` and `build_ladder`; `SsrSelectionConfig`, `MaxOffGridShare`,
   `DEFAULT_MAX_CANDIDATE_ALLELES_SSR` and `fill_sample_reads_per_rung`; the `ladder` and
   `sample_reads_per_rung` buffers on the shared `SelectionScratch` in
-  [mod.rs](src/ng/calling/allele_candidates/mod.rs). 25 tests; the module's filter goes
+  [mod.rs](src/calling/allele_candidates/mod.rs). 25 tests; the module's filter goes
   93 → 118 passing.
 - **Impl reports:** [B1](doc/devel/reports/implementations/ng_ssr_selection_b1_2026-09-02.md),
   [B2](doc/devel/reports/implementations/ng_ssr_selection_b2_2026-09-02.md),
@@ -4029,8 +910,8 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   the period; measured through the catalog's own `minimal_trim` and `recompute_purity`, 49 bases of
   an `AT` repeat with one extra base 40 bases in scores **purity 0.816** and clears the 0.8 floor.
   Every read at that tract's reference length is off a zero-anchored grid, so the locus would be
-  refused and never called. The reference length was preferred to production's anchor — the
-  commonest observed length — because it is a property of the locus rather than of the reads, so it
+  refused and never called. The reference length was preferred to the
+  commonest observed length because it is a property of the locus rather than of the reads, so it
   cannot move with depth, and because it is the quantity the genotype prior was re-indexed onto on
   2026-08-27. **Reverting to the documents' rule now fails a test**, which is what makes the
   amendment enforceable.
@@ -4041,11 +922,9 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   returned field would have no reader anywhere. The ladder still computes it, so restoring it is
   one line, and the architecture's own open question — whether selection should carry the mode at
   all — is left open rather than answered by shipping a field nobody reads.
-- **C1 done (nomination, per sample) — and the test spec §13 calls the one production cannot pass
-  is green.** A sample with 150 reads at ten repeats and 150 at eleven promotes **both**: nothing
-  here reads a neighbour, where production nominates a length only if its reads exceed both
-  neighbours by more than three and so resolves nothing at a heterozygote whose copies differ by
-  one repeat. Two range properties are asserted rather than argued: the same sample alone and
+- **C1 done (nomination, per sample) — and spec §13's adjacent-length heterozygote test is
+  green.** A sample with 150 reads at ten repeats and 150 at eleven promotes **both**: nothing
+  here reads a neighbour. Two range properties are asserted rather than argued: the same sample alone and
   beside a neighbour carrying 400 reads at a third length nominates the same two rungs, because no
   term of the bar reads the cohort; and a sample whose reads all stopped inside the tract nominates
   nothing without dividing by its zero denominator, because the floor is tested first by integer
@@ -4055,7 +934,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   every under-resolved sample of every tract; firing the rescue on a sample that did resolve its
   ploidy would widen every locus by up to two rungs a sample. Both mutations were run and both are
   caught. The occupancy test is `a rung exists at that count **and** its cohort reads are
-  non-zero`, which is where B1's pinned difference from production matters: the merge interns the
+  non-zero`, because the merge interns the
   reference tract whether or not a read landed on it. The cohort's set is the **union** across
   samples, not a vote — an allele one accession of sixty-three carries is still an allele.
 - **B2 done (the settings and the histogram) — and one departure that moves a number Milestone E
@@ -4080,10 +959,10 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     shape that survives the merge fix. What waits for the parallel plan's Milestone A is the call
     site — `select_ssr` reading the motif off `CohortObservation::kind` — so the selection work
     can run to its own Checkpoint D before that field exists.
-  - **⚑ `rung_of_repeat_count` is not production's `occupied` test, by one rung.** The merge
+  - **⚑ `rung_of_repeat_count` can return a rung that no read reached.** The merge
     interns the reference at index 0 whether or not a read landed on it, so the reference's rung
-    can exist carrying zero reads, where production's rescue asks `cohort_support(length) > 0`.
-    **C2, which ports the `±1` rescue, must ask this accessor together with `cohort_reads_at`**;
+    can exist carrying zero reads.
+    **C2's `±1` rescue must ask this accessor together with `cohort_reads_at`**;
     `the_reference_rung_exists_with_no_reads_on_it` pins the difference.
   - **The `(repeat count, table index)` sort key is a determinism guarantee no fixture can
     check.** It makes the order total so it cannot depend on the sort's stability, which is what
@@ -4143,7 +1022,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **⚑ The command surface's, not this file's — asked and answered.** The file records no run date, no
   caller version and no command line, so two copies in a directory are told apart only by their
   names. What a run stamps into its own output is a property of the invocation, and spec §11 already
-  puts the neighbouring question (`dump-parameters`) with the rest of `pop_var_caller_exp`'s
+  puts the neighbouring question (`dump-parameters`) with the rest of `pop_var_caller`'s
   subcommands.
 - **Two corrections to the record.** A design-review number did not survive checking: it refuted the
   header's *"eleven lines of prose"* correctly (it is **39**, already fixed in the source before the
@@ -4156,7 +1035,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   and which the new path round-trips and the old one did not.
 - **Was: fixes-applied, Milestone E complete — at Checkpoint E, awaiting review.** **A run that fitted nothing and was handed no file assembles the parameters it scores with** (`RunParameters::of_defaults`), writes them to a file, reads that file back as the same run, and **says which of its numbers it guessed** — in its report and in the file's own prose. Milestone F is next: **F1 is where all three of spec §7's sources meet, and only two of them work today.** **Was: E1 and E2 committed.** **Every number a run takes from the binary is now a named constant with its origin beside it, and the whole set is written down in one place** (`parameters_file/defaults.rs`) — seven rows rather than spec §8's four, because `to_toml.rs`'s own `origins` module already carried the substitution rate, the slippage numbers and the inbreeding coefficient, and the last of those had no default anywhere until the owner's ruling of 2026-08-31 gave it one. **⚑ E1 also added a `validate` rung and removed it again**: a `defaulted` base-quality multiplier is not the compiled-in 1.0 the way the outlier weight is 0.01, because the multiplier's warrant is copied from the *error rate* it was built from — so the rung refused a file this caller had just written. **Both questions that raised are now ruled** (below): a library nothing could be fitted for keeps being charged the pre-pass's stated 0.001 rather than taken at its reported quality, and **spec §5's third row is the sentence to correct**; and a defaults run's inbreeding coefficient is **0**, settable for the whole run or per sample. E2 is next and is unblocked. **Was: fixes-applied, Milestone D complete — at Checkpoint D, awaiting review.** The two derived bindings of spec §3.1 are now produced from the run's own inputs rather than handed over as text: `CensusIdentity::of` mints one digested term per value the census refuses to pool across, in `first_disagreement`'s own words and order, and `of_run` takes the run's `ReferenceDigest` and spells it. **A file fitted from other inputs is refused naming a key of the file and both values; one fitted from another census of this cohort is used, and every number in it says it was handed over.** Milestone E is next, and **three questions below are the owner's before it starts** — the largest being that this milestone's own door cannot be called by direct mode, which has no census. **Was: fixes-applied, Milestone C complete — at Checkpoint C, awaiting review.** C1 through C5 are committed, with the key revision's last two names, the outlier weight's wiring and the two re-worded parser messages. **A file a run wrote reads back into the parameters that wrote it**, every float comes back the same double, and the five states of spec §5 each change an answer when collapsed. **Milestone D is next and two of its questions are open below.** Merged from `main` on 2026-08-30 (`077d38f3`), bringing the psp store and the quality numbers: 5,474 lib tests, 0 failed. **Was: fixes-applied, in Milestone C** — Milestones A and B complete, and C1 implemented, reviewed and fixes applied. **A file a run wrote reads back into the shape that wrote it, and a malformed one fails naming its line.** **Six questions are open and are the owner's** (below). Branch `ng-parameters-file`, from `main` at `a6e8472b`. **On direct mode's critical path**: [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §2 cannot run without it.
 - **Plan:** [parameters_file.md](doc/devel/ng/impl_plan/parameters_file.md) (A–F, 15 steps, 6 checkpoints); **Spec:** [parameters_file.md](doc/devel/ng/spec/parameters_file.md). **No architecture document, by the owner's decision of 2026-08-28** — the TOML key names are the coder's proposal and are revised against a file a fitted run produced, not on paper.
-- **Code:** [src/ng/calling/parameters_file/](src/ng/calling/parameters_file/) — the file's shape, 26 structs and 8 enums, plus `testdata/every_shape.toml`, the golden copy every key is pinned against; `from_run_parameters.rs`, the projection from a run's assembled parameters, `to_toml.rs`, the hand-written writer with its own golden file `testdata/every_shape_as_written.toml`, and `from_toml.rs`, the reader and the line a failure sits on. `bindings.rs` derives the two bindings that are not names — `CensusIdentity::of` over a census's `RecordingTerms`, and the one hex spelling either binding's text is produced by. `ParametersFileError` lives in `mod.rs` rather than in the reader, because C2's `validate` and D2's bindings add variants from two other files. Reuse targets, unchanged: `RunParameters`, `Estimate<T>`, `Provenance`, `StratumFits`, the `toml` crate. B1 added seven read-only accessors to `run_parameters.rs` and three iterators to `stratum_fits.rs`, all of them so a writer can walk what a lookup can only answer one question about.
+- **Code:** [src/calling/parameters_file/](src/calling/parameters_file/) — the file's shape, 26 structs and 8 enums, plus `testdata/every_shape.toml`, the golden copy every key is pinned against; `from_run_parameters.rs`, the projection from a run's assembled parameters, `to_toml.rs`, the hand-written writer with its own golden file `testdata/every_shape_as_written.toml`, and `from_toml.rs`, the reader and the line a failure sits on. `bindings.rs` derives the two bindings that are not names — `CensusIdentity::of` over a census's `RecordingTerms`, and the one hex spelling either binding's text is produced by. `ParametersFileError` lives in `mod.rs` rather than in the reader, because C2's `validate` and D2's bindings add variants from two other files. Reuse targets, unchanged: `RunParameters`, `Estimate<T>`, `Provenance`, `StratumFits`, the `toml` crate. B1 added seven read-only accessors to `run_parameters.rs` and three iterators to `stratum_fits.rs`, all of them so a writer can walk what a lookup can only answer one question about.
 - **Impl reports:** [E3](doc/devel/reports/implementations/ng_parameters_file_e3_2026-08-31.md), [E2](doc/devel/reports/implementations/ng_parameters_file_e2_2026-08-31.md), [E1](doc/devel/reports/implementations/ng_parameters_file_e1_2026-08-31.md), [D3](doc/devel/reports/implementations/ng_parameters_file_d3_2026-08-31.md), [the bottom rung's warrant](doc/devel/reports/implementations/ng_parameters_file_bottom_rung_warrant_2026-08-30.md), [D2](doc/devel/reports/implementations/ng_parameters_file_d2_2026-08-30.md), [D1](doc/devel/reports/implementations/ng_parameters_file_d1_2026-08-30.md), [C2a](doc/devel/reports/implementations/ng_parameters_file_c2a_2026-08-30.md), [C1](doc/devel/reports/implementations/ng_parameters_file_c1_2026-08-30.md), [B3](doc/devel/reports/implementations/ng_parameters_file_b3_2026-08-28.md), [B2](doc/devel/reports/implementations/ng_parameters_file_b2_2026-08-28.md), [B1](doc/devel/reports/implementations/ng_parameters_file_b1_2026-08-28.md), [A1](doc/devel/reports/implementations/ng_parameters_file_a1_2026-08-28.md), [A2](doc/devel/reports/implementations/ng_parameters_file_a2_2026-08-28.md), [A3](doc/devel/reports/implementations/ng_parameters_file_a3_2026-08-28.md).
 - **Latest reviews:** [E3](doc/devel/reports/reviews/ng_parameters_file_e3_correctness_2026-08-31.md) — 0 Blockers / 9 Majors / ~10 Minors from three agents in isolated worktrees ([design fidelity](doc/devel/reports/reviews/ng_parameters_file_e3_design_fidelity_2026-08-31.md), [a defaults run's file read as a PCR tomato geneticist](doc/devel/reports/reviews/ng_parameters_file_e3_reader_2026-08-31.md)); **42 mutations** run across author and reviews, and the three that survived were all the same shape — a field or a guard whose only fixtures happened to agree. **The field's own headline predicate was one of them**: `every_tract_falls_back()` hard-coded to `true` passed all 5,563 library tests, because three tests asserted it true and none asserted it false. **The reader's Blocker was that "every repeat tract" reads as scope**, not as *one pair of numbers stands in for every stratum* — the fact that decides whether a mononucleotide call is dropped. [E2](doc/devel/reports/reviews/ng_parameters_file_e2_correctness_2026-08-31.md) — 1 Blocker / 12 Majors / ~12 Minors from three agents in isolated worktrees ([design fidelity](doc/devel/reports/reviews/ng_parameters_file_e2_design_fidelity_2026-08-31.md), [the defaults run's file read as a geneticist](doc/devel/reports/reviews/ng_parameters_file_e2_reader_2026-08-31.md), whose [produced file](doc/devel/reports/reviews/ng_parameters_file_e2_defaults_run_as_written_2026-08-31.toml) is kept beside it because nothing else in the tree shows one); 34 mutations run, 31 killed, 1 real weakening now pinned and 2 provably equivalent. **The Blocker was the file telling its reader the caller is broken** — every inbreeding row carried B3's pre-ruling text *"a run should not be able to write this line"*, and the geneticist's first action was to file a bug rather than change the number. **Three Majors were wrong claims of the author's, all caught by running the thing.** [E1](doc/devel/reports/reviews/ng_parameters_file_e1_correctness_2026-08-31.md) — 1 Blocker / 4 Majors / ~20 Minors from three agents in isolated worktrees ([design fidelity](doc/devel/reports/reviews/ng_parameters_file_e1_design_fidelity_2026-08-31.md), [the file read as a geneticist](doc/devel/reports/reviews/ng_parameters_file_e1_reader_2026-08-31.md)); 15 mutations run, 13 killed, and the 2 survivors are pinned now. **The Blocker was this caller refusing a file it had just written** — the second time on this plan — and every other finding was prose that said something untrue, among them "a multiplier of one asserts nothing about the chemistry", which `read_likelihoods.md` §3.2 and `validate.rs` eleven lines above the rung both refute. [C5, the five states](doc/devel/reports/reviews/ng_parameters_file_c5_2026-08-30.md) — 0 Blockers / 3 Majors / 6 Minors applied from one agent; five mutations run, five killed. **The Majors were two rows asserting through something the caller never reaches** — a fit-side function, and a warrant the writer copies with no logic between. [C4, the north-star round trip](doc/devel/reports/reviews/ng_parameters_file_c4_2026-08-30.md) — 1 Blocker / 5 Majors / 10 Minors applied from one agent, which re-derived all three of the step's measured numbers and found all three right. **The Blocker was the fixture not being shaped like a fit's output**, which is the whole of what the owner's ruling rests on. [C3, the float oracle](doc/devel/reports/reviews/ng_parameters_file_c3_2026-08-30.md) — 0 Blockers / 2 Majors / 5 Minors applied from one agent. **It found no defect in the code and two false claims in its own header**; the step's own value is the guard, since the writer that produces the artefact already formatted for round-trip by construction. [C2c, the two re-worded messages](doc/devel/reports/reviews/ng_parameters_file_c2c_2026-08-30.md) — 1 Blocker / 7 Majors / 6 Minors applied from two agents. **The Blocker was the file writing its own error message**: the translation searched the parser's *rendering*, which echoes the offending line of the document, so a file with `invalid type: string` in a comment took its clause from its own text. [C2b](doc/devel/reports/reviews/ng_parameters_file_c2b_2026-08-30.md) — 1 Blocker / 7 Majors / 11 Minors applied from three agents (correctness, design fidelity, and the file's own reader); 4 items recorded as owed. **The Blocker was the writer refusing itself**: a run with no repeat tracts declares no slippage group, and `validate` required that table to cover every read group — so Milestone E's defaults run and the single-sample case both wrote a file this caller turned down. [the outlier weight, wired](doc/devel/reports/reviews/ng_parameters_file_outlier_weight_2026-08-30.md) — 1 Blocker / 3 Majors / 8 Minors applied from two agents, one correctness and one design-fidelity; 1 Major recorded for D3. **The Blocker was a broken intra-doc link, which `cargo clippy` and `cargo test` cannot see and this crate denies**: `cargo doc --no-deps` is back at its 25-link baseline. [key names, the last two](doc/devel/reports/reviews/ng_parameters_file_key_names_two_2026-08-30.md) — 1 Blocker / 4 Majors applied from two agents, one of them the file's own reader, who guessed all three renamed keys correctly and confirmed all three against the rows; 12 findings recorded and left, none of them this change's. [C2a](doc/devel/reports/reviews/ng_parameters_file_c2a_2026-08-30.md) — Request-changes, 0 Blockers / 4 Majors / 14 Minors from two agents; 9 mutations run, 9 fail a test. [C1](doc/devel/reports/reviews/ng_parameters_file_c1_2026-08-30.md) — Request-changes, 0 Blockers / 6 Majors / 15 Minors from four agents in isolated worktrees, one of them the file's own reader; 8 mutations run, 6 fail a test and 2 proved equivalent. **One reported hole did not reproduce.** [B3](doc/devel/reports/reviews/ng_parameters_file_b3_2026-08-28.md) — Request-changes, 0 Blockers / 5 Majors / 6 Minors from two agents, one of them the file's own reader; 34 mutations run, 5 survived, all now fail a test. **Four of the five Majors were comments that said something untrue.** [B2](doc/devel/reports/reviews/ng_parameters_file_b2_2026-08-28.md) — Request-changes, 2 Blockers / 5 Majors / 8 Minors from three agents, one of them a TOML-specification pass and one of them a reading of the produced file as a geneticist; 11 mutations run, 4 survived, all now fail a test. [B1](doc/devel/reports/reviews/ng_parameters_file_b1_2026-08-28.md) — Request-changes, 2 Blockers / 9 Majors / 24 Minors from five agents in isolated worktrees; 23 mutations run, 18 survived, and the six whose behaviour difference was proved all fail a test on the fixed tree. [A3](doc/devel/reports/reviews/ng_parameters_file_a3_2026-08-28.md) — Request-changes, 1 Blocker / 4 Majors / 4 Minors from two agents, one of them a design-fidelity pass over the whole of Milestone A; 5 mutations run, 1 survived. [A2](doc/devel/reports/reviews/ng_parameters_file_a2_2026-08-28.md) — Request-changes, 4 Majors / 4 Minors from two category agents; 4 mutations run, 0 survived, so A2's own test is discriminating. [A1](doc/devel/reports/reviews/ng_parameters_file_a1_2026-08-28.md) — Request-changes, 1 Blocker / 13 Majors / 32 Minors as filed by five category agents in isolated worktrees; audit trail in the gitignored `tmp/review_2026-08-28_parameters-file-a1/`.
 - **Latest fixes-applied:** [C2a](doc/devel/reports/reviews/fixes_applied_ng_parameters_file_c2a_2026-08-30.md), [C1](doc/devel/reports/reviews/fixes_applied_ng_parameters_file_c1_2026-08-30.md), [B3](doc/devel/reports/reviews/fixes_applied_ng_parameters_file_b3_2026-08-28.md), [B2](doc/devel/reports/reviews/fixes_applied_ng_parameters_file_b2_2026-08-28.md), [B1](doc/devel/reports/reviews/fixes_applied_ng_parameters_file_b1_2026-08-28.md), [A3](doc/devel/reports/reviews/fixes_applied_ng_parameters_file_a3_2026-08-28.md), [A2](doc/devel/reports/reviews/fixes_applied_ng_parameters_file_a2_2026-08-28.md), [A1](doc/devel/reports/reviews/fixes_applied_ng_parameters_file_a1_2026-08-28.md).
@@ -4210,7 +1089,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - ~~Drift between the twelve mirrored types and their upstream originals is unguarded.~~ **Closed at B1**: the projection's eight conversions are exhaustive matches, so an added variant is a compile error, and `every_pre_pass_word_maps_to_its_own_word_in_the_file` names every pair so a crossed one is a test failure. It caught the seed's fourth rung on the way in.
   - ~~The key names are provisional; the revision's trigger is the first person who reads a produced file and has to ask what a key means.~~ **The trigger fired twice and both revisions have landed** (`fa293d2a`, and the two names it left orphaned).
   - `cargo doc --no-deps` fails on this tree, on 25 unresolved intra-doc links in other modules, none of them this feature's. Pre-existing; worth a sweep of its own.
-  - **⚠ `cargo test --all-targets --all-features` exits 101 on a pre-existing panic in `benches/psp_writer_perf.rs:386`** — an index-out-of-bounds in the bench's own priming loop, in production's psp writer path. Nothing outside `src/ng/calling/mod.rs`'s one `pub mod` line references this feature's module.
+  - **⚠ `cargo test --all-targets --all-features` exits 101 on a pre-existing panic in `benches/psp_writer_perf.rs:386`** — an index-out-of-bounds in the bench's own priming loop. Nothing outside `src/calling/mod.rs`'s one `pub mod` line references this feature's module.
 
 ---
 
@@ -4224,7 +1103,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   `PileupWalker::fill_pending`, changes at both mint sites, and the overturning of
   `finalise_recycling`'s written decision that an emitted record's bytes must be new each time.
   A person runs
-  `pop_var_caller_exp call-from-alignments` on a cohort of CRAMs and gets a VCF, the parameters
+  `pop_var_caller call-from-alignments` on a cohort of CRAMs and gets a VCF, the parameters
   used beside it, and a run report; since E1 the run's record path draws every sample's reader
   forward concurrently inside each cover (the merge's parallel cover), while assembly and
   genotyping stay on the merge thread — measured at the full 63-accession benchmark, decoding
@@ -4233,11 +1112,11 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Plan:** [run_driver_direct_mode.md](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
   **Spec:** [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §5.1;
   **Arch:** [run_streaming.md](doc/devel/ng/arch/run_streaming.md) §1, §3.4, §5.
-- **Code:** [src/ng/run/segments.rs](src/ng/run/segments.rs) (`Segmentation`,
-  `SegmentationInputs`), [src/ng/run/callers.rs](src/ng/run/callers.rs)
+- **Code:** [src/run/segments.rs](src/run/segments.rs) (`Segmentation`,
+  `SegmentationInputs`), [src/run/callers.rs](src/run/callers.rs)
   (`AlignmentInputs`, `MergeParameters`, `AlignedFilesVariantCaller`),
-  [src/ng/run/mod.rs](src/ng/run/mod.rs) (`RunError`, eight refusals — six of them direct
-  mode's and built). 40 tests across the two files; `ng::run` at 329 passing.
+  [src/run/mod.rs](src/run/mod.rs) (`RunError`, eight refusals — six of them direct
+  mode's and built). 40 tests across the two files; `run` at 329 passing.
 - **Impl reports:** [A1](doc/devel/reports/implementations/ng_run_driver_a1_2026-08-31.md),
   [A2](doc/devel/reports/implementations/ng_run_driver_a2_2026-08-31.md).
 - **A2 — six construction refusals:** a cohort of no alignment files; parameters assembled
@@ -4318,7 +1197,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   the calling, which the oracle now predates rather than owes.
 - **⚑ The development container's incremental-compilation cache can forge a determinism
   failure, and did.** On 2026-09-01 a corrupt `target-container/debug/incremental` produced a
-  test binary in which `cargo test --lib ng::run` returned **429 passed, 6 failed** at a clean
+  test binary in which `cargo test --lib run` returned **429 passed, 6 failed** at a clean
   ee7124f0 — the six merge tests that compare the parallel form against the serial one, with
   the parallel side assembling fewer of a sample's records into a locus. The same cache then
   crashed rustc in `join_codegen`, produced a link failure against undefined `anon.*.llvm.*`
@@ -4358,12 +1237,12 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 #### Psp mode — the walk to a psp+census, and calling from a cohort of psps
 - **Status:** `fixes-applied` — **Milestone C complete, at Checkpoint C: a cohort of psps
   from the command line.** The walk
-  stage has a command line: `pop_var_caller_exp generate-psps --reference … --catalog …
+  stage has a command line: `pop_var_caller generate-psps --reference … --catalog …
   --alignment … --output-dir …` walks each sample once and writes `<sample>.psp`, says what
   ground it spoke for, and refuses to replace a psp without `--force`. On a tomato slice:
   193,603 loci stored, 914,715 bytes, ~3 s, *311 of 318 typed regions, 199,672 of 200,000
   bases walked*. A walk goes to `<sample>.psp.<pid>.partial` and is renamed only once whole,
-  so a stopped re-walk leaves the psp it was replacing intact. Two prerequisites landed first — `ng::run`'s shared
+  so a stopped re-walk leaves the psp it was replacing intact. Two prerequisites landed first — `run`'s shared
   test fixtures (`70385f5b`, the carry-forward from B1/B2) and the **ground assembly lifted
   out of direct mode into `run_ground.rs`** (`f00d56e9`), which is what C1's "reuse
   `segments_over`/`analysed_regions`" required; direct mode's 88 command tests pass untouched
@@ -4376,11 +1255,11 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   ([`examples/ng_psp_gather_oracle.rs`](examples/ng_psp_gather_oracle.rs)). Two review
   rounds: nine agents on B1 (23 mutants / 10 survived), six on B2+B3 (6 mutants / 2
   survived) — every survivor closed. Checkpoint A passed (owner, 2026-09-03; the three rulings are recorded in the
-  plan's Checkpoint A note): `SegmentationInputs` lifted to `src/ng/segmentation_inputs.rs`
-  with the `ng::run` re-export kept (`a1fdab11` — nothing in `src/ng/psp/` imports from
-  `ng::run` any more), and the no-version-bump reason recorded in spec §6.1. B1 =
-  `SampleObservationGatherer` (`src/ng/run/gatherer.rs`): one sample's files through the
-  direct-mode chain as an iterator, the psp `Header` built at `open` (the first production
+  plan's Checkpoint A note): `SegmentationInputs` lifted to `src/segmentation_inputs.rs`
+  with the `run` re-export kept (`a1fdab11` — nothing in `src/psp/` imports from
+  `run` any more), and the no-version-bump reason recorded in spec §6.1. B1 =
+  `SampleObservationGatherer` (`src/run/gatherer.rs`): one sample's files through the
+  direct-mode chain as an iterator, the psp `Header` built at `open` (the first non-test
   header builder — configured reach ceiling, walk-local read-group table, filters as
   provenance), `write_psp` draining the walk into a `PspWriter`. Milestone A (complete,
   reviewed, fixed): the header carries spec §6.1 minus the deliberately dropped record
@@ -4409,23 +1288,22 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   A–G; three upstream questions all ruled by the owner 2026-09-03);
   **Spec:** [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §6.1–§6.3;
   **Arch:** [run_streaming.md](doc/devel/ng/arch/run_streaming.md) §4.
-- **Code:** [src/ng/psp/segmentation_section.rs](src/ng/psp/segmentation_section.rs) (the
+- **Code:** [src/psp/segmentation_section.rs](src/psp/segmentation_section.rs) (the
   `[segmentation]` section: wire types, checked-constructor decode, two-sided rules),
-  [src/ng/psp/header.rs](src/ng/psp/header.rs) (`ReadGroupIdentity`, the reach ceiling,
+  [src/psp/header.rs](src/psp/header.rs) (`ReadGroupIdentity`, the reach ceiling,
   the generic `record_parameters` seam; `check_contigs` split out so the reader validates
   contigs before span resolution),
-  [src/ng/read/filtering.rs](src/ng/read/filtering.rs)
+  [src/read/filtering.rs](src/read/filtering.rs)
   (`ReadFilterConfig::provenance_parameters`, exhaustively destructured;
   `READ_FILTER_PROVENANCE_KEYS`),
-  [src/ng/region_typing/mod.rs](src/ng/region_typing/mod.rs) (`GenomeRegions` owns its span
+  [src/region_typing/mod.rs](src/region_typing/mod.rs) (`GenomeRegions` owns its span
   storage; `from_normalized_spans` refuses a non-normalized list rather than re-sorting it,
   because a re-normalized set would compare unequal to the set it records).
 - **Impl reports:** [A1](doc/devel/reports/implementations/ng_psp_mode_a1_2026-09-03.md),
   [A2+A3+A4](doc/devel/reports/implementations/ng_psp_mode_a2_a3_a4_2026-09-03.md).
 - **Latest reviews:** [A1](doc/devel/reports/reviews/ng_psp_mode_a1_2026-09-03.md) (12
   mutations / 5 survived; the Blocker was a fixture whose defaults let a
-  default-substituting decode pass; M5 caught the step editing frozen `src/regions.rs` —
-  reverted byte-identical, the constructor moved into ng),
+  default-substituting decode pass),
   [A2+A3+A4](doc/devel/reports/reviews/ng_psp_mode_a2_a3_a4_2026-09-03.md) (9 mutations / 6
   survived; the Blocker was a filter-provenance test blind on four of six values);
   **fixes-applied:** [A1](doc/devel/reports/reviews/fixes_applied_2026-09-03.md),
@@ -4441,7 +1319,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     runs on (today `tmp/tomato_slice/`, untracked, 83 MB — copied from the main checkout
     because a worktree's container cannot see it).
   - ~~For Checkpoint A (review M6): where `SegmentationInputs` should live~~ — ruled and
-    done (`a1fdab11`): lifted to `src/ng/segmentation_inputs.rs`, `ng::run` re-export kept.
+    done (`a1fdab11`): lifted to `src/segmentation_inputs.rs`, `run` re-export kept.
   - ~~For Checkpoint A (review Mi9): record the no-version-bump ruling~~ — recorded in the
     plan's Checkpoint A note and spec §6.1 (`a1fdab11`).
 
@@ -4538,9 +1416,9 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   plan it seams with: [calling_loop_ssr.md](doc/devel/ng/impl_plan/calling_loop_ssr.md); what
   prompted both: [the loss attribution](doc/devel/reports/ng_str_path_losses_2026-09-02.md).
 - **A1 done (the merge carries the locus kind):**
-  [close.rs](src/ng/run/cohort_merge/close.rs) — `ClosedLocus::kind`, borrowed from the
+  [close.rs](src/run/cohort_merge/close.rs) — `ClosedLocus::kind`, borrowed from the
   observation that opened the locus so a refused locus costs no clone;
-  [build.rs](src/ng/run/cohort_merge/build.rs) — `CohortObservation::kind`, cloned in
+  [build.rs](src/run/cohort_merge/build.rs) — `CohortObservation::kind`, cloned in
   `CohortObservation::over`, which runs only on the loci the caller builds. The merge closed
   tract loci deliberately and then dropped the motif at assembly, so nothing downstream could
   tell a repeat tract from ordinary sequence. Three tests: the kind through the walk on both
@@ -4549,7 +1427,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   rebuilt empty fails. No verdict moves and nothing yet reads either field.
   [Impl report](doc/devel/reports/implementations/ng_ssr_observations_a1_2026-09-02.md).
 - **B1 done (the routing policy is the caller's):**
-  [call_from_alignments.rs](src/pop_var_caller_exp/call_from_alignments.rs) — `--min-copies`,
+  [call_from_alignments.rs](src/cli/call_from_alignments.rs) — `--min-copies`,
   `--min-period`, `--max-period`, `--max-str-len` and `--min-purity`, named as `type-regions`
   names them, defaulting to ng's measured calling floors; `routing_criteria` builds the
   `StrRepeatCriteria` `segments_over` asks the catalog with, where it used to pass
@@ -4595,9 +1473,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   30× (0.940 → 0.979 and 0.818 → 0.949 at 50×), for one extra false positive in total** —
   82 more true SNPs and 42 more true indels at 30×, precision flat to four decimals. The loss
   report's upper bound was ≈0.97 and ≈0.94; the measurement lands on it, 2,008 true SNPs against
-  the bound's 2,006. **ng's indel recall now exceeds the production caller's on this benchmark**
-  (0.946 against its 0.930, quoted from the loss report's own run of `src/var_calling/`); its SNP
-  recall is still below (0.974 against 0.987). The ground moved exactly as computed: HG002's
+  the bound's 2,006. The ground moved exactly as computed: HG002's
   repeat-classified bases 32,577 → 4,930, the report's own pair, and the three samples' ratios
   6.6×/7.3×/7.0× to the digit. The satellite class grew from nothing to 180/172/102 bases —
   a permanent refusal, since the calling floors cap a tract at 100 bp where the file allows 500.
@@ -4605,22 +1481,22 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   `accuracy_dashboard.py` does so two can be compared.
   [Report](doc/devel/reports/ng_str_routing_recovery_2026-09-02.md).
 - **C1 done (the tract generator says why its reader dropped reads):**
-  [ssr.rs](src/ng/locus_generation/ssr.rs) — the per-read-group tallies of the retired
+  [ssr.rs](src/locus_generation/ssr.rs) — the per-read-group tallies of the retired
   chromosomes' cursors, plus the trait override without which they are unreachable once the
   generator is boxed. The trait's default is an empty list, so a run with the slot filled would
   have reported only the SNP/indel generator's drops and called them the sample's: every number
   plausible, nothing to notice. Two mutations killed.
   [Impl report](doc/devel/reports/implementations/ng_ssr_observations_c1_2026-09-02.md).
 - **C2 done (a run produces repeat-tract observations, and sets each aside):**
-  [walker.rs](src/ng/run/walker.rs) builds an `SsrGenerator` into the slot, with its own
+  [walker.rs](src/run/walker.rs) builds an `SsrGenerator` into the slot, with its own
   reference accessors and **the bundle radius the ground was cut with** rather than the constant
-  that happens to equal it; [callers.rs](src/ng/run/callers.rs) counts and skips every
+  that happens to equal it; [callers.rs](src/run/callers.rs) counts and skips every
   non-generic cohort observation. The guard is not politeness — handed a tract,
   `call_one_generic_locus` would rank its tract lengths as ordinary alleles and emit a
   well-formed record whose genotype has no stutter model behind it. Two mutations killed.
   [Impl report](doc/devel/reports/implementations/ng_ssr_observations_c2_2026-09-02.md).
 - **C3 done (the report reads truthfully with the slot filled):**
-  [report.rs](src/ng/run/report.rs) — the *not called* line names what is actually unbuilt
+  [report.rs](src/run/report.rs) — the *not called* line names what is actually unbuilt
   (clusters of repeats with no clean flanks) instead of repeat tracts, and a new line in **loci**
   says how many tracts were built, merged and then not scored. Printed only when there are some.
   [Impl report](doc/devel/reports/implementations/ng_ssr_observations_c3_2026-09-02.md).
@@ -4683,48 +1559,47 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     no position can cross, and an assert names the premise if it breaks again.
 
 
-#### Step 11a — the hidden-duplication filter (ng's port)
-- **Status:** implemented — **Milestones B and C complete, all four of spec §10's oracles holding; Milestone D complete — D1 to D4 reviewed and fixed, Checkpoint D reached. The filter runs on real reads at one sample, at six, and at three hundred reads a position; it removes records at all three, the records it removes at six cluster where a collapsed duplication would put them, and production nominates a strict subset of what ng does** (branch `ng-paralog-filter`). **`ng-window-coverage` is merged in at `cdfd7821`**, so `src/ng/window_coverage/` supplies both types this plan stood in for and the copied coverage fit now reads ng's histogram rather than production's.
-- **Plan:** [hidden_paralog_filter.md](doc/devel/ng/impl_plan/hidden_paralog_filter.md); **Spec:** [hidden_paralog_filter.md](doc/devel/ng/spec/hidden_paralog_filter.md); the model it ports: [specs/hidden_paralog_filter.md](doc/devel/specs/hidden_paralog_filter.md) and [architecture/hidden_paralog_single_sample_scoring.md](doc/devel/architecture/hidden_paralog_single_sample_scoring.md). No architecture document — the spec's §3.7 type blocks are the code shape.
-- **Code:** five copies of production's statistics, each guarded — [coverage_model.rs](src/ng/paralog/coverage_model.rs) (the per-sample coverage fit), [locus_score.rs](src/ng/paralog/locus_score.rs) (the per-locus score), [prior.rs](src/ng/paralog/prior.rs) (the EM prior, the FDR curve and the cut), [model_params.rs](src/ng/paralog/model_params.rs) (the constants and grids), [calibration.rs](src/ng/paralog/calibration.rs) (a *span* of `src/var_calling/paralog_filter/calibrate.rs`; `CohortInbreeding` deliberately left behind, since ng's `F` is per sample) — plus two files of ng's own: [copy_fidelity.rs](src/ng/paralog/copy_fidelity.rs) (the textual guard, three sanctioned kinds of substitution) and [production_parity.rs](src/ng/paralog/production_parity.rs) (the bit-identity differential over the score, the prior, the curve and the cut). [mod.rs](src/ng/paralog/mod.rs) holds ng's declarations, re-exports and three added tests. Beside them, the run wiring in [src/ng/run/paralog_filter/](src/ng/run/paralog_filter/) — all ng's own, none of it a copy: [spill.rs](src/ng/run/paralog_filter/spill.rs), the entry a called record is parked as between the calling pass and the verdict, and the codec that carries it; [spill_file.rs](src/ng/run/paralog_filter/spill_file.rs), where those bytes live, the three-stage life that stops a run writing over its own spill, and the `Drop` that unlinks it on every exit path; [patch.rs](src/ng/run/paralog_filter/patch.rs), which puts the verdict on a line by splicing its seventh and eighth columns and keeping every other byte. Beside them, [vcf/writer.rs](src/ng/vcf/writer.rs) gains `write_line` and a public `RecordPlace` — carrying a `GenomePosition`, so it is type-for-type what `SpillEntry` holds — with `write_record` expressed in terms of it so there is one ordering check rather than two, and `place_of` reading the padding rule from `encode::written_position` rather than a second copy of it. `From<&SpillEntry> for RecordPlace` is how pass three builds a place, since the check reads the place and never the line's bytes. [mod.rs](src/ng/run/paralog_filter/mod.rs) holds the declarations and `From<&SpillEntry> for RecordPlace`; the temporary `WindowCoverage` is gone, replaced by the merged `crate::ng::window_coverage::WindowCoverage`.
+#### Step 11a — the hidden-duplication filter
+- **Status:** implemented — **Milestones B and C complete, all four of spec §10's oracles holding; Milestone D complete — D1 to D4 reviewed and fixed, Checkpoint D reached. The filter runs on real reads at one sample, at six, and at three hundred reads a position; it removes records at all three, the records it removes at six cluster where a collapsed duplication would put them** (branch `ng-paralog-filter`). **`ng-window-coverage` is merged in at `cdfd7821`**, so `src/window_coverage/` supplies both types this plan stood in for and the coverage fit reads ng's histogram.
+- **Plan:** [hidden_paralog_filter.md](doc/devel/ng/impl_plan/hidden_paralog_filter.md); **Spec:** [hidden_paralog_filter.md](doc/devel/ng/spec/hidden_paralog_filter.md); the statistical model's design: [specs/hidden_paralog_filter.md](doc/devel/specs/hidden_paralog_filter.md) and [architecture/hidden_paralog_single_sample_scoring.md](doc/devel/architecture/hidden_paralog_single_sample_scoring.md). No architecture document — the spec's §3.7 type blocks are the code shape.
+- **Code:** the statistics — [coverage_model.rs](src/paralog/coverage_model.rs) (the per-sample coverage fit), [locus_score.rs](src/paralog/locus_score.rs) (the per-locus score), [prior.rs](src/paralog/prior.rs) (the EM prior, the FDR curve and the cut), [model_params.rs](src/paralog/model_params.rs) (the constants and grids), [calibration.rs](src/paralog/calibration.rs) (`CohortInbreeding` deliberately left out, since ng's `F` is per sample). [mod.rs](src/paralog/mod.rs) holds ng's declarations, re-exports and three added tests. Beside them, the run wiring in [src/run/paralog_filter/](src/run/paralog_filter/): [spill.rs](src/run/paralog_filter/spill.rs), the entry a called record is parked as between the calling pass and the verdict, and the codec that carries it; [spill_file.rs](src/run/paralog_filter/spill_file.rs), where those bytes live, the three-stage life that stops a run writing over its own spill, and the `Drop` that unlinks it on every exit path; [patch.rs](src/run/paralog_filter/patch.rs), which puts the verdict on a line by splicing its seventh and eighth columns and keeping every other byte. Beside them, [vcf/writer.rs](src/vcf/writer.rs) gains `write_line` and a public `RecordPlace` — carrying a `GenomePosition`, so it is type-for-type what `SpillEntry` holds — with `write_record` expressed in terms of it so there is one ordering check rather than two, and `place_of` reading the padding rule from `encode::written_position` rather than a second copy of it. `From<&SpillEntry> for RecordPlace` is how pass three builds a place, since the check reads the place and never the line's bytes. [mod.rs](src/run/paralog_filter/mod.rs) holds the declarations and `From<&SpillEntry> for RecordPlace`; the temporary `WindowCoverage` is gone, replaced by the merged `crate::window_coverage::WindowCoverage`.
 - **Impl reports:** [A1 (constants + coverage model)](doc/devel/reports/implementations/ng_paralog_filter_a1_2026-09-06.md), [A2 (the score + the differential)](doc/devel/reports/implementations/ng_paralog_filter_a2_2026-09-06.md), [A3 (the prior, the curve, the calibration)](doc/devel/reports/implementations/ng_paralog_filter_a3_2026-09-06.md), [B1 (the spill entry and its codec)](doc/devel/reports/implementations/ng_paralog_filter_b1_2026-09-06.md), [B2 (the spill file and its guard)](doc/devel/reports/implementations/ng_paralog_filter_b2_2026-09-06.md), [B3 (the writer's line entry point and the two-column patch)](doc/devel/reports/implementations/ng_paralog_filter_b3_2026-09-06.md)
 - **Latest reviews:** [A1](doc/devel/reports/reviews/ng_paralog_filter_a1_2026-09-06.md) (0 Blocker / 4 Major / 8 Minor) — **fixes** [applied](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_a1_2026-09-06.md) (10 of 12); [A2](doc/devel/reports/reviews/ng_paralog_filter_a2_2026-09-06.md) (0 Blocker / 6 Major / 12 Minor) — **fixes** [applied](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_a2_2026-09-06.md) (17 of 18); [A3](doc/devel/reports/reviews/ng_paralog_filter_a3_2026-09-06.md) (**1 Blocker** / 6 Major / 7 Minor, Request-changes) — **fixes** [applied](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_a3_2026-09-06.md) (all); [B1](doc/devel/reports/reviews/ng_paralog_filter_b1_2026-09-06.md) (**1 Blocker** / 11 Major / 21 Minor, Request-changes; eight sub-agents in isolated worktrees) — **fixes** [applied](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_b1_2026-09-06.md) (36 applied, 3 adapted, 4 deferred); [B2](doc/devel/reports/reviews/ng_paralog_filter_b2_2026-09-06.md) (0 Blocker / 6 Major / 18 Minor, Request-changes; four sub-agents) — **fixes** [applied](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_b2_2026-09-06.md) (24 applied, 3 adapted, 2 deferred); [B3](doc/devel/reports/reviews/ng_paralog_filter_b3_2026-09-06.md) (**1 Blocker** / 7 Major / 15 Minor, Request-changes; three sub-agents, after a first fan-out was killed and its probe code salvaged) — **fixes** [applied](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_b3_2026-09-06.md) (19 applied, 3 adapted, 6 deferred).
 - **Open:**
-  - **The plan's first precondition does not hold, one step earlier than the plan says.** A1 needs ng's `CoverageByGcHistogram` and B1 needs its `WindowCoverage`, both from [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md)'s *first* step, not its Checkpoint C. A1 fits from production's `CoverageByGcHistogram` meanwhile; **B1 declares the two-field `WindowCoverage` in [spill.rs](src/ng/run/paralog_filter/spill.rs) as a stand-in**, marked for deletion at the rebase, and creates nothing under `src/ng/window_coverage/`. The codec reads the two fields and nothing else, so the swap is an import plus that deletion.
-  - **⛦ For Checkpoint A — which fields ng's `CoverageByGcHistogram` carries is unsettled, and the two documents disagree.** [window_coverage.md](doc/devel/ng/spec/window_coverage.md) §7 drops the fields the model fit does not read; production's transcribed test fixture (`coverage_model.rs:714-723`) builds all eight, so a verbatim port needs them all. Measured, not predicted: with §7 followed, the swap fails to compile (`E0560 … has no field named callable_positions`); with the fields kept, it is one `use` line. The decision belongs to that spec, on `ng-window-coverage`.
+  - **The plan's first precondition does not hold, one step earlier than the plan says.** A1 needs ng's `CoverageByGcHistogram` and B1 needs its `WindowCoverage`, both from [window_coverage.md](doc/devel/ng/impl_plan/window_coverage.md)'s *first* step, not its Checkpoint C. **B1 declares the two-field `WindowCoverage` in [spill.rs](src/run/paralog_filter/spill.rs) as a stand-in**, marked for deletion at the rebase, and creates nothing under `src/window_coverage/`. The codec reads the two fields and nothing else, so the swap is an import plus that deletion.
+  - **⛦ For Checkpoint A — which fields ng's `CoverageByGcHistogram` carries is unsettled, and the two documents disagree.** [window_coverage.md](doc/devel/ng/spec/window_coverage.md) §7 drops the fields the model fit does not read; the coverage model's test fixture (`coverage_model.rs:714-723`) builds all eight. Measured, not predicted: with §7 followed, the swap fails to compile (`E0560 … has no field named callable_positions`); with the fields kept, it is one `use` line. The decision belongs to that spec, on `ng-window-coverage`.
   - **Nothing yet makes the temporary import temporary** (A1 review Mi3). The fix — a step in this plan with window coverage's first step as its precondition — is a plan edit the plan-driven loop may not make.
-  - **A2 review Mi1 is closed by A3**: two ng files, one original each, `GuardedCopy` gaining `production_path` and `ends_before`, and a third sanctioned kind of substitution (`pub(crate)` → `pub`, because ng's module is public where production's is not).
-  - **~~Does `SpilledSample` keep the spec's flat shape?~~ — ruled, and the rule that selects it changed twice.** The owner settled §3.2 on 2026-09-07: **every record is scored, and every record carries both signals except a repeat tract, which is scored on coverage alone.** Slippage is what stops a read reporting its allele, and it happens at tracts and nowhere else — so a deletion, a multiallelic SNP and an insertion all keep the allele signal, which two earlier drafts of the rule had denied them. *Two drafts were wrong before this one*: biallelic-SNP-against-everything-else (the shape of production's test, not a reason), then one-position-against-wider, which the owner refuted — once a multi-base locus's depth is one number for the whole span, span distinguishes nothing, and it never distinguished the allele signal either. `SpilledSamples` is now two variants, `GenericLocus` and `RepeatTract`, and the tract's rows carry **no read counts at all**: an abstention must not be spellable as a zero in the fields a measurement lives in, because production's scorer drops a sample at zero total reads and would silently empty every tract's score. The selector is `is_repeat_tract`, which the entry already carried for the writer's ordering rule — so the entry lost a field rather than gaining one, and trap 2 is struck because nothing reads an allele. Commits `eba39471`, `50403942`, `3942d798`.
-  - **~~Which fields ng's `CoverageByGcHistogram` carries~~ — answered by the merge, and it never mattered.** ng's carries seven: production's `n_positions` and `n_skipped_tiles` renamed to `windows_folded` and `windows_under_the_floor`, and `callable_positions` dropped. Those three are exactly the three the copied fit never reads (zero occurrences each); the five it does read carry the same names on both. The fit now imports ng's type, declared to the copy guard as a fourth sanctioned substitution — **an input type ng owns** — with the guard's span narrowed at `#[cfg(test)]` rather than the file released, so all 694 lines of the fit stay compared byte for byte. Releasing it would have cost that check to accommodate a three-line test fixture, and the numeric differential next door covers the *scorer*, not the fit. Commit `dfc6a40c`. This closes the A1 review's "nothing yet makes the temporary import temporary".
+  - **~~Does `SpilledSample` keep the spec's flat shape?~~ — ruled, and the rule that selects it changed twice.** The owner settled §3.2 on 2026-09-07: **every record is scored, and every record carries both signals except a repeat tract, which is scored on coverage alone.** Slippage is what stops a read reporting its allele, and it happens at tracts and nowhere else — so a deletion, a multiallelic SNP and an insertion all keep the allele signal, which two earlier drafts of the rule had denied them. *Two drafts were wrong before this one*: biallelic-SNP-against-everything-else (the shape of a test, not a reason), then one-position-against-wider, which the owner refuted — once a multi-base locus's depth is one number for the whole span, span distinguishes nothing, and it never distinguished the allele signal either. `SpilledSamples` is now two variants, `GenericLocus` and `RepeatTract`, and the tract's rows carry **no read counts at all**: an abstention must not be spellable as a zero in the fields a measurement lives in, because the scorer drops a sample at zero total reads and would silently empty every tract's score. The selector is `is_repeat_tract`, which the entry already carried for the writer's ordering rule — so the entry lost a field rather than gaining one, and trap 2 is struck because nothing reads an allele. Commits `eba39471`, `50403942`, `3942d798`.
+  - **~~Which fields ng's `CoverageByGcHistogram` carries~~ — answered by the merge, and it never mattered.** ng's carries seven, including `windows_folded` and `windows_under_the_floor`; the fields it does not carry are ones the fit never reads (zero occurrences each). The fit now imports ng's type. Commit `dfc6a40c`. This closes the A1 review's "nothing yet makes the temporary import temporary".
   - **~~A spill that loses its tail reads back as a complete, shorter spill~~ — closed by B2**: `SpillReader::new` takes the count the writer settled as an argument, so a file holding a different number is refused in either direction (B1 review M9, B2 review M3).
-  - **A spill left by a run that was killed blocks the next run of the same output** until it is removed: creation refuses to overwrite anything at the path, because the alternative destroys either a finished run's evidence or a live run's records (B2 review M2). Spec §3.4 fixes the name, so production's `tempfile` answer is not available without a spec change.
+  - **A spill left by a run that was killed blocks the next run of the same output** until it is removed: creation refuses to overwrite anything at the path, because the alternative destroys either a finished run's evidence or a live run's records (B2 review M2). Spec §3.4 fixes the name, so a uniquely named temporary file is not available without a spec change.
   - **~~B3's review was dispatched and not collected~~ — done.** The first fan-out was killed before writing its findings files, but its three worktrees survived and their probe code was salvaged to [salvaged_from_dead_agents/](tmp/review_2026-09-06_ng_paralog_filter_b3/salvaged_from_dead_agents/) and handed to a second fan-out to verify rather than re-find; all ten probes reproduced. Review: [B3](doc/devel/reports/reviews/ng_paralog_filter_b3_2026-09-06.md) (**1 Blocker** / 7 Major / 15 Minor, Request-changes; three sub-agents in isolated worktrees) — **fixes** [applied](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_b3_2026-09-06.md) (19 applied, 3 adapted, 6 deferred). The Blocker was the gap this review was pointed at: the committed tests used hand-written line fixtures that were not even the encoder's shape, so spec §10's byte-identity oracle was checked against lines ng does not write. **Now 12 real `VcfRecord`s are encoded through `record_line` and round-tripped**, including a record on a second contig and a three-thousand-sample cohort, plus two `proptest` properties. Three Majors were type-level and are fixed now rather than after C4: `RecordPlace` carries a `GenomePosition` (it did not match `SpillEntry`'s `Position`), `From<&SpillEntry>` is how pass three builds one, and `place_of` reads the padding rule from `encode::written_position` instead of a second copy of it.
-  - **⛦ For Checkpoint B — does `patch.rs` stay in `run/paralog_filter/`?** The B3 implementation report's deviation 3 put it there because "its rules are the filter's". The review inventoried them: the tab separator, the `FILTER`/`INFO` column positions, `.`, `PASS` and `;` — **all five are VCF grammar**, and the filter id and the two `INFO` keys arrive as arguments. Two of the five are now imported from `src/ng/vcf` rather than re-spelled. Moving the file reverses a recorded deviation of a committed step, so the loop did not do it.
+  - **⛦ For Checkpoint B — does `patch.rs` stay in `run/paralog_filter/`?** The B3 implementation report's deviation 3 put it there because "its rules are the filter's". The review inventoried them: the tab separator, the `FILTER`/`INFO` column positions, `.`, `PASS` and `;` — **all five are VCF grammar**, and the filter id and the two `INFO` keys arrive as arguments. Two of the five are now imported from `src/vcf` rather than re-spelled. Moving the file reverses a recorded deviation of a committed step, so the loop did not do it.
   - **⛦ For Checkpoint B — should the patch refuse an embedded tab or newline, or only say it does not?** A `\n` in a line makes the writer put two records in the file and count one; a `\t` in an added value adds a column and shifts every sample column right. Neither is reachable from `record_line`, and pass three's added values are C4 constants — but the spill reader validates a length cap and not the bytes. The doc half is applied; refusing would put a scan of every line on a per-record path.
   - **A `place` that disagrees with the line it accompanies is accepted, and that is now by construction unlikely rather than merely undocumented.** `write_line` checks the place and never the line's bytes, so ascending places with descending lines write a backwards VCF and both calls return `Ok` — reproduced. `From<&SpillEntry> for RecordPlace` means pass three never types the three fields; `the_order_is_checked_against_the_place_and_not_the_line` pins the boundary so the next reader does not assume the bytes are checked.
   - **⛦ For step C1 — `SpilledSample`'s two read-count fields document different rules.** `alt_reads` says "`0` on every other record"; `ref_reads` says "`AD[0]`" with no qualifier. Spec §3.2 requires `alt_reads = 0` **and `total_reads = 0`** on every non-biallelic-SNP record, and total is ref + alt — so a tract spilling its real `AD[0]` gives C1 a non-zero total and a live allele term, which is spec §6 trap 1 by a different door. Latent, since nothing fills a spill until C2. It bears on the `SpilledSample` shape decision above.
-  - **C1 is implemented, reviewed and fixed** ([impl](doc/devel/reports/implementations/ng_paralog_filter_c1_2026-09-07.md), [review](doc/devel/reports/reviews/ng_paralog_filter_c1_2026-09-07.md) — **1 Blocker** / 4 Major / 13 Minor, Request-changes, three sub-agents — [fixes](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_c1_2026-09-07.md), 16 applied, 2 adapted, 3 deferred): [scoring_context.rs](src/ng/run/paralog_filter/scoring_context.rs) builds one fitted coverage model per sample with the four ways a sample can lose one kept apart, the σ₀ slice with `NaN` where absent, and `observation_of`, which is where spec §6 trap 1 lives — production's zero-read skip must not reach a tract, and the type is what stops it. **The Blocker was a fixture**: every coverage test rested on a one-GC-bin histogram, where the copied model returns the same multiplier for every GC value, so the GC half of the copy number was unobservable and replacing the GC argument with a literal passed all ten tests. Three mutations survived that suite; all three are killed now. `observations_of` also checks a record's width against the cohort once per record — nothing did, and the scorer answers a length mismatch with a *neutral score* rather than an error.
-  - **C2 is implemented, reviewed and fixed** ([impl](doc/devel/reports/implementations/ng_paralog_filter_c2_2026-09-07.md), [review](doc/devel/reports/reviews/ng_paralog_filter_c2_2026-09-07.md) — **1 Blocker** / 7 Major / 12 Minor, Request-changes, two sub-agents — [fixes](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_c2_2026-09-07.md), 20 applied, 1 adapted, 4 deferred): [pass_one.rs](src/ng/run/paralog_filter/pass_one.rs) turns a finished record and its per-sample windows into a spill entry, and `CalledRecordSink` is the choice the flag makes. **The review's five surviving mutations all exploited one thing** — every fixture sat on contig 0, held no no-call, and had no reads that no written allele explains — so the contig, the ploidy and the alternative-count rule could all be wrong and pass. All five are killed.
-  - **C3 is implemented, reviewed and fixed** ([impl](doc/devel/reports/implementations/ng_paralog_filter_c3_2026-09-07.md), [review](doc/devel/reports/reviews/ng_paralog_filter_c3_2026-09-07.md) — **1 Blocker** / 8 Major / 16 Minor, Request-changes, three sub-agents in isolated worktrees — [fixes](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_c3_2026-09-07.md), 23 applied, 2 adapted, 3 deferred): [pass_two.rs](src/ng/run/paralog_filter/pass_two.rs) reads the spill once, scores every parked record, fits how common duplications are in this run, and resolves the operator's target false-discovery rate to a cut — spec §3.7's `ParalogVerdicts`, plus the count of records the fit rests on, the count that saturated the histogram, and the constants that produced the cut. Beside it, [src/ng/paralog/calibrate.rs](src/ng/paralog/calibrate.rs), ng's own fourth file in that module: the fallback, the curve and the cut put together, with its differential against production moved in beside the other nine.
-    **The step is about one value.** A record no sample could speak for is unscored, and the copied scorer's answer there is a ratio of `0.0` — the same number it returns when the two stories tie — so passing it through turns "we could not weigh this" into "this is not a duplication" and a run whose fits all failed would fit a rate from nothing (spec §6 trap 4). Three things stand against it: `ParalogScoringContext::score` returns `NaN` by reading the scorer's own `samples_used`; the ratio folded into the histogram and the ratio kept for pass three are **the same binding**; and the verdict screens on finiteness — **which the review found untested and nearly load-bearing**: the false-discovery curve's own answer for a `NaN` is `0.4999999999999852`, *inside* a target of one in two, so that screen is the only thing keeping an unscorable record out of the removed set.
-    **Stricter than production in one reachable case** — production screens on whether any observation was *built*, and the scorer also drops a sample whose σ₀ is not positive and finite, so a record can hand it six observations and have it weigh none; production folds a `0.0` there. **C1's review Mi11 is closed**: `score` is the only way in, and four accessors are private, which is production's shape and what makes spec §6 trap 3 unspellable by a caller.
+  - **C1 is implemented, reviewed and fixed** ([impl](doc/devel/reports/implementations/ng_paralog_filter_c1_2026-09-07.md), [review](doc/devel/reports/reviews/ng_paralog_filter_c1_2026-09-07.md) — **1 Blocker** / 4 Major / 13 Minor, Request-changes, three sub-agents — [fixes](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_c1_2026-09-07.md), 16 applied, 2 adapted, 3 deferred): [scoring_context.rs](src/run/paralog_filter/scoring_context.rs) builds one fitted coverage model per sample with the four ways a sample can lose one kept apart, the σ₀ slice with `NaN` where absent, and `observation_of`, which is where spec §6 trap 1 lives — the scorer's zero-read skip must not reach a tract, and the type is what stops it. **The Blocker was a fixture**: every coverage test rested on a one-GC-bin histogram, where the model returns the same multiplier for every GC value, so the GC half of the copy number was unobservable and replacing the GC argument with a literal passed all ten tests. Three mutations survived that suite; all three are killed now. `observations_of` also checks a record's width against the cohort once per record — nothing did, and the scorer answers a length mismatch with a *neutral score* rather than an error.
+  - **C2 is implemented, reviewed and fixed** ([impl](doc/devel/reports/implementations/ng_paralog_filter_c2_2026-09-07.md), [review](doc/devel/reports/reviews/ng_paralog_filter_c2_2026-09-07.md) — **1 Blocker** / 7 Major / 12 Minor, Request-changes, two sub-agents — [fixes](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_c2_2026-09-07.md), 20 applied, 1 adapted, 4 deferred): [pass_one.rs](src/run/paralog_filter/pass_one.rs) turns a finished record and its per-sample windows into a spill entry, and `CalledRecordSink` is the choice the flag makes. **The review's five surviving mutations all exploited one thing** — every fixture sat on contig 0, held no no-call, and had no reads that no written allele explains — so the contig, the ploidy and the alternative-count rule could all be wrong and pass. All five are killed.
+  - **C3 is implemented, reviewed and fixed** ([impl](doc/devel/reports/implementations/ng_paralog_filter_c3_2026-09-07.md), [review](doc/devel/reports/reviews/ng_paralog_filter_c3_2026-09-07.md) — **1 Blocker** / 8 Major / 16 Minor, Request-changes, three sub-agents in isolated worktrees — [fixes](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_c3_2026-09-07.md), 23 applied, 2 adapted, 3 deferred): [pass_two.rs](src/run/paralog_filter/pass_two.rs) reads the spill once, scores every parked record, fits how common duplications are in this run, and resolves the operator's target false-discovery rate to a cut — spec §3.7's `ParalogVerdicts`, plus the count of records the fit rests on, the count that saturated the histogram, and the constants that produced the cut. Beside it, [src/paralog/calibrate.rs](src/paralog/calibrate.rs), ng's own fourth file in that module: the fallback, the curve and the cut put together.
+    **The step is about one value.** A record no sample could speak for is unscored, and the scorer's answer there is a ratio of `0.0` — the same number it returns when the two stories tie — so passing it through turns "we could not weigh this" into "this is not a duplication" and a run whose fits all failed would fit a rate from nothing (spec §6 trap 4). Three things stand against it: `ParalogScoringContext::score` returns `NaN` by reading the scorer's own `samples_used`; the ratio folded into the histogram and the ratio kept for pass three are **the same binding**; and the verdict screens on finiteness — **which the review found untested and nearly load-bearing**: the false-discovery curve's own answer for a `NaN` is `0.4999999999999852`, *inside* a target of one in two, so that screen is the only thing keeping an unscorable record out of the removed set.
+    **One reachable case needs the screen on what was weighed, not on what was built**: the scorer drops a sample whose σ₀ is not positive and finite, so a record can hand it six observations and have it weigh none; a screen on whether any observation was built would fold a `0.0` there. **C1's review Mi11 is closed**: `score` is the only way in, and four accessors are private, which is what makes spec §6 trap 3 unspellable by a caller.
     **Mutations: 8 run and killed before the review; the review ran 6 more and 4 survived** (the fallback read from the wrong field, no substitution on an empty histogram, a hardcoded contig, and the parked count in place of the fitted count — the last three each because a fixture was uniform in the dimension). **After the fixes, 8 re-run and 7 killed; the survivor was a defect in one of the fixes** — the range the run reports and the range the ratios were folded into were two expressions, and the test compared the first against the constants rather than against the second. Closed by construction: `LrHistogramShape::histogram` is now the only way the pass builds one. Nine mutations, nine killed.
     **⛦ For Checkpoint C — the likelihood-ratio histogram's range is fixed at ±100 while the ratio grows with the cohort.** Measured on one duplication-shaped record: 24.2 at one sample, 156.3 at six, **1,663 at 63**. Harmless while one class saturates, since its posterior is saturated anyway; not harmless if a cohort is large enough to push real variants *and* duplications past the same edge, where they share one bin and the target has nothing to move. Spec §4's three-thousand-sample paragraph considers memory and wall time, not this. Made countable rather than changed (`ratios_outside_the_histogram`); D2 and D3 are the runs that would answer it.
     **~~Spec §3.2's "a record with no alternative allele is not scored"~~ — ruled by the owner, 2026-09-07: nothing to build.** A position written out with no variant at it is not variable and is dropped from their analysis anyway, so the filter may remove such a line like any other. No spill field, no code. **⛦ The spec's sentence now says the opposite of the ruling and should be struck at Checkpoint C** — this plan does not edit the design docs mid-run. One consequence the ruling does not cover and nothing has measured: those lines still count towards the run's fitted duplication rate, which moves every other record's verdict; D2 is the first run that could say by how much.
     **For C4 — the ratios' order is prose.** `ratios: Vec<f64>` is indexable and carries no key, and pass three must take it front to back in step with its own read of the spill. A consuming cursor is the right shape and the review's open question is answered (spec §3.5 streams, so no index is needed); deferred because spec §3.7's type block declares the `Vec`.
-  - **C4 is implemented, reviewed and fixed** ([impl](doc/devel/reports/implementations/ng_paralog_filter_c4_2026-09-07.md), [review](doc/devel/reports/reviews/ng_paralog_filter_c4_2026-09-07.md) — **1 Blocker** / 17 Major / 28 Minor, Request-changes, three sub-agents; **31 mutations run, 19 survived** — [fixes](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_c4_2026-09-07.md), 24 applied, 2 adapted, 6 deferred, and 13 of the 19 re-run and all 13 killed): **the filter runs end to end.** [pass_three.rs](src/ng/run/paralog_filter/pass_three.rs) reads the spill again in step with pass two's ratios and writes the VCF, leaving out what the cut removes or writing it on the `hiddenParalog` filter; [finish.rs](src/ng/run/paralog_filter/finish.rs) is what a run does after its calling pass — the fit, both passes, the header's provenance and the report's words — and **both subcommands call it**, so the two modes cannot drift into filtering differently. [vcf/header.rs](src/ng/vcf/header.rs) gains `HiddenParalogProvenance`, the `##paralogFilter=` line and the three declarations, **all conditional on the filter having run**: the standing oracle is that an off run is byte-identical to the pre-filter run, and a declaration emitted always would break that on the header alone. `VcfHeaderMetadata` lost its `Eq` derive as a consequence — it now holds floats.
+  - **C4 is implemented, reviewed and fixed** ([impl](doc/devel/reports/implementations/ng_paralog_filter_c4_2026-09-07.md), [review](doc/devel/reports/reviews/ng_paralog_filter_c4_2026-09-07.md) — **1 Blocker** / 17 Major / 28 Minor, Request-changes, three sub-agents; **31 mutations run, 19 survived** — [fixes](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_c4_2026-09-07.md), 24 applied, 2 adapted, 6 deferred, and 13 of the 19 re-run and all 13 killed): **the filter runs end to end.** [pass_three.rs](src/run/paralog_filter/pass_three.rs) reads the spill again in step with pass two's ratios and writes the VCF, leaving out what the cut removes or writing it on the `hiddenParalog` filter; [finish.rs](src/run/paralog_filter/finish.rs) is what a run does after its calling pass — the fit, both passes, the header's provenance and the report's words — and **both subcommands call it**, so the two modes cannot drift into filtering differently. [vcf/header.rs](src/vcf/header.rs) gains `HiddenParalogProvenance`, the `##paralogFilter=` line and the three declarations, **all conditional on the filter having run**: the standing oracle is that an off run is byte-identical to the pre-filter run, and a declaration emitted always would break that on the header alone. `VcfHeaderMetadata` lost its `Eq` derive as a consequence — it now holds floats.
     **Both C2 departures are reversed**: `--paralog-fdr` is back to spec §3.6's `0.01` and the refusal of a non-zero target is deleted. 16 tests. **Every existing command-line test sets the flag explicitly, so nothing would have noticed the default failing to change** — both subcommands now read it off the parsed command line.
     **Clippy first went to 13 in four kinds the baseline does not have**; counting error kinds is what saw them. One was real design feedback — the run's entry point had eight arguments, two of them the operator's target and a bare `bool`, adjacent and swappable past the type checker; they are one decision and now travel as `WhatTheOperatorAskedFor`.
     **The review's one hazard, now closed by a type**: `--paralog-fdr 0` meant "off" only because two call sites each wrote `if target > 0.0`. Handed a zero the scoring does **not** remove nothing — a strongly duplicated record's tail false-discovery value underflows to exactly zero, and zero is not above zero (measured: one record at ratio 120 gives `dropped: 1`). `TargetFdr` now refuses zero and `WhatTheOperatorAskedFor::from_the_flags` is the one place zero becomes *no filter*, returning an `Option`.
     **~~Spec §10's second oracle cannot pass as written~~ — amended by the owner, 2026-09-07.** The oracle now strips the filter's four header lines as well as the two INFO keys; what it asserts is that the filter changes no record it does not flag, and the header is not a record. The original: "Filter on at an unreachable target, strip the two INFO keys, equals the filter-off file" fails because the on-run's header carries four lines the off-run does not. Declaring them always would break §10's *first* oracle instead — that an off run is byte-identical to the pre-filter run — which is the one the plan rests on. **The two were incompatible**, and the first is the one the plan rests on.
     **The Blocker was a fixture, and it is only half closed.** The one command-line test that runs the filter runs it over a cohort that writes **zero** records; direct mode has none. The filter's whole path is now exercised with records that are really removed and tagged, through the one function both subcommands call — but the ~45 lines of per-subcommand wiring around it are still untested, and giving the shared cohort enough coverage to write a record changes the ground every command-line test in three files stands on. **Filed for C5**, which builds real-data runs anyway.
   - **~~Two deliberate departures from the spec, both reversing at C4~~ — reversed, 2026-09-07.** `--paralog-fdr` defaults to spec §3.6's `0.01`, and a non-zero target is no longer refused. Both were C2's, taken because the passes that finish the filter did not exist; they do now.
-  - **C5 is partly done** ([impl](doc/devel/reports/implementations/ng_paralog_filter_c5_2026-09-07.md)): three of spec §10's four oracles hold, in [mode_equivalence.rs](src/pop_var_caller_exp/mode_equivalence.rs), on `a_varying_cohort_on_disk` — **the only cohort in the crate that writes records** (at least three). (ii) a filter flagging nothing changes nothing but its own lines; (iii) the drop-mode file is the tag-mode file without its tagged records; (iv) both modes filtered give one VCF. **(iv) is what closes C4's Blocker**: each subcommand carries its own copy of the ~45 lines around `fit_score_and_write_the_calls`, and nothing else in the crate compares those two copies.
+  - **C5 is partly done** ([impl](doc/devel/reports/implementations/ng_paralog_filter_c5_2026-09-07.md)): three of spec §10's four oracles hold, in [mode_equivalence.rs](src/cli/mode_equivalence.rs), on `a_varying_cohort_on_disk` — **the only cohort in the crate that writes records** (at least three). (ii) a filter flagging nothing changes nothing but its own lines; (iii) the drop-mode file is the tag-mode file without its tagged records; (iv) both modes filtered give one VCF. **(iv) is what closes C4's Blocker**: each subcommand carries its own copy of the ~45 lines around `fit_score_and_write_the_calls`, and nothing else in the crate compares those two copies.
     **What they do not show**: the cohort is too small for any sample to get a coverage model, so nothing is scored and nothing is flagged. The three prove the *relations between the files*, not that the filter finds duplications — the D milestone's job, and the owner has said it will be tested extensively there.
     **~~Oracle (i) cannot run here — `benchmarks/tomato1/crams/` is empty~~ — it ran, at D1, and it holds.** Six accessions at `--paralog-fdr 0` give 2,311 records and sha256 `84ad19c22dd14de583cd85805dcd2e5169e799d7a63691c979b7fa43d400590d` on everything but `##commandline` — the standing pre-filter baseline of 2026-09-06, unmoved. **The directory is empty in the worktree and not on the machine**: `benchmarks/tomato1/crams/` is in `.gitignore` (line 41), and a git worktree carries no ignored files, so only the main checkout has them — 63 CRAM slices and the repeat catalogue, there since June. The container reaches them with `DEV_EXTRA_MOUNT=/Users/jose/devel/pop_var_caller/benchmarks`. **Nothing D1 to D4 needs is missing**, including HG002's reference, catalogue and CRAM for D3.
     **Matching the baseline needs the output written under the baseline's own name**: the header carries `##parametersFile=<basename>`, so a run written as `off.vcf` differs from one written as `run.vcf` in that one line whatever the filter did — sha256 `9f6a0367…` against `84ad19c2…`, and that line is the whole difference. `scripts/ng_paralog_filter_runs.sh` writes every run as `run.vcf` and moves it afterwards.
     **~~Spec §10's second oracle could not pass as written~~ — amended by the owner, 2026-09-07**, to strip the filter's four header lines as well as the two INFO keys. The declarations are emitted only on a run that filtered, because emitting them always would break §10's *first* oracle instead; the two as written were incompatible. What the oracle asserts is that the filter changes no record it does not flag, and a header line is not a record.
-  - **D1 is implemented, reviewed and fixed** ([impl](doc/devel/reports/implementations/ng_paralog_filter_d1_2026-09-07.md), [review](doc/devel/reports/reviews/ng_paralog_filter_d1_2026-09-07.md) — 0 Blocker / **9 Major** / 12 Minor, Request-changes, two sub-agents in isolated worktrees — [fixes](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_d1_2026-09-07.md), all 21 applied, none deferred): **the filter runs at one sample and removes a record there.** One tomato accession (`SRR7279481.p1`, sample `SRS3394712`) over the plan's two 100 kb intervals: 217 records written without the filter, **all 217 scored and none unscorable**, π **0.012594 fitted from the run** (the `0.03` fallback did not fire), the cut at **8.2500**, **1 record dropped**, 1 of 1 sample with a coverage model, and **0 ratios past the histogram's ±100 ends**. Spec §9's second OPEN — whether the copied precompute works at `N = 1` — is closed on real reads. Every ratio is finite; the distribution runs −12.7036 to 21.5702 with a median of −6.2452.
+  - **D1 is implemented, reviewed and fixed** ([impl](doc/devel/reports/implementations/ng_paralog_filter_d1_2026-09-07.md), [review](doc/devel/reports/reviews/ng_paralog_filter_d1_2026-09-07.md) — 0 Blocker / **9 Major** / 12 Minor, Request-changes, two sub-agents in isolated worktrees — [fixes](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_d1_2026-09-07.md), all 21 applied, none deferred): **the filter runs at one sample and removes a record there.** One tomato accession (`SRR7279481.p1`, sample `SRS3394712`) over the plan's two 100 kb intervals: 217 records written without the filter, **all 217 scored and none unscorable**, π **0.012594 fitted from the run** (the `0.03` fallback did not fire), the cut at **8.2500**, **1 record dropped**, 1 of 1 sample with a coverage model, and **0 ratios past the histogram's ±100 ends**. Spec §9's second OPEN — whether the precompute works at `N = 1` — is closed on real reads. Every ratio is finite; the distribution runs −12.7036 to 21.5702 with a median of −6.2452.
     **The removed record is a duplication footprint**: `SL4.0ch01:3471589 G→T`, window depth 19.01 reads against a **fitted one-copy level of 5.22**, so about 3.5 copies, near the model's winsor cap of four. **The record ranked next was kept and is marginally deeper still** (19.13 reads, ratio 8.1116 against the cut) — the two are **13.4586 apart on the ratio axis**, and what separates them is four extra reads (worth `4 × 0.6831 = 2.73` nats, since the model's carrier configurations never put `m/T` above ½) plus the GC their windows sit at, 0.453 against 0.367.
     **The run now prints what each sample's coverage fit came to** — `ParalogScoringContext::what_each_fit_came_to` and a report line naming every fitted sample up to ten, the spread past that. Added because the review showed the report could not otherwise be written: with no fitted level printed, the obvious stand-in is the median depth of the records the run wrote, which is **8.49 against the fit's 5.22**, so a reader is told 2.24 copies where the model sees 3.5. **Seven mutations, all seven killed**; the fixtures give each sample a different fitted depth so a per-sample line cannot be confused with a repeated one.
     **All three of the review's file relations now hold on real reads with a record actually flagged** — the first time any of them has been more than the empty case, since C5's cohort could fit no coverage model. The third relation is new: **a flagged record is its off-run record with the verdict spliced in**. Without it, both existing relations worked by *removing* the flagged records from one side, so a flagged record's QUAL, FORMAT and sample columns were compared against nothing — and the tagging run's flagged records are the only place a ratio survives.
@@ -4746,16 +1621,14 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
     **The ±100 range does not bite from depth**: 2,768 of 8,242 ratios ran past it, **all at the negative end**, which is the confidently-a-real-variant side; the positive edge is 16 nats clear at 84.16. **Depth pushes the negative tail and cohort size the positive one**, and nothing in this plan has been large enough to test the second.
     **No repeat tract was flagged of 580 written, and none was close**: the highest tract ratio is **1.4843** against a cut of 4.6500, and **331 of the 580 share one ratio exactly (−0.6572)** because a tract is scored on coverage alone. A tract cannot respond to the allele half that removed all 284.
     **The recorded cut and the flag disagree on real data, once**: `lr_cut=4.6500` and the lowest removed record is at **4.6098** (A3 review M4's inherited behaviour). **Peak resident 13.4 GB** on all three runs alike — the calling pass, not the filter, since the filter-off arm peaks the same.
-  - **D4 is implemented, reviewed and fixed** ([impl](doc/devel/reports/implementations/ng_paralog_filter_d4_2026-09-07.md), [review](doc/devel/reports/reviews/ng_paralog_filter_d4_2026-09-07.md) — 0 Blocker / **5 Major** / 9 Minor, Request-changes, one sub-agent which reproduced both ng runs and both production runs from scratch — [fixes](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_d4_2026-09-07.md), all 14 applied): **what the filter scores and flags, by kind, on D2's and D3's runs.** Every record of every kind was scored on both; none was unscorable. On tomato only biallelic SNPs were flagged (36); on HG002 four kinds were (262 SNPs, 15 deletions, 4 insertions, 3 equal-length substitutions).
+  - **D4 is implemented, reviewed and fixed** ([impl](doc/devel/reports/implementations/ng_paralog_filter_d4_2026-09-07.md), [review](doc/devel/reports/reviews/ng_paralog_filter_d4_2026-09-07.md) — 0 Blocker / **5 Major** / 9 Minor, Request-changes, one sub-agent which reproduced both ng runs from scratch — [fixes](doc/devel/reports/reviews/fixes_applied_ng_paralog_filter_d4_2026-09-07.md), all 14 applied): **what the filter scores and flags, by kind, on D2's and D3's runs.** Every record of every kind was scored on both; none was unscorable. On tomato only biallelic SNPs were flagged (36); on HG002 four kinds were (262 SNPs, 15 deletions, 4 insertions, 3 equal-length substitutions).
     **⚠ Spec §8's tract question, answered — and the answer is the opposite shape from the first draft.** The coverage-only arm **answers the prior and nothing else over a band a copy wide, then turns on hard**. On HG002 it returns one value for every tract between **0.20 and 1.27 times the one-copy scale** (331 of 580 print −0.6572, 529 within 0.001), because at σ₀ 0.092 the carrier hypothesis at 1.5 copies is five standard deviations off and its branch underflows — **σ₀ sets the plateau, not the coverage**. At tomato's σ₀ 0.158–0.302 it does not underflow and **all 21 tract ratios are distinct**, so the two runs disagree about the phenomenon and must not be pooled. **It is not a safe zero**: the arm reaches the cut at **1.372 copies** and the run's highest-scoring tract sat at **1.310** — a gap of 0.68 σ₀, about **17 reads in a 364-read window**, so the run came 83% of the way. A tract flagged that way would be flagged on coverage alone with the allele half off, which spec §1 says cannot tell a duplication from anything else that raises depth. **A stronger case for §8's tract-aware allele term than "the arm is inert".**
     **Deletions really are a different population from tracts**, as the plan required: on HG002 a deletion's ratios reach 47.92 with 15 of 257 flagged, against a tract's 1.48 and none of 580. The causal reading is softened — a tract's coverage arm is not capped (56.7 at two copies), so the contrast is about the copy numbers these tracts had plus the second arm a deletion has.
-    **Production's filter, over the same six accessions**: on the **1,867 records both callers wrote** over the two intervals, production removed **17** and ng removed **27**, and **all 17 are among ng's 27** with nothing removed by production that ng kept. Of ng's 19 others, 9 production never called and 10 it called and kept. **The two calibrations are nowhere near each other** — production fitted π **0.174464** and a cut of **2.9500** against ng's **0.020634** and **6.2500** — which makes the agreement worth more; 15 of the 17 lie in the two clusters D2 found. Production removes 6,223 records over the whole of `regions.bed`, so this covers 0.27% of its verdict, not all of it.
     **⚠ Raw depth over the one-copy scale is not the copy number the model reads, and D4 is the fourth step running to trip on it.** The GC multiplier decides: HG002's deepest tract window (1.4156× the scale, GC 0.295) sits on the plateau at −0.6252, while the highest-scoring tract (1.2033×, GC 0.457) is at 1.4843. **The run still prints the scale and not the GC curve.**
   - **Checkpoint B was reached**, and the plan marks it a hard pause: an entry round-trips with its absences intact, the file cannot outlive its run, and a line goes out unchanged unless the verdict touches it. **Milestone C does not start until the window-coverage branch reaches `main`** — C1 needs ng's `CoverageByGcHistogram` and the `WindowCoverage` stand-in in `paralog_filter/mod.rs` is deleted at that rebase.
   - **⛦ For Checkpoint B: the spill's disk cost is reported nowhere, and how much larger it is than a compressed output is unmeasured.** It holds every record's line uncompressed plus about ten bytes a sample, so against a `.vcf.gz` output it is several times the output's size — the direction is certain from the code and the ratio is not. Spec §3.5's run-report list has no line for the spill, so adding one is a spec question (B2 review M6, Mi17); step D2 is the first run that could measure it.
-  - **⛦ For step C4: `lr_threshold` is not what `flags` decides on.** The cut the header records is the crossing histogram bin's *centre*; the flag is the bin. Every ratio in the lower half of that bin — 0.05 on the likelihood-ratio axis at the shipped 2,000 bins over `[-100, 100]` — is flagged while sitting below the recorded cut, so an operator reading "records at or above this ratio were dropped" is wrong for those. Production's behaviour, inherited; pinned by `the_recorded_cut_and_the_flag_agree_to_within_one_bin` (A3 review M4).
-  - **Spec §9's second OPEN (`N = 1`) is closed at the copy level by A2**: the copied precompute runs at one sample and agrees with production's bit for bit on 144 scored loci of 200 drawn. What it says about real data is still step D1's.
-  - **Spec §3.2's one decision beyond production — every record scored, non-SNPs on coverage alone — is confirmed with the owner before step C1 is coded.**
+  - **⛦ For step C4: `lr_threshold` is not what `flags` decides on.** The cut the header records is the crossing histogram bin's *centre*; the flag is the bin. Every ratio in the lower half of that bin — 0.05 on the likelihood-ratio axis at the shipped 2,000 bins over `[-100, 100]` — is flagged while sitting below the recorded cut, so an operator reading "records at or above this ratio were dropped" is wrong for those. Pinned by `the_recorded_cut_and_the_flag_agree_to_within_one_bin` (A3 review M4).
+  - **Spec §3.2's decision — every record scored, non-SNPs on coverage alone — is confirmed with the owner before step C1 is coded.**
   - **`main` is red on four checks**, which costs this branch (and every branch) the `--all-targets` gate: `examples/ng_candidate_selection_probe.rs` does not compile against the current `ClosedLocus`; `ng_calling_loop_calls_genotypes::a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele` fails; `cargo fmt --check` is dirty on nine files; `cargo clippy -D warnings` fires three `needless_lifetimes`. None is this plan's to fix.
 #### Window coverage — each sample's depth and GC around a locus, and the histogram behind it
 - **Status:** `fixes-applied` — **Milestones A, B, C and D complete** (branch `ng-window-coverage`): the accumulator, the floor, the per-sample depth
@@ -4773,12 +1646,11 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   **Spec:** [window_coverage.md](doc/devel/ng/spec/window_coverage.md). No architecture
   document — the spec's §3 type blocks are the code shape. Its consumer, built separately:
   [hidden_paralog_filter.md](doc/devel/ng/spec/hidden_paralog_filter.md).
-- **Code:** [src/ng/window_coverage/](src/ng/window_coverage/) —
-  [mod.rs](src/ng/window_coverage/mod.rs) (`WindowCoverageConfig`, `WindowCoverage`,
-  `CoverageByGcHistogram`), [accumulator.rs](src/ng/window_coverage/accumulator.rs)
-  (`WindowCoverageAccumulator`), [depth.rs](src/ng/window_coverage/depth.rs)
-  (`for_each_depth_the_record_reports`),
-  [production_parity.rs](src/ng/window_coverage/production_parity.rs).
+- **Code:** [src/window_coverage/](src/window_coverage/) —
+  [mod.rs](src/window_coverage/mod.rs) (`WindowCoverageConfig`, `WindowCoverage`,
+  `CoverageByGcHistogram`), [accumulator.rs](src/window_coverage/accumulator.rs)
+  (`WindowCoverageAccumulator`), [depth.rs](src/window_coverage/depth.rs)
+  (`for_each_depth_the_record_reports`).
 - **Impl reports:** [A1](doc/devel/reports/implementations/ng_window_coverage_a1_2026-09-06.md),
   [A2](doc/devel/reports/implementations/ng_window_coverage_a2_2026-09-06.md),
   [A3](doc/devel/reports/implementations/ng_window_coverage_a3_2026-09-06.md),
@@ -4816,16 +1688,11 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   — all applied or raised with a home; each step's fixes are in its own commit. **C2's correctness
   review ran a session late**, its design half having landed inside C2's own commit; its findings
   are fixed forward in their own commit after C3.
-- **A1 done (the accumulator, copied):** production's `SlidingWindowCoverageAccumulator`
-  ([coverage.rs](src/sample_summary/coverage.rs)) transcribed with its eleven sliding-window
-  tests, under spec §3.6's names and ng's coordinate types; the fixed-tile accumulator and the
-  heterozygosity fields left behind, and two histogram fields dropped. **The copy is checked
-  against the original, not only against hand arithmetic:** 200 pseudo-random streams over
-  window widths 1 to 600 compare **447,581 window means and GC fractions bit for bit**, plus
-  every histogram cell. **Fourteen of the module's fifteen new unit tests exist because a
+- **A1 done (the accumulator):** a sliding-window coverage accumulator with eleven sliding-window
+  tests, under spec §3.6's names and ng's coordinate types, without a fixed-tile accumulator, the heterozygosity fields or
+  two of the histogram fields. **Fourteen of the module's fifteen new unit tests exist because a
   mutation survived the twelve the step started with** — nineteen mutations run, seven
-  survivors, every one now carried by a unit test rather than by the differential alone, which
-  matters because the differential's histogram half stops applying at step A3.
+  survivors, every one now carried by a unit test.
 - **The standing oracle for every step of this plan:** a run with the filter off writes byte for
   byte what it writes today. Baseline taken 2026-09-06 on six tomato accessions over the first
   two 100 kb intervals of `benchmarks/tomato1/regions.bed` — 2,311 records, direct mode and psp
@@ -4838,13 +1705,11 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   cleared a floor of five and was folded. Seven mutations run on the fixed tree, each caught.
 - **A3 done (the depth axis, fitted per sample):** the accumulator holds its first
   `depth_scale_windows` windows back, takes the median of their mean depths, and cuts the depth
-  axis so the 400 regular bins span ten times it — **50 × 401 × 4 bytes, 80.2 kB a sample**,
-  against production's fixed 0.5× bin at 400 kB. A sample nothing can be fitted from has no
+  axis so the 400 regular bins span ten times it — **50 × 401 × 4 bytes, 80.2 kB a sample**.
+  A sample nothing can be fitted from has no
   histogram. **The review found the failure this step was warned about:** a fit that failed
   part-way through a sample silently retried and dropped the windows it failed on — measured, six
-  windows emitted and two folded — so the width is now three-state and latches unfittable. The
-  differential against production keeps the windows and gives up the histogram cells, which is
-  why A1's review gave the four behaviours it used to guard alone their own unit tests first.
+  windows emitted and two folded — so the width is now three-state and latches unfittable.
 - **B1 done (which positions a record reports depth at):** one function turns a drawn record into
   covered positions with a depth at each. A record spanning **one base** reports the count its
   summary already carries and decodes nothing; a **generic** record spanning more reports at its
@@ -5022,7 +1887,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   branch. **The reviews found two claims wrong**: "nine of the ten" stores fitted a shallow median
   is eight — both agents found it independently, and the report's own table printed the two
   exceptions — and the overflow fraction was divided by the accumulator's counter where the prose
-  claimed production's cell totals; the two agree on every store measured, but nothing was
+  claimed the histogram's cell totals; the two agree on every store measured, but nothing was
   checking, and two wrong denominators survived all 21 tests.
 - **D3 done (the memory, priced), and Milestone D complete:** **106.4 kB a psp-mode sample for the
   whole calling pass, and 368 kB while its depth axis is being fitted** — 21% and 74% of the 500 kB
@@ -5060,113 +1925,23 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 
 ## Standing project-wide items
 
-Not bound to a specific stage block; pick up whenever the active feature
+Not bound to a specific component; pick up whenever the active feature
 list is clear.
 
-- **One standard validation command is red, independent of any feature
-  work** (surfaced 2026-07-23 by the ng alignment plan's per-step
-  validation; verified pre-existing by `git stash -u` + re-run on a
-  clean tree). It is one of the five commands the review skill
-  prescribes, so every step of every plan currently has to except it by
-  hand. (The `psp_writer_perf` bench panic that used to sit beside it was
-  fixed 2026-09-03, `cba10a0b` on `ng-psp-mode`; `cargo test --all-targets`
-  is now red only on the three documented locus-dump behaviour failures.)
-  - `cargo doc --no-deps` fails on 11 unresolved intra-doc links, in
-    `src/ng/locus_generation/ssr.rs`,
-    `src/ng/region_typing/{segment_criteria.rs,mod.rs}`,
-    `src/ng/tandem_repeat.rs` and several `src/ssr/` files. Most are
-    Markdown file paths written in `[`…`]` link syntax, which rustdoc
-    reads as intra-doc links.
-- **BED-region skip.** Add a Stage 1 CLI flag that takes a BED file of
-  regions to skip (avoid pathological regions). Source:
-  [doc/devel/TODO.txt](doc/devel/TODO.txt).
 - **Phase-chain integration tests.** Add integration tests asserting that
-  phase chains are correctly carried through the Stage 5 likelihood
-  calculation. Source: [doc/devel/TODO.txt](doc/devel/TODO.txt).
-- **Parallel-optimization integration perf benches.** Build end-to-end
-  criterion (or equivalent) benches that measure wall time for the two
-  pipeline arms whose parallelism still needs tuning: CRAM → `.psp`
-  (Stage 1, `pileup` / `var-calling-from-bam`) and `.psp` → cohort VCF
-  (Stages 3–6, `var-calling`). These integration benches are the
-  ground truth for the deferred parallelisation-tuning pass
-  (rayon-over-records, `--per-group-batch-size`, per-group batch
-  sizing) — micro-benches alone can't catch end-to-end scaling
-  artefacts.
-  - **`.psp` → cohort VCF arm — shipped 2026-05-19:**
-    [benches/cohort_e2e_perf.rs](benches/cohort_e2e_perf.rs). Two
-    bench-group families: `cohort_e2e_core/*` times
-    [`drive_cohort_pipeline`](src/pop_var_caller/cohort_driver.rs) in
-    isolation (PSP open + FASTA verify outside the timed region) with
-    sub-groups `scaling_samples` (N ∈ {10, 64, 256}), `scaling_region`
-    (L ∈ {1 000, 5 000, 20 000}), and `scaling_threads` (T ∈ {1, 2,
-    4, max-cores} via per-bench local `rayon::ThreadPool` +
-    `pool.install(...)`); `cohort_e2e_full/*` times
-    [`run_var_calling`](src/pop_var_caller/var_calling.rs) end-to-end
-    over `scaling_samples` + `scaling_region`. The full group cannot
-    sweep thread count within one `cargo bench` invocation —
-    `configure_rayon_pool` / `ThreadPoolBuilder::build_global` is
-    once-per-process; run separate invocations under
-    `RAYON_NUM_THREADS=N`. Bench-surface lift:
-    [`drive_cohort_pipeline`](src/pop_var_caller/cohort_driver.rs) +
-    `CohortPipelineParams` promoted from `pub(crate)` to
-    `#[doc(hidden)] pub`. 15 bench variants pass `cargo bench --bench
-    cohort_e2e_perf -- --test`.
-  - **`.psp` → cohort VCF arm — perf review against real data
-    2026-05-20:**
-    [perf_psp_to_vcf_2026-05-20.md](doc/devel/reports/reviews/perf_psp_to_vcf_2026-05-20.md).
-    Used the bench above + an `examples/profile_cohort_e2e.rs`
-    one-off + `perf record` on real tomato (SL4.0)
-    `SRR7279725.small.psp × N=10` to produce the headline
-    diagnosis: pipeline is essentially single-threaded
-    (T=1=12.7s ≈ T=16=13.6s); DUST 33 %, allocations 21 %, PSP
-    decode 15 %; per-group merger + posterior together <2 %. Seven
-    Hot-path + 12 Likely findings; **H1 per-chromosome parallelism**
-    is the order-of-magnitude lever.
-  - **`.psp` → cohort VCF arm — H1 per-chromosome parallelism shipped
-    2026-05-20:**
-    [cohort_per_chromosome_parallel_2026-05-20.md](doc/devel/reports/implementations/cohort_per_chromosome_parallel_2026-05-20.md).
-    Realised **3.85× wall-time reduction at T=13** on the multi-chrom
-    real-data fixture
-    (`tmp/SRR7279727.multichrom.psp` — 2 Mbp from each of 13 SL4.0
-    chroms via `samtools view --regions`, N=10 cohort: 106.6 s →
-    27.7 s). Workload imbalance (ch00 unplaced/decoy reads at
-    13× the median per-chrom count) gates the ceiling below the
-    plan's predicted 6–10×; L5 contention is the next ceiling
-    (acknowledged for follow-up). Includes L1 (per-group inner
-    `par_iter` removed) and a new pure-Rust bgzf-aware concat
-    module (`src/var_calling/vcf_writer/concat.rs`).
-  - **CRAM → VCF arm (`var-calling-from-bam`) — REMOVED 2026-06-01.**
-    The direct single-sample BAM/CRAM → VCF subcommand was deleted
-    entirely (see the Current-focus "Last completed task"); the only
-    route to a VCF is now `pileup` → `.psp` → `var-calling`. The
-    history below is retained for the record. Per-chromosome
-    parallelism shipped 2026-05-24:
-    [var_calling_from_bam_per_chromosome_2026-05-24.md](doc/devel/reports/implementations/var_calling_from_bam_per_chromosome_2026-05-24.md);
-    plan
-    [var_calling_from_bam_per_chromosome.md](doc/devel/implementation_plans/var_calling_from_bam_per_chromosome.md).
-    Four-commit PR (`29b28e8` → `e5261ba` → `050da41` → `a858832`):
-    new `src/bam/index_preflight.rs` + `--build-map-file-index`
-    flag (opt-in `.crai` auto-build; off by default with a
-    samtools-pointing error), new
-    `CramMergedReader::query` indexed per-contig variant +
-    `OwnedIndexedCramRecords` iterator, new
-    `process_one_chromosome_from_bam` per-chrom worker, and a
-    `run_var_calling_from_bam` reshape that retires the serial
-    `run_cohort_pipeline_for_single_sample` + `PerChromRecordsIter`
-    helpers in favour of `rayon::par_iter` over chromosomes +
-    `vcf::concat::concat_fragments` (no new file-format module —
-    reuses the cohort H1's pure-Rust bgzf concat). Net diff
-    +1320 / -520 across the four commits; 898 lib + every
-    integration test pass; clippy + fmt clean. Wall-time
-    validation on real multi-chrom tomato CRAMs (the analogue of
-    cohort H1's 3.85× at T=13) is deferred: the
-    `examples/profile_from_bam_e2e.rs` + `benches/from_bam_e2e_perf.rs`
-    infrastructure (commit 5 of the plan) was scoped out.
-  - **CRAM → `.psp` arm (`pileup`): not planned** (design call
-    2026-05-24). The typical PSP workflow runs N independent samples
-    and the orchestrator (Snakemake, Nextflow, GNU parallel)
-    already provides the per-sample parallelism; a single `pileup`
-    invocation processes exactly one sample and stays serial.
-    Revisit only if a real workload appears where one sample's
-    `.psp` build dominates a pipeline's wall time.
-
+  phase chains are correctly carried into the read likelihoods (`calling::likelihood`).
+  Source: [doc/devel/TODO.txt](doc/devel/TODO.txt).
+- **The follow-ups the promotion handed on**, each with its reason in
+  [the plan's §8](doc/devel/implementation_plans/promote_ng_to_production.md): pruning `bam`,
+  `fasta` and `regions` of items nothing calls; gating the three `#[should_panic]` tests that fail
+  under `--release` so CI's release-mode test step can run crate-wide; a check of the aligner's
+  band margin that needs no other caller; the homozygous-variant site-quality question; and moving
+  `doc/devel/ng/{spec,arch,impl_plan,reports}` into `doc/devel/`, repairing their `src/ng/…` paths,
+  and renaming the `ng_` prefix off examples, integration tests, benches and scripts.
+- **Whether a fitted inbreeding coefficient improves calls.** `estimate-parameters` writes a fitted
+  coefficient and calling reads it. On four tomato accessions over 8 Mb the fit wrote 0.9128 to
+  0.9836, and calling with those rather than with zero changed 4,497 genotypes of 191,752 — but
+  those values are a four-sample artefact (the 63-accession fit put the panel at 0.23 to 0.90), and
+  most of the replicate pair's gain in agreement came from heterozygous calls disappearing ("both
+  heterozygous" fell from 1,230 pairs to 172). The GIAB trio, where truth exists and the right
+  coefficient is zero, would settle it; it has not been run.

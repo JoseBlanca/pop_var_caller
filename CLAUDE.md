@@ -220,13 +220,16 @@ lands where "0.09%" does not.
 
 ## Project layout pointers
 
-- Architecture and specs: `doc/devel/specs/` — start with
-  `calling_pipeline_architecture.md` and `design_principles.md`.
-- Implementation plans: `doc/devel/implementation_plans/`.
+- The caller's design: `doc/devel/ng/` — `spec/` (start with `ng_proposal.md`), `arch/`,
+  `impl_plan/`. The caller was written under the name "ng", which these paths keep.
+- Design principles every design is judged against: `doc/devel/specs/design_principles.md`.
+  The rest of `doc/devel/specs/` describes the older caller deleted on 2026-09-13.
+- Implementation plans: `doc/devel/implementation_plans/` and `doc/devel/ng/impl_plan/`.
 - Implementation reports: `doc/devel/reports/implementations/`.
 - Reviews (correctness and performance): `doc/devel/reports/reviews/`.
 - Skills used by the assistant: `ai/skills/`.
-- Source tree: `src/` (library) and `src/main.rs` (CLI).
+- Source tree: `src/` — the library, its modules at the crate root (`src/lib.rs` maps them) — and
+  `src/main.rs`, the `pop_var_caller` binary, whose subcommands live in `src/cli/`.
 - Tests: per-module `#[cfg(test)] mod tests` blocks; integration
   tests in `tests/`.
 

@@ -677,13 +677,26 @@ byte-identical to A1's digests, and its VCF's `##commandline` names
 
 ### Milestone F — close
 
-- ☐ **F1. PROJECT_STATUS** — the *Last completed task* entry with the numbers from every
+- ✅ **F1. PROJECT_STATUS** — the *Last completed task* entry with the numbers from every
   checkpoint; the *About* paragraph flagged for the owner (§8).
-- ☐ **F2. CLAUDE.md** — the "Source tree" layout pointer still names `src/main.rs` as
+  **Widened by the owner, 2026-09-13:** "edit the project_status.md. Remove all references to the
+  old production caller and adapt it to the new situation." So the *About* paragraph is rewritten
+  rather than flagged; the dated log of 134 completed tasks, written while ng grew beside
+  production, is trimmed to the promotion's own entry, pointing at `3dacbb73` for the untrimmed
+  copy (the file's existing convention); the production section is deleted; the component-status
+  section loses every production comparison and its `src/ng/` links move to `src/`; and the
+  standing items keep only what applies to the current caller. The file goes from 5,172 lines to
+  1,947, and a review found and restored what the first pass lost: two open items, a note that
+  some tests still hold the older caller's recorded answers, and that four step-4 blocks describe
+  a parameter route deleted on 2026-09-11.
+- ✅ **F2. CLAUDE.md** — the "Source tree" layout pointer still names `src/main.rs` as
   production's CLI; and the assistant's own memory notes about the production freeze are
-  retired.
-- ☐ **F3. Implementation report** under `doc/devel/reports/implementations/`, with the
-  before/after line and test counts and the md5 table.
+  retired. Done: the layout pointers name `doc/devel/ng/` as the design, `src/lib.rs` and `src/cli/`;
+  the two freeze notes are replaced by one saying the promotion happened and that the `trf-mod` rule
+  still binds.
+- ✅ **F3. Implementation report** under `doc/devel/reports/implementations/`, with the
+  before/after line and test counts and the md5 table:
+  [promote_ng_to_production_2026-09-13.md](../reports/implementations/promote_ng_to_production_2026-09-13.md).
 
 ## 6. Verification summary
 
