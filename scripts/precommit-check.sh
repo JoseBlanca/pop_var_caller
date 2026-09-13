@@ -51,7 +51,7 @@ step "1b/6 dependency guard: shipped ng must not depend on production"
 # gone. This exists so the end state of milestone B is visible before D starts, and
 # so that a new reach-in fails here rather than at the deletion.
 production_modules="pileup|psp|pileup_record|genetics|pop_var_caller|var_calling|vcf|ssr|paralog|sample_summary|baq|norm_seqs"
-oracles="parity\.rs|copy_fidelity\.rs|leftmost_property\.rs|test_fixtures\.rs|mock_reference\.rs|ssr_production_differential\.rs|prepared_read\.rs"
+oracles="parity\.rs|leftmost_property\.rs|test_fixtures\.rs|mock_reference\.rs|ssr_production_differential\.rs|prepared_read\.rs"
 reach_in=$(grep -rnE "^use crate::($production_modules)(::|;| )" src/ng --include="*.rs" \
     | grep -Ev "$oracles" || true)
 if [ -n "$reach_in" ]; then

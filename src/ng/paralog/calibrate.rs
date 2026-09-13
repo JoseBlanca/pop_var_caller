@@ -9,13 +9,12 @@
 //! alone and would otherwise calibrate the whole run. `converged` stays `false`, so the run report
 //! can say which happened.
 //!
-//! **This is ng's file, not a copy, and it is not guarded** — production keeps its counterpart
-//! (`calibrate_from_histogram`) in `src/var_calling/paralog_filter/calibrate.rs`, below four items
-//! ng deliberately does not port, so it falls outside the span
-//! `copy_fidelity` compares. It is checked against production all the
-//! same: `the_fallback_and_the_cut_agree_with_productions_bit_for_bit` in
-//! `production_parity` is the oracle, beside the nine other
-//! differentials.
+//! **This is ng's file, not a copy, and it was never textually guarded** — production keeps its
+//! counterpart (`calibrate_from_histogram`) in `src/var_calling/paralog_filter/calibrate.rs`, below
+//! four items ng deliberately does not port, so it fell outside the span the copy guard compared.
+//! It is checked against production all the same:
+//! `the_fallback_and_the_cut_agree_with_productions_bit_for_bit` in `production_parity` is the
+//! oracle, beside the nine other differentials.
 //!
 //! It lives in this module rather than beside its caller because it is statistics: it reads a
 //! histogram and a configuration and returns a calibration, and knows nothing about the spill, the

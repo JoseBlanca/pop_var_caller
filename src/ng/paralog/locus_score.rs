@@ -39,7 +39,7 @@
 //! **one function no longer is**: [`log_add_exp`] skips its `log1p` where the series of
 //! `ln(1 + x)` is already exact in the sum it goes into. `log1p` was 52.6% of the
 //! hidden-duplication filter's scoring pass and that pass was 31% of a `call-from-psps` run.
-//! `copy_fidelity.rs` no longer guards this file and its release table says so; **what
+//! The textual guard released this file (and was itself deleted at promotion step C3); **what
 //! replaced the textual guarantee is the numeric one**, below. The model's constants are the
 //! tomato2 prototype's, inherited and **not re-measured**
 //! (`doc/devel/ng/spec/hidden_paralog_filter.md` §3.2, plan step A2).

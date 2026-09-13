@@ -218,7 +218,15 @@ carries a header line naming the production commit that wrote it.
     files; at `d9e7b076` it guarded one, `decompose.rs`, the others having been released as ng
     changed them. Doc comments in six files and the module's arch doc that described it as a
     running check now say it was retired.
-  - ☐ C3 · ☐ C4 · ☐ C5 · ☐ C6 · ☐ C7 · ☐ C8 · ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
+  - ✅ **C3** `paralog/copy_fidelity.rs` — deleted. It held **nine** tests, not the table's ten
+    (the tenth `#[test]` the sweep counted is inside a doc comment). Two read production's text —
+    one comparing four copies against their originals, one checking the item a span copy stops
+    before still exists — and the other seven tested the guard's own machinery (the
+    appended-note rule, the repoints, the span markers, the directory bookkeeping). None checked what ng computes: that
+    is `production_parity.rs`, frozen at C4. Headers of eight paralog files and `src/ng/mod.rs`
+    that described the guard as running are put in the past tense, and `copy_fidelity\.rs`
+    leaves `precommit-check.sh`'s exemption list.
+  - ☐ C4 · ☐ C5 · ☐ C6 · ☐ C7 · ☐ C8 · ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
 - ☐ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
   `ng_psp_head_encoding.rs` (`test = true` in `Cargo.toml`), `paralog_score_parity.rs` — are
   deleted with a line each in the report saying which document already holds their result.

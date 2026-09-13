@@ -24,7 +24,8 @@
 //! ---
 //!
 //! **ng's copy.** Everything above and below this note is line for line and byte for byte
-//! `src/paralog/prior.rs`, which `copy_fidelity.rs` asserts textually — ng appends this note
+//! `src/paralog/prior.rs`, as a textual guard (`copy_fidelity.rs`, deleted at promotion step C3)
+//! asserted until then — ng appends this note
 //! to production's header and changes nothing else. The EM's start, tolerance and iteration
 //! cap, and the histogram's shape, are the tomato2 prototype's, inherited and **not
 //! re-measured** (`doc/devel/ng/spec/hidden_paralog_filter.md` §3.3, plan step A3).

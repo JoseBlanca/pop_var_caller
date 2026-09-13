@@ -8,15 +8,15 @@
 //! becomes a probability and a false-discovery q-value, and the operator's target FDR
 //! resolves to a cut.
 //!
-//! **Copied from production's `src/var_calling/paralog_filter/calibrate.rs`, from its first
-//! item down to but not including the cohort inbreeding coefficient** — the one place in this
-//! module where ng takes a span of a larger file rather than a whole one, because production
-//! keeps this type in the same file as its spill-streaming driver, which ng does not want.
-//! Everything below the `use` is that span, line for line and byte for byte but for **seven**
-//! lines `copy_fidelity.rs` declares and checks: one path into production, one rustdoc link
-//! to the driver ng leaves behind, and five items whose `pub(crate)` is widened to `pub`
-//! because ng re-exports them from a public module and a `pub use` cannot re-export a
-//! crate-private item. The file is guarded there like every other copy.
+//! **Copied from production's `src/var_calling/paralog_filter/calibrate.rs`, from its first item
+//! down to but not including the cohort inbreeding coefficient** — the one place in this module
+//! where ng takes a span of a larger file rather than a whole one, because production keeps this
+//! type in the same file as its spill-streaming driver, which ng does not want. Everything below
+//! the `use` is that span, line for line and byte for byte but for **seven** lines a textual guard
+//! (`copy_fidelity.rs`, deleted at promotion step C3) declared and checked: one path into
+//! production, one rustdoc link to the driver ng leaves behind, and five items whose `pub(crate)`
+//! is widened to `pub` because ng re-exports them from a public module and a `pub use` cannot
+//! re-export a crate-private item. The file was guarded there like every other copy.
 //!
 //! **ng's `F` is per sample where production's is one cohort number** — the parameters file
 //! carries a fitted coefficient for each sample (`doc/devel/ng/spec/hidden_paralog_filter.md`

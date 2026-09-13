@@ -17,15 +17,14 @@
 //!
 //! **Copied, not re-derived.** The model is production's
 //! (`doc/devel/specs/hidden_paralog_filter.md`, reformulated for one sample by
-//! `doc/devel/architecture/hidden_paralog_single_sample_scoring.md`). Three of the five
-//! files beside this one are production's source, line for line and byte for byte:
-//! [`coverage_model`], 1,157 lines past its module header; [`locus_score`], 797; and
-//! [`model_params`], 236. The other two are ng's own and are what assert the copies —
-//! `copy_fidelity` textually, so an edit to *either* tree fails the build instead of
-//! drifting quietly, and `production_parity` numerically, by scoring randomised loci
-//! through both implementations and comparing every number by bit pattern. What ng
-//! changes about the filter is where its numbers come from and when they are known, not
-//! what it computes: `doc/devel/ng/spec/hidden_paralog_filter.md`.
+//! `doc/devel/architecture/hidden_paralog_single_sample_scoring.md`). Three of the five files
+//! beside this one are production's source, line for line and byte for byte: [`coverage_model`],
+//! 1,157 lines past its module header; [`locus_score`], 797; and [`model_params`], 236. Two files
+//! of ng's own asserted the copies: `copy_fidelity.rs` textually, until promotion step C3 deleted
+//! it, and `production_parity` numerically, which still does — it scores randomised loci and
+//! compares every number against production's. What ng changes about the filter is where its
+//! numbers come from and when they are known, not what it computes:
+//! `doc/devel/ng/spec/hidden_paralog_filter.md`.
 //!
 //! **This file is ng's own**, and holds nothing but its declarations, its re-exports and
 //! the tests ng adds to production's. Production keeps the model's constants in its own
@@ -50,11 +49,6 @@ pub mod coverage_model;
 pub mod locus_score;
 pub mod model_params;
 pub mod prior;
-
-/// **ng's, not a copy** — the textual check that the copies beside it are still
-/// production's, written from outside the files it checks (spec §1.2).
-#[cfg(test)]
-mod copy_fidelity;
 
 /// **ng's, not a copy** — the differential that proves the copied scorer computes what
 /// production's does, on randomised inputs, by bit pattern (spec §10).

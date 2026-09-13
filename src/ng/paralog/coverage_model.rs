@@ -30,13 +30,13 @@
 //! ---
 //!
 //! **ng's copy.** Everything above and below this note is line for line and byte for byte
-//! `src/paralog/coverage_model.rs`, which `copy_fidelity.rs` asserts textually — ng
-//! appends this note to production's header and changes nothing else. The constants and
-//! guards are the tomato2 prototype's, inherited and **not re-measured**
+//! `src/paralog/coverage_model.rs`, as a textual guard (`copy_fidelity.rs`, deleted at promotion
+//! step C3) asserted until then — ng appends this note to production's header and changes nothing
+//! else. The constants and guards are the tomato2 prototype's, inherited and **not re-measured**
 //! (`doc/devel/ng/spec/hidden_paralog_filter.md` §3.1, plan step A1).
 //!
 //! **The histogram it fits from is ng's own** ([`crate::ng::window_coverage`]), where
-//! production's reads `crate::sample_summary`. That one-line difference is declared to the
+//! production's reads `crate::sample_summary`. That one-line difference was declared to the
 //! copy guard as an *input type ng owns* — the port exists so that ng's filter does not
 //! depend on the frozen tree, and a copy that kept production's path would have tied it there
 //! for good.

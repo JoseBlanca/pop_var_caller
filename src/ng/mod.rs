@@ -31,18 +31,18 @@
 //! what costs production nothing. Winning steps are ported back only after the
 //! experiments ng exists to run have decided something.
 //!
-//! **A test may read production as an oracle, and a handful do** — `scanner_parity`
-//! against `src/ssr/` and `calling::genotype_table_parity` against `src/var_calling/`
-//! were the first two; there are now several more, and the way to find them is
-//! `grep -rnE 'use crate::|include_str!\("\.\./\.\.' src/ng | grep -v 'crate::ng'` rather
-//! than a list here that goes stale. **The second alternative matters**: the copy guard
-//! `paralog/copy_fidelity.rs` reads production's source as *text* at compile time rather than
-//! importing from it, and a `use`-only sweep does not see it at all. Every one is `#[cfg(test)]`, so nothing shipped depends on production; the
-//! direction that matters is the other one, and production still depends on nothing in ng.
-//! A port's whole claim is that it agrees with what it was ported from, and only production
-//! can settle that. **Every occurrence outside a `#[cfg(test)]` module needs a stated
-//! reason** — `paralog::coverage_model` has the one that exists today, and its own header
-//! gives the reason and the date it ends.
+//! **A test may read production as an oracle, and a handful do** — `scanner_parity` against
+//! `src/ssr/` and `calling::genotype_table_parity` against `src/var_calling/` were the first two;
+//! there are now several more, and the way to find them is
+//! `grep -rnE 'use crate::|include_str!\("\.\./\.\.' src/ng | grep -v 'crate::ng'` rather than
+//! a list here that goes stale. **The second alternative mattered** while the copy guards existed: they read
+//! production's source as *text* at compile time rather than importing from it, and a `use`-only
+//! sweep did not see them. Both were deleted at promotion steps C2 and C3. Every one is
+//! `#[cfg(test)]`, so nothing shipped depends on production; the direction that matters is the
+//! other one, and production still depends on nothing in ng. A port's whole claim is that it agrees
+//! with what it was ported from, and only production can settle that. **Every occurrence outside a
+//! `#[cfg(test)]` module needs a stated reason** — `paralog::coverage_model` has the one that
+//! exists today, and its own header gives the reason and the date it ends.
 //!
 //! **One such oracle cost production one line, and it is the only edit ng has made to
 //! a frozen tree.** `posterior_engine.rs` declared `mod shape;` privately, which put
@@ -58,9 +58,9 @@
 //! [`paralog::calibration`] is a span of `src/var_calling/paralog_filter/calibrate.rs`, which
 //! production keeps `pub(crate)` inside a private module; ng re-exports the same names from
 //! [`paralog`], and a `pub use` cannot re-export a `pub(crate)` item, so five lines read
-//! `pub` where production reads `pub(crate)`. **Production is untouched.** Each such line is
-//! declared and checked in `paralog/copy_fidelity.rs`, and the check is exact: the two lines
-//! must be identical once `pub(crate)` becomes `pub`.
+//! `pub` where production reads `pub(crate)`. **Production is untouched.** Each such line was
+//! declared and checked in `paralog/copy_fidelity.rs` until promotion step C3 deleted it, and the
+//! check was exact: the two lines had to be identical once `pub(crate)` becomes `pub`.
 //!
 //! **The heaviest instance of that rule so far is
 //! [`locus_generation::pileup`]** — begun as a verbatim copy of `src/pileup/walker/`

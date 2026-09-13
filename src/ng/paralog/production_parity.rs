@@ -1,17 +1,18 @@
 //! **ng's copied scorer computes what production's does — asserted on randomised loci, by
 //! bit pattern.**
 //!
-//! `copy_fidelity` says the *text* is production's. This says the *numbers* are, which is
-//! the property the port actually claims (`doc/devel/ng/spec/hidden_paralog_filter.md`
-//! §7's reuse map: *"the parity oracle is bit-identical ratios against production's on
-//! identical synthetic inputs"*). The two are not the same statement, and **neither is
-//! strictly stronger than the other.** The text guard would still pass if a build flag or a
-//! platform difference made one tree evaluate the same source differently. The differential
-//! only sees what it draws: a review of this file found four input classes it did not reach,
-//! and for those four the text guard was the one catching the divergence. Both are kept, and
-//! the differential's reach is now pinned rather than described (see *What the stream must
-//! contain*), because `copy_fidelity.rs` already schedules one file for release — and once a
-//! file is released this is the only guard left on it.
+//! A textual guard (`copy_fidelity.rs`, deleted at promotion step C3) said the *text* was
+//! production's. This says the *numbers* are, which is the property the port actually claims
+//! (`doc/devel/ng/spec/hidden_paralog_filter.md` §7's reuse map: *"the parity oracle is
+//! bit-identical ratios against production's on identical synthetic inputs"*). The two are not the
+//! same statement, and **neither is strictly stronger than the other.** The text guard would still
+//! pass if a build flag or a platform difference made one tree evaluate the same source
+//! differently. The differential only sees what it draws: a review of this file found four input
+//! classes it did not reach, and for those four the text guard was the one catching the divergence.
+//! Both were kept until C3, and the differential's reach is now pinned rather than described (see
+//! *What the stream must contain*), because once a file was released from the text guard this was
+//! the only guard left on it — and since the text guard was deleted, it is the only one on any of
+//! them.
 //!
 //! Production's own tests are transcribed into `locus_score.rs` beside the copy, so they
 //! pass on both trees whatever either computes — which is exactly why they cannot serve
@@ -348,8 +349,8 @@ fn assert_the_same_score(
         // **A tolerance, and it stopped being bit equality on 2026-09-09.** ng's
         // `log_add_exp` skips `log1p` where its own cubic series is exact in the sum, which
         // is this port's one departure from production's arithmetic and is why the textual
-        // guard on the file was released (`copy_fidelity.rs`'s release table). The bound is
-        // absolute because these are log-likelihoods running to hundreds of nats, and the
+        // guard on the file was released (the text guard's release table, at `d9e7b076`).
+        // The bound is absolute because these are log-likelihoods running to hundreds of nats, and the
         // question the filter asks of them is whether a ratio sits above a cut of about 2.65
         // — so what has to be small is nats, not units in the last place.
         let apart = (ours - theirs).abs();

@@ -429,7 +429,7 @@ fn a_window_with_only_one_field_absent_is_absent() {
     // The GC half is load-bearing against a *panic*, not a wrong answer: a `NaN` GC fraction
     // reaches `gc_multiplier`, where both range comparisons are false, the floor saturates to
     // zero, and the interpolation indexes one past the end of a one-bin curve — inside a file
-    // the copy guard forbids editing.
+    // copied verbatim from production, which ng does not edit.
     let context = a_context_over(2);
     let entry = a_generic_locus(vec![
         (a_window_at(f32::NAN, ONE_COPY_DEPTH), 5, 5),
