@@ -292,7 +292,18 @@ carries a header line naming the production commit that wrote it.
     `bam::alignment_input` since B5, and `normalize_alleles` is named through ng's copy. The one
     production path left was a link to `pileup::walker`'s `indel_norm.rs` for the mismatch-count
     assertion, which ng's own `alignment::indel_norm` carries; the link now points there.
-  - ☐ C12 · ☐ C13
+  - ✅ **C12** `scanner_parity.rs` — **copied, as the row said; the 1 test kept.** Production's
+    post-filter (`ssr::catalog::postprocess::build_loci` and its helpers, 220 lines) is now a
+    `production_post_filter` module inside the test, unchanged but for taking the golden
+    catalog's four settings, writing `Motif::new`'s length check inline, and returning a plain
+    locus. Before production's copy was removed, the two were run side by side on the scanner's
+    intervals over the synthetic reference and returned the same 17 loci. The test's readout is
+    unchanged: 16 of 16 golden loci recovered, 15 exact, 1 boundary wobble, 1 scanner-only.
+    **Deviation, recorded 2026-09-13, which changes C19's action:** the golden catalog is a
+    16-locus BGZF text file, so rather than freeze its contents, ng gained a 50-line test-only
+    reader for it, `ng::golden_catalog`, which C19's three tests will use too. The committed file
+    stays the oracle.
+  - ☐ C13
 - ☐ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
   `ng_psp_head_encoding.rs` (`test = true` in `Cargo.toml`), `paralog_score_parity.rs` — are
   deleted with a line each in the report saying which document already holds their result.
@@ -332,7 +343,7 @@ mattered:
 | C16 | `pileup/per_sample/cram_files.rs` and its nine callers | — | the synthetic FASTA/CRAM builder itself | **rehome to `src/bam/`** — see the deviation note below |
 | C17 | `benches/ng_psp_perf.rs`, `examples/dhat_ng_psp.rs` | — | `pileup_record::ChainId` | **repoint** to `ng::types::ChainId`, finishing B3 |
 | C18 | `alignment/stutter.rs`, `calling/likelihood/mod.rs`, `locus_generation/pileup/{generator,mod}.rs`, `psp/{mod,header}.rs` | 6 | six constants asserted equal to ng's copies: `MAX_SLIP`, `MIN_BASE_ERROR`, five walker `DEFAULT_*`, `psp::header::HEAD_MAGIC` | **freeze** — the fixture is the literal value, with the production commit that wrote it |
-| C19 | `repeat_catalog/anchor.rs`, `region_typing/mod.rs`, `reference_info.rs` | 3 | `ssr::catalog::io::CatalogReader`, reading the committed `tests/data/tandem_repeat/golden.ssr_catalog.bed.gz` | **freeze the file's contents** — the loci, the header's build settings, and its reference md5 — so the golden catalog stays the oracle without production's parser |
+| C19 | `repeat_catalog/anchor.rs`, `region_typing/mod.rs`, `reference_info.rs` | 3 | `ssr::catalog::io::CatalogReader`, reading the committed `tests/data/tandem_repeat/golden.ssr_catalog.bed.gz` | ~~freeze the file's contents~~ **repoint to `ng::golden_catalog`**, the reader C12 added — the golden catalog stays the oracle without production's parser |
 | C20 | `calling/likelihood/generic.rs` | 1 | `var_calling::per_group_merger::standard_log_likelihood`, `pileup_record::AlleleSupportStats` | **freeze** |
 | C21 | `calling/genotype_prior/dirichlet_multinomial.rs` | 1 | `genetics::dirichlet_multinomial_log_priors` | **freeze** |
 | C22 | `alignment/ssr_marginal_sequence.rs` | 3 | `ssr::cohort::pair_hmm::{HmmScratch, align_subst}` | **freeze** |

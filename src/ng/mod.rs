@@ -75,6 +75,9 @@
 //! record of the releases is in its header at `d9e7b076`.
 
 #[cfg(test)]
+pub(crate) mod golden_catalog;
+
+#[cfg(test)]
 mod scanner_parity;
 
 pub mod alignment;
