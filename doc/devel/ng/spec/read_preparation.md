@@ -402,7 +402,9 @@ The parity oracle is the production prepared read **with BAQ off**: a ported v1 
 `PreparedRead` is byte-identical to production's `--no-baq` output on a fixture — same canonicalized
 CIGAR, and the raw qualities copied through uncapped. Three things to know before writing it:
 
-- **How to run it.** In-process, against `process_read(read, None /* no BAQ */, &mut raw_ref, &cfg)`,
+- **How to run it.** In-process, against `process_read(read, None /* no BAQ */, &mut raw_ref, &cfg)` —
+  *since promotion step C9 (2026-09-13) its answers are recorded in
+  `src/ng/read/testdata/left_align_production_prepared.tsv` and the test reads that file* —
   with **`max_read_mismatch_fraction: None`**. ng moved `F1` to step 1, so leaving it on makes
   production drop reads ng keeps and the two keep-sets diverge for reasons that have nothing to do
   with preparation.

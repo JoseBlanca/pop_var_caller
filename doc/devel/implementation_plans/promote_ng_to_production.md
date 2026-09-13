@@ -271,7 +271,14 @@ carries a header line naming the production commit that wrote it.
     539 distinct, since one tract has a single accession — is in
     `testdata/tomato_tract_production_candidates.csv` (36 KB), keyed by a digest of the whole
     tract. Dropping one candidate from a row fails two tests.
-  - ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
+  - ✅ **C9** `read/left_align_parity.rs` — **frozen, all 5 tests kept.** Production's
+    `process_read` output (its `--no-baq` arm, `F1` off) for the 8 fixture reads on the uppercase
+    and the soft-masked reference — 16 prepared reads, twelve fields each — was recorded at
+    `d9e7b076` into `read/testdata/left_align_production_prepared.tsv` and is compared field by
+    field. Restoring one row's unshifted CIGAR fails one test. The masked-reference test's check
+    that production left every read's CIGAR as the mapper wrote it now checks the recording
+    against the fixture's own input, not production's behaviour.
+  - ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
 - ☐ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
   `ng_psp_head_encoding.rs` (`test = true` in `Cargo.toml`), `paralog_score_parity.rs` — are
   deleted with a line each in the report saying which document already holds their result.

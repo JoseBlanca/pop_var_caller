@@ -1,5 +1,11 @@
 //! **Byte-parity of ng's prepared read against production's — the port anchor.**
 //!
+//! **Production's side is frozen since promotion step C9.** Until then the test ran production's
+//! `process_read` on each fixture read. Production is being deleted, so what it returned for the
+//! eight fixture reads on both references was recorded at commit `d9e7b076` into
+//! `testdata/left_align_production_prepared.tsv`, and the tests compare ng against that file. The
+//! prose below describes the oracle as it was built; what is asserted is unchanged.
+//!
 //! `LeftAlignPreparer` is a port of production's `process_read` fold, minus the stages ng moved
 //! elsewhere: `G2`/`F1` are step-1 filters and BAQ is deferred sine die, so what remains is `F3`,
 //! the left-alignment. This test is what makes that claim checkable.
@@ -7,7 +13,7 @@
 //! # What parity means here, exactly
 //!
 //! The oracle is production's `process_read(read, None, …)` — its `--no-baq` arm — run in-process
-//! with **`max_read_mismatch_fraction: None`**. That setting is not cosmetic: ng moved `F1` to step
+//! until promotion step C9, recorded since, with **`max_read_mismatch_fraction: None`**. That setting is not cosmetic: ng moved `F1` to step
 //! 1, so leaving it on would make production *drop* reads ng keeps, and the two keep-sets would
 //! diverge for reasons that have nothing to do with preparation.
 //!
@@ -26,15 +32,15 @@
 //!   indels are ambiguous and left-alignment is the entire point. ng fetches the uppercased view
 //!   and shifts normally (spec §6, §9).
 //!
-//! # Why this lives in `src/ng/` and reads production
+//! # Why this lives in `src/ng/`
 //!
-//! It is **ng's test**: its subject is ng's preparer and production is only the yardstick. It is
-//! `#[cfg(test)]`, so shipping ng code carries no test-only dependency on production — the same
-//! shape as [`delimit_parity`](crate::ng::alignment::delimit_parity).
+//! It is **ng's test**: its subject is ng's preparer and production is only the yardstick — since
+//! promotion step C9 a recorded one, so the test reads a file and depends on nothing in production.
 
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use noodles_fasta as fasta;
 use tempfile::TempDir;
@@ -49,9 +55,6 @@ use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::prepared_read::{MateRole, PreparedRead};
 use crate::ng::ref_seq::{RefSeq, ResidentRefSeq};
 use crate::ng::types::ContigId;
-use crate::pileup::per_sample::read_processor::{
-    RawContigRefCache, ReadOutcome, ReadProcessingConfig, process_read,
-};
 
 /// One contig of a fixture reference: its name and its bases, verbatim.
 struct FixtureContig {
@@ -118,31 +121,119 @@ fn contig_list(contigs: &[FixtureContig]) -> ContigList {
     }
 }
 
-/// Production's answer: the `--no-baq` arm of `process_read`, with `F1` disabled.
-fn production_prepared(
-    read: MappedRead,
-    fasta_path: &Path,
-    contigs: &ContigList,
-) -> Option<crate::pileup::walker::PreparedRead> {
-    let mut raw_ref = RawContigRefCache::new(repository(fasta_path), contigs.clone());
-    let config = ReadProcessingConfig {
-        // Disabled deliberately: ng runs the mismatch-fraction filter in step 1, so leaving it on
-        // here would drop reads ng keeps and the keep-sets would differ for unrelated reasons.
-        max_read_mismatch_fraction: None,
-        mismatch_bq_floor: 0,
+/// Production's prepared read for one fixture read, as frozen — the fields production's
+/// `PreparedRead` carried, ng's types standing in where the two share a vocabulary.
+struct FrozenPreparedRead {
+    chrom_id: u32,
+    alignment_start: u32,
+    alignment_end: u32,
+    cigar: Vec<CigarOp>,
+    seq: Vec<u8>,
+    bq_baq: Vec<u8>,
+    mq_log_err: f64,
+    mapq: u8,
+    is_reverse_strand: bool,
+    qname: Arc<str>,
+    mate_role: MateRole,
+    adaptor_boundary: Option<u32>,
+}
+
+/// A SAM CIGAR string as the ops production carried.
+fn parse_cigar(cigar: &str) -> Vec<CigarOp> {
+    let mut ops = Vec::new();
+    let mut length = 0_u32;
+    for character in cigar.chars() {
+        if let Some(digit) = character.to_digit(10) {
+            length = length * 10 + digit;
+            continue;
+        }
+        assert!(length > 0, "a CIGAR operation carries a length: {cigar}");
+        ops.push(match character {
+            'M' => CigarOp::Match(length),
+            'I' => CigarOp::Insertion(length),
+            'D' => CigarOp::Deletion(length),
+            'N' => CigarOp::Skip(length),
+            'S' => CigarOp::SoftClip(length),
+            'H' => CigarOp::HardClip(length),
+            'P' => CigarOp::Padding(length),
+            '=' => CigarOp::SeqMatch(length),
+            'X' => CigarOp::SeqMismatch(length),
+            other => panic!("not a CIGAR operation: {other:?} in {cigar}"),
+        });
+        length = 0;
+    }
+    assert_eq!(length, 0, "a CIGAR string ends in an operation: {cigar}");
+    ops
+}
+
+/// **Production's answer: the `--no-baq` arm of `process_read`, with `F1` disabled**, for the
+/// fixture read named `qname` on the `reference` named — `uppercase` or `soft_masked` — read from
+/// the frozen file.
+///
+/// `F1` was disabled deliberately: ng runs the mismatch-fraction filter in step 1, so leaving it on
+/// would have dropped reads ng keeps and the keep-sets would have differed for unrelated reasons.
+/// Production kept every fixture read under that setting, which is why every read has a row.
+fn production_prepared(reference: &str, qname: &[u8]) -> FrozenPreparedRead {
+    let qname = std::str::from_utf8(qname).expect("fixture qnames are ASCII");
+    let matching: Vec<&str> = include_str!("testdata/left_align_production_prepared.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter(|line| line.split('\t').take(2).eq([reference, qname]))
+        .collect();
+    let [line] = matching[..] else {
+        panic!(
+            "expected one frozen production read for {qname} on the {reference} reference, found {}",
+            matching.len()
+        );
     };
-    match process_read(read, None, &mut raw_ref, &config) {
-        ReadOutcome::Prepared(prepared) => Some(prepared),
-        ReadOutcome::Dropped(_) => None,
+    let fields: Vec<&str> = line.split('\t').collect();
+    let [
+        _,
+        name,
+        chrom_id,
+        start,
+        end,
+        cigar,
+        seq,
+        bq,
+        mq_log_err,
+        mapq,
+        reverse,
+        role,
+        adaptor,
+    ] = fields[..]
+    else {
+        panic!("a frozen read has thirteen columns: {line}");
+    };
+    FrozenPreparedRead {
+        chrom_id: chrom_id.parse().expect("a contig id"),
+        alignment_start: start.parse().expect("an alignment start"),
+        alignment_end: end.parse().expect("an alignment end"),
+        cigar: parse_cigar(cigar),
+        seq: seq.as_bytes().to_vec(),
+        bq_baq: bq.split(',').map(|q| q.parse().expect("a Phred")).collect(),
+        mq_log_err: f64::from_bits(u64::from_str_radix(mq_log_err, 16).expect("a bit pattern")),
+        mapq: mapq.parse().expect("a MAPQ"),
+        is_reverse_strand: reverse.parse().expect("a strand flag"),
+        qname: Arc::from(name),
+        mate_role: match role {
+            "Solo" => MateRole::Solo,
+            "FirstOfPair" => MateRole::FirstOfPair,
+            "SecondOfPair" => MateRole::SecondOfPair,
+            other => panic!("not a mate role: {other}"),
+        },
+        adaptor_boundary: match adaptor {
+            "-" => None,
+            boundary => Some(boundary.parse().expect("an adaptor boundary")),
+        },
     }
 }
 
 /// ng's answer.
 ///
-/// The fixture is built as production's `MappedRead`, because the other half of
-/// this comparison is production's own path and both sides must start from one
-/// record. Converting here is the whole of the difference: ng's read is that
-/// read plus its read group, and read preparation reads none of it.
+/// The fixture is built as a `MappedRead`, because that is the record production's answers were
+/// recorded from and both sides must start from one record. Converting here is the whole of the
+/// difference: ng's read is that read plus its read group, and read preparation reads none of it.
 fn ng_prepared(read: MappedRead, fasta_path: &Path, contigs: &ContigList) -> PreparedRead {
     let reference = ResidentRefSeq::new(repository(fasta_path), contigs.clone());
     let preparer = LeftAlignPreparer::with_default_normalizer(reference);
@@ -186,18 +277,14 @@ fn to_aligned_read(read: MappedRead) -> AlignedRead {
 /// **Both sides are destructured exhaustively, with no `..`, and that is the point.** An earlier
 /// version read the fields off `ours.<field>` / `production.<field>` and claimed in this very
 /// comment that "a field added to production forces this to be updated" — it did not: a thirteenth
-/// field would have left this compiling and passing, uncompared, while `from_production`'s own
-/// destructure quietly carried it into ng's type. The destructure is what makes the claim true,
-/// and it is the same construct `from_production` already uses.
+/// field would have left this compiling and passing, uncompared. The destructure is what makes the
+/// claim true. Since promotion step C9 production's side is [`FrozenPreparedRead`], destructured
+/// the same way.
 ///
 /// `read_group` is bound and ignored by name: it is the one field with no production counterpart,
 /// and it is checked in `left_align.rs` instead.
 #[track_caller]
-fn assert_same_prepared_read(
-    ours: &PreparedRead,
-    production: &crate::pileup::walker::PreparedRead,
-    context: &str,
-) {
+fn assert_same_prepared_read(ours: &PreparedRead, production: &FrozenPreparedRead, context: &str) {
     let PreparedRead {
         chrom_id,
         alignment_start,
@@ -213,7 +300,7 @@ fn assert_same_prepared_read(
         adaptor_boundary,
         read_group: _,
     } = ours;
-    let crate::pileup::walker::PreparedRead {
+    let FrozenPreparedRead {
         chrom_id: their_chrom_id,
         alignment_start: their_alignment_start,
         alignment_end: their_alignment_end,
@@ -247,11 +334,7 @@ fn assert_same_prepared_read(
         "is_reverse_strand [{context}]"
     );
     assert_eq!(qname, their_qname, "qname [{context}]");
-    assert_eq!(
-        *mate_role,
-        MateRole::from_production(*their_mate_role),
-        "mate_role [{context}]"
-    );
+    assert_eq!(mate_role, their_mate_role, "mate_role [{context}]");
     assert_eq!(
         adaptor_boundary, their_adaptor_boundary,
         "adaptor_boundary [{context}]"
@@ -389,17 +472,14 @@ fn ng_matches_production_on_an_uppercase_reference() {
 
     for (case, read) in fixture_reads() {
         let ours = ng_prepared(read.clone(), &fasta_path, &contigs);
-        let theirs = production_prepared(read, &fasta_path, &contigs)
-            .expect("production keeps every fixture read with F1 disabled");
+        let theirs = production_prepared("uppercase", &read.qname);
         assert_same_prepared_read(&ours, &theirs, case);
     }
 
-    // `mate_role` is the one field the comparison above cannot pin on its own: ng's read was
-    // *built* by `from_production`, so both sides of that assertion pass through the same
-    // conversion and a `From` collapsing two roles would make them equally wrong. Assert the one
-    // non-`Solo` fixture against the role itself, so the conversion is not the only thing standing
-    // between the two sides. (`prepared_read.rs` covers the conversion exhaustively; this keeps
-    // *this* file from depending on that one silently.)
+    // `mate_role` was the one field the comparison above could not pin on its own while ng's read
+    // was built by converting production's, since both sides then passed through one conversion.
+    // The frozen roles no longer share code with ng's, but the direct assertion is kept: it states
+    // the flag-to-role rule itself rather than only agreement with a recording.
     let (_, paired) = fixture_reads()
         .into_iter()
         .find(|(_, read)| read.qname == b"paired")
@@ -468,8 +548,9 @@ const SOFT_MASKED_REFERENCE: &[FixtureContig] = &[FixtureContig {
 /// 2. **production's answer is the mapper's original CIGAR, unshifted** — it normalized nothing;
 /// 3. therefore the two disagree, on exactly the reads that have somewhere to shift.
 ///
-/// Spec §6, §9, §11 record this as a known production defect ng fixes; production is frozen, so the
-/// number this test reports is the whole of what we can say about its size.
+/// Spec §6, §9, §11 record this as a known production defect ng fixes; production's answers on the
+/// masked reference are frozen with the rest, so the number this test reports is the whole of what
+/// can be said about its size.
 #[test]
 fn production_left_alignment_does_nothing_on_a_soft_masked_reference() {
     let (_upper_dir, upper_path) = write_fasta(REFERENCE);
@@ -484,8 +565,7 @@ fn production_left_alignment_does_nothing_on_a_soft_masked_reference() {
 
         let ours_masked = ng_prepared(read.clone(), &masked_path, &masked_contigs);
         let ours_unmasked = ng_prepared(read.clone(), &upper_path, &upper_contigs);
-        let theirs_masked = production_prepared(read, &masked_path, &masked_contigs)
-            .expect("production keeps every fixture read with F1 disabled");
+        let theirs_masked = production_prepared("soft_masked", &read.qname);
 
         // 1. Masking is invisible to ng.
         assert_eq!(
