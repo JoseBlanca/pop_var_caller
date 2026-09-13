@@ -611,15 +611,123 @@ mod tests {
 
     // ---- B3: the logarithm boundary + parity against the ported function ----------------
 
+    /// **Production's pair-HMM scorer, copied** — `align_subst` and its two helpers from
+    /// `src/ssr/cohort/pair_hmm.rs` at commit `d9e7b076`, moved here at promotion step C22 so the
+    /// bit-for-bit parity below outlives production. Unchanged but for visibility; `HmmScratch` is
+    /// production's one-field buffer. **Copied rather than recorded** because the property test
+    /// draws random sequences and error rates, which a fixed recording could not answer.
+    mod production_pair_hmm {
+        /// Production's `FLANK_SLOP`: bases of slop tolerated at each end of the tract.
+        const FLANK_SLOP: usize = 2;
+
+        /// Production's reused forward-DP buffer.
+        #[derive(Debug, Default)]
+        pub(super) struct HmmScratch {
+            cells: Vec<f64>,
+        }
+
+        impl HmmScratch {
+            pub(super) fn new() -> Self {
+                Self::default()
+            }
+        }
+
+        /// `P(obs | variant)` under a flat per-base error `ε`: substitutions in the tract,
+        /// gaps only in the flanks.
+        ///
+        /// NORMALIZATION: the equal-length path is an exact distribution over `obs`
+        /// (`Σ_obs (1−ε)^match·(ε/3)^mismatch = 1`). The unequal-length `banded_forward`
+        /// adds flank-gap paths on top, so summed over differing-length `obs` the total mass
+        /// slightly exceeds 1 — a boundary-slop correction, not a proper normalized
+        /// transition. Harmless in `Qᵣ` (the EM normalizes responsibilities per read), and
+        /// the equal-length core is the overwhelming majority; proper transition
+        /// normalization is an F2 refinement.
+        pub(super) fn align_subst(
+            obs: &[u8],
+            variant: &[u8],
+            eps: f64,
+            scratch: &mut HmmScratch,
+        ) -> f64 {
+            if obs == variant {
+                return (1.0 - eps).powi(obs.len() as i32);
+            }
+            if obs.len() == variant.len() {
+                return substitution_product(obs, variant, eps);
+            }
+            banded_forward(obs, variant, eps, scratch)
+        }
+
+        /// The closed-form substitution score for two equal-length sequences.
+        fn substitution_product(obs: &[u8], variant: &[u8], eps: f64) -> f64 {
+            let mismatch = eps / 3.0;
+            obs.iter()
+                .zip(variant)
+                .map(|(a, b)| if a == b { 1.0 - eps } else { mismatch })
+                .product()
+        }
+
+        /// Whether position `pos` (0-based) lies in either flank of a sequence of `len`.
+        fn in_flank(pos: usize, len: usize) -> bool {
+            pos < FLANK_SLOP || pos + FLANK_SLOP >= len
+        }
+
+        /// Banded forward sum for unequal-length sequences, with gaps confined to the
+        /// flanks. `obs` has length `m`, `variant` length `n`; cells outside the band
+        /// `|i − j| ≤ |m − n| + FLANK_SLOP` stay zero.
+        ///
+        /// Compute is band-limited; the scratch buffer is still the full `(m+1)·(n+1)`
+        /// matrix (memory is not banded). Fine at tract sizes; true memory-banding is an
+        /// F1 perf concern, not correctness.
+        fn banded_forward(obs: &[u8], variant: &[u8], eps: f64, scratch: &mut HmmScratch) -> f64 {
+            let m = obs.len();
+            let n = variant.len();
+            let band = m.abs_diff(n) + FLANK_SLOP;
+            let gap = eps; // a flank-slop base is error-like (flat emission); pinned in F2.
+            let mismatch = eps / 3.0;
+            let emit = |a: u8, b: u8| if a == b { 1.0 - eps } else { mismatch };
+
+            let width = n + 1;
+            scratch.cells.clear();
+            scratch.cells.resize((m + 1) * width, 0.0);
+            let at = |i: usize, j: usize| i * width + j;
+            scratch.cells[at(0, 0)] = 1.0;
+
+            for i in 0..=m {
+                for j in 0..=n {
+                    if i == 0 && j == 0 {
+                        continue;
+                    }
+                    if i.abs_diff(j) > band {
+                        continue;
+                    }
+                    let mut acc = 0.0;
+                    if i > 0 && j > 0 {
+                        acc += scratch.cells[at(i - 1, j - 1)] * emit(obs[i - 1], variant[j - 1]);
+                    }
+                    // Insertion: consume obs[i-1] against a gap in the variant — flank only.
+                    if i > 0 && in_flank(i - 1, m) {
+                        acc += scratch.cells[at(i - 1, j)] * gap;
+                    }
+                    // Deletion: consume variant[j-1] against a gap in obs — flank only.
+                    if j > 0 && in_flank(j - 1, n) {
+                        acc += scratch.cells[at(i, j - 1)] * gap;
+                    }
+                    scratch.cells[at(i, j)] = acc;
+                }
+            }
+            scratch.cells[at(m, n)]
+        }
+    }
+
     /// **Parity against the ported function — the byte-level oracle for this port.** ng's
     /// linear scorer must reproduce production's `align_subst`
     /// ([src/ssr/cohort/pair_hmm.rs](../../../ssr/cohort/pair_hmm.rs)) **bit for bit**, across
     /// all three of its arms and both gap directions. This is the fidelity the logarithm
-    /// boundary rests on: match the linear values and the logged ones match too. Production is
-    /// a read-only oracle here, exactly as `delimit_parity` uses `delimit_read`.
+    /// boundary rests on: match the linear values and the logged ones match too. Since promotion
+    /// step C22 production's function is the copy in [`production_pair_hmm`].
     #[test]
     fn linear_probability_matches_production_align_subst_bit_for_bit() {
-        use crate::ssr::cohort::pair_hmm::{HmmScratch, align_subst};
+        use production_pair_hmm::{HmmScratch, align_subst};
         let cases: &[(&[u8], &[u8])] = &[
             (b"CACACACA", b"CACACACA"),    // exact match — the fast path
             (b"CACAGACA", b"CACACACA"),    // equal-length substitution
@@ -662,7 +770,7 @@ mod tests {
     /// tests above (owner's decision, 2026-08-24, on adopting an optimised test profile).
     #[test]
     fn the_marginal_is_the_logarithm_of_production_align_subst() {
-        use crate::ssr::cohort::pair_hmm::{HmmScratch, align_subst};
+        use production_pair_hmm::{HmmScratch, align_subst};
         let a = aligner(EPS);
         for &(read, reference) in &[
             (b"CACACACA".as_slice(), b"CACACACA".as_slice()), // exact
@@ -729,7 +837,7 @@ mod tests {
             reference in prop::collection::vec(any::<u8>(), 0..12),
             eps in 0.0f64..=1.0,
         ) {
-            use crate::ssr::cohort::pair_hmm::{HmmScratch, align_subst};
+            use production_pair_hmm::{HmmScratch, align_subst};
             let a = SsrSequenceMarginal::try_new(eps).expect("eps in [0, 1]");
             let mut ours_scratch = SequenceMarginalScratch::new();
             let mut prod_scratch = HmmScratch::new();

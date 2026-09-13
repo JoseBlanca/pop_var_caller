@@ -414,7 +414,13 @@ mattered:
     agreement bound is unchanged. The neighbouring accuracy test compares against exact
     logarithms and ng's own `lgamma`, and never read production. Corrupting one recorded value
     fails the test.
-  - ☐ C22 · ☐ C23 · ☐ C24 · ☐ C25
+  - ✅ **C22** `alignment/ssr_marginal_sequence.rs` — **copied, not frozen; all 3 tests kept.**
+    *Deviation, recorded 2026-09-13:* one of the three is a property test over random sequences
+    and error rates, which a fixed recording cannot answer, and production's `align_subst` with
+    its two helpers is 70 lines. So they are a `production_pair_hmm` module inside the test,
+    identical to production's but for visibility and rustfmt's wrapping of one signature. Mutating
+    the copy's mismatch rate fails all three tests.
+  - ☐ C23 · ☐ C24 · ☐ C25
 - ☐ **C26** · *Depends:* C1, C9.
 
   **Deviation, recorded 2026-09-12: `cram_files` goes to `src/bam/`, and §2's "shared
