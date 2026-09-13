@@ -374,7 +374,14 @@ mattered:
 | C25 | `ref_seq.rs` | 1 | `pileup::per_sample::read_processor::RawContigRefCache` | **freeze** |
 | C26 | `read/prepared_read.rs` | 6 | `pileup::walker::{PreparedRead, MateRole}` through the four `#[cfg(test)]` bridges B7 left in place | **freeze**, and delete the bridges. *Depends:* C1 and C9, which consume them |
 
-- ☐ **C15** · **own commit** · *Depends:* B9 · *Source:* §1 (ng includes `pop_var_caller_exp`).
+- ✅ **C15** · **own commit** — done 2026-09-13. `current_command_line`, `rfc3339_now` and the
+  civil-date helper it calls, with their two tests, moved unchanged into a new
+  `pop_var_caller_exp::provenance`; `DEFAULT_BUFFERED_IO_CAPACITY` (64 KiB), used once, became a
+  constant in `typed_regions.rs`. Three doc links in the command surface that pointed at production's
+  CLI module became plain text, since they would break `cargo doc` once it is deleted. The identity
+  oracle cannot see this move — it strips the `##commandline` line and the psp header's timestamp,
+  the two things these functions write — so what stands behind it is that the code is copied
+  byte for byte and its two tests pass. · *Depends:* B9 · *Source:* §1 (ng includes `pop_var_caller_exp`).
 - ☐ **C16** · *Depends:* — · *Source:* the B5 deviation, which settled the same question for `CigarOp`.
 - ☐ **C17** · *Depends:* — · *Source:* B3's row.
 - ☐ **C18**–**C25**, one checkbox each, in table order · *Depends:* B9.

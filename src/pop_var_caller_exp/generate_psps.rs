@@ -78,7 +78,7 @@ use crate::ng::run::{
     CensusPlan, CensusSelection, RunError, SampleObservationGatherer, SampleWalkInputs,
 };
 use crate::ng::types::MAX_MOTIF_LEN;
-use crate::pop_var_caller::common::{current_command_line, rfc3339_now};
+use crate::pop_var_caller_exp::provenance::{current_command_line, rfc3339_now};
 use crate::pop_var_caller_exp::run_ground::{self, GroundError};
 
 #[cfg(test)]

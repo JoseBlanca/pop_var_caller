@@ -49,7 +49,7 @@ use crate::ng::run::cohort_merge::{
 use crate::ng::run::{MergeParameters, RunReport};
 use crate::ng::types::{DomainError, InbreedingF, Ploidy};
 use crate::ng::vcf::header::{HeaderContig, HeaderMetadataError, VcfHeaderMetadata};
-use crate::pop_var_caller::common::current_command_line;
+use crate::pop_var_caller_exp::provenance::current_command_line;
 
 /// Everything a calling run can refuse before it reads an observation, whichever mode it is.
 ///

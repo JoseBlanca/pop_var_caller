@@ -4,7 +4,7 @@
 //! (see `doc/devel/ng/spec/typed_regions_cli.md` §2). The library both
 //! binaries link is the same one; only what a user can *invoke* is split.
 //!
-//! Layout mirrors [`crate::pop_var_caller`]: [`cli`] owns the top-level
+//! Layout mirrors production's `pop_var_caller` module: [`cli`] owns the top-level
 //! `Parser` plus the subcommand enum, and one module per subcommand owns
 //! its `Args`, its `run_*`, and its `#[non_exhaustive]` error enum.
 
@@ -16,6 +16,7 @@ pub mod estimate_contamination;
 pub mod estimate_parameters;
 pub mod generate_psps;
 pub mod mode_equivalence;
+pub(crate) mod provenance;
 pub mod psp_inputs;
 pub mod regenerate_census;
 pub mod repeat_catalog;

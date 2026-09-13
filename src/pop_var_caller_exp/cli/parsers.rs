@@ -1,5 +1,5 @@
 //! Value parsers for the `pop_var_caller_exp` CLI. Production's
-//! [`crate::pop_var_caller::cli::parsers`] is the *pattern* this copies, not a
+//! `pop_var_caller::cli::parsers` is the *pattern* this copies, not a
 //! place to add to (spec §2.1) — ng's experiment knobs stay out of the
 //! production CLI.
 

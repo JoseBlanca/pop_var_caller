@@ -1,5 +1,5 @@
 //! Top-level CLI for the `pop_var_caller_exp` binary: the `Parser` and the
-//! subcommand enum. Shape copied from [`crate::pop_var_caller::cli`].
+//! subcommand enum. Shape copied from production's `pop_var_caller::cli`.
 
 use clap::{Parser, Subcommand};
 

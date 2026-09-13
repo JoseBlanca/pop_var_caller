@@ -40,8 +40,11 @@ use crate::ng::tandem_repeat::{
     PeriodRangeError, RepeatInterval, ScanParams,
 };
 use crate::ng::types::{Bp, ContigId, GenomeRegion};
-use crate::pop_var_caller::common::DEFAULT_BUFFERED_IO_CAPACITY;
 use crate::regions::{BedError, ContigBounds};
+
+/// The buffer the typed-regions table is written through: 64 KiB, production's
+/// `pop_var_caller::common::DEFAULT_BUFFERED_IO_CAPACITY`, copied at promotion step C15.
+const DEFAULT_BUFFERED_IO_CAPACITY: usize = 64 * 1024;
 
 /// `type-regions` arguments — the authoritative knob list; `run_typed_regions`
 /// (Milestone E) translates it into a `TypedRegionConfig`. Every knob defaults
