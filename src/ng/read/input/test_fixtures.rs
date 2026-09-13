@@ -22,13 +22,13 @@ use sam::header::record::value::Map;
 use sam::header::record::value::map::{ReadGroup, ReferenceSequence};
 use tempfile::TempDir;
 
+use crate::bam::cram_files::{ContigSpec, build_fasta};
 use crate::bam::index_preflight::preflight_alignment_indexes;
 use crate::ng::read::filtering::ReadFilterCounts;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::read::input::reference::OpenReference;
 use crate::ng::reference_info::{ReferenceSource, read_reference_info};
 use crate::ng::types::ReadGroupId;
-use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
 
 /// The fixture reference: two contigs of **different lengths**, so a
 /// permutation of an `@SQ` list is detectable on `name` and a re-labelling on
@@ -478,7 +478,7 @@ pub(crate) fn named_bam(
 /// written against it and that CRAM's `.crai`. Returns the CRAM's dir and path and the FASTA's.
 ///
 /// **Every other CRAM fixture in this tree is written against an all-`A` reference**
-/// ([`build_fasta`](crate::pileup::per_sample::cram_files::build_fasta)), and so is the
+/// ([`build_fasta`](crate::bam::cram_files::build_fasta)), and so is the
 /// in-memory accessor the cursor tests hand out. That makes them agree by construction — which
 /// is why `t8` stays valid — and it also makes them **blind to a reference read at the wrong
 /// offset**: a CRAM stores each read as its differences from the reference, so decoding against
@@ -491,7 +491,7 @@ pub(crate) fn named_bam(
 pub(crate) fn indexed_cram_over_a_varied_reference(
     records: &[RecordBuf],
 ) -> (TempDir, PathBuf, TempDir, PathBuf) {
-    use crate::pileup::per_sample::cram_files::{ContigSpec, HeaderOverrides, build_cram};
+    use crate::bam::cram_files::{ContigSpec, HeaderOverrides, build_cram};
     use std::io::Write as _;
 
     let specs: Vec<ContigSpec> = FIXTURE_CONTIGS
@@ -578,7 +578,7 @@ pub(crate) fn indexed_cram_declaring(
             .all(|record| record.reference_sequence_id() == Some(0)),
         "the CRAM fixture must stay on one contig — see this function's docs"
     );
-    use crate::pileup::per_sample::cram_files::{HeaderOverrides, build_cram};
+    use crate::bam::cram_files::{HeaderOverrides, build_cram};
 
     let specs: Vec<ContigSpec> = FIXTURE_CONTIGS
         .iter()
@@ -624,7 +624,7 @@ pub(crate) fn multi_container_cram(
     contig_length: usize,
     read_count: usize,
 ) -> (TempDir, PathBuf, TempDir, PathBuf) {
-    use crate::pileup::per_sample::cram_files::{HeaderOverrides, build_cram};
+    use crate::bam::cram_files::{HeaderOverrides, build_cram};
 
     let specs = vec![ContigSpec {
         name: "chr1".to_string(),
@@ -672,7 +672,7 @@ pub(crate) fn multi_container_cram_two_read_groups(
     contig_length: usize,
     read_count: usize,
 ) -> (TempDir, PathBuf, TempDir, PathBuf) {
-    use crate::pileup::per_sample::cram_files::{HeaderOverrides, build_cram};
+    use crate::bam::cram_files::{HeaderOverrides, build_cram};
 
     let specs = vec![ContigSpec {
         name: "chr1".to_string(),

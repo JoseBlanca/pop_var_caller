@@ -1251,8 +1251,8 @@ fn read_uppercased_bases(reader: &mut File, dst: &mut Vec<u8>, n_bases: usize) -
 mod tests {
     use super::*;
 
+    use crate::bam::cram_files::{ContigSpec, build_fasta};
     use crate::fasta::{ContigEntry, ContigList};
-    use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
 
     fn contig_list(entries: &[(&str, u64)]) -> ContigList {
         ContigList {

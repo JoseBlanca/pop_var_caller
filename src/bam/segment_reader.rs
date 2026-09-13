@@ -1255,9 +1255,7 @@ mod tests {
 
     use super::*;
     use crate::bam::alignment_input::build_fasta_repository;
-    use crate::pileup::per_sample::cram_files::{
-        ContigSpec, HeaderOverrides, build_cram, build_fasta,
-    };
+    use crate::bam::cram_files::{ContigSpec, HeaderOverrides, build_cram, build_fasta};
 
     const CONTIG_LEN: usize = 200;
 

@@ -224,11 +224,11 @@ fn a_walk_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
 /// for the whole genome, in a file that opens cleanly and says nothing is amiss.
 #[test]
 fn a_catalog_built_on_another_reference_of_the_same_shape_is_refused() {
+    use crate::bam::cram_files::{ContigSpec, build_fasta};
     use crate::ng::read::input::test_fixtures::FIXTURE_CONTIGS;
     use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
     use crate::ng::repeat_catalog::RepeatCatalogBuilder;
     use crate::ng::tandem_repeat::ScanParams;
-    use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
 
     let (_reference_dir, _zeta_dir, _alpha_dir, mut args) = a_cohort_on_disk();
 

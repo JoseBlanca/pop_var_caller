@@ -1925,9 +1925,7 @@ mod tests {
 
     // --- Real CRAM + FASTA fixtures (shared by Group C3) -------------
 
-    use crate::pileup::per_sample::cram_files::{
-        ContigSpec, HeaderOverrides, build_cram, build_fasta,
-    };
+    use crate::bam::cram_files::{ContigSpec, HeaderOverrides, build_cram, build_fasta};
 
     fn one_contig_chr1() -> Vec<ContigSpec> {
         vec![ContigSpec {

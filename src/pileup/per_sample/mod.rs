@@ -25,7 +25,9 @@ pub mod read_processor;
 
 #[cfg(test)]
 mod baq_tests;
+// Moved to `crate::bam` at promotion step C16, where the shared-infrastructure tests that also
+// use it live; re-exported so this module's callers are untouched.
 #[cfg(test)]
-pub(crate) mod cram_files;
+pub(crate) use crate::bam::cram_files;
 #[cfg(test)]
 pub(crate) mod record_specs;

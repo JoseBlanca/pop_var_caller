@@ -382,7 +382,12 @@ mattered:
   oracle cannot see this move — it strips the `##commandline` line and the psp header's timestamp,
   the two things these functions write — so what stands behind it is that the code is copied
   byte for byte and its two tests pass. · *Depends:* B9 · *Source:* §1 (ng includes `pop_var_caller_exp`).
-- ☐ **C16** · *Depends:* — · *Source:* the B5 deviation, which settled the same question for `CigarOp`.
+- ✅ **C16** · *Depends:* — · *Source:* the B5 deviation, which settled the same question for `CigarOp`.
+  Done 2026-09-13: `git mv src/pileup/per_sample/cram_files.rs src/bam/cram_files.rs`, declared
+  `#[cfg(test)] pub(crate) mod cram_files` in `bam`, and 14 call sites in 8 files repointed — ng's
+  read-input tests, the command surface's tests, `bam`'s three and `fasta`'s one. Production's own
+  three callers in `ssr` compile unchanged through a one-line `pub(crate) use` left in
+  `pileup::per_sample`, which goes with that module at D3. The file's content is unchanged.
 - ☐ **C17** · *Depends:* — · *Source:* B3's row.
 - ☐ **C18**–**C25**, one checkbox each, in table order · *Depends:* B9.
 - ☐ **C26** · *Depends:* C1, C9.

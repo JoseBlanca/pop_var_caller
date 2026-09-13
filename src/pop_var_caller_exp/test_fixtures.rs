@@ -51,6 +51,7 @@ pub(crate) struct ACohortOnDisk {
 ///
 /// On any failure to build the fixture, which is a broken test rather than a finding.
 pub(crate) fn a_cohort_on_disk() -> ACohortOnDisk {
+    use crate::bam::cram_files::{ContigSpec, build_fasta};
     use crate::ng::read::input::test_fixtures::{
         FIXTURE_CONTIGS, header, indexed_named_bam, matching_contigs, read_group_for,
         read_named_with_length_in_read_group,
@@ -58,7 +59,6 @@ pub(crate) fn a_cohort_on_disk() -> ACohortOnDisk {
     use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
     use crate::ng::repeat_catalog::RepeatCatalogBuilder;
     use crate::ng::tandem_repeat::ScanParams;
-    use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
     use noodles_sam::alignment::RecordBuf;
 
     let specs: Vec<ContigSpec> = FIXTURE_CONTIGS

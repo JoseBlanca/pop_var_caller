@@ -2214,9 +2214,9 @@ mod tests {
     /// cursor is for.
     #[test]
     fn a_cursor_refuses_an_accessor_that_cannot_serve_its_contig() {
+        use crate::bam::cram_files::{ContigSpec, build_fasta};
         use crate::fasta::{ContigEntry, ContigList};
         use crate::ng::ref_seq::WindowedRefSeq;
-        use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
 
         let (_reference_dir, _bam_dir, file) =
             opened_over(&[read_named_with_length("r", 1, 1, 30)]);
@@ -2426,9 +2426,9 @@ mod tests {
     /// closure is ever split again, the half that would go unwatched is watched here.
     #[test]
     fn a_cram_cursor_checks_that_its_second_reader_can_serve_the_contig() {
+        use crate::bam::cram_files::{ContigSpec, build_fasta};
         use crate::fasta::{ContigEntry, ContigList};
         use crate::ng::ref_seq::WindowedRefSeq;
-        use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
         use std::cell::Cell;
 
         let (_cram_dir, cram_path, _fasta_dir, fasta) = indexed_cram(&one_read());

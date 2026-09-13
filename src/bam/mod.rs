@@ -36,6 +36,10 @@ pub mod alignment_input;
 // them. `pub(crate)` keeps the path scope honest.
 pub(crate) mod bam_input;
 pub(crate) mod cram_input;
+// Test fixtures: synthetic FASTA and CRAM files written to a tempdir. Used by this module's
+// tests, `fasta`'s, and ng's; it lived in `pileup::per_sample` until promotion step C16.
+#[cfg(test)]
+pub(crate) mod cram_files;
 pub mod errors;
 pub mod index_preflight;
 // The shared indexed-segment read source: pooled, thread-safe
