@@ -56,30 +56,30 @@ use clap::Args;
 use thiserror::Error;
 
 use crate::fasta::ContigList;
-use crate::ng::locus_generation::LocusCounts;
-use crate::ng::locus_generation::pileup::PileupGeneratorConfig;
-use crate::ng::parameter_estimation::joint::loci::{SelectionError, UnambiguousRuns};
-use crate::ng::psp::{WriteStats, WriterProvenance};
-use crate::ng::read::ReadFilterConfig;
-use crate::ng::read::input::read_groups::{
-    ReadGroupError, ReadGroups, SampleReadGroups, build_read_groups,
-};
-use crate::ng::read::input::reference::OpenReference;
-use crate::ng::reference_info::{
-    ReferenceCheck, ReferenceInfoError, read_reference_observing_or_creating_fai,
-};
-use crate::ng::region_typing::DEFAULT_MAX_STR_LEN;
-use crate::ng::region_typing::segment_criteria::{
-    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
-};
-use crate::ng::repeat_catalog::RepeatCatalog;
-use crate::ng::run::report::{describe, plural, share_of};
-use crate::ng::run::{
-    CensusPlan, CensusSelection, RunError, SampleObservationGatherer, SampleWalkInputs,
-};
-use crate::ng::types::MAX_MOTIF_LEN;
+use crate::locus_generation::LocusCounts;
+use crate::locus_generation::pileup::PileupGeneratorConfig;
+use crate::parameter_estimation::joint::loci::{SelectionError, UnambiguousRuns};
 use crate::pop_var_caller_exp::provenance::{current_command_line, rfc3339_now};
 use crate::pop_var_caller_exp::run_ground::{self, GroundError};
+use crate::psp::{WriteStats, WriterProvenance};
+use crate::read::ReadFilterConfig;
+use crate::read::input::read_groups::{
+    ReadGroupError, ReadGroups, SampleReadGroups, build_read_groups,
+};
+use crate::read::input::reference::OpenReference;
+use crate::reference_info::{
+    ReferenceCheck, ReferenceInfoError, read_reference_observing_or_creating_fai,
+};
+use crate::region_typing::DEFAULT_MAX_STR_LEN;
+use crate::region_typing::segment_criteria::{
+    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
+};
+use crate::repeat_catalog::RepeatCatalog;
+use crate::run::report::{describe, plural, share_of};
+use crate::run::{
+    CensusPlan, CensusSelection, RunError, SampleObservationGatherer, SampleWalkInputs,
+};
+use crate::types::MAX_MOTIF_LEN;
 
 #[cfg(test)]
 mod tests;

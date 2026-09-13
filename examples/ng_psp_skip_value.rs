@@ -39,7 +39,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use pop_var_caller::ng::psp::PspReader;
+use pop_var_caller::psp::PspReader;
 
 /// How many rounds each walk is timed over, so a reading is not one sample of a noisy machine.
 ///

@@ -10,24 +10,22 @@ use std::path::PathBuf;
 use clap::Args;
 use thiserror::Error;
 
-use crate::ng::reference_info::{
-    ReferenceInfoError, ReferenceSource, read_reference_info_observing,
-};
-use crate::ng::region_typing::segment_criteria::{
+use crate::pop_var_caller_exp::cli::parsers::parse_min_copies;
+use crate::reference_info::{ReferenceInfoError, ReferenceSource, read_reference_info_observing};
+use crate::region_typing::segment_criteria::{
     DEFAULT_BUNDLE_THRESHOLD, DEFAULT_MIN_PURITY, DEFAULT_MIN_SCORE, MAX_MOTIF_LEN, MinCopies,
     SsrSegmentCriteria,
 };
-use crate::ng::repeat_catalog::criteria::{
+use crate::repeat_catalog::criteria::{
     CATALOG_MAX_PERIOD, CATALOG_MAX_STR_LEN_BP, CATALOG_MIN_FLANK_BP, CATALOG_MIN_PERIOD,
 };
-use crate::ng::repeat_catalog::{
+use crate::repeat_catalog::{
     BuildTally, RepeatCatalogBuilder, RepeatCatalogError, StrRepeatCriteria, sibling_catalog_path,
 };
-use crate::ng::tandem_repeat::{
+use crate::tandem_repeat::{
     DEFAULT_MATCH_REWARD, DEFAULT_MISMATCH_PENALTY, PeriodRange, PeriodRangeError, ScanParams,
 };
-use crate::ng::types::Bp;
-use crate::pop_var_caller_exp::cli::parsers::parse_min_copies;
+use crate::types::Bp;
 
 /// The permissive floor handed to the scanner itself.
 ///
@@ -279,7 +277,7 @@ fn report(tally: &BuildTally, contigs: usize) {
 /// keeps the literal and [`CATALOG_MIN_COPIES`] from drifting apart.
 #[cfg(test)]
 fn default_min_copies_flag() -> String {
-    crate::ng::repeat_catalog::criteria::CATALOG_MIN_COPIES
+    crate::repeat_catalog::criteria::CATALOG_MIN_COPIES
         .iter()
         .map(u32::to_string)
         .collect::<Vec<_>>()
@@ -289,7 +287,7 @@ fn default_min_copies_flag() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::repeat_catalog::criteria::CATALOG_MIN_COPIES;
+    use crate::repeat_catalog::criteria::CATALOG_MIN_COPIES;
     use clap::Parser;
 
     use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
@@ -337,7 +335,7 @@ mod tests {
         // The path the driver builds — kept in step with `run_repeat_catalog` by being the
         // same expression.
         let mut expected = args.reference.clone().into_os_string();
-        expected.push(crate::ng::repeat_catalog::CATALOG_SUFFIX);
+        expected.push(crate::repeat_catalog::CATALOG_SUFFIX);
         assert_eq!(
             PathBuf::from(expected),
             PathBuf::from("/data/ref.fa.repeats.parquet")
@@ -366,8 +364,8 @@ mod tests {
     /// catalog opens against the very reference it was built from.
     #[test]
     fn the_command_writes_a_catalog_that_opens_against_its_reference() {
-        use crate::ng::reference_info::{ReferenceSource, read_reference_info};
-        use crate::ng::repeat_catalog::{ReadScope, RepeatCatalog};
+        use crate::reference_info::{ReferenceSource, read_reference_info};
+        use crate::repeat_catalog::{ReadScope, RepeatCatalog};
         use std::io::Write;
 
         let dir = tempfile::tempdir().expect("tmp");
@@ -393,7 +391,7 @@ mod tests {
         run_repeat_catalog(&args).expect("the build succeeds");
 
         let mut catalog_path = fasta.clone().into_os_string();
-        catalog_path.push(crate::ng::repeat_catalog::CATALOG_SUFFIX);
+        catalog_path.push(crate::repeat_catalog::CATALOG_SUFFIX);
         let catalog_path = PathBuf::from(catalog_path);
         assert!(catalog_path.exists(), "the catalog lands beside the FASTA");
 

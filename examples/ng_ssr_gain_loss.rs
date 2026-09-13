@@ -18,25 +18,25 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use pop_var_caller::alignment::PerQualityEmission;
+use pop_var_caller::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
+use pop_var_caller::alignment::ssr_unit_robust::SsrUnitRobustAligner;
 use pop_var_caller::fasta::ContigList;
-use pop_var_caller::ng::alignment::PerQualityEmission;
-use pop_var_caller::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
-use pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner;
-use pop_var_caller::ng::locus_generation::LocusGenerator;
-use pop_var_caller::ng::locus_generation::ReadWitness;
-use pop_var_caller::ng::locus_generation::ssr::{
+use pop_var_caller::locus_generation::LocusGenerator;
+use pop_var_caller::locus_generation::ReadWitness;
+use pop_var_caller::locus_generation::ssr::{
     RepeatDelimiter, SegmentDelimitations, SsrGenerator, SsrGeneratorConfig,
 };
-use pop_var_caller::ng::read::ReadFilterConfig;
-use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::ref_seq::WindowedRefSeq;
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::read::ReadFilterConfig;
+use pop_var_caller::read::input::SampleReads;
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::ref_seq::WindowedRefSeq;
+use pop_var_caller::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::{RegionKind, TypedRegionConfig};
-use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
-use pop_var_caller::ng::types::{Bp, ContigId};
+use pop_var_caller::region_typing::{RegionKind, TypedRegionConfig};
+use pop_var_caller::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::types::{Bp, ContigId};
 
 #[path = "shared/catalog_regions.rs"]
 mod catalog_regions;

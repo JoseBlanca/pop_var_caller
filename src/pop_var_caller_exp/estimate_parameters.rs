@@ -34,7 +34,7 @@
 //! **The file this writes is the only way a coefficient reaches a calling run** — the calling
 //! commands take no flag for it — so the ladder is resolved here, once, and written with the
 //! warrant that says which rung it came from
-//! ([`DeclaredInbreeding::of_each_sample_over`](crate::ng::calling::parameters_file::DeclaredInbreeding::of_each_sample_over)):
+//! ([`DeclaredInbreeding::of_each_sample_over`](crate::calling::parameters_file::DeclaredInbreeding::of_each_sample_over)):
 //!
 //! - **`supplied`** — `--inbreeding` was given. It overrides the fit, because a user who knows how
 //!   their material was bred knows it whatever the cohort size (owner, 2026-08-27).
@@ -51,17 +51,18 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 use thiserror::Error;
 
-use crate::ng::calling::parameters_file::{DeclaredInbreeding, ParametersFile};
-use crate::ng::parameter_estimation::joint::fit::JointFitConfig;
-use crate::ng::parameter_estimation::joint::loci::{
-    ReferenceDigest, SelectionError, UnambiguousRuns,
-};
-use crate::ng::parameter_estimation::joint::ssr_fit::SsrFitConfig;
-use crate::ng::reference_info::{
+use crate::calling::parameters_file::{DeclaredInbreeding, ParametersFile};
+use crate::parameter_estimation::joint::fit::JointFitConfig;
+use crate::parameter_estimation::joint::loci::{ReferenceDigest, SelectionError, UnambiguousRuns};
+use crate::parameter_estimation::joint::ssr_fit::SsrFitConfig;
+use crate::pop_var_caller_exp::generate_psps::PSP_FILE_EXTENSION;
+use crate::pop_var_caller_exp::psp_inputs::{PspArgumentRefusal, psps_named};
+use crate::pop_var_caller_exp::run_ground::{self, GroundError};
+use crate::reference_info::{
     ReferenceCheck, ReferenceInfoError, read_reference_observing_or_creating_fai,
 };
-use crate::ng::repeat_catalog::RepeatCatalogHeader;
-use crate::ng::run::{
+use crate::repeat_catalog::RepeatCatalogHeader;
+use crate::run::{
     CensusCohortError, CensusPlan, CensusSelection, CensusesToRegenerate, CohortFitError,
     OpenPspCohort, RunError, THE_COMMAND_THAT_REBUILDS_A_CENSUS, each_census_in_the_cohorts_psps,
     every_read_group_pooled, fit_a_cohort, fitted_inbreeding_of, parameters_file_of,
@@ -69,10 +70,7 @@ use crate::ng::run::{
     what_the_heads_say_about_every_census_in_a_cohort,
     what_the_run_says_about_every_census_in_a_cohort,
 };
-use crate::ng::types::{ContigId, InbreedingF, Ploidy};
-use crate::pop_var_caller_exp::generate_psps::PSP_FILE_EXTENSION;
-use crate::pop_var_caller_exp::psp_inputs::{PspArgumentRefusal, psps_named};
-use crate::pop_var_caller_exp::run_ground::{self, GroundError};
+use crate::types::{ContigId, InbreedingF, Ploidy};
 
 #[cfg(test)]
 mod tests;
@@ -585,7 +583,7 @@ fn the_command_that_regenerates(args: &EstimateParametersArgs) -> String {
 /// ([`RepeatCatalogHeader::first_difference`]), so this command and `regenerate-census` name the
 /// same difference in the same words; what is this command's is the sentence around it, which says
 /// what to do. `call-from-psps` makes the same comparison through
-/// [`SegmentationInputs::first_difference`](crate::ng::run::SegmentationInputs::first_difference),
+/// [`SegmentationInputs::first_difference`](crate::run::SegmentationInputs::first_difference),
 /// which names only *the repeat catalog* — enough for a run that will not proceed either way, and
 /// not enough for a person deciding which of two files they hold.
 ///

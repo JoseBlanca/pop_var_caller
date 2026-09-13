@@ -4,10 +4,10 @@
 use super::*;
 use clap::Parser;
 
-use crate::ng::parameter_estimation::joint::census_file::{CensusFile, decode_census};
-use crate::ng::psp::PspReader;
-use crate::ng::repeat_catalog::StrRepeatCriteria;
+use crate::parameter_estimation::joint::census_file::{CensusFile, decode_census};
 use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
+use crate::psp::PspReader;
+use crate::repeat_catalog::StrRepeatCriteria;
 
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
 fn args_of(argv: &[&str]) -> GeneratePspsArgs {
@@ -225,10 +225,10 @@ fn a_walk_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
 #[test]
 fn a_catalog_built_on_another_reference_of_the_same_shape_is_refused() {
     use crate::bam::cram_files::{ContigSpec, build_fasta};
-    use crate::ng::read::input::test_fixtures::FIXTURE_CONTIGS;
-    use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
-    use crate::ng::repeat_catalog::RepeatCatalogBuilder;
-    use crate::ng::tandem_repeat::ScanParams;
+    use crate::read::input::test_fixtures::FIXTURE_CONTIGS;
+    use crate::reference_info::{ReferenceSource, read_reference_info_observing};
+    use crate::repeat_catalog::RepeatCatalogBuilder;
+    use crate::tandem_repeat::ScanParams;
 
     let (_reference_dir, _zeta_dir, _alpha_dir, mut args) = a_cohort_on_disk();
 
@@ -287,7 +287,7 @@ fn a_catalog_built_on_another_reference_of_the_same_shape_is_refused() {
 /// before zeta and alpha were written.
 #[test]
 fn a_walk_that_stops_names_its_sample_and_leaves_the_earlier_samples_psps_written() {
-    use crate::ng::read::input::test_fixtures::{header, matching_contigs, named_bam};
+    use crate::read::input::test_fixtures::{header, matching_contigs, named_bam};
 
     let (_reference_dir, _zeta_dir, _alpha_dir, mut args) = a_cohort_on_disk();
     // beta's file carries no index and the run was not told to build one, so its walk stops
@@ -331,9 +331,7 @@ fn a_walk_that_stops_names_its_sample_and_leaves_the_earlier_samples_psps_writte
 /// would leave a stump every reader refuses.
 #[test]
 fn a_stopped_rewalk_does_not_destroy_the_psp_it_was_replacing() {
-    use crate::ng::read::input::test_fixtures::{
-        header, matching_contigs, named_bam, read_group_for,
-    };
+    use crate::read::input::test_fixtures::{header, matching_contigs, named_bam, read_group_for};
 
     let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
     run_generate_psps(&args).expect("the cohort walks");
@@ -438,7 +436,7 @@ fn the_min_purity_flag_reaches_the_criteria_the_catalog_is_asked_with() {
 /// sample's walk stops at the open, which is what the stopped-walk test above relies on.
 #[test]
 fn the_build_index_flag_reaches_the_open_that_would_use_it() {
-    use crate::ng::read::input::test_fixtures::{header, matching_contigs, named_bam};
+    use crate::read::input::test_fixtures::{header, matching_contigs, named_bam};
 
     let (_reference_dir, _zeta_dir, _alpha_dir, mut args) = a_cohort_on_disk();
     let (_beta_dir, beta) = named_bam(
@@ -651,7 +649,7 @@ fn the_output_directory_is_created_when_it_does_not_exist() {
 /// (`read_groups.md` §4) — and the file the walk was given twice is opened once.
 #[test]
 fn two_files_naming_one_sample_become_one_psp() {
-    use crate::ng::read::input::test_fixtures::{header, indexed_named_bam, matching_contigs};
+    use crate::read::input::test_fixtures::{header, indexed_named_bam, matching_contigs};
 
     let (_reference_dir, _zeta_dir, _alpha_dir, mut args) = a_cohort_on_disk();
     let with_second_read_group = |file: &str| {
@@ -702,7 +700,7 @@ fn two_files_naming_one_sample_become_one_psp() {
 /// this shape — without the deduplication the list would come back three long.
 #[test]
 fn a_file_holding_several_of_a_samples_read_groups_is_listed_once() {
-    use crate::ng::read::input::read_groups::ReadGroups;
+    use crate::read::input::read_groups::ReadGroups;
 
     let read_groups = ReadGroups::of_libraries(&[
         ("rg1", "zeta"),
@@ -910,7 +908,7 @@ fn a_truncated_psp_is_refused_as_interrupted() {
 /// no psp at the sample's own path, and no scratch file beside it either.
 #[test]
 fn a_stopped_walk_leaves_no_file_at_the_samples_path_or_beside_it() {
-    use crate::ng::read::input::test_fixtures::{header, matching_contigs, named_bam};
+    use crate::read::input::test_fixtures::{header, matching_contigs, named_bam};
 
     let (_reference_dir, _zeta_dir, _alpha_dir, mut args) = a_cohort_on_disk();
     let (_beta_dir, beta) = named_bam(
@@ -966,13 +964,13 @@ fn the_per_sample_line_prints_the_numbers_it_names() {
         sample: "zeta".to_string(),
         psp: PathBuf::from("psps/zeta.psp"),
         census_bytes: 812,
-        stats: crate::ng::psp::WriteStats {
+        stats: crate::psp::WriteStats {
             records: 41,
             blocks: 3,
             bytes: 6007,
             trailer_bytes: 812,
         },
-        counts: crate::ng::locus_generation::LocusCounts {
+        counts: crate::locus_generation::LocusCounts {
             regions_in: 17,
             regions_handled: 11,
             regions_handled_bp: 500,
@@ -1024,13 +1022,13 @@ fn a_walk_that_covered_its_whole_ground_carries_no_uncovered_clause() {
         sample: "zeta".to_string(),
         psp: PathBuf::from("psps/zeta.psp"),
         census_bytes: 812,
-        stats: crate::ng::psp::WriteStats {
+        stats: crate::psp::WriteStats {
             records: 41,
             blocks: 3,
             bytes: 6007,
             trailer_bytes: 812,
         },
-        counts: crate::ng::locus_generation::LocusCounts {
+        counts: crate::locus_generation::LocusCounts {
             regions_in: 11,
             regions_handled: 11,
             regions_handled_bp: 1_000,

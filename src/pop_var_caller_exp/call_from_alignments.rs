@@ -47,34 +47,34 @@ use std::sync::Arc;
 use clap::Args;
 use thiserror::Error;
 
+use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
+use crate::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
+use crate::calling::inference::summarise_condition::SummariseConditionLoop;
+use crate::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
+use crate::calling::parameters_file::{ParametersFile, beside_the_vcf};
 use crate::fasta::ContigList;
-use crate::ng::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
-use crate::ng::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
-use crate::ng::calling::inference::summarise_condition::SummariseConditionLoop;
-use crate::ng::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
-use crate::ng::calling::parameters_file::{ParametersFile, beside_the_vcf};
-use crate::ng::locus_generation::pileup::PileupGeneratorConfig;
-use crate::ng::parameter_estimation::joint::loci::ReferenceDigest;
-use crate::ng::read::ReadFilterConfig;
-use crate::ng::read::input::read_groups::{ReadGroupError, build_read_groups};
-use crate::ng::read::input::reference::OpenReference;
-use crate::ng::reference_info::{
+use crate::locus_generation::pileup::PileupGeneratorConfig;
+use crate::parameter_estimation::joint::loci::ReferenceDigest;
+use crate::pop_var_caller_exp::calling_run;
+use crate::pop_var_caller_exp::run_ground::{self, GroundError};
+use crate::read::ReadFilterConfig;
+use crate::read::input::read_groups::{ReadGroupError, build_read_groups};
+use crate::read::input::reference::OpenReference;
+use crate::reference_info::{
     ReferenceCheck, ReferenceInfoCache, ReferenceInfoError,
     read_reference_verifying_or_creating_fai,
 };
-use crate::ng::region_typing::DEFAULT_MAX_STR_LEN;
-use crate::ng::region_typing::segment_criteria::{
+use crate::region_typing::DEFAULT_MAX_STR_LEN;
+use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
-use crate::ng::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
-use crate::ng::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
-use crate::ng::run::report::BoundsTheRunCalledUnder;
-use crate::ng::run::{AlignedFilesVariantCaller, AlignmentInputs, RunError, RunReport};
-use crate::ng::types::InbreedingF;
-use crate::ng::types::MAX_MOTIF_LEN;
-use crate::ng::vcf::writer::{VcfWriteError, VcfWriter};
-use crate::pop_var_caller_exp::calling_run;
-use crate::pop_var_caller_exp::run_ground::{self, GroundError};
+use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
+use crate::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
+use crate::run::report::BoundsTheRunCalledUnder;
+use crate::run::{AlignedFilesVariantCaller, AlignmentInputs, RunError, RunReport};
+use crate::types::InbreedingF;
+use crate::types::MAX_MOTIF_LEN;
+use crate::vcf::writer::{VcfWriteError, VcfWriter};
 
 /// Default target false-discovery rate for the hidden-duplication filter — spec §3.6's.
 ///
@@ -290,7 +290,7 @@ pub enum CallFromAlignmentsCliError {
     ParalogTargetIsNotAFraction {
         /// What the type said was wrong with it.
         #[source]
-        source: crate::ng::run::paralog_filter::NotATargetFdr,
+        source: crate::run::paralog_filter::NotATargetFdr,
     },
 
     /// The hidden-duplication filter could not finish the run.
@@ -298,7 +298,7 @@ pub enum CallFromAlignmentsCliError {
     ParalogFilter {
         /// What the filter said.
         #[source]
-        source: crate::ng::run::paralog_filter::ParalogFilterError,
+        source: crate::run::paralog_filter::ParalogFilterError,
     },
 
     /// The calls could not be written, or the records could not be parked for the filter.
@@ -308,7 +308,7 @@ pub enum CallFromAlignmentsCliError {
         path: PathBuf,
         /// What pass one said.
         #[source]
-        source: crate::ng::run::paralog_filter::PassOneError,
+        source: crate::run::paralog_filter::PassOneError,
     },
     /// The reference could not be read.
     #[error("reading the reference {}", path.display())]
@@ -615,7 +615,7 @@ pub fn run_call_from_alignments(
                 .finish()
                 .map_err(|source| CallFromAlignmentsCliError::CallsNotWritten {
                     path: args.output.clone(),
-                    source: crate::ng::run::paralog_filter::PassOneError::Vcf(source),
+                    source: crate::run::paralog_filter::PassOneError::Vcf(source),
                 })?;
             None
         }
@@ -623,7 +623,7 @@ pub fn run_call_from_alignments(
             spilling.finish_parking().map_err(|source| {
                 CallFromAlignmentsCliError::CallsNotWritten {
                     path: args.output.clone(),
-                    source: crate::ng::run::paralog_filter::PassOneError::Spill(source),
+                    source: crate::run::paralog_filter::PassOneError::Spill(source),
                 }
             })?;
             Some(spilling)

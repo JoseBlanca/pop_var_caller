@@ -4,7 +4,7 @@
 //! sample's real alignment file, walked through the real repeat catalog, written to a psp by
 //! [`SampleObservationGatherer::write_psp`] — and then the file read back and compared
 //! **record for record, field for field** against the same sample walked again in memory.
-//! The fixture-scale version of this comparison lives in `src/ng/run/gatherer.rs`'s tests;
+//! The fixture-scale version of this comparison lives in `src/run/gatherer.rs`'s tests;
 //! what this harness adds is real sequenced DNA, ground with repeat tracts, gaps and contig
 //! ends in it, and record values the synthetic fixtures never produce.
 //!
@@ -55,26 +55,24 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
-use pop_var_caller::ng::locus_generation::{LocusKind, SampleLocusObservations};
-use pop_var_caller::ng::psp::WriterProvenance;
-use pop_var_caller::ng::psp::{
+use pop_var_caller::locus_generation::{LocusKind, SampleLocusObservations};
+use pop_var_caller::psp::WriterProvenance;
+use pop_var_caller::psp::{
     Header, ParameterValue, PspReader, WriteStats, ZSTD_COMPRESSION_LEVEL,
     ZSTD_COMPRESSION_LEVEL_KEY,
 };
-use pop_var_caller::ng::read::ReadFilterConfig;
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::read::ReadFilterConfig;
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::GenomeRegions;
-use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
-use pop_var_caller::ng::run::{
-    RunError, SampleObservationGatherer, SampleWalkInputs, Segmentation,
-};
+use pop_var_caller::region_typing::GenomeRegions;
 use pop_var_caller::regions::ContigBounds;
+use pop_var_caller::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::run::{RunError, SampleObservationGatherer, SampleWalkInputs, Segmentation};
 
 use pop_var_caller::fasta::ContigList;
-use pop_var_caller::ng::locus_generation::pileup::PileupGeneratorConfig;
+use pop_var_caller::locus_generation::pileup::PileupGeneratorConfig;
 
 const SAMPLES_BY_DEFAULT: usize = 1;
 const REGIONS_BY_DEFAULT: usize = 2;

@@ -14,23 +14,23 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::reference_info::{
     ReferenceInfo, ReferenceSource, read_reference_info_observing,
 };
-use pop_var_caller::ng::region_typing::segment_criteria::{
+use pop_var_caller::region_typing::segment_criteria::{
     MinCopies, RejectionCounts, SsrSegmentCriteria,
 };
-use pop_var_caller::ng::region_typing::{
+use pop_var_caller::region_typing::{
     RegionKind, TypedRegion, TypedRegionConfig, partition_resident, partition_resident_in,
 };
-use pop_var_caller::ng::repeat_catalog::criteria::{
+use pop_var_caller::repeat_catalog::criteria::{
     CATALOG_MIN_COPIES, CATALOG_MIN_COPIES_BEYOND_TABLE,
 };
-use pop_var_caller::ng::repeat_catalog::{
+use pop_var_caller::repeat_catalog::{
     ReadScope, RepeatCatalog, RepeatCatalogBuilder, StrRepeatCriteria,
 };
-use pop_var_caller::ng::tandem_repeat::{PeriodRange, ScanParams};
-use pop_var_caller::ng::types::{Bp, ContigId, GenomeRegion, Position};
+use pop_var_caller::tandem_repeat::{PeriodRange, ScanParams};
+use pop_var_caller::types::{Bp, ContigId, GenomeRegion, Position};
 
 /// A region covering one contig whole — what "just this chromosome" looks like now that the
 /// read surface speaks regions.
@@ -751,13 +751,13 @@ fn both_tallies(
     spans: &[GenomeRegion],
     criteria: &StrRepeatCriteria,
 ) -> (
-    pop_var_caller::ng::region_typing::TypedRegionCounts,
-    pop_var_caller::ng::repeat_catalog::CatalogRegionCounts,
+    pop_var_caller::region_typing::TypedRegionCounts,
+    pop_var_caller::repeat_catalog::CatalogRegionCounts,
     Vec<TypedRegion>,
 ) {
     let config = scan_config(criteria);
     let mut scanned = Vec::new();
-    let mut counts = pop_var_caller::ng::region_typing::TypedRegionCounts::default();
+    let mut counts = pop_var_caller::region_typing::TypedRegionCounts::default();
     for (index, (name, bases)) in contigs.iter().enumerate() {
         let contig = ContigId(index as u32);
         if !spans.iter().any(|span| span.contig == contig) {
@@ -788,10 +788,10 @@ fn both_tallies(
 /// **Exhaustive on purpose**: a counter added to `TypedRegionCounts` later must break this
 /// line rather than be silently left at zero in every multi-contig comparison below.
 fn add_counts(
-    total: &mut pop_var_caller::ng::region_typing::TypedRegionCounts,
-    one: &pop_var_caller::ng::region_typing::TypedRegionCounts,
+    total: &mut pop_var_caller::region_typing::TypedRegionCounts,
+    one: &pop_var_caller::region_typing::TypedRegionCounts,
 ) {
-    let pop_var_caller::ng::region_typing::TypedRegionCounts {
+    let pop_var_caller::region_typing::TypedRegionCounts {
         spans,
         ssr_loci,
         ssr_bundles,
@@ -996,7 +996,7 @@ fn the_tally_differs_only_at_the_contig_ends() {
     // The regions themselves differ here, so `both_tallies`' region check would fire — run
     // the two sides directly instead.
     let config = scan_config(&criteria);
-    let mut walk_counts = pop_var_caller::ng::region_typing::TypedRegionCounts::default();
+    let mut walk_counts = pop_var_caller::region_typing::TypedRegionCounts::default();
     for (index, (name, bases)) in contigs.iter().enumerate() {
         let contig = ContigId(index as u32);
         if !spans.iter().any(|span| span.contig == contig) {

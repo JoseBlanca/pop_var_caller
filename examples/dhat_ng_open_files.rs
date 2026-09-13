@@ -64,17 +64,17 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use pop_var_caller::fasta::ContigList;
-use pop_var_caller::ng::read::ReadFilterConfig;
-use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::read_groups::build_read_groups;
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::ref_seq::WindowedRefSeq;
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::read::ReadFilterConfig;
+use pop_var_caller::read::input::SampleReads;
+use pop_var_caller::read::input::read_groups::build_read_groups;
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::ref_seq::WindowedRefSeq;
+use pop_var_caller::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::GenomeRegions;
-use pop_var_caller::ng::types::ContigId;
+use pop_var_caller::region_typing::GenomeRegions;
 use pop_var_caller::regions::ContigBounds;
+use pop_var_caller::types::ContigId;
 
 fn main() -> ExitCode {
     #[cfg(feature = "dhat-heap")]

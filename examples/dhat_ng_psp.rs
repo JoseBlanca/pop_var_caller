@@ -1,8 +1,8 @@
 //! Count the heap allocations ng's psp store makes, per record, on both sides.
 //!
 //! **The counterpart the store did not have.** `examples/dhat_psp_reader.rs` and
-//! `dhat_psp_writer.rs` profile *production's* `src/psp/`; `src/ng/psp/` had no allocation
-//! oracle at all, so an allocations review could only gate on wall time — which moves 20–25 %
+//! `dhat_psp_writer.rs` profiled *production's* `src/psp/`; ng's store (now also `src/psp/`) had
+//! no allocation oracle at all, so an allocations review could only gate on wall time — which moves 20–25 %
 //! run to run — instead of on a count that is identical every run.
 //!
 //! Run inside the dev container:
@@ -46,17 +46,15 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use pop_var_caller::ng::locus_generation::{
+use pop_var_caller::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
 };
-use pop_var_caller::ng::psp::{
+use pop_var_caller::psp::{
     ContigIdentity, FORMAT_VERSION, Header, Manifest, PspReader, PspWriter, ReferenceIdentity,
     WriterProvenance,
 };
-use pop_var_caller::ng::types::ChainId;
-use pop_var_caller::ng::types::{
-    Bp, ContigId, GenomeRegion, Position, ReadGroupId, SummedLogError,
-};
+use pop_var_caller::types::ChainId;
+use pop_var_caller::types::{Bp, ContigId, GenomeRegion, Position, ReadGroupId, SummedLogError};
 
 const MATE_LENGTH_POSITIONS: u64 = 150;
 const INNER_GAP_POSITIONS: u64 = 200;
@@ -165,21 +163,21 @@ fn a_header(shape: &CorpusShape) -> Header {
             length: contig_length,
             md5: None,
         }],
-        read_groups: vec![pop_var_caller::ng::psp::ReadGroupIdentity {
+        read_groups: vec![pop_var_caller::psp::ReadGroupIdentity {
             id: "dhat".to_string(),
             library: "dhat".to_string(),
-            walk_local_id: pop_var_caller::ng::types::ReadGroupId(0),
+            walk_local_id: pop_var_caller::types::ReadGroupId(0),
         }],
         // The widest span the generator *accepts* (its ceiling, not its default cap) — a
         // true bound on this corpus's one-base records, and a bound is all the field
         // promises.
         observation_reach_ceiling_bp: Bp(u64::from(
-            pop_var_caller::ng::locus_generation::pileup::MAX_RECORD_SPAN_CEILING,
+            pop_var_caller::locus_generation::pileup::MAX_RECORD_SPAN_CEILING,
         )),
-        segmentation_inputs: pop_var_caller::ng::run::SegmentationInputs {
-            catalog: pop_var_caller::ng::repeat_catalog::RepeatCatalogHeader::no_catalog("dhat"),
-            repeat_tract_criteria: pop_var_caller::ng::repeat_catalog::StrRepeatCriteria::default(),
-            analysed_regions: pop_var_caller::ng::region_typing::GenomeRegions::whole_contigs(&[
+        segmentation_inputs: pop_var_caller::run::SegmentationInputs {
+            catalog: pop_var_caller::repeat_catalog::RepeatCatalogHeader::no_catalog("dhat"),
+            repeat_tract_criteria: pop_var_caller::repeat_catalog::StrRepeatCriteria::default(),
+            analysed_regions: pop_var_caller::region_typing::GenomeRegions::whole_contigs(&[
                 pop_var_caller::regions::ContigBounds {
                     name: "chr1",
                     length: contig_length as u32,

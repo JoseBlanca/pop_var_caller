@@ -60,12 +60,12 @@ use sam::header::record::value::Map;
 use sam::header::record::value::map::{ReadGroup, ReferenceSequence};
 
 use pop_var_caller::bam::index_preflight::preflight_alignment_indexes;
-use pop_var_caller::ng::read::ReadFilterConfig;
-use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::ref_seq::InMemoryRefSeq;
-use pop_var_caller::ng::reference_info::{ReferenceSource, read_reference_info};
-use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
+use pop_var_caller::read::ReadFilterConfig;
+use pop_var_caller::read::input::SampleReads;
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::ref_seq::InMemoryRefSeq;
+use pop_var_caller::reference_info::{ReferenceSource, read_reference_info};
+use pop_var_caller::types::{ContigId, GenomeRegion, Position};
 
 const CONTIG: &str = "chr1";
 const CONTIG_LENGTH: usize = 100_000;

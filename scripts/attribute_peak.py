@@ -31,11 +31,20 @@ FRAME = re.compile(r"^0x[0-9a-f]+:\s*(?P<symbol>.*?)\s*\((?P<path>[^()]*):\d+(?:
 #
 # The rows for production's per-sample file, calling engine and pileup — and the
 # symbol rules that split `var_calling/pipeline.rs` between two of them — went
-# with that code in promotion Milestone D. **When ng's modules move from
-# `src/ng/` up to `src/` (promotion Milestone E), the `ng` row below matches
-# nothing and has to be split by module.**
+# with that code in promotion Milestone D, and the single `src/ng/` row became
+# one row per stage when Milestone E moved ng's modules up to `src/`.
 MODULES = [
-    ("ng", ("src/ng/",)),
+    ("psp", ("src/psp/",)),
+    ("cohort merge and run", ("src/run/",)),
+    ("calling", ("src/calling/", "src/genetics")),
+    ("parameter fit", ("src/parameter_estimation/",)),
+    ("locus generation", ("src/locus_generation/",)),
+    ("reads and alignment", ("src/read/", "src/alignment/")),
+    ("paralog filter", ("src/paralog/", "src/window_coverage/")),
+    ("reference and repeats", ("src/ref_seq", "src/raw_chrom_reader", "src/reference_info",
+                               "src/tandem_repeat", "src/repeat_catalog", "src/region_typing",
+                               "src/segmentation_inputs")),
+    ("vcf", ("src/vcf/",)),
     ("read input", ("src/bam/", "src/fasta/")),
 ]
 
@@ -43,7 +52,11 @@ MODULES = [
 # reports std as `src/vec/mod.rs`, `alloc/src/...` — indistinguishable from ours
 # by prefix alone, so ours are named explicitly.
 PROJECT_DIRS = (
-    "src/ng/", "src/bam/", "src/fasta/", "src/pop_var_caller_exp/", "src/region",
+    "src/psp/", "src/run/", "src/calling/", "src/genetics", "src/parameter_estimation/",
+    "src/locus_generation/", "src/read/", "src/alignment/", "src/paralog/",
+    "src/window_coverage/", "src/ref_seq", "src/raw_chrom_reader", "src/reference_info",
+    "src/tandem_repeat", "src/repeat_catalog", "src/region", "src/segmentation_inputs",
+    "src/vcf/", "src/types", "src/bam/", "src/fasta/", "src/pop_var_caller_exp/",
 )
 
 
@@ -55,6 +68,11 @@ def parse(frame):
 
 
 def is_project(path):
+    # The module fragments below also occur inside dependencies' own trees — noodles-sam has a
+    # `src/alignment/`, arrow a `src/types.rs` — so a frame from the cargo registry, a git
+    # checkout or the standard library is never the project's, whatever its path contains.
+    if "/registry/src/" in path or "/git/checkouts/" in path or "/rustc/" in path:
+        return False
     return any(d in path for d in PROJECT_DIRS)
 
 

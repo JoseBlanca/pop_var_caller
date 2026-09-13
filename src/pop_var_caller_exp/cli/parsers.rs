@@ -3,14 +3,14 @@
 //! place to add to (spec §2.1) — ng's experiment knobs stay out of the
 //! production CLI.
 
-use crate::ng::region_typing::segment_criteria::{MAX_MOTIF_LEN, MinCopies};
+use crate::region_typing::segment_criteria::{MAX_MOTIF_LEN, MinCopies};
 
 /// The floor [`MinCopies`] applies to periods wider than the table, which
 /// `--min-copies` deliberately does not expose.
 ///
 /// It is **structurally unreachable** from this command: the walk asserts the
 /// period ceiling is `<= MAX_MOTIF_LEN`
-/// ([`segment_criteria`](crate::ng::region_typing::segment_criteria)), so no
+/// ([`segment_criteria`](crate::region_typing::segment_criteria)), so no
 /// period-7+ interval can ever reach the floor. Rather than make the user type a
 /// value that decides nothing, the parser supplies this inert one (spec §2.1).
 const INERT_WIDER_PERIOD_FLOOR: u32 = 3;

@@ -73,17 +73,17 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use pop_var_caller::ng::calling::allele_candidates::generic::select_generic;
-use pop_var_caller::ng::calling::allele_candidates::{
+use pop_var_caller::calling::allele_candidates::generic::select_generic;
+use pop_var_caller::calling::allele_candidates::{
     CandidateSelectionConfig, MaxCandidateAlleles, SelectionScratch,
 };
-use pop_var_caller::ng::locus_generation::LocusKind;
-use pop_var_caller::ng::run::cohort_merge::build::{
+use pop_var_caller::locus_generation::LocusKind;
+use pop_var_caller::run::cohort_merge::build::{
     AlleleSupport, CohortObservation, SampleSupport, SupportedAllele,
 };
-use pop_var_caller::ng::run::cohort_merge::{MinAltObs, MinAltReadShare, MinAltReads};
-use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
-use pop_var_caller::ng::window_coverage::WindowCoverage;
+use pop_var_caller::run::cohort_merge::{MinAltObs, MinAltReadShare, MinAltReads};
+use pop_var_caller::types::{ContigId, GenomeRegion, Position, ReadGroupId};
+use pop_var_caller::window_coverage::WindowCoverage;
 
 /// One sample's evidence at one fixture locus: its reads on each allele of the merge's table,
 /// and its compared reads at the locus.
@@ -383,7 +383,7 @@ fn doubling_the_share_costs_true_alleles_at_both_depths() {
 fn the_shipped_bar_keeps_nearly_every_true_allele_and_loses_at_least_one() {
     for depth in ["30x", "300x"] {
         let loci = fixture(depth);
-        let bar = pop_var_caller::ng::calling::allele_candidates::DEFAULT_MIN_ALLELE_SUPPORT;
+        let bar = pop_var_caller::calling::allele_candidates::DEFAULT_MIN_ALLELE_SUPPORT;
         let (floor, share) = (bar.floor.get(), bar.share.get());
         let truth: usize = loci
             .iter()

@@ -26,7 +26,7 @@
 //! it, the walk also recomputes **every position's window** — the whole-store recomputation of
 //! spec §10 — and, given `--windows-from-the-run`, checks the run's windows against its own. The
 //! run writes that file when
-//! [`recorded_windows::PATH_VARIABLE`](pop_var_caller::ng::run::cohort_merge::recorded_windows::PATH_VARIABLE)
+//! [`recorded_windows::PATH_VARIABLE`](pop_var_caller::run::cohort_merge::recorded_windows::PATH_VARIABLE)
 //! names one, and nothing else about the run changes.
 //!
 //! **The stores must be listed in the run's own sample order**, because that is what the file
@@ -116,7 +116,7 @@
 //!
 //! This walk builds each body through the psp reader, which applies a record's chain-id changes
 //! before decoding it; the calling run builds a kept body through its own source, **against an
-//! empty live set** (`src/ng/run/psp_source.rs`'s `build`). The two agree only while the encoder
+//! empty live set** (`src/run/psp_source.rs`'s `build`). The two agree only while the encoder
 //! writes no chain ids, which is true today and stops being true at the psp path's Milestone E.
 //! When it does, this measurement has to be retaken rather than cited.
 //!
@@ -141,28 +141,28 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use pop_var_caller::fasta::ContigList;
-use pop_var_caller::ng::locus_generation::{LocusKind, ReadWitness, SampleLocusObservations};
-use pop_var_caller::ng::paralog::coverage_model::DEFAULT_MAX_OVERFLOW_FRACTION;
-use pop_var_caller::ng::psp::{PspReader, RecordHead};
-use pop_var_caller::ng::ref_seq::{RefSeq, WindowedRefSeq};
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::locus_generation::{LocusKind, ReadWitness, SampleLocusObservations};
+use pop_var_caller::paralog::coverage_model::DEFAULT_MAX_OVERFLOW_FRACTION;
+use pop_var_caller::psp::{PspReader, RecordHead};
+use pop_var_caller::ref_seq::{RefSeq, WindowedRefSeq};
+use pop_var_caller::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::run::cohort_merge::observation_cache::LocusSummary;
-use pop_var_caller::ng::run::cohort_merge::recorded_windows::{
+use pop_var_caller::run::cohort_merge::observation_cache::LocusSummary;
+use pop_var_caller::run::cohort_merge::recorded_windows::{
     histograms_beside, read_a_row, write_the_histogram,
 };
-use pop_var_caller::ng::types::{ContigId, GenomePosition, GenomeRegion, Position};
-use pop_var_caller::ng::window_coverage::depth::{EvidenceForOneRecord, for_each_reported_depth};
-use pop_var_caller::ng::window_coverage::{
+use pop_var_caller::types::{ContigId, GenomePosition, GenomeRegion, Position};
+use pop_var_caller::window_coverage::depth::{EvidenceForOneRecord, for_each_reported_depth};
+use pop_var_caller::window_coverage::{
     self, CoverageByGcHistogram, SampleHistogram, WindowCoverage, WindowCoverageAccumulator,
     WindowCoverageConfig,
 };
 
 #[cfg(test)]
-use pop_var_caller::ng::locus_generation::{LocusLen, SequenceObservation, SsrDetail};
+use pop_var_caller::locus_generation::{LocusLen, SequenceObservation, SsrDetail};
 #[cfg(test)]
-use pop_var_caller::ng::types::{Motif, ReadGroupId, SummedLogError};
+use pop_var_caller::types::{Motif, ReadGroupId, SummedLogError};
 
 /// How many disagreeing records to print in full before printing only the count. Enough to see
 /// whether counter-examples cluster in one region or are scattered.
@@ -1762,7 +1762,7 @@ impl Arguments {
 /// own sample order, which is the order the stores are listed in.
 ///
 /// **The row format is the library's**, written and read by one pair of functions in
-/// [`recorded_windows`](pop_var_caller::ng::run::cohort_merge::recorded_windows), because a column
+/// [`recorded_windows`](pop_var_caller::run::cohort_merge::recorded_windows), because a column
 /// reordered on one side alone would still parse on the other and every locus would then read as
 /// one the run had no window for — which is what a *pass* looks like in this measurement. What is
 /// decided here is what the file means: which sample index is in range, and what two rows for one

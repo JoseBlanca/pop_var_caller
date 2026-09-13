@@ -8,11 +8,11 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use pop_var_caller::ng::reference_info::{ReferenceSource, read_reference_info};
-use pop_var_caller::ng::region_typing::{GenomeRegions, RegionKind};
-use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
-use pop_var_caller::ng::types::{GenomeRegion, Position};
+use pop_var_caller::reference_info::{ReferenceSource, read_reference_info};
+use pop_var_caller::region_typing::{GenomeRegions, RegionKind};
 use pop_var_caller::regions::ContigBounds;
+use pop_var_caller::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::types::{GenomeRegion, Position};
 
 fn main() {
     let mut args = std::env::args().skip(1);

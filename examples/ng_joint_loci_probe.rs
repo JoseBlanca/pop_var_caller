@@ -23,15 +23,13 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use pop_var_caller::ng::parameter_estimation::joint::loci::{
+use pop_var_caller::parameter_estimation::joint::loci::{
     SelectableRegions, UnambiguousRuns, select_generic_positions, threshold_for,
 };
-use pop_var_caller::ng::reference_info::{
-    ContigInfo, ReferenceSource, read_reference_info_observing,
-};
-use pop_var_caller::ng::region_typing::segment_criteria::SsrSegmentCriteria;
-use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
-use pop_var_caller::ng::types::{Bp, ContigId, GenomeRegion, Position};
+use pop_var_caller::reference_info::{ContigInfo, ReferenceSource, read_reference_info_observing};
+use pop_var_caller::region_typing::segment_criteria::SsrSegmentCriteria;
+use pop_var_caller::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::types::{Bp, ContigId, GenomeRegion, Position};
 
 fn whole_reference_regions(contigs: &[ContigInfo]) -> SelectableRegions {
     SelectableRegions::new(

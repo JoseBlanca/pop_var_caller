@@ -837,7 +837,7 @@ pub(super) enum FilterBucket {
 // ---------------------------------------------------------------------
 
 // `pub(crate)` (widened from `pub(super)`) so the ng read-filtering adapter
-// (`crate::ng::read::filtering`) can reuse this decode path — the ng → existing
+// (`crate::read::filtering`) can reuse this decode path — the ng → existing
 // code dependency the read-filtering spec §7 (decision a) calls for.
 pub(crate) fn record_buf_to_mapped_read(
     rb: &sam::alignment::RecordBuf,
@@ -1086,7 +1086,7 @@ pub(crate) fn cigar_is_bad(cigar: &[CigarOp]) -> bool {
 /// decoding; `ref_seq` is the reference slice covering
 /// `[read.pos, read.pos + cigar_ref_span(cigar))`. Indexing into
 /// these slices uses the standard CIGAR semantics — see
-/// `src/ng/locus_generation/pileup/decompose.rs` for the
+/// `src/locus_generation/pileup/decompose.rs` for the
 /// reference walk pattern this function mirrors.
 pub(crate) fn read_exceeds_mismatch_fraction(
     cigar: &[CigarOp],
@@ -1189,7 +1189,7 @@ pub(crate) fn read_exceeds_mismatch_fraction(
 }
 
 /// `pub(crate)` for ng's own decode, which reuses this rather than copying the
-/// CIGAR translation (`src/ng/read/aligned_read.rs`).
+/// CIGAR translation (`src/read/aligned_read.rs`).
 pub(crate) fn cigar_to_ops(cigar: &sam::alignment::record_buf::Cigar) -> Vec<CigarOp> {
     use sam::alignment::record::cigar::op::Kind;
     cigar

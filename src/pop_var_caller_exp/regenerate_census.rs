@@ -55,22 +55,22 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 use thiserror::Error;
 
-use crate::ng::parameter_estimation::joint::census::CensusError;
-use crate::ng::parameter_estimation::joint::census_file::write_census;
-use crate::ng::parameter_estimation::joint::loci::{SelectionError, UnambiguousRuns};
-use crate::ng::psp::{TrailerReplacementFailure, replace_trailer};
-use crate::ng::reference_info::{
+use crate::parameter_estimation::joint::census::CensusError;
+use crate::parameter_estimation::joint::census_file::write_census;
+use crate::parameter_estimation::joint::loci::{SelectionError, UnambiguousRuns};
+use crate::pop_var_caller_exp::psp_inputs::{PspArgumentRefusal, psps_named};
+use crate::pop_var_caller_exp::run_ground::{self, GroundError};
+use crate::psp::{TrailerReplacementFailure, replace_trailer};
+use crate::reference_info::{
     ReferenceCheck, ReferenceInfoError, read_reference_observing_or_creating_fai,
 };
-use crate::ng::repeat_catalog::RepeatCatalogHeader;
-use crate::ng::run::report::{describe, plural};
-use crate::ng::run::{
+use crate::repeat_catalog::RepeatCatalogHeader;
+use crate::run::report::{describe, plural};
+use crate::run::{
     CensusFromPspError, CensusPlan, CensusSelection, CensusTally, CensusVerdict, OpenPspCohort,
     RunError, Segmentation, THE_COMMAND_THAT_REBUILDS_A_CENSUS, census_from_psp,
     the_census_in_a_psp, what_the_heads_say_about_every_census_in_a_cohort,
 };
-use crate::pop_var_caller_exp::psp_inputs::{PspArgumentRefusal, psps_named};
-use crate::pop_var_caller_exp::run_ground::{self, GroundError};
 
 #[cfg(test)]
 mod tests;
@@ -78,7 +78,7 @@ mod tests;
 /// What this subcommand is called on the command line.
 ///
 /// **Defined from the constant the library names it by, never the reverse.** Two refusals in
-/// `ng::run` tell a person to run this command — the report `estimate-parameters` refuses a stale
+/// `run` tell a person to run this command — the report `estimate-parameters` refuses a stale
 /// cohort with, and the fit's own backstop — and `ng` imports nothing from this module outside its
 /// tests, so pointing that constant at this name would be the first place it did.
 pub const SUBCOMMAND: &str = THE_COMMAND_THAT_REBUILDS_A_CENSUS;
@@ -243,7 +243,7 @@ pub enum RegenerateCensusCliError {
     /// A psp would not take its new census.
     ///
     /// **What state that file is left in is the cause's to say, and it says it**
-    /// ([`crate::ng::psp::FileAfterAFailedReplacement`]): a psp left byte for byte what it was
+    /// ([`crate::psp::FileAfterAFailedReplacement`]): a psp left byte for byte what it was
     /// needs this command
     /// run again, and one already cut back to its trailer has no footer, so that sample has to be
     /// rewritten before anything can read it. **This variant carries no copy of that verdict** —
@@ -352,7 +352,7 @@ pub struct CensusReport {
     /// **Listed, where the refusal report counts its fresh samples and lists only the stale.**
     /// That report is about what a person must go and do, so the fifty-seven files that are fine
     /// would bury the three that are not
-    /// ([`CensusesToRegenerate`](crate::ng::run::CensusesToRegenerate)). This one is the record of
+    /// ([`CensusesToRegenerate`](crate::run::CensusesToRegenerate)). This one is the record of
     /// what a run *did*, and a person who ran it over a cohort a fit refused is checking that the
     /// samples it named are the samples it rebuilt — for which the skipped ones have to be
     /// nameable too. **A re-run of a sixty-sample cohort therefore prints sixty lines**, which is

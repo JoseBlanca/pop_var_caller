@@ -625,12 +625,22 @@ at `74e424ea`; 62 examples; 6 benches; 1 binary.
 
 ### Milestone E — ng moves to `src/`, and its binary takes the name
 
-- ☐ **E1. The move.** `git mv src/ng/<module> src/<module>` for each of ng's 19 top-level
+- ✅ **E1. The move.** `git mv src/ng/<module> src/<module>` for each of ng's 19 top-level
   entries; `src/ng/mod.rs`'s declarations and re-exports fold into `src/lib.rs`; every
   `crate::ng::` becomes `crate::` and every `pop_var_caller::ng::` in `tests/`, `examples/`,
   `benches/` becomes `pop_var_caller::`. No module name collides — production's `psp`, `vcf`,
   `paralog` are gone at D3–D4, which is why E follows D. **One commit, rename-only.**
-  *Depends:* D7. *Source:* `module_layout.md` §"Where ng lives".
+  *Depends:* D7. *Source:* `module_layout.md` §"Where ng lives". Done 2026-09-13: 232 files
+  moved, every one detected by git as a rename (the least similar at 89%). The rewrite changed
+  2,485 `crate::ng::` paths, 616 `pop_var_caller::ng::` paths, 44 bare `ng::<module>` paths — two
+  of them code: the names of two tests that re-run themselves in a child process — and 43 `src/ng/`
+  file paths, in `.rs` files, `Cargo.toml` and the mutation script that edits
+  `run/census_from_psp.rs`. `ng/mod.rs`'s header became the crate doc. **Not pure rename, and on
+  purpose:** a path left pointing at `src/ng/` in a script or a test name fails at run time, not at
+  build time. Left as they are: the seven fixtures whose header comment names the test that wrote
+  them by its `src/ng/` path, since they are recorded bytes; Markdown under `doc/` (§8); and CI's
+  `ng::calling` filter, which is E3. `attribute_peak.py`'s one `src/ng/` row is split by module, and
+  it now ignores dependency frames, whose paths share fragments such as `src/alignment/`.
 - ☐ **E2. The binary.** `src/main_exp.rs` → `src/main.rs`; `src/pop_var_caller_exp/` →
   `src/cli/`; clap `name = "pop_var_caller"`; the `[[bin]]` entry; `##commandline` now says
   `pop_var_caller`. The 4 `scripts/ng_*.sh` and 6 `benchmarks/**/run_ng*` drivers that look

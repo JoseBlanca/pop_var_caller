@@ -47,44 +47,44 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::fasta::ContigList;
-use crate::ng::locus_generation::pileup::{
+use crate::locus_generation::pileup::{
     PileupGenerator, PileupGeneratorConfig, PileupGeneratorConfigError,
 };
-use crate::ng::locus_generation::{
+use crate::locus_generation::{
     GeneratorSet, GeneratorSlot, LocusGenerationError, SampleLocusObservationsIterator,
     UnhandledReason,
 };
-use crate::ng::parameter_estimation::depth_bins::DepthBinEdges;
-use crate::ng::parameter_estimation::joint::census::{
+use crate::parameter_estimation::depth_bins::DepthBinEdges;
+use crate::parameter_estimation::joint::census::{
     CensusWriter, CohortCensusEvidence, CohortRefusal, DepthCap, NamedReadGroup, ReadCap,
     SampleCensusEvidence,
 };
-use crate::ng::parameter_estimation::joint::contamination::{
+use crate::parameter_estimation::joint::contamination::{
     ContaminationConfig, ContaminationEstimate, ContaminationSource, DEFAULT_COMPONENTS,
 };
-use crate::ng::parameter_estimation::joint::fit::{JointFitConfig, JointFitError, fit_jointly};
-use crate::ng::parameter_estimation::joint::loci::{
+use crate::parameter_estimation::joint::fit::{JointFitConfig, JointFitError, fit_jointly};
+use crate::parameter_estimation::joint::loci::{
     CatalogBuildSettings, CensusLoci, ReferenceDigest, RegionSetDigest, SelectableRegions,
     SelectionError, SelectionTerms, UnambiguousRuns, select_kept_loci,
 };
-use crate::ng::read::ReadFilterConfig;
-use crate::ng::read::input::SampleReads;
-use crate::ng::read::input::read_groups::{
+use crate::read::ReadFilterConfig;
+use crate::read::input::SampleReads;
+use crate::read::input::read_groups::{
     ReadGroupError, ReadGroups, SampleReadGroups, build_read_groups,
 };
-use crate::ng::read::input::reference::OpenReference;
-use crate::ng::read::left_align::LeftAlignPreparer;
-use crate::ng::ref_seq::WindowedRefSeq;
-use crate::ng::reference_info::{
+use crate::read::input::reference::OpenReference;
+use crate::read::left_align::LeftAlignPreparer;
+use crate::ref_seq::WindowedRefSeq;
+use crate::reference_info::{
     ReferenceInfo, ReferenceInfoError, ReferenceSource, read_reference_info_observing,
 };
-use crate::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig};
-use crate::ng::repeat_catalog::{
+use crate::region_typing::{GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig};
+use crate::regions::{BedError, ContigBounds};
+use crate::repeat_catalog::{
     ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria, sibling_catalog_path,
 };
-use crate::ng::types::ReadGroupId;
-use crate::ng::types::{ContigId, GenomeRegion, Position};
-use crate::regions::{BedError, ContigBounds};
+use crate::types::ReadGroupId;
+use crate::types::{ContigId, GenomeRegion, Position};
 
 /// How much genome the run looks at when no BED is given.
 ///
@@ -246,7 +246,7 @@ pub enum EstimateContaminationCliError {
     OpenAlignment {
         path: PathBuf,
         #[source]
-        source: crate::ng::read::input::IngestError,
+        source: crate::read::input::IngestError,
     },
 
     #[error("the walk over {} stopped", .path.display())]
@@ -789,7 +789,7 @@ fn walk_one_sample(
         &contig_of,
         prepared.terms.clone(),
         DepthBinEdges::for_census(),
-        ReadCap(crate::ng::locus_generation::ssr::DEFAULT_SSR_MAX_READS_PER_LOCUS),
+        ReadCap(crate::locus_generation::ssr::DEFAULT_SSR_MAX_READS_PER_LOCUS),
         DEPTH_CAP,
     );
 
@@ -834,7 +834,7 @@ fn assemble(
     args: &EstimateContaminationArgs,
     prepared: &Prepared,
     library_names: &BTreeMap<String, Vec<LibraryName>>,
-    fit: &crate::ng::parameter_estimation::joint::fit::JointFit,
+    fit: &crate::parameter_estimation::joint::fit::JointFit,
 ) -> ContaminationReport {
     let mut samples: Vec<LibraryContamination> = Vec::new();
     let mut estimated: Vec<f64> = Vec::new();

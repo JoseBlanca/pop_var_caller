@@ -21,13 +21,13 @@
 //! "line-tables-only"`, and dhat's backtraces then collapse into frames that name
 //! no source line. The `profiling` profile is release speed with `lto = false`,
 //! `codegen-units = 16` and full debug info, which is what makes a site
-//! attributable to `src/ng/parameter_estimation/…rs:line`. The counts themselves
+//! attributable to `src/parameter_estimation/…rs:line`. The counts themselves
 //! are the same either way.
 //!
 //! Each run writes `dhat-heap-<mode>.json` in the working directory. Open one at
 //! <https://nnethercote.github.io/dh_view/dh_view.html>, or parse it offline —
 //! the stacks are deep, so attribute a site to the first
-//! `src/ng/parameter_estimation/…rs:line` frame, skipping this file's own
+//! `src/parameter_estimation/…rs:line` frame, skipping this file's own
 //! allocator hook and the alloc/core/BTreeMap internals.
 //!
 //! **One caveat when parsing offline, and it bites.** dhat splits one source
@@ -96,23 +96,23 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use pop_var_caller::ng::parameter_estimation::depth_bins::DepthBinEdges;
-use pop_var_caller::ng::parameter_estimation::joint::census::{
+use pop_var_caller::parameter_estimation::depth_bins::DepthBinEdges;
+use pop_var_caller::parameter_estimation::joint::census::{
     AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
     GenericEvidence, NamedReadGroup, ObservedAllele, OffsetCounts, PackedDepthCodes, ReadCap,
     RecordingTerms, SampleCensusEvidence, Section, SectionKey, SelectionTermsDigest, SsrEvidence,
     Stratum, WalkedBits,
 };
-use pop_var_caller::ng::parameter_estimation::joint::fit::{JointFitConfig, fit_jointly};
-use pop_var_caller::ng::parameter_estimation::joint::loci::{
+use pop_var_caller::parameter_estimation::joint::fit::{JointFitConfig, fit_jointly};
+use pop_var_caller::parameter_estimation::joint::loci::{
     CatalogBuildSettings, CensusLociDigester, ReferenceDigest, RegionSetDigest, SelectionTerms,
 };
-use pop_var_caller::ng::parameter_estimation::joint::ssr_fit::{
+use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     self, SampleTractReads, Slippage, SsrFitConfig, StratumEvidence, TractReads,
 };
-use pop_var_caller::ng::repeat_catalog::StrRepeatCriteria;
-use pop_var_caller::ng::tandem_repeat::ScanParams;
-use pop_var_caller::ng::types::{Ploidy, ReadGroupId};
+use pop_var_caller::repeat_catalog::StrRepeatCriteria;
+use pop_var_caller::tandem_repeat::ScanParams;
+use pop_var_caller::types::{Ploidy, ReadGroupId};
 
 fn main() {
     // Which phases to run. **The mode exists for one reason: dhat reports a

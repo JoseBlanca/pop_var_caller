@@ -50,11 +50,11 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use pop_var_caller::ng::calling::genotype_prior::{SeedRegime, SpectrumSeed};
-use pop_var_caller::ng::calling::quality::score_uncorrected_site_quality;
-use pop_var_caller::ng::calling::{CallingScratch, CandidateAlleles, GenotypeTable};
-use pop_var_caller::ng::locus_generation::LocusKind;
-use pop_var_caller::ng::types::{LogProb, Ploidy};
+use pop_var_caller::calling::genotype_prior::{SeedRegime, SpectrumSeed};
+use pop_var_caller::calling::quality::score_uncorrected_site_quality;
+use pop_var_caller::calling::{CallingScratch, CandidateAlleles, GenotypeTable};
+use pop_var_caller::locus_generation::LocusKind;
+use pop_var_caller::types::{LogProb, Ploidy};
 
 /// The cohort sizes §13's Q3 names, plus nothing else: 63 is the tomato panel this repository
 /// tests on, 3,000 the top of the range `CLAUDE.md` §0 commits to.

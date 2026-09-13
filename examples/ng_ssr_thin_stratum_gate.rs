@@ -24,8 +24,8 @@
 
 use std::time::Instant;
 
-use pop_var_caller::ng::parameter_estimation::joint::slippage_curve::SlippageCurveConfig;
-use pop_var_caller::ng::parameter_estimation::joint::ssr_fit::{
+use pop_var_caller::parameter_estimation::joint::slippage_curve::SlippageCurveConfig;
+use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     self, Slippage, SsrFitConfig, StratumOutcome, bench_fixtures,
 };
 

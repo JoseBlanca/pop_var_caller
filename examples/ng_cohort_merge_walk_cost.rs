@@ -15,12 +15,12 @@
 
 use std::time::Instant;
 
-use pop_var_caller::ng::locus_generation::{
+use pop_var_caller::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
 };
-use pop_var_caller::ng::run::cohort_merge::build::build_region;
-use pop_var_caller::ng::run::cohort_merge::{MaxCohortLocusSpan, MinAltReads};
-use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
+use pop_var_caller::run::cohort_merge::build::build_region;
+use pop_var_caller::run::cohort_merge::{MaxCohortLocusSpan, MinAltReads};
+use pop_var_caller::types::{ContigId, GenomeRegion, Position, ReadGroupId};
 
 /// One sample's record at one position, showing the reference to three reads.
 fn record_at(position: u64, observed: &[u8]) -> SampleLocusObservations {
@@ -37,7 +37,7 @@ fn record_at(position: u64, observed: &[u8]) -> SampleLocusObservations {
             read_group: ReadGroupId(0),
             num_obs: 3,
             num_fwd: 3,
-            q_sum: pop_var_caller::ng::types::SummedLogError::from_nats(-6.0),
+            q_sum: pop_var_caller::types::SummedLogError::from_nats(-6.0),
             mapq_sum: 180,
             mapq_sum_sq: 10_800,
             placed_left: 0,

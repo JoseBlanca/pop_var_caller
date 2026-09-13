@@ -26,7 +26,7 @@
 //!
 //! **The bar is the merge's own keep rule, one level down.** The merge asks each sample whether
 //! its *non-reference reads* reach `max(floor, ceil(share × its compared reads))` and builds the
-//! locus if any one does (`MinAltReads`, `ng::run::cohort_merge`). Selection asks the identical
+//! locus if any one does (`MinAltReads`, `run::cohort_merge`). Selection asks the identical
 //! question of each *alternative allele* separately: an alternative survives if some single
 //! sample lent it that many reads. Nothing new is introduced — the floor and the share are the
 //! merge's, so a sweep here and a sweep there move the same two knobs.
@@ -79,39 +79,39 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use pop_var_caller::ng::alignment::emission::PerQualityEmission;
-use pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner;
-use pop_var_caller::ng::calling::allele_candidates::generic::select_generic;
-use pop_var_caller::ng::calling::allele_candidates::ssr::{SsrSelectionConfig, select_ssr};
-use pop_var_caller::ng::calling::allele_candidates::{
+use pop_var_caller::alignment::emission::PerQualityEmission;
+use pop_var_caller::alignment::ssr_unit_robust::SsrUnitRobustAligner;
+use pop_var_caller::calling::allele_candidates::generic::select_generic;
+use pop_var_caller::calling::allele_candidates::ssr::{SsrSelectionConfig, select_ssr};
+use pop_var_caller::calling::allele_candidates::{
     CandidateSelectionConfig, DEFAULT_MAX_CANDIDATE_ALLELES, LocusSelection, MaxCandidateAlleles,
     SelectionScratch, SelectionVerdict,
 };
-use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
-use pop_var_caller::ng::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
-use pop_var_caller::ng::locus_generation::{
+use pop_var_caller::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
+use pop_var_caller::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
+use pop_var_caller::locus_generation::{
     GeneratorSet, GeneratorSlot, SampleLocusObservations, SampleLocusObservationsIterator,
     UnhandledReason,
 };
-use pop_var_caller::ng::locus_generation::{LocusGenerator, LocusKind};
-use pop_var_caller::ng::read::ReadFilterConfig;
-use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
-use pop_var_caller::ng::ref_seq::WindowedRefSeq;
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::locus_generation::{LocusGenerator, LocusKind};
+use pop_var_caller::read::ReadFilterConfig;
+use pop_var_caller::read::input::SampleReads;
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::read::left_align::LeftAlignPreparer;
+use pop_var_caller::ref_seq::WindowedRefSeq;
+use pop_var_caller::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::{RegionKind, TypedRegion, TypedRegionConfig};
-use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
-use pop_var_caller::ng::run::cohort_merge::build::CohortObservation;
-use pop_var_caller::ng::run::cohort_merge::close::{LocusCloser, Verdict};
-use pop_var_caller::ng::run::cohort_merge::observation_cache::WindowedCohort;
-use pop_var_caller::ng::run::cohort_merge::{
+use pop_var_caller::region_typing::{RegionKind, TypedRegion, TypedRegionConfig};
+use pop_var_caller::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::run::cohort_merge::build::CohortObservation;
+use pop_var_caller::run::cohort_merge::close::{LocusCloser, Verdict};
+use pop_var_caller::run::cohort_merge::observation_cache::WindowedCohort;
+use pop_var_caller::run::cohort_merge::{
     MaxCohortLocusSpan, MinAltObs, MinAltReadShare, MinAltReads,
 };
-use pop_var_caller::ng::types::{Bp, Ploidy};
-use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
+use pop_var_caller::types::{Bp, Ploidy};
+use pop_var_caller::types::{ContigId, GenomeRegion, Position};
 
 #[path = "shared/reference_check.rs"]
 mod reference_check_knob;
@@ -480,7 +480,7 @@ struct TractTally {
 impl TractTally {
     fn push(
         &mut self,
-        narrowed: &pop_var_caller::ng::calling::allele_candidates::ssr::SsrLocusSelection,
+        narrowed: &pop_var_caller::calling::allele_candidates::ssr::SsrLocusSelection,
     ) {
         let selection = &narrowed.selection;
         self.loci += 1;
@@ -663,7 +663,7 @@ fn walk_one_sample(
         GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
     );
 
-    let regions: Vec<Result<TypedRegion, pop_var_caller::ng::repeat_catalog::RepeatCatalogError>> =
+    let regions: Vec<Result<TypedRegion, pop_var_caller::repeat_catalog::RepeatCatalogError>> =
         analysed
             .iter()
             .map(|region| {

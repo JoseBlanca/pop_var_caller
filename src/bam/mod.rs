@@ -25,7 +25,7 @@
 //!   driver).
 //!
 //! The walk's input starts here: a [`MappedRead`](alignment_input::MappedRead) becomes ng's
-//! [`PreparedRead`](crate::ng::read::PreparedRead) in read preparation. CIGAR ops are
+//! [`PreparedRead`](crate::read::PreparedRead) in read preparation. CIGAR ops are
 //! [`CigarOp`](alignment_input::CigarOp), defined here and used crate-wide.
 
 pub mod alignment_input;

@@ -5,13 +5,13 @@ use super::*;
 use clap::Parser;
 use std::path::Path;
 
-use crate::ng::region_typing::DEFAULT_MAX_STR_LEN;
-use crate::ng::region_typing::segment_criteria::{
-    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
-};
 use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
 use crate::pop_var_caller_exp::generate_psps::{GeneratePspsArgs, run_generate_psps};
 use crate::pop_var_caller_exp::test_fixtures::{AVaryingCohort, a_varying_cohort_on_disk};
+use crate::region_typing::DEFAULT_MAX_STR_LEN;
+use crate::region_typing::segment_criteria::{
+    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
+};
 
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
 fn args_of(argv: &[&str]) -> EstimateParametersArgs {
@@ -278,11 +278,11 @@ fn the_selection_is_rebuilt_over_the_ground_the_psps_were_walked_on() {
 /// regenerated against this catalog would be refused again by the next fit with the right one.
 #[test]
 fn a_catalog_the_psps_were_not_walked_with_is_refused_before_segments_are_cut() {
-    use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
-    use crate::ng::region_typing::segment_criteria::SsrSegmentCriteria;
-    use crate::ng::repeat_catalog::RepeatCatalogBuilder;
-    use crate::ng::repeat_catalog::StrRepeatCriteria;
-    use crate::ng::tandem_repeat::ScanParams;
+    use crate::reference_info::{ReferenceSource, read_reference_info_observing};
+    use crate::region_typing::segment_criteria::SsrSegmentCriteria;
+    use crate::repeat_catalog::RepeatCatalogBuilder;
+    use crate::repeat_catalog::StrRepeatCriteria;
+    use crate::tandem_repeat::ScanParams;
 
     let (cohort, psps) = a_walked_cohort();
     let coarse = cohort
@@ -428,7 +428,7 @@ fn a_stated_inbreeding_coefficient_overrides_the_fit_and_is_recorded_as_supplied
         assert_eq!(row.inbreeding_coefficient.value, 0.25);
         assert_eq!(
             row.inbreeding_coefficient.warrant,
-            crate::ng::calling::parameters_file::Warrant::Supplied,
+            crate::calling::parameters_file::Warrant::Supplied,
             "a declared coefficient is supplied, never fitted",
         );
     }
@@ -466,7 +466,7 @@ fn with_nothing_stated_the_fits_own_coefficient_is_written_and_marked_fitted() {
     for row in &file.inbreeding.by_sample {
         assert_eq!(
             row.inbreeding_coefficient.warrant,
-            crate::ng::calling::parameters_file::Warrant::FittedHere,
+            crate::calling::parameters_file::Warrant::FittedHere,
             "two samples identify a homozygote excess, so it is fitted here: {:?}",
             row,
         );
@@ -558,7 +558,7 @@ fn a_psp_carrying_no_census_is_refused_and_the_report_names_it() {
         cohort.directory.path().join("out.toml"),
     ))
     .expect("the directory lists");
-    crate::ng::psp::replace_trailer(&paths[1], b"").expect("the tail rewrites");
+    crate::psp::replace_trailer(&paths[1], b"").expect("the tail rewrites");
 
     let error = fit_and_assemble(&args_over(
         &cohort,
@@ -597,9 +597,9 @@ fn a_psp_carrying_no_census_is_refused_and_the_report_names_it() {
 /// `generic_target` positions — the census a build with another position budget would have
 /// written, in this build's format.
 fn recensus_under_a_budget_of(cohort: &AVaryingCohort, paths: &[PathBuf], generic_target: u64) {
-    use crate::ng::parameter_estimation::joint::census_file::write_census;
-    use crate::ng::run::census_from_psp;
-    use crate::ng::run::test_fixtures::a_census_plan_over_selecting;
+    use crate::parameter_estimation::joint::census_file::write_census;
+    use crate::run::census_from_psp;
+    use crate::run::test_fixtures::a_census_plan_over_selecting;
 
     let (segmentation, plan) =
         a_census_plan_over_selecting(&cohort.reference, &cohort.catalog, generic_target);
@@ -607,7 +607,7 @@ fn recensus_under_a_budget_of(cohort: &AVaryingCohort, paths: &[PathBuf], generi
         let rebuilt = census_from_psp(path, &plan, &segmentation).expect("the psp reads");
         let mut bytes = Vec::new();
         write_census(&rebuilt.evidence, &mut bytes).expect("the census encodes");
-        crate::ng::psp::replace_trailer(path, &bytes).expect("the tail rewrites");
+        crate::psp::replace_trailer(path, &bytes).expect("the tail rewrites");
     }
 }
 
@@ -737,7 +737,7 @@ fn the_report_names_no_catalog_when_the_run_named_none() {
         cohort.directory.path().join("out.toml"),
     ))
     .expect("the directory lists");
-    crate::ng::psp::replace_trailer(&paths[1], b"").expect("the tail rewrites");
+    crate::psp::replace_trailer(&paths[1], b"").expect("the tail rewrites");
     let mut args = args_over(&cohort, &psps, cohort.directory.path().join("out.toml"));
     // The fixture's catalog is where a run looks when it is told nothing, so dropping the flag
     // changes what is printed and not what would be read.
@@ -777,20 +777,20 @@ fn two_stale_psps_are_both_named_in_one_report() {
         cohort.directory.path().join("out.toml"),
     ))
     .expect("the directory lists");
-    crate::ng::psp::replace_trailer(&paths[0], b"").expect("the tail rewrites");
+    crate::psp::replace_trailer(&paths[0], b"").expect("the tail rewrites");
     let of_another_version = {
-        use crate::ng::parameter_estimation::joint::census_file::{
+        use crate::parameter_estimation::joint::census_file::{
             BYTES_THAT_NAME_THE_VERSION, VERSION,
         };
         let mut census = {
-            let mut psp = crate::ng::psp::PspReader::open(&paths[1]).expect("the psp opens");
+            let mut psp = crate::psp::PspReader::open(&paths[1]).expect("the psp opens");
             psp.trailer().expect("its census reads")
         };
         let word_at = BYTES_THAT_NAME_THE_VERSION - size_of::<u16>();
         census[word_at..BYTES_THAT_NAME_THE_VERSION].copy_from_slice(&(VERSION - 1).to_le_bytes());
         census
     };
-    crate::ng::psp::replace_trailer(&paths[1], &of_another_version).expect("the tail rewrites");
+    crate::psp::replace_trailer(&paths[1], &of_another_version).expect("the tail rewrites");
 
     let error = fit_and_assemble(&args_over(
         &cohort,
@@ -829,7 +829,7 @@ fn a_stale_cohort_is_refused_before_the_reference_is_read() {
         cohort.directory.path().join("out.toml"),
     ))
     .expect("the directory lists");
-    crate::ng::psp::replace_trailer(&paths[1], b"").expect("the tail rewrites");
+    crate::psp::replace_trailer(&paths[1], b"").expect("the tail rewrites");
     let mut args = args_over(&cohort, &psps, cohort.directory.path().join("out.toml"));
     args.reference = cohort.directory.path().join("no-such-reference.fa");
 

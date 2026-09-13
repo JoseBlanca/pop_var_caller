@@ -38,11 +38,11 @@
 
 use std::time::Instant;
 
-use pop_var_caller::ng::parameter_estimation::joint::census::Stratum;
-use pop_var_caller::ng::parameter_estimation::joint::ssr_fit::bench_fixtures::{
+use pop_var_caller::parameter_estimation::joint::census::Stratum;
+use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::{
     draw_stratum, spectrum_of,
 };
-use pop_var_caller::ng::parameter_estimation::joint::ssr_fit::{
+use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     Slippage, SsrFitConfig, StartingPoint, StratumEvidence, StratumOutcome, WhereTheThreadsGo,
     fit_strata,
 };

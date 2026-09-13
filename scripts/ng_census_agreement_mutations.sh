@@ -2,7 +2,7 @@
 # Does the census-agreement test actually fail when the producer that reads a
 # stored psp loses something?
 #
-# What it exercises is the test module `ng::run::census_from_psp::the_two_producers_agree`:
+# What it exercises is the test module `run::census_from_psp::the_two_producers_agree`:
 # one sample's census built while its reads are walked, and built again from the
 # psp that walk wrote, compared byte for byte. A test that compares two things
 # built the same way passes whether or not either is right, so this writes
@@ -26,7 +26,7 @@
 # Run it from anywhere: the repository root is derived from this file.
 set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$REPO/src/ng/run/census_from_psp.rs"
+SRC="$REPO/src/run/census_from_psp.rs"
 DEV="$REPO/scripts/dev.sh"
 cp "$SRC" "$SRC.orig" || { echo "the file to mutate could not be backed up" >&2; exit 1; }
 restore() { cp "$SRC.orig" "$SRC"; rm -f "$SRC.orig"; }
@@ -60,7 +60,7 @@ run_case "the producer skips repeat-tract loci" \
             writer.add_locus(record);
         }' \
   'if let Some(record) = streamed.record.as_ref() {
-            if !matches!(record.kind, crate::ng::locus_generation::LocusKind::Ssr(_)) {
+            if !matches!(record.kind, crate::locus_generation::LocusKind::Ssr(_)) {
                 writer.add_locus(record);
             }
         }'
@@ -84,7 +84,7 @@ run_case "a read is credited to the wrong read group" \
   'if let Some(record) = streamed.record.as_ref() {
             let mut record = record.clone();
             for observation in &mut record.observations {
-                observation.read_group = crate::ng::types::ReadGroupId(0);
+                observation.read_group = crate::types::ReadGroupId(0);
             }
             writer.add_locus(&record);
         }'
@@ -105,7 +105,7 @@ run_case "one read's minted error arrives one step off" \
   'if let Some(record) = streamed.record.as_ref() {
             let mut record = record.clone();
             if let Some(observation) = record.observations.first_mut() {
-                observation.q_sum = crate::ng::types::SummedLogError::from_steps(
+                observation.q_sum = crate::types::SummedLogError::from_steps(
                     observation.q_sum.steps() - 1,
                 );
             }

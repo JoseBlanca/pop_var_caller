@@ -17,7 +17,7 @@
 //! that the construction path — every file opened, six refusals evaluated, every sample's contig
 //! checksums compared — survives past a handful of samples.
 //!
-//! **Second, what a run actually spends per alignment file.** `src/ng/run/callers.rs`'s
+//! **Second, what a run actually spends per alignment file.** `src/run/callers.rs`'s
 //! `DESCRIPTORS_AN_ALIGNMENT_FILE_NEEDS` is 2, and until this ran it was spec §7.1a's estimate
 //! ("a CRAM and its index are two descriptors each") rather than anything counted. So this counts
 //! `/proc/self/fd` at three points and reports the per-file slope between them:
@@ -53,26 +53,26 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use pop_var_caller::calling::allele_candidates::CandidateSelectionConfig;
+use pop_var_caller::calling::inference::CallingLoopConfig;
+use pop_var_caller::calling::parameters_file::DeclaredInbreeding;
+use pop_var_caller::calling::run_parameters::RunParameters;
 use pop_var_caller::fasta::ContigList;
-use pop_var_caller::ng::calling::allele_candidates::CandidateSelectionConfig;
-use pop_var_caller::ng::calling::inference::CallingLoopConfig;
-use pop_var_caller::ng::calling::parameters_file::DeclaredInbreeding;
-use pop_var_caller::ng::calling::run_parameters::RunParameters;
-use pop_var_caller::ng::locus_generation::pileup::PileupGeneratorConfig;
-use pop_var_caller::ng::read::ReadFilterConfig;
-use pop_var_caller::ng::read::input::read_groups::build_read_groups;
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::ref_seq::{RefSeq, WindowedRefSeq};
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::locus_generation::pileup::PileupGeneratorConfig;
+use pop_var_caller::read::ReadFilterConfig;
+use pop_var_caller::read::input::read_groups::build_read_groups;
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::ref_seq::{RefSeq, WindowedRefSeq};
+use pop_var_caller::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::GenomeRegions;
-use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
-use pop_var_caller::ng::run::{
+use pop_var_caller::region_typing::GenomeRegions;
+use pop_var_caller::regions::ContigBounds;
+use pop_var_caller::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::run::{
     AlignedFilesVariantCaller, AlignmentInputs, MergeParameters, Segmentation,
 };
-use pop_var_caller::ng::types::Ploidy;
-use pop_var_caller::regions::ContigBounds;
+use pop_var_caller::types::Ploidy;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

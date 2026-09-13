@@ -67,7 +67,7 @@
 
 use std::env;
 
-use pop_var_caller::ng::genetics::lgamma;
+use pop_var_caller::genetics::lgamma;
 
 /// Panel sizes, in diploid individuals — the committed range, one sample to a thousand
 /// (`doc/devel/specs/design_principles.md` §0).

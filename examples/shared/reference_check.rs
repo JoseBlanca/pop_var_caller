@@ -22,7 +22,7 @@
 //! anything else is a usage error rather than a silent default, because a misspelled value
 //! that quietly meant "check" would show up only as an unexplained 11 seconds.
 
-use pop_var_caller::ng::reference_info::ReferenceCheck;
+use pop_var_caller::reference_info::ReferenceCheck;
 
 /// The environment variable that turns the check off. Named for what it grants, not for what
 /// it saves: the operator is asserting the index is trustworthy, and the time is the

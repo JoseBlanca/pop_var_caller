@@ -76,13 +76,8 @@
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use crate::ng::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
-    use crate::ng::calling::parameters_file::beside_the_vcf;
-    use crate::ng::region_typing::DEFAULT_MAX_STR_LEN;
-    use crate::ng::region_typing::segment_criteria::{
-        DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
-    };
-    use crate::ng::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
+    use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
+    use crate::calling::parameters_file::beside_the_vcf;
     use crate::pop_var_caller_exp::call_from_alignments::{
         CallFromAlignmentsArgs, run_call_from_alignments,
     };
@@ -94,6 +89,11 @@ mod tests {
         AVaryingCohort, FIRST_SAMPLES_SUBSTITUTION, SECOND_SAMPLES_SUBSTITUTION, TRACT,
         a_varying_cohort_on_disk,
     };
+    use crate::region_typing::DEFAULT_MAX_STR_LEN;
+    use crate::region_typing::segment_criteria::{
+        DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
+    };
+    use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
 
     /// A VCF's whole contents, as the lines a comparison holds and a failure prints.
     ///
@@ -508,8 +508,8 @@ mod tests {
     /// is 5.5 copies of a period-2 motif, one copy short of its six-copy floor.
     #[test]
     fn the_fixtures_ground_is_typed_as_its_doc_says() {
-        use crate::ng::region_typing::RegionKind;
         use crate::pop_var_caller_exp::run_ground::{self, GroundRequest, RepeatRouting};
+        use crate::region_typing::RegionKind;
 
         let cohort = a_varying_cohort_on_disk();
         let request = GroundRequest {
@@ -562,10 +562,10 @@ mod tests {
     fn the_references_two_views(
         fasta: &Path,
     ) -> (
-        std::sync::Arc<crate::ng::reference_info::ReferenceInfo>,
-        std::sync::Arc<crate::ng::reference_info::ReferenceInfo>,
+        std::sync::Arc<crate::reference_info::ReferenceInfo>,
+        std::sync::Arc<crate::reference_info::ReferenceInfo>,
     ) {
-        use crate::ng::reference_info::{
+        use crate::reference_info::{
             ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
         };
         let cache = std::sync::Arc::new(ReferenceInfoCache::new());
@@ -824,8 +824,8 @@ mod tests {
     /// and the run calls that cohort rather than refusing it or dropping the sample.
     #[test]
     fn a_sample_that_analysed_ground_and_found_nothing_is_not_a_sample_that_never_looked() {
-        use crate::ng::psp::PspReader;
         use crate::pop_var_caller_exp::test_fixtures::a_cohort_on_disk;
+        use crate::psp::PspReader;
 
         // `zeta` carries three reads and `alpha` none, over ground both were walked across.
         let cohort = a_cohort_on_disk();

@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
-use crate::ng::repeat_catalog::StrRepeatCriteria;
+use crate::repeat_catalog::StrRepeatCriteria;
 
 /// A reference, a catalog built on it, and two samples' alignment files — with the temporary
 /// directories that keep them alive.
@@ -52,13 +52,13 @@ pub(crate) struct ACohortOnDisk {
 /// On any failure to build the fixture, which is a broken test rather than a finding.
 pub(crate) fn a_cohort_on_disk() -> ACohortOnDisk {
     use crate::bam::cram_files::{ContigSpec, build_fasta};
-    use crate::ng::read::input::test_fixtures::{
+    use crate::read::input::test_fixtures::{
         FIXTURE_CONTIGS, header, indexed_named_bam, matching_contigs, read_group_for,
         read_named_with_length_in_read_group,
     };
-    use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
-    use crate::ng::repeat_catalog::RepeatCatalogBuilder;
-    use crate::ng::tandem_repeat::ScanParams;
+    use crate::reference_info::{ReferenceSource, read_reference_info_observing};
+    use crate::repeat_catalog::RepeatCatalogBuilder;
+    use crate::tandem_repeat::ScanParams;
     use noodles_sam::alignment::RecordBuf;
 
     let specs: Vec<ContigSpec> = FIXTURE_CONTIGS
@@ -255,12 +255,12 @@ fn a_base_that_is_not(reference: u8) -> u8 {
 ///
 /// On any failure to build the fixture, which is a broken test rather than a finding.
 pub(crate) fn a_varying_cohort_on_disk() -> AVaryingCohort {
-    use crate::ng::read::input::test_fixtures::{
+    use crate::read::input::test_fixtures::{
         FixtureReadGroup, header_with_read_groups, indexed_named_bam,
     };
-    use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
-    use crate::ng::repeat_catalog::RepeatCatalogBuilder;
-    use crate::ng::tandem_repeat::ScanParams;
+    use crate::reference_info::{ReferenceSource, read_reference_info_observing};
+    use crate::repeat_catalog::RepeatCatalogBuilder;
+    use crate::tandem_repeat::ScanParams;
     use noodles_sam::alignment::record::MappingQuality;
     use noodles_sam::alignment::record::cigar::op::{Kind, Op};
     use noodles_sam::alignment::record::data::field::Tag;

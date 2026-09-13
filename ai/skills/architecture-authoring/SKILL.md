@@ -85,7 +85,7 @@ naming, defaults, errors, and module-structure rules from
 - **Defaults are visible:** named `pub const`s with a doc comment giving units and source; no
   magic numbers. `Option<T>` means "absent", not a sentinel `0`.
 - **Errors are explicit and future-proof:** `#[non_exhaustive]` `thiserror` enums with a
-  per-variant doc comment stating when it fires (see `src/ng/ref_seq.rs::RefSeqError`). Decide
+  per-variant doc comment stating when it fires (see `src/ref_seq.rs::RefSeqError`). Decide
   the error surface here — fallible constructor vs. fatal, `Result` vs. panic.
 - **One swappable trait per step, impls side by side** (the bake-off shape) — but a step with
   no competing implementations is a single file with no trait ceremony. State which this is.
@@ -159,4 +159,4 @@ scar tissue, not imported best practice.
   [`clear-technical-writing`](../clear-technical-writing/SKILL.md) — applied at design time so
   the conventions are locked in before code exists.
 - Grounding examples: the repo's own `ng_step_interfaces.md`, `module_layout.md`,
-  `arch/read_filtering.md`, and the code they describe (`src/ng/`).
+  `arch/read_filtering.md`, and the code they describe (`src/`).

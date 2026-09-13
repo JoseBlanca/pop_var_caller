@@ -116,35 +116,35 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
-use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
-use pop_var_caller::ng::locus_generation::{
+use pop_var_caller::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
+use pop_var_caller::locus_generation::{
     GeneratorSet, GeneratorSlot, SampleLocusObservations, SampleLocusObservationsIterator,
     UnhandledReason,
 };
-use pop_var_caller::ng::read::ReadFilterConfig;
-use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
-use pop_var_caller::ng::ref_seq::WindowedRefSeq;
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::read::ReadFilterConfig;
+use pop_var_caller::read::input::SampleReads;
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::read::left_align::LeftAlignPreparer;
+use pop_var_caller::ref_seq::WindowedRefSeq;
+use pop_var_caller::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::{RegionKind, TypedRegion};
-use pop_var_caller::ng::run::cohort_merge::build::RegionOutcome;
-use pop_var_caller::ng::run::cohort_merge::close::{LocusCloser, Verdict};
-use pop_var_caller::ng::run::cohort_merge::observation_cache::{
+use pop_var_caller::region_typing::{RegionKind, TypedRegion};
+use pop_var_caller::run::cohort_merge::build::RegionOutcome;
+use pop_var_caller::run::cohort_merge::close::{LocusCloser, Verdict};
+use pop_var_caller::run::cohort_merge::observation_cache::{
     MergeReference, ObservationCache, ObservationSource, ReferenceUnreadable, building_regions_of,
 };
-use pop_var_caller::ng::run::cohort_merge::parallel::merge_cohort_in_parallel;
-use pop_var_caller::ng::run::cohort_merge::serial::{
+use pop_var_caller::run::cohort_merge::parallel::merge_cohort_in_parallel;
+use pop_var_caller::run::cohort_merge::serial::{
     merge_cohort_serially, merge_cohort_through_cache,
 };
-use pop_var_caller::ng::run::cohort_merge::timing as merge_timing;
-use pop_var_caller::ng::run::cohort_merge::{
+use pop_var_caller::run::cohort_merge::timing as merge_timing;
+use pop_var_caller::run::cohort_merge::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltObs,
     MinAltReadShare, MinAltReads,
 };
-use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
+use pop_var_caller::types::{ContigId, GenomeRegion, Position};
 
 #[path = "shared/reference_check.rs"]
 mod reference_check_knob;
@@ -317,7 +317,7 @@ fn walk_one_sample(
         GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
     );
 
-    let regions: Vec<Result<TypedRegion, pop_var_caller::ng::repeat_catalog::RepeatCatalogError>> =
+    let regions: Vec<Result<TypedRegion, pop_var_caller::repeat_catalog::RepeatCatalogError>> =
         analysed
             .iter()
             .map(|region| {
@@ -931,7 +931,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                 // **Where the merge's own wall time went**, summed over the rounds below and printed
                 // after them. Every counter is zero unless the build asked for `--features
                 // merge-timing`, in which case the merge itself is what timed each part
-                // (`pop_var_caller::ng::run::cohort_merge::timing`) — no sampling, no attribution.
+                // (`pop_var_caller::run::cohort_merge::timing`) — no sampling, no attribution.
                 merge_timing::reset();
                 let started = Instant::now();
                 // **Every round's own time, not a running sum.** One descheduled round moves a mean

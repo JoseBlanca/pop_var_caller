@@ -260,13 +260,13 @@ fn the_command_writes_a_vcf_and_the_parameters_beside_it() {
 /// reads the artefact rather than the code that builds it.
 ///
 /// Ignored, because its value is the eye and not the assertion — the report's own tests
-/// (`ng::run::report`) are what pin the lines. Run it deliberately:
+/// (`run::report`) are what pin the lines. Run it deliberately:
 ///
 /// ```text
 /// cargo test --lib call_from_psps -- --ignored --nocapture the_report_a_person_sees
 /// ```
 #[test]
-#[ignore = "prints the run report for a person to read; the assertions are in ng::run::report"]
+#[ignore = "prints the run report for a person to read; the assertions are in run::report"]
 fn the_report_a_person_sees() {
     let (_cohort, args) = a_cohort_of_psps();
     run_call_from_psps(&args).expect("a cohort of stored samples calls");

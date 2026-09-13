@@ -5,19 +5,19 @@ use super::*;
 use clap::Parser;
 use std::path::Path;
 
-use crate::ng::calling::parameters_file::{
+use crate::calling::parameters_file::{
     CensusIdentity, DeclaredInbreeding, ReadsBehindEachCalibration,
 };
-use crate::ng::calling::run_parameters::RunParameters;
-use crate::ng::read::input::read_groups::ReadGroups;
-use crate::ng::reference_info::ReferenceInfo;
-use crate::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig};
-use crate::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
-use crate::ng::types::InbreedingF;
-use crate::ng::types::Ploidy;
+use crate::calling::run_parameters::RunParameters;
 use crate::pop_var_caller_exp::calling_run;
 use crate::pop_var_caller_exp::run_ground::{GroundError, routing_criteria, segments_over};
+use crate::read::input::read_groups::ReadGroups;
+use crate::reference_info::ReferenceInfo;
+use crate::region_typing::{GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig};
 use crate::regions::ContigBounds;
+use crate::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use crate::types::InbreedingF;
+use crate::types::Ploidy;
 
 use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
 
@@ -537,7 +537,7 @@ fn a_parameters_file_that_is_not_the_runs_own_output_is_admitted() {
 /// keyed on it — one row a read group, one a sample, in the order this table fixes — and a
 /// hand-built one would not exercise the joins `ParametersFile::of_run` holds in release.
 fn a_cohorts_read_groups() -> (tempfile::TempDir, tempfile::TempDir, ReadGroups) {
-    use crate::ng::read::input::test_fixtures::{
+    use crate::read::input::test_fixtures::{
         header, indexed_named_bam, matching_contigs, read_group_for,
     };
 
@@ -802,13 +802,13 @@ fn the_command_refuses_to_write_its_parameters_over_the_file_it_was_given() {
 /// reads the artefact rather than the code that builds it.
 ///
 /// Ignored, because its value is the eye and not the assertion — the report's own tests
-/// (`ng::run::report`) are what pin the lines. Run it deliberately:
+/// (`run::report`) are what pin the lines. Run it deliberately:
 ///
 /// ```text
 /// cargo test --lib call_from_alignments -- --ignored --nocapture the_report_a_person_sees
 /// ```
 #[test]
-#[ignore = "prints the run report for a person to read; the assertions are in ng::run::report"]
+#[ignore = "prints the run report for a person to read; the assertions are in run::report"]
 fn the_report_a_person_sees() {
     let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
     run_call_from_alignments(&args).expect("the cohort runs");
@@ -942,9 +942,9 @@ fn the_fixture_references_bases() -> Vec<u8> {
 
 fn a_reference_with_a_tract_on_each_side_of_the_calling_floor()
 -> (tempfile::TempDir, CallFromAlignmentsArgs, ReferenceInfo) {
-    use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
-    use crate::ng::repeat_catalog::RepeatCatalogBuilder;
-    use crate::ng::tandem_repeat::ScanParams;
+    use crate::reference_info::{ReferenceSource, read_reference_info_observing};
+    use crate::repeat_catalog::RepeatCatalogBuilder;
+    use crate::tandem_repeat::ScanParams;
     use std::io::Write;
 
     let bases = the_fixture_references_bases();
@@ -1216,11 +1216,11 @@ fn where_the_routing_did_not_move_the_vcf_is_byte_identical() {
     // because that is the shortest read the filters keep, and each is the reference with its
     // fifteenth base flipped, so there is one variant to call rather than thirty.
     let bases = the_fixture_references_bases();
-    let header = crate::ng::read::input::test_fixtures::header(
+    let header = crate::read::input::test_fixtures::header(
         Some("coordinate"),
         &[("chr1", 136, None)],
         &[(
-            &crate::ng::read::input::test_fixtures::read_group_for("one"),
+            &crate::read::input::test_fixtures::read_group_for("one"),
             Some("one"),
         )],
     );
@@ -1237,7 +1237,7 @@ fn where_the_routing_did_not_move_the_vcf_is_byte_identical() {
         }
     }
     let (_bam_dir, bam) =
-        crate::ng::read::input::test_fixtures::indexed_named_bam(&header, &reads, "one.bam");
+        crate::read::input::test_fixtures::indexed_named_bam(&header, &reads, "one.bam");
     args.alignments = vec![bam];
 
     // **The same file name in two directories**, because the VCF header names the parameters

@@ -4,15 +4,15 @@
 use super::*;
 use clap::Parser;
 
-use crate::ng::psp::PspReader;
-use crate::ng::region_typing::DEFAULT_MAX_STR_LEN;
-use crate::ng::region_typing::segment_criteria::{
-    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
-};
 use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
 use crate::pop_var_caller_exp::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
 use crate::pop_var_caller_exp::test_fixtures::{
     ACohortOnDisk, a_cohort_on_disk, a_varying_cohort_on_disk,
+};
+use crate::psp::PspReader;
+use crate::region_typing::DEFAULT_MAX_STR_LEN;
+use crate::region_typing::segment_criteria::{
+    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
 
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
@@ -104,7 +104,7 @@ fn the_trailers_in(psps: &Path, samples: &[&str]) -> Vec<(PathBuf, Vec<u8>)> {
 /// every test in this file. Emptying the trailers first makes each psp owed a rebuild.
 fn empty_every_trailer(walked: &[(PathBuf, Vec<u8>)]) {
     for (path, _) in walked {
-        crate::ng::psp::replace_trailer(path, b"").expect("the tail rewrites");
+        crate::psp::replace_trailer(path, b"").expect("the tail rewrites");
     }
 }
 
@@ -137,7 +137,7 @@ fn corrupt_a_block_of(psp: &Path) {
 
 /// **The command is spelled by the constant the library's refusals name.**
 ///
-/// The refusals in `ng::run` tell a person to run this command, and until this step they named one
+/// The refusals in `run` tell a person to run this command, and until this step they named one
 /// that did not exist. **What this pins is that the word they print is the one clap answers to**:
 /// the argument list parsed here is built from that constant, and clap answers `--help` for it
 /// rather than reporting a subcommand it does not know.
@@ -340,7 +340,7 @@ fn a_psp_with_no_census_is_rebuilt_and_the_fresh_one_is_skipped() {
     let (cohort, psps) = a_walked_cohort();
     let walked = the_trailers_in(&psps, &["alpha", "zeta"]);
     let emptied = psp_path_for(&psps, "alpha");
-    crate::ng::psp::replace_trailer(&emptied, b"").expect("the tail rewrites");
+    crate::psp::replace_trailer(&emptied, b"").expect("the tail rewrites");
     assert_eq!(
         PspReader::open(&emptied)
             .expect("the psp opens")
@@ -401,7 +401,7 @@ fn a_psp_with_no_census_is_rebuilt_and_the_fresh_one_is_skipped() {
 /// two files differing.
 #[test]
 fn the_trailer_it_writes_decodes_as_a_census() {
-    use crate::ng::parameter_estimation::joint::census_file::decode_census;
+    use crate::parameter_estimation::joint::census_file::decode_census;
 
     let (cohort, psps) = a_walked_cohort();
     empty_every_trailer(&the_trailers_in(&psps, &["alpha", "zeta"]));
@@ -599,7 +599,7 @@ fn a_directory_with_no_psp_in_it_is_refused() {
 /// This is the end of the repair: the psps a fit refused are read back by the fit's own reader.
 #[test]
 fn the_censuses_it_writes_assemble_into_a_cohort() {
-    use crate::ng::run::every_census_in_the_cohorts_psps;
+    use crate::run::every_census_in_the_cohorts_psps;
 
     let (cohort, psps) = a_walked_cohort();
     let args = args_over(&cohort.reference, &cohort.catalog, &psps);
@@ -641,7 +641,7 @@ fn the_censuses_it_writes_assemble_into_a_cohort() {
 /// **What it does not pin: that nothing read those blocks at all.** Measured by mutation — code
 /// added to the skip arm that reads the psp's records and discards the result passes every test in
 /// this file, because a discarded failure is invisible and nothing counts block bytes the way
-/// [`trailer_bytes_read`](crate::ng::psp::trailer_bytes_read) counts trailer bytes.
+/// [`trailer_bytes_read`](crate::psp::trailer_bytes_read) counts trailer bytes.
 ///
 /// **The control is the second half of the test**: with that psp's trailer emptied, the same
 /// corrupted file is owed a rebuild, and then the run does fail on it — which is what says the
@@ -688,7 +688,7 @@ fn a_cohort_that_needs_nothing_is_skipped_whole_and_its_records_are_not_read() {
     // **The control.** With its census gone, the same corrupted psp is owed a rebuild — and now
     // the run fails on it, which is what makes the pass above a statement about records not read
     // rather than about a psp that would have read cleanly anyway.
-    crate::ng::psp::replace_trailer(&corrupted, b"").expect("the tail rewrites");
+    crate::psp::replace_trailer(&corrupted, b"").expect("the tail rewrites");
 
     let error = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
         .expect_err("this psp's records are nonsense, and now they have to be read");
@@ -716,9 +716,9 @@ fn a_cohort_that_needs_nothing_is_skipped_whole_and_its_records_are_not_read() {
 /// positions alone would skip, and the case C5 measured on the fit. At three the set differs too.
 #[test]
 fn a_cohort_recorded_under_another_selection_is_rebuilt_whole() {
-    use crate::ng::parameter_estimation::joint::census_file::write_census;
-    use crate::ng::run::census_from_psp;
-    use crate::ng::run::test_fixtures::a_census_plan_over_selecting;
+    use crate::parameter_estimation::joint::census_file::write_census;
+    use crate::run::census_from_psp;
+    use crate::run::test_fixtures::a_census_plan_over_selecting;
 
     for budget in [CensusSelection::SHIPPED.generic_target / 2, 3] {
         let (cohort, psps) = a_walked_cohort();
@@ -730,7 +730,7 @@ fn a_cohort_recorded_under_another_selection_is_rebuilt_whole() {
                 census_from_psp(path, &under_another_budget, &segmentation).expect("the psp reads");
             let mut bytes = Vec::new();
             write_census(&rebuilt.evidence, &mut bytes).expect("the census encodes");
-            crate::ng::psp::replace_trailer(path, &bytes).expect("the tail rewrites");
+            crate::psp::replace_trailer(path, &bytes).expect("the tail rewrites");
         }
 
         let report = regenerate_every_census(&args_over(&cohort.reference, &cohort.catalog, &psps))
@@ -776,8 +776,8 @@ fn a_cohort_recorded_under_another_selection_is_rebuilt_whole() {
 fn a_census_damaged_past_its_version_word_is_rebuilt() {
     use std::io::{Seek, SeekFrom, Write};
 
-    use crate::ng::parameter_estimation::joint::census_file::BYTES_THAT_NAME_THE_VERSION;
-    use crate::ng::run::{
+    use crate::parameter_estimation::joint::census_file::BYTES_THAT_NAME_THE_VERSION;
+    use crate::run::{
         the_census_in_a_psp, what_the_footer_and_the_trailers_head_say_about_a_census,
     };
 
@@ -803,7 +803,7 @@ fn a_census_damaged_past_its_version_word_is_rebuilt() {
     let mut psp = PspReader::open(&damaged).expect("the psp opens");
     assert_eq!(
         what_the_footer_and_the_trailers_head_say_about_a_census(&mut psp).expect("its head reads"),
-        crate::ng::run::CensusVerdict::Fresh,
+        crate::run::CensusVerdict::Fresh,
         "the damage is past the version word, so the head cannot see it",
     );
     assert!(
@@ -1006,7 +1006,7 @@ fn a_regenerated_psp_is_the_walked_one_byte_for_byte() {
         std::fs::copy(&walked, &copy).expect("the scratch dir is ours");
         as_the_walk_sealed_them
             .push((copy.clone(), std::fs::read(&walked).expect("the psp reads")));
-        crate::ng::psp::replace_trailer(&copy, b"").expect("the tail rewrites");
+        crate::psp::replace_trailer(&copy, b"").expect("the tail rewrites");
         assert_ne!(
             std::fs::read(&copy).expect("the copy reads"),
             as_the_walk_sealed_them.last().expect("just pushed").1,
@@ -1122,10 +1122,10 @@ fn a_reference_the_psps_were_not_walked_against_is_refused_before_anything_is_re
 /// up, where the psps' was built at the default floors — the same assembly, another file.
 #[test]
 fn a_catalog_the_psps_were_not_walked_with_is_refused_before_anything_is_rewritten() {
-    use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
-    use crate::ng::region_typing::segment_criteria::SsrSegmentCriteria;
-    use crate::ng::repeat_catalog::{RepeatCatalogBuilder, StrRepeatCriteria};
-    use crate::ng::tandem_repeat::ScanParams;
+    use crate::reference_info::{ReferenceSource, read_reference_info_observing};
+    use crate::region_typing::segment_criteria::SsrSegmentCriteria;
+    use crate::repeat_catalog::{RepeatCatalogBuilder, StrRepeatCriteria};
+    use crate::tandem_repeat::ScanParams;
 
     let (cohort, psps) = a_walked_cohort();
     let walked = the_trailers_in(&psps, &["alpha", "zeta"]);
@@ -1200,7 +1200,7 @@ fn a_catalog_the_psps_were_not_walked_with_is_refused_before_anything_is_rewritt
 /// fail on another.
 #[test]
 fn a_psp_that_will_not_take_its_census_names_the_file_and_its_state() {
-    use crate::ng::psp::{FileAfterAFailedReplacement, PspWriteError};
+    use crate::psp::{FileAfterAFailedReplacement, PspWriteError};
 
     for (state, expected) in [
         (

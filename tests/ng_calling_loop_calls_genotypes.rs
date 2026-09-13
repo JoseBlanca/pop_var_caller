@@ -42,51 +42,49 @@
 //! repeat fit's own output types, which a fixture has to build by hand because the pre-pass that
 //! produces them is a different subsystem.
 
-use pop_var_caller::ng::calling::allele_candidates::generic::select_generic;
-use pop_var_caller::ng::calling::allele_candidates::{CandidateSelectionConfig, SelectionScratch};
-use pop_var_caller::ng::calling::evidence_shaping::{
+use pop_var_caller::calling::allele_candidates::generic::select_generic;
+use pop_var_caller::calling::allele_candidates::{CandidateSelectionConfig, SelectionScratch};
+use pop_var_caller::calling::evidence_shaping::{
     GenericEvidenceScratch, shape_generic_locus, shape_ssr_locus,
 };
-use pop_var_caller::ng::calling::genotype_prior::{
+use pop_var_caller::calling::genotype_prior::{
     MarginalizedDirichletPrior, SeedRegime, SpectrumSeed,
 };
-use pop_var_caller::ng::calling::inference::summarise_condition::SummariseConditionLoop;
-use pop_var_caller::ng::calling::inference::{CallingLoopConfig, LocusGenotyper};
-use pop_var_caller::ng::calling::likelihood::ssr_emission::{
+use pop_var_caller::calling::inference::summarise_condition::SummariseConditionLoop;
+use pop_var_caller::calling::inference::{CallingLoopConfig, LocusGenotyper};
+use pop_var_caller::calling::likelihood::ssr_emission::{
     StutterSubstitutionEmission, StutterSubstitutionScratch,
 };
-use pop_var_caller::ng::calling::{
+use pop_var_caller::calling::{
     CallingScratch, CandidateAlleles, ContaminationView, FrozenParameters, GenericLocusSample,
     LocusInference, ReadGroupCalibration, RepeatTractProvenance, SsrSampleEvidence,
 };
-use pop_var_caller::ng::locus_generation::{
+use pop_var_caller::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, SsrDetail,
 };
-use pop_var_caller::ng::parameter_estimation::Provenance;
-use pop_var_caller::ng::parameter_estimation::joint::census::Stratum as FitStratum;
-use pop_var_caller::ng::parameter_estimation::joint::contamination::ContaminationSource;
-use pop_var_caller::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
-use pop_var_caller::ng::parameter_estimation::joint::share_curve::ShareSource;
-use pop_var_caller::ng::parameter_estimation::joint::slippage_curve::LevelSource;
-use pop_var_caller::ng::parameter_estimation::joint::ssr_fit::{
+use pop_var_caller::parameter_estimation::Provenance;
+use pop_var_caller::parameter_estimation::joint::census::Stratum as FitStratum;
+use pop_var_caller::parameter_estimation::joint::contamination::ContaminationSource;
+use pop_var_caller::parameter_estimation::joint::sequencing_batches::SequencingBatches;
+use pop_var_caller::parameter_estimation::joint::share_curve::ShareSource;
+use pop_var_caller::parameter_estimation::joint::slippage_curve::LevelSource;
+use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit, StratumOutcome,
 };
-use pop_var_caller::ng::parameter_estimation::joint::stratum_fits::{
-    LengthSpectrumRung, StratumFits,
-};
-use pop_var_caller::ng::parameter_estimation::repeat_strata::{
+use pop_var_caller::parameter_estimation::joint::stratum_fits::{LengthSpectrumRung, StratumFits};
+use pop_var_caller::parameter_estimation::repeat_strata::{
     RepeatCount, Stratum as SsrStratum, StratumKey,
 };
-use pop_var_caller::ng::run::cohort_merge::MinAltReads;
-use pop_var_caller::ng::run::cohort_merge::build::CohortObservation;
-use pop_var_caller::ng::run::cohort_merge::close::{ClosedLocus, SampleMembers, Verdict};
-use pop_var_caller::ng::run::cohort_merge::observation_cache::WindowedCohort;
-use pop_var_caller::ng::types::{
+use pop_var_caller::run::cohort_merge::MinAltReads;
+use pop_var_caller::run::cohort_merge::build::CohortObservation;
+use pop_var_caller::run::cohort_merge::close::{ClosedLocus, SampleMembers, Verdict};
+use pop_var_caller::run::cohort_merge::observation_cache::WindowedCohort;
+use pop_var_caller::types::{
     AlleleId, ContigId, ErrorRate, GenomeRegion, InbreedingF, Motif, Ploidy, Position, ReadGroupId,
     SsrPeriod, SummedLogError,
 };
 
-use pop_var_caller::ng::parameter_estimation::Estimate;
+use pop_var_caller::parameter_estimation::Estimate;
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 

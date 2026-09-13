@@ -20,27 +20,27 @@ use clap::Args;
 use thiserror::Error;
 
 use crate::fasta::ContigList;
-use crate::ng::reference_info::{
+use crate::reference_info::{
     ReferenceCheck, ReferenceInfoCache, ReferenceInfoError, VerificationHandle,
     read_reference_verifying_or_creating_fai,
 };
-use crate::ng::region_typing::segment_criteria::{
+use crate::region_typing::segment_criteria::{
     DEFAULT_BUNDLE_THRESHOLD, DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY,
     DEFAULT_MIN_SCORE, MAX_MOTIF_LEN, MinCopies, SsrSegmentCriteria,
 };
-use crate::ng::region_typing::{
+use crate::region_typing::{
     DEFAULT_MAX_STR_LEN, GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig,
 };
-use crate::ng::repeat_catalog::{
+use crate::regions::{BedError, ContigBounds};
+use crate::repeat_catalog::{
     CatalogRegionCounts, CatalogRejectionCounts, ReadScope, RepeatCatalog, RepeatCatalogError,
     StrRepeatCriteria,
 };
-use crate::ng::tandem_repeat::{
+use crate::tandem_repeat::{
     DEFAULT_MATCH_REWARD, DEFAULT_MIN_COPIES, DEFAULT_MISMATCH_PENALTY, PeriodRange,
     PeriodRangeError, RepeatInterval, ScanParams,
 };
-use crate::ng::types::{Bp, ContigId, GenomeRegion};
-use crate::regions::{BedError, ContigBounds};
+use crate::types::{Bp, ContigId, GenomeRegion};
 
 /// The buffer the typed-regions table is written through: 64 KiB, production's
 /// `pop_var_caller::common::DEFAULT_BUFFERED_IO_CAPACITY`, copied at promotion step C15.
@@ -391,7 +391,7 @@ fn members_json(tracts: &[RepeatInterval]) -> String {
 /// Resolve a [`ContigId`] to its name through the run's one contig table.
 ///
 /// Every row is named from this table rather than from
-/// [`SsrSegment::chrom`](crate::ng::region_typing::segment_criteria::SsrSegment::chrom):
+/// [`SsrSegment::chrom`](crate::region_typing::segment_criteria::SsrSegment::chrom):
 /// `Generic`, `Satellite` and `SsrBundle` carry no segment, so the table is
 /// needed anyway (spec §4), and naming every row from one source is what stops
 /// the two ever disagreeing.
@@ -475,7 +475,7 @@ pub struct WalkInputs {
     /// against. **The FASTA is the source of truth for every digest**, so the check is only
     /// as strong as this value: a `.fai` read carries no digests, and then names, lengths and
     /// order are all that can disagree.
-    pub info: Arc<crate::ng::reference_info::ReferenceInfo>,
+    pub info: Arc<crate::reference_info::ReferenceInfo>,
     /// What to emit. A BED chooses what is emitted, never what is scanned
     /// (spec T10).
     pub regions: GenomeRegions,
@@ -907,8 +907,8 @@ mod tests {
     /// header is a function of the resolved config, not a constant.
     #[test]
     fn the_header_follows_a_non_default_config() {
-        use crate::ng::tandem_repeat::PeriodRange;
-        use crate::ng::types::Bp;
+        use crate::tandem_repeat::PeriodRange;
+        use crate::types::Bp;
         let config = TypedRegionConfig {
             max_str_len: Bp(250),
             criteria: SsrSegmentCriteria {
@@ -938,8 +938,8 @@ mod tests {
     // ---- the row formatter and the T4 conversion (spec §3.1, §4, T4/T5/T6) ----
 
     use crate::fasta::ContigEntry;
-    use crate::ng::region_typing::segment_criteria::{Motif, SsrSegment};
-    use crate::ng::types::Position;
+    use crate::region_typing::segment_criteria::{Motif, SsrSegment};
+    use crate::types::Position;
 
     /// One row, parsed back into its fields. The **oracle's other half**: the
     /// round-trip is only a check if the parse is independent of the format
@@ -1558,7 +1558,7 @@ mod tests {
         // Ask the module for the convention rather than re-deriving it: a
         // hand-built `with_extension` only happens to agree while the fixture is
         // named `.fa`, and would silently check an unrelated path if renamed.
-        let fai = crate::ng::reference_info::sibling_fai_path(&fasta);
+        let fai = crate::reference_info::sibling_fai_path(&fasta);
         assert!(!fai.exists(), "the fixture starts without a .fai");
 
         let cache = Arc::new(ReferenceInfoCache::new());
@@ -1631,8 +1631,8 @@ mod tests {
     /// The command refuses to run without one, so every end-to-end fixture needs this — and
     /// that refusal is itself the subject of `a_run_without_a_catalog_names_the_command`.
     fn build_catalog_beside(fasta: &Path) {
-        use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
-        use crate::ng::repeat_catalog::{RepeatCatalogBuilder, sibling_catalog_path};
+        use crate::reference_info::{ReferenceSource, read_reference_info_observing};
+        use crate::repeat_catalog::{RepeatCatalogBuilder, sibling_catalog_path};
 
         let mut builder = RepeatCatalogBuilder::create(
             &sibling_catalog_path(fasta),
@@ -2017,7 +2017,7 @@ mod tests {
     #[test]
     fn a_run_without_a_catalog_names_the_command() {
         let (dir, fasta) = e2e_reference();
-        std::fs::remove_file(crate::ng::repeat_catalog::sibling_catalog_path(&fasta))
+        std::fs::remove_file(crate::repeat_catalog::sibling_catalog_path(&fasta))
             .expect("the fixture built one");
 
         let output = dir.path().join("out.tsv");

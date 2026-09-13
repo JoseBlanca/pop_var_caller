@@ -38,13 +38,13 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::{GenomeRegions, RegionKind, TypedRegionConfig};
-use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
-use pop_var_caller::ng::types::GenomeRegion;
+use pop_var_caller::region_typing::{GenomeRegions, RegionKind, TypedRegionConfig};
 use pop_var_caller::regions::ContigBounds;
+use pop_var_caller::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::types::GenomeRegion;
 
 /// The shared "should this run check the reference?" rule — see the module's own docs for
 /// why the default is to check even in a tool that is re-run constantly.

@@ -67,21 +67,21 @@ use std::hint::black_box;
 use std::time::Duration;
 
 #[cfg(feature = "bench-fixtures")]
-use pop_var_caller::ng::parameter_estimation::joint::census::Stratum;
+use pop_var_caller::parameter_estimation::joint::census::Stratum;
 #[cfg(feature = "bench-fixtures")]
-use pop_var_caller::ng::parameter_estimation::joint::fit::bench_fixtures::{
+use pop_var_caller::parameter_estimation::joint::fit::bench_fixtures::{
     DrawnCohort, as_cohort, draw_cohort,
 };
 #[cfg(feature = "bench-fixtures")]
-use pop_var_caller::ng::parameter_estimation::joint::fit::{
+use pop_var_caller::parameter_estimation::joint::fit::{
     FrequencyDensity, JointFitConfig, StartingPoint as GenericStart, fit_jointly,
 };
 #[cfg(feature = "bench-fixtures")]
-use pop_var_caller::ng::parameter_estimation::joint::ssr_fit::bench_fixtures::{
+use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::{
     draw_stratum, spectrum_of,
 };
 #[cfg(feature = "bench-fixtures")]
-use pop_var_caller::ng::parameter_estimation::joint::ssr_fit::{
+use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     Slippage, SsrFitConfig, StartingPoint as SsrStart, StratumEvidence, StratumOutcome, fit_strata,
     fit_stratum,
 };

@@ -66,22 +66,22 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Instant;
 
-use pop_var_caller::ng::locus_generation::{
+use pop_var_caller::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
 };
-use pop_var_caller::ng::ref_seq::InMemoryRefSeq;
-use pop_var_caller::ng::run::cohort_merge::observation_cache::{
+use pop_var_caller::ref_seq::InMemoryRefSeq;
+use pop_var_caller::run::cohort_merge::observation_cache::{
     MergeReference, ObservationCache, ReferenceUnreadable,
 };
-use pop_var_caller::ng::run::cohort_merge::parallel::merge_cohort_in_parallel;
-use pop_var_caller::ng::run::cohort_merge::serial::{
+use pop_var_caller::run::cohort_merge::parallel::merge_cohort_in_parallel;
+use pop_var_caller::run::cohort_merge::serial::{
     merge_cohort_serially, merge_cohort_through_cache,
 };
-use pop_var_caller::ng::run::cohort_merge::{
+use pop_var_caller::run::cohort_merge::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
     MinAltReads,
 };
-use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
+use pop_var_caller::types::{ContigId, GenomeRegion, Position, ReadGroupId};
 
 /// This probe cannot fail, so its source never errors.
 #[derive(Debug)]
@@ -118,7 +118,7 @@ fn record_at(position: u64, observed: &[u8]) -> SampleLocusObservations {
             read_group: ReadGroupId(0),
             num_obs: 3,
             num_fwd: 3,
-            q_sum: pop_var_caller::ng::types::SummedLogError::from_nats(-6.0),
+            q_sum: pop_var_caller::types::SummedLogError::from_nats(-6.0),
             mapq_sum: 180,
             mapq_sum_sq: 10_800,
             placed_left: 0,

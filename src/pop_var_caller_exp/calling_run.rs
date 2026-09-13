@@ -28,28 +28,28 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::fasta::ContigList;
-use crate::ng::calling::allele_candidates::{CandidateSelectionConfig, MaxCandidateAlleles};
-use crate::ng::calling::inference::{CallingLoopConfig, DiscoveryMode, RunnableCallingLoopConfig};
-use crate::ng::calling::likelihood::MAX_PLOIDY_COPIES;
-use crate::ng::calling::parameters_file::{
+use crate::calling::allele_candidates::{CandidateSelectionConfig, MaxCandidateAlleles};
+use crate::calling::inference::{CallingLoopConfig, DiscoveryMode, RunnableCallingLoopConfig};
+use crate::calling::likelihood::MAX_PLOIDY_COPIES;
+use crate::calling::parameters_file::{
     CensusIdentity, DeclaredInbreeding, ParametersFile, ParametersFileError,
     ReadsBehindEachCalibration, beside_the_vcf,
 };
-use crate::ng::calling::run_parameters::RunParameters;
-use crate::ng::parameter_estimation::Estimate;
-use crate::ng::parameter_estimation::joint::loci::{ReferenceDigest, SelectionError};
-use crate::ng::read::input::read_groups::ReadGroups;
-use crate::ng::reference_info::ReferenceInfo;
-use crate::ng::repeat_catalog::StrRepeatCriteria;
-use crate::ng::run::cohort_merge::{
+use crate::calling::run_parameters::RunParameters;
+use crate::fasta::ContigList;
+use crate::parameter_estimation::Estimate;
+use crate::parameter_estimation::joint::loci::{ReferenceDigest, SelectionError};
+use crate::pop_var_caller_exp::provenance::current_command_line;
+use crate::read::input::read_groups::ReadGroups;
+use crate::reference_info::ReferenceInfo;
+use crate::repeat_catalog::StrRepeatCriteria;
+use crate::run::cohort_merge::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen,
     DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN, MaxCohortLocusSpan,
 };
-use crate::ng::run::{MergeParameters, RunReport};
-use crate::ng::types::{DomainError, InbreedingF, Ploidy};
-use crate::ng::vcf::header::{HeaderContig, HeaderMetadataError, VcfHeaderMetadata};
-use crate::pop_var_caller_exp::provenance::current_command_line;
+use crate::run::{MergeParameters, RunReport};
+use crate::types::{DomainError, InbreedingF, Ploidy};
+use crate::vcf::header::{HeaderContig, HeaderMetadataError, VcfHeaderMetadata};
 
 /// Everything a calling run can refuse before it reads an observation, whichever mode it is.
 ///

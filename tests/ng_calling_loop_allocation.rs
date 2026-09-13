@@ -35,23 +35,23 @@
 
 #![cfg(feature = "dhat-heap")]
 
-use pop_var_caller::ng::calling::genotype_prior::{
+use pop_var_caller::calling::genotype_prior::{
     MarginalizedDirichletPrior, SeedRegime, SpectrumSeed,
 };
-use pop_var_caller::ng::calling::inference::summarise_condition::SummariseConditionLoop;
-use pop_var_caller::ng::calling::inference::{CallingLoopConfig, LocusGenotyper};
-use pop_var_caller::ng::calling::likelihood::ssr_emission::{
+use pop_var_caller::calling::inference::summarise_condition::SummariseConditionLoop;
+use pop_var_caller::calling::inference::{CallingLoopConfig, LocusGenotyper};
+use pop_var_caller::calling::likelihood::ssr_emission::{
     StutterSubstitutionEmission, StutterSubstitutionScratch,
 };
-use pop_var_caller::ng::calling::{
+use pop_var_caller::calling::{
     CallingScratch, CandidateAlleles, ContaminationView, FrozenParameters, GenericLocusSample,
     GenericObservation, GenericSampleEvidence, LocusEvidence, ReadGroupCalibration,
 };
-use pop_var_caller::ng::locus_generation::LocusKind;
-use pop_var_caller::ng::parameter_estimation::joint::contamination::ContaminationSource;
-use pop_var_caller::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
-use pop_var_caller::ng::parameter_estimation::joint::stratum_fits::StratumFits;
-use pop_var_caller::ng::types::{
+use pop_var_caller::locus_generation::LocusKind;
+use pop_var_caller::parameter_estimation::joint::contamination::ContaminationSource;
+use pop_var_caller::parameter_estimation::joint::sequencing_batches::SequencingBatches;
+use pop_var_caller::parameter_estimation::joint::stratum_fits::StratumFits;
+use pop_var_caller::types::{
     AlleleId, ContigId, GenomeRegion, InbreedingF, Ploidy, Position, ReadGroupId,
 };
 use std::num::NonZeroU32;

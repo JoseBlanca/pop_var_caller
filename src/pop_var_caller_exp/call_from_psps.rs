@@ -31,32 +31,32 @@ use std::path::PathBuf;
 use clap::Args;
 use thiserror::Error;
 
+use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
+use crate::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
+use crate::calling::inference::summarise_condition::SummariseConditionLoop;
+use crate::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
+use crate::calling::parameters_file::{ParametersFile, beside_the_vcf};
 use crate::fasta::ContigList;
-use crate::ng::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
-use crate::ng::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
-use crate::ng::calling::inference::summarise_condition::SummariseConditionLoop;
-use crate::ng::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
-use crate::ng::calling::parameters_file::{ParametersFile, beside_the_vcf};
-use crate::ng::parameter_estimation::joint::loci::ReferenceDigest;
-use crate::ng::read::input::reference::OpenReference;
-use crate::ng::reference_info::{
-    ReferenceCheck, ReferenceInfoCache, ReferenceInfoError,
-    read_reference_verifying_or_creating_fai,
-};
-use crate::ng::region_typing::DEFAULT_MAX_STR_LEN;
-use crate::ng::region_typing::segment_criteria::{
-    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
-};
-use crate::ng::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
-use crate::ng::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
-use crate::ng::run::report::BoundsTheRunCalledUnder;
-use crate::ng::run::{OpenPspCohort, PspVariantCaller, RunError, RunReport, StoredCohortInputs};
-use crate::ng::types::{InbreedingF, MAX_MOTIF_LEN};
-use crate::ng::vcf::writer::{VcfWriteError, VcfWriter};
+use crate::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::pop_var_caller_exp::calling_run::{self, CallingRunError};
 use crate::pop_var_caller_exp::generate_psps::PSP_FILE_EXTENSION;
 use crate::pop_var_caller_exp::psp_inputs::{PspArgumentRefusal, psps_named};
 use crate::pop_var_caller_exp::run_ground::{self, GroundError};
+use crate::read::input::reference::OpenReference;
+use crate::reference_info::{
+    ReferenceCheck, ReferenceInfoCache, ReferenceInfoError,
+    read_reference_verifying_or_creating_fai,
+};
+use crate::region_typing::DEFAULT_MAX_STR_LEN;
+use crate::region_typing::segment_criteria::{
+    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
+};
+use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
+use crate::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
+use crate::run::report::BoundsTheRunCalledUnder;
+use crate::run::{OpenPspCohort, PspVariantCaller, RunError, RunReport, StoredCohortInputs};
+use crate::types::{InbreedingF, MAX_MOTIF_LEN};
+use crate::vcf::writer::{VcfWriteError, VcfWriter};
 
 #[cfg(test)]
 mod tests;
@@ -238,7 +238,7 @@ pub enum CallFromPspsCliError {
     ParalogTargetIsNotAFraction {
         /// What the type said was wrong with it.
         #[source]
-        source: crate::ng::run::paralog_filter::NotATargetFdr,
+        source: crate::run::paralog_filter::NotATargetFdr,
     },
 
     /// The hidden-duplication filter could not finish the run.
@@ -246,7 +246,7 @@ pub enum CallFromPspsCliError {
     ParalogFilter {
         /// What the filter said.
         #[source]
-        source: crate::ng::run::paralog_filter::ParalogFilterError,
+        source: crate::run::paralog_filter::ParalogFilterError,
     },
 
     /// The calls could not be written, or the records could not be parked for the filter.
@@ -256,7 +256,7 @@ pub enum CallFromPspsCliError {
         path: PathBuf,
         /// What pass one said.
         #[source]
-        source: crate::ng::run::paralog_filter::PassOneError,
+        source: crate::run::paralog_filter::PassOneError,
     },
     /// The reference could not be read.
     #[error("reading the reference {}", path.display())]
@@ -557,7 +557,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
                 .finish()
                 .map_err(|source| CallFromPspsCliError::CallsNotWritten {
                     path: args.output.clone(),
-                    source: crate::ng::run::paralog_filter::PassOneError::Vcf(source),
+                    source: crate::run::paralog_filter::PassOneError::Vcf(source),
                 })?;
             None
         }
@@ -566,7 +566,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
                 .finish_parking()
                 .map_err(|source| CallFromPspsCliError::CallsNotWritten {
                     path: args.output.clone(),
-                    source: crate::ng::run::paralog_filter::PassOneError::Spill(source),
+                    source: crate::run::paralog_filter::PassOneError::Spill(source),
                 })?;
             Some(spilling)
         }

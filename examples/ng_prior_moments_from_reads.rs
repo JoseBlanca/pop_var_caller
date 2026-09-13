@@ -83,27 +83,27 @@ use std::collections::BTreeMap;
 use std::env;
 use std::time::Instant;
 
-use pop_var_caller::ng::calling::genotype_prior::{GenotypePriorModel, MarginalizedDirichletPrior};
-use pop_var_caller::ng::calling::genotype_prior::{PriorRow, SpectrumSeed};
-use pop_var_caller::ng::calling::genotype_prior::{
+use pop_var_caller::calling::genotype_prior::{GenotypePriorModel, MarginalizedDirichletPrior};
+use pop_var_caller::calling::genotype_prior::{PriorRow, SpectrumSeed};
+use pop_var_caller::calling::genotype_prior::{
     VariantClass, fill_locus_concentration, seed_from_population_moments,
 };
-use pop_var_caller::ng::parameter_estimation::depth_bins::DepthBinEdges;
-use pop_var_caller::ng::parameter_estimation::joint::census::{
+use pop_var_caller::parameter_estimation::depth_bins::DepthBinEdges;
+use pop_var_caller::parameter_estimation::joint::census::{
     AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
     GenericEvidence, NamedReadGroup, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,
     SampleCensusEvidence, Section, SectionKey, SelectionTermsDigest,
 };
-use pop_var_caller::ng::parameter_estimation::joint::census_moments::CensusMoments;
-use pop_var_caller::ng::parameter_estimation::joint::fit::{
+use pop_var_caller::parameter_estimation::joint::census_moments::CensusMoments;
+use pop_var_caller::parameter_estimation::joint::fit::{
     FrequencyDensity, JointFitConfig, StartingPoint, fit_jointly,
 };
-use pop_var_caller::ng::parameter_estimation::joint::loci::{
+use pop_var_caller::parameter_estimation::joint::loci::{
     CatalogBuildSettings, CensusLociDigester, ReferenceDigest, RegionSetDigest, SelectionTerms,
 };
-use pop_var_caller::ng::repeat_catalog::StrRepeatCriteria;
-use pop_var_caller::ng::tandem_repeat::ScanParams;
-use pop_var_caller::ng::types::{
+use pop_var_caller::repeat_catalog::StrRepeatCriteria;
+use pop_var_caller::tandem_repeat::ScanParams;
+use pop_var_caller::types::{
     AlleleId, ExpectedAlternativeFrequency, ExpectedHeterozygosity, InbreedingF, LogProb,
     ReadGroupId,
 };
@@ -923,7 +923,7 @@ fn check_against_the_shipped_estimator(
 /// `A = pi / (2 f (1 - f) - pi)`. A measurement no pair can reach — `pi` at or above `2f(1-f)` —
 /// falls back to the neutral pair, which is what the shipped seam does too.
 fn seed_from_moments(frequency: f64, heterozygosity: f64) -> SpectrumSeed {
-    use pop_var_caller::ng::calling::genotype_prior::SeedRegime;
+    use pop_var_caller::calling::genotype_prior::SeedRegime;
     let frequency = frequency.clamp(1e-12, 1.0 - 1e-12);
     let ceiling = 2.0 * frequency * (1.0 - frequency);
     if heterozygosity <= 0.0 || heterozygosity >= ceiling {

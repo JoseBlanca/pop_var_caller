@@ -22,17 +22,17 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::fasta::ContigList;
-use crate::ng::reference_info::ReferenceInfo;
-use crate::ng::region_typing::segment_criteria::{MinCopies, SsrSegmentCriteria};
-use crate::ng::region_typing::{GenomeRegions, TypedRegionConfig};
-use crate::ng::repeat_catalog::{
+use crate::reference_info::ReferenceInfo;
+use crate::region_typing::segment_criteria::{MinCopies, SsrSegmentCriteria};
+use crate::region_typing::{GenomeRegions, TypedRegionConfig};
+use crate::regions::{BedError, ContigBounds};
+use crate::repeat_catalog::{
     CriteriaRefusal, ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria,
     sibling_catalog_path,
 };
-use crate::ng::run::{RunError, Segmentation};
-use crate::ng::tandem_repeat::{PeriodRange, PeriodRangeError};
-use crate::ng::types::Bp;
-use crate::regions::{BedError, ContigBounds};
+use crate::run::{RunError, Segmentation};
+use crate::tandem_repeat::{PeriodRange, PeriodRangeError};
+use crate::types::Bp;
 
 /// **What this run counts as a repeat** — the five flags that say so, as both subcommands
 /// spell them.

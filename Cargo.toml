@@ -60,7 +60,7 @@ inherits = "release"
 debug = true
 
 # **The test suite is a numerical workload, and unoptimised it costs fifteen
-# minutes.** `ng::parameter_estimation::joint` alone is essentially the whole
+# minutes.** `parameter_estimation::joint` alone is essentially the whole
 # suite — 190 tests, each a search or a maximisation over a count table, because
 # that module has no parity oracle and no legible fixture, so its check is the
 # estimator's bias computed exactly. Measured 2026-08-24: that module ran in
@@ -103,7 +103,7 @@ debug = true
 # rather than a crash. Fat LTO is dropped because a soak is a correctness run, not
 # a measurement — link time is the dominant cost otherwise.
 #
-#     PVC_PARITY_CASES=5000 cargo test --profile soak --lib ng::locus_generation::pileup::parity
+#     PVC_PARITY_CASES=5000 cargo test --profile soak --lib locus_generation::pileup::parity
 #
 # Host-native: `scripts/dev.sh` forwards only `CARGO_TARGET_DIR` and `HOME`, so
 # `PVC_PARITY_CASES` does not reach the container and a soak run through it
@@ -127,11 +127,11 @@ arrow-array = "59.2"
 arrow-schema = "59.2"
 clap = { version = "4", features = ["derive"] }
 # crossbeam-channel: the bounded channels of ng's psp writer
-# (src/ng/psp/writer.rs, src/ng/run/psp_writer_line.rs).
+# (src/psp/writer.rs, src/run/psp_writer_line.rs).
 crossbeam-channel = "0.5"
 dhat = { version = "0.3", optional = true }
 # libm: `lgamma` for the genotype prior's Dirichlet-multinomial log-priors
-# (src/ng/genetics.rs). Rust std has no log-gamma and the crate's `ln_factorial` is
+# (src/genetics.rs). Rust std has no log-gamma and the crate's `ln_factorial` is
 # integer-only; the prior's concentration `α` is non-integer. libm is the
 # rust-lang port of musl's libm — zero transitive deps, exact to f64 precision.
 libm = "0.2"
@@ -176,7 +176,7 @@ toml = "1.1"
 # `wide`: portable SIMD primitives — AVX2 on x86_64 (production
 # server), NEON on aarch64 (Apple Silicon dev laptop). Single
 # source for both ISAs. Used by the joint fit's four-lane dot product
-# (src/ng/parameter_estimation/joint/ssr_fit.rs).
+# (src/parameter_estimation/joint/ssr_fit.rs).
 wide = "1.4"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zstd = "0.13"
@@ -237,7 +237,7 @@ default = ["alloc-mimalloc"]
 #
 #     cargo bench --features bench-fixtures --bench ng_joint_fit_perf
 bench-fixtures = []
-# Compile the cohort merge's stopwatches (`src/ng/run/cohort_merge/timing.rs`), so a
+# Compile the cohort merge's stopwatches (`src/run/cohort_merge/timing.rs`), so a
 # probe can ask a merge where its own wall time went: drawing the readers forward,
 # evicting, the builders' own work, the wait for each round's slowest builder, and
 # what launching them costs.
