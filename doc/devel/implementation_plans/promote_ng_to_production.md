@@ -474,6 +474,15 @@ mattered:
 > Pause for review — this is the last checkpoint where the owner can ask for another oracle to be
 > frozen, because after D there is nothing to freeze it from.
 
+**Reached 2026-09-13.** After C26 the sweep found no import and five doc comments that named
+production's items by `crate::` path as history; they now name the files instead, and the sweep
+returns nothing. `cargo test --lib --tests`: 6,351 passed, 0 failed, 8 ignored; the identity
+oracle is byte-identical to the baseline. **What the sweep cannot see:** it matches `crate::`
+paths, and examples name the library as `pop_var_caller::`. Four `examples/ng_*` probes still
+import production that way — `ng_depth_term_family` and `ng_prior_moment_estimators` (`lgamma`),
+`ng_normalizer_screen` (`CigarOp`), `ng_window_coverage_probe` (a paralog constant). D5 already
+owns them.
+
 ### Milestone D — delete production
 
 Leaves first, so each commit compiles. `lib.rs` loses its `pub mod` line with each tree.

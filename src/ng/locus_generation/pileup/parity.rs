@@ -1448,7 +1448,7 @@ fn the_generator_exercises_what_the_port_can_break() {
 ///
 /// # The frozen answers
 ///
-/// Each fixture's expected outcome is what production's walker (`crate::pileup::walker::run`)
+/// Each fixture's expected outcome is what production's walker (`run` in `src/pileup/walker/`)
 /// emitted on the same reads at commit `d9e7b076`, with its errors rendered into the shape
 /// [`render_ng_error`] produces and its records projected into ng's locus type, then written
 /// out here by hand when promotion step C1 removed the call. On all five fixtures production's

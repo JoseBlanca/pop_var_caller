@@ -96,7 +96,6 @@ impl From<&SpillEntry> for RecordPlace {
 /// swap was this re-export and the deletion of the copy. The codec in [`spill`] reads the two
 /// fields and nothing else, and did not change.
 ///
-/// The crate holds a second, unrelated `WindowCoverage` in
-/// `crate::sample_summary::coverage`, which is production's per-tile summary; the two do not
-/// meet.
+/// Production's `src/sample_summary/coverage.rs`, which promotion Milestone D deletes, holds a
+/// second, unrelated `WindowCoverage` — its per-tile summary; the two do not meet.
 pub use crate::ng::window_coverage::WindowCoverage;

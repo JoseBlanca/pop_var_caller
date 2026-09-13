@@ -31,7 +31,7 @@
 //!
 //! # ng's copy has diverged from production's, on purpose
 //!
-//! This file was byte-identical to `crate::pileup::walker::cigar_cursor` and enforced so
+//! This file was byte-identical to production's `src/pileup/walker/cigar_cursor.rs` and enforced so
 //! by `copy_fidelity.rs`. It was released on 2026-08-05 for the predicate above, which is
 //! worth **−5.8 % of the walk at ~130× coverage and −4.0 % at 30×**. Production has the
 //! same redundant second query and is deliberately not being changed — ng is the caller

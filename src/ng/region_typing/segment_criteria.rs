@@ -8,7 +8,7 @@
 //! tests a detected repeat passes to be *typed* as an STR segment, not a policy for
 //! routing it to a caller (owner, 2026-07-18).
 //!
-//! **This began as a port of `crate::ssr::catalog::postprocess`, not a rewrite.**
+//! **This began as a port of production's `src/ssr/catalog/postprocess.rs`, not a rewrite.**
 //! The rule set (period scope, score gate, compound-motif drop, bundle drop,
 //! minimal trim, copy floor, purity floor, contig-edge drop) is a working, tested
 //! implementation — itself a faithful port of GangSTR's `minimal_trim.py` /
@@ -131,7 +131,7 @@ pub enum SsrSegmentError {
 /// but that is a question about *distances*, which coordinates answer. Only the
 /// payload is gone.
 ///
-/// ng's port of `crate::ssr::types::Locus`, now divergent by more than the two
+/// ng's port of production's `Locus` (`src/ssr/types.rs`), now divergent by more than the two
 /// differences spec §4 records (**1-based inclusive** and **`u64`**, against
 /// production's 0-based/`u32`).
 ///
