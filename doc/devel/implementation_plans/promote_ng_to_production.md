@@ -388,7 +388,8 @@ mattered:
   read-input tests, the command surface's tests, `bam`'s three and `fasta`'s one. Production's own
   three callers in `ssr` compile unchanged through a one-line `pub(crate) use` left in
   `pileup::per_sample`, which goes with that module at D3. The file's content is unchanged.
-- ☐ **C17** · *Depends:* — · *Source:* B3's row.
+- ✅ **C17** · *Depends:* — · *Source:* B3's row. Done 2026-09-13: both files now import
+  `pop_var_caller::ng::types::ChainId`, the same `u64` alias, so nothing they compute can change.
 - ☐ **C18**–**C25**, one checkbox each, in table order · *Depends:* B9.
 - ☐ **C26** · *Depends:* C1, C9.
 

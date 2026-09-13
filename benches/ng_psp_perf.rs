@@ -92,10 +92,10 @@ use pop_var_caller::ng::psp::{
     ContigIdentity, FORMAT_VERSION, Header, Manifest, PspReader, PspWriter, ReferenceIdentity,
     WriterProvenance,
 };
+use pop_var_caller::ng::types::ChainId;
 use pop_var_caller::ng::types::{
     Bp, ContigId, GenomeRegion, Position, ReadGroupId, SummedLogError,
 };
-use pop_var_caller::pileup_record::ChainId;
 
 /// How many reference positions one mate covers. **150, the Illumina read this project's corpora
 /// are.**

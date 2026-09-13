@@ -53,10 +53,10 @@ use pop_var_caller::ng::psp::{
     ContigIdentity, FORMAT_VERSION, Header, Manifest, PspReader, PspWriter, ReferenceIdentity,
     WriterProvenance,
 };
+use pop_var_caller::ng::types::ChainId;
 use pop_var_caller::ng::types::{
     Bp, ContigId, GenomeRegion, Position, ReadGroupId, SummedLogError,
 };
-use pop_var_caller::pileup_record::ChainId;
 
 const MATE_LENGTH_POSITIONS: u64 = 150;
 const INNER_GAP_POSITIONS: u64 = 200;
