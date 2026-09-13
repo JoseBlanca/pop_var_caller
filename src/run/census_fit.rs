@@ -535,8 +535,8 @@ mod tests {
     //! and the selection it is fitted against is the one it was written against.
 
     use super::*;
-    use crate::pop_var_caller_exp::generate_psps::{GeneratePspsArgs, run_generate_psps};
-    use crate::pop_var_caller_exp::test_fixtures::a_varying_cohort_on_disk;
+    use crate::cli::generate_psps::{GeneratePspsArgs, run_generate_psps};
+    use crate::cli::test_fixtures::a_varying_cohort_on_disk;
     use crate::run::census_cohort::every_census_in_the_cohorts_psps;
     use crate::run::psp_caller::OpenPspCohort;
     use crate::run::test_fixtures::a_census_plan_over_selecting;
@@ -548,10 +548,8 @@ mod tests {
     /// homopolymer, the whole genome routes to the repeat path, and the selection keeps no tract
     /// at all — measured, 0 strata over 0 tracts, which would leave the repeat-tract half of the
     /// fit untested. This one carries a deliberate ten-copy `GT` tract.
-    pub(super) fn a_fitted_cohorts_inputs() -> (
-        crate::pop_var_caller_exp::test_fixtures::AVaryingCohort,
-        Vec<PathBuf>,
-    ) {
+    pub(super) fn a_fitted_cohorts_inputs()
+    -> (crate::cli::test_fixtures::AVaryingCohort, Vec<PathBuf>) {
         use crate::region_typing::DEFAULT_MAX_STR_LEN;
         use crate::region_typing::segment_criteria::{
             DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,

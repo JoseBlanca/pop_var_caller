@@ -52,11 +52,11 @@ use crate::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichlet
 use crate::calling::inference::summarise_condition::SummariseConditionLoop;
 use crate::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
 use crate::calling::parameters_file::{ParametersFile, beside_the_vcf};
+use crate::cli::calling_run;
+use crate::cli::run_ground::{self, GroundError};
 use crate::fasta::ContigList;
 use crate::locus_generation::pileup::PileupGeneratorConfig;
 use crate::parameter_estimation::joint::loci::ReferenceDigest;
-use crate::pop_var_caller_exp::calling_run;
-use crate::pop_var_caller_exp::run_ground::{self, GroundError};
 use crate::read::ReadFilterConfig;
 use crate::read::input::read_groups::{ReadGroupError, build_read_groups};
 use crate::read::input::reference::OpenReference;
@@ -102,7 +102,7 @@ pub struct CallFromAlignmentsArgs {
     pub reference: PathBuf,
 
     /// The tandem-repeat catalog, which says where the repeat tracts are. Build it first with
-    /// `pop_var_caller_exp repeat-catalog --reference <reference>`; it is not optional.
+    /// `pop_var_caller repeat-catalog --reference <reference>`; it is not optional.
     ///
     /// Defaults to `<reference>.repeats.parquet`, which is where that command writes it. A
     /// catalog built on another reference is refused: its coordinates would put every tract in
@@ -231,7 +231,7 @@ pub struct CallFromAlignmentsArgs {
     /// SNP/indel caller handles it.
     #[arg(
         long,
-        value_parser = crate::pop_var_caller_exp::cli::parsers::parse_min_copies,
+        value_parser = crate::cli::parsers::parse_min_copies,
         default_value = "8,6,6,6,5,4",
         help_heading = "What counts as a repeat"
     )]
@@ -275,7 +275,7 @@ pub struct CallFromAlignmentsArgs {
     #[arg(
         long,
         default_value_t = DEFAULT_MIN_PURITY,
-        value_parser = crate::pop_var_caller_exp::cli::parsers::parse_min_purity,
+        value_parser = crate::cli::parsers::parse_min_purity,
         help_heading = "What counts as a repeat"
     )]
     pub min_purity: f32,

@@ -56,7 +56,7 @@ PROJECT_DIRS = (
     "src/locus_generation/", "src/read/", "src/alignment/", "src/paralog/",
     "src/window_coverage/", "src/ref_seq", "src/raw_chrom_reader", "src/reference_info",
     "src/tandem_repeat", "src/repeat_catalog", "src/region", "src/segmentation_inputs",
-    "src/vcf/", "src/types", "src/bam/", "src/fasta/", "src/pop_var_caller_exp/",
+    "src/vcf/", "src/types", "src/bam/", "src/fasta/", "src/cli/",
 )
 
 

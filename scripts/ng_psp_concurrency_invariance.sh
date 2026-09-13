@@ -21,14 +21,14 @@ shift 3
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin=""
-for candidate in "$root/target-container/release/pop_var_caller_exp" \
-                 "$root/target/release/pop_var_caller_exp"; do
+for candidate in "$root/target-container/release/pop_var_caller" \
+                 "$root/target/release/pop_var_caller"; do
   if [ -x "$candidate" ] && { [ -z "$bin" ] || [ "$candidate" -nt "$bin" ]; }; then
     bin=$candidate
   fi
 done
 if [ -z "$bin" ]; then
-  echo "no release build of pop_var_caller_exp; build one first" >&2
+  echo "no release build of pop_var_caller; build one first" >&2
   exit 1
 fi
 

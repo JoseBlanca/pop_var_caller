@@ -28,7 +28,7 @@
 //! **What the rule does not give is a way to tell two files apart by their contents** — the file
 //! records no run date, no caller version and no command line, so two copies in a directory are
 //! distinguishable only by their names. That is recorded rather than solved: what a run stamps
-//! into its own output is the command surface's, beside the rest of `pop_var_caller_exp`'s
+//! into its own output is the command surface's, beside the rest of `pop_var_caller`'s
 //! subcommands (spec §11).
 //!
 //! **The argument is a VCF *file's* path.** Hand it a directory and the parameters file lands

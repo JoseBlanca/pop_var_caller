@@ -15,7 +15,7 @@
 //!
 //! The kinds come from the reference's repeat catalog, opened beside the FASTA — the same
 //! file the run reads, so this answers the run's question rather than a similar one. Build it
-//! first with `pop_var_caller_exp repeat-catalog --reference <reference.fa>`.
+//! first with `pop_var_caller repeat-catalog --reference <reference.fa>`.
 //!
 //! **The third argument is which floors decide what an STR tract is**, and the two differ by
 //! a lot. `catalog` (the default) is what `call-from-alignments` uses today: the floors the

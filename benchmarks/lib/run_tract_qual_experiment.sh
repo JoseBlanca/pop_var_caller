@@ -69,7 +69,7 @@ OUT_DIR="${2:-$REPO/tmp/tract_qual}"
 GIAB_ROOT="${GIAB_ROOT:-$BENCHMARKS/giab}"
 SSR_HG002_ROOT="${SSR_HG002_ROOT:-$BENCHMARKS/ssr_hg002}"
 REFERENCE="$GIAB_ROOT/ref_genome_GRCh38/GCA_000001405.15_GRCh38_no_alt_plus_hs38d1_analysis_set.fna"
-NG_BIN="${NG_BIN:-$REPO/target-container/release/pop_var_caller_exp}"
+NG_BIN="${NG_BIN:-$REPO/target-container/release/pop_var_caller}"
 NG_EXAMPLE_DIR="${NG_EXAMPLE_DIR:-$REPO/target-container/release/examples}"
 SCORER="$HERE/tract_qual_experiment.py"
 

@@ -266,7 +266,7 @@ mod tests {
     //! read.
 
     use super::*;
-    use crate::pop_var_caller_exp::test_fixtures::a_cohort_on_disk;
+    use crate::cli::test_fixtures::a_cohort_on_disk;
     use crate::psp::PspReader;
     use crate::run::test_fixtures::{a_census_plan_over, gatherer_over};
 
@@ -416,8 +416,8 @@ mod the_two_producers_agree {
     //! fixture has a tract for a read to have a length at.
 
     use super::*;
+    use crate::cli::test_fixtures::a_varying_cohort_on_disk;
     use crate::parameter_estimation::joint::census_file::write_census;
-    use crate::pop_var_caller_exp::test_fixtures::a_varying_cohort_on_disk;
     use crate::run::test_fixtures::{a_census_plan_over, gatherer_over};
 
     /// Build both censuses for one sample and return the two encodings' bytes.

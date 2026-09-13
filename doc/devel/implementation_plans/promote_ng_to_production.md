@@ -641,11 +641,21 @@ at `74e424ea`; 62 examples; 6 benches; 1 binary.
   them by its `src/ng/` path, since they are recorded bytes; Markdown under `doc/` (§8); and CI's
   `ng::calling` filter, which is E3. `attribute_peak.py`'s one `src/ng/` row is split by module, and
   it now ignores dependency frames, whose paths share fragments such as `src/alignment/`.
-- ☐ **E2. The binary.** `src/main_exp.rs` → `src/main.rs`; `src/pop_var_caller_exp/` →
+- ✅ **E2. The binary.** `src/main_exp.rs` → `src/main.rs`; `src/pop_var_caller_exp/` →
   `src/cli/`; clap `name = "pop_var_caller"`; the `[[bin]]` entry; `##commandline` now says
   `pop_var_caller`. The 4 `scripts/ng_*.sh` and 6 `benchmarks/**/run_ng*` drivers that look
   for `pop_var_caller_exp` in `target*/release/` are repointed.
-  *Depends:* E1. *Source:* §2 In ("subcommand names are unchanged").
+  *Depends:* E1. *Source:* §2 In ("subcommand names are unchanged"). Done 2026-09-13.
+  **Deviation:** the module's own `cli.rs` would have become `cli::cli`, which clippy's
+  `module_inception` refuses, so it is `cli::command_line`, and its `parsers` submodule moves up to
+  `cli::parsers`; the subcommand enum loses its `Exp` (`PopVarCallerCommand`). The rename reached
+  34 names in 12 scripts and benchmark drivers (the plan counted 4 and 6), their build hints now
+  `--bin pop_var_caller`. Where the blanket rename produced prose comparing `pop_var_caller` with
+  itself — `main.rs`, `cli/mod.rs`, `error_render.rs`, `Cargo.toml`, `cli/parsers.rs` — it is
+  rewritten to say what the binary was. Two live READMEs described the older caller as current:
+  `README.md` lists its subcommands and the new ones now, and `benchmarks/lib/README.md` drops
+  `run_ours.sh`. The run's outputs carry the binary name only in `##commandline` (the VCF) and a
+  psp header's provenance, neither of which the identity oracle reads.
 - ✅ **E3. CI.** `.github/workflows/ci.yml`'s release-test step is scoped to `ng::calling`;
   rescope to `calling`. Nothing else in CI names a path.
   *Depends:* E1. Done 2026-09-13, before E2, since it depends only on E1 and CI's filter matched
@@ -658,6 +668,12 @@ at `74e424ea`; 62 examples; 6 benches; 1 binary.
 
 > **Checkpoint E: the same file under a new name.** A2's md5s equal A1's — `##commandline` is the
 > exempted line and the only one that may differ. Pause for review.
+
+**Reached 2026-09-13.** `fmt --check`, `clippy --all-targets -D warnings`, `doc -D warnings`, the
+release build and the doc tests are green; `cargo test --lib --tests` 4,787 passed, 0 failed,
+4 ignored, unchanged since D2–D4; the identity oracle, run with the renamed binary, is
+byte-identical to A1's digests, and its VCF's `##commandline` names
+`target-container/release/pop_var_caller`. E3 landed before E2.
 
 ### Milestone F — close
 

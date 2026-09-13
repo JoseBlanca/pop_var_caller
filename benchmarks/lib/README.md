@@ -11,10 +11,9 @@ its paths and knobs; the scripts here hold all the common scaffolding
 benchmarks/
   lib/
     common.sh             # sourced by the runners; config + helpers
-    run_ours.sh           # pop_var_caller   (single | cohort)
     run_gatk.sh           # GATK             (single | cohort)
     run_freebayes.sh      # freebayes        (single | cohort)
-    run_ng.sh             # ng, the experimental caller (single | cohort)
+    run_ng.sh             # ng, the caller (pop_var_caller) (single | cohort)
     prepare_reference.sh  # build .fai (+ .dict for GATK) for a reference
     compare_to_truth.sh   # precision/recall/F1 vs a truth VCF (accuracy)
   <name>/
@@ -30,7 +29,6 @@ benchmarks/
 benchmarks/lib/prepare_reference.sh benchmarks/<name>/bench.config.sh
 
 # 2. run a caller — mode is `single` (one sample) or `cohort` (all)
-benchmarks/lib/run_ours.sh      benchmarks/<name>/bench.config.sh single
 benchmarks/lib/run_gatk.sh      benchmarks/<name>/bench.config.sh cohort
 benchmarks/lib/run_freebayes.sh benchmarks/<name>/bench.config.sh single
 benchmarks/lib/run_ng.sh        benchmarks/<name>/bench.config.sh cohort
@@ -60,14 +58,11 @@ also overridable from the environment (`REFERENCE=… THREADS=8 …`).
 ## Notes
 
 - GATK lives at `/opt/gatk/gatk` inside the dev container; override with
-  `GATK_BIN=…`. `pop_var_caller` is auto-detected from
-  `target-container/release` then `target/release` (override with
-  `POP_VAR_CALLER_BIN=…`).
-- `pop_var_caller` has no BED/region flag, so `run_ours.sh` processes the
-  whole CRAM — fine here because the benchmark CRAMs are already
-  pre-sliced to the region set. GATK, freebayes and ng restrict via the BED.
-- **ng** is `pop_var_caller_exp call-from-alignments`, auto-detected the same
-  way (override with `NG_BIN=`). It needs a tandem-repeat catalog built from
+  `GATK_BIN=…`.
+- **ng** is `pop_var_caller call-from-alignments`. The binary is auto-detected as the newer runnable
+  build of `target-container/release` and `target/release` (override with `NG_BIN=`). The older
+  caller's runner, `run_ours.sh`, was deleted with that caller on 2026-09-13; its results under
+  `results/ours/` stay. GATK, freebayes and ng restrict via the BED. It needs a tandem-repeat catalog built from
   the same reference: `run_ng.sh` builds one at `NG_CATALOG` if it is missing,
   which takes about 100 s on GRCh38. Where the reference sits on a read-only
   mount, the benchmark config points `NG_CATALOG` somewhere writable.

@@ -46,8 +46,8 @@ pub const THE_COMMAND_THAT_REBUILDS_A_CENSUS: &str = "regenerate-census";
 /// **What a run should do with the census in one psp**, in the words spec §4.2 uses.
 ///
 /// **A verdict and not an action**: the same answers serve a command that refuses
-/// ([`estimate-parameters`](crate::pop_var_caller_exp::estimate_parameters)) and one that
-/// rebuilds ([`regenerate-census`](crate::pop_var_caller_exp::regenerate_census)), and which of
+/// ([`estimate-parameters`](crate::cli::estimate_parameters)) and one that
+/// rebuilds ([`regenerate-census`](crate::cli::regenerate_census)), and which of
 /// those happens is the command's business.
 ///
 /// **The four causes cost three different reads to reach.** [`NoCensus`](Self::NoCensus) is in

@@ -1,21 +1,21 @@
-//! `pop_var_caller_exp` binary namespace — ng's experiment command
-//! surface. A second binary in the same crate, kept apart from the
-//! production `pop_var_caller` CLI so ng's experiment knobs never grow it
-//! (see `doc/devel/ng/spec/typed_regions_cli.md` §2). The library both
-//! binaries link is the same one; only what a user can *invoke* is split.
+//! The `pop_var_caller` binary's command line: [`command_line`] owns the top-level `Parser` and the
+//! subcommand enum, [`parsers`] the value parsers several subcommands share, and one module per
+//! subcommand owns its `Args`, its `run_*` and its `#[non_exhaustive]` error enum.
 //!
-//! Layout mirrors production's `pop_var_caller` module: [`cli`] owns the top-level
-//! `Parser` plus the subcommand enum, and one module per subcommand owns
-//! its `Args`, its `run_*`, and its `#[non_exhaustive]` error enum.
+//! This was `pop_var_caller_exp`, ng's experiment binary, kept apart from the production
+//! `pop_var_caller` binary so that ng's experiment knobs never grew it
+//! (`doc/devel/ng/spec/typed_regions_cli.md` §2). Promotion step E2 renamed the binary and moved
+//! this module from `src/pop_var_caller_exp/`; the subcommands kept their names.
 
 pub mod call_from_alignments;
 pub mod call_from_psps;
 pub mod calling_run;
-pub mod cli;
+pub mod command_line;
 pub mod estimate_contamination;
 pub mod estimate_parameters;
 pub mod generate_psps;
 pub mod mode_equivalence;
+pub mod parsers;
 pub(crate) mod provenance;
 pub mod psp_inputs;
 pub mod regenerate_census;
@@ -29,7 +29,7 @@ pub use call_from_alignments::{
     CallFromAlignmentsArgs, CallFromAlignmentsCliError, run_call_from_alignments,
 };
 pub use call_from_psps::{CallFromPspsArgs, CallFromPspsCliError, run_call_from_psps};
-pub use cli::{Cli, PopVarCallerExpCommand};
+pub use command_line::{Cli, PopVarCallerCommand};
 pub use estimate_contamination::{
     EstimateContaminationArgs, EstimateContaminationCliError, run_estimate_contamination,
 };

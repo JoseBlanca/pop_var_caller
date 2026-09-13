@@ -30,7 +30,7 @@
 //! - [`types`] — the vocabulary the steps share.
 //!
 //! [`error_render`] and [`iter_ext`] are small helpers the rest shares. The command line is
-//! [`pop_var_caller_exp`].
+//! [`cli`].
 //!
 //! The tandem-repeat scanner is this crate's own; nothing here depends on `trf-mod`, whose output
 //! survives only as a committed test catalog (the test-only `golden_catalog`).
@@ -78,6 +78,7 @@ mod scanner_parity;
 pub mod alignment;
 pub mod bam;
 pub mod calling;
+pub mod cli;
 pub mod error_render;
 pub mod fasta;
 pub mod genetics;
@@ -85,7 +86,6 @@ pub mod iter_ext;
 pub mod locus_generation;
 pub mod paralog;
 pub mod parameter_estimation;
-pub mod pop_var_caller_exp;
 pub mod psp;
 pub mod raw_chrom_reader;
 pub mod read;

@@ -770,7 +770,7 @@ impl GenotypeFrequency {
 /// (`MAX_INBREEDING_COEFFICIENT`) —
 /// 20 Phred, which read evidence can overcome. Its `--inbreeding-coefficient`
 /// flag is a second door and is not clamped: the parser accepts the closed
-/// `[0, 1]` (`pop_var_caller::cli::parsers::parse_inbreeding_coefficient`) and
+/// `[0, 1]` (the deleted production binary's `parse_inbreeding_coefficient`) and
 /// the value goes to the engine as given (`var_calling::pipeline`). That is the
 /// gap this newtype closes for ng — the limit is unrepresentable here whichever
 /// door a value came through.

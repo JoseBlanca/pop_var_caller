@@ -159,7 +159,7 @@ pub struct MergeParameters {
     /// **It is the second half of one memory decision, not a thread count.** A round holds
     /// every sample's observations over `regions_in_flight × cohort_locus_builder_regions_len`
     /// bases, so this and the width are chosen together —
-    /// `crate::pop_var_caller_exp::calling_run::round_shape_for` is where, and it divides the
+    /// `crate::cli::calling_run::round_shape_for` is where, and it divides the
     /// ground rather than multiplying it.
     pub cohort_locus_builder_regions_in_flight: CohortLocusBuilderRegionsInFlight,
     /// The widest a cohort locus may be, in reference bases, before it is refused rather than
@@ -5996,7 +5996,7 @@ mod records_handed_over_as_the_run_finishes_them {
                 md5: None,
             }],
             sample_names.clone(),
-            "pop_var_caller_exp call-from-alignments".to_owned(),
+            "pop_var_caller call-from-alignments".to_owned(),
             "reference.fa".to_owned(),
             String::new(),
         )
@@ -6230,7 +6230,7 @@ mod records_handed_over_as_the_run_finishes_them {
                     md5: None,
                 }],
                 sample_names,
-                "pop_var_caller_exp call-from-alignments".to_owned(),
+                "pop_var_caller call-from-alignments".to_owned(),
                 "reference.fa".to_owned(),
                 String::new(),
             )

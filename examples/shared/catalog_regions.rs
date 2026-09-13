@@ -3,7 +3,7 @@
 //!
 //! Each of these tools used to build a walk over the FASTA and let it cut the reference into
 //! typed regions as it went. The catalog holds those repeats already — found once per
-//! reference by `pop_var_caller_exp repeat-catalog` — so a tool opens the file beside the
+//! reference by `pop_var_caller repeat-catalog` — so a tool opens the file beside the
 //! reference and reads them back. It costs a run nothing to scan, and every tool sees the
 //! same repeats rather than each rediscovering them.
 //!
@@ -38,7 +38,7 @@ pub fn whole_contig(contig: ContigId, length: u64) -> GenomeRegion {
 
 /// Build the reference's catalog, for a **synthetic fixture that has none**.
 ///
-/// A real reference gets one from `pop_var_caller_exp repeat-catalog`, once, and every tool
+/// A real reference gets one from `pop_var_caller repeat-catalog`, once, and every tool
 /// reads it. A fixture a test writes has no such run behind it, so the test does what that
 /// command does: streams the reference once and writes the catalog beside it.
 #[allow(dead_code)]

@@ -1,7 +1,5 @@
-//! Value parsers for the `pop_var_caller_exp` CLI. Production's
-//! `pop_var_caller::cli::parsers` is the *pattern* this copies, not a
-//! place to add to (spec §2.1) — ng's experiment knobs stay out of the
-//! production CLI.
+//! Value parsers several `pop_var_caller` subcommands share. The shape was first copied from the
+//! deleted production binary's `cli::parsers` (spec §2.1).
 
 use crate::region_typing::segment_criteria::{MAX_MOTIF_LEN, MinCopies};
 

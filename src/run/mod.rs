@@ -24,7 +24,7 @@
 //! once, which is what an oracle wants and what no real run can afford;
 //! [`AlignedFilesVariantCaller::call_cohort_handing_each_record_over`] hands each record over as
 //! it is finished and keeps none, which is the path
-//! [`call-from-alignments`](crate::pop_var_caller_exp::call_from_alignments) takes; and
+//! [`call-from-alignments`](crate::cli::call_from_alignments) takes; and
 //! [`SampleObservationGatherer::write_psp`] stores one sample's walk as a psp, calling
 //! nothing — psp mode's walk half, whose calling half reads a cohort of those files back.
 

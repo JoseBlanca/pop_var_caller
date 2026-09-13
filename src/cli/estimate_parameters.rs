@@ -52,12 +52,12 @@ use clap::Args;
 use thiserror::Error;
 
 use crate::calling::parameters_file::{DeclaredInbreeding, ParametersFile};
+use crate::cli::generate_psps::PSP_FILE_EXTENSION;
+use crate::cli::psp_inputs::{PspArgumentRefusal, psps_named};
+use crate::cli::run_ground::{self, GroundError};
 use crate::parameter_estimation::joint::fit::JointFitConfig;
 use crate::parameter_estimation::joint::loci::{ReferenceDigest, SelectionError, UnambiguousRuns};
 use crate::parameter_estimation::joint::ssr_fit::SsrFitConfig;
-use crate::pop_var_caller_exp::generate_psps::PSP_FILE_EXTENSION;
-use crate::pop_var_caller_exp::psp_inputs::{PspArgumentRefusal, psps_named};
-use crate::pop_var_caller_exp::run_ground::{self, GroundError};
 use crate::reference_info::{
     ReferenceCheck, ReferenceInfoError, read_reference_observing_or_creating_fai,
 };

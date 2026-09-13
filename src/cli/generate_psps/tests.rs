@@ -4,15 +4,15 @@
 use super::*;
 use clap::Parser;
 
+use crate::cli::command_line::{Cli, PopVarCallerCommand};
 use crate::parameter_estimation::joint::census_file::{CensusFile, decode_census};
-use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
 use crate::psp::PspReader;
 use crate::repeat_catalog::StrRepeatCriteria;
 
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
 fn args_of(argv: &[&str]) -> GeneratePspsArgs {
     match Cli::parse_from(argv).cmd {
-        PopVarCallerExpCommand::GeneratePsps(args) => args,
+        PopVarCallerCommand::GeneratePsps(args) => args,
         other => panic!("expected generate-psps, got {other:?}"),
     }
 }
@@ -24,7 +24,7 @@ fn refusal_of(argv: &[&str]) -> clap::Error {
 /// The shortest walk a person can type.
 fn a_walk() -> Vec<&'static str> {
     vec![
-        "pop_var_caller_exp",
+        "pop_var_caller",
         "generate-psps",
         "--reference",
         "ref.fa",
@@ -47,7 +47,7 @@ fn the_subcommand_is_spelled_generate_psps() {
 #[test]
 fn the_alignment_flag_repeats_and_keeps_the_order_it_was_given() {
     let mut argv = vec![
-        "pop_var_caller_exp",
+        "pop_var_caller",
         "generate-psps",
         "--reference",
         "ref.fa",
@@ -73,7 +73,7 @@ fn the_alignment_flag_repeats_and_keeps_the_order_it_was_given() {
 #[test]
 fn a_walk_with_no_alignment_is_refused() {
     let refused = refusal_of(&[
-        "pop_var_caller_exp",
+        "pop_var_caller",
         "generate-psps",
         "--reference",
         "ref.fa",
@@ -117,7 +117,7 @@ fn the_routing_defaults_are_the_same_as_direct_modes() {
     );
 
     let direct = match Cli::parse_from([
-        "pop_var_caller_exp",
+        "pop_var_caller",
         "call-from-alignments",
         "--reference",
         "ref.fa",
@@ -129,7 +129,7 @@ fn the_routing_defaults_are_the_same_as_direct_modes() {
     ])
     .cmd
     {
-        PopVarCallerExpCommand::CallFromAlignments(args) => args,
+        PopVarCallerCommand::CallFromAlignments(args) => args,
         other => panic!("expected call-from-alignments, got {other:?}"),
     };
     // **The whole criteria struct, not a tuple of the axes someone remembered.** An earlier
@@ -157,7 +157,7 @@ fn the_routing_defaults_are_the_same_as_direct_modes() {
 #[test]
 fn the_recorded_subcommand_is_the_one_a_person_types() {
     let parsed = Cli::try_parse_from([
-        "pop_var_caller_exp",
+        "pop_var_caller",
         SUBCOMMAND,
         "--reference",
         "ref.fa",
@@ -167,10 +167,7 @@ fn the_recorded_subcommand_is_the_one_a_person_types() {
         "psps",
     ])
     .expect("the recorded subcommand name is the one clap answers to");
-    assert!(matches!(
-        parsed.cmd,
-        PopVarCallerExpCommand::GeneratePsps(_)
-    ));
+    assert!(matches!(parsed.cmd, PopVarCallerCommand::GeneratePsps(_)));
 }
 
 /// **An alignment file that is not there names itself**, and it is refused at the door —
@@ -507,7 +504,7 @@ fn a_cohort_on_disk() -> (
     tempfile::TempDir,
     GeneratePspsArgs,
 ) {
-    let cohort = crate::pop_var_caller_exp::test_fixtures::a_cohort_on_disk();
+    let cohort = crate::cli::test_fixtures::a_cohort_on_disk();
     let args = GeneratePspsArgs {
         reference: cohort.reference,
         catalog: Some(cohort.catalog),

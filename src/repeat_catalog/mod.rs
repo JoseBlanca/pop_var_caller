@@ -426,7 +426,7 @@ pub enum RepeatCatalogError {
     /// No catalog at that path. **The one error a caller can act on**, so it names the
     /// command that writes one — distinct from a catalog that is present but wrong.
     #[error(
-        "no repeat catalog at {path}; build one with `pop_var_caller_exp repeat-catalog --reference <ref.fa>`"
+        "no repeat catalog at {path}; build one with `pop_var_caller repeat-catalog --reference <ref.fa>`"
     )]
     NotFound {
         /// Where a catalog was looked for.

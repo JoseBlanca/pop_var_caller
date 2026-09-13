@@ -116,7 +116,7 @@ pub enum GroundError {
 
     /// There is no repeat catalog to route this run's ground with.
     #[error(
-        "no repeat catalog at {}; build one with `pop_var_caller_exp repeat-catalog --reference {}`",
+        "no repeat catalog at {}; build one with `pop_var_caller repeat-catalog --reference {}`",
         path.display(),
         reference.display()
     )]

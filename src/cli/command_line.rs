@@ -1,5 +1,5 @@
-//! Top-level CLI for the `pop_var_caller_exp` binary: the `Parser` and the
-//! subcommand enum. Shape copied from production's `pop_var_caller::cli`.
+//! Top-level CLI for the `pop_var_caller` binary: the `Parser` and the
+//! subcommand enum. Shape first copied from the deleted production binary's `cli` module.
 
 use clap::{Parser, Subcommand};
 
@@ -12,20 +12,18 @@ use super::regenerate_census::RegenerateCensusArgs;
 use super::repeat_catalog::RepeatCatalogArgs;
 use super::typed_regions::TypedRegionsArgs;
 
-pub mod parsers;
-
-/// Top-level CLI for the `pop_var_caller_exp` binary.
+/// Top-level CLI for the `pop_var_caller` binary.
 #[derive(Debug, Parser)]
-#[command(name = "pop_var_caller_exp", version, about, long_about = None)]
+#[command(name = "pop_var_caller", version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
-    pub cmd: PopVarCallerExpCommand,
+    pub cmd: PopVarCallerCommand,
 }
 
-/// The exp binary's subcommands. Each kebab-cases to its command name, as
+/// The binary's subcommands. Each kebab-cases to its command name, as
 /// `SsrCatalog` → `ssr-catalog`.
 #[derive(Debug, Subcommand)]
-pub enum PopVarCallerExpCommand {
+pub enum PopVarCallerCommand {
     /// Run step 3's walk over a reference and write the typed-region
     /// partition to a file (contig, span, kind, and STR detail per region).
     TypeRegions(TypedRegionsArgs),

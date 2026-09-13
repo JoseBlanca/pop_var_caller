@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use clap::Args;
 use thiserror::Error;
 
-use crate::pop_var_caller_exp::cli::parsers::parse_min_copies;
+use crate::cli::parsers::parse_min_copies;
 use crate::reference_info::{ReferenceInfoError, ReferenceSource, read_reference_info_observing};
 use crate::region_typing::segment_criteria::{
     DEFAULT_BUNDLE_THRESHOLD, DEFAULT_MIN_PURITY, DEFAULT_MIN_SCORE, MAX_MOTIF_LEN, MinCopies,
@@ -290,23 +290,18 @@ mod tests {
     use crate::repeat_catalog::criteria::CATALOG_MIN_COPIES;
     use clap::Parser;
 
-    use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
+    use crate::cli::command_line::{Cli, PopVarCallerCommand};
 
     fn args_of(argv: &[&str]) -> RepeatCatalogArgs {
         match Cli::parse_from(argv).cmd {
-            PopVarCallerExpCommand::RepeatCatalog(args) => args,
+            PopVarCallerCommand::RepeatCatalog(args) => args,
             other => panic!("expected repeat-catalog, got {other:?}"),
         }
     }
 
     #[test]
     fn the_flag_default_is_the_catalogs_own_floor_table() {
-        let args = args_of(&[
-            "pop_var_caller_exp",
-            "repeat-catalog",
-            "--reference",
-            "r.fa",
-        ]);
+        let args = args_of(&["pop_var_caller", "repeat-catalog", "--reference", "r.fa"]);
         let criteria = catalog_criteria(&args).expect("valid");
         for (index, expected) in CATALOG_MIN_COPIES.iter().enumerate() {
             let period = index as u8 + 1;
@@ -326,7 +321,7 @@ mod tests {
     #[test]
     fn the_output_defaults_to_a_sibling_of_the_reference() {
         let args = args_of(&[
-            "pop_var_caller_exp",
+            "pop_var_caller",
             "repeat-catalog",
             "--reference",
             "/data/ref.fa",
@@ -345,7 +340,7 @@ mod tests {
     #[test]
     fn an_impossible_period_range_is_an_error_not_a_scan() {
         let args = args_of(&[
-            "pop_var_caller_exp",
+            "pop_var_caller",
             "repeat-catalog",
             "--reference",
             "r.fa",
@@ -383,7 +378,7 @@ mod tests {
         drop(file);
 
         let args = args_of(&[
-            "pop_var_caller_exp",
+            "pop_var_caller",
             "repeat-catalog",
             "--reference",
             fasta.to_str().expect("utf8"),
@@ -423,7 +418,7 @@ mod tests {
         assert!(format!("{err}").contains("--force"));
 
         let forced = args_of(&[
-            "pop_var_caller_exp",
+            "pop_var_caller",
             "repeat-catalog",
             "--reference",
             fasta.to_str().expect("utf8"),
@@ -436,7 +431,7 @@ mod tests {
     fn a_misspelled_flag_does_not_parse() {
         assert!(
             Cli::try_parse_from([
-                "pop_var_caller_exp",
+                "pop_var_caller",
                 "repeat-catalog",
                 "--reference",
                 "r.fa",

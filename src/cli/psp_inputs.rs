@@ -15,7 +15,7 @@
 
 use std::path::PathBuf;
 
-use crate::pop_var_caller_exp::generate_psps::PSP_FILE_EXTENSION;
+use crate::cli::generate_psps::PSP_FILE_EXTENSION;
 
 /// Why a `--psp` argument could not be turned into a list of files.
 ///

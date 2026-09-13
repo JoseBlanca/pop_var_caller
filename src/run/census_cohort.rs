@@ -244,14 +244,12 @@ mod tests {
     //! C3's report, over [`census_freshness`](super::super::census_freshness)'s verdicts.
 
     use super::*;
-    use crate::pop_var_caller_exp::generate_psps::{
-        GeneratePspsArgs, psp_path_for, run_generate_psps,
-    };
-    use crate::pop_var_caller_exp::test_fixtures::a_cohort_on_disk;
+    use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
+    use crate::cli::test_fixtures::a_cohort_on_disk;
 
     /// The fixture cohort walked into psps, opened as the run opens it.
     fn a_walked_cohort() -> (
-        crate::pop_var_caller_exp::test_fixtures::ACohortOnDisk,
+        crate::cli::test_fixtures::ACohortOnDisk,
         Vec<PathBuf>,
         OpenPspCohort,
     ) {

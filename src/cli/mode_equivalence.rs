@@ -78,14 +78,10 @@ mod tests {
 
     use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
     use crate::calling::parameters_file::beside_the_vcf;
-    use crate::pop_var_caller_exp::call_from_alignments::{
-        CallFromAlignmentsArgs, run_call_from_alignments,
-    };
-    use crate::pop_var_caller_exp::call_from_psps::{CallFromPspsArgs, run_call_from_psps};
-    use crate::pop_var_caller_exp::generate_psps::{
-        GeneratePspsArgs, psp_path_for, run_generate_psps,
-    };
-    use crate::pop_var_caller_exp::test_fixtures::{
+    use crate::cli::call_from_alignments::{CallFromAlignmentsArgs, run_call_from_alignments};
+    use crate::cli::call_from_psps::{CallFromPspsArgs, run_call_from_psps};
+    use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
+    use crate::cli::test_fixtures::{
         AVaryingCohort, FIRST_SAMPLES_SUBSTITUTION, SECOND_SAMPLES_SUBSTITUTION, TRACT,
         a_varying_cohort_on_disk,
     };
@@ -508,7 +504,7 @@ mod tests {
     /// is 5.5 copies of a period-2 motif, one copy short of its six-copy floor.
     #[test]
     fn the_fixtures_ground_is_typed_as_its_doc_says() {
-        use crate::pop_var_caller_exp::run_ground::{self, GroundRequest, RepeatRouting};
+        use crate::cli::run_ground::{self, GroundRequest, RepeatRouting};
         use crate::region_typing::RegionKind;
 
         let cohort = a_varying_cohort_on_disk();
@@ -824,7 +820,7 @@ mod tests {
     /// and the run calls that cohort rather than refusing it or dropping the sample.
     #[test]
     fn a_sample_that_analysed_ground_and_found_nothing_is_not_a_sample_that_never_looked() {
-        use crate::pop_var_caller_exp::test_fixtures::a_cohort_on_disk;
+        use crate::cli::test_fixtures::a_cohort_on_disk;
         use crate::psp::PspReader;
 
         // `zeta` carries three reads and `alpha` none, over ground both were walked across.

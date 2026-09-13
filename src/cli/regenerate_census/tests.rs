@@ -4,11 +4,9 @@
 use super::*;
 use clap::Parser;
 
-use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
-use crate::pop_var_caller_exp::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
-use crate::pop_var_caller_exp::test_fixtures::{
-    ACohortOnDisk, a_cohort_on_disk, a_varying_cohort_on_disk,
-};
+use crate::cli::command_line::{Cli, PopVarCallerCommand};
+use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
+use crate::cli::test_fixtures::{ACohortOnDisk, a_cohort_on_disk, a_varying_cohort_on_disk};
 use crate::psp::PspReader;
 use crate::region_typing::DEFAULT_MAX_STR_LEN;
 use crate::region_typing::segment_criteria::{
@@ -18,7 +16,7 @@ use crate::region_typing::segment_criteria::{
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
 fn args_of(argv: &[&str]) -> RegenerateCensusArgs {
     match Cli::parse_from(argv).cmd {
-        PopVarCallerExpCommand::RegenerateCensus(args) => args,
+        PopVarCallerCommand::RegenerateCensus(args) => args,
         other => panic!("expected regenerate-census, got {other:?}"),
     }
 }
@@ -27,7 +25,7 @@ fn args_of(argv: &[&str]) -> RegenerateCensusArgs {
 /// and the criteria come from the psps.
 fn a_shortest_run() -> Vec<&'static str> {
     vec![
-        "pop_var_caller_exp",
+        "pop_var_caller",
         SUBCOMMAND,
         "--reference",
         "ref.fa",
@@ -150,7 +148,7 @@ fn the_subcommand_is_spelled_regenerate_census() {
     // carries the claim is the parse above, whose argument list is built from the constant the
     // library's refusals print: if clap did not answer to that word, `args_of` would not return.
     let refused = Cli::try_parse_from([
-        "pop_var_caller_exp",
+        "pop_var_caller",
         THE_COMMAND_THAT_REBUILDS_A_CENSUS,
         "--help",
     ])
@@ -1059,7 +1057,7 @@ fn a_regenerated_psp_is_the_walked_one_byte_for_byte() {
 /// psps' and only the bases differ.
 #[test]
 fn a_reference_the_psps_were_not_walked_against_is_refused_before_anything_is_rewritten() {
-    use crate::pop_var_caller_exp::test_fixtures::{VARYING_CONTIG, the_varying_cohorts_reference};
+    use crate::cli::test_fixtures::{VARYING_CONTIG, the_varying_cohorts_reference};
 
     let cohort = a_varying_cohort_on_disk();
     let psps = cohort.directory.path().join("psps");

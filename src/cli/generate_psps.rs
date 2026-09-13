@@ -55,12 +55,12 @@ use std::sync::Arc;
 use clap::Args;
 use thiserror::Error;
 
+use crate::cli::provenance::{current_command_line, rfc3339_now};
+use crate::cli::run_ground::{self, GroundError};
 use crate::fasta::ContigList;
 use crate::locus_generation::LocusCounts;
 use crate::locus_generation::pileup::PileupGeneratorConfig;
 use crate::parameter_estimation::joint::loci::{SelectionError, UnambiguousRuns};
-use crate::pop_var_caller_exp::provenance::{current_command_line, rfc3339_now};
-use crate::pop_var_caller_exp::run_ground::{self, GroundError};
 use crate::psp::{WriteStats, WriterProvenance};
 use crate::read::ReadFilterConfig;
 use crate::read::input::read_groups::{
@@ -109,7 +109,7 @@ pub struct GeneratePspsArgs {
     pub reference: PathBuf,
 
     /// The tandem-repeat catalog, which says where the repeat tracts are. Build it first with
-    /// `pop_var_caller_exp repeat-catalog --reference <reference>`; it is not optional.
+    /// `pop_var_caller repeat-catalog --reference <reference>`; it is not optional.
     ///
     /// Defaults to `<reference>.repeats.parquet`, which is where that command writes it. A
     /// catalog built on another reference is refused: its coordinates would put every tract in
@@ -164,7 +164,7 @@ pub struct GeneratePspsArgs {
     /// SNP/indel path handles it.
     #[arg(
         long,
-        value_parser = crate::pop_var_caller_exp::cli::parsers::parse_min_copies,
+        value_parser = crate::cli::parsers::parse_min_copies,
         default_value = "8,6,6,6,5,4",
         help_heading = "What counts as a repeat"
     )]
@@ -208,7 +208,7 @@ pub struct GeneratePspsArgs {
     #[arg(
         long,
         default_value_t = DEFAULT_MIN_PURITY,
-        value_parser = crate::pop_var_caller_exp::cli::parsers::parse_min_purity,
+        value_parser = crate::cli::parsers::parse_min_purity,
         help_heading = "What counts as a repeat"
     )]
     pub min_purity: f32,

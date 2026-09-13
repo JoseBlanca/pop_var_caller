@@ -5,7 +5,7 @@
 #   call-from-alignments            — walk the CRAMs and call
 #   generate-psps + call-from-psps  — walk the CRAMs into stored files, then call those
 #
-# The unit test `pop_var_caller_exp::mode_equivalence` makes the same comparison on a fixture of
+# The unit test `cli::mode_equivalence` makes the same comparison on a fixture of
 # one contig and two samples. This is where the claim has weight: real reads, a real catalog, and
 # a cohort big enough that anything the psp fails to carry has somewhere to show up.
 #
@@ -22,7 +22,7 @@
 #   scripts/ng_mode_equivalence_oracle.sh <reference.fa> <catalog.parquet> <regions.bed> \
 #       <output-dir> <alignment.cram>...
 #
-# It expects a release build of `pop_var_caller_exp` in `target-container/release` or `target/
+# It expects a release build of `pop_var_caller` in `target-container/release` or `target/
 # release` and takes whichever is newer, because a machine with no container runtime builds to
 # the second (see CLAUDE.md).
 set -eu
@@ -40,14 +40,14 @@ shift 4
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin=""
-for candidate in "$root/target-container/release/pop_var_caller_exp" \
-                 "$root/target/release/pop_var_caller_exp"; do
+for candidate in "$root/target-container/release/pop_var_caller" \
+                 "$root/target/release/pop_var_caller"; do
   if [ -x "$candidate" ] && { [ -z "$bin" ] || [ "$candidate" -nt "$bin" ]; }; then
     bin=$candidate
   fi
 done
 if [ -z "$bin" ]; then
-  echo "no release build of pop_var_caller_exp; build one first" >&2
+  echo "no release build of pop_var_caller; build one first" >&2
   exit 1
 fi
 

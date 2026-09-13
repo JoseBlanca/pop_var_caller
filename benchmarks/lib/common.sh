@@ -81,7 +81,7 @@ bench_load_config() {
 # Binary discovery (identical logic the per-caller scripts used to repeat)
 # ---------------------------------------------------------------------------
 
-# Discover the caller's binary, pop_var_caller_exp, into NG_BIN. Honors a
+# Discover the caller's binary, pop_var_caller, into NG_BIN. Honors a
 # pre-set NG_BIN. Looks in the container build tree and the host build tree and
 # takes the **newer** of the builds that run here: a machine with no container
 # runtime builds only into target/, where a stale target-container/ build would
@@ -92,8 +92,8 @@ bench_discover_ng_bin() {
     if [[ -z "${NG_BIN:-}" ]]; then
         local candidate
         for candidate in \
-            "$PROJECT_ROOT/target-container/release/pop_var_caller_exp" \
-            "$PROJECT_ROOT/target/release/pop_var_caller_exp"; do
+            "$PROJECT_ROOT/target-container/release/pop_var_caller" \
+            "$PROJECT_ROOT/target/release/pop_var_caller"; do
             if [[ -x "$candidate" ]] && "$candidate" --version >/dev/null 2>&1 \
                 && { [[ -z "${NG_BIN:-}" ]] || [[ "$candidate" -nt "$NG_BIN" ]]; }; then
                 NG_BIN="$candidate"
@@ -101,8 +101,8 @@ bench_discover_ng_bin() {
         done
     fi
     if [[ -z "${NG_BIN:-}" || ! -x "${NG_BIN}" ]]; then
-        echo "no pop_var_caller_exp binary found." >&2
-        echo "build with: ./scripts/dev.sh cargo build --release --bin pop_var_caller_exp" >&2
+        echo "no pop_var_caller binary found." >&2
+        echo "build with: ./scripts/dev.sh cargo build --release --bin pop_var_caller" >&2
         echo "or set NG_BIN=<path>" >&2
         exit 1
     fi

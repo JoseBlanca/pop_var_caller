@@ -53,8 +53,8 @@ discover_bin() {
     if [[ -z "${NG_BIN:-}" ]]; then
         local candidate
         for candidate in \
-            "$REPO/target-container/release/pop_var_caller_exp" \
-            "$REPO/target/release/pop_var_caller_exp"; do
+            "$REPO/target-container/release/pop_var_caller" \
+            "$REPO/target/release/pop_var_caller"; do
             if [[ -x "$candidate" ]] && "$candidate" --version >/dev/null 2>&1; then
                 NG_BIN="$candidate"
                 break
@@ -62,7 +62,7 @@ discover_bin() {
         done
     fi
     [[ -n "${NG_BIN:-}" && -x "${NG_BIN}" ]] || {
-        echo "no pop_var_caller_exp binary; build it or set NG_BIN" >&2
+        echo "no pop_var_caller binary; build it or set NG_BIN" >&2
         exit 1
     }
 }

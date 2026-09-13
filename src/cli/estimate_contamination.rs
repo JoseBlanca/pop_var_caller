@@ -205,7 +205,7 @@ pub enum EstimateContaminationCliError {
         source: std::io::Error,
     },
 
-    #[error("no repeat catalog at {}; build one with `pop_var_caller_exp repeat-catalog`", .path.display())]
+    #[error("no repeat catalog at {}; build one with `pop_var_caller repeat-catalog`", .path.display())]
     MissingCatalog { path: PathBuf },
 
     #[error("the repeat catalog could not be used")]

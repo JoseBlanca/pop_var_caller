@@ -65,7 +65,7 @@ use pop_var_caller::calling::inference::summarise_condition::SummariseConditionL
 use pop_var_caller::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
 use pop_var_caller::calling::parameters_file::DeclaredInbreeding;
 use pop_var_caller::calling::run_parameters::RunParameters;
-use pop_var_caller::pop_var_caller_exp::run_ground::{self, GroundRequest, RepeatRouting};
+use pop_var_caller::cli::run_ground::{self, GroundRequest, RepeatRouting};
 use pop_var_caller::read::input::reference::OpenReference;
 use pop_var_caller::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,

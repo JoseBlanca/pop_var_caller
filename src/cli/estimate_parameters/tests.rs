@@ -5,9 +5,9 @@ use super::*;
 use clap::Parser;
 use std::path::Path;
 
-use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
-use crate::pop_var_caller_exp::generate_psps::{GeneratePspsArgs, run_generate_psps};
-use crate::pop_var_caller_exp::test_fixtures::{AVaryingCohort, a_varying_cohort_on_disk};
+use crate::cli::command_line::{Cli, PopVarCallerCommand};
+use crate::cli::generate_psps::{GeneratePspsArgs, run_generate_psps};
+use crate::cli::test_fixtures::{AVaryingCohort, a_varying_cohort_on_disk};
 use crate::region_typing::DEFAULT_MAX_STR_LEN;
 use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
@@ -16,7 +16,7 @@ use crate::region_typing::segment_criteria::{
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
 fn args_of(argv: &[&str]) -> EstimateParametersArgs {
     match Cli::parse_from(argv).cmd {
-        PopVarCallerExpCommand::EstimateParameters(args) => args,
+        PopVarCallerCommand::EstimateParameters(args) => args,
         other => panic!("expected estimate-parameters, got {other:?}"),
     }
 }
@@ -24,7 +24,7 @@ fn args_of(argv: &[&str]) -> EstimateParametersArgs {
 /// The shortest run a person can type.
 fn a_shortest_run() -> Vec<&'static str> {
     vec![
-        "pop_var_caller_exp",
+        "pop_var_caller",
         "estimate-parameters",
         "--reference",
         "ref.fa",
@@ -103,7 +103,7 @@ fn the_subcommand_is_spelled_estimate_parameters() {
     assert_eq!(args.psps, vec![PathBuf::from("zeta.psp")]);
     assert_eq!(args.output, PathBuf::from("cohort.parameters.toml"));
     assert!(
-        Cli::try_parse_from(["pop_var_caller_exp", SUBCOMMAND, "--help"])
+        Cli::try_parse_from(["pop_var_caller", SUBCOMMAND, "--help"])
             .expect_err("--help exits")
             .to_string()
             .contains(SUBCOMMAND),
@@ -359,7 +359,7 @@ fn a_catalog_the_psps_were_not_walked_with_is_refused_before_segments_are_cut() 
 /// regenerate them against the wrong reference.
 #[test]
 fn a_reference_the_psps_were_not_walked_against_is_refused_before_the_selection_is_rebuilt() {
-    use crate::pop_var_caller_exp::test_fixtures::{VARYING_CONTIG, the_varying_cohorts_reference};
+    use crate::cli::test_fixtures::{VARYING_CONTIG, the_varying_cohorts_reference};
 
     let (cohort, psps) = a_walked_cohort();
     let mut bases = the_varying_cohorts_reference();
@@ -710,7 +710,7 @@ fn the_report_names_the_command_that_rebuilds_a_psps_census() {
     // `regenerate_census::SUBCOMMAND` *is* this constant, so comparing the two is `X == X`;
     // what carries the claim is the parse below.
     let parsed = Cli::try_parse_from([
-        "pop_var_caller_exp",
+        "pop_var_caller",
         THE_COMMAND_THAT_REBUILDS_A_CENSUS,
         "--reference",
         "ref.fa",
@@ -720,7 +720,7 @@ fn the_report_names_the_command_that_rebuilds_a_psps_census() {
     .expect("the command this report prints is one clap answers to");
 
     assert!(
-        matches!(parsed.cmd, PopVarCallerExpCommand::RegenerateCensus(_)),
+        matches!(parsed.cmd, PopVarCallerCommand::RegenerateCensus(_)),
         "and it is the repair rather than another subcommand: {:?}",
         parsed.cmd,
     );

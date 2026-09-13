@@ -31,7 +31,7 @@
 # choosing the sink, taking it apart, running passes two and three, printing the report — and
 # nothing but a run compares the copies on real data. `psps` is the route plan step D3 names.
 #
-# It expects a release build of `pop_var_caller_exp` in `target-container/release` or
+# It expects a release build of `pop_var_caller` in `target-container/release` or
 # `target/release` and takes whichever is newer, because a machine with no container runtime
 # builds to the second (see CLAUDE.md).
 #
@@ -55,14 +55,14 @@ threads=${NG_THREADS:-4}
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin=""
-for candidate in "$root/target-container/release/pop_var_caller_exp" \
-                 "$root/target/release/pop_var_caller_exp"; do
+for candidate in "$root/target-container/release/pop_var_caller" \
+                 "$root/target/release/pop_var_caller"; do
   if [[ -x "$candidate" ]] && { [[ -z "$bin" ]] || [[ "$candidate" -nt "$bin" ]]; }; then
     bin=$candidate
   fi
 done
 if [[ -z "$bin" ]]; then
-  echo "no release build of pop_var_caller_exp; build one first" >&2
+  echo "no release build of pop_var_caller; build one first" >&2
   exit 1
 fi
 

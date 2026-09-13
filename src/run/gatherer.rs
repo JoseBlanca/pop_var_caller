@@ -1572,9 +1572,9 @@ mod census_tests {
     //! Milestone C recorded and F1 paid off.
 
     use super::*;
+    use crate::cli::test_fixtures::{ACohortOnDisk, a_cohort_on_disk};
     use crate::parameter_estimation::joint::census::DepthCode;
     use crate::parameter_estimation::joint::census_file::decode_census;
-    use crate::pop_var_caller_exp::test_fixtures::{ACohortOnDisk, a_cohort_on_disk};
     use crate::psp::PspReader;
     use crate::run::test_fixtures::gatherer_over;
 

@@ -9,8 +9,8 @@ use crate::calling::parameters_file::{
     CensusIdentity, DeclaredInbreeding, ReadsBehindEachCalibration,
 };
 use crate::calling::run_parameters::RunParameters;
-use crate::pop_var_caller_exp::calling_run;
-use crate::pop_var_caller_exp::run_ground::{GroundError, routing_criteria, segments_over};
+use crate::cli::calling_run;
+use crate::cli::run_ground::{GroundError, routing_criteria, segments_over};
 use crate::read::input::read_groups::ReadGroups;
 use crate::reference_info::ReferenceInfo;
 use crate::region_typing::{GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig};
@@ -19,12 +19,12 @@ use crate::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
 use crate::types::InbreedingF;
 use crate::types::Ploidy;
 
-use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
+use crate::cli::command_line::{Cli, PopVarCallerCommand};
 
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
 fn args_of(argv: &[&str]) -> CallFromAlignmentsArgs {
     match Cli::parse_from(argv).cmd {
-        PopVarCallerExpCommand::CallFromAlignments(args) => args,
+        PopVarCallerCommand::CallFromAlignments(args) => args,
         other => panic!("expected call-from-alignments, got {other:?}"),
     }
 }
@@ -38,7 +38,7 @@ fn refusal_of(argv: &[&str]) -> clap::Error {
 /// the defaults.
 fn a_defaults_run() -> Vec<&'static str> {
     vec![
-        "pop_var_caller_exp",
+        "pop_var_caller",
         "call-from-alignments",
         "--reference",
         "ref.fa",
@@ -70,7 +70,7 @@ fn the_subcommand_is_spelled_call_from_alignments() {
 #[test]
 fn a_run_that_names_neither_a_parameters_file_nor_the_defaults_is_refused() {
     let refusal = refusal_of(&[
-        "pop_var_caller_exp",
+        "pop_var_caller",
         "call-from-alignments",
         "--reference",
         "ref.fa",
@@ -106,7 +106,7 @@ fn a_run_that_names_both_a_parameters_file_and_the_defaults_is_refused() {
 #[test]
 fn the_alignment_flag_repeats_and_keeps_the_order_it_was_given() {
     let args = args_of(&[
-        "pop_var_caller_exp",
+        "pop_var_caller",
         "call-from-alignments",
         "--reference",
         "ref.fa",
@@ -126,7 +126,7 @@ fn the_alignment_flag_repeats_and_keeps_the_order_it_was_given() {
     );
     assert!(
         refusal_of(&[
-            "pop_var_caller_exp",
+            "pop_var_caller",
             "call-from-alignments",
             "--reference",
             "ref.fa",
@@ -679,7 +679,7 @@ fn a_defaults_runs_file_says_it_fitted_nothing() {
 /// **A reference, its catalog, and two samples' alignment files** — everything
 /// [`run_call_from_alignments`] needs, built on disk.
 ///
-/// **The shared one** ([`crate::pop_var_caller_exp::test_fixtures`]), which is also what
+/// **The shared one** ([`crate::cli::test_fixtures`]), which is also what
 /// `generate-psps` and `call-from-psps` are driven over — so the three commands are exercised
 /// on one cohort and a fixture change reaches all of them. It was two cohorts until F1: this
 /// one gave both samples no reads at all, so the only test that drove the whole command drove
@@ -697,7 +697,7 @@ fn a_cohort_on_disk() -> (
     tempfile::TempDir,
     CallFromAlignmentsArgs,
 ) {
-    let cohort = crate::pop_var_caller_exp::test_fixtures::a_cohort_on_disk();
+    let cohort = crate::cli::test_fixtures::a_cohort_on_disk();
     let args = CallFromAlignmentsArgs {
         reference: cohort.reference,
         catalog: Some(cohort.catalog),
@@ -1011,8 +1011,7 @@ fn a_tract_below_the_calling_floor_becomes_generic_ground_and_one_above_it_stays
     // default()` is, and what this command passed before it had flags.
     let mut catalog_floors = calling_floors.clone();
     catalog_floors.min_copies =
-        crate::pop_var_caller_exp::cli::parsers::parse_min_copies("5,5,4,4,4,3")
-            .expect("the catalog's own table");
+        crate::cli::parsers::parse_min_copies("5,5,4,4,4,3").expect("the catalog's own table");
     catalog_floors.max_str_len = StrRepeatCriteria::default().max_str_len_bp.get();
 
     let bounds = vec![ContigBounds {
@@ -1078,8 +1077,7 @@ fn a_tract_below_the_calling_floor_becomes_generic_ground_and_one_above_it_stays
 #[test]
 fn the_written_parameters_file_records_what_this_run_counted_as_a_repeat() {
     let (_reference_dir, _zeta_dir, _alpha_dir, mut args) = a_cohort_on_disk();
-    args.min_copies = crate::pop_var_caller_exp::cli::parsers::parse_min_copies("9,7,7,7,6,5")
-        .expect("six floors");
+    args.min_copies = crate::cli::parsers::parse_min_copies("9,7,7,7,6,5").expect("six floors");
     args.min_period = 2;
     args.max_period = 5;
     args.max_str_len = 64;
@@ -1190,8 +1188,7 @@ fn the_min_copies_of(criteria: &StrRepeatCriteria) -> MinCopies {
                 .to_string()
         })
         .collect();
-    crate::pop_var_caller_exp::cli::parsers::parse_min_copies(&floors.join(","))
-        .expect("six floors")
+    crate::cli::parsers::parse_min_copies(&floors.join(",")).expect("six floors")
 }
 
 /// **Where the routing did not move, nothing about the run moved either** — spec §10's

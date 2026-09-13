@@ -1,19 +1,20 @@
 # Pop Var Caller
 
-Multi-sample SNP caller built around a six-stage pipeline:
-per-sample pileup → `.psp` artefact → DUST filter → variant grouping →
-per-group merger → posterior engine.
+A population variant caller: SNPs, indels and repeat tracts, from aligned reads to one VCF, for
+one sample to a cohort. The `pop_var_caller` binary ([src/main.rs](src/main.rs)) has the
+subcommands `type-regions`, `repeat-catalog`, `call-from-alignments`, `generate-psps`,
+`call-from-psps`, `regenerate-census`, `estimate-parameters` and `estimate-contamination`;
+`pop_var_caller <subcommand> --help` describes each.
 
-> The project was originally a gVCF merger and is mid-pivot to the
-> caller described above. The gVCF-merger code has been removed; the
-> tree now contains only the new pipeline. The CLI surface (`pileup`,
-> `psp-to-pileup`, `var-calling`, `var-calling-from-bam`,
-> `estimate-contamination`) is shipped via the `pop_var_caller`
-> binary in [src/main.rs](src/main.rs).
+> This caller was written as "ng", beside an older six-stage caller (per-sample pileup → `.psp`
+> → DUST → grouping → merger → posterior engine), and replaced it on 2026-09-13. Its design is
+> under [doc/devel/ng/](doc/devel/ng/); the specs listed below describe the older caller and are
+> kept as its record.
 
 ## Authoritative documentation
 
-- **Pipeline architecture (spec):**
+- **This caller's design:** [doc/devel/ng/](doc/devel/ng/) (`spec/`, `arch/`)
+- **The older caller's pipeline architecture (spec):**
   [doc/devel/specs/calling_pipeline_architecture.md](doc/devel/specs/calling_pipeline_architecture.md)
 - **Design principles:**
   [doc/devel/specs/design_principles.md](doc/devel/specs/design_principles.md)

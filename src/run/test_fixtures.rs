@@ -134,8 +134,8 @@ pub(crate) fn a_census_plan_over_selecting(
     catalog_path: &Path,
     generic_target: u64,
 ) -> (Arc<Segmentation>, super::CensusPlan) {
+    use crate::cli::run_ground::{self, GroundRequest, RepeatRouting};
     use crate::parameter_estimation::joint::loci::UnambiguousRuns;
-    use crate::pop_var_caller_exp::run_ground::{self, GroundRequest, RepeatRouting};
     use crate::reference_info::{ReferenceSource, read_reference_info_observing};
     use crate::region_typing::DEFAULT_MAX_STR_LEN;
     use crate::region_typing::segment_criteria::{

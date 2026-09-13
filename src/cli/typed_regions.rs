@@ -4,7 +4,7 @@
 //! error enum.
 //!
 //! **Complete.** The knob surface and its
-//! [parsers](crate::pop_var_caller_exp::cli::parsers); the error enum; the
+//! [parsers](crate::cli::parsers); the error enum; the
 //! output writer ([`write_header`] + [`write_row`], carrying the T4 coordinate
 //! conversion); the fallible setup ([`prepare_walk_inputs`]); and the driver
 //! ([`run_typed_regions`]), which streams the partition to `<output>.tmp` and
@@ -52,7 +52,7 @@ const DEFAULT_BUFFERED_IO_CAPACITY: usize = 64 * 1024;
 /// short-read settings ng ships (spec §2.1, §2.3).
 ///
 /// `--min-copies` is a table rather than a scalar, so it carries its own
-/// [`value_parser`](crate::pop_var_caller_exp::cli::parsers::parse_min_copies)
+/// [`value_parser`](crate::cli::parsers::parse_min_copies)
 /// (a `MinCopies` cannot derive a clap parser on its own).
 #[derive(Debug, Args, Clone)]
 pub struct TypedRegionsArgs {
@@ -142,7 +142,7 @@ pub struct TypedRegionsArgs {
     #[arg(
         long,
         default_value_t = DEFAULT_MIN_PURITY,
-        value_parser = crate::pop_var_caller_exp::cli::parsers::parse_min_purity,
+        value_parser = crate::cli::parsers::parse_min_purity,
         help_heading = "Advanced"
     )]
     pub min_purity: f32,
@@ -157,7 +157,7 @@ pub struct TypedRegionsArgs {
     /// STR. Any other count is a hard parse error.
     #[arg(
         long,
-        value_parser = crate::pop_var_caller_exp::cli::parsers::parse_min_copies,
+        value_parser = crate::cli::parsers::parse_min_copies,
         default_value = "8,6,6,6,5,4",
         help_heading = "Advanced"
     )]
@@ -179,7 +179,7 @@ pub struct TypedRegionsArgs {
 
 /// Errors from the `type-regions` subcommand. The house pattern: a
 /// `#[non_exhaustive]` `thiserror` enum, `#[from]` where a single source type
-/// identifies the failure. `main_exp` walks the source chain to render it (spec
+/// identifies the failure. `main` walks the source chain to render it (spec
 /// §6). **Not** a `--max-str-len`/`--flank-bp` variant — the walk's
 /// `TypedRegionError` already carries both numbers (spec T3).
 #[derive(Debug, Error)]
@@ -311,7 +311,7 @@ pub fn write_header<W: io::Write>(
         min_copies: scan_min_copies,
     } = scan;
 
-    writeln!(out, "## tool: pop_var_caller_exp type-regions")?;
+    writeln!(out, "## tool: pop_var_caller type-regions")?;
     writeln!(out, "## version: {}", env!("CARGO_PKG_VERSION"))?;
     writeln!(out, "## reference: {}", reference.display())?;
     writeln!(out, "## min_period: {}", periods.min())?;
@@ -737,7 +737,7 @@ pub fn run_typed_regions(args: &TypedRegionsArgs) -> Result<(), TypedRegionsCliE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
+    use crate::cli::command_line::{Cli, PopVarCallerCommand};
     use clap::Parser;
 
     /// The subcommand parses through the top-level CLI, and every knob resolves
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn parses_through_the_top_level_cli() {
         let cli = Cli::try_parse_from([
-            "pop_var_caller_exp",
+            "pop_var_caller",
             "type-regions",
             "--reference",
             "r.fa",
@@ -754,7 +754,7 @@ mod tests {
             "regions.tsv",
         ])
         .unwrap();
-        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd else {
+        let PopVarCallerCommand::TypeRegions(args) = cli.cmd else {
             panic!("the parsed command is not type-regions");
         };
         assert_eq!(args.reference, PathBuf::from("r.fa"));
@@ -877,7 +877,7 @@ mod tests {
     /// straight back into a re-run of the command that produced the file.
     #[test]
     fn the_header_min_copies_round_trips_through_the_flag_parser() {
-        use crate::pop_var_caller_exp::cli::parsers::parse_min_copies;
+        use crate::cli::parsers::parse_min_copies;
         let config = TypedRegionConfig::default();
         let header = header_of(&config);
         let recorded = header
@@ -1358,7 +1358,7 @@ mod tests {
         output: &Path,
     ) -> TypedRegionsArgs {
         let mut argv = vec![
-            "pop_var_caller_exp".to_string(),
+            "pop_var_caller".to_string(),
             "type-regions".to_string(),
             "--reference".to_string(),
             reference.display().to_string(),
@@ -1370,7 +1370,7 @@ mod tests {
             argv.push(bed.display().to_string());
         }
         let cli = Cli::try_parse_from(argv).expect("the args parse");
-        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd else {
+        let PopVarCallerCommand::TypeRegions(args) = cli.cmd else {
             panic!("the parsed command is not type-regions");
         };
         args
@@ -1870,7 +1870,7 @@ mod tests {
             "--min-purity=inf",  //
         ] {
             let err = Cli::try_parse_from([
-                "pop_var_caller_exp",
+                "pop_var_caller",
                 "type-regions",
                 "--reference",
                 "r.fa",
@@ -2056,7 +2056,7 @@ mod tests {
     #[test]
     fn min_copies_accepts_exactly_six_values() {
         let cli = Cli::try_parse_from([
-            "pop_var_caller_exp",
+            "pop_var_caller",
             "type-regions",
             "--reference",
             "r.fa",
@@ -2066,7 +2066,7 @@ mod tests {
             "9,5,4,3,3,3",
         ])
         .expect("six values parse");
-        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd else {
+        let PopVarCallerCommand::TypeRegions(args) = cli.cmd else {
             panic!("the parsed command is not type-regions");
         };
         assert_eq!(args.min_copies.for_period(1), 9);
@@ -2080,7 +2080,7 @@ mod tests {
     fn min_copies_with_a_wrong_count_is_a_cli_usage_error() {
         for bad in ["6,4,4,3,3", "6,4,4,3,3,3,3", "6"] {
             let err = Cli::try_parse_from([
-                "pop_var_caller_exp",
+                "pop_var_caller",
                 "type-regions",
                 "--reference",
                 "r.fa",

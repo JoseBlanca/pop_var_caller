@@ -251,7 +251,7 @@ impl GenotypePriorModel for MarginalizedDirichletPrior {
 /// guarantee, and the clamp does not provide it** (corrected 2026-08-23, alongside spec §7). The
 /// clamp is a line inside one estimator; production's own command line takes the closed `[0, 1]`
 /// and a test pins that it accepts exactly 1
-/// (`parse_inbreeding_coefficient`, `src/pop_var_caller/cli/parsers.rs`), so in production a
+/// (the deleted production binary's `parse_inbreeding_coefficient`), so in production a
 /// coefficient of 1 reaches the engine whenever someone passes one. **ng has no such door, and now
 /// cannot have one by accident** — every construction from a raw `f64` outside test code goes
 /// through the checked constructor, the fitted path clamps at 0.99 before it, and

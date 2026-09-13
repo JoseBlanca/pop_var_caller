@@ -5,14 +5,14 @@
 use super::*;
 use clap::Parser;
 
-use crate::pop_var_caller_exp::cli::{Cli, PopVarCallerExpCommand};
-use crate::pop_var_caller_exp::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
-use crate::pop_var_caller_exp::test_fixtures::{ACohortOnDisk, a_cohort_on_disk};
+use crate::cli::command_line::{Cli, PopVarCallerCommand};
+use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
+use crate::cli::test_fixtures::{ACohortOnDisk, a_cohort_on_disk};
 
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
 fn args_of(argv: &[&str]) -> CallFromPspsArgs {
     match Cli::parse_from(argv).cmd {
-        PopVarCallerExpCommand::CallFromPsps(args) => args,
+        PopVarCallerCommand::CallFromPsps(args) => args,
         other => panic!("expected call-from-psps, got {other:?}"),
     }
 }
@@ -24,7 +24,7 @@ fn refusal_of(argv: &[&str]) -> clap::Error {
 /// The shortest run a person can type.
 fn a_defaults_run() -> Vec<&'static str> {
     vec![
-        "pop_var_caller_exp",
+        "pop_var_caller",
         "call-from-psps",
         "--reference",
         "ref.fa",
@@ -43,7 +43,7 @@ fn the_subcommand_is_spelled_call_from_psps() {
     assert_eq!(args.psps, vec![PathBuf::from("zeta.psp")]);
     assert_eq!(args.output, PathBuf::from("calls.vcf"));
     assert!(
-        Cli::try_parse_from(["pop_var_caller_exp", SUBCOMMAND, "--help"])
+        Cli::try_parse_from(["pop_var_caller", SUBCOMMAND, "--help"])
             .expect_err("--help exits")
             .to_string()
             .contains(SUBCOMMAND),
@@ -57,7 +57,7 @@ fn the_subcommand_is_spelled_call_from_psps() {
 #[test]
 fn a_run_that_names_neither_a_parameters_file_nor_the_defaults_is_refused() {
     let refused = refusal_of(&[
-        "pop_var_caller_exp",
+        "pop_var_caller",
         "call-from-psps",
         "--reference",
         "ref.fa",
@@ -91,7 +91,7 @@ fn the_ground_cannot_be_narrowed_by_a_flag() {
 #[test]
 fn the_psp_flag_repeats_and_keeps_the_order_it_was_given() {
     let mut argv = vec![
-        "pop_var_caller_exp",
+        "pop_var_caller",
         "call-from-psps",
         "--reference",
         "ref.fa",

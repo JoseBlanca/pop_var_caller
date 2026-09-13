@@ -18,7 +18,7 @@
 //! `regions_in_flight × cohort_locus_builder_regions_len` bases where the streaming driver
 //! holds one region's worth. So the two knobs are one lever and a caller that wants today's
 //! memory divides today's width by the count it asks for
-//! (`crate::pop_var_caller_exp::calling_run::round_shape_for`). Sized that way, peak resident rises 4% to
+//! (`crate::cli::calling_run::round_shape_for`). Sized that way, peak resident rises 4% to
 //! 13% across cohorts of 1, 4, 8, 16, 32 and 63 accessions.
 //!
 //! **Ordering.** `regions_in_round.par_iter()` is indexed, so `collect` gives the round's

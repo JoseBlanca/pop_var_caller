@@ -962,9 +962,9 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
     println!("next, from the output directory:");
     println!("  samtools faidx reference.fa");
     println!("  for bam in sim*.bam; do samtools index \"$bam\"; done");
-    println!("  pop_var_caller_exp repeat-catalog --reference reference.fa");
+    println!("  pop_var_caller repeat-catalog --reference reference.fa");
     println!(
-        "  pop_var_caller_exp call-from-alignments --reference reference.fa \\\n    \
+        "  pop_var_caller call-from-alignments --reference reference.fa \\\n    \
          --alignment sim000.bam --regions confident.bed --output calls.vcf --defaults"
     );
     Ok(())

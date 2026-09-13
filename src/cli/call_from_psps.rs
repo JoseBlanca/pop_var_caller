@@ -36,12 +36,12 @@ use crate::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichlet
 use crate::calling::inference::summarise_condition::SummariseConditionLoop;
 use crate::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
 use crate::calling::parameters_file::{ParametersFile, beside_the_vcf};
+use crate::cli::calling_run::{self, CallingRunError};
+use crate::cli::generate_psps::PSP_FILE_EXTENSION;
+use crate::cli::psp_inputs::{PspArgumentRefusal, psps_named};
+use crate::cli::run_ground::{self, GroundError};
 use crate::fasta::ContigList;
 use crate::parameter_estimation::joint::loci::ReferenceDigest;
-use crate::pop_var_caller_exp::calling_run::{self, CallingRunError};
-use crate::pop_var_caller_exp::generate_psps::PSP_FILE_EXTENSION;
-use crate::pop_var_caller_exp::psp_inputs::{PspArgumentRefusal, psps_named};
-use crate::pop_var_caller_exp::run_ground::{self, GroundError};
 use crate::read::input::reference::OpenReference;
 use crate::reference_info::{
     ReferenceCheck, ReferenceInfoCache, ReferenceInfoError,
@@ -186,7 +186,7 @@ pub struct CallFromPspsArgs {
     /// segmentation has to be the one that produced the stored loci.
     #[arg(
         long,
-        value_parser = crate::pop_var_caller_exp::cli::parsers::parse_min_copies,
+        value_parser = crate::cli::parsers::parse_min_copies,
         default_value = "8,6,6,6,5,4",
         help_heading = "What counts as a repeat"
     )]
@@ -223,7 +223,7 @@ pub struct CallFromPspsArgs {
     #[arg(
         long,
         default_value_t = DEFAULT_MIN_PURITY,
-        value_parser = crate::pop_var_caller_exp::cli::parsers::parse_min_purity,
+        value_parser = crate::cli::parsers::parse_min_purity,
         help_heading = "What counts as a repeat"
     )]
     pub min_purity: f32,
