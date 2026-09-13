@@ -646,9 +646,15 @@ at `74e424ea`; 62 examples; 6 benches; 1 binary.
   `pop_var_caller`. The 4 `scripts/ng_*.sh` and 6 `benchmarks/**/run_ng*` drivers that look
   for `pop_var_caller_exp` in `target*/release/` are repointed.
   *Depends:* E1. *Source:* §2 In ("subcommand names are unchanged").
-- ☐ **E3. CI.** `.github/workflows/ci.yml`'s release-test step is scoped to `ng::calling`;
+- ✅ **E3. CI.** `.github/workflows/ci.yml`'s release-test step is scoped to `ng::calling`;
   rescope to `calling`. Nothing else in CI names a path.
-  *Depends:* E1.
+  *Depends:* E1. Done 2026-09-13, before E2, since it depends only on E1 and CI's filter matched
+  no test once E1 landed. The filter is `calling::`, which selects exactly the module's 1,167
+  tests (1,165 pass and 2 are ignored under `--release`). The step's comment justified the narrow
+  scope with 8 release-mode failures, mostly in production; measured now, the whole library has 3
+  under `--release` — two `alignment` tests and one `genetics` test that expect a panic from a
+  debug-only check. The comment says so; gating those three and widening the step is handed on
+  (§8).
 
 > **Checkpoint E: the same file under a new name.** A2's md5s equal A1's — `##commandline` is the
 > exempted line and the only one that may differ. Pause for review.
@@ -691,6 +697,7 @@ at `74e424ea`; 62 examples; 6 benches; 1 binary.
 | Moving `doc/devel/ng/{spec,arch,impl_plan,reports}` to `doc/devel/` and repairing `src/ng/...` paths in about 200 Markdown files | doc churn that would bury the code diff; nothing in it is checked by a build | the same follow-on |
 | Renaming the `ng_` prefix off 40 examples, 5 integration tests, 5 benches, 8 scripts | cosmetic; better done once the doc paths move with it | the same follow-on |
 | PROJECT_STATUS's *About this project* paragraph, which still describes `pileup → .psp → DUST → merger → posterior engine` | protected: "do not edit this paragraph" | the owner |
+| CI's release-mode test step runs only `calling::`: three `#[should_panic]` tests elsewhere (`alignment::left_align_{repeated,structured}::…::an_offset_past_the_reference_panics`, `genetics::…::lgamma_panics_on_non_positive_in_debug`) expect a debug-only panic and fail under `--release` | found at E3; a one-line `#[cfg(debug_assertions)]` each, then the step can run crate-wide | a small follow-up |
 | Whether a fitted inbreeding coefficient improves calls on GIAB | unrelated; open since 2026-09-11 | PROJECT_STATUS, current focus |
 | A production-free soak for the aligner's band margin (`BAND_HEADROOM`): ng's banded aligner against the same aligner over the whole matrix, at case counts past the 3,000 a seed C10 froze | C10 lost the soak that validated the margin; nothing in this plan narrows it, so the risk waits for someone who does. Owner agreed at Checkpoint C (2026-09-13) | its own task, before anyone changes `BAND_HEADROOM` |
 | Why `quality_parity::a_homozygous_variant_cohort_is_skipped_by_both`'s cohort — ten samples of 78 variant and 2 reference reads — has its site quality taken from 900 to 0 when its comment says the correction skips it; production did the same, so it is a wrong comment or a defect ng inherited | found at C7, outside this plan; ng reproduces it alone, so it needs no production. Owner agreed at Checkpoint C | a short investigation after the plan |

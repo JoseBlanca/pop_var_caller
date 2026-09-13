@@ -47,7 +47,7 @@ jobs:
         run: cargo test --lib --tests --examples --all-features
 
       - name: Test the calling module under --release (holds its release-only assertions)
-        # `src/ng/calling/` is designed with no `Result` anywhere: a caller bug is an
+        # `src/calling/` is designed with no `Result` anywhere: a caller bug is an
         # assertion, and a good few of those are deliberately held in RELEASE because the
         # failure they prevent is silent — a truncated row scored as a whole one, a `NaN`
         # laundered into a plausible allele frequency. A debug test run cannot tell
@@ -57,13 +57,15 @@ jobs:
         # in `score_one_sample` to `debug_assert` and running under `--release` fails six
         # tests, one per check. Under the debug run it fails none.
         #
-        # SCOPED TO `ng::calling` ON PURPOSE. Crate-wide, `cargo test --release --lib` has
-        # 8 failures in `genetics`, `ng::alignment`, `sample_summary`, `ssr::cohort` and
-        # `var_calling` — all `#[should_panic]` tests on checks that are debug-only by
-        # design and simply lack `#[cfg(debug_assertions)]`. Two of them already say
-        # `_in_debug` in their names. They live in the frozen caller and in modules ng may
-        # not edit, so widening this scope is their owners' work, not this step's.
-        run: cargo test --release --lib ng::calling --all-features
+        # SCOPED TO `calling::` ON PURPOSE — the filter selects exactly the `calling`
+        # module's tests, 1,167 of them. Crate-wide, `cargo test --release --lib` has 3
+        # failures (measured 2026-09-13, after the older caller was deleted and ng's modules
+        # moved to the crate root): `alignment::left_align_repeated` and
+        # `alignment::left_align_structured`'s `an_offset_past_the_reference_panics`, and
+        # `genetics::tests::lgamma_panics_on_non_positive_in_debug` — `#[should_panic]`
+        # tests on checks that are debug-only by design and lack
+        # `#[cfg(debug_assertions)]`. Gating those three would let this step run crate-wide.
+        run: cargo test --release --lib calling:: --all-features
 
       - name: Doc build (deny warnings)
         env:
