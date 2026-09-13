@@ -226,7 +226,17 @@ carries a header line naming the production commit that wrote it.
     is `production_parity.rs`, frozen at C4. Headers of eight paralog files and `src/ng/mod.rs`
     that described the guard as running are put in the past tense, and `copy_fidelity\.rs`
     leaves `precommit-check.sh`'s exemption list.
-  - ☐ C4 · ☐ C5 · ☐ C6 · ☐ C7 · ☐ C8 · ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
+  - ✅ **C4** `paralog/production_parity.rs` — **frozen, all 14 tests kept.** Every value
+    production's filter returned on the file's generated inputs — the scores of 800 swept
+    loci, 200 one-sample loci and 19 hand-built cases; the prior, curve and cut over eight ratio
+    streams; the verdict at 320 combinations of stream, target and ratio; the empty and
+    unconverged EM; and the fallback at 45 combinations of configuration, histogram and target —
+    was recorded at `d9e7b076` by an instrumented copy
+    of the test: 6,494 keyed values in `paralog/testdata/production_parity_answers.tsv`
+    (274 KB), f64s as bit patterns. The tests still generate the inputs from the same seeds
+    and compare ng against the file; each asserts it read every answer in its section. Changing
+    one fixture value fails one test; changing one generator draw rate fails three.
+  - ☐ C5 · ☐ C6 · ☐ C7 · ☐ C8 · ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
 - ☐ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
   `ng_psp_head_encoding.rs` (`test = true` in `Cargo.toml`), `paralog_score_parity.rs` — are
   deleted with a line each in the report saying which document already holds their result.

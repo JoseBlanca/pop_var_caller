@@ -50,7 +50,8 @@
 //!
 //! **What proves the copy computes what it was copied from is not this file's tests.**
 //! They are production's, transcribed, so they pass on both trees whatever either does.
-//! `production_parity.rs` feeds the two implementations the same randomised inputs — at
+//! `production_parity.rs` feeds ng's copy the randomised inputs production was run on, and
+//! compares against production's answers frozen in `testdata/production_parity_answers.tsv` — at
 //! cohort sizes 1, 2, 10 and 63, with absent samples, zero-read samples and degenerate σ₀
 //! among them — and asserts the two counts equal exactly and the likelihood ratio and both
 //! log-likelihoods **within 1e-9 nats**, a wall derived from the series' truncation term.
@@ -505,8 +506,8 @@ fn ln_normal(x: f64, mu: f64, sigma: f64) -> f64 {
 /// **fewer than 1 pair in 500** landing on the neighbour.
 ///
 /// **On the inputs a real cohort produces it does not move at all**, which is the claim that
-/// matters and is measured next door: `production_parity`'s differential scores 800 randomised
-/// loci at cohort sizes 1, 2, 10 and 63 through this tree and through production's, and the
+/// matters and is measured next door: `production_parity`'s differential scores 800 randomised loci
+/// at cohort sizes 1, 2, 10 and 63 through this tree, against production's frozen answers, and the
 /// widest gap on any field is **exactly zero**. On the 63-accession tomato cohort the VCF, the
 /// 29,212 records dropped, the fitted duplication rate and the cut are all unchanged.
 ///

@@ -12,7 +12,7 @@
 //! **This is ng's file, not a copy, and it was never textually guarded** — production keeps its
 //! counterpart (`calibrate_from_histogram`) in `src/var_calling/paralog_filter/calibrate.rs`, below
 //! four items ng deliberately does not port, so it fell outside the span the copy guard compared.
-//! It is checked against production all the same:
+//! It is checked against production's frozen answers all the same:
 //! `the_fallback_and_the_cut_agree_with_productions_bit_for_bit` in `production_parity` is the
 //! oracle, beside the nine other differentials.
 //!
