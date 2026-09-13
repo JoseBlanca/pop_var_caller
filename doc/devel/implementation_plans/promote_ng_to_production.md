@@ -261,7 +261,17 @@ carries a header line naming the production commit that wrote it.
     documented as a cohort the correction leaves alone, yet production took its 900 Phred to
     0 and ng agrees within 0.001 — a wrong doc comment or a defect both share; out of this
     plan's scope and raised with the owner.
-  - ☐ C8 · ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
+  - ✅ **C8** `calling/allele_candidates/ssr_production_differential.rs` — **frozen, not copied;
+    all 5 tests kept.** *Deviation from the row, recorded 2026-09-13:* the three rules the row
+    says to copy were already re-implemented in the file; what still ran production was its own
+    selector (`build_rungs` then `assemble_candidates`), used as the answer the re-implementation
+    must reproduce. Copying that selector would have meant porting two production modules into a
+    test; its answers were recorded instead. What production returned on every tract the tests
+    build — 269 tomato tracts with the whole panel, the same with one accession, two hand-built;
+    539 distinct, since one tract has a single accession — is in
+    `testdata/tomato_tract_production_candidates.csv` (36 KB), keyed by a digest of the whole
+    tract. Dropping one candidate from a row fails two tests.
+  - ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
 - ☐ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
   `ng_psp_head_encoding.rs` (`test = true` in `Cargo.toml`), `paralog_score_parity.rs` — are
   deleted with a line each in the report saying which document already holds their result.

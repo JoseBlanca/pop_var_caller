@@ -1,5 +1,5 @@
-//! **The other end of the differential: production's selector, run against ng's on the same
-//! tomato loci** (spec §10; arch *Test & bench shape*).
+//! **The other end of the differential: production's selector's recorded answers, against ng's
+//! on the same tomato loci** (spec §10; arch *Test & bench shape*).
 //!
 //! Three of production's rules are replaced on purpose, so byte-identical output is impossible
 //! by construction and a parity test with an escape clause would have no failing state. What
@@ -7,6 +7,14 @@
 //! production's clear-peak nomination, its cohort-summed depth gate and its same-length sibling
 //! bar, driving ng's own fold and ng's own ladder — and require the result to be production's
 //! candidate set on real reads.
+//!
+//! **Production's own answer is frozen since promotion step C8.** Until then each test also ran
+//! production's selector — `ssr::cohort::rung_ladder::build_rungs` then
+//! `ssr::cohort::candidate_set::assemble_candidates`, at ploidy 2 with both configurations'
+//! `dev_default()` — on the same tract. What it returned on every tract the tests build was
+//! recorded at commit `d9e7b076` into `testdata/tomato_tract_production_candidates.csv`, keyed by
+//! a digest of the whole tract as the test builds it, so a tract built differently finds no answer
+//! and fails. The re-implemented rules below still run; only the yardstick is a file.
 //!
 //! **The rules are re-implemented here and not made a field of [`SsrSelectionConfig`]**: the
 //! shipping binary carries one rule, and a configuration nobody should ever set does not belong
@@ -35,7 +43,8 @@
 //! alternatives come out in is the merge table's own on the shipped path and is pinned by the
 //! module's unit tests; what this file asserts is that **the same sequences survive**.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::OnceLock;
 
 use super::fixtures::{row, sample_showing};
 use super::ssr::{SsrSelectionConfig, build_ladder, rescue_occupied_neighbours, select_ssr};
@@ -43,10 +52,6 @@ use super::{SelectionScratch, summarise_alleles};
 use crate::ng::locus_generation::{LocusKind, SsrDetail};
 use crate::ng::run::cohort_merge::build::CohortObservation;
 use crate::ng::types::{ContigId, GenomeRegion, Motif, Ploidy, Position};
-
-use crate::ssr::cohort::candidate_set::{CandidateCfg, assemble_candidates};
-use crate::ssr::cohort::rung_ladder::{RungCfg, build_rungs};
-use crate::ssr::cohort::types::{CohortLocus, LocusId, SampleEvidence, SsrQc};
 
 /// One tract of the fixture: the merge's allele table and every covering sample's reads on it.
 struct FixtureTract {
@@ -177,38 +182,32 @@ impl FixtureTract {
         }
     }
 
-    /// The same locus as production's Stage-2 sees it.
-    fn as_production_locus(&self) -> CohortLocus {
-        let mut locus = CohortLocus::new(
-            LocusId {
-                chrom_id: self.contig,
-                start: self.start,
-                end: self.end,
-            },
-            crate::ssr::types::Motif::new(&self.motif).expect("the fixture's motif"),
-            self.alleles[0].clone().into_boxed_slice(),
-            self.alleles[0].clone().into_boxed_slice(),
-        );
-        let mut by_sample: BTreeMap<usize, Vec<(usize, u32)>> = BTreeMap::new();
+    /// **This tract, reduced to one number** — FNV-1a over the coordinates, the motif, the allele
+    /// table and every row, each length-prefixed so that two tables cannot run into each other.
+    /// The key production's frozen answers are looked up by.
+    fn digest(&self) -> u64 {
+        let mut bytes = Vec::new();
+        bytes.extend(self.contig.to_le_bytes());
+        bytes.extend(self.start.to_le_bytes());
+        bytes.extend(self.end.to_le_bytes());
+        bytes.extend((self.motif.len() as u64).to_le_bytes());
+        bytes.extend(&self.motif);
+        bytes.extend((self.alleles.len() as u64).to_le_bytes());
+        for allele in &self.alleles {
+            bytes.extend((allele.len() as u64).to_le_bytes());
+            bytes.extend(allele);
+        }
+        bytes.extend((self.rows.len() as u64).to_le_bytes());
         for &(sample, allele, reads) in &self.rows {
-            by_sample.entry(sample).or_default().push((allele, reads));
+            bytes.extend((sample as u64).to_le_bytes());
+            bytes.extend((allele as u64).to_le_bytes());
+            bytes.extend(reads.to_le_bytes());
         }
-        for (sample, rows) in by_sample {
-            // Production's contract is one entry per distinct sequence, byte-sorted.
-            let mut seq_counts: Vec<(Box<[u8]>, u32)> = rows
-                .into_iter()
-                .map(|(allele, reads)| (self.alleles[allele].clone().into_boxed_slice(), reads))
-                .collect();
-            seq_counts.sort_by(|(left, _), (right, _)| left.cmp(right));
-            locus.push(
-                u32::try_from(sample).expect("a sample index"),
-                SampleEvidence {
-                    seq_counts,
-                    qc: SsrQc::default(),
-                },
-            );
-        }
-        locus
+        bytes
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |digest, &byte| {
+                (digest ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            })
     }
 }
 
@@ -216,8 +215,8 @@ impl FixtureTract {
 /// assembles, expressed against the merge's table instead of against its own evidence rows.
 ///
 /// The constants are production's own defaults, retyped here rather than read from
-/// `CandidateCfg` so that a change to production's development defaults turns this red instead
-/// of silently moving both sides of the comparison together.
+/// `CandidateCfg`. While production ran beside this, that made a change to its development
+/// defaults turn the comparison red; against the frozen answers it is what they were written at.
 mod productions_rules {
     use super::*;
 
@@ -422,12 +421,50 @@ mod productions_rules {
     }
 }
 
-/// Production's own selector's answer at this tract, through its own code.
+/// Production's frozen candidate sets, keyed by tract digest.
+fn productions_frozen_answers() -> &'static HashMap<u64, BTreeSet<Vec<u8>>> {
+    static ANSWERS: OnceLock<HashMap<u64, BTreeSet<Vec<u8>>>> = OnceLock::new();
+    ANSWERS.get_or_init(|| {
+        let mut answers = HashMap::new();
+        for line in include_str!("testdata/tomato_tract_production_candidates.csv")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .skip(1)
+        {
+            let fields: Vec<&str> = line.split(',').collect();
+            let [digest, _contig, _start, _end, candidates] = fields[..] else {
+                panic!("the candidate table has five columns: {line}");
+            };
+            let digest = u64::from_str_radix(digest, 16).expect("a tract digest");
+            assert!(
+                !candidates.is_empty(),
+                "production always offers the reference: {line}"
+            );
+            let candidates: BTreeSet<Vec<u8>> = candidates
+                .split('|')
+                .map(|seq| seq.as_bytes().to_vec())
+                .collect();
+            assert!(
+                answers.insert(digest, candidates).is_none(),
+                "tract {digest:016x} is frozen twice"
+            );
+        }
+        answers
+    })
+}
+
+/// Production's own selector's answer at this tract, as frozen.
 fn productions_own_answer(tract: &FixtureTract) -> BTreeSet<Vec<u8>> {
-    let locus = tract.as_production_locus();
-    let rungs = build_rungs(&locus, &RungCfg::dev_default());
-    let set = assemble_candidates(&locus, &rungs, 2, &CandidateCfg::dev_default());
-    set.alleles.iter().map(|seq| seq.to_vec()).collect()
+    productions_frozen_answers()
+        .get(&tract.digest())
+        .unwrap_or_else(|| {
+            panic!(
+                "no frozen production answer for the tract at contig {} {}-{} — it is not built \
+                 the way it was when production was run",
+                tract.contig, tract.start, tract.end,
+            )
+        })
+        .clone()
 }
 
 #[cfg(test)]
@@ -442,7 +479,7 @@ mod tests {
     /// selector reproduces production's candidate set at every tract of the tomato fixture.**
     ///
     /// This is the assertion spec §10 asks for. It has a failing state at both ends: a rule
-    /// re-implemented wrongly here fails against production's own code, and a change to ng's
+    /// re-implemented wrongly here fails against production's recorded answers, and a change to ng's
     /// ladder or fold — which this arm drives — fails the same way.
     #[test]
     fn productions_rules_switched_in_reproduce_productions_candidate_set_on_tomato() {
