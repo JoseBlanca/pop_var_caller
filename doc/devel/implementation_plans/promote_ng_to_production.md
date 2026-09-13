@@ -450,7 +450,14 @@ mattered:
     is the two contigs, `acgtNRYK` and `ACGTACGT`, and each of ng's slices is compared against
     its run of them. Production's cache is unchanged since `d9e7b076`. Changing one recorded byte
     fails the test.
-- ☐ **C26** · *Depends:* C1, C9.
+- ✅ **C26** · *Depends:* C1, C9. `read/prepared_read.rs` — **bridges deleted; 6 tests → 2, both
+  frozen.** Nothing outside the file used the four `#[cfg(test)]` conversions any more. Four of the
+  six tests checked only those conversions — that each mate role and every field reached its
+  counterpart in production's type and back — and went with them, so the suite drops by 4. The
+  other two compared ng's `length()` with production's on nine reads; production's answers,
+  recorded at `d9e7b076`, are now written in the tests — seven lengths, a CIGAR-consumes-4-of-5
+  error, and the quality-length error reported first when both checks fail. Changing one recorded
+  length or one error field fails its test.
 
   **Deviation, recorded 2026-09-12: `cram_files` goes to `src/bam/`, and §2's "shared
   infrastructure is not touched" gives way.** The alternative is a copy in ng and a second copy

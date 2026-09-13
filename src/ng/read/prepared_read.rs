@@ -17,7 +17,8 @@
 //! carries**: [`prepare_passthrough`] is production's `--no-baq` arm copied here on
 //! 2026-09-12, deriving the same four values from the same flags and CIGAR and returning
 //! ng's read with its group attached. Until then ng minted production's read and converted
-//! it; `from_production` survives only as the oracles' bridge and is `#[cfg(test)]`.
+//! it; that conversion survived as a test-only bridge for the parity oracles until promotion
+//! step C26 deleted it.
 //! Either way ng re-derives none of the per-field wiring, and the read-preparation parity
 //! fixture is what says so.
 //!
@@ -34,13 +35,6 @@ use crate::ng::types::ReadGroupId;
 // `pileup::walker` until 2026-09-12, and the old path was the misleading one: this is
 // crate-wide read vocabulary, not the walk's.
 use crate::bam::alignment_input::CigarOp;
-// Aliased, so "ours" and "production's" read at a glance instead of being carried by a
-// four-segment path at every site below. **`#[cfg(test)]` since 2026-09-12**: the only
-// things naming production's types now are the oracles' bridges.
-#[cfg(test)]
-use crate::pileup::walker::MateRole as ProductionMateRole;
-#[cfg(test)]
-use crate::pileup::walker::PreparedRead as ProductionPreparedRead;
 
 // ---------------------------------------------------------------------
 // Minting one
@@ -215,49 +209,6 @@ impl MateRole {
             MateRole::Solo | MateRole::SecondOfPair => false,
         }
     }
-
-    /// The same role, on ng's copy of the enum.
-    ///
-    /// Written as an exhaustive `match` rather than a cast, so a variant added to
-    /// **production's** enum stops this compiling instead of being silently mapped to a
-    /// neighbour. *That is the only direction the compiler checks here:* a variant added
-    /// to **ng's** would simply be unreachable from any production read, in silence —
-    /// [`to_production`](Self::to_production) is the `#[cfg(test)]` witness that closes
-    /// it.
-    ///
-    /// An inherent `pub(crate)` function rather than a `From` impl, matching its
-    /// neighbour `PreparedRead::from_production`: trait impls carry no visibility, so a
-    /// `From` would publish an ng→production coupling that nothing outside the crate can
-    /// use.
-    ///
-    /// **`#[cfg(test)]` since 2026-09-12**, with its neighbour and for the same reason:
-    /// [`mate_role_of`] now derives the role from the SAM flags directly, so no run turns a
-    /// production role into ng's.
-    #[cfg(test)]
-    pub(crate) fn from_production(role: ProductionMateRole) -> Self {
-        match role {
-            ProductionMateRole::Solo => MateRole::Solo,
-            ProductionMateRole::FirstOfPair => MateRole::FirstOfPair,
-            ProductionMateRole::SecondOfPair => MateRole::SecondOfPair,
-        }
-    }
-
-    /// The reverse direction, **`#[cfg(test)]` only**: nothing needs it at run time.
-    /// See also [`PreparedRead::into_production`], which the walker parity harness needs
-    /// for the same reason — to hand one prepared stream to both walkers.
-    ///
-    /// It exists so that an exhaustive `match` over *ng's* enum also has to be updated
-    /// when ng's enum grows — which is what makes
-    /// [`from_production`](Self::from_production)'s claim true in both directions instead
-    /// of half-true.
-    #[cfg(test)]
-    pub(crate) fn to_production(self) -> ProductionMateRole {
-        match self {
-            MateRole::Solo => ProductionMateRole::Solo,
-            MateRole::FirstOfPair => ProductionMateRole::FirstOfPair,
-            MateRole::SecondOfPair => ProductionMateRole::SecondOfPair,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------
@@ -426,105 +377,6 @@ impl PreparedRead {
         }
         Ok(cigar_consumed)
     }
-
-    /// Production's prepared read plus the read group it had nowhere to put.
-    ///
-    /// **The per-field wiring stays production's.** Read preparation builds its
-    /// output by calling `prepare_passthrough` — production's `--no-baq` arm —
-    /// rather than re-deriving `alignment_end`, `mate_role`, `mq_log_err` and
-    /// the rest; this is the one line where that output becomes ng's type. Every
-    /// field is moved across unchanged, and `read_group` is the only thing added.
-    ///
-    /// Written as a **destructure** so a field added to production's type stops
-    /// this compiling instead of being silently dropped on the way into ng's —
-    /// the same reason `AlignedRead::into_mapped_read` destructures on the way
-    /// out.
-    /// **`#[cfg(test)]` since 2026-09-12**: nothing a run executes builds production's read
-    /// any more. [`prepare_passthrough`] mints ng's directly, so the only readers left are
-    /// the oracles that hand one stream to both walkers, and this file's own tests of the
-    /// conversion. It goes when those oracles do.
-    #[cfg(test)]
-    pub(crate) fn from_production(read: ProductionPreparedRead, read_group: ReadGroupId) -> Self {
-        let ProductionPreparedRead {
-            chrom_id,
-            alignment_start,
-            alignment_end,
-            cigar,
-            seq,
-            bq_baq,
-            mq_log_err,
-            mapq,
-            is_reverse_strand,
-            qname,
-            mate_role,
-            adaptor_boundary,
-        } = read;
-
-        Self {
-            chrom_id,
-            alignment_start,
-            alignment_end,
-            cigar,
-            seq,
-            bq_baq,
-            mq_log_err,
-            mapq,
-            is_reverse_strand,
-            qname,
-            mate_role: MateRole::from_production(mate_role),
-            adaptor_boundary,
-            read_group,
-        }
-    }
-
-    /// ng's prepared read as production's, **dropping the read group** — the one field
-    /// production has nowhere to put.
-    ///
-    /// `#[cfg(test)]`, and it exists for exactly one caller: the walker parity harness,
-    /// which must hand **one** prepared stream to both walkers. Preparing twice would
-    /// compare two different inputs and call the result parity. Reads are prepared once,
-    /// by ng's preparer, and converted down here.
-    ///
-    /// Destructured for the reason `from_production` is: a field added to ng's type must
-    /// stop this compiling, so that whoever adds it decides whether it has a production
-    /// counterpart rather than discovering later that the parity harness quietly stopped
-    /// carrying it.
-    #[cfg(test)]
-    pub(crate) fn into_production(self) -> ProductionPreparedRead {
-        let Self {
-            chrom_id,
-            alignment_start,
-            alignment_end,
-            cigar,
-            seq,
-            bq_baq,
-            mq_log_err,
-            mapq,
-            is_reverse_strand,
-            qname,
-            mate_role,
-            adaptor_boundary,
-            // Production's type has no counterpart; this is the whole reason ng owns its
-            // own read. The walk does not read it, which is what makes dropping it safe
-            // *here* and only here.
-            read_group: _,
-        } = self;
-
-        ProductionPreparedRead {
-            chrom_id,
-            alignment_start,
-            alignment_end,
-            cigar,
-            seq,
-            bq_baq,
-            mq_log_err,
-            mapq,
-            is_reverse_strand,
-            qname,
-            mate_role: mate_role.to_production(),
-            adaptor_boundary,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -647,43 +499,25 @@ mod tests {
         assert!(!MateRole::SecondOfPair.is_first_of_pair());
     }
 
-    /// Each production role maps to its own counterpart — not to a neighbour.
-    /// A conversion that collapsed two roles would silently disable the
-    /// mate-overlap tie-break rather than fail.
-    ///
-    /// Both directions, because the two catch different mistakes: `from_production`'s
-    /// `match` is what the compiler checks when *production* grows a variant, and
-    /// `to_production` is what it checks when *ng* does. Asserting the round trip on top
-    /// is what rules out a pair of conversions that are each exhaustive and disagree.
-    #[test]
-    fn every_production_mate_role_maps_to_its_counterpart() {
-        for (theirs, ours) in [
-            (ProductionMateRole::Solo, MateRole::Solo),
-            (ProductionMateRole::FirstOfPair, MateRole::FirstOfPair),
-            (ProductionMateRole::SecondOfPair, MateRole::SecondOfPair),
-        ] {
-            assert_eq!(MateRole::from_production(theirs), ours);
-            assert_eq!(ours.to_production(), theirs);
-        }
-    }
-
     /// **The transcription, checked against its original.** `length()` was copied out of
     /// production's `walker/mod.rs` by hand — the one thing in this milestone that was,
     /// everything else being a byte copy — and the tests above pin ng against ng. This
-    /// pins ng against production, over every op class and both failure modes, so a slip
+    /// pins ng against production's recorded answers, over every op class and the
+    /// CIGAR-length failure — the quality-length failure is the next test's — so a slip
     /// in the op classification or in the order of the two checks fails here rather than
     /// surviving as a silent divergence.
     ///
-    /// The two `ReadLengthError` types are distinct but structurally identical, so the
-    /// comparison goes through `Debug`.
+    /// Production's answers were recorded at commit `d9e7b076` (promotion step C26) and are
+    /// the third column. Its `ReadLengthError` was a distinct type with the same variants and
+    /// fields as ng's, so its errors are recorded, and compared, through `Debug`.
     #[test]
     fn length_agrees_with_productions_on_every_op_mix() {
-        // (cigar, seq_len) — the last two rows are the two failure modes.
-        let cases: Vec<(Vec<CigarOp>, usize)> = vec![
-            (vec![], 0),
-            (vec![CigarOp::Match(4)], 4),
-            (vec![CigarOp::Deletion(4)], 0),
-            (vec![CigarOp::Skip(4), CigarOp::Match(2)], 2),
+        // (cigar, seq_len, production's answer) — the last row is a failure mode.
+        let cases: Vec<(Vec<CigarOp>, usize, Result<u64, &str>)> = vec![
+            (vec![], 0, Ok(0)),
+            (vec![CigarOp::Match(4)], 4, Ok(4)),
+            (vec![CigarOp::Deletion(4)], 0, Ok(0)),
+            (vec![CigarOp::Skip(4), CigarOp::Match(2)], 2, Ok(2)),
             (
                 vec![
                     CigarOp::HardClip(3),
@@ -691,30 +525,30 @@ mod tests {
                     CigarOp::Match(1),
                 ],
                 3,
+                Ok(3),
             ),
-            (vec![CigarOp::Padding(2), CigarOp::Insertion(3)], 3),
-            (vec![CigarOp::SeqMatch(2), CigarOp::SeqMismatch(2)], 4),
-            (vec![CigarOp::Match(4)], 5),
+            (vec![CigarOp::Padding(2), CigarOp::Insertion(3)], 3, Ok(3)),
+            (
+                vec![CigarOp::SeqMatch(2), CigarOp::SeqMismatch(2)],
+                4,
+                Ok(4),
+            ),
+            (
+                vec![CigarOp::Match(4)],
+                5,
+                Err("CigarSeqMismatch { cigar_consumed: 4, seq_len: 5 }"),
+            ),
         ];
-        for (cigar, seq_len) in cases {
-            let production = ProductionPreparedRead {
-                chrom_id: 0,
-                alignment_start: 1,
-                alignment_end: 1,
+        for (cigar, seq_len, production) in cases {
+            let ours = PreparedRead {
                 cigar: cigar.clone(),
                 seq: vec![b'A'; seq_len],
                 bq_baq: vec![30; seq_len],
-                mq_log_err: -6.0,
-                mapq: 60,
-                is_reverse_strand: false,
-                qname: Arc::from("read1"),
-                mate_role: ProductionMateRole::Solo,
-                adaptor_boundary: None,
+                ..consistent_read()
             };
-            let ours = PreparedRead::from_production(production.clone(), ReadGroupId(1));
             assert_eq!(
                 ours.length().map_err(|error| format!("{error:?}")),
-                production.length().map_err(|error| format!("{error:?}")),
+                production.map_err(str::to_string),
                 "cigar {cigar:?} against {seq_len} bases",
             );
         }
@@ -722,153 +556,19 @@ mod tests {
 
     /// The `seq`/`bq_baq` check runs before the CIGAR check on **both** sides — the one
     /// ordering the table above cannot see, since it never breaks two invariants at once.
+    /// Production's answer on this read, recorded at commit `d9e7b076` (promotion step C26),
+    /// was the quality-length error.
     #[test]
     fn the_check_order_agrees_with_productions_when_both_invariants_break() {
-        let production = ProductionPreparedRead {
-            chrom_id: 0,
-            alignment_start: 1,
-            alignment_end: 1,
+        let ours = PreparedRead {
             cigar: vec![CigarOp::Match(9)],
             seq: b"ACGT".to_vec(),
             bq_baq: vec![30, 30],
-            mq_log_err: -6.0,
-            mapq: 60,
-            is_reverse_strand: false,
-            qname: Arc::from("read1"),
-            mate_role: ProductionMateRole::Solo,
-            adaptor_boundary: None,
+            ..consistent_read()
         };
-        let ours = PreparedRead::from_production(production.clone(), ReadGroupId(1));
         assert_eq!(
             ours.length().map_err(|error| format!("{error:?}")),
-            production.length().map_err(|error| format!("{error:?}")),
-        );
-    }
-
-    /// **The reverse conversion moves every field too.** The mirror of the test below, and
-    /// the one that needs saying out loud: `into_production`'s only caller is the
-    /// `#[ignore]`d walker parity harness, so without this it is compiled and never
-    /// executed — zero runtime coverage on the conversion the entire real-data half of the
-    /// oracle rests on. A lossy one would surface as "the two walkers disagree", which is
-    /// the wrong diagnosis and would be chased into the walker.
-    #[test]
-    fn into_production_moves_every_field_to_its_counterpart() {
-        let ours = PreparedRead {
-            chrom_id: 2,
-            alignment_start: 101,
-            alignment_end: 140,
-            cigar: vec![CigarOp::SoftClip(1), CigarOp::Match(3)],
-            seq: b"TACG".to_vec(),
-            bq_baq: vec![11, 22, 33, 44],
-            mq_log_err: -13.5,
-            mapq: 37,
-            is_reverse_strand: true,
-            qname: Arc::from("frag/1"),
-            mate_role: MateRole::SecondOfPair,
-            adaptor_boundary: Some(137),
-            read_group: ReadGroupId(4),
-        };
-
-        let theirs = ours.clone().into_production();
-
-        assert_eq!(theirs.chrom_id, 2);
-        assert_eq!(theirs.alignment_start, 101);
-        assert_eq!(theirs.alignment_end, 140);
-        assert_eq!(theirs.cigar, ours.cigar);
-        assert_eq!(theirs.seq, b"TACG".to_vec());
-        assert_eq!(theirs.bq_baq, vec![11, 22, 33, 44]);
-        assert_eq!(theirs.mq_log_err, -13.5);
-        assert_eq!(theirs.mapq, 37);
-        assert!(theirs.is_reverse_strand);
-        assert_eq!(&*theirs.qname, "frag/1");
-        assert_eq!(theirs.mate_role, ProductionMateRole::SecondOfPair);
-        assert_eq!(theirs.adaptor_boundary, Some(137));
-    }
-
-    /// **The claim the real-data differential rests on: the round trip is lossless for
-    /// everything the walk reads.**
-    ///
-    /// One prepared stream is handed to both walkers by converting ng's *down* to
-    /// production's, so a field that does not survive the trip means the two walkers saw
-    /// different inputs — and the divergence would be blamed on the walk. The two
-    /// conversions are individually plausible and could still disagree; this is what rules
-    /// that out, as `every_production_mate_role_maps_to_its_counterpart` does for the role.
-    ///
-    /// `read_group` is the one field *meant* to be lost, so the round trip re-attaches it
-    /// and everything else must match.
-    #[test]
-    fn the_two_conversions_round_trip_every_field_the_walk_reads() {
-        for (role, boundary) in [
-            (ProductionMateRole::Solo, None),
-            (ProductionMateRole::FirstOfPair, Some(137)),
-            (ProductionMateRole::SecondOfPair, Some(1)),
-        ] {
-            let original = ProductionPreparedRead {
-                chrom_id: 2,
-                alignment_start: 101,
-                alignment_end: 140,
-                cigar: vec![CigarOp::SoftClip(1), CigarOp::Match(3)],
-                seq: b"TACG".to_vec(),
-                bq_baq: vec![11, 22, 33, 44],
-                mq_log_err: -13.5,
-                mapq: 37,
-                is_reverse_strand: true,
-                qname: Arc::from("frag/1"),
-                mate_role: role,
-                adaptor_boundary: boundary,
-            };
-            let back =
-                PreparedRead::from_production(original.clone(), ReadGroupId(4)).into_production();
-            // Production's type has no `PartialEq`, so `Debug` is the oracle — total over
-            // these fields, and it names the one that moved.
-            assert_eq!(
-                format!("{back:?}"),
-                format!("{original:?}"),
-                "the round trip lost or altered a field on {role:?}",
-            );
-        }
-    }
-
-    /// **The conversion moves every field to its counterpart, not to a
-    /// neighbour of the same type.** The destructure makes it exhaustive; only
-    /// this makes it correct. The fixture gives each field a distinct value for
-    /// that reason — `chrom_id` and `alignment_start` are both `u32`, and
-    /// swapping them would compile.
-    #[test]
-    fn the_conversion_from_productions_read_moves_every_field() {
-        let production = ProductionPreparedRead {
-            chrom_id: 2,
-            alignment_start: 101,
-            alignment_end: 140,
-            cigar: vec![CigarOp::SoftClip(1), CigarOp::Match(3)],
-            seq: b"TACG".to_vec(),
-            bq_baq: vec![11, 22, 33, 44],
-            mq_log_err: -13.5,
-            mapq: 37,
-            is_reverse_strand: true,
-            qname: Arc::from("frag/1"),
-            mate_role: ProductionMateRole::SecondOfPair,
-            adaptor_boundary: Some(137),
-        };
-
-        let ours = PreparedRead::from_production(production.clone(), ReadGroupId(4));
-
-        assert_eq!(ours.chrom_id, production.chrom_id);
-        assert_eq!(ours.alignment_start, production.alignment_start);
-        assert_eq!(ours.alignment_end, production.alignment_end);
-        assert_eq!(ours.cigar, production.cigar);
-        assert_eq!(ours.seq, production.seq);
-        assert_eq!(ours.bq_baq, production.bq_baq);
-        assert_eq!(ours.mq_log_err, production.mq_log_err);
-        assert_eq!(ours.mapq, production.mapq);
-        assert_eq!(ours.is_reverse_strand, production.is_reverse_strand);
-        assert_eq!(ours.qname, production.qname);
-        assert_eq!(ours.mate_role, MateRole::SecondOfPair);
-        assert_eq!(ours.adaptor_boundary, production.adaptor_boundary);
-        assert_eq!(
-            ours.read_group,
-            ReadGroupId(4),
-            "the one field production has no counterpart for"
+            Err("SeqBqMismatch { seq_len: 4, bq_baq_len: 2 }".to_string()),
         );
     }
 }
