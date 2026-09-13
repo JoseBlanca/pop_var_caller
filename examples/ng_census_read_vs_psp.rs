@@ -50,24 +50,22 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
-use pop_var_caller::ng::parameter_estimation::joint::census::{
+use pop_var_caller::cli::run_ground::{self, GroundRequest, RepeatRouting};
+use pop_var_caller::parameter_estimation::joint::census::{
     CensusWriter, NamedReadGroup, SampleCensusEvidence,
 };
-use pop_var_caller::ng::parameter_estimation::joint::census_file::{read_census, write_census};
-use pop_var_caller::ng::parameter_estimation::joint::loci::UnambiguousRuns;
-use pop_var_caller::ng::psp::{PspReader, RecordHead};
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::reference_info::{
-    ReferenceCheck, read_reference_observing_or_creating_fai,
-};
-use pop_var_caller::ng::region_typing::DEFAULT_MAX_STR_LEN;
-use pop_var_caller::ng::region_typing::segment_criteria::{
+use pop_var_caller::parameter_estimation::joint::census_file::{read_census, write_census};
+use pop_var_caller::parameter_estimation::joint::loci::UnambiguousRuns;
+use pop_var_caller::psp::{PspReader, RecordHead};
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::reference_info::{ReferenceCheck, read_reference_observing_or_creating_fai};
+use pop_var_caller::region_typing::DEFAULT_MAX_STR_LEN;
+use pop_var_caller::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
-use pop_var_caller::ng::repeat_catalog::RepeatCatalog;
-use pop_var_caller::ng::run::{CensusPlan, CensusSelection, Segmentation, census_from_psp};
-use pop_var_caller::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
-use pop_var_caller::pop_var_caller_exp::run_ground::{self, GroundRequest, RepeatRouting};
+use pop_var_caller::repeat_catalog::RepeatCatalog;
+use pop_var_caller::run::{CensusPlan, CensusSelection, Segmentation, census_from_psp};
+use pop_var_caller::types::{GenomePosition, GenomeRegion, ReadGroupId};
 
 /// How many rounds each walk is timed over.
 ///
@@ -366,7 +364,7 @@ fn run(
 /// difference between decoding and reading can be the whole cost.
 fn touch_every_value(
     census: &mut SampleCensusEvidence,
-) -> Result<u64, pop_var_caller::ng::parameter_estimation::joint::census::CensusError> {
+) -> Result<u64, pop_var_caller::parameter_estimation::joint::census::CensusError> {
     let groups = census.read_groups();
     let strata = census.strata();
     let mut seen = 0_u64;
@@ -377,7 +375,7 @@ fn touch_every_value(
             for index in 0..depth.len() {
                 if !matches!(
                     depth.get(index),
-                    pop_var_caller::ng::parameter_estimation::joint::census::DepthCode::NeverWalked
+                    pop_var_caller::parameter_estimation::joint::census::DepthCode::NeverWalked
                 ) {
                     seen += 1;
                 }
@@ -418,7 +416,7 @@ fn holds_a_kept_position(kept: &[GenomePosition], region: GenomeRegion) -> bool 
 /// probe is not the place to give it an ordering the library has declined to.
 fn kept_tract_regions(
     plan: &CensusPlan,
-    reference: &pop_var_caller::ng::reference_info::ReferenceInfo,
+    reference: &pop_var_caller::reference_info::ReferenceInfo,
 ) -> Vec<(u32, u64, u64)> {
     let contigs = reference.contig_list();
     let id_of = |name: &str| {

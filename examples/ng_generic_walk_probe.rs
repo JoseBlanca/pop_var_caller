@@ -126,28 +126,28 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
-use pop_var_caller::ng::locus_generation::pileup::{
+use pop_var_caller::locus_generation::pileup::{
     PileupGenerator, PileupGeneratorConfig, PileupGeneratorCounts,
 };
-use pop_var_caller::ng::locus_generation::{
+use pop_var_caller::locus_generation::{
     GeneratorCounts, GeneratorSet, GeneratorSlot, ReadWitness, SampleLocusObservationsIterator,
     UnhandledReason,
 };
-use pop_var_caller::ng::read::ReadFilterConfig;
-use pop_var_caller::ng::read::ReadPreparer;
-use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
-use pop_var_caller::ng::ref_seq::WindowedRefSeq;
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::read::ReadFilterConfig;
+use pop_var_caller::read::ReadPreparer;
+use pop_var_caller::read::input::SampleReads;
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::read::left_align::LeftAlignPreparer;
+use pop_var_caller::ref_seq::WindowedRefSeq;
+use pop_var_caller::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 
-use pop_var_caller::ng::region_typing::{RegionKind, TypedRegion, TypedRegionConfig};
-use pop_var_caller::ng::repeat_catalog::{
+use pop_var_caller::region_typing::{RegionKind, TypedRegion, TypedRegionConfig};
+use pop_var_caller::repeat_catalog::{
     ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria,
 };
-use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
+use pop_var_caller::types::{ContigId, GenomeRegion, Position};
 
 /// The shared "should this run check the reference?" rule — see the module's own docs for
 /// why the default is to check even in a tool built for measuring.
@@ -874,12 +874,12 @@ fn main() -> ExitCode {
             // probe's own tests pin stays exactly as it was.
             eprintln!(
                 "fast_columns={}",
-                pop_var_caller::ng::locus_generation::pileup::column_census::FAST_COLUMNS
+                pop_var_caller::locus_generation::pileup::column_census::FAST_COLUMNS
                     .load(std::sync::atomic::Ordering::Relaxed)
             );
-            if pop_var_caller::ng::locus_generation::pileup::column_census::enabled() {
+            if pop_var_caller::locus_generation::pileup::column_census::enabled() {
                 for (name, value) in
-                    pop_var_caller::ng::locus_generation::pileup::column_census::snapshot()
+                    pop_var_caller::locus_generation::pileup::column_census::snapshot()
                 {
                     eprintln!("census_{}={}", name.to_lowercase(), value);
                 }

@@ -15,7 +15,7 @@
 #
 #   * It needs a tandem-repeat catalog built from the same reference. The
 #     default is `<reference>.repeats.parquet`, which is where
-#     `pop_var_caller_exp repeat-catalog` writes it; this script builds it once
+#     `pop_var_caller repeat-catalog` writes it; this script builds it once
 #     if it is not there, which on GRCh38 is the slow part of a first run.
 #   * It needs either a fitted parameters file or `--defaults`. No command
 #     writes a fitted file yet, so every run here is `--defaults`: no
@@ -102,8 +102,8 @@ discover_bin() {
     if [[ -z "${NG_BIN:-}" ]]; then
         local candidate
         for candidate in \
-            "$PROJECT_ROOT/target-container/release/pop_var_caller_exp" \
-            "$PROJECT_ROOT/target/release/pop_var_caller_exp"; do
+            "$PROJECT_ROOT/target-container/release/pop_var_caller" \
+            "$PROJECT_ROOT/target/release/pop_var_caller"; do
             if [[ -x "$candidate" ]] && "$candidate" --version >/dev/null 2>&1; then
                 NG_BIN="$candidate"
                 break
@@ -111,8 +111,8 @@ discover_bin() {
         done
     fi
     if [[ -z "${NG_BIN:-}" || ! -x "${NG_BIN}" ]]; then
-        echo "no pop_var_caller_exp binary found." >&2
-        echo "build with: ./scripts/dev.sh cargo build --release --bin pop_var_caller_exp" >&2
+        echo "no pop_var_caller binary found." >&2
+        echo "build with: ./scripts/dev.sh cargo build --release --bin pop_var_caller" >&2
         echo "or set NG_BIN=<path>" >&2
         exit 1
     fi

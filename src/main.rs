@@ -1,49 +1,59 @@
-//! `pop_var_caller` binary entry point. Parses the top-level CLI and
-//! dispatches to the subcommand orchestrator. Subcommand logic lives
-//! in `pop_var_caller/cli.rs`; this file is intentionally thin.
+//! `pop_var_caller` binary entry point. Parses the top-level command line and dispatches to the
+//! subcommand's driver; the logic lives in `src/cli/`, so this file is intentionally thin. Errors
+//! are rendered through the library's `format_error_chain` (spec T7a). This was the
+//! `pop_var_caller_exp` binary, `src/main_exp.rs`, until promotion step E2 gave it the name the
+//! deleted production binary had.
 
 use std::process;
 
-// The `mimalloc` global allocator, **on by default** since 2026-08-19
-// (`alloc-mimalloc`; `--no-default-features` opts out). This path is
-// allocation-churn-heavy — per-allele record building across the worker pool —
-// and on a T=8 / N=50 tomato cohort mimalloc cut peak RSS ~9% and shaved wall
-// time against the system allocator, byte-identical. The ng cohort merge then
-// measured the same shape and larger: a quarter to two fifths off the merge and
-// 9% off peak resident at 63 accessions (`Cargo.toml`, the feature's own note).
-// What it costs is a vendored C allocator in every build.
+// The `mimalloc` global allocator. A `#[global_allocator]` is per *binary*, not per crate, so
+// the `alloc-mimalloc` default feature does nothing for a binary that does not
+// declare one: without this line every `call-from-alignments` run — and every
+// number measured from one — used the system allocator while every probe in
+// `examples/` used mimalloc.
+//
+// It is worth its line here: a calling run frees far more blocks than it
+// allocates on the merge thread, because the observations it walks were
+// allocated by the sample sweeps and released as it passes them, and a
+// system allocator takes a lock per cross-thread free.
 #[cfg(feature = "alloc-mimalloc")]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::Parser;
-use pop_var_caller::error_render::format_error_chain;
-use pop_var_caller::pop_var_caller::{
-    Cli, PopVarCallerCommand, run_estimate_contamination, run_pileup, run_psp_to_pileup,
-    run_ssr_call, run_ssr_catalog, run_ssr_pileup, run_var_calling,
+use pop_var_caller::cli::{
+    Cli, PopVarCallerCommand, run_call_from_alignments, run_call_from_psps,
+    run_estimate_contamination, run_estimate_parameters, run_generate_psps, run_regenerate_census,
+    run_repeat_catalog, run_typed_regions,
 };
+use pop_var_caller::error_render::format_error_chain;
 
 fn main() {
     let cli = Cli::parse();
     let result = match cli.cmd {
-        PopVarCallerCommand::Pileup(args) => run_pileup(&args).map_err(|e| format_error_chain(&e)),
-        PopVarCallerCommand::PspToPileup(args) => {
-            run_psp_to_pileup(&args).map_err(|e| format_error_chain(&e))
+        PopVarCallerCommand::TypeRegions(args) => {
+            run_typed_regions(&args).map_err(|e| format_error_chain(&e))
+        }
+        PopVarCallerCommand::RepeatCatalog(args) => {
+            run_repeat_catalog(&args).map_err(|e| format_error_chain(&e))
+        }
+        PopVarCallerCommand::CallFromAlignments(args) => {
+            run_call_from_alignments(&args).map_err(|e| format_error_chain(&e))
+        }
+        PopVarCallerCommand::CallFromPsps(args) => {
+            run_call_from_psps(&args).map_err(|e| format_error_chain(&e))
+        }
+        PopVarCallerCommand::GeneratePsps(args) => {
+            run_generate_psps(&args).map_err(|e| format_error_chain(&e))
+        }
+        PopVarCallerCommand::RegenerateCensus(args) => {
+            run_regenerate_census(&args).map_err(|e| format_error_chain(&e))
+        }
+        PopVarCallerCommand::EstimateParameters(args) => {
+            run_estimate_parameters(&args).map_err(|e| format_error_chain(&e))
         }
         PopVarCallerCommand::EstimateContamination(args) => {
             run_estimate_contamination(&args).map_err(|e| format_error_chain(&e))
-        }
-        PopVarCallerCommand::VarCalling(args) => {
-            run_var_calling(&args).map_err(|e| format_error_chain(&e))
-        }
-        PopVarCallerCommand::SsrCatalog(args) => {
-            run_ssr_catalog(&args).map_err(|e| format_error_chain(&e))
-        }
-        PopVarCallerCommand::SsrPileup(args) => {
-            run_ssr_pileup(&args).map_err(|e| format_error_chain(&e))
-        }
-        PopVarCallerCommand::SsrCall(args) => {
-            run_ssr_call(&args).map_err(|e| format_error_chain(&e))
         }
     };
     if let Err(msg) = result {

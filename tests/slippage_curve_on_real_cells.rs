@@ -29,7 +29,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use pop_var_caller::ng::parameter_estimation::joint::slippage_curve::{
+use pop_var_caller::parameter_estimation::joint::slippage_curve::{
     FittedCell, RiseShape, SlippageCurveConfig, choose_rise_shape,
 };
 

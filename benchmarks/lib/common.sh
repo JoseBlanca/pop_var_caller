@@ -81,27 +81,29 @@ bench_load_config() {
 # Binary discovery (identical logic the per-caller scripts used to repeat)
 # ---------------------------------------------------------------------------
 
-# Discover the pop_var_caller binary into POP_VAR_CALLER_BIN. Honors a
-# pre-set POP_VAR_CALLER_BIN. Tries container build first (canonical on
-# Linux per CLAUDE.md), then host build, verifying each actually runs on
-# the current platform (a Linux ELF in target-container/ is +x but
-# unusable on a macOS host).
-bench_discover_ours_bin() {
-    if [[ -z "${POP_VAR_CALLER_BIN:-}" ]]; then
+# Discover the caller's binary, pop_var_caller, into NG_BIN. Honors a
+# pre-set NG_BIN. Looks in the container build tree and the host build tree and
+# takes the **newer** of the builds that run here: a machine with no container
+# runtime builds only into target/, where a stale target-container/ build would
+# otherwise win (CLAUDE.md), and a Linux ELF in target-container/ is +x but
+# unusable on a macOS host, hence the --version check. The production binary this
+# function first discovered was deleted in promotion Milestone D.
+bench_discover_ng_bin() {
+    if [[ -z "${NG_BIN:-}" ]]; then
         local candidate
         for candidate in \
             "$PROJECT_ROOT/target-container/release/pop_var_caller" \
             "$PROJECT_ROOT/target/release/pop_var_caller"; do
-            if [[ -x "$candidate" ]] && "$candidate" --version >/dev/null 2>&1; then
-                POP_VAR_CALLER_BIN="$candidate"
-                break
+            if [[ -x "$candidate" ]] && "$candidate" --version >/dev/null 2>&1 \
+                && { [[ -z "${NG_BIN:-}" ]] || [[ "$candidate" -nt "$NG_BIN" ]]; }; then
+                NG_BIN="$candidate"
             fi
         done
     fi
-    if [[ -z "${POP_VAR_CALLER_BIN:-}" || ! -x "${POP_VAR_CALLER_BIN}" ]]; then
+    if [[ -z "${NG_BIN:-}" || ! -x "${NG_BIN}" ]]; then
         echo "no pop_var_caller binary found." >&2
-        echo "build with: ./scripts/dev.sh cargo build --release" >&2
-        echo "or set POP_VAR_CALLER_BIN=<path>" >&2
+        echo "build with: ./scripts/dev.sh cargo build --release --bin pop_var_caller" >&2
+        echo "or set NG_BIN=<path>" >&2
         exit 1
     fi
 }

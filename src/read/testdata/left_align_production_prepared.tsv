@@ -1,0 +1,25 @@
+# Production's prepared reads for src/ng/read/left_align_parity.rs, frozen at promotion plan step C9.
+# Each row is what production's process_read(read, None, …) — its --no-baq arm, with
+# max_read_mismatch_fraction None and mismatch_bq_floor 0 — returned at commit d9e7b076 for one
+# fixture read on one of the test's two references: `uppercase` (CCTAAAAGGTTTTTACGCATGCGCG) or
+# `soft_masked` (the same bases, lowercased).
+#
+# Columns, tab-separated: reference, qname, chrom_id, alignment_start, alignment_end, CIGAR in SAM
+# notation, seq, bq_baq as comma-separated Phred, mq_log_err as its IEEE-754 bit pattern in 16 hex
+# digits, mapq, is_reverse_strand, mate_role, adaptor_boundary (`-` for none).
+soft_masked	already_left	0	3	12	1M1D8M	TAAAGGTTT	20,21,22,23,24,25,26,27,28	c02ba18a998fffa2	60	false	Solo	-
+soft_masked	del_in_a_run	0	3	12	4M1D5M	TAAAGGTTT	20,21,22,23,24,25,26,27,28	c02ba18a998fffa2	60	false	Solo	-
+soft_masked	ins_in_t_run	0	9	15	6M1I1M	GTTTTTTA	20,21,22,23,24,25,26,27	c02ba18a998fffa2	60	false	Solo	-
+soft_masked	paired	0	1	10	10M	CCTAAAAGGT	20,21,22,23,24,25,26,27,28,29	c02ba18a998fffa2	60	false	SecondOfPair	-
+soft_masked	plain	0	1	10	10M	CCTAAAAGGT	20,21,22,23,24,25,26,27,28,29	c02ba18a998fffa2	60	false	Solo	-
+soft_masked	reverse	0	3	12	4M1D5M	TAAAGGTTT	20,21,22,23,24,25,26,27,28	c02ba18a998fffa2	60	true	Solo	-
+soft_masked	soft_clipped	0	3	12	2S4M1D5M	GGTAAAGGTTT	20,21,22,23,24,25,26,27,28,29,30	c02ba18a998fffa2	60	false	Solo	-
+soft_masked	unique_context	0	16	23	3M1D4M	CGCTGCG	20,21,22,23,24,25,26	c02ba18a998fffa2	60	false	Solo	-
+uppercase	already_left	0	3	12	1M1D8M	TAAAGGTTT	20,21,22,23,24,25,26,27,28	c02ba18a998fffa2	60	false	Solo	-
+uppercase	del_in_a_run	0	3	12	1M1D8M	TAAAGGTTT	20,21,22,23,24,25,26,27,28	c02ba18a998fffa2	60	false	Solo	-
+uppercase	ins_in_t_run	0	9	15	1M1I6M	GTTTTTTA	20,21,22,23,24,25,26,27	c02ba18a998fffa2	60	false	Solo	-
+uppercase	paired	0	1	10	10M	CCTAAAAGGT	20,21,22,23,24,25,26,27,28,29	c02ba18a998fffa2	60	false	SecondOfPair	-
+uppercase	plain	0	1	10	10M	CCTAAAAGGT	20,21,22,23,24,25,26,27,28,29	c02ba18a998fffa2	60	false	Solo	-
+uppercase	reverse	0	3	12	1M1D8M	TAAAGGTTT	20,21,22,23,24,25,26,27,28	c02ba18a998fffa2	60	true	Solo	-
+uppercase	soft_clipped	0	3	12	2S1M1D8M	GGTAAAGGTTT	20,21,22,23,24,25,26,27,28,29,30	c02ba18a998fffa2	60	false	Solo	-
+uppercase	unique_context	0	16	23	3M1D4M	CGCTGCG	20,21,22,23,24,25,26	c02ba18a998fffa2	60	false	Solo	-

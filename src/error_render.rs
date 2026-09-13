@@ -1,8 +1,7 @@
-//! Shared CLI error rendering. Both binaries (`pop_var_caller` and
-//! `pop_var_caller_exp`) report an error the same way, so the rule lives
-//! here in the library rather than being copied into each `main` — two
-//! copies of an error-rendering heuristic that must agree is how they stop
-//! agreeing (spec T7a).
+//! Shared CLI error rendering. The rule lives here in the library rather than in `main`: when
+//! there were two binaries, production's and ng's, it kept them reporting an error the same way —
+//! two copies of an error-rendering heuristic that must agree is how they stop agreeing (spec
+//! T7a).
 
 use std::error::Error;
 

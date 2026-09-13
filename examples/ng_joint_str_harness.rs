@@ -1358,7 +1358,7 @@ fn stratum_size_sweep(samples: usize, depth: u32, only: usize, classes: usize, k
 // ---------------------------------------------------------------------
 
 /// Fit one drawn stratum twice — here and in
-/// `ng::parameter_estimation::joint::ssr_fit` — and print the two answers side by side.
+/// `parameter_estimation::joint::ssr_fit` — and print the two answers side by side.
 ///
 /// **This is the test that says the library estimator was lifted out of this program rather
 /// than written again.** Two implementations of one model are two things to keep agreeing, and
@@ -1367,7 +1367,7 @@ fn stratum_size_sweep(samples: usize, depth: u32, only: usize, classes: usize, k
 /// independent-draw halves separately, so that a sample may carry its own homozygote excess,
 /// and that reorders a few additions.
 fn library_agreement(truth: &Truth, loci: usize, seed: u64) {
-    use pop_var_caller::ng::parameter_estimation::joint::ssr_fit;
+    use pop_var_caller::parameter_estimation::joint::ssr_fit;
 
     println!(
         "\nThe same draw, fitted twice — {} classes, {} samples, {} reads a locus, {loci} \
@@ -1491,7 +1491,7 @@ fn library_agreement(truth: &Truth, loci: usize, seed: u64) {
 // since Milestone D landed.
 //
 // **The question it asked is still live on the per-sample route**, which still borrows and still
-// merges (`src/ng/parameter_estimation/ssr/mod.rs`); measuring it there needs a harness against
+// merges (`src/parameter_estimation/ssr/mod.rs`); measuring it there needs a harness against
 // that estimator rather than this one. What replaced the rule on the joint route is priced in
 // `doc/devel/ng/reports/str_slippage_curves_on_both_cohorts_2026-08-21.md`.
 

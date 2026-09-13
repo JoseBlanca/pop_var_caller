@@ -29,7 +29,7 @@
 //!
 //! # Where the arithmetic sum comes from, since nothing stores it
 //!
-//! From [`minted_error_census`](pop_var_caller::ng::locus_generation::pileup::minted_error_census),
+//! From [`minted_error_census`](pop_var_caller::locus_generation::pileup::minted_error_census),
 //! which sums both shapes at the one place a read's own error still exists as one read's — the
 //! record's finalise, before `add_contribution` pools it into an observation. It is off unless
 //! `PVC_MINTED_ERROR_CENSUS=1` is set, and **this tool refuses to run without it** rather than
@@ -39,7 +39,7 @@
 //! # The identity this tool also checks
 //!
 //! The census and the pre-pass's own accumulator
-//! ([`calibration`](pop_var_caller::ng::parameter_estimation::calibration)) are supposed
+//! ([`calibration`](pop_var_caller::parameter_estimation::calibration)) are supposed
 //! to see **the same reads**: complete witnesses at generic loci. This tool folds every locus
 //! through the accumulator as well and prints both read counts and both log-error sums, so a run
 //! where the two disagree says so in its own output instead of leaving the claim to an argument.
@@ -90,28 +90,28 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use pop_var_caller::ng::locus_generation::pileup::minted_error_census::{self, MintedErrorTotals};
-use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
-use pop_var_caller::ng::locus_generation::{
+use pop_var_caller::locus_generation::pileup::minted_error_census::{self, MintedErrorTotals};
+use pop_var_caller::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
+use pop_var_caller::locus_generation::{
     GeneratorSet, GeneratorSlot, SampleLocusObservationsIterator, UnhandledReason,
 };
-use pop_var_caller::ng::parameter_estimation::calibration::{
+use pop_var_caller::parameter_estimation::calibration::{
     MintedReadErrors, fold_into, minted_error_by_read_group,
 };
-use pop_var_caller::ng::parameter_estimation::depth_bins::DepthBinEdges;
-use pop_var_caller::ng::read::ReadFilterConfig;
-use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::read_groups::build_read_groups;
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
-use pop_var_caller::ng::ref_seq::WindowedRefSeq;
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::parameter_estimation::depth_bins::DepthBinEdges;
+use pop_var_caller::read::ReadFilterConfig;
+use pop_var_caller::read::input::SampleReads;
+use pop_var_caller::read::input::read_groups::build_read_groups;
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::read::left_align::LeftAlignPreparer;
+use pop_var_caller::ref_seq::WindowedRefSeq;
+use pop_var_caller::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion};
-use pop_var_caller::ng::repeat_catalog::RepeatCatalogError;
-use pop_var_caller::ng::types::ReadGroupId;
+use pop_var_caller::region_typing::{GenomeRegions, RegionKind, TypedRegion};
 use pop_var_caller::regions::ContigBounds;
+use pop_var_caller::repeat_catalog::RepeatCatalogError;
+use pop_var_caller::types::ReadGroupId;
 
 #[path = "shared/reference_check.rs"]
 mod reference_check_knob;
@@ -131,7 +131,7 @@ struct GroupAnswer {
     census: MintedErrorTotals,
     /// **The same fold, but with each site thinned to the depth the error-rate histogram bins
     /// at.** The histogram caps every position at
-    /// [`DepthBinEdges::max_depth`](pop_var_caller::ng::parameter_estimation::depth_bins::DepthBinEdges::max_depth)
+    /// [`DepthBinEdges::max_depth`](pop_var_caller::parameter_estimation::depth_bins::DepthBinEdges::max_depth)
     /// before the rate is fitted; the calibration fold caps nothing. Per site that is harmless —
     /// the draw is on counts and never on a quality — but it changes **how much weight each site
     /// carries**: a 500-read position gets 500 votes in the denominator and 124 in the population

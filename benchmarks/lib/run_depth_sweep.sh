@@ -4,7 +4,7 @@
 #   benchmarks/lib/run_depth_sweep.sh <bench.config.sh> <subcommand>
 #
 # Downsamples the single benchmark CRAM to a ladder of global coverage
-# depths, re-calls all three callers at each depth, scores each against
+# depths, re-calls each caller at each depth, scores each against
 # the truth set, and merges the per-depth QUAL/DP tables into two tidy
 # files the dashboard reads. The point: study how TP-vs-FP QUAL
 # separation moves with sequencing depth (the native CRAM is ~301x, far
@@ -12,12 +12,11 @@
 #
 # Subcommands:
 #   crams      samtools subsample the native CRAM to each depth (host)
-#   ours       run pop_var_caller (pileup -> psp -> var-calling) per depth (host)
 #   freebayes  run freebayes per depth (host)
 #   gatk       run GATK HaplotypeCaller per depth (DEV CONTAINER ONLY)
 #   compare    compare_to_truth.sh per depth -> per-depth qual_dist/accuracy (host)
 #   merge      concatenate per-depth tables with a `depth` column (host)
-#   host       crams + ours + freebayes (everything runnable on the host)
+#   host       crams + freebayes (everything runnable on the host)
 #
 # GATK is not on the host here; run that phase inside the dev container:
 #   DEV_EXTRA_MOUNT=$HOME/genomes ./scripts/dev.sh \
@@ -37,8 +36,9 @@
 #                target depth into a subsample fraction (default 301.35)
 #   SUBSAMPLE_SEED  samtools -s seed (default 42; reproducible draws)
 #   SWEEP_ROOT   output root (default $OUT_ROOT/depth_sweep)
-# Plus everything the per-caller run scripts honor (THREADS, PILEUP_EXTRA,
-# VARCALL_EXTRA, HC_EXTRA, MIN_QUAL, ...).
+# Plus everything the per-caller run scripts honor (THREADS, HC_EXTRA,
+# MIN_QUAL, ...). The production caller's `ours` phase was deleted with that
+# caller in promotion Milestone D.
 
 set -euo pipefail
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -137,11 +137,10 @@ phase_merge() {
 
 case "$SUBCMD" in
     crams)     phase_crams ;;
-    ours)      run_caller_phase run_ours.sh ;;
     freebayes) run_caller_phase run_freebayes.sh ;;
     gatk)      run_caller_phase run_gatk.sh ;;
     compare)   phase_compare ;;
     merge)     phase_merge ;;
-    host)      phase_crams; run_caller_phase run_ours.sh; run_caller_phase run_freebayes.sh ;;
-    *) echo "usage: $0 <config> {crams|ours|freebayes|gatk|compare|merge|host}" >&2; exit 2 ;;
+    host)      phase_crams; run_caller_phase run_freebayes.sh ;;
+    *) echo "usage: $0 <config> {crams|freebayes|gatk|compare|merge|host}" >&2; exit 2 ;;
 esac

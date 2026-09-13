@@ -229,6 +229,13 @@ no half taken on trust.
 
 **The parity oracle, in two stages.**
 
+> **Retired, 2026-09-13 (promotion plan step C1).** Both stages below describe a comparison that no
+> longer runs. The whole-output differentials were `#[ignore]`d on 2026-09-11, when widening an
+> insertion's record made ng's streams stop holding production's records, and were deleted with
+> production's walker; the census, the divergence classes and `project` went with them. The
+> section, and the `parity.rs` line links in it and in §12, describe the file as it stood at commit
+> `d9e7b076`. What `parity.rs` still holds is listed in its own header.
+
 *Stage 1 — the port is identical.* A `#[cfg(test)]` differential in the `delimit_parity` /
 `left_align_parity` shape already used twice in `src/ng/`: build one `Vec<PreparedRead>`, hand it
 to `crate::pileup::walker::run` and to the ng copy's `run` with the same `WalkerConfig` and the

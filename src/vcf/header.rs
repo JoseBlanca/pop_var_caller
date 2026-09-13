@@ -1,494 +1,886 @@
-//! Build a `noodles_vcf::Header` from the project's
-//! [`CohortMetadata`].
+//! **What the file says about the run that produced it** — the metadata behind every `##` line
+//! and the `#CHROM` line (`doc/devel/ng/spec/vcf_output.md` §4).
 //!
-//! The header carries `##fileformat=VCFv4.4`, optional `##source` and
-//! `##commandline` unstructured records, one `##contig=` per entry in
-//! `metadata.contigs`, the standard INFO / FORMAT definitions for the
-//! fields the writer emits, and the cohort sample-name vector. The
-//! `GP` FORMAT declaration is only present when `config.emit_gp` is
-//! true so a strict parser doesn't flag a declared-but-unused field.
+//! This is the header's *content*, not its text: rendering belongs to a later step. What lives
+//! here is the set of facts a header states, and the refusals that stop a header from stating
+//! something a reader could not act on.
+//!
+//! **Refused rather than asserted, and the distinction is deliberate.** The record type in this
+//! module's parent panics on a bad record, because every one of its invariants binds two things
+//! the same worker built moments apart — a violation is a wiring defect, not an input. Header
+//! metadata is the opposite: sample names come from the alignment files, contigs from the
+//! reference, the command line from whoever typed it. Two files naming the same sample is a
+//! *run* someone can fix, so it is a `Result`, which is what production's header builder does
+//! for the same reason ([`src/vcf/header.rs`](../../../vcf/header.rs)).
 
 use std::collections::HashSet;
 
-use noodles_vcf::Header;
-use noodles_vcf::header::Builder as HeaderBuilder;
-use noodles_vcf::header::FileFormat;
-use noodles_vcf::header::record::Value as HeaderValue;
-use noodles_vcf::header::record::key::other::ParseError as OtherKeyParseError;
-use noodles_vcf::header::record::value::Map;
-use noodles_vcf::header::record::value::map::{
-    Contig, Filter, Format, Info,
-    format::{Number as FormatNumber, Type as FormatType},
-    info::{Number as InfoNumber, Type as InfoType},
-};
+use thiserror::Error;
 
-use super::WriterConfig;
-use super::errors::VcfWriteError;
-use crate::psp::header::ParsedChromosome;
+/// The largest contig length a VCF `##contig` line can carry.
+///
+/// **The VCF integer type is 32-bit signed**, so a longer contig cannot be written honestly;
+/// production refuses it rather than truncating, and so does this. No real assembly is near it
+/// — the largest human chromosome is about 249 million bases, one part in nine of the ceiling —
+/// so this catches a corrupt reference index rather than a large genome.
+pub const MAX_CONTIG_LENGTH: u64 = i32::MAX as u64;
 
-/// Canonical FILTER ID emitted on records whose posterior EM hit the
-/// iteration cap. Shared between the header-declaration site (this
-/// module) and the per-record FILTER-value site
-/// ([`record_encode`](super::record_encode)) so a future rename
-/// stays in one place. Following the GATK / bcftools convention of
-/// short no-underscore identifiers.
-pub(super) const EM_NO_CONV_FILTER_ID: &str = "EMNoConv";
+/// **What the header states about the run**, before any of it is rendered as text.
+///
+/// Built once per run and refused if it says anything a reader could not act on. The
+/// constructor is the only way in, so a metadata value in hand has already passed every check
+/// in [`HeaderMetadataError`].
+// **`Eq` is gone, and cannot come back**: the metadata now carries the filter's fitted rate and
+// its resolved cut, which are floating-point, and `Eq` promises a reflexivity floats do not have.
+#[derive(Clone, PartialEq, Debug)]
+pub struct VcfHeaderMetadata {
+    contigs: Vec<HeaderContig>,
+    sample_names: Vec<String>,
+    command_line: String,
+    reference_path: String,
+    parameters_file_name: String,
+    /// What the hidden-duplication filter was calibrated to, when it ran. `None` — the default,
+    /// and what every run wrote before the filter existed — emits neither the `##paralogFilter=`
+    /// line nor the filter's three declarations, which is what keeps a filter-off run's header
+    /// byte for byte the header it wrote before.
+    hidden_paralog: Option<HiddenParalogProvenance>,
+}
 
-/// Inputs the writer needs at construction time. Built by the CLI
-/// from `merger.sample_names()`, `merger.chromosomes()`, and the
-/// invocation context.
-#[derive(Debug, Clone)]
-pub struct CohortMetadata {
-    /// Sample names in the cohort, ordered to match the layout of
-    /// `PosteriorRecord.posteriors` rows. The writer emits the
-    /// `#CHROM ... FORMAT SAMPLE_0 SAMPLE_1 ...` data-header line
-    /// in this order, so it must come from the upstream merger's
-    /// `sample_names()` (the single source of truth) — not from the
-    /// CLI argument order, even when the two look identical.
-    pub sample_names: Vec<String>,
-    /// Contig table — name, length, md5. Sourced from the per-position
-    /// merger's chromosome slice, which in turn was sourced from the
-    /// `.psp` headers.
+impl VcfHeaderMetadata {
+    /// **Say that the hidden-duplication filter ran, and what it was calibrated to.**
     ///
-    /// An empty vector is accepted (the header will carry no
-    /// `##contig=` lines); operationally meaningless but structurally
-    /// valid.
-    pub contigs: Vec<ParsedChromosome>,
-    /// Goes into `##source=...`. Conventionally `"pop_var_caller
-    /// <version>"`. An empty string skips the `##source` line.
-    pub tool_string: String,
-    /// Goes into `##commandline=...`. CLIs build this from
-    /// `std::env::args()`; library users may pass an empty string to
-    /// skip the field.
-    pub command_line: String,
-    /// Goes into `##paralogFilter=...` — the hidden-paralog filter's run
-    /// provenance (target FDR, estimated `π`, resolved LR cut), recorded so a
-    /// reader knows the filter ran and with what settings (the filter drops
-    /// flagged records with no per-record trace, so the header is the only
-    /// place this lives). An **empty string skips the line**, so a run with the
-    /// filter off is byte-identical to one produced before this field existed.
-    pub paralog_provenance: String,
-}
+    /// Consuming, so the header cannot be built and then quietly amended: what a header states is
+    /// settled before the file is opened. Called only on the filter's on-path — a run with it off
+    /// never calls this, and its header is the one it wrote before the filter existed.
+    #[must_use]
+    pub fn the_hidden_duplication_filter_ran(mut self, as_: HiddenParalogProvenance) -> Self {
+        self.hidden_paralog = Some(as_);
+        self
+    }
 
-pub(super) fn build_vcf_header(
-    metadata: &CohortMetadata,
-    config: &WriterConfig,
-) -> Result<Header, VcfWriteError> {
-    validate_metadata(metadata)?;
-
-    let mut builder = Header::builder().set_file_format(FileFormat::new(4, 4));
-
-    builder = insert_unstructured(builder, "source", &metadata.tool_string)?;
-    builder = insert_unstructured(builder, "commandline", &metadata.command_line)?;
-    // Empty when the paralog filter is off → no line → byte-identical header.
-    builder = insert_unstructured(builder, "paralogFilter", &metadata.paralog_provenance)?;
-
-    for entry in &metadata.contigs {
-        // Mi4: `usize::try_from(u32)` is infallible on 32-bit and
-        // 64-bit targets (the project deploys to x86_64 and aarch64).
-        // The only real cap is the VCF spec's `##contig=length=` field
-        // which htslib treats as signed 32-bit. One check suffices.
-        if entry.length > i32::MAX as u32 {
-            return Err(VcfWriteError::ContigLengthOverflow {
-                name: entry.name.clone(),
-                length: entry.length,
-            });
+    /// Gather what the header will state, checking what a header cannot honestly say.
+    ///
+    /// `sample_names` must be **in the run's sample order** — the same order every record's
+    /// sample columns are in. Nothing here can check that (a permutation is still a list of
+    /// distinct names); it is the run's to get right, and it is why the order is named in the
+    /// parameter's own documentation rather than left implied.
+    ///
+    /// # Errors
+    ///
+    /// See [`HeaderMetadataError`]. An **empty contig list is accepted**, matching production:
+    /// a run given a reference with no contigs has nothing to say about them, which is a
+    /// strange run rather than an unwritable header.
+    pub fn try_new(
+        contigs: Vec<HeaderContig>,
+        sample_names: Vec<String>,
+        command_line: String,
+        reference_path: String,
+        parameters_file_name: String,
+    ) -> Result<Self, HeaderMetadataError> {
+        if sample_names.is_empty() {
+            return Err(HeaderMetadataError::NoSamples);
         }
-        let length_usize = entry.length as usize;
-        let mut contig = Map::<Contig>::new();
-        *contig.length_mut() = Some(length_usize);
-        *contig.md5_mut() = Some(entry.md5.clone());
-        builder = builder.add_contig(entry.name.clone(), contig);
-    }
+        let mut seen_samples = HashSet::with_capacity(sample_names.len());
+        for name in &sample_names {
+            if name.is_empty() {
+                return Err(HeaderMetadataError::EmptySampleName);
+            }
+            if !seen_samples.insert(name.as_str()) {
+                return Err(HeaderMetadataError::DuplicateSampleName(name.clone()));
+            }
+        }
 
-    // PASS filter — declared so bcftools / strict consumers see the
-    // canonical entry; emitted on records whose EM converged.
-    builder = builder.add_filter("PASS", Map::<Filter>::pass());
-    // EMNoConv — emitted on records whose posterior EM hit the
-    // iteration cap without satisfying `convergence_threshold`. The
-    // record is still well-formed (allele frequencies + posteriors
-    // come from a final E-step under the un-converged p̂/f̂); the
-    // flag exists so downstream consumers can prune via
-    // `bcftools view -f PASS` without losing the cohort run on a
-    // single problematic site.
-    builder = builder.add_filter(
-        EM_NO_CONV_FILTER_ID,
-        Map::<Filter>::new("EM posterior did not converge within max iterations"),
-    );
+        let mut seen_contigs = HashSet::with_capacity(contigs.len());
+        for contig in &contigs {
+            if contig.name.is_empty() {
+                return Err(HeaderMetadataError::EmptyContigName);
+            }
+            if !seen_contigs.insert(contig.name.as_str()) {
+                return Err(HeaderMetadataError::DuplicateContigName(
+                    contig.name.clone(),
+                ));
+            }
+            if contig.length > MAX_CONTIG_LENGTH {
+                return Err(HeaderMetadataError::ContigTooLong {
+                    name: contig.name.clone(),
+                    length: contig.length,
+                });
+            }
+        }
 
-    // INFO entries.
-    builder = builder
-        .add_info(
-            "AF",
-            Map::<Info>::new(
-                InfoNumber::AlternateBases,
-                InfoType::Float,
-                "Allele frequency from EM",
-            ),
-        )
-        .add_info(
-            "AC",
-            Map::<Info>::new(
-                InfoNumber::AlternateBases,
-                InfoType::Integer,
-                "Allele count in called genotypes",
-            ),
-        )
-        .add_info(
-            "AN",
-            Map::<Info>::new(
-                InfoNumber::Count(1),
-                InfoType::Integer,
-                "Total number of called alleles",
-            ),
-        )
-        .add_info(
-            "DP",
-            Map::<Info>::new(
-                InfoNumber::Count(1),
-                InfoType::Integer,
-                "Total depth across samples",
-            ),
-        )
-        .add_info(
-            "CA",
-            Map::<Info>::new(
-                InfoNumber::Count(0),
-                InfoType::Flag,
-                "At least one sample is a chain-anchor-broken compound call",
-            ),
-        )
-        .add_info(
-            "MQRef",
-            Map::<Info>::new(
-                InfoNumber::Count(1),
-                InfoType::Float,
-                "Cohort-pooled mean mapping quality of reads supporting REF",
-            ),
-        )
-        .add_info(
-            "MQAlt",
-            Map::<Info>::new(
-                InfoNumber::AlternateBases,
-                InfoType::Float,
-                "Cohort-pooled mean mapping quality of reads supporting each ALT",
-            ),
-        )
-        .add_info(
-            "MQDiff",
-            Map::<Info>::new(
-                InfoNumber::AlternateBases,
-                InfoType::Float,
-                "MQAlt - MQRef per ALT; negative => alt reads have lower MAPQ than ref reads (multi-mapper fingerprint)",
-            ),
-        )
-        .add_info(
-            "MQDiffT",
-            Map::<Info>::new(
-                InfoNumber::AlternateBases,
-                InfoType::Float,
-                "Welch's t-statistic comparing ALT vs REF MAPQ distributions across the cohort. Negative => alt reads cluster at lower MAPQ.",
-            ),
-        )
-        .add_info(
-            "PARALOG_POST",
-            Map::<Info>::new(
-                InfoNumber::Count(1),
-                InfoType::Float,
-                "Hidden-paralog posterior P(collapsed paralog | data) from the coverage/het likelihood ratio; present only on loci the paralog filter scored (biallelic SNPs). Higher => more likely a reference-collapsed paralog artifact.",
-            ),
-        );
-
-    // FORMAT entries — always-on quartet, plus GP only when enabled.
-    builder = builder
-        .add_format(
-            "GT",
-            Map::<Format>::new(FormatNumber::Count(1), FormatType::String, "Genotype"),
-        )
-        .add_format(
-            "GQ",
-            Map::<Format>::new(
-                FormatNumber::Count(1),
-                FormatType::Integer,
-                "Genotype quality (Phred)",
-            ),
-        )
-        .add_format(
-            "DP",
-            Map::<Format>::new(FormatNumber::Count(1), FormatType::Integer, "Read depth"),
-        )
-        .add_format(
-            "AD",
-            Map::<Format>::new(
-                FormatNumber::ReferenceAlternateBases,
-                FormatType::Integer,
-                "Allelic depths for REF + ALT",
-            ),
-        );
-    if config.emit_gp {
-        // noodles' name for VCF `Number=G` is `Number::Samples` (the
-        // crate enum is keyed by the spec letter — see
-        // header/record/value/map/format/number.rs).
-        builder = builder.add_format(
-            "GP",
-            Map::<Format>::new(
-                FormatNumber::Samples,
-                FormatType::Float,
-                "Genotype posterior probabilities",
-            ),
-        );
-    }
-
-    for name in &metadata.sample_names {
-        builder = builder.add_sample_name(name.clone());
-    }
-
-    Ok(builder.build())
-}
-
-/// Mi6: insert one unstructured `##key=value` header record. Empty
-/// `value` is a no-op (callers contract on it to skip the line). Both
-/// the key-parse and the insert failure surface as
-/// `VcfWriteError::Encode` with the project-side operation tag —
-/// the noodles cause is boxed per the project's "no third-party types
-/// in our public error API" decision.
-fn insert_unstructured(
-    builder: HeaderBuilder,
-    key: &'static str,
-    value: &str,
-) -> Result<HeaderBuilder, VcfWriteError> {
-    if value.is_empty() {
-        return Ok(builder);
-    }
-    let parsed_key = key
-        .parse::<noodles_vcf::header::record::key::Other>()
-        .map_err(|e: OtherKeyParseError| VcfWriteError::Encode {
-            operation: header_op_for_key(key, KeyOp::Parse),
-            source: Box::new(e),
-        })?;
-    builder
-        .insert(parsed_key, HeaderValue::from(value))
-        .map_err(|e| VcfWriteError::Encode {
-            operation: header_op_for_key(key, KeyOp::Insert),
-            source: Box::new(e),
+        Ok(Self {
+            contigs,
+            sample_names,
+            command_line,
+            reference_path,
+            parameters_file_name,
+            hidden_paralog: None,
         })
-}
+    }
 
-enum KeyOp {
-    Parse,
-    Insert,
-}
+    /// The contigs, in the reference's own order — one `##contig` line each.
+    #[inline]
+    #[must_use]
+    pub fn contigs(&self) -> &[HeaderContig] {
+        &self.contigs
+    }
 
-/// Produces a `&'static str` operation tag for the `Encode` variant.
-/// The set of keys we ever insert is known at compile time, so a
-/// small `match` keeps `Encode { operation: &'static str }` honest.
-fn header_op_for_key(key: &'static str, op: KeyOp) -> &'static str {
-    match (key, op) {
-        ("source", KeyOp::Parse) => "##source key parse",
-        ("source", KeyOp::Insert) => "##source insert",
-        ("commandline", KeyOp::Parse) => "##commandline key parse",
-        ("commandline", KeyOp::Insert) => "##commandline insert",
-        (_, KeyOp::Parse) => "header key parse",
-        (_, KeyOp::Insert) => "header insert",
+    /// The sample names, in the run's sample order — the tail of the `#CHROM` line, and the
+    /// order every record's sample columns are in.
+    #[inline]
+    #[must_use]
+    pub fn sample_names(&self) -> &[String] {
+        &self.sample_names
+    }
+
+    /// The `##source` value: what wrote the file, and which build of it.
+    ///
+    /// **Derived rather than stored**, so a run cannot claim to have been written by something
+    /// other than the binary that wrote it.
+    #[inline]
+    #[must_use]
+    pub fn source(&self) -> String {
+        format!("ng {}", env!("CARGO_PKG_VERSION"))
+    }
+
+    /// The `##commandline` value: the invocation, as it was typed.
+    #[inline]
+    #[must_use]
+    pub fn command_line(&self) -> &str {
+        &self.command_line
+    }
+
+    /// The `##reference` value: the reference this run was called against.
+    #[inline]
+    #[must_use]
+    pub fn reference_path(&self) -> &str {
+        &self.reference_path
+    }
+
+    /// The `##parametersFile` value: the parameters file written beside this VCF.
+    ///
+    /// **A file name, not a path**, and that is the point: the two travel as a directory, and an
+    /// absolute path would be stale the first time the pair moved. It is the line that makes a
+    /// run reproducible from its own output directory, and neither production writer has
+    /// anything like it.
+    #[inline]
+    #[must_use]
+    pub fn parameters_file_name(&self) -> &str {
+        &self.parameters_file_name
     }
 }
 
-fn validate_metadata(metadata: &CohortMetadata) -> Result<(), VcfWriteError> {
-    if metadata.sample_names.is_empty() {
-        return Err(VcfWriteError::InvalidMetadata(
-            "sample_names is empty; a cohort needs at least one sample".into(),
-        ));
-    }
-    let mut seen_samples = HashSet::with_capacity(metadata.sample_names.len());
-    for name in &metadata.sample_names {
-        if !seen_samples.insert(name.as_str()) {
-            return Err(VcfWriteError::InvalidMetadata(format!(
-                "duplicate sample name `{name}`"
-            )));
-        }
-    }
+/// **One contig, as the header states it**: its name, its length, and its digest where the run
+/// has one.
+///
+/// A projection of the reference's own [`ContigInfo`](crate::reference_info::ContigInfo),
+/// keeping the three things a `##contig` line carries and dropping the file geometry, which
+/// says where bases live in a FASTA and means nothing in a VCF.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct HeaderContig {
+    /// The contig's name — the same string every record's `CHROM` column names.
+    pub name: String,
+    /// Its length in bases.
+    pub length: u64,
+    /// Its MD5, where the run read the reference's bases.
+    ///
+    /// **`None` is honest, not missing.** A run driven from a `.fai` alone never saw the
+    /// sequence, so it has no digest to state; the attribute is then left off the line rather
+    /// than invented. Production's SNP/indel writer states it and its repeat-tract writer never
+    /// does — this carries it when the run has it, which is neither of those two behaviours.
+    pub md5: Option<[u8; 16]>,
+}
 
-    let mut seen_contigs = HashSet::with_capacity(metadata.contigs.len());
-    for c in &metadata.contigs {
-        if !seen_contigs.insert(c.name.as_str()) {
-            return Err(VcfWriteError::InvalidMetadata(format!(
-                "duplicate contig name `{}`",
-                c.name
-            )));
-        }
-    }
-    Ok(())
+/// What a header cannot honestly state.
+///
+/// Every one of these is reachable from a run's inputs rather than from a defect in this crate,
+/// which is why they are errors and not assertions.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum HeaderMetadataError {
+    /// A VCF names its samples in the `#CHROM` line, and a cohort has at least one.
+    #[error("a cohort has at least one sample, and this header names none")]
+    NoSamples,
+
+    /// **Two samples of one run carrying one name.** Every record's columns are positional, so
+    /// nothing downstream could tell the two apart — the file would be ambiguous rather than
+    /// wrong, which is worse.
+    #[error(
+        "two samples of this run are both named `{0}`: the file's sample columns are \
+         positional, so nothing reading it could tell them apart"
+    )]
+    DuplicateSampleName(String),
+
+    /// A sample with no name at all — a column heading that names nothing.
+    #[error("a sample of this run has an empty name, so its column would head nothing")]
+    EmptySampleName,
+
+    /// Two contigs of one reference carrying one name, which makes every `CHROM` ambiguous.
+    #[error(
+        "two contigs of this reference are both named `{0}`, so the CHROM column could not \
+         say which one a record is on"
+    )]
+    DuplicateContigName(String),
+
+    /// A contig with no name at all.
+    #[error("a contig of this reference has an empty name, so no record could name it")]
+    EmptyContigName,
+
+    /// **A contig longer than a VCF can state.** The format's integers are 32-bit signed, so
+    /// the length is refused rather than truncated into a plausible smaller one.
+    #[error(
+        "contig `{name}` is {length} bases and a VCF states a contig length as a 32-bit \
+         signed integer, so anything above {MAX_CONTIG_LENGTH} cannot be written honestly"
+    )]
+    ContigTooLong {
+        /// Which contig.
+        name: String,
+        /// Its stated length.
+        length: u64,
+    },
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
 
-    /// Serialise a header through the actual VCF writer so the test
-    /// matches what users will see on disk. `noodles_vcf::Header`
-    /// does not implement `Display`; the writer is the rendering
-    /// path.
-    fn header_to_string(header: &Header) -> String {
-        let mut writer = noodles_vcf::io::Writer::new(Vec::new());
-        writer.write_header(header).unwrap();
-        String::from_utf8(writer.into_inner()).unwrap()
-    }
-
-    fn fixture_metadata() -> CohortMetadata {
-        CohortMetadata {
-            sample_names: vec!["S0".into(), "S1".into(), "S2".into()],
-            contigs: vec![
-                ParsedChromosome {
-                    name: "chr1".into(),
-                    length: 1_000,
-                    md5: "00000000000000000000000000000001".into(),
-                },
-                ParsedChromosome {
-                    name: "chr2".into(),
-                    length: 2_000,
-                    md5: "00000000000000000000000000000002".into(),
-                },
-            ],
-            tool_string: "pop_var_caller 0.1.0".into(),
-            command_line: "pop_var_caller cohort --output out.vcf".into(),
-            paralog_provenance: String::new(),
+    fn contig(name: &str, length: u64) -> HeaderContig {
+        HeaderContig {
+            name: name.to_string(),
+            length,
+            md5: None,
         }
     }
 
-    fn cfg_emit_gp_off() -> WriterConfig {
-        WriterConfig::new(PathBuf::from("/dev/null"))
-    }
-
-    fn cfg_emit_gp_on() -> WriterConfig {
-        WriterConfig::new(PathBuf::from("/dev/null")).with_emit_gp(true)
+    fn metadata(
+        contigs: Vec<HeaderContig>,
+        samples: &[&str],
+    ) -> Result<VcfHeaderMetadata, HeaderMetadataError> {
+        VcfHeaderMetadata::try_new(
+            contigs,
+            samples.iter().map(|name| (*name).to_string()).collect(),
+            "ng call --reference ref.fa".to_string(),
+            "/genomes/ref.fa".to_string(),
+            "run.parameters.toml".to_string(),
+        )
     }
 
     #[test]
-    fn header_round_trips_without_gp_by_default() {
-        let metadata = fixture_metadata();
-        let header = build_vcf_header(&metadata, &cfg_emit_gp_off()).unwrap();
-        let text = header_to_string(&header);
-        assert!(text.contains("##fileformat=VCFv4.4"));
-        assert!(text.contains("##source=pop_var_caller 0.1.0"));
-        assert!(text.contains("##commandline="));
-        assert!(text.contains("##contig=<ID=chr1"));
-        assert!(text.contains("length=1000"));
-        assert!(text.contains("md5=00000000000000000000000000000001"));
-        assert!(text.contains("##INFO=<ID=AF"));
-        assert!(text.contains("##INFO=<ID=CA,Number=0,Type=Flag"));
-        assert!(text.contains("##FORMAT=<ID=GT"));
-        assert!(text.contains("##FORMAT=<ID=AD,Number=R,Type=Integer"));
-        assert!(
-            !text.contains("##FORMAT=<ID=GP"),
-            "GP should be absent when emit_gp = false"
+    fn a_header_states_the_run_it_came_from() {
+        let header = metadata(vec![contig("chr1", 248_956_422)], &["HG002", "HG003"])
+            .expect("a well-formed header");
+
+        assert_eq!(header.sample_names(), ["HG002", "HG003"]);
+        assert_eq!(header.contigs()[0].name, "chr1");
+        assert_eq!(header.command_line(), "ng call --reference ref.fa");
+        assert_eq!(header.reference_path(), "/genomes/ref.fa");
+        assert_eq!(header.parameters_file_name(), "run.parameters.toml");
+        // The source names this binary and its version, so a file cannot claim another writer.
+        assert!(header.source().starts_with("ng "));
+        assert!(header.source().len() > "ng ".len());
+    }
+
+    #[test]
+    fn a_contig_digest_is_absent_rather_than_invented_when_the_run_never_read_the_bases() {
+        let from_index_alone =
+            metadata(vec![contig("chr1", 1_000)], &["one"]).expect("a well-formed header");
+        assert_eq!(from_index_alone.contigs()[0].md5, None);
+
+        let from_the_fasta = metadata(
+            vec![HeaderContig {
+                name: "chr1".to_string(),
+                length: 1_000,
+                md5: Some([7u8; 16]),
+            }],
+            &["one"],
+        )
+        .expect("a well-formed header");
+        assert_eq!(from_the_fasta.contigs()[0].md5, Some([7u8; 16]));
+    }
+
+    #[test]
+    fn a_reference_with_no_contigs_is_accepted() {
+        // Production accepts it, and a run with nothing to say about contigs is a strange run
+        // rather than an unwritable header.
+        let header = metadata(Vec::new(), &["one"]).expect("a header with no contig lines");
+        assert!(header.contigs().is_empty());
+    }
+
+    #[test]
+    fn the_sample_order_is_kept_exactly_as_given() {
+        // It is the order every record's columns are in, so the header may not tidy it.
+        let header = metadata(Vec::new(), &["c", "a", "b"]).expect("a well-formed header");
+        assert_eq!(header.sample_names(), ["c", "a", "b"]);
+    }
+
+    #[test]
+    fn a_cohort_with_no_samples_is_refused() {
+        assert_eq!(
+            metadata(vec![contig("chr1", 1_000)], &[]),
+            Err(HeaderMetadataError::NoSamples)
         );
-        let chrom_line = text.lines().find(|l| l.starts_with("#CHROM")).unwrap();
-        assert!(chrom_line.ends_with("\tS0\tS1\tS2"));
     }
 
     #[test]
-    fn header_includes_gp_when_enabled() {
-        let metadata = fixture_metadata();
-        let header = build_vcf_header(&metadata, &cfg_emit_gp_on()).unwrap();
-        let text = header_to_string(&header);
-        assert!(text.contains("##FORMAT=<ID=GP,Number=G,Type=Float"));
+    fn two_samples_of_one_name_are_refused() {
+        assert_eq!(
+            metadata(Vec::new(), &["HG002", "HG003", "HG002"]),
+            Err(HeaderMetadataError::DuplicateSampleName(
+                "HG002".to_string()
+            ))
+        );
     }
 
     #[test]
-    fn empty_sample_names_rejected() {
-        let mut metadata = fixture_metadata();
-        metadata.sample_names.clear();
-        let err = build_vcf_header(&metadata, &cfg_emit_gp_off()).unwrap_err();
-        assert!(matches!(err, VcfWriteError::InvalidMetadata(_)));
+    fn a_sample_with_no_name_is_refused() {
+        assert_eq!(
+            metadata(Vec::new(), &["HG002", ""]),
+            Err(HeaderMetadataError::EmptySampleName)
+        );
     }
 
     #[test]
-    fn duplicate_sample_name_rejected() {
-        let mut metadata = fixture_metadata();
-        metadata.sample_names = vec!["S0".into(), "S0".into()];
-        let err = build_vcf_header(&metadata, &cfg_emit_gp_off()).unwrap_err();
-        match err {
-            VcfWriteError::InvalidMetadata(msg) => {
-                assert!(msg.contains("duplicate sample name"), "got: {msg}");
-            }
-            other => panic!("expected InvalidMetadata, got {other:?}"),
+    fn two_contigs_of_one_name_are_refused() {
+        assert_eq!(
+            metadata(vec![contig("chr1", 1_000), contig("chr1", 2_000)], &["one"]),
+            Err(HeaderMetadataError::DuplicateContigName("chr1".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_contig_with_no_name_is_refused() {
+        assert_eq!(
+            metadata(vec![contig("", 1_000)], &["one"]),
+            Err(HeaderMetadataError::EmptyContigName)
+        );
+    }
+
+    #[test]
+    fn a_contig_longer_than_the_format_can_state_is_refused() {
+        assert_eq!(
+            metadata(vec![contig("huge", MAX_CONTIG_LENGTH + 1)], &["one"]),
+            Err(HeaderMetadataError::ContigTooLong {
+                name: "huge".to_string(),
+                length: MAX_CONTIG_LENGTH + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn a_contig_at_the_format_ceiling_is_accepted() {
+        // The boundary is inclusive: exactly `i32::MAX` is writable.
+        let header = metadata(vec![contig("big", MAX_CONTIG_LENGTH)], &["one"])
+            .expect("a contig at the ceiling");
+        assert_eq!(header.contigs()[0].length, MAX_CONTIG_LENGTH);
+    }
+
+    #[test]
+    fn the_largest_real_chromosome_is_far_inside_the_ceiling() {
+        // Human chr1 is about 249 million bases against a ceiling of about 2.15 billion, so
+        // this refusal catches a corrupt index rather than a large genome.
+        let human_chr1 = 248_956_422u64;
+        assert!(human_chr1 < MAX_CONTIG_LENGTH);
+        assert!(MAX_CONTIG_LENGTH / human_chr1 >= 8);
+    }
+}
+
+/// The VCF version every ng file declares.
+///
+/// **4.4**, matching both production writers. The version is what tells a reader which spelling
+/// rules apply — among them the padding rule for an allele at a contig's first base, which spec
+/// §5 relies on.
+pub const FILE_FORMAT: &str = "VCFv4.4";
+
+/// The nine fixed column headings, before the sample names.
+const FIXED_COLUMN_HEADINGS: &str = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
+
+/// **Every `INFO` field the file can carry, declared** — spec §6, in the order records write
+/// them.
+const INFO_DECLARATIONS: &[&str] = &[
+    r#"##INFO=<ID=AF,Number=A,Type=Float,Description="Fitted frequency of each ALT allele, from the calling loop's converged pass">"#,
+    r#"##INFO=<ID=AC,Number=A,Type=Integer,Description="Copies of each ALT allele in the called genotypes">"#,
+    r#"##INFO=<ID=AN,Number=1,Type=Integer,Description="Total called allele copies (no-call samples excluded)">"#,
+    r#"##INFO=<ID=DP,Number=1,Type=Integer,Description="Sum of the samples' DP">"#,
+    r#"##INFO=<ID=ABPEN,Number=1,Type=Float,Description="Phred subtracted from QUAL by the allele-balance artifact test">"#,
+    r#"##INFO=<ID=SPPEN,Number=1,Type=Float,Description="Phred subtracted from QUAL by the strand and read-position artifact test">"#,
+    r#"##INFO=<ID=MQREF,Number=1,Type=Float,Description="Cohort-pooled mean mapping quality of reads supporting REF">"#,
+    r#"##INFO=<ID=MQALT,Number=A,Type=Float,Description="Cohort-pooled mean mapping quality of reads supporting each ALT">"#,
+    r#"##INFO=<ID=MQDIFF,Number=A,Type=Float,Description="MQALT minus MQREF per ALT; negative means ALT reads map worse (multi-mapper fingerprint)">"#,
+    r#"##INFO=<ID=STR,Number=0,Type=Flag,Description="This record is a repeat-tract locus">"#,
+    r#"##INFO=<ID=RU,Number=1,Type=String,Description="Repeat unit of the tract, reference strand">"#,
+    r#"##INFO=<ID=PERIOD,Number=1,Type=Integer,Description="Repeat unit length in bases">"#,
+];
+
+/// **What the hidden-duplication filter adds to the header, and only when it ran.**
+///
+/// Three declarations and, beside them, the `##paralogFilter=` line
+/// ([`HiddenParalogProvenance`]) saying what the run was calibrated to. They are **not** in the
+/// unconditional lists above, and that is deliberate: the standing oracle for the whole filter is
+/// that a run with it off writes byte for byte what the run wrote before the filter existed
+/// (`hidden_paralog_filter.md` §1.1 goal 7, §10), and a declaration emitted always would break
+/// that on the header alone. A file that declares a filter it never applied is also a small lie —
+/// a reader cannot tell "nothing was flagged" from "the filter did not run".
+const HIDDEN_PARALOG_DECLARATIONS: &[&str] = &[
+    r#"##INFO=<ID=PARALOG_LR,Number=1,Type=Float,Description="Log likelihood ratio of a hidden paralog over a real variant, from coverage and allele balance across samples">"#,
+    r#"##INFO=<ID=PARALOG_POST,Number=1,Type=Float,Description="Posterior probability that this locus is a hidden paralog, under the run's fitted paralog rate">"#,
+    r#"##FILTER=<ID=hiddenParalog,Description="Better explained by a reference-collapsed duplication than by a variant; tail FDR at or below the run's target">"#,
+];
+
+/// **The filter's id, as it appears in a removed record's `FILTER` column.**
+///
+/// Here rather than beside the pass that writes it, because a `FILTER` value a record carries and
+/// the `##FILTER` line that declares it are one fact spelled twice — and a file whose records
+/// carry an id its header does not declare is invalid VCF. `the_declared_filter_id_is_the_one_a_record_carries`
+/// is what holds the two together.
+pub const HIDDEN_PARALOG_FILTER_ID: &str = "hiddenParalog";
+
+/// **How a record's likelihood ratio is written**, and how the header writes the cut it is
+/// compared against — one number of decimals, because an operator auditing why a record went
+/// compares the two as written and a difference must be a real one.
+pub const PARALOG_RATIO_DECIMALS: usize = 4;
+
+/// How a record's posterior probability is written, and how the header writes the fitted rate it
+/// is read against.
+pub const PARALOG_POSTERIOR_DECIMALS: usize = 6;
+
+/// **What the run calibrated the hidden-duplication filter to** — the `##paralogFilter=` line.
+///
+/// A dropped record leaves no trace in the file, so without this a reader cannot tell a run that
+/// removed nothing from one that was never asked to remove anything. Production writes the first
+/// four fields; the fifth is ng's addition, and it says how much of the cohort the coverage
+/// evidence rested on — a filter fitted on two samples of sixty-three is a different statement
+/// from one fitted on all of them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HiddenParalogProvenance {
+    /// The operator's target false-discovery rate among the records removed.
+    pub target_fdr: f64,
+    /// The fitted rate at which this run's loci are hidden duplications.
+    pub paralog_rate: f64,
+    /// The likelihood ratio the target resolved to, or `None` where no bin reached it.
+    pub lr_cut: Option<f64>,
+    /// Whether the rate was fitted, or the documented fallback was used instead.
+    pub rate_was_fitted: bool,
+    /// How many samples had a fitted coverage model.
+    pub samples_with_a_coverage_model: usize,
+    /// How many samples the run has.
+    pub samples_in_the_run: usize,
+}
+
+impl HiddenParalogProvenance {
+    /// The line's value, in production's spelling with ng's field appended.
+    ///
+    /// **The cut is written to the same number of decimals a record's `PARALOG_LR` is**, so an
+    /// operator can compare the two as written.
+    #[must_use]
+    pub fn as_header_value(&self) -> String {
+        let Self {
+            target_fdr,
+            paralog_rate,
+            lr_cut,
+            rate_was_fitted,
+            samples_with_a_coverage_model,
+            samples_in_the_run,
+        } = self;
+        let cut = match lr_cut {
+            Some(lr) => format!("{:.*}", PARALOG_RATIO_DECIMALS, lr),
+            None => "none".to_string(),
+        };
+        format!(
+            "target_fdr={:.*};pi={:.*};lr_cut={cut};\
+em_converged={rate_was_fitted};\
+samples_with_coverage_model={samples_with_a_coverage_model}/{samples_in_the_run}",
+            PARALOG_RATIO_DECIMALS, target_fdr, PARALOG_POSTERIOR_DECIMALS, paralog_rate,
+        )
+    }
+}
+
+/// **Every `FILTER` value the file can carry, declared** — spec §8, `PASS` included.
+///
+/// Production's repeat-tract writer leaves `PASS` undeclared, which is legal VCF and gratuitous:
+/// declaring it costs one line and spares a reader wondering whether the file means something
+/// else by it.
+const FILTER_DECLARATIONS: &[&str] = &[
+    r#"##FILTER=<ID=PASS,Description="All filters passed">"#,
+    r#"##FILTER=<ID=EMNoConv,Description="The calling loop did not converge within its pass cap">"#,
+    r#"##FILTER=<ID=notPeriodic,Description="Tract allele-length distribution inconsistent with the motif period">"#,
+    r#"##FILTER=<ID=tooManyAlleles,Description="More candidate alleles segregate than the caller admits">"#,
+    r#"##FILTER=<ID=lowDepth,Description="Insufficient cohort depth to call the tract">"#,
+];
+
+/// **Every `FORMAT` field the file can carry, declared** — spec §7.
+const FORMAT_DECLARATIONS: &[&str] = &[
+    r#"##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype, unphased">"#,
+    r#"##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Phred probability the called genotype is wrong, capped at 99">"#,
+    r#"##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Reads this sample observed at the locus, whether or not a written allele explains them">"#,
+    r#"##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Reads whose sequence matched each allele exactly, REF first">"#,
+    r#"##FORMAT=<ID=REPCN,Number=.,Type=Integer,Description="Repeat copy number of each called allele, GT order">"#,
+];
+
+/// **The whole header, as the file's text**, ending with a newline so the first record follows
+/// directly.
+///
+/// The order is spec §4's: the format version, what wrote the file and how, what it was called
+/// against, the contigs, then the declarations, then the column headings.
+///
+/// **Hand-written rather than assembled through noodles**, which the plan proposed. noodles
+/// groups header records by kind in an order of its own, and §4 fixes a different one; since the
+/// records are hand-written text already, one mechanism and one order is worth more here than
+/// the library's validation, and `bcftools` is what judges the result.
+///
+/// **A provenance line whose value is empty is omitted rather than written empty**, which is
+/// production's rule: `##reference=` states nothing and invites a reader to think the run had a
+/// reference it could not name.
+#[must_use]
+pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
+    // **Destructured exhaustively, so a field added to the metadata cannot be silently left out
+    // of the header it exists to state.** That is not hypothetical: the filter's provenance field
+    // was added one commit ago, and reading the metadata field by field is what would have let it
+    // be added and never written. The bindings below are used through `metadata`'s accessors
+    // where those do work (the contigs, the sample names); what matters is that the compiler
+    // names every field here.
+    let VcfHeaderMetadata {
+        contigs: _,
+        sample_names: _,
+        command_line: _,
+        reference_path: _,
+        parameters_file_name: _,
+        hidden_paralog,
+    } = metadata;
+
+    let mut lines: Vec<String> = vec![format!("##fileformat={FILE_FORMAT}")];
+
+    for (key, value) in [
+        ("source", metadata.source()),
+        ("commandline", metadata.command_line().to_string()),
+        ("reference", metadata.reference_path().to_string()),
+        (
+            "parametersFile",
+            metadata.parameters_file_name().to_string(),
+        ),
+    ] {
+        if !value.is_empty() {
+            lines.push(format!("##{key}={value}"));
+        }
+    }
+
+    for contig in metadata.contigs() {
+        lines.push(contig_line(contig));
+    }
+
+    if let Some(paralog) = hidden_paralog {
+        lines.push(format!("##paralogFilter={}", paralog.as_header_value()));
+    }
+
+    lines.extend(INFO_DECLARATIONS.iter().map(ToString::to_string));
+    lines.extend(FILTER_DECLARATIONS.iter().map(ToString::to_string));
+    // Only where the filter ran — see `HIDDEN_PARALOG_DECLARATIONS`.
+    if hidden_paralog.is_some() {
+        lines.extend(HIDDEN_PARALOG_DECLARATIONS.iter().map(ToString::to_string));
+    }
+    lines.extend(FORMAT_DECLARATIONS.iter().map(ToString::to_string));
+
+    let mut headings = FIXED_COLUMN_HEADINGS.to_string();
+    for name in metadata.sample_names() {
+        headings.push('\t');
+        headings.push_str(name);
+    }
+    lines.push(headings);
+
+    let mut text = lines.join("\n");
+    text.push('\n');
+    text
+}
+
+/// One `##contig` line. The digest is written only where the run has one — see
+/// [`HeaderContig::md5`].
+fn contig_line(contig: &HeaderContig) -> String {
+    let mut line = format!("##contig=<ID={},length={}", contig.name, contig.length);
+    if let Some(digest) = contig.md5 {
+        line.push_str(",md5=");
+        for byte in digest {
+            line.push_str(&format!("{byte:02x}"));
+        }
+    }
+    line.push('>');
+    line
+}
+
+#[cfg(test)]
+mod header_text_tests {
+    use super::*;
+
+    fn metadata_with(contigs: Vec<HeaderContig>, samples: &[&str]) -> VcfHeaderMetadata {
+        VcfHeaderMetadata::try_new(
+            contigs,
+            samples.iter().map(|name| (*name).to_string()).collect(),
+            "ng call --reference ref.fa cohort/*.cram".to_string(),
+            "/genomes/ref.fa".to_string(),
+            "run.parameters.toml".to_string(),
+        )
+        .expect("a well-formed header")
+    }
+
+    /// **The id a removed record carries is the id the header declares.**
+    ///
+    /// A `FILTER` value and the `##FILTER` line declaring it are one fact spelled twice, and a
+    /// file whose records carry an id its header does not declare is invalid VCF. The two lived
+    /// in different modules for one commit; this is what stops them drifting apart again.
+    #[test]
+    fn the_declared_filter_id_is_the_one_a_record_carries() {
+        let declaration = HIDDEN_PARALOG_DECLARATIONS
+            .iter()
+            .find(|line| line.starts_with("##FILTER="))
+            .expect("the filter declares itself");
+
+        assert!(
+            declaration.contains(&format!("<ID={HIDDEN_PARALOG_FILTER_ID},")),
+            "the declaration must name the id records carry: {declaration}"
+        );
+    }
+
+    /// **The header writes its two numbers to the precisions a record's own fields use.**
+    ///
+    /// An operator auditing why a record went compares its `PARALOG_LR` against the header's
+    /// `lr_cut`; if the two were rounded differently, a difference between them would not say
+    /// whether the record was above the cut or merely printed differently.
+    #[test]
+    fn the_provenance_writes_the_cut_and_the_rate_to_the_records_own_precisions() {
+        let stated = HiddenParalogProvenance {
+            target_fdr: 0.01,
+            paralog_rate: 0.031_25,
+            lr_cut: Some(4.211_712_3),
+            rate_was_fitted: true,
+            samples_with_a_coverage_model: 61,
+            samples_in_the_run: 63,
+        }
+        .as_header_value();
+
+        assert_eq!(
+            stated,
+            "target_fdr=0.0100;pi=0.031250;lr_cut=4.2117;em_converged=true;\
+samples_with_coverage_model=61/63",
+        );
+        assert_eq!(PARALOG_RATIO_DECIMALS, 4);
+        assert_eq!(PARALOG_POSTERIOR_DECIMALS, 6);
+    }
+
+    /// **A run whose target the curve never reaches says so in words, not with a number.**
+    #[test]
+    fn the_provenance_says_none_where_no_ratio_reached_the_target() {
+        let stated = HiddenParalogProvenance {
+            target_fdr: 0.0,
+            paralog_rate: 0.03,
+            lr_cut: None,
+            rate_was_fitted: false,
+            samples_with_a_coverage_model: 0,
+            samples_in_the_run: 2,
+        }
+        .as_header_value();
+
+        assert!(
+            stated.contains("lr_cut=none;"),
+            "an unreachable target has no cut to state: {stated}"
+        );
+        assert!(stated.contains("em_converged=false"));
+        assert!(stated.contains("samples_with_coverage_model=0/2"));
+    }
+
+    /// **The calibration line comes before the declarations, where the provenance lines are.**
+    ///
+    /// The header's order is spec §4's: what wrote the file and how, then what it was called
+    /// against, then the contigs, then the declarations. `##paralogFilter=` is provenance — what
+    /// the run was calibrated to — so it belongs with the first group and not among the `##INFO`
+    /// lines. Moving it is a change a reader of the file would see and no other test would.
+    #[test]
+    fn the_calibration_line_comes_before_the_info_declarations() {
+        let metadata = metadata_with(
+            vec![HeaderContig {
+                name: "chr1".to_string(),
+                length: 1000,
+                md5: None,
+            }],
+            &["one"],
+        )
+        .the_hidden_duplication_filter_ran(HiddenParalogProvenance {
+            target_fdr: 0.01,
+            paralog_rate: 0.03,
+            lr_cut: Some(4.2),
+            rate_was_fitted: true,
+            samples_with_a_coverage_model: 1,
+            samples_in_the_run: 1,
+        });
+
+        let text = header_text(&metadata);
+        let lines: Vec<&str> = text.lines().collect();
+        let calibration = lines
+            .iter()
+            .position(|line| line.starts_with("##paralogFilter="))
+            .expect("the calibration line is written");
+        let first_info = lines
+            .iter()
+            .position(|line| line.starts_with("##INFO="))
+            .expect("the INFO declarations are written");
+        let contigs = lines
+            .iter()
+            .position(|line| line.starts_with("##contig="))
+            .expect("the contigs are written");
+
+        assert!(
+            contigs < calibration && calibration < first_info,
+            "the calibration sits after the contigs and before the declarations; \
+             contigs at {contigs}, calibration at {calibration}, first INFO at {first_info}"
+        );
+    }
+
+    #[test]
+    fn the_whole_header_of_a_two_sample_run() {
+        let metadata = metadata_with(
+            vec![HeaderContig {
+                name: "chr1".to_string(),
+                length: 248_956_422,
+                md5: None,
+            }],
+            &["HG002", "HG003"],
+        );
+
+        let expected = format!(
+            "##fileformat=VCFv4.4\n\
+             ##source=ng {version}\n\
+             ##commandline=ng call --reference ref.fa cohort/*.cram\n\
+             ##reference=/genomes/ref.fa\n\
+             ##parametersFile=run.parameters.toml\n\
+             ##contig=<ID=chr1,length=248956422>\n\
+             {info}\n{filter}\n{format}\n\
+             #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tHG002\tHG003\n",
+            version = env!("CARGO_PKG_VERSION"),
+            info = INFO_DECLARATIONS.join("\n"),
+            filter = FILTER_DECLARATIONS.join("\n"),
+            format = FORMAT_DECLARATIONS.join("\n"),
+        );
+
+        assert_eq!(header_text(&metadata), expected);
+    }
+
+    #[test]
+    fn a_contig_digest_is_written_as_hexadecimal_when_the_run_read_the_bases() {
+        let metadata = metadata_with(
+            vec![HeaderContig {
+                name: "chr1".to_string(),
+                length: 1_000,
+                md5: Some([
+                    0x6a, 0xef, 0x89, 0x7c, 0x3d, 0x6f, 0xf0, 0xc7, 0x8a, 0xff, 0x06, 0xac, 0x18,
+                    0x91, 0x78, 0xdd,
+                ]),
+            }],
+            &["one"],
+        );
+
+        assert!(
+            header_text(&metadata)
+                .contains("##contig=<ID=chr1,length=1000,md5=6aef897c3d6ff0c78aff06ac189178dd>"),
+            "got {}",
+            header_text(&metadata)
+        );
+    }
+
+    #[test]
+    fn a_run_without_the_reference_bases_writes_a_contig_line_with_no_digest() {
+        let metadata = metadata_with(
+            vec![HeaderContig {
+                name: "chr1".to_string(),
+                length: 1_000,
+                md5: None,
+            }],
+            &["one"],
+        );
+        assert!(header_text(&metadata).contains("##contig=<ID=chr1,length=1000>\n"));
+        assert!(!header_text(&metadata).contains("md5="));
+    }
+
+    #[test]
+    fn a_provenance_line_with_nothing_to_say_is_omitted_rather_than_written_empty() {
+        // Production's rule: `##reference=` states nothing and invites a reader to think the
+        // run had a reference it could not name.
+        let metadata = VcfHeaderMetadata::try_new(
+            Vec::new(),
+            vec!["one".to_string()],
+            String::new(),
+            String::new(),
+            "run.parameters.toml".to_string(),
+        )
+        .expect("a well-formed header");
+
+        let text = header_text(&metadata);
+        assert!(!text.contains("##commandline"), "got {text}");
+        assert!(!text.contains("##reference"), "got {text}");
+        // The one that is present still is.
+        assert!(text.contains("##parametersFile=run.parameters.toml\n"));
+        // And `##source` is derived, so it is always there.
+        assert!(text.contains("##source=ng "));
+    }
+
+    #[test]
+    fn every_value_the_records_can_write_is_declared() {
+        // The rule that keeps a file self-describing: nothing may appear in a record that the
+        // header did not declare. These are the ids the encoder emits.
+        let metadata = metadata_with(Vec::new(), &["one"]);
+        let text = header_text(&metadata);
+
+        for id in [
+            "AF", "AC", "AN", "DP", "ABPEN", "SPPEN", "MQREF", "MQALT", "MQDIFF", "STR", "RU",
+            "PERIOD",
+        ] {
+            assert!(text.contains(&format!("##INFO=<ID={id},")), "INFO {id}");
+        }
+        for id in ["GT", "GQ", "DP", "AD", "REPCN"] {
+            assert!(text.contains(&format!("##FORMAT=<ID={id},")), "FORMAT {id}");
+        }
+        for id in [
+            "PASS",
+            "EMNoConv",
+            "notPeriodic",
+            "tooManyAlleles",
+            "lowDepth",
+        ] {
+            assert!(text.contains(&format!("##FILTER=<ID={id},")), "FILTER {id}");
         }
     }
 
     #[test]
-    fn duplicate_contig_name_rejected() {
-        let mut metadata = fixture_metadata();
-        metadata.contigs[1].name = "chr1".into();
-        let err = build_vcf_header(&metadata, &cfg_emit_gp_off()).unwrap_err();
-        match err {
-            VcfWriteError::InvalidMetadata(msg) => {
-                assert!(msg.contains("duplicate contig name"), "got: {msg}");
-            }
-            other => panic!("expected InvalidMetadata, got {other:?}"),
+    fn every_filter_verdict_the_encoder_can_write_has_a_declaration() {
+        // Stronger than the list above: it walks the enum, so a verdict added later without a
+        // declaration fails here rather than in a consumer.
+        use crate::vcf::FilterVerdict;
+
+        let text = header_text(&metadata_with(Vec::new(), &["one"]));
+        for verdict in [
+            FilterVerdict::Pass,
+            FilterVerdict::EmDidNotConverge,
+            FilterVerdict::NotPeriodic,
+            FilterVerdict::TooManyAlleles,
+            FilterVerdict::LowDepth,
+        ] {
+            assert!(
+                text.contains(&format!("##FILTER=<ID={},", verdict.as_str())),
+                "no declaration for {}",
+                verdict.as_str()
+            );
         }
     }
 
-    /// Mi4: contig length over `i32::MAX` is rejected with the typed
-    /// variant. Previously had zero coverage.
     #[test]
-    fn contig_length_above_i32_max_rejected() {
-        let mut metadata = fixture_metadata();
-        let bad_length = (i32::MAX as u32) + 1;
-        metadata.contigs[0].length = bad_length;
-        let err = build_vcf_header(&metadata, &cfg_emit_gp_off()).unwrap_err();
-        match err {
-            VcfWriteError::ContigLengthOverflow { name, length } => {
-                assert_eq!(name, "chr1");
-                assert_eq!(length, bad_length);
-            }
-            other => panic!("expected ContigLengthOverflow, got {other:?}"),
-        }
+    fn the_header_ends_with_a_newline_so_the_first_record_follows_directly() {
+        let text = header_text(&metadata_with(Vec::new(), &["one"]));
+        assert!(text.ends_with('\n'));
+        assert!(!text.ends_with("\n\n"));
     }
 
-    /// Mi5: empty `tool_string` skips the `##source` line; doc on
-    /// `CohortMetadata::tool_string` contracts on this skip.
     #[test]
-    fn header_omits_source_when_tool_string_empty() {
-        let mut metadata = fixture_metadata();
-        metadata.tool_string = String::new();
-        let header = build_vcf_header(&metadata, &cfg_emit_gp_off()).unwrap();
-        let text = header_to_string(&header);
-        assert!(
-            !text.contains("##source="),
-            "##source should be absent with empty tool_string\n{text}"
-        );
-    }
-
-    /// Mi5: empty `command_line` skips the `##commandline` line.
-    #[test]
-    fn header_omits_commandline_when_command_line_empty() {
-        let mut metadata = fixture_metadata();
-        metadata.command_line = String::new();
-        let header = build_vcf_header(&metadata, &cfg_emit_gp_off()).unwrap();
-        let text = header_to_string(&header);
-        assert!(
-            !text.contains("##commandline="),
-            "##commandline should be absent with empty command_line\n{text}"
-        );
-    }
-
-    /// Mi3: empty `contigs` is structurally valid; we accept it and
-    /// produce a header with no `##contig=` lines. (Documented in
-    /// `CohortMetadata::contigs`.)
-    #[test]
-    fn empty_contigs_accepted_produces_header_with_no_contig_lines() {
-        let mut metadata = fixture_metadata();
-        metadata.contigs.clear();
-        let header = build_vcf_header(&metadata, &cfg_emit_gp_off()).unwrap();
-        let text = header_to_string(&header);
-        assert!(
-            !text.contains("##contig="),
-            "no ##contig lines expected\n{text}"
-        );
-        // Sample names still flow through.
-        let chrom_line = text.lines().find(|l| l.starts_with("#CHROM")).unwrap();
-        assert!(chrom_line.ends_with("\tS0\tS1\tS2"));
+    fn the_sample_names_close_the_column_headings_in_the_run_s_order() {
+        let text = header_text(&metadata_with(Vec::new(), &["c", "a", "b"]));
+        let headings = text
+            .lines()
+            .next_back()
+            .expect("the column headings are the last line");
+        assert!(headings.ends_with("\tFORMAT\tc\ta\tb"), "got {headings}");
     }
 }

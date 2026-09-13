@@ -26,10 +26,36 @@
 //! `benchmarks/tomato2/src/build_gc_normalization.py`, adapted to fit from
 //! the binned 2-D histogram rather than the raw per-window table, and to
 //! anchor on the mode rather than the median (arch Premise 1, spec §4).
+//!
+//! ---
+//!
+//! **ng's copy.** Everything above and below this note is line for line and byte for byte
+//! `src/paralog/coverage_model.rs`, as a textual guard (`copy_fidelity.rs`, deleted at promotion
+//! step C3) asserted until then — ng appends this note to production's header and changes nothing
+//! else. The constants and guards are the tomato2 prototype's, inherited and **not re-measured**
+//! (`doc/devel/ng/spec/hidden_paralog_filter.md` §3.1, plan step A1).
+//!
+//! **The histogram it fits from is ng's own** ([`crate::window_coverage`]), where
+//! production's reads `crate::sample_summary`. That one-line difference was declared to the
+//! copy guard as an *input type ng owns* — the port exists so that ng's filter does not
+//! depend on the frozen tree, and a copy that kept production's path would have tied it there
+//! for good.
+//!
+//! **The fit needed nothing else.** It reads five of the histogram's fields — `window_bp`,
+//! `gc_bins`, `depth_bin_width`, `depth_bins`, `counts` — and ng's histogram carries all five
+//! under the same names. The three that differ (production's `n_positions` and
+//! `n_skipped_tiles` are ng's `windows_folded` and `windows_under_the_floor`, and
+//! `callable_positions` has no counterpart) are read by no line of the fit.
+//!
+//! **The transcribed tests below are outside the guard, and only they are.** Production's
+//! fixture builds the histogram naming all eight of its fields; ng's names the six it has, and
+//! three lines becoming two is not a substitution any line-for-line repoint can express. So the
+//! guard's span stops at `#[cfg(test)]` and the 644 lines above it — the whole of the fit —
+//! stay compared byte for byte.
 
 use thiserror::Error;
 
-use crate::sample_summary::CoverageByGcHistogram;
+use crate::window_coverage::CoverageByGcHistogram;
 
 /// Default minimum tile count for a GC bin's curve value to be trusted;
 /// thinner bins are gap-filled from neighbours (prototype `>= 50`).
@@ -699,9 +725,8 @@ mod tests {
             gc_bins,
             depth_bin_width: width,
             depth_bins,
-            n_positions: n,
-            n_skipped_tiles: 0,
-            callable_positions: n,
+            windows_folded: n,
+            windows_under_the_floor: 0,
             counts,
         }
     }

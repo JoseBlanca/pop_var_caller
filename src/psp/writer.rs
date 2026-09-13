@@ -1,1825 +1,2902 @@
-//! Streaming writer that turns a [`PileupRecord`] stream into a v1.0
-//! `.psp` file.
+//! Writing a psp: create a file, push records into it, and finish it.
 //!
-//! Three public entry points:
+//! **Finishing is what makes the file readable at all.** Before [`PspWriter::finish`] there is
+//! no footer, and every reader refuses a file without one — which is exactly what should happen
+//! to a run that was killed, and is goal 3 of the format (spec §6.3). A `PspWriter` dropped
+//! without finishing therefore leaves a file no reader will touch, and that is the intended
+//! outcome rather than a leak.
 //!
-//! - [`PspWriter::new`] — emits the framed TOML header to the sink
-//!   and prepares the in-memory state for accepting records.
-//! - [`PspWriter::write_record`] — validates one record and buffers
-//!   it into the open block; auto-flushes when the projected
-//!   uncompressed payload reaches [`TARGET_BLOCK_BYTES`] or
-//!   the next record crosses a chromosome boundary.
-//! - [`PspWriter::finish`] — flushes any open block, writes the
-//!   block index and the trailer (with its XXH3-64 index checksum),
-//!   and returns the sink.
-//!
-//! Every per-record / per-block invariant from spec
-//! §"Header-binary consistency" and §"Block sizing / Block
-//! invariants" is enforced at write_record / flush time, so a sink
-//! that received a sequence of `Ok` returns is *necessarily* a
-//! reader-valid `.psp`. The reader's checks (in step 6) duplicate
-//! these — that is by design, because the file may be read on a
-//! machine that did not write it.
+//! ```text
+//! create   → header
+//! push     → blocks, one compressed frame each, as the cut rule closes them
+//! finish   → the last block, the index, the trailer, the footer — then flushed and synced
+//! ```
 
-use std::io::Write;
+use std::fs::File;
+use std::io::{BufWriter, Seek, Write};
+use std::path::{Path, PathBuf};
 
-use super::block::{
-    BlockHeader, ColumnManifestEntry, encode_block_header, encode_bytes_concat,
-    encode_list_column_csr, encode_scalar_column, encode_varint_column, new_column_compressor,
-    zstd_compress_into,
-};
-use super::errors::{InvalidRecordKind, PspWriteError};
-use super::header::{WriterHeader, build_header_bytes_for};
-use super::index::{BlockIndexEntry, checksum_index, encode_index};
-use super::kind::{BlockAccumulator, PspKind};
-use super::registry::{
-    ColumnDef, ColumnKey, ColumnPayload, ElementType, MAX_ALLELE_SEQ_LEN, V1_0_COLUMNS,
-};
-use super::registry_ssr::{SsrBlock, SsrKind, SsrLocusRecord};
-use super::trailer::{Trailer, encode_trailer};
-use crate::pileup_record::{ChainId, PileupRecord};
+use super::block::{BlockBuilder, BlockCompressError, BlockCompressor, BlockHead, BlockWriteError};
+use super::footer::{FOOTER_BYTES, Footer, encode_footer};
+use super::header::Header;
+use super::index::BlockIndexEntry;
+use super::{PspWriteError, footer, index};
+use crate::locus_generation::SampleLocusObservations;
+use crate::types::{GenomePosition, GenomeRegion};
 
-/// Default target uncompressed bytes per block. The writer
-/// auto-flushes when an open block's projected payload reaches this
-/// value. The CLI (`pileup --block-target-bytes`) exposes the knob to
-/// users; library callers can also override directly via
-/// [`PspWriter::new_with_block_target`].
+/// The header-parameter key under which a writer records the zstd level it compressed at.
 ///
-/// **Trade-off: peak memory vs on-disk size.** Each `PspReader` holds
-/// one decoded block live; the cohort `var-calling` driver opens N
-/// readers per chromosome worker, so peak heap is
-/// `n_threads × N × per_block`. Smaller blocks → less heap, slightly
-/// worse compression context (so larger files).
-///
-/// 2026-05-27 sweep on tomato1 (N=18, T=4, real per-sample PSPs):
-///
-/// | target  | peak RSS | cohort size | wall  |
-/// |---------|---------:|------------:|------:|
-/// | 16 MiB  |  2501 MB |      183 MB | 10.4s |
-/// |  4 MiB  |   757 MB |      189 MB | 10.3s |
-/// |  1 MiB  |   261 MB |      206 MB | 10.6s | ← default
-/// | 512 KiB |   161 MB |      233 MB | 10.6s |
-/// | 256 KiB |   108 MB |      246 MB | 10.9s |
-/// |  64 KiB |    59 MB |      321 MB | 10.8s |
-///
-/// Wall time is flat across the sweep — there is no CPU cost to
-/// shrinking blocks. 1 MiB pays +13% on-disk size relative to the
-/// historical 16 MiB hardcoded value, in exchange for ~10× lower
-/// cohort-step peak heap. Single-sample / archival users who only
-/// pay the disk-size axis can dial back up with
-/// `--block-target-bytes`; large-cohort joint-genotyping users who
-/// hit the memory ceiling dial it down explicitly.
-pub const TARGET_BLOCK_BYTES: usize = 1024 * 1024;
+/// **Named because three sites must spell it identically**: `create` writes it, `append`
+/// reads it back to match bytes already in the file, and anything comparing a header it
+/// built against a header read back has to add it. A rename that reached only some of them
+/// would look like a store defect rather than a typo.
+pub const ZSTD_COMPRESSION_LEVEL_KEY: &str = "zstd-compression-level";
 
-/// Lower bound accepted by the `pileup --block-target-bytes` CLI
-/// parser. Below 16 KiB zstd loses meaningful compression context —
-/// the sweep showed 64 KiB already at +75% disk vs the 16 MiB
-/// baseline (well past the knee in the curve), so dropping further
-/// would just inflate output without any cohort-memory benefit the
-/// 64 KiB row didn't already deliver.
-pub const MIN_BLOCK_TARGET_BYTES: usize = 16 * 1024;
-
-/// Upper bound accepted by the `pileup --block-target-bytes` CLI
-/// parser. 16 MiB is the legacy hardcoded value retired in the
-/// 2026-05-27 sweep — it minimises on-disk size but produces the
-/// cohort-step memory blow-up (`n_threads × N × per_block`) that
-/// motivated this knob. Anything larger has no further compression
-/// payoff and exacerbates the memory issue.
-pub const MAX_BLOCK_TARGET_BYTES: usize = 16 * 1024 * 1024;
-
-/// Default genomic window (bases) per block — the **primary** block-cut
-/// criterion (2026-06-02 scaling work). Blocks are cut on a fixed
-/// reference-coordinate grid (`pos / block_window_bp`), so every sample
-/// — written independently — cuts at the *same* positions. That
-/// alignment is what collapses the cohort reader's per-block sync count
-/// (one shared step per covered window instead of one per sample's
-/// every block). PSP stores a fixed per-position summary (not per-read
-/// data), so a fixed genomic window holds roughly constant memory
-/// regardless of read depth. `target_block_bytes` remains as a *safety
-/// cap* for pathological windows. See
-/// [the architecture review](../../doc/devel/reports/reviews/architecture_psp_to_vcf_scaling_2026-06-02.md).
+/// What one finished file cost, handed back by [`PspWriter::finish`].
 ///
-/// 2026-06-08 window sweep (tomato1, N=50, T=6, real cohort) — the block is
-/// the cohort reader's decode unit, so psp→VCF peak RSS scales strongly with
-/// it while wall stays flat and on-disk size has long-since kneed:
-///
-/// | window | psp→VCF RSS | psp→VCF wall | cohort on-disk |
-/// |--------|------------:|-------------:|---------------:|
-/// |  80 kb |    3237 MB |  ~7.4s |  1510 MB |
-/// |  40 kb |    2680 MB |  ~7.1s |  1531 MB |
-/// |  20 kb |    1995 MB |  ~6.8s |  1571 MB |  ← old default
-/// |  10 kb |    1337 MB |  ~6.9s |  1649 MB |
-/// |   5 kb |    1062 MB |  ~7.3s |  1774 MB |  ← default
-///
-/// Compression has effectively plateaued by 20 kb (5 kb pays only +13% disk
-/// vs 20 kb), but RSS keeps falling, so 5 kb trades a little disk + ~2% wall
-/// for ~48% lower psp→VCF peak RSS — the right call when RAM is the binding
-/// constraint at large N (the memory thesis). Dial up with `--block-window-bp`
-/// for archival/disk-bound single-sample use.
-pub const DEFAULT_BLOCK_WINDOW_BP: u32 = 5_000;
-
-/// Initial `Vec::with_capacity` hint for per-record columns in a
-/// freshly-opened block (delta-pos, n-alleles, the per-record list
-/// columns). Sized at ~66 % of the SNP-typical fill (block target ÷
-/// ~31 uncompressed bytes per record), so column `Vec`s do not
-/// realloc on the hot path. Derived from [`TARGET_BLOCK_BYTES`] so
-/// retuning the block size automatically retunes the hint.
-///
-/// **Indel-heavy / multi-allelic workloads** carry more bytes per
-/// record, so blocks flush at fewer records. In that regime this
-/// hint *over-allocates* by ~5–10×; the excess is freed at flush.
-/// No reallocation occurs either way — the trade is "spend some
-/// peak RAM, save the hot-path doubling cost on SNP runs."
-const INITIAL_RECORDS_HINT: usize = TARGET_BLOCK_BYTES / 48;
-/// Initial hint for per-allele columns. Slightly above
-/// [`INITIAL_RECORDS_HINT`] to absorb the typical excess of alleles
-/// over records (occasional multi-allelic positions). Same
-/// SNP-vs-indel trade.
-const INITIAL_ALLELES_HINT: usize = TARGET_BLOCK_BYTES / 46;
-/// Initial hint for the concatenated allele-sequence byte buffer.
-/// SNP-typical workloads need ~1 byte/allele, indel-heavier ~10
-/// bytes; the 1/16 ratio to [`TARGET_BLOCK_BYTES`] covers both
-/// without much slack.
-const INITIAL_ALLELE_SEQ_BYTES_HINT: usize = TARGET_BLOCK_BYTES / 16;
-/// Initial chain-id-data capacity for the list-shaped chain-id
-/// column (Mi4). Most records carry zero chain ids; the SNP-typical
-/// high-water mark is already well under this hint, so it does not
-/// scale with block size.
-const INITIAL_CHAIN_IDS_HINT: usize = 4096;
-
-/// Byte mask of allele bytes the writer accepts. `ALLOWED[b]` is
-/// `true` iff `b` is one of `b'A' | b'C' | b'G' | b'T' | b'N'`. Walked
-/// via `slice.iter().all(|&b| ALLOWED[b as usize])` so the hot-path
-/// loop is one indexed load + one branch per byte and runs to
-/// completion (no per-element early-exit via `?`) — autovectorisable
-/// on `target-cpu = x86-64-v3` (H4).
-const ALLOWED_ALLELE_BYTE: [bool; 256] = {
-    let mut t = [false; 256];
-    t[b'A' as usize] = true;
-    t[b'C' as usize] = true;
-    t[b'G' as usize] = true;
-    t[b'T' as usize] = true;
-    t[b'N' as usize] = true;
-    t
-};
-
-/// `#[cold]` constructor for `PspWriteError::InvalidRecord` (L5).
-/// Keeping the construction out-of-line shrinks the hot-path body
-/// of `validate_record` (which the samply profile puts at 10 % self).
-#[cold]
-#[inline(never)]
-fn err_invalid_record(record_index: u64, kind: InvalidRecordKind) -> PspWriteError {
-    PspWriteError::InvalidRecord { record_index, kind }
+/// **Counts of what was written, not of what was offered**: a record the writer refused is not
+/// here, because it is not in the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub struct WriteStats {
+    /// How many records reached the file.
+    pub records: u64,
+    /// How many blocks they were cut into — and therefore how many entries the index holds.
+    pub blocks: u64,
+    /// The finished file's length in bytes, header and footer included.
+    pub bytes: u64,
+    /// How many of those bytes are the closing payload the caller supplied — the trailer.
+    ///
+    /// **Handed back because the caller has no other way to say what its own payload cost in
+    /// the file**, and reopening the finished psp to read the footer would be a second answer
+    /// to a question this call already knows. For a sample walk the payload is that sample's
+    /// census (`psp_census_pair.md` §3.1), so this is how much of a psp the parameters fit
+    /// reads and the rest is what it does not.
+    pub trailer_bytes: u64,
 }
 
-#[cold]
-#[inline(never)]
-fn err_invalid_allele_byte(record_index: u64, allele_index: usize, seq: &[u8]) -> PspWriteError {
-    // PANIC-FREE: validate_record only calls this helper after the
-    // `seq.iter().all(|&b| ALLOWED_ALLELE_BYTE[b as usize])` check
-    // at writer.rs:399 has returned `false` — so at least one
-    // invalid byte exists in `seq`. find() returning None here
-    // would mean the two walks disagree, which is a codebase bug.
-    let (byte_offset, byte) = seq
-        .iter()
-        .enumerate()
-        .find(|&(_, &b)| !ALLOWED_ALLELE_BYTE[b as usize])
-        .map(|(j, &b)| (j, b))
-        .expect("invariant: caller observed an invalid byte but find() returned None");
-    PspWriteError::InvalidRecord {
-        record_index,
-        kind: InvalidRecordKind::InvalidAlleleByte {
-            allele_index,
-            byte_offset,
-            byte,
-        },
+/// **How many closed blocks may be waiting to be compressed before the walk has to wait.**
+///
+/// Two, not more: a block is the walk's own record buffer copied out, so every slot costs a
+/// block payload of resident memory, and the walk closes one block per genomic block (100 kb by
+/// default) while compressing one costs a few per cent of the walk. One in the queue and one
+/// under the compressor is already enough for the compressor never to be the reason the walk
+/// stops; a deeper queue would buy nothing and cost payloads.
+const BLOCKS_AWAITING_COMPRESSION: usize = 2;
+
+/// One closed block, on its way to the compressor.
+struct BlockToCompress {
+    head: BlockHead,
+    /// The block payload — its head, then its records. A buffer recycled through
+    /// [`BlockCompressionLine::spare_payloads`], not a fresh allocation per block.
+    payload: Vec<u8>,
+    /// Where the compressed block is to be written. Recycled the same way.
+    frame: Vec<u8>,
+}
+
+/// One compressed block, on its way back to the writing thread.
+struct CompressedBlock {
+    head: BlockHead,
+    /// The payload buffer, to be filled again.
+    payload: Vec<u8>,
+    /// `Ok` holds the whole on-disk block — its four-byte length, then its zstd frame. `Err`
+    /// is why it could not be compressed, carried back rather than raised on the compressing
+    /// thread, so that the walk still owns every failure it reports.
+    frame: Result<Vec<u8>, BlockCompressError>,
+}
+
+/// **Compressing a psp's blocks on a thread of its own, while the walk carries on.**
+///
+/// A closed block is compressed and written and nothing waits for it: no record after it
+/// depends on its bytes, and its index entry is not built until it is written. So the only
+/// thing tying compression to the walk is *order* — the file's blocks and its index entries
+/// must land in the order the walk closed them — and one compressing thread with FIFO queues
+/// keeps that by construction. **The bytes are the same bytes**: [`BlockCompressor::compress`]
+/// is a pure function of one payload, holding no state between blocks, so which thread ran it
+/// cannot be read out of the file.
+///
+/// **What it costs in memory** is `BLOCKS_AWAITING_COMPRESSION` block payloads plus the frames
+/// they compress to, all recycled rather than reallocated — on the default 100 kb grid, a few
+/// megabytes at one sample. What it costs in threads is one, for as long as one psp is open.
+struct BlockCompressionLine {
+    to_compress: crossbeam_channel::Sender<BlockToCompress>,
+    /// **Unbounded on purpose, and it is what makes this deadlock-free.** The walk can block
+    /// handing a block over; the compressor must never block handing one back, or the two
+    /// would wait on each other. It is bounded in fact by the sending side, which never has
+    /// more than `BLOCKS_AWAITING_COMPRESSION` blocks in flight.
+    compressed: crossbeam_channel::Receiver<CompressedBlock>,
+    /// Joined when the writer is dropped, so no compressing thread outlives its psp.
+    worker: Option<std::thread::JoinHandle<()>>,
+    /// How many blocks the compressor has been handed and not yet given back.
+    in_flight: usize,
+    /// Payload and frame buffers that have come back, ready to be filled again.
+    spare_payloads: Vec<Vec<u8>>,
+    spare_frames: Vec<Vec<u8>>,
+}
+
+impl std::fmt::Debug for BlockCompressionLine {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BlockCompressionLine")
+            .field("in_flight", &self.in_flight)
+            .finish_non_exhaustive()
     }
 }
 
-/// Running per-record state shared across `write_record` calls.
-/// M15 extracts this from [`PspWriter`] so the record-ingest path
-/// owns its own bookkeeping without touching scratch buffers or
-/// the sink.
-struct IngestState {
-    /// Last admitted record's `(chrom_id, pos)`, for monotonicity
-    /// enforcement across `write_record` calls.
-    last_locus: Option<(u32, u32)>,
-    /// Running count of records the caller has handed us. Used in
-    /// error messages so the offending input is identifiable.
-    records_seen: u64,
-}
-
-impl IngestState {
-    fn new() -> Self {
+impl BlockCompressionLine {
+    /// Start the compressing thread, which owns `compressor` from here on.
+    fn start(compressor: BlockCompressor) -> Self {
+        let (to_compress, jobs) = crossbeam_channel::bounded(BLOCKS_AWAITING_COMPRESSION);
+        let (done, compressed) = crossbeam_channel::unbounded();
+        let worker = std::thread::Builder::new()
+            .name("psp-block-compression".to_string())
+            .spawn(move || compress_blocks(compressor, &jobs, &done))
+            .expect("a thread for compressing psp blocks");
         Self {
-            last_locus: None,
-            records_seen: 0,
+            to_compress,
+            compressed,
+            worker: Some(worker),
+            in_flight: 0,
+            spare_payloads: Vec::new(),
+            spare_frames: Vec::new(),
         }
     }
-}
 
-/// Reused per-flush scratch state. M15 hoists the zstd compressor
-/// and the four buffer-sized scratches out of [`PspWriter`] so the
-/// god-struct can shrink and the flush phases can be written as
-/// free functions taking `&mut WriterScratch`.
-struct WriterScratch {
-    /// Persistent zstd compressor reused across every column of
-    /// every block. Each `compress_to_buffer` call resets the
-    /// internal frame state but keeps the CCtx workspace and tables
-    /// alive.
-    compressor: zstd::bulk::Compressor<'static>,
-    /// Reused per-column uncompressed-payload scratch.
-    uncompressed: Vec<u8>,
-    /// Reused per-column compressed-frame buffers, indexed by the
-    /// schema's column-table position. Each flush `clear()`s the inner
-    /// Vecs (preserving their capacity) before refilling.
-    compressed: Vec<Vec<u8>>,
-    /// Reused per-flush manifest buffer (one entry per column).
-    manifest: Vec<ColumnManifestEntry>,
-    /// Reused block-header serialisation buffer.
-    header_bytes: Vec<u8>,
-}
-
-impl WriterScratch {
-    /// `n_columns` sizes the per-column compressed-frame buffers and
-    /// the manifest scratch to the schema's column count
-    /// (`S::columns().len()`).
-    fn new(n_columns: usize) -> Result<Self, PspWriteError> {
-        let compressor = new_column_compressor().map_err(|e| PspWriteError::Io {
-            context: "zstd compressor init",
-            block_index: None,
-            column_tag: None,
-            source: e,
-        })?;
-        Ok(Self {
-            compressor,
-            uncompressed: Vec::new(),
-            compressed: (0..n_columns).map(|_| Vec::new()).collect(),
-            manifest: Vec::with_capacity(n_columns),
-            header_bytes: Vec::new(),
-        })
-    }
-}
-
-/// Streaming `.psp` writer over any `Write` sink, generic over the
-/// container schema `S` (architecture §10). `S` defaults to
-/// [`SnpKind`], so the existing `PspWriter<W>` call sites and their
-/// `PspWriter::new(...)` constructors are unchanged. The schema supplies
-/// the column table ([`PspKind::columns`]), the per-block accumulator
-/// ([`PspKind::Block`]), and the record→column encode
-/// ([`PspKind::encode_column`]); the flush/index/header machinery here
-/// is schema-agnostic.
-///
-/// M15: down from 14 fields to 7 by extracting [`IngestState`] and
-/// [`WriterScratch`].
-pub struct PspWriter<W: Write, S: PspKind = SnpKind> {
-    sink: W,
-    header: WriterHeader,
-    /// Bytes written to `sink` so far. Updated after every flush so
-    /// the block index records absolute offsets.
-    sink_offset: u64,
-    /// One entry per emitted block.
-    index_entries: Vec<BlockIndexEntry>,
-    /// Open block — `None` when the writer is between blocks (just
-    /// after `new` or just after a flush).
-    block: Option<S::Block>,
-    /// Running per-record ingest state.
-    ingest: IngestState,
-    /// Reused per-flush scratch buffers + zstd compressor.
-    scratch: WriterScratch,
-    /// Safety-cap auto-flush trigger: the writer force-flushes when an
-    /// open block's projected uncompressed bytes reach this value, even
-    /// mid-window. Protects against a pathological window (extreme
-    /// multi-allelic density) blowing up resident memory. The *primary*
-    /// cut is [`block_window_bp`](Self::block_window_bp); this is the
-    /// backstop.
-    target_block_bytes: usize,
-    /// Primary block-cut grid (bases). A block holds records whose
-    /// position falls in one `[k·w, (k+1)·w)` window; the next record in
-    /// a different window starts a new block. Identical across samples ⇒
-    /// aligned block boundaries. See [`DEFAULT_BLOCK_WINDOW_BP`].
-    block_window_bp: u32,
-    /// Opaque payload for the optional metadata section (architecture
-    /// `doc/devel/architecture/hidden_paralog_psp_integration.md`),
-    /// stamped by [`Self::attach_metadata`] and written at
-    /// [`Self::finish`] between the block index and the trailer. `None`
-    /// ⇒ no section is written and the file is byte-identical to one
-    /// produced before this field existed.
-    metadata: Option<Vec<u8>>,
-}
-
-impl<W: Write> PspWriter<W, SnpKind> {
-    /// Validate the header, frame it (magic + length prefix + TOML +
-    /// sentinel), and write it to `sink`. After this returns, the
-    /// writer is ready to accept records.
+    /// Hand one closed block over, having first written every block that has come back.
     ///
-    /// **Buffering.** Each block flush issues one `write_all` for the
-    /// block header plus one per column payload, and `finish` adds
-    /// one for the index and one for the 32-byte trailer. Against a
-    /// real-file sink each `write_all` becomes one `write(2)`
-    /// syscall. Wrap a `File` in
-    /// `BufWriter::with_capacity(64 * 1024, file)` (or larger) before
-    /// passing it here. In-memory sinks (`io::sink()`,
-    /// `Cursor<Vec<u8>>`) need no wrapper.
-    pub fn new(sink: W, header: WriterHeader) -> Result<Self, PspWriteError> {
-        Self::new_with_block_target(sink, header, TARGET_BLOCK_BYTES)
+    /// The `&'static str` in the error is what [`PspWriter::spent`] records: which of the two
+    /// unrecoverable things happened to a block whose records exist nowhere else.
+    fn hand_over(
+        &mut self,
+        head: BlockHead,
+        payload: &[u8],
+        path: &Path,
+        out: &mut BufWriter<File>,
+        written: &mut u64,
+        index: &mut Vec<BlockIndexEntry>,
+    ) -> Result<(), (&'static str, PspWriteError)> {
+        self.write_what_came_back(path, out, written, index)?;
+        while self.in_flight >= BLOCKS_AWAITING_COMPRESSION {
+            self.write_one(path, out, written, index)?;
+        }
+        let mut buffer = self.spare_payloads.pop().unwrap_or_default();
+        buffer.clear();
+        buffer.extend_from_slice(payload);
+        let frame = self.spare_frames.pop().unwrap_or_default();
+        self.to_compress
+            .send(BlockToCompress {
+                head,
+                payload: buffer,
+                frame,
+            })
+            .expect("the compressing thread outlives every block handed to it");
+        self.in_flight += 1;
+        Ok(())
     }
 
-    /// Like [`Self::new`] but overrides the auto-flush projected-byte
-    /// threshold. Used by the `pileup --block-target-bytes` CLI knob
-    /// and by tests that need to force size-driven flushes with
-    /// realistic record counts. The spec leaves block sizing as a
-    /// writer-internal choice (a reader handles any block size); the
-    /// CLI gatekeeps the accepted range to
-    /// [`MIN_BLOCK_TARGET_BYTES`]..=[`MAX_BLOCK_TARGET_BYTES`].
-    pub fn new_with_block_target(
-        sink: W,
-        header: WriterHeader,
-        target_block_bytes: usize,
-    ) -> Result<Self, PspWriteError> {
-        Self::new_with_block_layout(sink, header, target_block_bytes, DEFAULT_BLOCK_WINDOW_BP)
+    /// Write every block already compressed, without waiting for any that is not.
+    fn write_what_came_back(
+        &mut self,
+        path: &Path,
+        out: &mut BufWriter<File>,
+        written: &mut u64,
+        index: &mut Vec<BlockIndexEntry>,
+    ) -> Result<(), (&'static str, PspWriteError)> {
+        while let Ok(block) = self.compressed.try_recv() {
+            self.in_flight -= 1;
+            self.write(block, path, out, written, index)?;
+        }
+        Ok(())
     }
 
-    /// Like [`Self::new_with_block_target`] but also sets the primary
-    /// genomic-window block-cut grid (`block_window_bp`). The `pileup`
-    /// CLI passes both knobs; the window is the aligned primary cut and
-    /// `target_block_bytes` is the safety cap. A `block_window_bp` of 0
-    /// is clamped to 1 (every record its own window — degenerate, but
-    /// never panics).
-    pub fn new_with_block_layout(
-        sink: W,
-        header: WriterHeader,
-        target_block_bytes: usize,
-        block_window_bp: u32,
-    ) -> Result<Self, PspWriteError> {
-        Self::open(sink, header, target_block_bytes, block_window_bp)
+    /// Wait for the next block to come back, and write it.
+    fn write_one(
+        &mut self,
+        path: &Path,
+        out: &mut BufWriter<File>,
+        written: &mut u64,
+        index: &mut Vec<BlockIndexEntry>,
+    ) -> Result<(), (&'static str, PspWriteError)> {
+        let block = self
+            .compressed
+            .recv()
+            .expect("a block handed over comes back");
+        self.in_flight -= 1;
+        self.write(block, path, out, written, index)
     }
 
-    /// Append one record. Returns the number of bytes pushed to the
-    /// sink as a side effect of any auto-flush this call triggered
-    /// (zero if no flush).
-    pub fn write_record(&mut self, record: &PileupRecord) -> Result<u64, PspWriteError> {
-        let record_index = self.ingest.records_seen;
-        self.ingest.records_seen += 1;
-        self.validate_record(record_index, record)?;
+    /// Wait for every block still in flight, and write them all in order.
+    fn write_all(
+        &mut self,
+        path: &Path,
+        out: &mut BufWriter<File>,
+        written: &mut u64,
+        index: &mut Vec<BlockIndexEntry>,
+    ) -> Result<(), (&'static str, PspWriteError)> {
+        while self.in_flight > 0 {
+            self.write_one(path, out, written, index)?;
+        }
+        Ok(())
+    }
 
-        // Should we flush before appending? Flush triggers:
-        // - chrom_id change (blocks never cross chromosomes)
-        // - PRIMARY: the record crosses into a new genomic window
-        //   (`pos / block_window_bp`), so block boundaries land on a
-        //   fixed reference grid shared by every independently-written
-        //   sample → aligned boundaries → far fewer cohort-read sync
-        //   steps.
-        // - SAFETY CAP: projected uncompressed size past the cap (guards
-        //   against a pathological window blowing up resident memory).
-        let pre_flush_bytes = self.sink_offset;
-        let w = self.block_window_bp;
-        let should_flush = match &self.block {
-            None => false,
-            Some(b) => {
-                b.chrom_id != record.chrom_id
-                    || (record.pos / w) != (b.first_pos / w)
-                    || b.projected_bytes >= self.target_block_bytes
+    fn write(
+        &mut self,
+        block: CompressedBlock,
+        path: &Path,
+        out: &mut BufWriter<File>,
+        written: &mut u64,
+        index: &mut Vec<BlockIndexEntry>,
+    ) -> Result<(), (&'static str, PspWriteError)> {
+        let CompressedBlock {
+            head,
+            payload,
+            frame,
+        } = block;
+        self.spare_payloads.push(payload);
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(source) => {
+                return Err((
+                    "a block could not be compressed",
+                    PspWriteError::BlockRefused {
+                        path: path.to_path_buf(),
+                        source,
+                    },
+                ));
             }
         };
-        if should_flush {
-            self.flush_block()?;
+        let put = PspWriter::put_block(path, out, written, index, &head, &frame);
+        self.spare_frames.push(frame);
+        put.map_err(|error| ("a block could not be written", error))
+    }
+}
+
+/// **Joined, not detached.** A psp that is finished, or one whose writer was dropped
+/// half-written, must leave no thread behind — a cohort walked in one process would otherwise
+/// accumulate one per sample.
+impl Drop for BlockCompressionLine {
+    fn drop(&mut self) {
+        // Replacing the sender closes the one the worker is waiting on, which ends its loop.
+        let (closed, _) = crossbeam_channel::bounded(0);
+        self.to_compress = closed;
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
-        let flushed_bytes = self.sink_offset - pre_flush_bytes;
+    }
+}
 
-        // Start a new block if none is open. With unique-per-file
-        // chain ids there is no active-slot snapshot to copy; the
-        // block header only carries structural metadata
-        // (chrom_id, first_pos, n_records, n_total_alleles, manifest).
-        if self.block.is_none() {
-            self.block = Some(SnpBlock::new_block(record.chrom_id, record.pos));
+/// The compressing thread's whole life: take a block, compress it, hand both buffers back.
+///
+/// **A failure travels back down the channel rather than panicking here**, so that the walk
+/// still reports every failure of its own file — a compressing thread that died would leave
+/// the walk waiting on a block that never comes.
+fn compress_blocks(
+    mut compressor: BlockCompressor,
+    jobs: &crossbeam_channel::Receiver<BlockToCompress>,
+    done: &crossbeam_channel::Sender<CompressedBlock>,
+) {
+    while let Ok(job) = jobs.recv() {
+        let BlockToCompress {
+            head,
+            payload,
+            mut frame,
+        } = job;
+        let compressed = match compressor.compress(&payload) {
+            Ok(bytes) => {
+                frame.clear();
+                frame.extend_from_slice(bytes);
+                Ok(frame)
+            }
+            Err(source) => Err(source),
+        };
+        if done
+            .send(CompressedBlock {
+                head,
+                payload,
+                frame: compressed,
+            })
+            .is_err()
+        {
+            return;
         }
+    }
+}
 
-        self.apply_record_to_block(record_index, record)?;
-        self.ingest.last_locus = Some((record.chrom_id, record.pos));
+/// Writes one psp, from its header to its footer.
+///
+/// **The manifest is fixed at [`create`](Self::create) and cannot change afterwards** (spec
+/// §6.3): a field's encoding, the genomic block size and the look-back window are all decided
+/// before the first record and recorded in the header, because a writer that could change one
+/// half-way through would produce a file no reader could interpret without re-reading the header
+/// per block.
+#[derive(Debug)]
+#[must_use]
+pub struct PspWriter {
+    /// Which file is being written. **Every error this type raises names it**, because a cohort
+    /// gathering sixty samples at once raises them from sixty writers at once.
+    path: PathBuf,
+    out: BufWriter<File>,
+    /// Where the next byte will land — the file's length so far. Advanced only by a write that
+    /// returned, so it always describes bytes this writer has handed to the buffer.
+    written: u64,
+    /// **An `Option` because [`BlockBuilder::finish`] consumes the builder**, which is its own
+    /// guard: a builder that could be closed twice would put the last block in the file twice.
+    /// It is `Some` for the whole of this writer's life, because the only thing that takes it is
+    /// [`PspWriter::finish`], which consumes the writer in the same breath.
+    builder: Option<BlockBuilder>,
+    /// **Compression, on a thread of its own.** See [`BlockCompressionLine`].
+    line: BlockCompressionLine,
+    /// One entry per block closed so far, in the order they were written.
+    index: Vec<BlockIndexEntry>,
+    records: u64,
+    /// Why this writer can no longer produce a whole file, once something has gone wrong that
+    /// it cannot undo.
+    ///
+    /// **The block builder hands a closed block over and reopens in the same call**, so once
+    /// [`push`](Self::push) holds a payload the builder will never offer it again. Everything
+    /// after that point — reading the head back, compressing, writing — can still fail, and a
+    /// failure there means those records exist nowhere. Without this flag `finish` then wrote a
+    /// **valid** file: footer, matching index checksum, entries in ascending order, and a
+    /// thousand bases missing out of the middle of a contig with nothing saying so. That is
+    /// worse than the unreadable stump a killed run leaves, because every reader accepts it.
+    spent: Option<&'static str>,
+}
 
-        Ok(flushed_bytes)
+impl PspWriter {
+    /// Create a psp and write its header.
+    ///
+    /// **⚠ An existing file at `path` is truncated**, the way `File::create` truncates — so
+    /// creating over a finished psp destroys it, and there is no footer left to say a sample was
+    /// ever there. That is the conventional meaning of *create* and it is what the pipeline
+    /// wants when it re-runs a sample, but it is not stated anywhere in the spec, and the spec
+    /// *does* warn about the milder destruction `append` causes (§6.4: "write to a new path and
+    /// rename if that matters"). A caller that must not destroy an existing psp checks for one
+    /// first.
+    ///
+    /// **Nothing touches the filesystem until the header and the manifest have been accepted.**
+    /// The header is encoded, and the cut rule and compressor built from its manifest, before
+    /// the file is created — so a header this writer cannot honour leaves no file behind at all,
+    /// rather than an empty one that every reader then refuses for a different reason.
+    pub fn create(path: &Path, mut header: Header) -> Result<Self, PspWriteError> {
+        // **The compression level is recorded because it is a setting, and goal 4 is that
+        // settings are recorded.** A reader needs nothing from it — zstd decodes any level — but
+        // `append` must match bytes already in a file, and without this it would have no way to
+        // learn what those bytes were written at. `block.rs`'s own doc assigns this to F3 by
+        // name.
+        header.writer.parameters.insert(
+            ZSTD_COMPRESSION_LEVEL_KEY.to_string(),
+            crate::psp::header::ParameterValue::Integer(i64::from(
+                super::block::ZSTD_COMPRESSION_LEVEL,
+            )),
+        );
+        let header_bytes = header.encode()?;
+        let builder = BlockBuilder::from_manifest(&header.manifest).map_err(|source| {
+            PspWriteError::UnsupportedHeader {
+                path: path.to_path_buf(),
+                source: source.into(),
+            }
+        })?;
+        let compressor = BlockCompressor::from_manifest(&header.manifest).map_err(|source| {
+            PspWriteError::UnsupportedHeader {
+                path: path.to_path_buf(),
+                source: source.into(),
+            }
+        })?;
+
+        let file = File::create(path).map_err(|source| PspWriteError::Io {
+            path: path.to_path_buf(),
+            while_doing: "creating the file",
+            source,
+        })?;
+        let mut writer = Self {
+            path: path.to_path_buf(),
+            out: BufWriter::new(file),
+            written: 0,
+            builder: Some(builder),
+            line: BlockCompressionLine::start(compressor),
+            index: Vec::new(),
+            records: 0,
+            spent: None,
+        };
+        writer.put(&header_bytes, "writing the header")?;
+        Ok(writer)
     }
 
-    fn validate_record(
-        &self,
-        record_index: u64,
-        record: &PileupRecord,
-    ) -> Result<(), PspWriteError> {
-        // Chromosome id known.
-        let n_chroms = self.header.chromosomes.len();
-        if record.chrom_id as usize >= n_chroms {
-            return Err(PspWriteError::UnknownChromId {
-                record_index,
-                chrom_id: record.chrom_id,
-                n_chroms: n_chroms as u32,
-            });
+    /// Reopen a finished psp and add records to it.
+    ///
+    /// **The footer says where the blocks end, so appending is truncating at the index offset and
+    /// carrying on** (spec §6.4): the old index, trailer and footer are discarded, the blocks and
+    /// the header are not touched, and `finish` writes a whole new index made of the entries that
+    /// were already there and the ones this writer adds.
+    ///
+    /// **The header is not rewritten, so the manifest is the file's.** A field's encoding, the
+    /// grid the blocks cut on and the look-back window are all already declared, and appended
+    /// records must use them — so a manifest this build cannot honour is
+    /// [`UnsupportedHeader`](PspWriteError::UnsupportedHeader) here rather than a file whose
+    /// added records no reader can interpret under the header it keeps.
+    ///
+    /// **Coordinate order runs across the seam.** The last record already in the file is found by
+    /// walking the last block's heads — the bodies are never built — and the first appended record
+    /// is checked against it.
+    ///
+    /// **⚠ A file being appended to has no footer while this writer holds it open**, exactly like
+    /// a new one, so an append interrupted half-way leaves a file every reader refuses. That is
+    /// right — but note it has *lost the trailer the file had*, which is not recoverable. Spec
+    /// §6.4: **write to a new path and rename if that matters to the caller.**
+    pub fn append(path: &Path) -> Result<Self, PspWriteError> {
+        let reopen = |source: super::PspReadError| PspWriteError::Reopen {
+            path: path.to_path_buf(),
+            source,
+        };
+        // **Opened as a reader first, and every check `open` makes is made.** An append writes a
+        // fresh index and footer onto whatever it finds, so a file the reader would refuse must
+        // not be extended — the same lesson `replace_trailer` learned from its own review, and
+        // here the index is needed anyway.
+        let mut psp = super::PspReader::open(path).map_err(reopen)?;
+        let header = psp.header().clone();
+        let blocks_end = psp.footer().index_offset;
+        let index = psp.block_index().to_vec();
+        // **The manifest is checked before the file is walked, and the order is the finding.**
+        // `BlockBuilder::from_manifest` is what refuses a layout this build cannot write, and the
+        // walk below needs the same layout to read — so walking first made a manifest this writer
+        // cannot honour arrive as a *reader's* refusal wrapped in `Reopen`, which is the wrong
+        // class for what spec §6.4 calls out by name.
+        let mut builder = BlockBuilder::from_manifest(&header.manifest).map_err(|source| {
+            PspWriteError::UnsupportedHeader {
+                path: path.to_path_buf(),
+                source: source.into(),
+            }
+        })?;
+        let last_record = Self::find_the_last_record_in(&mut psp).map_err(reopen)?;
+        drop(psp);
+        if let Some(region) = last_record {
+            builder = builder.continuing_after(region);
         }
-        let chrom = &self.header.chromosomes[record.chrom_id as usize];
+        // **At the level the file records, not this build's** (spec goal 4). `create` writes it
+        // into the header's parameters for exactly this: an append that used another level would
+        // put blocks in one file compressed two ways, with nothing saying so.
+        let compressor =
+            Self::build_the_compressor_the_header_records(&header).map_err(|source| {
+                PspWriteError::UnsupportedHeader {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })?;
 
-        // pos in [1, chrom.length].
-        if record.pos == 0 || record.pos > chrom.length {
-            return Err(PspWriteError::PosOutOfRange {
-                record_index,
-                chrom_id: record.chrom_id,
-                pos: record.pos,
-                chrom_length: chrom.length,
-            });
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|source| PspWriteError::Io {
+                path: path.to_path_buf(),
+                while_doing: "reopening the file to append to it",
+                source,
+            })?;
+        // **The truncation is what removes the footer**, and from here until `finish` writes a new
+        // one every reader refuses the file — which is the same state a new writer leaves and is
+        // goal 3.
+        file.set_len(blocks_end)
+            .map_err(|source| PspWriteError::Io {
+                path: path.to_path_buf(),
+                while_doing: "truncating the file at its block index",
+                source,
+            })?;
+        file.seek(std::io::SeekFrom::Start(blocks_end))
+            .map_err(|source| PspWriteError::Io {
+                path: path.to_path_buf(),
+                while_doing: "seeking to the end of the blocks",
+                source,
+            })?;
+
+        Ok(Self {
+            path: path.to_path_buf(),
+            out: BufWriter::new(file),
+            // **Where the next byte lands, which is where the blocks ended.** Every offset the
+            // new index and footer carry is measured from this, so a zero here would put every
+            // appended block at an address inside the file that was already there.
+            written: blocks_end,
+            builder: Some(builder),
+            line: BlockCompressionLine::start(compressor),
+            index,
+            // **Not the records already in the file**, which nothing counts: `WriteStats` says
+            // what this writer wrote, and the blocks it inherited are in the index it inherited.
+            records: 0,
+            spent: None,
+        })
+    }
+
+    /// The region of the last record already in a file, or `None` if it holds none.
+    ///
+    /// **Heads only.** The walk declines every body, so this costs the last block's framing and
+    /// no record building — and the last block is the only one read.
+    fn find_the_last_record_in(
+        psp: &mut super::PspReader,
+    ) -> Result<Option<GenomeRegion>, super::PspReadError> {
+        let Some(last_block) = psp.block_index().len().checked_sub(1) else {
+            return Ok(None);
+        };
+        let mut last = None;
+        for found in psp
+            .records_from_block(last_block)?
+            .building_only_where(|_| false)
+        {
+            last = Some(found?.head.region);
         }
+        Ok(last)
+    }
 
-        // Monotonic locus.
-        if let Some((prev_chrom, prev_pos)) = self.ingest.last_locus {
-            let regression = record.chrom_id < prev_chrom
-                || (record.chrom_id == prev_chrom && record.pos <= prev_pos);
-            if regression {
-                return Err(PspWriteError::OutOfOrderRecord {
-                    record_index,
-                    prev_chrom,
-                    prev_pos,
-                    this_chrom: record.chrom_id,
-                    this_pos: record.pos,
+    /// Build a compressor at the window the manifest declares and the level the header records.
+    ///
+    /// **A header that records no level gives this build's**, which is what a file written before
+    /// the parameter existed looks like. **Every other shape is refused**, including one recorded
+    /// as a string or a float — ⚠ until the G4 review those fell into the same arm as *absent*,
+    /// so a file recording `"1"` was appended to at level 9 with nothing said, which is exactly
+    /// the file §2.4 says must not exist.
+    fn build_the_compressor_the_header_records(
+        header: &Header,
+    ) -> Result<BlockCompressor, super::HeaderRefusal> {
+        use crate::psp::header::ParameterValue;
+
+        let level = match header.writer.parameters.get(ZSTD_COMPRESSION_LEVEL_KEY) {
+            Some(ParameterValue::Integer(recorded)) => {
+                i32::try_from(*recorded).map_err(|_| super::HeaderRefusal::LevelPastAnyLevel {
+                    recorded: *recorded,
+                })?
+            }
+            // **Absent is the one shape that falls back**, and only because it is what a file
+            // written before this parameter existed looks like. Any other shape is a level
+            // recorded and then ignored, which is the file §2.4 says must not exist.
+            Some(other) => {
+                return Err(super::HeaderRefusal::UnreadableLevel {
+                    recorded: format!("{other:?}"),
                 });
             }
+            None => super::block::ZSTD_COMPRESSION_LEVEL,
+        };
+        Ok(BlockCompressor::with_level(
+            header.manifest.look_back_window_log,
+            level,
+        )?)
+    }
+
+    /// Lay one record down.
+    ///
+    /// **Coordinate order is enforced** (spec §6.3): a record starting before the one before it,
+    /// or on a contig already finished with, is refused rather than written — a file that breaks
+    /// the order seeks wrongly instead of failing, because the index and every seek rest on it.
+    ///
+    /// **A record refused for its coordinates leaves the file exactly as it was**, and the
+    /// writer stays usable: the cut rule guarantees that for its own state, and nothing here
+    /// writes a byte until the builder has handed back a whole block.
+    ///
+    /// ⚠ **Every other failure is unrecoverable, and marks the writer so.** Once the builder has
+    /// handed a closed block over it has already reopened, so nothing can offer that block
+    /// again; a failure while reading its head back, compressing it or writing it means those
+    /// records exist nowhere. The writer records why and [`finish`](Self::finish) then refuses.
+    ///
+    /// An earlier version said an I/O failure here "is terminal and is meant to be", reasoning
+    /// that the file would keep no footer. **That holds only while the failure persists.** A
+    /// transient one — one full device that empties, one refused write — left `finish` free to
+    /// write a footer over a file with a thousand bases missing from the middle of a contig,
+    /// which every reader accepts.
+    pub fn push(&mut self, record: &SampleLocusObservations) -> Result<(), PspWriteError> {
+        let closed = self
+            .builder
+            .as_mut()
+            .expect("the builder is taken only by `finish`, which consumes the writer")
+            .push(record)
+            .map_err(|refused| match refused {
+                BlockWriteError::OutOfOrder { previous, offered } => PspWriteError::OutOfOrder {
+                    path: self.path.clone(),
+                    previous,
+                    offered,
+                },
+                other => PspWriteError::RecordRefused {
+                    path: self.path.clone(),
+                    source: other,
+                },
+            })?;
+        self.records += 1;
+        let Some(payload) = closed else {
+            return Ok(());
+        };
+        // **From here on a failure is unrecoverable and is recorded as such.** The builder has
+        // already closed this block and reopened; nothing can hand it back.
+        let head = Self::decode_the_head_of(payload, &self.path).inspect_err(|_| {
+            self.spent = Some("a block it had just built could not be read back");
+        })?;
+        // **Destructured because the block goes to the compressing thread and the blocks that
+        // have come back from it go to the file, and the two touch disjoint fields.** Naming
+        // them says so to the borrow checker.
+        //
+        // **Handing a block over is not writing it**, so a failure raised here can belong to a
+        // block closed several records ago. That costs nothing a reader can see — the file
+        // stops at the same place either way, and `finish` refuses to seal it — and it is why
+        // the line hands back the sentence [`spent`](Self::spent) records rather than the call
+        // site guessing which of the two things went wrong.
+        let Self {
+            path,
+            out,
+            written,
+            line,
+            index,
+            ..
+        } = self;
+        match line.hand_over(head, payload, path, out, written, index) {
+            Ok(()) => Ok(()),
+            Err((why, error)) => {
+                self.spent = Some(why);
+                Err(error)
+            }
+        }
+    }
+
+    /// Write the last block, the index, the trailer and the footer, then make the file durable.
+    ///
+    /// **It consumes the writer**, which is what says in the type system that a file with no
+    /// footer is not a file: there is no way to hold a writer that has finished, and no way to
+    /// produce a readable psp without calling this (arch §4.2, §5).
+    ///
+    /// **⚠ Durability is three steps in this order, and it is easy to get wrong** (spec §6.3):
+    /// flush the format, *then* surface the buffered writer's errors, *then* sync. A `BufWriter`
+    /// dropped without the middle step can swallow a failed flush, and a truncated footer on a
+    /// billions-of-records file looks exactly like an interrupted run.
+    ///
+    /// **What it writes, it reads back before believing it.** The index and the footer are
+    /// decoded by the very functions a reader will use, and a failure is refused here rather
+    /// than left on disk — see [`Self::check_the_index_and_footer_read_back`].
+    pub fn finish(mut self, trailer: &[u8]) -> Result<WriteStats, PspWriteError> {
+        // **A writer that lost a block cannot produce a whole file, and must not produce a file
+        // that looks whole.** See the `spent` field for what that looked like before this
+        // existed.
+        if let Some(why) = self.spent {
+            return Err(PspWriteError::WouldNotBeReadable {
+                path: self.path.clone(),
+                reason: format!("records were lost earlier in the walk: {why}"),
+                // The loss happened earlier and its own error went to the caller then.
+                source: None,
+            });
+        }
+        let last_block = self
+            .builder
+            .take()
+            .expect("the builder is taken only here, and `finish` consumes the writer")
+            .finish();
+        if let Some(payload) = last_block {
+            let head = Self::decode_the_head_of(&payload, &self.path)?;
+            // **Destructured for the reason `push` destructures**: the compressing line and the
+            // file are disjoint fields, and naming them says so.
+            let Self {
+                path,
+                out,
+                written,
+                line,
+                index,
+                ..
+            } = &mut self;
+            line.hand_over(head, &payload, path, out, written, index)
+                .map_err(|(_, error)| error)?;
+        }
+        // **Every block that is still in flight is written before the index is built**, because
+        // the index describes them and the footer describes the index. This is the one place
+        // the walk waits for the compressor, and by then there is nothing else left to do.
+        {
+            let Self {
+                path,
+                out,
+                written,
+                line,
+                index,
+                ..
+            } = &mut self;
+            line.write_all(path, out, written, index)
+                .map_err(|(_, error)| error)?;
         }
 
-        // At least one allele.
-        if record.alleles.is_empty() {
-            return Err(err_invalid_record(
-                record_index,
-                InvalidRecordKind::ZeroAlleles,
-            ));
-        }
+        let index_offset = self.written;
+        let index_bytes = index::encode_index(&self.index);
+        let footer = Footer {
+            index_offset,
+            index_bytes: index_bytes.len() as u64,
+            trailer_offset: index_offset + index_bytes.len() as u64,
+            trailer_bytes: trailer.len() as u64,
+            n_blocks: self.index.len() as u64,
+            index_checksum: index::checksum_index(&index_bytes),
+        };
+        self.check_the_index_and_footer_read_back(&index_bytes, &footer)?;
 
-        // Per-allele rules.
-        for (i, allele) in record.alleles.iter().enumerate() {
-            let len = allele.seq.len();
-            if len == 0 || (len as u64) > MAX_ALLELE_SEQ_LEN {
-                return Err(err_invalid_record(
-                    record_index,
-                    InvalidRecordKind::AlleleSeqLen {
-                        allele_index: i,
-                        length: len,
-                        max: MAX_ALLELE_SEQ_LEN,
-                    },
-                ));
+        self.put(&index_bytes, "writing the block index")?;
+        self.put(trailer, "writing the trailer")?;
+        self.put(&encode_footer(&footer), "writing the footer")?;
+
+        // **Every byte of the file is accounted for by a section the footer names.** The blocks
+        // end where the index starts, the index and the trailer have the lengths the footer
+        // carries, and the footer is the last 48 bytes — so the counter and the footer must
+        // agree, and if they ever do not, every offset the footer holds is measured from a
+        // different file than the one on disk.
+        //
+        // **Carried forward from the F3 and F4 reviews, and re-measured here**: a defect that
+        // adds a fifth section between the trailer and the footer fails **82 tests with this
+        // assertion and 66 without it**, so it accounts for sixteen of them. ⚠ The F-era figure
+        // was *1 failing test to 7*, on a suite a third this size; a number measured on another
+        // tree is not a fact about this one, and the G4 review caught it still standing here.
+        //
+        // It is a `debug_assert` because it is arithmetic on numbers this function itself
+        // produced — a release build gains nothing by re-deriving them. **What it buys is where
+        // the failure lands**: at the writer, naming the disagreement, rather than at sixty-six
+        // readers.
+        debug_assert_eq!(
+            self.written,
+            footer.trailer_offset + footer.trailer_bytes + FOOTER_BYTES as u64,
+            "the bytes written and the sections the footer names must be the same file"
+        );
+
+        let stats = WriteStats {
+            records: self.records,
+            blocks: self.index.len() as u64,
+            bytes: self.written,
+            trailer_bytes: footer.trailer_bytes,
+        };
+
+        // **The durability steps, in the one order that surfaces every failure** (spec §6.3).
+        //
+        // ⚠ `into_inner` *is* the flush, and it is the flush that surfaces. An earlier version
+        // called `flush()` first and then `into_inner()`, which reads like the spec's three
+        // steps but is not: a successful `flush()` empties the buffer, so the flush inside
+        // `into_inner` then has nothing to write and cannot fail. The error arm was
+        // unreachable — deleting it changed no behaviour under mutation, which is how it was
+        // found.
+        let file = self.out.into_inner().map_err(|failed| PspWriteError::Io {
+            path: self.path.clone(),
+            while_doing: "flushing the finished file",
+            source: failed.into_error(),
+        })?;
+        file.sync_all().map_err(|source| PspWriteError::Io {
+            path: self.path.clone(),
+            while_doing: "syncing the finished file",
+            source,
+        })?;
+
+        Ok(stats)
+    }
+
+    /// **A writer must not be able to produce a file its own reader refuses**, so the two
+    /// structures with rules of their own are read back with the very functions that will read
+    /// them from disk.
+    ///
+    /// This is the obligation F1 and F2 both routed here rather than solving in their codecs:
+    /// neither could assert its rule at the encoder, because each module's own tests must be
+    /// able to write the bytes that prove the reader refuses them. `finish` is the one place
+    /// where the bytes being written are meant to be readable, so it is the one place the
+    /// assertion belongs.
+    ///
+    /// It costs one index decode and one 48-byte footer decode per file — against a walk that
+    /// wrote every block in it.
+    fn check_the_index_and_footer_read_back(
+        &self,
+        index_bytes: &[u8],
+        footer: &Footer,
+    ) -> Result<(), PspWriteError> {
+        index::decode_index(index_bytes, footer.n_blocks).map_err(|source| {
+            PspWriteError::WouldNotBeReadable {
+                path: self.path.clone(),
+                reason: "the block index it wrote does not decode".to_string(),
+                source: Some(source.into()),
             }
-            // H4: lookup-table walk lets the loop run to completion
-            // (no per-element early-exit) so LLVM can autovectorise
-            // on long alleles. The cold path scans again to locate
-            // the offending byte for the error message.
-            if !allele.seq.iter().all(|&b| ALLOWED_ALLELE_BYTE[b as usize]) {
-                return Err(err_invalid_allele_byte(record_index, i, &allele.seq));
+        })?;
+        // **The checksum too**, because a reader checks it before it decodes: a footer carrying
+        // a checksum of something other than the index is a file `open` refuses, and computing
+        // it over the trailer instead sailed through this guard before the check existed.
+        let found = index::checksum_index(index_bytes);
+        if found != footer.index_checksum {
+            return Err(PspWriteError::WouldNotBeReadable {
+                path: self.path.clone(),
+                reason: format!(
+                    "the footer carries {:#010x} as the block index's checksum; the index it \
+                     wrote checksums to {found:#010x}",
+                    footer.index_checksum
+                ),
+                // A rule the writer checks itself: no decoder can see the two together.
+                source: None,
+            });
+        }
+        footer::decode_footer(&encode_footer(footer)).map_err(|source| {
+            PspWriteError::WouldNotBeReadable {
+                path: self.path.clone(),
+                reason: "the footer it wrote does not decode".to_string(),
+                source: Some(source.into()),
             }
-            if !allele.support.q_sum.is_finite() {
-                return Err(err_invalid_record(
-                    record_index,
-                    InvalidRecordKind::NonFiniteQSum {
-                        allele_index: i,
-                        q_sum: allele.support.q_sum,
-                    },
-                ));
-            }
-            // chain_ids ascending + distinct (defensive).
-            for w in allele.chain_ids.windows(2) {
-                if w[0] >= w[1] {
-                    return Err(err_invalid_record(
-                        record_index,
-                        InvalidRecordKind::AlleleChainIdsNotAscending { allele_index: i },
-                    ));
+        })?;
+        Ok(())
+    }
+
+    /// The head of a block this writer has just built, read back out of its own bytes.
+    ///
+    /// **The index entry comes from the bytes going to disk, not from a number kept beside
+    /// them**, so the index describes the file rather than the writer's intentions.
+    fn decode_the_head_of(payload: &[u8], path: &Path) -> Result<BlockHead, PspWriteError> {
+        BlockHead::decode(payload)
+            .map(|decoded| decoded.head)
+            .map_err(|source| PspWriteError::WouldNotBeReadable {
+                path: path.to_path_buf(),
+                reason: "a block it just built does not decode".to_string(),
+                source: Some(source.into()),
+            })
+    }
+
+    /// Write one compressed block and give it its index entry.
+    ///
+    /// **The entry is pushed only if the write returned**, so the index never claims a block the
+    /// file does not hold — and its offset is where the block went, taken before the write moves
+    /// the counter.
+    ///
+    /// **The fields are named rather than reached through `self`**, and that is not a style
+    /// choice: both callers hold `block` as a borrow of the compressor's own buffer, so a method
+    /// taking `&mut self` could not be given it without copying the block out first — one
+    /// allocation the size of a compressed block, per block, for nothing. Naming the disjoint
+    /// fields says to the borrow checker that the compressor is not among them.
+    fn put_block(
+        path: &Path,
+        out: &mut BufWriter<File>,
+        written: &mut u64,
+        index: &mut Vec<BlockIndexEntry>,
+        head: &BlockHead,
+        block: &[u8],
+    ) -> Result<(), PspWriteError> {
+        let entry = BlockIndexEntry {
+            first_position: GenomePosition {
+                contig: head.contig,
+                position: head.first_position,
+            },
+            block_offset: *written,
+        };
+        out.write_all(block).map_err(|source| PspWriteError::Io {
+            path: path.to_path_buf(),
+            while_doing: "writing a block",
+            source,
+        })?;
+        *written += block.len() as u64;
+        index.push(entry);
+        Ok(())
+    }
+
+    /// Hand bytes to the buffer and count them.
+    fn put(&mut self, bytes: &[u8], while_doing: &'static str) -> Result<(), PspWriteError> {
+        self.out
+            .write_all(bytes)
+            .map_err(|source| PspWriteError::Io {
+                path: self.path.clone(),
+                while_doing,
+                source,
+            })?;
+        self.written += bytes.len() as u64;
+        Ok(())
+    }
+}
+
+/// Fixtures shared by this module's tests and by the reader's.
+///
+/// **Here rather than duplicated**, because a reader's tests need a psp that a writer wrote, and
+/// two copies of a fixture drift: the one thing worse than a fixture that cannot fail is two
+/// fixtures that disagree about what a sample looks like.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+    use crate::locus_generation::{LocusKind, ReadWitness, SequenceObservation};
+    use crate::psp::header::{
+        ContigIdentity, FORMAT_VERSION, ParameterValue, ReferenceIdentity, WriterProvenance,
+    };
+    use crate::types::{Bp, ContigId, GenomeRegion, Position, ReadGroupId, SummedLogError};
+    use std::io::Read as _;
+
+    /// A tomato-shaped header, with the block grid small enough that a handful of records cut
+    /// several blocks.
+    pub(crate) fn a_header(genomic_block_size_bp: u64) -> Header {
+        let contigs = vec![
+            ContigIdentity {
+                name: "SL4.0ch01".to_string(),
+                length: 90_863_682,
+                md5: Some([0x1b; 16]),
+            },
+            ContigIdentity {
+                name: "SL4.0ch02".to_string(),
+                length: 53_473_368,
+                md5: Some([0x2c; 16]),
+            },
+        ];
+        let mut header = Header {
+            format_version: FORMAT_VERSION,
+            sample: "SRR7279481".to_string(),
+            reference: ReferenceIdentity {
+                name: "S_lycopersicum_chromosomes.4.00.fa".to_string(),
+                md5: Some([0x0a; 16]),
+            },
+            segmentation_inputs: crate::psp::segmentation_section::segmentation_inputs_for_tests(
+                &contigs,
+            ),
+            contigs,
+            read_groups: crate::psp::header::read_groups_for_tests(),
+            observation_reach_ceiling_bp: Bp(4_000),
+            writer: WriterProvenance {
+                tool: "ng".to_string(),
+                version: "0.1.0".to_string(),
+                subcommand: "pileup".to_string(),
+                input_alignments: vec!["SRR7279481.cram".to_string()],
+                input_reference: "S_lycopersicum_chromosomes.4.00.fa".to_string(),
+                command_line: "ng pileup --sample SRR7279481".to_string(),
+                parameters: std::collections::BTreeMap::from([(
+                    "depth-cap".to_string(),
+                    ParameterValue::Integer(300),
+                )]),
+                created: "2026-08-28T00:00:00Z"
+                    .parse()
+                    .expect("a valid RFC 3339 stamp"),
+            },
+            manifest: crate::psp::header::Manifest::as_this_build_writes_it(),
+        };
+        header.manifest.genomic_block_size_bp = Bp(genomic_block_size_bp);
+        header
+    }
+
+    pub(crate) fn a_record(contig: u32, start: u64, span: u64) -> SampleLocusObservations {
+        let bases: Box<[u8]> = (0..span)
+            .map(|offset| b"ACGT"[((start + offset) % 4) as usize])
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        SampleLocusObservations {
+            region: GenomeRegion {
+                contig: ContigId(contig),
+                start: Position(start),
+                end: Position(start + span - 1),
+            },
+            reference_bases: bases.clone(),
+            observations: vec![SequenceObservation {
+                bases,
+                read_witness: ReadWitness::Complete,
+                read_group: ReadGroupId(0),
+                num_obs: 3,
+                num_fwd: 2,
+                q_sum: SummedLogError::from_steps(-4_096),
+                mapq_sum: 180,
+                mapq_sum_sq: 10_800,
+                placed_left: 1,
+                chain_ids: Vec::new(),
+            }],
+            reads_without_observation: 1,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Generic,
+        }
+    }
+
+    /// Records across two contigs, cutting several blocks on a 1 kb grid.
+    pub(crate) fn a_sample() -> Vec<SampleLocusObservations> {
+        let mut records = Vec::new();
+        for contig in 0..2u32 {
+            for block in 0..4u64 {
+                for step in 0..5u64 {
+                    records.push(a_record(contig, 1 + block * 1_000 + step * 100, 1));
                 }
             }
         }
-
-        Ok(())
+        records
     }
 
-    /// Apply the record's content to the open block's per-column
-    /// buffers.
-    fn apply_record_to_block(
-        &mut self,
-        record_index: u64,
-        record: &PileupRecord,
-    ) -> Result<(), PspWriteError> {
-        // With unique-per-file chain ids there's no active-set
-        // bookkeeping or lifecycle-marker validation. Each
-        // `allele.chain_ids` is just a list of `u64`s that must
-        // be strictly ascending (per-record well-formedness — pinned
-        // in `validate_record`); identifier collisions are
-        // structurally impossible because the chain-id allocator
-        // monotonically mints distinct values per file.
-        //
-        // PANIC-FREE: write_record opens `self.block` on every path
-        // that reaches this call. The Option shape is an artefact
-        // of the flush/open cycle, not a real "may be absent"
-        // condition here.
-        let _ = record_index;
-        let block = self.block.as_mut().expect("block open by construction");
-        block.append(record);
-
-        Ok(())
-    }
-}
-
-impl<W: Write> PspWriter<W, SsrKind> {
-    /// Open an `.ssr.psp` writer with the default block layout. Mirror
-    /// of [`PspWriter::<W, SnpKind>::new`].
-    pub fn new_ssr(sink: W, header: WriterHeader) -> Result<Self, PspWriteError> {
-        Self::open(sink, header, TARGET_BLOCK_BYTES, DEFAULT_BLOCK_WINDOW_BP)
+    /// A finished psp holding [`a_sample`], cut on a 1 kb grid, and where it is.
+    ///
+    /// **One fixture for the writer's tests, the reader's and the walk's.** Three copies of
+    /// "what a finished file looks like" drift, and the one thing worse than a fixture that
+    /// cannot fail is two that disagree about what a sample is.
+    pub(crate) fn a_finished_psp() -> (tempfile::TempDir, PathBuf) {
+        let (dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        for record in a_sample() {
+            writer.push(&record).expect("in order");
+        }
+        let _ = writer.finish(b"a per-sample summary").expect("it finishes");
+        (dir, path)
     }
 
-    /// Open an `.ssr.psp` writer with explicit block layout (window grid
-    /// + safety-cap bytes). Mirror of the SNP `new_with_block_layout`.
-    pub fn new_ssr_with_block_layout(
-        sink: W,
-        header: WriterHeader,
-        target_block_bytes: usize,
-        block_window_bp: u32,
-    ) -> Result<Self, PspWriteError> {
-        Self::open(sink, header, target_block_bytes, block_window_bp)
+    /// The footer of a psp read whole into memory.
+    ///
+    /// **The three-line preamble every test that damages a file writes**: slice the fixed tail,
+    /// widen it to an array, decode it. Here rather than in each of them, for the reason
+    /// [`a_finished_psp`] is.
+    pub(crate) fn footer_of(bytes: &[u8]) -> crate::psp::footer::Footer {
+        let tail: [u8; crate::psp::footer::FOOTER_BYTES] = bytes
+            [bytes.len() - crate::psp::footer::FOOTER_BYTES..]
+            .try_into()
+            .expect("the file is at least a footer long");
+        crate::psp::footer::decode_footer(&tail).expect("a finished file's footer reads")
     }
 
-    /// Append one locus record. Blocks are cut on the same genomic-window
-    /// grid as the SNP path, keyed on the locus `start`; the block index
-    /// `last_pos` tracks the block's max `end` (interval semantics,
-    /// §10.5). Returns bytes pushed by any auto-flush this call triggered.
-    pub fn write_locus(&mut self, record: &SsrLocusRecord) -> Result<u64, PspWriteError> {
-        let record_index = self.ingest.records_seen;
-        self.ingest.records_seen += 1;
-        self.validate_locus(record_index, record)?;
-
-        let pre_flush_bytes = self.sink_offset;
-        let w = self.block_window_bp;
-        let should_flush = match &self.block {
-            None => false,
-            Some(b) => {
-                b.chrom_id() != record.chrom_id
-                    || (record.start / w) != (b.first_pos() / w)
-                    || b.projected_bytes() >= self.target_block_bytes
-            }
-        };
-        if should_flush {
-            self.flush_block()?;
-        }
-        let flushed_bytes = self.sink_offset - pre_flush_bytes;
-
-        if self.block.is_none() {
-            self.block = Some(SsrBlock::new_block(record.chrom_id, record.start));
-        }
-        self.block
-            .as_mut()
-            .expect("block open by construction")
-            .append(record);
-        self.ingest.last_locus = Some((record.chrom_id, record.start));
-        Ok(flushed_bytes)
-    }
-
-    fn validate_locus(
-        &self,
-        record_index: u64,
-        record: &SsrLocusRecord,
-    ) -> Result<(), PspWriteError> {
-        let n_chroms = self.header.chromosomes.len();
-        if record.chrom_id as usize >= n_chroms {
-            return Err(PspWriteError::UnknownChromId {
-                record_index,
-                chrom_id: record.chrom_id,
-                n_chroms: n_chroms as u32,
-            });
-        }
-        let chrom = &self.header.chromosomes[record.chrom_id as usize];
-
-        // start in [1, length]; end in (start, length + 1] (the interval
-        // [start, end) is half-open, so `end` may sit one past the last
-        // 1-based position). `end <= start` would also underflow the
-        // `span = end - start` encode, so it must be rejected here.
-        if record.start == 0 || record.start > chrom.length {
-            return Err(PspWriteError::PosOutOfRange {
-                record_index,
-                chrom_id: record.chrom_id,
-                pos: record.start,
-                chrom_length: chrom.length,
-            });
-        }
-        if record.end <= record.start || record.end > chrom.length + 1 {
-            return Err(PspWriteError::LocusEndOutOfRange {
-                record_index,
-                chrom_id: record.chrom_id,
-                start: record.start,
-                end: record.end,
-                chrom_length: chrom.length,
-            });
-        }
-
-        if let Some((prev_chrom, prev_start)) = self.ingest.last_locus {
-            let regression = record.chrom_id < prev_chrom
-                || (record.chrom_id == prev_chrom && record.start <= prev_start);
-            if regression {
-                return Err(PspWriteError::OutOfOrderRecord {
-                    record_index,
-                    prev_chrom,
-                    prev_pos: prev_start,
-                    this_chrom: record.chrom_id,
-                    this_pos: record.start,
+    /// Fill one block's compressed frame with `0xff`, leaving the four-byte length in front of
+    /// it, so the block cannot inflate.
+    ///
+    /// **`0xff` rather than a flipped bit**, and deliberately: zstd refuses a frame with no magic
+    /// outright, where a flipped bit inside a frame can inflate to something plausible and make
+    /// the test depend on which byte was chosen.
+    pub(crate) fn wreck_the_block(path: &Path, ordinal: usize) {
+        let mut whole = bytes_of(path);
+        let (at, ends) = {
+            let psp = crate::psp::PspReader::open(path).expect("a finished psp opens");
+            let entries = psp.block_index();
+            let at = entries[ordinal].block_offset as usize;
+            let ends = entries
+                .get(ordinal + 1)
+                .map_or(psp.footer().index_offset as usize, |next| {
+                    next.block_offset as usize
                 });
-            }
-        }
-
-        // Mark-2 records carry no log-probabilities (just observed sequences +
-        // counts), so there is no finite sweep to run here. Observed-sequence
-        // byte lengths are bounded by the read length (≪ MAX_ALLELE_SEQ_LEN), and
-        // the decoder caps them defensively for foreign files.
-        Ok(())
-    }
-}
-
-impl<W: Write, S: PspKind> PspWriter<W, S> {
-    /// Schema-generic construction: frame the `S`-kind header (its
-    /// `kind` tag + column table), write it, and prepare empty state.
-    /// The per-kind public constructors (SNP `new`/`new_with_block_*`,
-    /// SSR `new_ssr*`) delegate here so the header/scratch wiring lives
-    /// in one place. `block_window_bp` of 0 is clamped to 1.
-    fn open(
-        mut sink: W,
-        header: WriterHeader,
-        target_block_bytes: usize,
-        block_window_bp: u32,
-    ) -> Result<Self, PspWriteError> {
-        let header_bytes = build_header_bytes_for(&header, S::KIND, S::columns())?;
-        sink.write_all(&header_bytes)
-            .map_err(|e| PspWriteError::Io {
-                context: "file header",
-                block_index: None,
-                column_tag: None,
-                source: e,
-            })?;
-        let sink_offset = header_bytes.len() as u64;
-        let scratch = WriterScratch::new(S::columns().len())?;
-        Ok(Self {
-            sink,
-            header,
-            sink_offset,
-            index_entries: Vec::new(),
-            block: None,
-            ingest: IngestState::new(),
-            scratch,
-            target_block_bytes,
-            block_window_bp: block_window_bp.max(1),
-            metadata: None,
-        })
-    }
-
-    /// Attach an opaque payload to be written as the file's single
-    /// **metadata section** at [`Self::finish`] — a zstd frame placed
-    /// between the block index and the trailer, located on read as the
-    /// bytes between `index_offset + index_byte_length` and the trailer
-    /// start (the 32-byte trailer layout is unchanged). The payload is a
-    /// kind-defined document; the container core stores it verbatim.
-    ///
-    /// Call at most once before `finish`. A second call is a producer
-    /// bug (the first payload would be lost) and returns
-    /// [`PspWriteError::MetadataAlreadyAttached`].
-    pub fn attach_metadata(&mut self, payload: Vec<u8>) -> Result<(), PspWriteError> {
-        if self.metadata.is_some() {
-            return Err(PspWriteError::MetadataAlreadyAttached);
-        }
-        self.metadata = Some(payload);
-        Ok(())
-    }
-
-    /// Flush any open block, write the block index, and write the
-    /// trailer. Consumes the writer; the returned sink is positioned
-    /// at the end of a complete `.psp` file.
-    ///
-    /// **End-of-stage discipline for `BufWriter`-wrapped file sinks.**
-    /// `BufWriter::drop` may swallow flush errors, which for a
-    /// billions-of-records file can silently truncate the trailer.
-    /// The production caller should do, in order:
-    /// ```ignore
-    /// let buf = writer.finish()?;       // PSP-level flush
-    /// let file = buf.into_inner()?;     // surface BufWriter errors
-    /// file.sync_all()?;                 // durability for downstream stages
-    /// ```
-    /// `sync_all` is end-of-stage only — never per-block.
-    pub fn finish(mut self) -> Result<W, PspWriteError> {
-        if self.block.is_some() {
-            self.flush_block()?;
-        }
-        let index_offset = self.sink_offset;
-        let index_bytes = encode_index(&self.index_entries);
-        let index_byte_length = index_bytes.len() as u64;
-        let index_checksum = checksum_index(&index_bytes);
-        self.sink
-            .write_all(&index_bytes)
-            .map_err(|e| PspWriteError::Io {
-                context: "block index",
-                block_index: None,
-                column_tag: None,
-                source: e,
-            })?;
-        self.sink_offset += index_byte_length;
-
-        // Optional metadata section: a zstd frame after the index and
-        // before the trailer. The trailer's pointer math is unchanged —
-        // the reader recovers the section as the gap between index-end
-        // and trailer-start, so writing nothing leaves a zero-length gap
-        // (no section) and a byte-identical file.
-        if let Some(payload) = self.metadata.take() {
-            let frame =
-                super::metadata::compress_metadata(&payload).map_err(|e| PspWriteError::Io {
-                    context: "metadata section",
-                    block_index: None,
-                    column_tag: None,
-                    source: e,
-                })?;
-            self.sink.write_all(&frame).map_err(|e| PspWriteError::Io {
-                context: "metadata section",
-                block_index: None,
-                column_tag: None,
-                source: e,
-            })?;
-            self.sink_offset += frame.len() as u64;
-        }
-
-        let trailer = Trailer {
-            index_offset,
-            index_byte_length,
-            n_blocks: self.index_entries.len() as u64,
-            index_checksum,
+            (at, ends)
         };
-        let trailer_bytes = encode_trailer(&trailer);
-        self.sink
-            .write_all(&trailer_bytes)
-            .map_err(|e| PspWriteError::Io {
-                context: "file trailer",
-                block_index: None,
-                column_tag: None,
-                source: e,
-            })?;
-        self.sink_offset += trailer_bytes.len() as u64;
-        self.sink.flush().map_err(|e| PspWriteError::Io {
-            context: "final flush",
-            block_index: None,
-            column_tag: None,
-            source: e,
-        })?;
-        Ok(self.sink)
+        whole[at + crate::psp::COMPRESSED_BLOCK_LENGTH_BYTES..ends].fill(0xff);
+        rewrite(path, &whole);
     }
 
-    /// Projected uncompressed bytes the currently-open block has
-    /// accumulated. `None` when no block is open (just after `new` or
-    /// just after a flush).
-    ///
-    /// Hidden from rustdoc — this peek into writer state exists only
-    /// to let benches align iteration boundaries with the writer's
-    /// auto-flush boundary (see L10 in
-    /// `ia/reviews/perf_psp_writer_2026-05-13.md`).
-    #[doc(hidden)]
-    pub fn current_block_projected_bytes(&self) -> Option<usize> {
-        self.block.as_ref().map(|b| b.projected_bytes())
+    /// Replace a file's contents wholesale — how a test lays down a psp it has damaged.
+    pub(crate) fn rewrite(path: &Path, bytes: &[u8]) {
+        use std::io::Write as _;
+        let mut file = File::create(path).expect("the file is writable");
+        file.write_all(bytes).expect("it writes");
     }
 
-    /// Encode the current block to wire bytes, compress its columns,
-    /// emit header + payloads to the sink, and append an index
-    /// entry.
-    ///
-    /// Per-flush scratch state (uncompressed payload buffer, the 12
-    /// compressed-frame buffers, the manifest scratch, and the
-    /// block-header bytes buffer) is reused across flushes — each is
-    /// `clear()`ed inside this method, keeping its prior capacity so
-    /// subsequent flushes do not pay realloc cost.
-    fn flush_block(&mut self) -> Result<(), PspWriteError> {
-        // PANIC-FREE: flush_block is called only from `write_record`
-        // (gated by `should_flush`, which requires `self.block` to
-        // already be `Some`) and from `finish` (gated by
-        // `if self.block.is_some()`). Both call sites ensure a block
-        // is open.
-        let block = self
-            .block
-            .take()
-            .expect("flush_block called with no open block");
-        let block_offset = self.sink_offset;
-        let n_records = block.n_records();
-        let n_total_alleles = block.n_entries();
-        let block_index = self.index_entries.len() as u64;
-
-        // Mi30: split flush into three phases. Each is a free
-        // function taking `&mut WriterScratch` (and, where needed,
-        // the open block, the sink, and `block_index` for error
-        // context). Each is generic over the schema `S`.
-        encode_and_compress_columns::<S>(&block, &mut self.scratch, block_index)?;
-        assemble_block_header::<S>(
-            &block,
-            &mut self.scratch,
-            block_index,
-            n_records,
-            n_total_alleles,
-        )?;
-        let written = emit_block_to_sink::<W, S>(&mut self.sink, &self.scratch, block_index)?;
-        self.sink_offset += written;
-
-        self.index_entries.push(BlockIndexEntry {
-            chrom_id: block.chrom_id(),
-            first_pos: block.first_pos(),
-            last_pos: block.last_pos(),
-            n_records,
-            block_offset,
-        });
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------
-// Flush phases (Mi30)
-// ---------------------------------------------------------------------
-
-/// Phase 1: walk the schema's column table, encoding each column's
-/// uncompressed bytes, compressing them into `scratch.compressed[i]`,
-/// and recording a manifest entry. `block_index` is used only for
-/// error context.
-fn encode_and_compress_columns<S: PspKind>(
-    block: &S::Block,
-    scratch: &mut WriterScratch,
-    block_index: u64,
-) -> Result<(), PspWriteError> {
-    scratch.manifest.clear();
-    for (i, column_def) in S::columns().iter().enumerate() {
-        scratch.uncompressed.clear();
-        S::encode_column(column_def, block, &mut scratch.uncompressed)?;
-        let uncompressed_len = scratch.uncompressed.len() as u32;
-        zstd_compress_into(
-            &mut scratch.compressor,
-            &scratch.uncompressed,
-            &mut scratch.compressed[i],
-        )
-        .map_err(|e| PspWriteError::Io {
-            context: "zstd compression of column payload",
-            block_index: Some(block_index),
-            column_tag: Some(column_def.tag),
-            source: e,
-        })?;
-        scratch.manifest.push(ColumnManifestEntry {
-            tag: column_def.tag,
-            compressed_len: scratch.compressed[i].len() as u32,
-            uncompressed_len,
-        });
-    }
-    Ok(())
-}
-
-/// Phase 2: build the [`BlockHeader`] struct (moving the manifest
-/// scratch into it) and serialise it into `scratch.header_bytes`.
-/// The manifest scratch is restored at the end so capacity carries
-/// over to the next flush.
-fn assemble_block_header<S: PspKind>(
-    block: &S::Block,
-    scratch: &mut WriterScratch,
-    block_index: u64,
-    n_records: u32,
-    n_total_alleles: u32,
-) -> Result<(), PspWriteError> {
-    let header = BlockHeader {
-        chrom_id: block.chrom_id(),
-        first_pos: block.first_pos(),
-        n_records,
-        n_total_alleles,
-        manifest: std::mem::take(&mut scratch.manifest),
-    };
-    scratch.header_bytes.clear();
-    encode_block_header(&header, &mut scratch.header_bytes)
-        .map_err(|kind| PspWriteError::BlockEmission { block_index, kind })?;
-    // Recover the manifest for the next flush so capacity is
-    // preserved.
-    scratch.manifest = header.manifest;
-    Ok(())
-}
-
-/// Phase 3: write the encoded block header followed by every
-/// compressed column payload to the sink. Returns the total number
-/// of bytes written so the caller can update `sink_offset`.
-fn emit_block_to_sink<W: Write, S: PspKind>(
-    sink: &mut W,
-    scratch: &WriterScratch,
-    block_index: u64,
-) -> Result<u64, PspWriteError> {
-    sink.write_all(&scratch.header_bytes)
-        .map_err(|e| PspWriteError::Io {
-            context: "block header",
-            block_index: Some(block_index),
-            column_tag: None,
-            source: e,
-        })?;
-    let mut written = scratch.header_bytes.len() as u64;
-    let columns = S::columns();
-    for (i, compressed) in scratch.compressed.iter().enumerate() {
-        sink.write_all(compressed).map_err(|e| PspWriteError::Io {
-            context: "block column payload",
-            block_index: Some(block_index),
-            column_tag: Some(columns[i].tag),
-            source: e,
-        })?;
-        written += compressed.len() as u64;
-    }
-    Ok(written)
-}
-
-// ---------------------------------------------------------------------
-// SnpKind — the SNP `.psp` schema (the only [`PspKind`] in steps 1–3)
-// ---------------------------------------------------------------------
-
-/// The SNP `.psp` schema. Supplies the v1.0 column table
-/// ([`V1_0_COLUMNS`]), the [`SnpBlock`] accumulator, and the
-/// `PileupRecord` → column-bytes encode. The generic
-/// [`PspWriter`]'s default schema parameter.
-pub struct SnpKind;
-
-impl PspKind for SnpKind {
-    type Record = PileupRecord;
-    type Block = SnpBlock;
-    type Decoder = super::reader::SnpDecoder;
-    const KIND: &'static str = super::registry::SNP_KIND;
-
-    fn columns() -> &'static [ColumnDef] {
-        V1_0_COLUMNS
+    pub(crate) fn a_file() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("SRR7279481.psp");
+        (dir, path)
     }
 
-    fn encode_column(
-        def: &ColumnDef,
-        block: &SnpBlock,
-        out: &mut Vec<u8>,
-    ) -> Result<(), PspWriteError> {
-        encode_snp_column_into(def, block, out)
-    }
-
-    fn record_interval(record: &PileupRecord) -> (u32, u32, u32) {
-        // SNP is a degenerate point: the record covers exactly `pos`,
-        // so the half-open interval is `[pos, pos + 1)`. `pos` is
-        // bounded by the SAM `@SQ LN` max (`2^31 - 1`), so `+ 1` cannot
-        // overflow `u32`; `saturating_add` is belt-and-braces.
-        (record.chrom_id, record.pos, record.pos.saturating_add(1))
-    }
-}
-
-/// Flat CSR storage for a per-record or per-allele list column.
-/// `offsets[i]..offsets[i+1]` is row `i`'s slice into `data`;
-/// `offsets[0]` is always `0`. H2 in
-/// `ia/reviews/perf_psp_writer_2026-05-13.md`.
-struct ListColumn {
-    data: Vec<ChainId>,
-    offsets: Vec<u32>,
-}
-
-impl ListColumn {
-    fn with_capacity(n_rows_hint: usize, n_chain_ids_hint: usize) -> Self {
-        let mut offsets = Vec::with_capacity(n_rows_hint + 1);
-        offsets.push(0);
-        Self {
-            data: Vec::with_capacity(n_chain_ids_hint),
-            offsets,
-        }
-    }
-    #[inline]
-    fn push_row(&mut self, row: &[ChainId]) {
-        self.data.extend_from_slice(row);
-        self.offsets.push(self.data.len() as u32);
-    }
-}
-
-/// The SNP per-block accumulator: the v1.0 column buffers plus the
-/// structural metadata the flush + block index read back. Implements
-/// [`BlockAccumulator`] for [`SnpKind`].
-pub struct SnpBlock {
-    chrom_id: u32,
-    first_pos: u32,
-    last_pos: u32,
-    // Per-record columns.
-    delta_pos: Vec<u64>,
-    n_alleles: Vec<u64>,
-    windowed_gc: Vec<f32>,
-    windowed_coverage: Vec<f32>,
-    // Per-allele columns.
-    allele_seq_len: Vec<u64>,
-    allele_seq_bytes: Vec<u8>,
-    allele_obs_count: Vec<u32>,
-    allele_q_sum_log: Vec<f64>,
-    allele_fwd_count: Vec<u32>,
-    allele_placed_left_count: Vec<u32>,
-    allele_placed_start_count: Vec<u32>,
-    allele_mapq_sum: Vec<u32>,
-    allele_mapq_sum_sq: Vec<u64>,
-    allele_chain_ids: ListColumn,
-    /// Rough projection of the uncompressed byte total. Used to
-    /// decide when to auto-flush.
-    projected_bytes: usize,
-}
-
-impl BlockAccumulator for SnpBlock {
-    type Record = PileupRecord;
-
-    fn new_block(chrom_id: u32, first_pos: u32) -> Self {
-        Self {
-            chrom_id,
-            first_pos,
-            last_pos: first_pos,
-            delta_pos: Vec::with_capacity(INITIAL_RECORDS_HINT),
-            n_alleles: Vec::with_capacity(INITIAL_RECORDS_HINT),
-            windowed_gc: Vec::with_capacity(INITIAL_RECORDS_HINT),
-            windowed_coverage: Vec::with_capacity(INITIAL_RECORDS_HINT),
-            allele_seq_len: Vec::with_capacity(INITIAL_ALLELES_HINT),
-            allele_seq_bytes: Vec::with_capacity(INITIAL_ALLELE_SEQ_BYTES_HINT),
-            allele_obs_count: Vec::with_capacity(INITIAL_ALLELES_HINT),
-            allele_q_sum_log: Vec::with_capacity(INITIAL_ALLELES_HINT),
-            allele_fwd_count: Vec::with_capacity(INITIAL_ALLELES_HINT),
-            allele_placed_left_count: Vec::with_capacity(INITIAL_ALLELES_HINT),
-            allele_placed_start_count: Vec::with_capacity(INITIAL_ALLELES_HINT),
-            allele_mapq_sum: Vec::with_capacity(INITIAL_ALLELES_HINT),
-            allele_mapq_sum_sq: Vec::with_capacity(INITIAL_ALLELES_HINT),
-            allele_chain_ids: ListColumn::with_capacity(
-                INITIAL_ALLELES_HINT,
-                INITIAL_CHAIN_IDS_HINT,
-            ),
-            projected_bytes: 0,
-        }
-    }
-
-    fn append(&mut self, record: &PileupRecord) {
-        let is_first = self.delta_pos.is_empty();
-        let delta = if is_first {
-            0u64
-        } else {
-            (record.pos - self.last_pos) as u64
-        };
-        self.delta_pos.push(delta);
-        self.n_alleles.push(record.alleles.len() as u64);
-        self.windowed_gc.push(record.windowed_gc);
-        self.windowed_coverage.push(record.windowed_coverage);
-
-        for allele in &record.alleles {
-            self.allele_seq_len.push(allele.seq.len() as u64);
-            self.allele_seq_bytes.extend_from_slice(&allele.seq);
-            self.allele_obs_count.push(allele.support.num_obs);
-            self.allele_q_sum_log.push(allele.support.q_sum);
-            self.allele_fwd_count.push(allele.support.fwd);
-            self.allele_placed_left_count
-                .push(allele.support.placed_left);
-            self.allele_placed_start_count
-                .push(allele.support.placed_start);
-            self.allele_mapq_sum.push(allele.support.mapq_sum);
-            self.allele_mapq_sum_sq.push(allele.support.mapq_sum_sq);
-            self.allele_chain_ids.push_row(&allele.chain_ids);
-        }
-
-        self.last_pos = record.pos;
-
-        // Rough size projection — per record, plus per-allele +
-        // per-byte. Doesn't need to be precise; the target is a soft
-        // cap. Chain ids are u64 little-endian (8 bytes/id);
-        // zstd compresses the high-order zero bytes effectively.
-        let per_record = 1 // delta-pos varint typical
-            + 1 // n-alleles varint typical
-            + 4 // windowed-gc f32
-            + 4; // windowed-coverage f32
-        let per_allele: usize = record
-            .alleles
-            .iter()
-            .map(|a| {
-                1                       // allele-seq-len varint typical
-                + a.seq.len()           // allele-seq bytes
-                + 4 + 8 + 4 + 4 + 4     // num_obs / q_sum / fwd / placed_left / placed_start
-                + 4 + 8                 // mapq_sum (u32) + mapq_sum_sq (u64)
-                + (1 + 8 * a.chain_ids.len()) // varint count + u64 ids
-            })
-            .sum();
-        self.projected_bytes += per_record + per_allele;
-    }
-
-    fn chrom_id(&self) -> u32 {
-        self.chrom_id
-    }
-
-    fn first_pos(&self) -> u32 {
-        self.first_pos
-    }
-
-    fn last_pos(&self) -> u32 {
-        self.last_pos
-    }
-
-    fn n_records(&self) -> u32 {
-        self.delta_pos.len() as u32
-    }
-
-    fn n_entries(&self) -> u32 {
-        self.allele_seq_len.len() as u32
-    }
-
-    fn projected_bytes(&self) -> usize {
-        self.projected_bytes
-    }
-}
-
-// ---------------------------------------------------------------------
-// Column encoders — exhaustive dispatch on `ColumnKey` (M4)
-// ---------------------------------------------------------------------
-
-/// Encode one SNP column from the block accumulator into its
-/// uncompressed wire form, appending into the caller-provided `out`
-/// buffer. Dispatches exhaustively on `def.key`, so adding a
-/// `ColumnKey` variant forces an arm here as a compile error — no
-/// runtime fall-through. The caller is responsible for `clear()`-ing
-/// `out` before calling so the buffer can be reused across columns
-/// without reallocation (L1).
-///
-/// Backs [`SnpKind::encode_column`]; folds in the writer-side
-/// column-size self-check (M5).
-fn encode_snp_column_into(
-    def: &ColumnDef,
-    block: &SnpBlock,
-    out: &mut Vec<u8>,
-) -> Result<(), PspWriteError> {
-    // `ColumnDef` is schema-agnostic (no `key`); recover the SNP
-    // dispatch key from the tag. The `match` stays exhaustive over
-    // `ColumnKey`.
-    // UNREACHABLE: `def` is a `V1_0_COLUMNS` row (the only caller walks
-    // that table), so its tag is always a `ColumnKey`.
-    let key = ColumnKey::from_tag(def.tag)
-        .expect("encode_snp_column_into called with a non-SNP column tag");
-    match key {
-        ColumnKey::DeltaPos => encode_varint_column(&block.delta_pos, out),
-        ColumnKey::NAlleles => encode_varint_column(&block.n_alleles, out),
-        ColumnKey::AlleleSeqLen => encode_varint_column(&block.allele_seq_len, out),
-        ColumnKey::AlleleSeq => encode_bytes_concat(
-            // The bytes-column payload is the concatenation of every
-            // allele's sequence bytes; the per-allele lengths live
-            // in the `allele-seq-len` column. We kept the bytes
-            // concatenated as we appended records, so the payload
-            // is just `allele_seq_bytes` as-is.
-            &[&block.allele_seq_bytes[..]],
-            out,
-        ),
-        // Per-record windowed coverage (NaN permitted — no finite check).
-        ColumnKey::WindowedGc => encode_scalar_column(&block.windowed_gc, out),
-        ColumnKey::WindowedCoverage => encode_scalar_column(&block.windowed_coverage, out),
-        ColumnKey::AlleleObsCount => encode_scalar_column(&block.allele_obs_count, out),
-        ColumnKey::AlleleQSumLog => {
-            // q_sum was finite-validated at write_record time.
-            encode_scalar_column(&block.allele_q_sum_log, out)
-        }
-        ColumnKey::AlleleFwdCount => encode_scalar_column(&block.allele_fwd_count, out),
-        ColumnKey::AllelePlacedLeftCount => {
-            encode_scalar_column(&block.allele_placed_left_count, out)
-        }
-        ColumnKey::AllelePlacedStartCount => {
-            encode_scalar_column(&block.allele_placed_start_count, out)
-        }
-        ColumnKey::AlleleMapqSum => encode_scalar_column(&block.allele_mapq_sum, out),
-        ColumnKey::AlleleMapqSumSq => encode_scalar_column(&block.allele_mapq_sum_sq, out),
-        ColumnKey::AlleleChainIds => encode_list_column_csr(
-            &block.allele_chain_ids.data,
-            &block.allele_chain_ids.offsets,
-            out,
-        ),
-    }
-    // M5: promote the writer-side column-size self-check from a
-    // debug-only assertion to a real check. Catches a writer bug
-    // (encoded length disagrees with the schema-predicted length)
-    // at the producer, not weeks later when a consumer rejects the
-    // file. The cost is one length comparison per column per block
-    // flush — well below the noise floor of the block's
-    // compression cost.
-    let predicted = predict_uncompressed_len(def, block);
-    if let Some(expected) = predicted
-        && expected != out.len()
-    {
-        return Err(PspWriteError::ColumnSizeSelfCheck {
-            column: def.name,
-            got: out.len(),
-            expected,
-        });
-    }
-    Ok(())
-}
-
-/// Predict the encoded byte length for a column whose shape gives
-/// us an a-priori bound. Returns `None` for columns whose encoded
-/// length is genuinely variable (varint scalars, list columns).
-///
-/// The exhaustive match on `ColumnPayload` (and on the inner
-/// `ElementType` for fixed-width scalars) forces a compile-time
-/// update when a new variant lands — replacing the prior
-/// `_ => true` catch-all that silently approved any future
-/// combination.
-fn predict_uncompressed_len(def: &ColumnDef, block: &SnpBlock) -> Option<usize> {
-    use super::registry::Cardinality;
-    let n_records = block.delta_pos.len();
-    let n_total_alleles = block.allele_seq_len.len();
-    match def.payload {
-        ColumnPayload::Bytes { .. } => {
-            // `MAX_ALLELE_SEQ_LEN = 10_000`; with `u32::MAX` alleles
-            // per block the sum still fits comfortably in `usize` on
-            // 64-bit targets, but be defensive.
-            let total: u64 = block.allele_seq_len.iter().sum();
-            usize::try_from(total).ok()
-        }
-        ColumnPayload::List { .. } => None,
-        ColumnPayload::Scalar { element_type: et } => {
-            let count = match def.cardinality {
-                Cardinality::PerRecord => n_records,
-                Cardinality::PerAllele => n_total_alleles,
-            };
-            match et {
-                ElementType::Varint | ElementType::Svarint => None,
-                ElementType::U8
-                | ElementType::U16
-                | ElementType::U32
-                | ElementType::U64
-                | ElementType::I32
-                | ElementType::I64
-                | ElementType::F32
-                | ElementType::F64
-                | ElementType::Bool => Some(
-                    count
-                        * et.fixed_byte_width()
-                            .expect("fixed-width path: et was checked above"),
-                ),
-            }
-        }
+    pub(crate) fn bytes_of(path: &Path) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        File::open(path)
+            .expect("the file exists")
+            .read_to_end(&mut bytes)
+            .expect("it reads");
+        bytes
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::tests_support::{
+        a_file, a_finished_psp, a_header, a_record, a_sample, bytes_of, footer_of, rewrite,
+        wreck_the_block,
+    };
     use super::*;
-    use crate::pileup_record::{AlleleObservation, AlleleSupportStats};
-    use crate::psp::PspReadError;
-    use crate::psp::header::{ParsedHeader, parse_header_bytes};
+    use crate::psp::NotReadable;
+    use crate::psp::PspReader;
+    use crate::psp::footer::{FOOTER_BYTES, FOOTER_MAGIC, decode_footer};
     use crate::psp::index::decode_index;
-    use crate::psp::trailer::{TRAILER_BYTES, decode_trailer};
-    use std::io::Cursor;
+    use crate::types::{ContigId, Position};
 
-    // ---------- Fixture builders ---------------------------------
-    //
-    // Mi20: the `writer_header` fixture lives in the shared
-    // `super::super::test_fixtures` module so a new mandatory
-    // `WriterHeader` field updates one place.
-    use super::super::test_fixtures::writer_header;
+    // -----------------------------------------------------------------
+    // What a finished file is
+    // -----------------------------------------------------------------
 
-    fn support(num_obs: u32, q_sum: f64) -> AlleleSupportStats {
-        AlleleSupportStats {
-            num_obs,
-            q_sum,
-            fwd: num_obs / 2,
-            placed_left: 0,
-            placed_start: num_obs,
-
-            mapq_sum: 0,
-            mapq_sum_sq: 0,
+    /// **A finished file ends with the footer, and everything the footer says is where it says.**
+    /// The index decodes, its checksum matches, the trailer is the payload handed to `finish`,
+    /// and the block count is the number of entries.
+    #[test]
+    fn a_finished_file_is_laid_out_the_way_its_footer_says() {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a writable header");
+        let records = a_sample();
+        for record in &records {
+            writer.push(record).expect("the fixture is in order");
         }
-    }
+        let stats = writer.finish(b"a per-sample summary").expect("it finishes");
 
-    fn allele(seq: &[u8], num_obs: u32, q_sum: f64, chain_ids: &[u64]) -> AlleleObservation {
-        AlleleObservation {
-            seq: seq.to_vec(),
-            support: support(num_obs, q_sum),
-            chain_ids: chain_ids.to_vec(),
-        }
-    }
+        let bytes = bytes_of(&path);
+        assert_eq!(stats.bytes, bytes.len() as u64, "the count is the file");
+        assert_eq!(stats.records, records.len() as u64);
+        assert!(stats.blocks >= 8, "two contigs of four grid cells each");
 
-    fn record(chrom_id: u32, pos: u32, alleles: Vec<AlleleObservation>) -> PileupRecord {
-        PileupRecord::new(chrom_id, pos, alleles)
-    }
+        let tail: [u8; FOOTER_BYTES] = bytes[bytes.len() - FOOTER_BYTES..]
+            .try_into()
+            .expect("the file is at least a footer long");
+        let footer = decode_footer(&tail).expect("a finished file has a readable footer");
+        assert_eq!(footer.n_blocks, stats.blocks);
 
-    // ---------- new() emits a valid framed header -----------------
-
-    #[test]
-    fn new_emits_valid_framed_header() {
-        let header = writer_header(2);
-        let cursor = Cursor::new(Vec::new());
-        let writer = PspWriter::new(cursor, header.clone()).expect("new should succeed");
-        // Drop the writer to extract the sink (or just call finish to get the trailer too).
-        let sink = writer.finish().expect("finish should succeed");
-        let bytes = sink.into_inner();
-        // Parse the header back.
-        let (parsed, consumed): (ParsedHeader, usize) =
-            parse_header_bytes(&bytes).expect("header parse round-trip");
-        assert_eq!(parsed.sample, "sample");
-        assert_eq!(parsed.chromosomes.len(), 2);
-        assert!(consumed > 0);
-    }
-
-    // ---------- finish() with zero records -----------------------
-
-    #[test]
-    fn finish_with_zero_records_writes_header_empty_index_trailer() {
-        let header = writer_header(1);
-        let cursor = Cursor::new(Vec::new());
-        let writer = PspWriter::new(cursor, header).unwrap();
-        let bytes = writer.finish().unwrap().into_inner();
-
-        // Last 32 bytes are the trailer.
-        let trailer_bytes: &[u8; TRAILER_BYTES] =
-            bytes[bytes.len() - TRAILER_BYTES..].try_into().unwrap();
-        let trailer = decode_trailer(trailer_bytes).expect("trailer should decode");
-        assert_eq!(trailer.n_blocks, 0);
-        assert_eq!(trailer.index_byte_length, 0);
-        // Index lives between header-end and trailer-start, here
-        // empty — index_offset points to trailer-start.
-        let expected_index_offset = (bytes.len() - TRAILER_BYTES) as u64;
-        assert_eq!(trailer.index_offset, expected_index_offset);
-
-        let index = decode_index(&[], trailer.n_blocks).unwrap();
-        assert!(index.is_empty());
-    }
-
-    // ---------- metadata section (A1) -----------------------------
-
-    /// A payload attached via `attach_metadata` round-trips through the
-    /// reader, and the records are unaffected.
-    #[test]
-    fn attach_metadata_round_trips_through_reader() {
-        use crate::psp::PspReader;
-
-        let header = writer_header(1);
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), header).unwrap();
-        writer
-            .write_record(&record(0, 100, vec![allele(b"A", 9, -1.0, &[])]))
-            .unwrap();
-        writer
-            .write_record(&record(0, 200, vec![allele(b"C", 7, -1.0, &[])]))
-            .unwrap();
-        let payload = b"[coverage-gc]\nwindow-bp = 500\n".to_vec();
-        writer.attach_metadata(payload.clone()).unwrap();
-        let bytes = writer.finish().unwrap().into_inner();
-
-        let mut reader = PspReader::new(Cursor::new(bytes)).expect("reader open");
-        assert_eq!(reader.metadata(), Some(payload.as_slice()));
-        // Records still decode correctly alongside the section.
-        let positions: Vec<u32> = reader.records().map(|r| r.unwrap().pos).collect();
-        assert_eq!(positions, vec![100, 200]);
-    }
-
-    /// With no `attach_metadata`, the reader reports `None` and the
-    /// trailing region is empty — the index ends exactly at the trailer
-    /// start (additive-tail invariant: no section bytes are written).
-    #[test]
-    fn no_metadata_yields_none_and_no_trailing_gap() {
-        use crate::psp::PspReader;
-
-        let header = writer_header(1);
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), header).unwrap();
-        writer
-            .write_record(&record(0, 100, vec![allele(b"A", 9, -1.0, &[])]))
-            .unwrap();
-        let bytes = writer.finish().unwrap().into_inner();
-
-        // index_offset + index_byte_length == trailer_start (no gap).
-        let trailer_bytes: &[u8; TRAILER_BYTES] =
-            bytes[bytes.len() - TRAILER_BYTES..].try_into().unwrap();
-        let trailer = decode_trailer(trailer_bytes).unwrap();
-        let trailer_start = (bytes.len() - TRAILER_BYTES) as u64;
+        let index = &bytes
+            [footer.index_offset as usize..(footer.index_offset + footer.index_bytes) as usize];
         assert_eq!(
-            trailer.index_offset + trailer.index_byte_length,
-            trailer_start
+            crate::psp::index::checksum_index(index),
+            footer.index_checksum
         );
+        let entries = decode_index(index, footer.n_blocks).expect("the index reads");
+        assert_eq!(entries.len() as u64, stats.blocks);
 
-        let reader = PspReader::new(Cursor::new(bytes)).expect("reader open");
-        assert_eq!(reader.metadata(), None);
-    }
+        let trailer = &bytes[footer.trailer_offset as usize
+            ..(footer.trailer_offset + footer.trailer_bytes) as usize];
+        assert_eq!(trailer, b"a per-sample summary");
 
-    /// `attach_metadata` is single-shot; a second call is rejected.
-    #[test]
-    fn double_attach_metadata_is_rejected() {
-        let header = writer_header(1);
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), header).unwrap();
-        writer.attach_metadata(b"first".to_vec()).unwrap();
-        let err = writer
-            .attach_metadata(b"second".to_vec())
-            .expect_err("second attach must fail");
-        assert!(matches!(err, PspWriteError::MetadataAlreadyAttached));
-    }
-
-    /// Attaching an *empty* payload writes a (tiny) section that reads
-    /// back as `Some(&[])` — distinct from never attaching, which reads
-    /// back as `None`. Pins the zero-vs-no-section semantics.
-    #[test]
-    fn attach_empty_metadata_is_some_empty_distinct_from_none() {
-        use crate::psp::PspReader;
-
-        let mut with = PspWriter::new(Cursor::new(Vec::new()), writer_header(1)).unwrap();
-        with.attach_metadata(Vec::new()).unwrap();
-        let with_bytes = with.finish().unwrap().into_inner();
-        let with_reader = PspReader::new(Cursor::new(with_bytes)).expect("reader open");
-        assert_eq!(with_reader.metadata(), Some(&[][..]));
-
-        let without = PspWriter::new(Cursor::new(Vec::new()), writer_header(1)).unwrap();
-        let without_bytes = without.finish().unwrap().into_inner();
-        let without_reader = PspReader::new(Cursor::new(without_bytes)).expect("reader open");
-        assert_eq!(without_reader.metadata(), None);
-    }
-
-    /// A trailer whose `index_byte_length` makes the index end past the
-    /// trailer start is rejected at open with `IndexOverrunsTrailer` —
-    /// both the "runs past trailer" arm and the `u64`-overflow arm.
-    #[test]
-    fn reader_rejects_index_overrunning_trailer() {
-        use crate::psp::PspReader;
-
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), writer_header(1)).unwrap();
-        writer
-            .write_record(&record(0, 100, vec![allele(b"A", 9, -1.0, &[])]))
-            .unwrap();
-        let good = writer.finish().unwrap().into_inner();
-
-        // Rewrite the trailer in place with a corrupted index_byte_length.
-        let corrupt_with = |index_byte_length: u64| -> Vec<u8> {
-            let mut bytes = good.clone();
-            let tb: &[u8; TRAILER_BYTES] = bytes[bytes.len() - TRAILER_BYTES..].try_into().unwrap();
-            let mut trailer = decode_trailer(tb).unwrap();
-            trailer.index_byte_length = index_byte_length;
-            let encoded = encode_trailer(&trailer);
-            let start = bytes.len() - TRAILER_BYTES;
-            bytes[start..].copy_from_slice(&encoded);
-            bytes
-        };
-
-        // (a) index_end = index_offset + len lands past trailer_start.
-        let past = corrupt_with(1_000_000);
-        let err = PspReader::new(Cursor::new(past)).expect_err("overrun must fail");
-        assert!(
-            matches!(err, PspReadError::IndexOverrunsTrailer { .. }),
-            "expected IndexOverrunsTrailer (past), got {err:?}"
-        );
-
-        // (b) index_offset + len overflows u64.
-        let overflow = corrupt_with(u64::MAX);
-        let err = PspReader::new(Cursor::new(overflow)).expect_err("overflow must fail");
-        assert!(
-            matches!(err, PspReadError::IndexOverrunsTrailer { .. }),
-            "expected IndexOverrunsTrailer (overflow), got {err:?}"
-        );
-    }
-
-    /// A corrupt byte inside the metadata frame is caught at open
-    /// (`PspReader::new`) and surfaces as `Zstd`, not a panic or silent
-    /// accept.
-    #[test]
-    fn reader_rejects_corrupt_metadata_frame() {
-        use crate::psp::PspReader;
-
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), writer_header(1)).unwrap();
-        writer
-            .write_record(&record(0, 100, vec![allele(b"A", 9, -1.0, &[])]))
-            .unwrap();
-        writer
-            .attach_metadata(b"[coverage-gc]\nwindow-bp = 500\n".to_vec())
-            .unwrap();
-        let mut bytes = writer.finish().unwrap().into_inner();
-
-        // The metadata frame sits between the index end and the trailer
-        // start. Decode the trailer to locate it, then flip a content
-        // byte in the middle of the frame so the frame length is
-        // unchanged but the content checksum fails.
-        let tb: &[u8; TRAILER_BYTES] = bytes[bytes.len() - TRAILER_BYTES..].try_into().unwrap();
-        let trailer = decode_trailer(tb).unwrap();
-        let index_end = (trailer.index_offset + trailer.index_byte_length) as usize;
-        let trailer_start = bytes.len() - TRAILER_BYTES;
-        assert!(
-            index_end < trailer_start,
-            "expected a non-empty metadata gap"
-        );
-        let target = index_end + (trailer_start - index_end) / 2;
-        bytes[target] ^= 0xFF;
-
-        let err = PspReader::new(Cursor::new(bytes)).expect_err("corrupt metadata must fail");
-        assert!(
-            matches!(
-                err,
-                PspReadError::Zstd { .. } | PspReadError::MetadataTrailingBytes { .. }
-            ),
-            "expected Zstd or MetadataTrailingBytes, got {err:?}"
-        );
-    }
-
-    // ---------- write_record validation ---------------------------
-
-    #[test]
-    fn rejects_unknown_chrom_id() {
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), writer_header(1)).unwrap();
-        let err = writer
-            .write_record(&record(5, 100, vec![allele(b"A", 10, -1.0, &[])]))
-            .expect_err("chrom_id 5 with 1 chromosome should fail");
-        assert!(matches!(err, PspWriteError::UnknownChromId { .. }));
-    }
-
-    #[test]
-    fn rejects_pos_zero() {
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), writer_header(1)).unwrap();
-        let err = writer
-            .write_record(&record(0, 0, vec![allele(b"A", 10, -1.0, &[])]))
-            .expect_err("pos 0 should fail");
-        assert!(matches!(err, PspWriteError::PosOutOfRange { .. }));
-    }
-
-    #[test]
-    fn rejects_pos_beyond_contig_length() {
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), writer_header(1)).unwrap();
-        let err = writer
-            .write_record(&record(0, 10_000_000, vec![allele(b"A", 10, -1.0, &[])]))
-            .expect_err("pos beyond contig length should fail");
-        assert!(matches!(err, PspWriteError::PosOutOfRange { .. }));
-    }
-
-    #[test]
-    fn rejects_out_of_order_positions() {
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), writer_header(1)).unwrap();
-        writer
-            .write_record(&record(0, 100, vec![allele(b"A", 10, -1.0, &[])]))
-            .unwrap();
-        let err = writer
-            .write_record(&record(0, 50, vec![allele(b"A", 10, -1.0, &[])]))
-            .expect_err("going backwards should fail");
-        assert!(matches!(err, PspWriteError::OutOfOrderRecord { .. }));
-    }
-
-    #[test]
-    fn rejects_chrom_regression() {
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), writer_header(2)).unwrap();
-        writer
-            .write_record(&record(1, 100, vec![allele(b"A", 10, -1.0, &[])]))
-            .unwrap();
-        let err = writer
-            .write_record(&record(0, 100, vec![allele(b"A", 10, -1.0, &[])]))
-            .expect_err("chrom regression should fail");
-        assert!(matches!(err, PspWriteError::OutOfOrderRecord { .. }));
-    }
-
-    #[test]
-    fn rejects_zero_alleles() {
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), writer_header(1)).unwrap();
-        let err = writer
-            .write_record(&record(0, 100, vec![]))
-            .expect_err("zero alleles should fail");
-        assert!(matches!(err, PspWriteError::InvalidRecord { .. }));
-    }
-
-    #[test]
-    fn rejects_non_acgtn_allele_byte() {
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), writer_header(1)).unwrap();
-        let err = writer
-            .write_record(&record(0, 100, vec![allele(b"X", 10, -1.0, &[])]))
-            .expect_err("non-ACGTN should fail");
-        assert!(matches!(err, PspWriteError::InvalidRecord { .. }));
-    }
-
-    #[test]
-    fn rejects_oversized_allele_sequence() {
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), writer_header(1)).unwrap();
-        let seq = b"A".repeat((MAX_ALLELE_SEQ_LEN + 1) as usize);
-        let err = writer
-            .write_record(&record(0, 100, vec![allele(&seq, 10, -1.0, &[])]))
-            .expect_err("seq > cap should fail");
-        assert!(matches!(err, PspWriteError::InvalidRecord { .. }));
-    }
-
-    #[test]
-    fn rejects_nan_q_sum() {
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), writer_header(1)).unwrap();
-        let err = writer
-            .write_record(&record(0, 100, vec![allele(b"A", 10, f64::NAN, &[])]))
-            .expect_err("NaN q_sum should fail");
-        assert!(matches!(err, PspWriteError::InvalidRecord { .. }));
-    }
-
-    // Phase-chain marker inconsistency tests removed: the writer no
-    // longer tracks an active-chain set, so the marker-vs-active
-    // validation it used to enforce is gone. Chain ids are unique
-    // per `.psp` file (u64), so the same family of violations is
-    // structurally impossible. The remaining per-record well-
-    // formedness check (chain_ids strictly ascending) is pinned
-    // by the iterator-style assertions inside the round-trip tests.
-
-    // ---------- One block round-trip via writer alone ----------
-
-    #[test]
-    fn one_record_one_block_finishes_cleanly() {
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), writer_header(1)).unwrap();
-        writer
-            .write_record(&record(0, 100, vec![allele(b"A", 10, -2.5, &[])]))
-            .unwrap();
-        let bytes = writer.finish().unwrap().into_inner();
-
-        // Trailer at tail says one block.
-        let trailer: &[u8; TRAILER_BYTES] =
-            bytes[bytes.len() - TRAILER_BYTES..].try_into().unwrap();
-        let trailer = decode_trailer(trailer).unwrap();
-        assert_eq!(trailer.n_blocks, 1);
-
-        // Index decodes to one entry with the expected coordinates.
-        let index_bytes = &bytes[trailer.index_offset as usize
-            ..(trailer.index_offset + trailer.index_byte_length) as usize];
-        let entries = decode_index(index_bytes, trailer.n_blocks).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].chrom_id, 0);
-        assert_eq!(entries[0].first_pos, 100);
-        assert_eq!(entries[0].last_pos, 100);
-        assert_eq!(entries[0].n_records, 1);
-
-        // Index checksum verifies.
-        let stored = trailer.index_checksum;
-        let computed = checksum_index(index_bytes);
-        assert_eq!(stored, computed);
-    }
-
-    /// Chromosome boundary forces a flush.
-    #[test]
-    fn chrom_change_triggers_flush() {
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), writer_header(2)).unwrap();
-        writer
-            .write_record(&record(0, 100, vec![allele(b"A", 1, -1.0, &[])]))
-            .unwrap();
-        writer
-            .write_record(&record(0, 200, vec![allele(b"C", 1, -1.0, &[])]))
-            .unwrap();
-        // Switch chromosome — the writer should flush block 0 and
-        // start block 1.
-        writer
-            .write_record(&record(1, 1, vec![allele(b"G", 1, -1.0, &[])]))
-            .unwrap();
-        let bytes = writer.finish().unwrap().into_inner();
-        let trailer: &[u8; TRAILER_BYTES] =
-            bytes[bytes.len() - TRAILER_BYTES..].try_into().unwrap();
-        let trailer = decode_trailer(trailer).unwrap();
+        // The footer starts exactly where the trailer ends: nothing is left over.
         assert_eq!(
-            trailer.n_blocks, 2,
-            "chrom change should produce two blocks"
+            footer.trailer_offset + footer.trailer_bytes,
+            (bytes.len() - FOOTER_BYTES) as u64
         );
     }
 
-    /// (M14.) The size-driven auto-flush trigger fires when an open
-    /// block's projected bytes cross `target_block_bytes`. We use
-    /// the `#[cfg(test)]`-exposed knob to override the 16 MiB
-    /// default so a modestly-sized fixture exercises the branch.
+    /// **Every index entry points at a block whose head names the coordinate the entry
+    /// claims.** The offsets are read back out of the file, each is checked to start a whole
+    /// compressed block, and the block is inflated and its head decoded so the coordinate can be
+    /// compared.
+    ///
+    /// ⚠ **This test used to stop at "it starts a whole block", while its name promised the
+    /// rest.** Shifting every entry's position 100 bases past its block's true head survived all
+    /// twelve tests — an index that seeks to the wrong block is exactly the silent-wrong-answer
+    /// failure the whole ordering apparatus exists to prevent, and the one test named for it
+    /// never decoded a head.
     #[test]
-    fn auto_flushes_on_projected_size_boundary() {
-        // Target ~8 KiB worth of projected bytes — each simple
-        // record contributes ~30 bytes, so ~270 records per block.
-        let target = 8 * 1024;
-        let mut writer =
-            PspWriter::new_with_block_target(Cursor::new(Vec::new()), writer_header(1), target)
-                .unwrap();
-        for i in 1u32..=2000 {
-            writer
-                .write_record(&record(0, i, vec![allele(b"A", 1, -1.0, &[])]))
-                .unwrap();
+    fn every_index_entry_points_at_the_block_it_names() {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a writable header");
+        for record in a_sample() {
+            writer.push(&record).expect("the fixture is in order");
         }
-        let bytes = writer.finish().unwrap().into_inner();
-        let trailer: &[u8; TRAILER_BYTES] =
-            bytes[bytes.len() - TRAILER_BYTES..].try_into().unwrap();
-        let trailer = decode_trailer(trailer).unwrap();
-        assert!(
-            trailer.n_blocks >= 2,
-            "size-based auto-flush should produce multiple blocks, got {}",
-            trailer.n_blocks
-        );
-    }
+        let _ = writer.finish(&[]).expect("it finishes");
 
-    /// (Mi26.) `write_record` returns the number of bytes pushed to
-    /// the sink as a side effect of any auto-flush it triggered.
-    /// Defending the contract against a future refactor of the
-    /// `pre_flush_bytes` accounting.
-    #[test]
-    fn write_record_returns_flushed_byte_count() {
-        // Tiny block target so the second batch of records forces a
-        // flush.
-        let target = 4 * 1024;
-        let mut writer =
-            PspWriter::new_with_block_target(Cursor::new(Vec::new()), writer_header(1), target)
-                .unwrap();
-        // Records up to ~the target are absorbed with no flush.
-        let mut saw_flush = false;
-        let mut flush_pos = 0u32;
-        for i in 1u32..=2000 {
-            let pushed = writer
-                .write_record(&record(0, i, vec![allele(b"A", 1, -1.0, &[])]))
-                .unwrap();
-            if pushed > 0 {
-                saw_flush = true;
-                flush_pos = i;
-                break;
-            }
-        }
-        assert!(
-            saw_flush,
-            "expected at least one auto-flush before record 2000"
-        );
-        // The very next record after a flush is on a fresh block — it must
-        // report 0 bytes pushed. Keep it adjacent to `flush_pos` so it lands in
-        // the same genomic window (no window-boundary flush, independent of the
-        // `block_window_bp` default) and doesn't refill the byte target.
-        let post_flush = writer
-            .write_record(&record(0, flush_pos + 1, vec![allele(b"A", 1, -1.0, &[])]))
-            .unwrap();
-        assert_eq!(post_flush, 0, "post-flush record must not push bytes");
-    }
-
-    /// (Mi27.) Multi-block index entries match the input order and
-    /// coordinates — defends against a bug that reverses entries,
-    /// drops one, or computes a wrong `last_pos` / `block_offset`.
-    #[test]
-    fn index_entries_match_input_order_and_coordinates() {
-        let mut writer = PspWriter::new(Cursor::new(Vec::new()), writer_header(2)).unwrap();
-        writer
-            .write_record(&record(0, 100, vec![allele(b"A", 1, -1.0, &[])]))
-            .unwrap();
-        writer
-            .write_record(&record(0, 200, vec![allele(b"C", 1, -1.0, &[])]))
-            .unwrap();
-        writer
-            .write_record(&record(1, 1, vec![allele(b"G", 1, -1.0, &[])]))
-            .unwrap();
-        let bytes = writer.finish().unwrap().into_inner();
-        let trailer: &[u8; TRAILER_BYTES] =
-            bytes[bytes.len() - TRAILER_BYTES..].try_into().unwrap();
-        let trailer = decode_trailer(trailer).unwrap();
-        let index_bytes = &bytes[trailer.index_offset as usize
-            ..(trailer.index_offset + trailer.index_byte_length) as usize];
-        let entries = decode_index(index_bytes, trailer.n_blocks).unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].chrom_id, 0);
-        assert_eq!(entries[0].first_pos, 100);
-        assert_eq!(entries[0].last_pos, 200);
-        assert_eq!(entries[0].n_records, 2);
-        assert_eq!(entries[1].chrom_id, 1);
-        assert_eq!(entries[1].first_pos, 1);
-        assert_eq!(entries[1].last_pos, 1);
-        assert_eq!(entries[1].n_records, 1);
-        assert!(
-            entries[1].block_offset > entries[0].block_offset,
-            "second block's offset must come after first"
-        );
-    }
-
-    /// Window-based cut: blocks fall on a fixed genomic grid
-    /// (`pos / block_window_bp`), so every block lies within a single
-    /// window and the boundaries are deterministic regardless of
-    /// record content. This is the cross-sample alignment property the
-    /// cohort reader relies on. The byte target is set generous
-    /// (`MAX_BLOCK_TARGET_BYTES`) so only the window drives the cut.
-    #[test]
-    fn block_window_cuts_on_a_fixed_genomic_grid() {
-        let window = 100u32;
-        let mut writer = PspWriter::new_with_block_layout(
-            Cursor::new(Vec::new()),
-            writer_header(1),
-            MAX_BLOCK_TARGET_BYTES,
-            window,
+        let bytes = bytes_of(&path);
+        let tail: [u8; FOOTER_BYTES] = bytes[bytes.len() - FOOTER_BYTES..].try_into().unwrap();
+        let footer = decode_footer(&tail).expect("a footer");
+        let entries = decode_index(
+            &bytes
+                [footer.index_offset as usize..(footer.index_offset + footer.index_bytes) as usize],
+            footer.n_blocks,
         )
-        .unwrap();
-        // Positions across several 100bp windows, with multiple records
-        // sharing some windows (windows 0, 1, 2, 4, 9 are populated).
-        let positions = [50u32, 60, 150, 250, 251, 252, 470, 999];
-        for p in positions {
-            writer
-                .write_record(&record(0, p, vec![allele(b"A", 1, -1.0, &[])]))
-                .unwrap();
-        }
-        let bytes = writer.finish().unwrap().into_inner();
-        let trailer: &[u8; TRAILER_BYTES] =
-            bytes[bytes.len() - TRAILER_BYTES..].try_into().unwrap();
-        let trailer = decode_trailer(trailer).unwrap();
-        let index_bytes = &bytes[trailer.index_offset as usize
-            ..(trailer.index_offset + trailer.index_byte_length) as usize];
-        let entries = decode_index(index_bytes, trailer.n_blocks).unwrap();
+        .expect("the index reads");
+        assert!(!entries.is_empty(), "the fixture must produce blocks");
 
-        // Every block lies within a single window.
-        for e in &entries {
+        let mut decompressor = zstd::zstd_safe::DCtx::create();
+        for entry in &entries {
+            let at = entry.block_offset as usize;
+            assert!(
+                at < footer.index_offset as usize,
+                "a block offset must land in the blocks, not in the index"
+            );
+            let frame = match crate::psp::block::compressed_block_at(&bytes[at..]) {
+                crate::psp::block::CompressedBlockAt::Whole { zstd_frame, .. } => zstd_frame,
+                other => panic!("entry at byte {at} does not start a whole block: {other:?}"),
+            };
+            // `decompress` writes into spare capacity, so the room has to be there first.
+            let mut payload = Vec::with_capacity(1 << 20);
+            decompressor
+                .decompress(&mut payload, frame)
+                .expect("a block this writer wrote inflates");
+            let head = crate::psp::block::BlockHead::decode(&payload)
+                .expect("a block opens with its head")
+                .head;
             assert_eq!(
-                e.first_pos / window,
-                e.last_pos / window,
-                "block [{}, {}] straddles a {window}bp window boundary",
-                e.first_pos,
-                e.last_pos,
+                (head.contig, head.first_position),
+                (entry.first_position.contig, entry.first_position.position),
+                "the entry at byte {at} names a coordinate the block does not start at"
             );
         }
-        // One block per populated window — deterministic from the grid,
-        // independent of how many records fall in each.
-        let populated: std::collections::BTreeSet<u32> =
-            positions.iter().map(|p| p / window).collect();
-        assert_eq!(entries.len(), populated.len());
-        // Block boundaries land on the grid: each block's window index
-        // is distinct and ascending.
-        let block_windows: Vec<u32> = entries.iter().map(|e| e.first_pos / window).collect();
-        let mut sorted = block_windows.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(block_windows, sorted, "blocks ascending, one per window");
     }
 
-    // The `active_slot_snapshot_carries_across_blocks` and
-    // `rejects_chain_active_at_chromosome_boundary` tests are gone:
-    // block headers no longer carry an active-slot snapshot, and
-    // there's no active-set bookkeeping for the writer to validate
-    // against at a chromosome boundary. Chain ids are unique per
-    // file, so chains "still active across blocks" is just a normal
-    // sequence of ids referenced by alleles in both blocks — nothing
-    // special to check.
+    // -----------------------------------------------------------------
+    // What is refused
+    // -----------------------------------------------------------------
+
+    /// A record that goes backwards is refused, and **the file is untouched by the refusal**:
+    /// pushing the records that follow still produces a file with exactly the accepted ones.
+    #[test]
+    fn a_record_that_goes_backwards_is_refused_and_costs_the_file_nothing() {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a writable header");
+        writer.push(&a_record(0, 1_000, 1)).expect("the first");
+        let refused = writer
+            .push(&a_record(0, 900, 1))
+            .expect_err("that goes backwards");
+        assert!(
+            matches!(refused, PspWriteError::OutOfOrder { .. }),
+            "got {refused}"
+        );
+        assert!(
+            refused.to_string().contains("SRR7279481.psp"),
+            "the message must name the file: {refused}"
+        );
+        writer.push(&a_record(0, 1_100, 1)).expect("and on we go");
+        let stats = writer.finish(&[]).expect("it finishes");
+        assert_eq!(stats.records, 2, "the refused record is not in the file");
+    }
+
+    /// A contig already written and revisited is refused: two runs of blocks on one contig give
+    /// a seek nothing to choose between.
+    #[test]
+    fn a_contig_that_comes_back_is_refused() {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a writable header");
+        writer.push(&a_record(1, 10, 1)).expect("contig 1");
+        let refused = writer
+            .push(&a_record(0, 10, 1))
+            .expect_err("contig 0 comes before contig 1");
+        // **And it carries the block builder's own account.** The variant has no `reason` of
+        // its own: the cause *is* the detail, so a wiring that dropped it would leave a caller
+        // with "a record could not be written" and nothing more.
+        match refused {
+            PspWriteError::RecordRefused { source, .. } => assert!(
+                matches!(source, BlockWriteError::ContigOutOfOrder { .. }),
+                "got {source}"
+            ),
+            other => panic!("got {other}"),
+        }
+    }
+
+    /// **A header this writer cannot honour leaves no file behind at all.** An empty contig list
+    /// is refused, and the path it was handed does not exist afterwards — rather than an empty
+    /// file that every reader then refuses for a different reason.
+    #[test]
+    fn a_header_that_cannot_be_written_leaves_no_file() {
+        let (_dir, path) = a_file();
+        let mut header = a_header(1_000);
+        header.contigs.clear();
+        let refused = PspWriter::create(&path, header).expect_err("an empty contig list");
+        assert!(
+            matches!(refused, PspWriteError::InvalidHeaderField { .. }),
+            "got {refused}"
+        );
+        assert!(!path.exists(), "no file must have been created");
+    }
+
+    // -----------------------------------------------------------------
+    // What an unfinished file is
+    // -----------------------------------------------------------------
+
+    /// **A writer dropped without finishing leaves a file with no footer**, which is the whole
+    /// of goal 3: a killed run must be refused, not read short.
+    ///
+    /// The file has a header and blocks in it — it is not empty, which is exactly why reading it
+    /// short would be so easy and so wrong.
+    #[test]
+    fn a_writer_dropped_without_finishing_leaves_a_file_with_no_footer() {
+        let (_dir, path) = a_file();
+        {
+            let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+            for record in a_sample() {
+                writer.push(&record).expect("in order");
+            }
+            // Dropped here, deliberately, without `finish`.
+        }
+        let bytes = bytes_of(&path);
+        assert!(
+            bytes.len() > FOOTER_BYTES,
+            "the file holds a header and blocks: {} bytes",
+            bytes.len()
+        );
+        assert_ne!(
+            &bytes[bytes.len() - 4..],
+            &FOOTER_MAGIC,
+            "an unfinished file must not end with the footer magic"
+        );
+        // And its header still reads, which is what `read_header` exists for (spec §6.6).
+        let header = crate::psp::read_header(&path).expect("the header survives");
+        assert_eq!(header.sample, "SRR7279481");
+    }
+
+    /// The environment variable that turns this test binary into the writer the test kills. Its
+    /// **value is the path the child writes its psp to**.
+    ///
+    /// **The child is this binary, run again.** A killed writer has to be a real process, and the
+    /// only program in this tree that writes a psp is this test suite.
+    #[cfg(unix)]
+    const WRITE_THE_PSP_HERE: &str = "NG_PSP_KILLED_WRITER_TARGET";
+
+    /// The file the child touches **when it stops pushing records of its own accord**. The
+    /// parent requires it to be absent, which is how *the child was still writing when it was
+    /// killed* is checked rather than assumed.
+    #[cfg(unix)]
+    fn where_the_child_says_it_stopped_pushing(psp: &Path) -> PathBuf {
+        psp.with_extension("stopped-pushing")
+    }
+
+    /// How long the child keeps pushing before it gives up. Far longer than the parent's own
+    /// wait, so the kill always arrives first; bounded only so that an orphan left by a parent
+    /// that died itself does not write for ever.
+    #[cfg(unix)]
+    const THE_CHILD_PUSHES_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// The name of the test the child is told to run. **Kept beside the test it names**, because
+    /// a rename that misses it makes the child run nothing at all.
+    #[cfg(unix)]
+    const THE_TEST_THE_CHILD_RUNS: &str =
+        "psp::writer::tests::a_writer_killed_before_finishing_leaves_a_file_every_reader_refuses";
+
+    /// How long the parent waits for those bytes before failing rather than hanging, and how
+    /// often it looks.
+    #[cfg(unix)]
+    const WAIT_FOR_THE_CHILD: std::time::Duration = std::time::Duration::from_secs(6);
+    #[cfg(unix)]
+    const LOOK_EVERY: std::time::Duration = std::time::Duration::from_millis(10);
+
+    /// The signal [`std::process::Child::kill`] sends. Asserted, so an ordinary exit cannot pass
+    /// for a kill.
+    #[cfg(unix)]
+    const SIGKILL: i32 = 9;
+
+    /// **A writer killed with `SIGKILL` before `finish` leaves a file every reader refuses**, and
+    /// its header still reads — which is Milestone H2's oracle and spec §6.3's goal 3.
+    ///
+    /// ⚠ **This is not the same test as
+    /// [`a_writer_dropped_without_finishing_leaves_a_file_with_no_footer`].** Dropping a
+    /// `PspWriter` in-process runs `BufWriter`'s own `Drop`, which **flushes** — so the file on
+    /// disk is everything the writer had produced. `SIGKILL` runs no destructor, so **the blocks
+    /// still sitting in the buffer are lost**, and the file is shorter than the same work dropped
+    /// would leave.
+    ///
+    /// ⚠ **What the kill does *not* produce here is a cut inside a block, and the first version
+    /// of this doc claimed it did.** `PspWriter` hands each finished block to the `BufWriter` in
+    /// one `write_all`, and the buffer is the default 8 kB while this fixture's blocks average
+    /// about 57 bytes — so a flush can only ever land where a `write_all` ended, which is a block
+    /// boundary. Measured on the file the child leaves: **233 whole blocks, the chain ending
+    /// exactly at the file's last byte.** The mid-block state is real and is worth covering, and
+    /// what covers it is
+    /// [`super::super::reader::tests::every_truncation_of_a_finished_psp_is_refused_without_panicking`],
+    /// which manufactures every cut by truncation. **This test's own contribution is the
+    /// mechanism end to end on a real process**, plus the `Incomplete` refusal.
+    ///
+    /// The block-edge property is asserted below rather than left to this paragraph, so that a
+    /// change to the writer's buffering says the premise moved instead of quietly making the
+    /// claim true again.
+    ///
+    /// **What is asserted, and why each matters:**
+    ///
+    /// - the child really was killed by signal 9, so no destructor ran — without this the test
+    ///   could be passing on an ordinary exit and proving nothing about the buffer;
+    /// - blocks reached disk, so a reader that ignored the missing footer would hand back real
+    ///   records from this file — the *sample that covered less of the genome* spec §6.3's goal 3
+    ///   forbids;
+    /// - `PspReader::open` refuses it as [`PspReadError::Incomplete`], not as damage — the
+    ///   instruction is *the run was interrupted, rebuild it*;
+    /// - `read_header` still succeeds (spec §6.6), because a tool that reports what a
+    ///   half-written file was going to be needs it.
+    #[cfg(unix)]
+    #[test]
+    fn a_writer_killed_before_finishing_leaves_a_file_every_reader_refuses() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        // The child arm. Reached only in the re-executed copy of this binary.
+        if let Ok(psp_path) = std::env::var(WRITE_THE_PSP_HERE) {
+            let psp_path = PathBuf::from(psp_path);
+            let mut writer = PspWriter::create(&psp_path, a_header(1_000)).expect("a header");
+            // **It pushes until it is killed, rather than a fixed count**, and that is a
+            // correction rather than a preference. The first version pushed 80,000 records and
+            // then slept, and the H2 review measured what that did: the whole workload takes
+            // about 5 ms while the parent kills at about 12 ms, so in **25 runs out of 25** the
+            // child had *finished* and was asleep when the signal arrived. A writer that has
+            // stopped writing is not what this test is about, and it made the test a race —
+            // adding a `finish` call after the loop failed 40 of 40 standalone runs and passed
+            // 3 of 10 under the parallel suite.
+            //
+            // Four bases apart on the 1 kb grid, so a block closes every 250 records and the
+            // parent has a boundary to catch it at whenever it looks.
+            // **Bounded by the coordinates as well as by the clock.** Positions are four bases
+            // apart and the header's two contigs are about 90 and 53 megabases, so a per-contig
+            // cap of twenty million records keeps every position inside its contig. Forty million
+            // pushes is roughly 2.5 s of work against a parent that kills at about 12 ms — a
+            // margin of some two hundred, where the version this replaces *lost* the race.
+            const RECORDS_PER_CONTIG: u64 = 20_000_000;
+            let give_up_at = std::time::Instant::now() + THE_CHILD_PUSHES_FOR;
+            let mut at = 0u64;
+            while std::time::Instant::now() < give_up_at && at < 2 * RECORDS_PER_CONTIG {
+                let contig = u32::try_from(at / RECORDS_PER_CONTIG).expect("two contigs");
+                let position = 1 + (at % RECORDS_PER_CONTIG) * 4;
+                writer
+                    .push(&a_record(contig, position, 1))
+                    .expect("in order");
+                at += 1;
+            }
+            // **Only reached if the kill never came**, and the marker is what says so. Its
+            // presence tells the parent that the file it is about to judge is not the file of an
+            // interrupted writer but of one that stopped on its own.
+            std::fs::write(
+                where_the_child_says_it_stopped_pushing(&psp_path),
+                b"stopped",
+            )
+            .expect("the marker is written");
+            // **It panics rather than returning**, because this branch is inside the test it is
+            // spawned to re-run: returning would be a *pass*. A process that reaches here was
+            // never killed, which means it was not the child the parent spawned — the usual
+            // cause being the environment variable already set in the shell.
+            panic!(
+                "this process took the writer branch and pushed for {THE_CHILD_PUSHES_FOR:?} \
+                 without being killed: {WRITE_THE_PSP_HERE} was set in an environment this test \
+                 did not create"
+            );
+        }
+
+        let (_dir, path) = a_file();
+        let mut child = std::process::Command::new(
+            std::env::current_exe().expect("the test binary knows its own path"),
+        )
+        .args(["--exact", THE_TEST_THE_CHILD_RUNS, "--nocapture"])
+        .env(WRITE_THE_PSP_HERE, &path)
+        .stdout(std::process::Stdio::null())
+        // **Kept, not discarded.** Every way the child can fail — a stale `--exact` name after a
+        // rename, a panic in `create`, a panic in `push` — reaches the parent only as an
+        // ordinary exit, and the assertion that fires first is the one about SIGKILL. Without
+        // the child's own words that refusal reads as *a destructor ran*, which sends the reader
+        // into `BufWriter::drop` instead of at the four characters that went stale.
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("re-executing this test binary");
+
+        // Wait until blocks have reached disk, so the kill lands on a file worth refusing rather
+        // than on an empty one. Bounded, so a child that never writes fails the test instead of
+        // hanging it.
+        //
+        // **The threshold is the header's own length, not a multiple of the footer.** An earlier
+        // version used eight footers — 384 bytes — against a header of 3,136, so a child killed
+        // before it had finished writing its *header* cleared the guard and then failed three
+        // assertions later, inside `read_header`, pointing at the header reader.
+        let enough_bytes = {
+            let (_scratch_dir, sound) = a_finished_psp();
+            let (_header, header_bytes) = crate::psp::read_header_and_its_length(&sound)
+                .expect("a finished psp's header reads");
+            u64::try_from(header_bytes).expect("a header is a small number of bytes")
+        };
+        let mut bytes_on_disk = 0;
+        let mut why_the_file_could_not_be_measured = None;
+        let rounds = WAIT_FOR_THE_CHILD.as_millis() / LOOK_EVERY.as_millis();
+        for _ in 0..rounds {
+            match std::fs::metadata(&path) {
+                Ok(found) => bytes_on_disk = found.len(),
+                Err(source) => why_the_file_could_not_be_measured = Some(source),
+            }
+            if bytes_on_disk > enough_bytes {
+                break;
+            }
+            std::thread::sleep(LOOK_EVERY);
+        }
+        child
+            .kill()
+            .expect("the child is still alive and can be killed");
+        let status = child.wait().expect("the killed child is reaped");
+        let mut what_the_child_said = String::new();
+        if let Some(mut complaints) = child.stderr.take() {
+            use std::io::Read as _;
+            let _ = complaints.read_to_string(&mut what_the_child_said);
+        }
+
+        // **This assertion cannot tell its causes apart, so it names all of them.** It is the
+        // first to fire whenever the child exits on its own, whatever the reason.
+        assert_eq!(
+            status.signal(),
+            Some(SIGKILL),
+            "the child exited on its own instead of dying by SIGKILL (exit code {:?}, \
+             {bytes_on_disk} bytes written, file not measurable: \
+             {why_the_file_could_not_be_measured:?}). Either it never ran this test — \
+             `THE_TEST_THE_CHILD_RUNS` repeats this test's own name and goes stale on a rename, \
+             and a libtest binary whose filter matches nothing exits 0 — or it ran and exited, \
+             which would run the flush this test exists to prevent. The child said: \
+             {what_the_child_said}",
+            status.code()
+        );
+        assert!(
+            bytes_on_disk > enough_bytes,
+            "the child wrote {bytes_on_disk} bytes before the kill; with no blocks on disk this \
+             file is refused for being empty rather than for being unfinished"
+        );
+        // **The child was still pushing when the signal arrived.** That is the difference between
+        // interrupting a writer and killing one that had already stopped, and it is the property
+        // the first version of this test claimed and did not have.
+        assert!(
+            !where_the_child_says_it_stopped_pushing(&path).exists(),
+            "the child stopped pushing of its own accord before the kill, so the file it left is \
+             not an interrupted writer's — it is one that finished its work and waited"
+        );
+
+        let bytes = bytes_of(&path);
+        assert_ne!(
+            bytes.get(bytes.len().saturating_sub(4)..),
+            Some(&FOOTER_MAGIC[..]),
+            "a killed writer cannot have written a footer"
+        );
+
+        // **Where the kill actually cut.** Walk the length-prefixed block chain forward from the
+        // header's end: if it lands exactly on the file's last byte, every block on disk is
+        // whole, and the kill lost buffered blocks rather than splitting one.
+        let (_, header_bytes) =
+            crate::psp::read_header_and_its_length(&path).expect("the header survives the kill");
+        let mut at = header_bytes;
+        let mut whole_blocks = 0;
+        while at + crate::psp::COMPRESSED_BLOCK_LENGTH_BYTES <= bytes.len() {
+            let declared: [u8; crate::psp::COMPRESSED_BLOCK_LENGTH_BYTES] = bytes
+                [at..at + crate::psp::COMPRESSED_BLOCK_LENGTH_BYTES]
+                .try_into()
+                .expect("a slice of exactly the prefix's width");
+            let next = at
+                + crate::psp::COMPRESSED_BLOCK_LENGTH_BYTES
+                + u32::from_le_bytes(declared) as usize;
+            if next > bytes.len() {
+                break;
+            }
+            at = next;
+            whole_blocks += 1;
+        }
+        assert!(
+            whole_blocks > 0,
+            "the kill has to leave whole blocks on disk, or this file is a header and nothing else"
+        );
+        assert_eq!(
+            at,
+            bytes.len(),
+            "the kill left a partial block on disk. That is not a defect — it is the state this \
+             test's doc used to claim it produced and does not. If the writer's buffering has \
+             changed so that a block can now exceed the `BufWriter`, update the ⚠ paragraph \
+             above: {whole_blocks} whole blocks, chain ending at {at} of {} bytes",
+            bytes.len()
+        );
+        let refused = PspReader::open(&path).expect_err("a file with no footer is not readable");
+        assert!(
+            matches!(refused, crate::psp::PspReadError::Incomplete { .. }),
+            "the instruction is `the run was interrupted, rebuild it` and not `the file is \
+             damaged`; got {refused}"
+        );
+        // Spec §6.6: the half-written file still has a header, and this is what reads it.
+        let header = crate::psp::read_header(&path).expect("the header survives the kill");
+        assert_eq!(header.sample, "SRR7279481");
+    }
+
+    // -----------------------------------------------------------------
+    // Worker-count invariance
+    // -----------------------------------------------------------------
+
+    /// The block grid the sharded sample is written on.
+    ///
+    /// ⚠ **Named because the mid-block precondition divides by it**, and the two used to be two
+    /// literals that had to agree with nothing making them. Measured: writing the fixture on a
+    /// 40 bp grid instead gives every record its own block — 1,000 instead of 40 — so every shard
+    /// boundary lands on a grid line, the exact condition the precondition exists to refuse, **and
+    /// the test still passed**. The filter is not conservative: a position off the 1 kb grid can
+    /// sit exactly on a finer one.
+    const GRID_BP_OF_THE_SHARDED_SAMPLE: u64 = 1_000;
+
+    /// How many records each of the two contigs holds.
+    const RECORDS_PER_CONTIG_IN_THE_SHARDED_SAMPLE: u64 = 500;
+
+    /// How far apart consecutive records sit. **Not a divisor of the grid times any small worker
+    /// count**, which is what keeps some shard boundary off the grid — see [`shard_boundaries`].
+    const BASES_BETWEEN_RECORDS: u64 = 40;
+
+    /// How many contigs the sharded sample spans, which is what the fixture header declares.
+    const CONTIGS_IN_THE_SHARDED_SAMPLE: u64 = 2;
+
+    /// Where one run's shards begin and end, as record ordinals into the whole sample.
+    ///
+    /// **Deliberately uneven.** An even split of two equal contigs puts the two-worker boundary
+    /// exactly on the contig's first record — a grid line — and the four-worker boundaries on
+    /// grid lines too, since 250 records at 40 bases is 10,000, a whole number of 1 kb cells. A
+    /// sweep whose every boundary sits on a grid line cannot tell a cut that follows the
+    /// coordinate from one that follows the shards, which is the thing it exists to tell apart.
+    /// The `+ shard` skew is what moves them off.
+    fn shard_boundaries(workers: u64) -> Vec<u64> {
+        let records = CONTIGS_IN_THE_SHARDED_SAMPLE * RECORDS_PER_CONTIG_IN_THE_SHARDED_SAMPLE;
+        let mut boundaries = vec![0];
+        boundaries
+            .extend((1..workers).map(|shard| (shard * records / workers + shard).min(records)));
+        boundaries.push(records);
+        boundaries.dedup();
+        boundaries
+    }
+
+    /// The contig and position a record ordinal lands on.
+    fn the_record_ordinal_lands_at(ordinal: u64) -> (u32, u64) {
+        let per_contig = RECORDS_PER_CONTIG_IN_THE_SHARDED_SAMPLE;
+        let contig = ordinal / per_contig;
+        // **Checked, rather than left to `try_from`**, which only fails past `u32::MAX`: an
+        // ordinal past the fixture would otherwise return contig 2 and surface much later, as a
+        // record naming a contig the header does not declare.
+        assert!(
+            contig < CONTIGS_IN_THE_SHARDED_SAMPLE,
+            "the fixture header declares {CONTIGS_IN_THE_SHARDED_SAMPLE} contigs, and ordinal \
+             {ordinal} is past them"
+        );
+        (
+            u32::try_from(contig).expect("a contig index fits a u32"),
+            1 + (ordinal % per_contig) * BASES_BETWEEN_RECORDS,
+        )
+    }
+
+    /// One sample's records, produced by `workers` threads each owning a contiguous span of the
+    /// genome, then put back in coordinate order.
+    ///
+    /// **The threads are real and the spans are uneven**, so the interleaving in time genuinely
+    /// varies with `workers`; what must not vary is the sequence that comes out.
+    fn a_sample_gathered_by(workers: u64) -> Vec<SampleLocusObservations> {
+        let boundaries = shard_boundaries(workers);
+        let shards: Vec<(u64, u64)> = boundaries
+            .windows(2)
+            .map(|pair| (pair[0], pair[1]))
+            .collect();
+        let gathered: Vec<Vec<SampleLocusObservations>> = std::thread::scope(|threads| {
+            let running: Vec<_> = shards
+                .iter()
+                .map(|&(from, to)| {
+                    threads.spawn(move || {
+                        (from..to)
+                            .map(|at| {
+                                let (contig, position) = the_record_ordinal_lands_at(at);
+                                a_record(contig, position, 1)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            running
+                .into_iter()
+                .map(|thread| thread.join().expect("a worker did not panic"))
+                .collect()
+        });
+        // The shards are contiguous and in order, so concatenating them *is* the coordinate-order
+        // merge a run would do.
+        gathered.into_iter().flatten().collect()
+    }
+
+    /// Write a sample; give back the file's bytes **and how many blocks it cut**.
+    ///
+    /// **One writer, not three.** The block count used to be read by writing the same sample a
+    /// second time and throwing the bytes away, which is the drift `a_finished_psp`'s own doc
+    /// warns about — three spellings of *what a finished file looks like* in one module.
+    fn the_file_written_from(records: &[SampleLocusObservations]) -> (Vec<u8>, u64) {
+        let (_dir, path) = a_file();
+        let mut writer =
+            PspWriter::create(&path, a_header(GRID_BP_OF_THE_SHARDED_SAMPLE)).expect("a header");
+        for record in records {
+            writer.push(record).expect("in order");
+        }
+        let stats = writer.finish(b"a per-sample summary").expect("it finishes");
+        (bytes_of(&path), stats.blocks)
+    }
+
+    /// **One sample gathered at 1, 2, 4, 8 and 16 workers gives byte-identical files** — spec §7's
+    /// byte-identity claim, and H3.
+    ///
+    /// **What this can and cannot prove, stated plainly, because the difference decides what the
+    /// test is worth.** ng's writer is serial: it is handed records in coordinate order and the
+    /// producing is what a run parallelises. So byte-identity across worker counts rests on two
+    /// things, and only the first is this file's doing:
+    ///
+    /// 1. **the writer is a function of the record sequence alone** — nothing about *when* records
+    ///    arrive, or in what batches, reaches the bytes. **That half is already held** by
+    ///    [`the_same_records_written_twice_give_the_same_bytes`], which is where a leaked
+    ///    timestamp, a hash iteration order or an address would show;
+    /// 2. **the sharding gives back the same sequence** whatever the worker count, which is the
+    ///    run's job and is reproduced here so the claim is end to end rather than assumed.
+    ///
+    /// **And the block cut must not follow the shards.** The grid is a function of the coordinate
+    /// (spec §4.1), so a shard boundary falling mid-block must not close one — which is only
+    /// tested if some boundary actually falls mid-block. That is asserted below, not hoped for.
+    #[test]
+    fn one_sample_gathered_at_any_worker_count_gives_byte_identical_files() {
+        let by_one = a_sample_gathered_by(1);
+        let (expected, blocks) = the_file_written_from(&by_one);
+
+        // **The fixture has to cut several blocks**, or "the cut does not follow the shards" is a
+        // claim about a file with one block in it. It says nothing about *where* the boundaries
+        // fall — that is the per-worker-count check below, and conflating the two is how this
+        // message read before.
+        assert!(
+            blocks > 1,
+            "the sample cuts {blocks} block; a one-block file makes \"the cut does not follow \
+             the shards\" vacuous, whatever the boundaries do"
+        );
+
+        // **Counts that do not divide the records, as well as ones that do.** 1,000 records
+        // divide evenly by 2, 4, 8 and 16, so the truncating branch of `records / workers` was
+        // never taken with a remainder; 3, 5 and 7 take it.
+        for workers in [2u64, 3, 4, 5, 7, 8, 16] {
+            // **A shard boundary that falls mid-block**, without which a writer that closed a
+            // block at every shard boundary would produce the same file anyway.
+            let boundaries = shard_boundaries(workers);
+            let mid_block_boundaries = boundaries[1..boundaries.len() - 1]
+                .iter()
+                .filter(|at| {
+                    let (_contig, position) = the_record_ordinal_lands_at(**at);
+                    (position - 1) % GRID_BP_OF_THE_SHARDED_SAMPLE != 0
+                })
+                .count();
+            assert!(
+                mid_block_boundaries > 0,
+                "at {workers} workers every shard boundary lands on a grid line, so this round \
+                 cannot tell a coordinate cut from a shard cut"
+            );
+
+            let gathered = a_sample_gathered_by(workers);
+            assert_eq!(
+                gathered.len(),
+                by_one.len(),
+                "at {workers} workers the sharding produced a different number of records"
+            );
+            assert!(
+                gathered == by_one,
+                "at {workers} workers the sharding produced a different record sequence"
+            );
+            assert!(
+                the_file_written_from(&gathered).0 == expected,
+                "at {workers} workers the file differs from the one-worker file"
+            );
+        }
+    }
+
+    /// **The header's timestamp is the only thing allowed to differ, and it differs only inside
+    /// the header** — the second half of spec §7's sentence, which nothing held.
+    ///
+    /// The invariance claim is *byte-identical apart from any timestamp in the header*. The sweep
+    /// above holds the first half by keeping `created` fixed; this holds the second, by writing
+    /// the same records twice with two different stamps and requiring every differing byte to lie
+    /// inside the header.
+    ///
+    /// **Why it is worth a test of its own.** The timestamp is written into the header's TOML, so
+    /// a stamp of a different rendered *width* moves the header's length — and with it every
+    /// offset in the footer, the index, and the blocks' positions in the file. A run whose files
+    /// differed past the header would be one where nothing downstream could compare two samples
+    /// byte for byte, which is what §7 offers.
+    #[test]
+    fn two_runs_differing_only_in_their_timestamp_differ_only_inside_the_header() {
+        let write_stamped = |created: &str| {
+            let (dir, path) = a_file();
+            let mut header = a_header(GRID_BP_OF_THE_SHARDED_SAMPLE);
+            header.writer.created = created.parse().expect("a valid RFC 3339 stamp");
+            let mut writer = PspWriter::create(&path, header).expect("a header");
+            for record in a_sample() {
+                writer.push(&record).expect("in order");
+            }
+            let _ = writer.finish(b"a per-sample summary").expect("it finishes");
+            let bytes = bytes_of(&path);
+            drop(dir);
+            bytes
+        };
+        // Two stamps of the same rendered width — **and that is a precondition, not a
+        // description**: see the sibling test below, which measures what a wider one does.
+        let early = write_stamped("2026-08-28T00:00:00Z");
+        let later = write_stamped("2026-08-30T11:22:33Z");
+        assert_eq!(
+            early.len(),
+            later.len(),
+            "two stamps of the same width must not change the file's length"
+        );
+
+        let (_header, header_bytes) = {
+            let (dir, path) = a_file();
+            rewrite(&path, &early);
+            let read = crate::psp::read_header_and_its_length(&path).expect("the header reads");
+            drop(dir);
+            read
+        };
+        let differing: Vec<usize> = early
+            .iter()
+            .zip(&later)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(at, _)| at)
+            .collect();
+        assert!(
+            !differing.is_empty(),
+            "two different stamps have to change something, or this test proves nothing"
+        );
+        assert!(
+            differing.iter().all(|at| *at < header_bytes),
+            "the two files differ outside the {header_bytes}-byte header, at {:?} — a timestamp \
+             is the one field spec §7 allows to differ, and only inside the header",
+            differing
+                .iter()
+                .filter(|at| **at >= header_bytes)
+                .take(8)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// ⚠ **Spec §7's byte-identity holds only while every stamp renders to the same width, and
+    /// nothing enforces that.** This test pins the limit rather than the promise.
+    ///
+    /// `created` is a `toml::value::Datetime`, which carries an optional sub-second fraction and
+    /// an offset, so `2026-08-30T11:22:33.5Z` is two characters wider than
+    /// `2026-08-28T00:00:00Z`. The stamp goes into the header's TOML, so those two characters
+    /// move the header's length — **and with it every offset in the footer, the index, and where
+    /// the blocks sit in the file**. Measured here: the two files differ in length, and the
+    /// difference is exactly the two characters.
+    ///
+    /// **Why this matters beyond the test.** ng has no production header writer yet — every
+    /// `WriterProvenance` built under `src/` is in a test. A future `pileup` rendering the
+    /// clock with `to_rfc3339`, which prints sub-second digits only when they are non-zero, would
+    /// produce stamps of *varying* width run to run, and §7's promise — the thing that lets
+    /// anything downstream compare two samples byte for byte — would quietly stop holding.
+    ///
+    /// **The fix is not this test's to make.** Either the writer normalises `created` to whole
+    /// seconds in UTC, or it refuses a stamp that does not render at a fixed width, or spec §7
+    /// gains the words "of fixed rendered width". All three are design decisions and are raised
+    /// rather than taken.
+    #[test]
+    fn a_wider_timestamp_moves_every_offset_in_the_file_and_that_is_the_limit_of_the_promise() {
+        let write_stamped = |created: &str| {
+            let (dir, path) = a_file();
+            let mut header = a_header(GRID_BP_OF_THE_SHARDED_SAMPLE);
+            header.writer.created = created.parse().expect("a valid RFC 3339 stamp");
+            let mut writer = PspWriter::create(&path, header).expect("a header");
+            for record in a_sample() {
+                writer.push(&record).expect("in order");
+            }
+            let _ = writer.finish(b"a per-sample summary").expect("it finishes");
+            let bytes = bytes_of(&path);
+            drop(dir);
+            bytes
+        };
+        let narrow = write_stamped("2026-08-28T00:00:00Z");
+        let wider = write_stamped("2026-08-30T11:22:33.5Z");
+        assert_eq!(
+            wider.len(),
+            narrow.len() + 2,
+            "the wider stamp is two characters wider, and the file grows by exactly that"
+        );
+
+        let (_header, header_bytes) = {
+            let (dir, path) = a_file();
+            rewrite(&path, &narrow);
+            let read = crate::psp::read_header_and_its_length(&path).expect("the header reads");
+            drop(dir);
+            read
+        };
+        // **And the difference does not stay inside the header**, which is the whole point: the
+        // shorter file's own bytes past its header no longer match the wider file's.
+        let past_the_header = narrow
+            .iter()
+            .zip(&wider)
+            .skip(header_bytes)
+            .any(|(a, b)| a != b);
+        assert!(
+            past_the_header,
+            "a wider stamp has to move the bytes past the header — if it did not, spec §7 would \
+             hold at any width and this test would be recording a limit that is not there"
+        );
+    }
+
+    /// **The shard split never produces an empty or backwards shard**, even asked for more
+    /// workers than there are records — the case `.min` and `.dedup` in [`shard_boundaries`] exist
+    /// for and that no worker count in the sweep reaches.
+    #[test]
+    fn the_shard_split_stays_ordered_with_more_workers_than_records() {
+        let records = CONTIGS_IN_THE_SHARDED_SAMPLE * RECORDS_PER_CONTIG_IN_THE_SHARDED_SAMPLE;
+        for workers in [1u64, 2, 999, records, records + 1, 4 * records] {
+            let boundaries = shard_boundaries(workers);
+            assert!(
+                boundaries.windows(2).all(|pair| pair[0] < pair[1]),
+                "at {workers} workers a shard may be small but never empty or backwards: \
+                 {boundaries:?}"
+            );
+            assert_eq!(
+                boundaries.first(),
+                Some(&0),
+                "the split starts at the first record"
+            );
+            assert_eq!(
+                boundaries.last(),
+                Some(&records),
+                "and ends at the last, or records go unwritten"
+            );
+        }
+    }
+
+    /// A file with no records at all still finishes, and its index is empty rather than absent.
+    #[test]
+    fn a_sample_with_no_records_still_finishes() {
+        let (_dir, path) = a_file();
+        let writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        let stats = writer.finish(b"nothing was found").expect("it finishes");
+        assert_eq!(stats.records, 0);
+        assert_eq!(stats.blocks, 0);
+
+        let bytes = bytes_of(&path);
+        let tail: [u8; FOOTER_BYTES] = bytes[bytes.len() - FOOTER_BYTES..].try_into().unwrap();
+        let footer = decode_footer(&tail).expect("an empty psp is still a psp");
+        assert_eq!(footer.n_blocks, 0);
+        assert_eq!(footer.index_bytes, 0);
+        assert_eq!(footer.trailer_bytes, b"nothing was found".len() as u64);
+    }
+
+    /// An empty trailer is legal, and the footer says so.
+    #[test]
+    fn an_empty_trailer_is_legal() {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        writer.push(&a_record(0, 1, 1)).expect("one record");
+        let _ = writer.finish(&[]).expect("it finishes");
+
+        let bytes = bytes_of(&path);
+        let tail: [u8; FOOTER_BYTES] = bytes[bytes.len() - FOOTER_BYTES..].try_into().unwrap();
+        let footer = decode_footer(&tail).expect("a footer");
+        assert_eq!(footer.trailer_bytes, 0);
+        assert_eq!(
+            footer.trailer_offset,
+            footer.index_offset + footer.index_bytes
+        );
+    }
+
+    /// **A failed flush is surfaced, not swallowed** — the durability contract spec §6.3 calls
+    /// easy to get wrong.
+    ///
+    /// `/dev/full` accepts an open and fails every write with `ENOSPC`. The fixture is well under
+    /// `BufWriter`'s 8 KiB buffer, so nothing reaches the device until `into_inner` flushes
+    /// inside `finish` — which pins exactly the step that surfaces.
+    ///
+    /// ⚠ **F3 recorded this as untestable without a failing file descriptor and routed it to
+    /// H2.** It was testable here; the review found the route. Linux only — macOS has no
+    /// `/dev/full`, and the container this project builds in is Linux.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_flush_is_surfaced_rather_than_swallowed() {
+        let full = Path::new("/dev/full");
+        if !full.exists() {
+            return;
+        }
+        let mut writer = PspWriter::create(full, a_header(1_000))
+            .expect("/dev/full accepts an open and buffers the header");
+        writer.push(&a_record(0, 1, 1)).expect("it buffers");
+        let refused = writer
+            .finish(b"a per-sample summary")
+            .expect_err("a device with no room must not report a finished file");
+        assert!(matches!(refused, PspWriteError::Io { .. }), "got {refused}");
+        assert!(
+            refused.to_string().contains("flushing the finished file"),
+            "the message must name the step that failed: {refused}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // The guard that reads back what it is about to write
+    // -----------------------------------------------------------------
+
+    /// **The guard fires on an index the reader would refuse**, driven directly because the
+    /// writer cannot currently produce one: `BlockBuilder` enforces coordinate order, so every
+    /// index `finish` builds is already sorted.
+    ///
+    /// That is exactly why the guard is worth having and worth testing this way — it is a net
+    /// under a defect somewhere else, and a net nothing ever falls into is untested by
+    /// construction. Removing the call changed no test until this one existed.
+    #[test]
+    fn the_readable_check_refuses_an_index_a_reader_would_not_take() {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        writer.push(&a_record(0, 1, 1)).expect("one record");
+
+        // Two entries whose offsets go backwards — the shape `decode_index` refuses.
+        let entry = |position: u64, block_offset: u64| BlockIndexEntry {
+            first_position: GenomePosition {
+                contig: ContigId(0),
+                position: Position(position),
+            },
+            block_offset,
+        };
+        writer.index = vec![entry(1, 8_192), entry(2, 4_096)];
+
+        let index_bytes = index::encode_index(&writer.index);
+        let footer = Footer {
+            index_offset: 100,
+            index_bytes: index_bytes.len() as u64,
+            trailer_offset: 100 + index_bytes.len() as u64,
+            trailer_bytes: 0,
+            n_blocks: writer.index.len() as u64,
+            index_checksum: index::checksum_index(&index_bytes),
+        };
+        let refused = writer
+            .check_the_index_and_footer_read_back(&index_bytes, &footer)
+            .expect_err("a reader would refuse that index");
+        // **The index decoder's own account is kept.** Replacing the cause with `None` left the
+        // whole suite green until this looked at it (the G3 review).
+        match &refused {
+            PspWriteError::WouldNotBeReadable {
+                source: Some(NotReadable::BlockIndex(_)),
+                reason,
+                ..
+            } => assert_eq!(reason, "the block index it wrote does not decode"),
+            other => panic!("got {other}"),
+        }
+
+        // **And through `finish`, which is what wires the guard in.** Called directly the guard
+        // could be right while nothing called it: deleting the call from `finish` left the
+        // assertion above green.
+        let through_finish = writer
+            .finish(&[])
+            .expect_err("finish must not write a file it cannot read");
+        assert!(
+            matches!(through_finish, PspWriteError::WouldNotBeReadable { .. }),
+            "got {through_finish}"
+        );
+        assert!(
+            refused.to_string().contains("SRR7279481.psp"),
+            "the message must name the file: {refused}"
+        );
+        assert!(
+            refused.to_string().contains("block index"),
+            "the message must say which structure: {refused}"
+        );
+    }
+
+    /// The same guard on the footer half: sections that do not abut.
+    #[test]
+    fn the_readable_check_refuses_a_footer_a_reader_would_not_take() {
+        let (_dir, path) = a_file();
+        let writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        let index_bytes = index::encode_index(&[]);
+        let footer = Footer {
+            index_offset: 100,
+            index_bytes: 0,
+            // A gap: the trailer does not start where the index ends.
+            trailer_offset: 200,
+            trailer_bytes: 0,
+            n_blocks: 0,
+            index_checksum: index::checksum_index(&index_bytes),
+        };
+        let refused = writer
+            .check_the_index_and_footer_read_back(&index_bytes, &footer)
+            .expect_err("a reader would refuse that footer");
+        assert!(
+            refused.to_string().contains("footer"),
+            "the message must say which structure: {refused}"
+        );
+    }
+
+    /// **A writer that lost a block refuses to finish**, rather than writing a file every reader
+    /// accepts with records missing out of the middle of it.
+    ///
+    /// The loss is forced the way the review forced it: the writer's own `spent` marker is set,
+    /// standing in for a compressor refusal, a head that would not read back, or a transient
+    /// write error. What matters is what `finish` then does.
+    ///
+    /// ⚠ Before this, `finish` returned `Ok` and produced a file with a valid footer, a
+    /// checksum-matching index, entries in ascending order — and a thousand bases missing from
+    /// the middle of a contig. That is worse than the unreadable stump a killed run leaves,
+    /// because every reader takes it.
+    #[test]
+    fn a_writer_that_lost_a_block_refuses_to_finish() {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        for record in a_sample() {
+            writer.push(&record).expect("in order");
+        }
+        writer.spent = Some("a block could not be written");
+
+        let refused = writer
+            .finish(b"a per-sample summary")
+            .expect_err("a walk that lost records must not report a finished file");
+        // **No cause here, and that is right**: nothing decoded, the loss happened earlier and
+        // its own error went to the caller then.
+        assert!(
+            matches!(
+                refused,
+                PspWriteError::WouldNotBeReadable { source: None, .. }
+            ),
+            "got {refused}"
+        );
+        assert!(
+            refused.to_string().contains("records were lost"),
+            "the message must say what happened: {refused}"
+        );
+
+        // And the file on disk is not a finished psp: no footer, so every reader refuses it.
+        let bytes = bytes_of(&path);
+        assert_ne!(&bytes[bytes.len() - 4..], &FOOTER_MAGIC);
+    }
+
+    /// **The guard runs before anything is written, and that ordering is the point.**
+    ///
+    /// Moved after the three writes it still returns `Err` — and leaves a file ending in the
+    /// footer magic on disk, which by this module's own contract is a *finished* file. A
+    /// `finish` that fails must leave nothing a reader will take.
+    #[test]
+    fn a_finish_that_refuses_leaves_no_finished_file_behind() {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        writer.push(&a_record(0, 1, 1)).expect("one record");
+
+        // An index the reader refuses: offsets that go backwards.
+        let entry = |position: u64, block_offset: u64| BlockIndexEntry {
+            first_position: GenomePosition {
+                contig: ContigId(0),
+                position: Position(position),
+            },
+            block_offset,
+        };
+        writer.index = vec![entry(1, 8_192), entry(2, 4_096)];
+
+        let refused = writer
+            .finish(&[])
+            .expect_err("a reader would refuse that index");
+        assert!(
+            matches!(refused, PspWriteError::WouldNotBeReadable { .. }),
+            "got {refused}"
+        );
+        let bytes = bytes_of(&path);
+        assert!(
+            bytes.len() < FOOTER_BYTES || bytes[bytes.len() - 4..] != FOOTER_MAGIC,
+            "a refused finish must not leave a file ending in the footer magic"
+        );
+    }
+
+    /// The footer's checksum must be over the index the writer actually wrote.
+    ///
+    /// Computing it over the trailer instead sailed through the guard until this was asserted —
+    /// a file `open` refuses at the checksum, produced by a `finish` that returned `Ok`.
+    #[test]
+    fn the_readable_check_refuses_a_checksum_over_the_wrong_bytes() {
+        let (_dir, path) = a_file();
+        let writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        let index_bytes = index::encode_index(&[]);
+        let footer = Footer {
+            index_offset: 100,
+            index_bytes: 0,
+            trailer_offset: 100,
+            trailer_bytes: 0,
+            n_blocks: 0,
+            index_checksum: index::checksum_index(b"something else entirely"),
+        };
+        let refused = writer
+            .check_the_index_and_footer_read_back(&index_bytes, &footer)
+            .expect_err("that checksum is of other bytes");
+        assert!(refused.to_string().contains("checksum"), "got {refused}");
+    }
+
+    /// The compression level the writer used reaches the file, because it is a setting and
+    /// goal 4 is that settings are recorded — and because `append` must match bytes already
+    /// written and has no other way to learn what level produced them.
+    #[test]
+    fn the_compression_level_reaches_the_header() {
+        let (_dir, path) = a_file();
+        let writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        let _ = writer.finish(&[]).expect("it finishes");
+
+        let header = crate::psp::read_header(&path).expect("the header reads");
+        assert_eq!(
+            header.writer.parameters.get("zstd-compression-level"),
+            Some(&crate::psp::header::ParameterValue::Integer(i64::from(
+                crate::psp::block::ZSTD_COMPRESSION_LEVEL
+            ))),
+            "the level this build compresses at must be in the file"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // The same sample twice
+    // -----------------------------------------------------------------
+
+    /// **The same records give the same bytes**, which is what spec §7's worker-count invariance
+    /// rests on — the header's timestamp is the one field allowed to differ, and this fixture
+    /// holds it fixed so the rest can be compared byte for byte.
+    #[test]
+    fn the_same_records_written_twice_give_the_same_bytes() {
+        let write = || {
+            let (dir, path) = a_file();
+            let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+            for record in a_sample() {
+                writer.push(&record).expect("in order");
+            }
+            let _ = writer.finish(b"the same payload").expect("it finishes");
+            let bytes = bytes_of(&path);
+            drop(dir);
+            bytes
+        };
+        assert_eq!(write(), write());
+    }
+
+    /// The block grid decides how many blocks a sample cuts, and the index follows it. **A
+    /// coarser grid gives fewer blocks and a shorter index**, which is the whole memory argument
+    /// of the format (spec §3.3).
+    #[test]
+    fn a_coarser_block_grid_gives_fewer_index_entries() {
+        let blocks_at = |grid: u64| {
+            let (_dir, path) = a_file();
+            let mut writer = PspWriter::create(&path, a_header(grid)).expect("a header");
+            for record in a_sample() {
+                writer.push(&record).expect("in order");
+            }
+            writer.finish(&[]).expect("it finishes").blocks
+        };
+        let fine = blocks_at(1_000);
+        let coarse = blocks_at(1_000_000);
+        assert!(
+            coarse < fine,
+            "a 1 Mb grid must cut fewer blocks than a 1 kb one: {coarse} against {fine}"
+        );
+        // Two contigs, and a block never crosses one, so the floor is two.
+        assert_eq!(coarse, 2);
+    }
+
+    // -----------------------------------------------------------------
+    // Appending to a finished file (G4)
+    // -----------------------------------------------------------------
+
+    /// **A file appended to reads back as one file**: every record that was there and every
+    /// record added, in order, from one walk.
+    ///
+    /// The comparison is against the two record lists concatenated, field for field — an append
+    /// that lost the old records, or wrote the new ones somewhere a walk does not reach, fails
+    /// here rather than in a count.
+    #[test]
+    fn an_appended_file_reads_back_as_one_file() {
+        let (_dir, path) = a_finished_psp();
+        let already_there = a_sample();
+        let added: Vec<_> = (0..6u64)
+            .map(|step| a_record(1, 60_000 + step * 100, 1))
+            .collect();
+
+        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
+        for record in &added {
+            writer
+                .push(record)
+                .expect("past the last record already there");
+        }
+        let stats = writer
+            .finish(b"a summary of both halves")
+            .expect("it finishes");
+        // **The three fields are measured on two different populations**, and each is pinned:
+        // records is this writer's, blocks and bytes are the file's.
+        assert_eq!(
+            stats.records, 6,
+            "what this writer wrote, not what the file holds"
+        );
+        assert_eq!(
+            stats.blocks, 9,
+            "eight already there and one block appended"
+        );
+        assert_eq!(stats.bytes, bytes_of(&path).len() as u64, "the whole file");
+
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        let read: Vec<_> = psp
+            .records()
+            .expect("the walk starts")
+            .map(|found| found.expect("a finished psp walks").record.expect("a body"))
+            .collect();
+        let expected: Vec<_> = already_there.iter().chain(&added).cloned().collect();
+        assert_eq!(read, expected);
+        assert_eq!(
+            psp.trailer().expect("it reads"),
+            b"a summary of both halves"
+        );
+    }
+
+    /// **The blocks and the header that were already there are byte-identical afterwards**, and
+    /// the appended blocks start exactly where the old index did.
+    #[test]
+    fn appending_leaves_the_header_and_the_old_blocks_untouched() {
+        let (_dir, path) = a_finished_psp();
+        let before = bytes_of(&path);
+        let footer = footer_of(&before);
+        let blocks_end = footer.index_offset as usize;
+        let old_blocks = before[..blocks_end].to_vec();
+        let old_entries = {
+            let psp = PspReader::open(&path).expect("it opens");
+            psp.block_index().to_vec()
+        };
+
+        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
+        writer.push(&a_record(1, 60_000, 1)).expect("in order");
+        let _ = writer.finish(b"").expect("it finishes");
+
+        let after = bytes_of(&path);
+        assert_eq!(
+            after[..blocks_end],
+            old_blocks[..],
+            "the header and every old block"
+        );
+        let psp = PspReader::open(&path).expect("it opens");
+        assert_eq!(
+            &psp.block_index()[..old_entries.len()],
+            &old_entries[..],
+            "the old index entries come back unchanged"
+        );
+        assert_eq!(
+            psp.block_index()[old_entries.len()].block_offset,
+            blocks_end as u64,
+            "and the first appended block starts where the old index did"
+        );
+    }
+
+    /// **Coordinate order runs across the seam** (spec §6.4): a first appended record that
+    /// precedes the last one already in the file is refused, on the position and on the contig.
+    ///
+    /// ⚠ **A builder that started blank would accept both** — it is the seed taken from the last
+    /// block's heads that makes this fail, and nothing else in the file could.
+    #[test]
+    fn a_record_that_precedes_the_seam_is_refused() {
+        for (contig, at, what) in [
+            (1u32, 1u64, "an earlier position on the same contig"),
+            (0, 9_000, "an earlier contig"),
+        ] {
+            let (_dir, path) = a_finished_psp();
+            let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
+            let refused = writer
+                .push(&a_record(contig, at, 1))
+                .expect_err("that is behind the seam");
+            assert!(
+                matches!(
+                    refused,
+                    PspWriteError::OutOfOrder { .. } | PspWriteError::RecordRefused { .. }
+                ),
+                "{what}: got {refused}"
+            );
+        }
+    }
+
+    /// **A record at exactly the last record's position is accepted**, because the rule is *must
+    /// not precede* and two records may begin on one base.
+    #[test]
+    fn a_record_at_the_seams_own_position_is_accepted() {
+        let (_dir, path) = a_finished_psp();
+        let last = {
+            let mut psp = PspReader::open(&path).expect("it opens");
+            psp.records()
+                .expect("the walk starts")
+                .last()
+                .expect("the fixture has records")
+                .expect("a finished psp walks")
+                .head
+                .region
+        };
+        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
+        writer
+            .push(&a_record(last.contig.0, last.start.get(), 1))
+            .expect("the same base is not before it");
+        let _ = writer.finish(b"").expect("it finishes");
+
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        assert_eq!(psp.records().expect("the walk starts").count(), 41);
+    }
+
+    /// **A writer abandoned with blocks still being compressed must not hang, and must leave no
+    /// thread behind.**
+    ///
+    /// Since compression moved to a thread of its own, dropping a writer has to close the
+    /// channel that thread is waiting on and join it. Getting that wrong has two shapes and
+    /// neither shows up as a failing assertion elsewhere: a join on a thread whose channel was
+    /// never closed hangs the run at the drop, and a detached thread leaks — one per sample, in
+    /// a cohort walked in a single process, each holding a block payload.
+    ///
+    /// So this abandons twenty writers in turn, each with several blocks closed and unwritten,
+    /// in one process. A hang fails it by timing out; a leak is what the twenty are for. The
+    /// existing drop tests cannot reach either: they push one record, which closes no block, so
+    /// nothing is ever in flight.
+    #[test]
+    fn writers_abandoned_with_blocks_in_flight_neither_hang_nor_pile_up() {
+        let (_dir, path) = a_file();
+        for round in 0..20u64 {
+            let mut writer =
+                PspWriter::create(&path, a_header(1_000)).expect("a header for each round");
+            // Ten genomic blocks at a thousand bases each, so blocks are closed and handed over
+            // rather than only built.
+            for step in 0..10u64 {
+                writer
+                    .push(&a_record(0, 1 + step * 1_000 + round, 1))
+                    .expect("each record is past the last");
+            }
+            // No `finish`: this is what a killed run leaves, and it is the path that has to
+            // close the channel rather than wait on it.
+            drop(writer);
+        }
+
+        // The last file is what a killed run leaves — headed, unsealed, and refused for append.
+        let refused = PspWriter::append(&path).expect_err("nothing sealed the last one");
+        assert!(
+            matches!(refused, PspWriteError::Reopen { .. }),
+            "an unsealed file is refused for append, not opened: {refused:?}",
+        );
+    }
+
+    /// **A file with no footer cannot be appended to**, because nothing says where its blocks
+    /// end — it is what a killed run leaves, and the answer is to re-run it.
+    #[test]
+    fn a_file_with_no_footer_cannot_be_appended_to() {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        writer.push(&a_record(0, 1, 1)).expect("one record");
+        drop(writer);
+
+        let refused = PspWriter::append(&path).expect_err("there is no footer");
+        // ⚠ **`Reopen { .. }` alone cannot tell what this test names from three other things** —
+        // it is satisfied by `NotAnNgPsp`, by `Damaged` and by `Io` too. That is G3's M2, in a
+        // test written after that finding was fixed.
+        assert!(
+            matches!(
+                refused,
+                PspWriteError::Reopen {
+                    source: crate::psp::PspReadError::Incomplete { .. },
+                    ..
+                }
+            ),
+            "got {refused}"
+        );
+    }
+
+    /// **An append is refused on a manifest this writer cannot honour** (spec §6.4), because the
+    /// header is not rewritten: the added records would have to use encodings the file declares
+    /// and this build does not write, and left unchecked they would be added anyway — unreadable
+    /// under the header the file keeps.
+    #[test]
+    fn an_append_is_refused_on_a_manifest_this_writer_cannot_honour() {
+        let (_dir, path) = a_finished_psp();
+        let mut whole = bytes_of(&path);
+        let declared = b"position-offset";
+        let at = whole
+            .windows(declared.len())
+            .position(|window| window == declared)
+            .expect("the manifest names the record's first field");
+        whole[at..at + declared.len()].copy_from_slice(b"position-offsex");
+        rewrite(&path, &whole);
+
+        let refused = PspWriter::append(&path).expect_err("this build cannot write that layout");
+        match refused {
+            PspWriteError::UnsupportedHeader { source, .. } => {
+                assert!(
+                    matches!(source, crate::psp::HeaderRefusal::CutRule(_)),
+                    "got {source}"
+                )
+            }
+            other => panic!("got {other}"),
+        }
+        assert_eq!(bytes_of(&path), whole, "and the file is exactly as it was");
+    }
+
+    /// **An append dropped before it finishes leaves a file every reader refuses** — and the
+    /// trailer the file had is gone with the index it followed (spec §6.4).
+    #[test]
+    fn an_append_dropped_before_finishing_leaves_a_file_no_reader_accepts() {
+        let (_dir, path) = a_finished_psp();
+        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
+        writer.push(&a_record(1, 60_000, 1)).expect("in order");
+        drop(writer);
+
+        let refused = PspReader::open(&path).expect_err("there is no footer any more");
+        assert!(
+            matches!(refused, crate::psp::PspReadError::Incomplete { .. }),
+            "got {refused}"
+        );
+    }
+
+    /// **An append writes at the level the file records**, not at this build's — so a file's
+    /// blocks are all compressed the same way, which is goal 4.
+    ///
+    /// ⚠ **The fixture has to make the two levels give different bytes, and the first one did
+    /// not.** It compared an appended block against a fresh block at the level the file records,
+    /// which *is* this build's — so an append that ignored the record entirely passed. Here the
+    /// file's recorded level is patched to 1 in its own header text, which is one character wide
+    /// and moves no offset, and the payload is varied enough that 1 and 9 differ. **Both halves
+    /// are asserted**: that the levels separate, and that the appended block is the recorded
+    /// level's.
+    #[test]
+    fn an_append_compresses_at_the_level_the_file_records() {
+        use crate::psp::header::ParameterValue;
+        use crate::psp::{BlockCompressor, COMPRESSED_BLOCK_LENGTH_BYTES, ZSTD_COMPRESSION_LEVEL};
+
+        // A record whose bases do not repeat trivially, so the levels have something to disagree
+        // about.
+        let varied = || {
+            let mut record = a_record(1, 60_000, 1);
+            let bases: Vec<u8> = (0..8_000u64)
+                .map(|i| b"ACGT"[((i * 7 + i / 3 + i * i / 5) % 4) as usize])
+                .collect();
+            record.reference_bases = bases.clone().into_boxed_slice();
+            record.observations[0].bases = bases.into_boxed_slice();
+            record
+        };
+
+        let (_dir, path) = a_finished_psp();
+        let mut whole = bytes_of(&path);
+        assert_eq!(
+            ZSTD_COMPRESSION_LEVEL, 9,
+            "or the fixture patches the wrong text"
+        );
+        let recorded = b"zstd-compression-level = 9";
+        let patched_to = b"zstd-compression-level = 1";
+        let at = whole
+            .windows(recorded.len())
+            .position(|window| window == recorded)
+            .expect("the header records the level it was written at");
+        // **The same width, so no offset in the file moves** — the whole reason for a one-digit
+        // level here.
+        whole[at..at + patched_to.len()].copy_from_slice(patched_to);
+        rewrite(&path, &whole);
+        {
+            let psp = PspReader::open(&path).expect("the patched file still opens");
+            assert_eq!(
+                psp.header().writer.parameters.get("zstd-compression-level"),
+                Some(&ParameterValue::Integer(1)),
+                "the fixture must record a level this build does not use"
+            );
+        }
+
+        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
+        writer.push(&varied()).expect("in order");
+        let _ = writer.finish(b"").expect("it finishes");
+        let appended = {
+            let whole = bytes_of(&path);
+            let psp = PspReader::open(&path).expect("it opens");
+            let at = psp.block_index().last().expect("blocks").block_offset as usize;
+            whole[at..psp.footer().index_offset as usize].to_vec()
+        };
+
+        // The same record, alone, in a fresh file — which this build writes at its own level.
+        let (_dir2, fresh) = a_file();
+        let mut writer = PspWriter::create(&fresh, a_header(1_000)).expect("a header");
+        writer.push(&varied()).expect("one record");
+        let _ = writer.finish(b"").expect("it finishes");
+        let (payload, at_this_builds_level) = {
+            let whole = bytes_of(&fresh);
+            let psp = PspReader::open(&fresh).expect("it opens");
+            let at = psp.block_index()[0].block_offset as usize;
+            let block = whole[at..psp.footer().index_offset as usize].to_vec();
+            let payload = zstd::decode_all(&block[COMPRESSED_BLOCK_LENGTH_BYTES..])
+                .expect("the block inflates");
+            (payload, block)
+        };
+
+        let mut at_one =
+            BlockCompressor::with_level(a_header(1_000).manifest.look_back_window_log, 1)
+                .expect("a level zstd takes");
+        let at_one = at_one.compress(&payload).expect("it compresses").to_vec();
+        assert_ne!(
+            at_one, at_this_builds_level,
+            "the fixture must separate the levels, or it proves nothing"
+        );
+        assert_eq!(
+            appended, at_one,
+            "the appended block is compressed at the level the file records"
+        );
+    }
+
+    /// **A footer that puts the block index inside the header is refused, and the file is left
+    /// whole.**
+    ///
+    /// ⚠ **This is the G4 review's Blocker, and it is G3's one operation over.** `append`
+    /// truncates at `index_offset`, so this rule is all that stands between a footer of nonsense
+    /// and a psp reduced to a stump — and **the per-entry rule cannot carry it: on an empty index
+    /// there are no entries to check.** A footer saying the index is at byte 4 and holds nothing
+    /// passed `PspReader::open`, and `append` then cut a 3,742-byte psp down to 109 bytes and
+    /// returned `Ok`.
+    #[test]
+    fn a_footer_that_puts_the_block_index_inside_the_header_is_refused() {
+        use crate::psp::footer::Footer;
+
+        let (_dir, path) = a_finished_psp();
+        let whole = bytes_of(&path);
+        let mut crafted = whole[..whole.len() - FOOTER_BYTES].to_vec();
+        let footer = Footer {
+            index_offset: 4,
+            index_bytes: 0,
+            trailer_offset: 4,
+            trailer_bytes: (crafted.len() - 4) as u64,
+            n_blocks: 0,
+            index_checksum: crate::psp::checksum_index(&[]),
+        };
+        crafted.extend_from_slice(&crate::psp::encode_footer(&footer));
+        rewrite(&path, &crafted);
+
+        let refused = PspWriter::append(&path).expect_err("the index is inside the header");
+        match refused {
+            PspWriteError::Reopen {
+                source: crate::psp::PspReadError::Damaged { reason, .. },
+                ..
+            } => assert!(reason.contains("inside the"), "got {reason}"),
+            other => panic!("got {other}"),
+        }
+        assert_eq!(bytes_of(&path), crafted, "and every byte is still there");
+    }
+
+    /// **The seam is the last record in the file, not the last block's first.**
+    ///
+    /// ⚠ **The first version of the seam test could not tell those apart.** Both records it
+    /// offered preceded every record in the last block, so it separated *seeded* from *not
+    /// seeded* and nothing finer — and an implementation keeping the **first** record of the last
+    /// block passed all 381 tests. A record falling between the two is what closes it.
+    #[test]
+    fn a_record_inside_the_last_blocks_span_is_refused() {
+        let (_dir, path) = a_finished_psp();
+        let (first_of_last, last_of_last) = {
+            let mut psp = PspReader::open(&path).expect("it opens");
+            let n = psp.block_index().len();
+            let regions: Vec<_> = psp
+                .records_from_block(n - 1)
+                .expect("the walk starts")
+                .building_only_where(|_| false)
+                .map(|found| found.expect("a finished psp walks").head.region)
+                .collect();
+            (regions[0], *regions.last().expect("the block has records"))
+        };
+        assert!(
+            first_of_last.start < last_of_last.start,
+            "the fixture's last block must hold more than one position, or this proves nothing"
+        );
+
+        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
+        let refused = writer
+            .push(&a_record(
+                last_of_last.contig.0,
+                first_of_last.start.get() + 1,
+                1,
+            ))
+            .expect_err("that is behind the last record, though inside the last block");
+        assert!(
+            matches!(refused, PspWriteError::OutOfOrder { .. }),
+            "got {refused}"
+        );
+    }
+
+    /// **A psp that holds no records is appendable**, and the first appended record is checked
+    /// against nothing: `finish` writes such a file, `open` accepts it, and there is no block to
+    /// walk for a seam.
+    #[test]
+    fn a_psp_that_holds_no_records_is_appendable() {
+        let (_dir, path) = a_file();
+        let writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        let empty = writer.finish(b"no coverage").expect("it finishes");
+        assert_eq!(empty.blocks, 0, "the fixture must hold no blocks");
+
+        let mut writer = PspWriter::append(&path).expect("a psp with no blocks is appendable");
+        // The seam is nothing, so even the file's lowest coordinate is legal.
+        writer
+            .push(&a_record(0, 1, 1))
+            .expect("nothing precedes it");
+        let stats = writer.finish(b"one record now").expect("it finishes");
+        assert_eq!((stats.records, stats.blocks), (1, 1));
+
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        assert_eq!(psp.records().expect("the walk starts").count(), 1);
+        assert_eq!(psp.trailer().expect("it reads"), b"one record now");
+    }
+
+    /// **A recorded compression level this build cannot use is refused, not written at another
+    /// one** — and the refusal names the level the file records, not a substitute for it.
+    ///
+    /// ⚠ **It used to name a substitute.** Every level outside an `i32` became `i32::MAX` before
+    /// the check saw it, so a file recording −5,000,000,000 was refused for recording
+    /// 2,147,483,647 — a number that is not in the file. And nothing reached the path at all.
+    #[test]
+    fn an_append_is_refused_on_a_recorded_level_zstd_will_not_take() {
+        use crate::psp::header::ParameterValue;
+
+        for recorded in [99i64, -5_000_000_000, 5_000_000_000] {
+            let mut header = a_header(1_000);
+            header.writer.parameters.insert(
+                "zstd-compression-level".to_string(),
+                ParameterValue::Integer(recorded),
+            );
+            let refused = PspWriter::build_the_compressor_the_header_records(&header)
+                .expect_err("zstd does not take that level");
+            assert!(
+                matches!(
+                    refused,
+                    crate::psp::HeaderRefusal::Compressor(_)
+                        | crate::psp::HeaderRefusal::LevelPastAnyLevel { .. }
+                ),
+                "got {refused}"
+            );
+            // **The refusal names the level the file records**, not a substitute for it — which
+            // is the half that used to be wrong: every level outside an `i32` became `i32::MAX`
+            // before the range check saw it.
+            assert!(
+                refused.to_string().contains(&recorded.to_string()),
+                "the refusal must name the level the file records; got {refused}"
+            );
+        }
+    }
+
+    /// **The sentence a refused append prints sends an operator to the header, not the
+    /// manifest.**
+    ///
+    /// The two things built before a byte is written come from different halves of the header:
+    /// the block cut rule from the manifest, and the compression level from the writer's own
+    /// recorded parameters. One sentence covers both, so it names the header — the G4 review
+    /// found it naming the manifest for a failure that is not in one, which sends whoever reads
+    /// it to the wrong section of a file they are already unsure about.
+    ///
+    /// **The error is constructed rather than provoked, and that is a limit worth stating.** The
+    /// only way to a wrongly-typed level in a real file is editing the header's bytes, and no
+    /// length-preserving edit of `zstd-compression-level = 3` is valid TOML — while re-encoding
+    /// the header moves every offset in the file after it, which is refused first and for
+    /// another reason. What this pins is the sentence; that `append` raises this variant with
+    /// this cause is held by
+    /// [`an_append_is_refused_on_a_manifest_this_writer_cannot_honour`] and by
+    /// [`a_level_recorded_in_a_shape_this_writer_cannot_read_is_refused`].
+    #[test]
+    fn a_header_this_writer_cannot_honour_is_reported_against_the_header() {
+        let refused = PspWriteError::UnsupportedHeader {
+            path: PathBuf::from("/somewhere/sample.ngpsp"),
+            source: crate::psp::HeaderRefusal::UnreadableLevel {
+                recorded: "String(\"1\")".to_string(),
+            },
+        };
+        let sentence = refused.to_string();
+        assert!(
+            sentence.contains("header"),
+            "the refusal has to name the part of the file to look at; got {sentence}"
+        );
+        assert!(
+            !sentence.contains("manifest"),
+            "a compression level is not in the manifest, and this sentence covers both halves; \
+             got {sentence}"
+        );
+        assert!(
+            sentence.contains("/somewhere/sample.ngpsp"),
+            "and the file, because a cohort raises these from thousands of writers at once; got \
+             {sentence}"
+        );
+
+        // The cause underneath is what says *which* setting, and it is a separate sentence so
+        // the two do not print the same words twice.
+        let cause = std::error::Error::source(&refused).expect("the refusal carries its cause");
+        assert!(
+            cause.to_string().contains("compression level"),
+            "got {cause}"
+        );
+    }
+
+    /// **A level recorded in a shape this writer cannot read is refused, not ignored.**
+    ///
+    /// A setting recorded and then silently replaced is what §2.4 argues is worse than one not
+    /// recorded — and *absent* is the one case that legitimately falls back, because it is what a
+    /// file written before the parameter existed looks like.
+    #[test]
+    fn a_level_recorded_in_a_shape_this_writer_cannot_read_is_refused() {
+        use crate::psp::header::ParameterValue;
+
+        for shape in [
+            ParameterValue::String("1".to_string()),
+            ParameterValue::Float(1.0),
+            ParameterValue::Boolean(true),
+        ] {
+            let mut header = a_header(1_000);
+            header
+                .writer
+                .parameters
+                .insert("zstd-compression-level".to_string(), shape.clone());
+            let refused = PspWriter::build_the_compressor_the_header_records(&header)
+                .expect_err("a level recorded and unreadable is not a level to guess at");
+            assert!(
+                matches!(refused, crate::psp::HeaderRefusal::UnreadableLevel { .. }),
+                "for {shape:?}, got {refused}"
+            );
+        }
+
+        // And absent is the compatibility case, which still falls back.
+        let mut header = a_header(1_000);
+        header.writer.parameters.remove("zstd-compression-level");
+        PspWriter::build_the_compressor_the_header_records(&header)
+            .expect("a file that records none");
+    }
+
+    /// **The seam is found from the last block alone.** `records_from_block` walks to the end of
+    /// the file, so starting anywhere earlier gives the same answer at the cost of every block
+    /// before it — a change nothing else would notice.
+    #[test]
+    fn the_seam_is_found_by_reading_only_the_last_block() {
+        let (_dir, path) = a_finished_psp();
+        let mut psp = PspReader::open(&path).expect("it opens");
+        let blocks = psp.block_index().len();
+        let seen = psp
+            .records_from_block(blocks - 1)
+            .expect("the walk starts")
+            .building_only_where(|_| false)
+            .count();
+        assert_eq!(seen, 5, "the last block's records, not the file's");
+        assert!(
+            seen < 40,
+            "or the walk is reading blocks the seam does not need"
+        );
+    }
+
+    /// **An append stopped part way leaves a file no reader accepts**, at every stopping point
+    /// from the truncation onwards — the shape `replace_trailer` was given at G3, on the more
+    /// destructive of the two operations.
+    #[test]
+    fn an_append_stopped_part_way_leaves_a_file_no_reader_accepts() {
+        let (_dir, path) = a_finished_psp();
+        let blocks_end = footer_of(&bytes_of(&path)).index_offset as usize;
+        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
+        for step in 0..6u64 {
+            writer
+                .push(&a_record(1, 60_000 + step * 100, 1))
+                .expect("in order");
+        }
+        let _ = writer.finish(b"whole").expect("it finishes");
+        let whole = bytes_of(&path);
+
+        for stopped_at in blocks_end..whole.len() {
+            rewrite(&path, &whole[..stopped_at]);
+            assert!(
+                PspReader::open(&path).is_err(),
+                "a file stopped at byte {stopped_at} of {} opened",
+                whole.len()
+            );
+        }
+        rewrite(&path, &whole);
+        assert!(PspReader::open(&path).is_ok(), "and the complete one opens");
+    }
+
+    /// **A second append inherits the first's index, not the original's** — and the file grows a
+    /// block a time, which §6's trade-off note is about.
+    #[test]
+    fn a_second_append_inherits_the_first_ones_index() {
+        let (_dir, path) = a_finished_psp();
+        for round in 0..2u64 {
+            let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
+            writer
+                .push(&a_record(1, 60_000 + round * 1_000, 1))
+                .expect("in order");
+            let stats = writer.finish(b"round").expect("it finishes");
+            assert_eq!(stats.records, 1, "what this writer wrote");
+            assert_eq!(stats.blocks, 9 + round, "and every block in the file");
+        }
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        assert_eq!(psp.records().expect("the walk starts").count(), 42);
+    }
+
+    /// **A psp whose last block cannot inflate is not extended**, and the file is left whole.
+    ///
+    /// This is the one check `append` makes that `open` does not: the seam walk reads the last
+    /// block, so a damaged one is met before a byte is truncated. §2.1's "every check `open`
+    /// makes comes free" is therefore only half of it.
+    #[test]
+    fn a_psp_whose_last_block_cannot_inflate_is_not_extended() {
+        let (_dir, path) = a_finished_psp();
+        let blocks = {
+            let psp = PspReader::open(&path).expect("it opens");
+            psp.block_index().len()
+        };
+        wreck_the_block(&path, blocks - 1);
+        let wrecked = bytes_of(&path);
+
+        let refused = PspWriter::append(&path).expect_err("the last block does not inflate");
+        assert!(
+            matches!(refused, PspWriteError::Reopen { .. }),
+            "got {refused}"
+        );
+        assert_eq!(
+            bytes_of(&path),
+            wrecked,
+            "and the file is exactly as it was"
+        );
+    }
+
+    /// **A record appended into the grid cell the old last block covered opens a second block
+    /// for that cell**, rather than reopening the first — which is legal, and is one of the two
+    /// ways two blocks come to share a first position (`index.rs`).
+    ///
+    /// ⚠ **`continuing_after`'s doc claims both halves and nothing asserted either.** It is the
+    /// shape G1's Blocker was about, so it is worth pinning from the writer's side too.
+    #[test]
+    fn a_record_appended_into_the_old_last_cell_opens_a_second_block_for_it() {
+        let (_dir, path) = a_finished_psp();
+        let (blocks_before, last_entry) = {
+            let psp = PspReader::open(&path).expect("it opens");
+            (
+                psp.block_index().len(),
+                *psp.block_index().last().expect("blocks"),
+            )
+        };
+        // The fixture's grid is 1 kb and its last block starts at 3,001; 3,500 is the same cell.
+        let same_cell = last_entry.first_position.position.get() + 499;
+        assert_eq!(
+            same_cell / 1_000,
+            last_entry.first_position.position.get() / 1_000
+        );
+
+        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
+        writer
+            .push(&a_record(last_entry.first_position.contig.0, same_cell, 1))
+            .expect("past the seam");
+        let _ = writer.finish(b"").expect("it finishes");
+
+        let psp = PspReader::open(&path).expect("a finished psp opens");
+        assert_eq!(
+            psp.block_index().len(),
+            blocks_before + 1,
+            "the appended record opened a block of its own"
+        );
+        assert_eq!(
+            psp.block_index()
+                .last()
+                .expect("blocks")
+                .first_position
+                .position
+                .get(),
+            same_cell
+        );
+    }
 }

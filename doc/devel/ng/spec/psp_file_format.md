@@ -456,7 +456,7 @@ previous record — a format nothing has implemented, so there is nothing to mea
 *can* be measured is narrower: the same bodies with and without the head's own bytes. Re-taken
 2026-09-04, compressed bytes a record, on two production psps rebuilt with the current `pileup`
 (**tomato SRR7279481**, 7,687,686 records at **10.25 reads a position**, and **HG002 chr21**,
-56,627 records at **280.32**; `examples/ng_psp_head_encoding.rs`):
+56,627 records at **280.32**; `examples/ng_psp_head_encoding.rs`, deleted at promotion step C14 because it read production psps):
 
 | what the file carries | tomato, 10.25 reads a position | HG002 chr21, 280.32 |
 |---|---:|---:|

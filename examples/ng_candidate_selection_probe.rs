@@ -26,7 +26,7 @@
 //!
 //! **The bar is the merge's own keep rule, one level down.** The merge asks each sample whether
 //! its *non-reference reads* reach `max(floor, ceil(share × its compared reads))` and builds the
-//! locus if any one does (`MinAltReads`, `ng::run::cohort_merge`). Selection asks the identical
+//! locus if any one does (`MinAltReads`, `run::cohort_merge`). Selection asks the identical
 //! question of each *alternative allele* separately: an alternative survives if some single
 //! sample lent it that many reads. Nothing new is introduced — the floor and the share are the
 //! merge's, so a sweep here and a sweep there move the same two knobs.
@@ -79,38 +79,39 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use pop_var_caller::ng::alignment::emission::PerQualityEmission;
-use pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner;
-use pop_var_caller::ng::calling::allele_candidates::generic::select_generic;
-use pop_var_caller::ng::calling::allele_candidates::ssr::{SsrSelectionConfig, select_ssr};
-use pop_var_caller::ng::calling::allele_candidates::{
+use pop_var_caller::alignment::emission::PerQualityEmission;
+use pop_var_caller::alignment::ssr_unit_robust::SsrUnitRobustAligner;
+use pop_var_caller::calling::allele_candidates::generic::select_generic;
+use pop_var_caller::calling::allele_candidates::ssr::{SsrSelectionConfig, select_ssr};
+use pop_var_caller::calling::allele_candidates::{
     CandidateSelectionConfig, DEFAULT_MAX_CANDIDATE_ALLELES, LocusSelection, MaxCandidateAlleles,
     SelectionScratch, SelectionVerdict,
 };
-use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
-use pop_var_caller::ng::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
-use pop_var_caller::ng::locus_generation::{
+use pop_var_caller::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
+use pop_var_caller::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
+use pop_var_caller::locus_generation::{
     GeneratorSet, GeneratorSlot, SampleLocusObservations, SampleLocusObservationsIterator,
     UnhandledReason,
 };
-use pop_var_caller::ng::locus_generation::{LocusGenerator, LocusKind};
-use pop_var_caller::ng::read::ReadFilterConfig;
-use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
-use pop_var_caller::ng::ref_seq::WindowedRefSeq;
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::locus_generation::{LocusGenerator, LocusKind};
+use pop_var_caller::read::ReadFilterConfig;
+use pop_var_caller::read::input::SampleReads;
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::read::left_align::LeftAlignPreparer;
+use pop_var_caller::ref_seq::WindowedRefSeq;
+use pop_var_caller::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::{RegionKind, TypedRegion, TypedRegionConfig};
-use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
-use pop_var_caller::ng::run::cohort_merge::build::CohortObservation;
-use pop_var_caller::ng::run::cohort_merge::close::{LocusCloser, Verdict};
-use pop_var_caller::ng::run::cohort_merge::{
+use pop_var_caller::region_typing::{RegionKind, TypedRegion, TypedRegionConfig};
+use pop_var_caller::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::run::cohort_merge::build::CohortObservation;
+use pop_var_caller::run::cohort_merge::close::{LocusCloser, Verdict};
+use pop_var_caller::run::cohort_merge::observation_cache::WindowedCohort;
+use pop_var_caller::run::cohort_merge::{
     MaxCohortLocusSpan, MinAltObs, MinAltReadShare, MinAltReads,
 };
-use pop_var_caller::ng::types::{Bp, Ploidy};
-use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
+use pop_var_caller::types::{Bp, Ploidy};
+use pop_var_caller::types::{ContigId, GenomeRegion, Position};
 
 #[path = "shared/reference_check.rs"]
 mod reference_check_knob;
@@ -242,20 +243,40 @@ fn table_reads_of(observation: &CohortObservation) -> u64 {
         .sum()
 }
 
+/// The cohort as the assembler wants it: records in hand, no summaries and no windows.
+///
+/// **A run over stored files has the other shape** — summaries without the records, and each
+/// sample's finalised coverage windows beside them — which is why [`CohortObservation::over`]
+/// takes a [`WindowedCohort`] rather than the slices. This probe walks alignment files, so it
+/// has the records and nothing else, and every locus it assembles gets an absent window.
+fn records_only<'a>(all: &'a [&'a [SampleLocusObservations]]) -> WindowedCohort<'a> {
+    WindowedCohort {
+        observations: Some(all),
+        summaries: None,
+        finalised_windows: None,
+    }
+}
+
 /// **The same locus with only the first `samples` samples of the run covering it**, its
 /// allele table untouched — how the bar's answer moves as a cohort grows, with the table
 /// held fixed so that nothing but the number of samples asked can move it.
 fn restrict_to_first_samples(observation: &CohortObservation, samples: usize) -> CohortObservation {
+    // **`window_coverage` is parallel to `per_sample`, entry for entry**, so the two are
+    // filtered together and not one after the other: dropping a sample from one list and not
+    // from the other would hand every surviving sample its neighbour's read depth.
+    let (per_sample, window_coverage) = observation
+        .per_sample
+        .iter()
+        .zip(&observation.window_coverage)
+        .filter(|(sample, _)| sample.sample < samples)
+        .map(|(sample, window)| (sample.clone(), *window))
+        .unzip();
     CohortObservation {
         region: observation.region,
         alleles: observation.alleles.clone(),
-        per_sample: observation
-            .per_sample
-            .iter()
-            .filter(|sample| sample.sample < samples)
-            .cloned()
-            .collect(),
+        per_sample,
         kind: observation.kind.clone(),
+        window_coverage,
     }
 }
 
@@ -459,7 +480,7 @@ struct TractTally {
 impl TractTally {
     fn push(
         &mut self,
-        narrowed: &pop_var_caller::ng::calling::allele_candidates::ssr::SsrLocusSelection,
+        narrowed: &pop_var_caller::calling::allele_candidates::ssr::SsrLocusSelection,
     ) {
         let selection = &narrowed.selection;
         self.loci += 1;
@@ -642,7 +663,7 @@ fn walk_one_sample(
         GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
     );
 
-    let regions: Vec<Result<TypedRegion, pop_var_caller::ng::repeat_catalog::RepeatCatalogError>> =
+    let regions: Vec<Result<TypedRegion, pop_var_caller::repeat_catalog::RepeatCatalogError>> =
         analysed
             .iter()
             .map(|region| {
@@ -754,7 +775,11 @@ fn run_tracts(
         Err(_) => None,
     };
     for locus in LocusCloser::over(&all, MaxCohortLocusSpan::DEFAULT, MinAltReads::DEFAULT) {
-        let motif = match &locus.kind {
+        // **A closed locus holds index ranges now, and its kind comes off a member's record**,
+        // so it is resolved against the cohort before either can be read. Resolved once here
+        // and reused below, rather than twice.
+        let resolved = locus.resolved_against(&all);
+        let motif = match &resolved.kind {
             LocusKind::Ssr(detail) => Some(detail.motif),
             _ => None,
         };
@@ -775,7 +800,7 @@ fn run_tracts(
             }
             continue;
         }
-        let observation = CohortObservation::over(&locus);
+        let observation = CohortObservation::over(&resolved, &records_only(&all));
         // A bundle is a repeat cluster with no clean flanks and nothing builds one today, but the
         // kind exists and `select_ssr` refuses it by design — so it is counted here rather than
         // handed over. `Generic` cannot appear: every region this arm walks came from the
@@ -953,7 +978,9 @@ fn run(
     let built: Vec<CohortObservation> =
         LocusCloser::over(&all, MaxCohortLocusSpan::DEFAULT, keep_rule)
             .filter(|locus| locus.verdict == Verdict::Build)
-            .map(|locus| CohortObservation::over(&locus))
+            .map(|locus| {
+                CohortObservation::over(&locus.resolved_against(&all), &records_only(&all))
+            })
             .collect();
     println!("# loci the merge built: {}", built.len());
 

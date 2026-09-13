@@ -2,7 +2,7 @@
 //!
 //! **The store had no benchmark at all before this file.** `benches/psp_reader_perf.rs` and
 //! `benches/psp_writer_perf.rs` measure *production's* `src/psp/`, from the May 2026 review; ng's
-//! `src/ng/psp/` had only milestone harnesses under `examples/`, which measure ratios (the head
+//! `src/psp/` had only milestone harnesses under `examples/`, which measure ratios (the head
 //! skip, H5) and resident memory (H4) rather than throughput. A profile needs something
 //! reproducible under it, and this is it.
 //!
@@ -42,7 +42,8 @@
 //! at 83 % of identifiers on the human sample and 91 % on tomato, and which is the case the
 //! reader's live-set merge cannot take its cheap path on. What they do **not** reproduce is a real
 //! sample's variety of witnesses, read groups and locus kinds; for record-for-record fidelity
-//! against a real corpus, see `examples/ng_psp_parity.rs`.
+//! against a real corpus, `examples/ng_psp_parity.rs` was the harness until promotion step C14 deleted
+//! it with production; its result is in `doc/devel/reports/implementations/ng_psp_h1_2026-08-28.md`.
 //!
 //! # Two things these numbers are not
 //!
@@ -84,17 +85,15 @@ use std::time::Duration;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
-use pop_var_caller::ng::locus_generation::{
+use pop_var_caller::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
 };
-use pop_var_caller::ng::psp::{
+use pop_var_caller::psp::{
     ContigIdentity, FORMAT_VERSION, Header, Manifest, PspReader, PspWriter, ReferenceIdentity,
     WriterProvenance,
 };
-use pop_var_caller::ng::types::{
-    Bp, ContigId, GenomeRegion, Position, ReadGroupId, SummedLogError,
-};
-use pop_var_caller::pileup_record::ChainId;
+use pop_var_caller::types::ChainId;
+use pop_var_caller::types::{Bp, ContigId, GenomeRegion, Position, ReadGroupId, SummedLogError};
 
 /// How many reference positions one mate covers. **150, the Illumina read this project's corpora
 /// are.**
@@ -344,22 +343,20 @@ fn a_header(shape: &CorpusShape, records: u64) -> Header {
             length: contig_length,
             md5: None,
         }],
-        read_groups: vec![pop_var_caller::ng::psp::ReadGroupIdentity {
+        read_groups: vec![pop_var_caller::psp::ReadGroupIdentity {
             id: "bench".to_string(),
             library: "bench".to_string(),
-            walk_local_id: pop_var_caller::ng::types::ReadGroupId(0),
+            walk_local_id: pop_var_caller::types::ReadGroupId(0),
         }],
         // The widest span the generator *accepts* (its ceiling, not its default cap) — a
         // true bound on this corpus, and a bound is all the field promises.
         observation_reach_ceiling_bp: Bp(u64::from(
-            pop_var_caller::ng::locus_generation::pileup::MAX_RECORD_SPAN_CEILING,
+            pop_var_caller::locus_generation::pileup::MAX_RECORD_SPAN_CEILING,
         )),
-        segmentation_inputs: pop_var_caller::ng::run::SegmentationInputs {
-            catalog: pop_var_caller::ng::repeat_catalog::RepeatCatalogHeader::no_catalog(
-                "ng_psp_perf",
-            ),
-            repeat_tract_criteria: pop_var_caller::ng::repeat_catalog::StrRepeatCriteria::default(),
-            analysed_regions: pop_var_caller::ng::region_typing::GenomeRegions::whole_contigs(&[
+        segmentation_inputs: pop_var_caller::run::SegmentationInputs {
+            catalog: pop_var_caller::repeat_catalog::RepeatCatalogHeader::no_catalog("ng_psp_perf"),
+            repeat_tract_criteria: pop_var_caller::repeat_catalog::StrRepeatCriteria::default(),
+            analysed_regions: pop_var_caller::region_typing::GenomeRegions::whole_contigs(&[
                 pop_var_caller::regions::ContigBounds {
                     name: "chr1",
                     length: contig_length as u32,

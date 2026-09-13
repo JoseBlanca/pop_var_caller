@@ -1,283 +1,291 @@
-//! The hidden-paralog filter's consumer statistics.
+//! **The hidden-duplication filter's statistics, copied from production into ng.**
 //!
-//! This module holds the *pure* statistics that decide, at each locus,
-//! which of two stories better explains all the samples' coverage and
-//! allele counts: **H1** a real single-copy variant, or **H2** a hidden
-//! (reference-collapsed) paralog. It consumes the per-sample summaries the
-//! Stage-1 pileup already stores in the `.psp`
-//! ([`crate::sample_summary`]) and depends on nothing in `var_calling`
-//! (architecture
-//! `doc/devel/architecture/hidden_paralog_locus_statistic.md`, Premise 0),
-//! so every function here is unit-testable and parity-checkable in
-//! isolation before the var-calling wiring depends inward on it.
+//! At each locus the filter asks which of two stories better explains what every sample
+//! showed: a real variant that some of them carry, or two gene copies the reference
+//! collapsed into one, piling their reads onto the same position. Four quantities answer
+//! that, and **all four have landed.** The per-sample coverage model says what read depth
+//! *one copy* would produce in a sample at a window of a given GC content, so that dividing
+//! an observed depth by it gives a copy number — one for a single copy, about two for a
+//! collapsed pair. The per-locus score then says how much better the collapsed-pair story
+//! fits every sample's copy numbers and allele counts than the real-variant story does. The
+//! prior says how common hidden duplications are in this run, estimated from the run's own
+//! scores rather than assumed. And the calibration turns each score into a probability and
+//! resolves the operator's target false-discovery rate to a cut.
 //!
-//! Build order (implementation plan
-//! `doc/devel/implementation_plans/paralog_filter_model.md`, Milestone Q):
+//! Nothing here reads a file, writes a record or knows what a VCF is; the run's wiring will
+//! live in `crate::run::paralog_filter` (plan step B1) and has not landed.
 //!
-//! - **Q1 (this file):** the fixed model constants/grids —
-//!   [`ParalogModelParams`].
-//! - Q2 `coverage_model` — fit the per-sample single-copy depth scale +
-//!   GC-bias curve → a window's `relative_copy_number`.
-//! - Q3 `locus_score` — the pure H1-vs-H2 marginal likelihood ratio.
-//! - Q4 the inbreeding scalar `F` from observed het + `Hexp`.
-//! - Q5 `prior` — the empirical-Bayes prior + FDR that turn the raw
-//!   likelihood ratio into a per-locus probability and a cut.
+//! **Copied, not re-derived.** The model is production's
+//! (`doc/devel/specs/hidden_paralog_filter.md`, reformulated for one sample by
+//! `doc/devel/architecture/hidden_paralog_single_sample_scoring.md`). Three of the five files
+//! beside this one are production's source, line for line and byte for byte: [`coverage_model`],
+//! 1,157 lines past its module header; [`locus_score`], 797; and [`model_params`], 236. Two files
+//! of ng's own asserted the copies: `copy_fidelity.rs` textually, until promotion step C3 deleted
+//! it, and `production_parity` numerically, which still does — it scores randomised loci and
+//! compares every number against production's answers, frozen at promotion step C4. What ng changes
+//! about the filter is where its numbers come from and when they are known, not what it computes:
+//! `doc/devel/ng/spec/hidden_paralog_filter.md`.
 //!
-//! The design intent lives in the spec
-//! `doc/devel/specs/hidden_paralog_filter.md` (§4–§7); the validated maths
-//! reference is the tomato2 prototype
-//! (`benchmarks/tomato2/src/build_paralog_lr.py`,
-//! `build_paralog_eb.py`, `build_gc_normalization.py`) — a *reference
-//! draft*, not a bit-exact oracle.
+//! **This file is ng's own**, and holds nothing but its declarations, its re-exports and
+//! the tests ng adds to production's. Production keeps the model's constants in its own
+//! `mod.rs`, whose declarations ng cannot share; ng puts them in [`model_params`] instead,
+//! precisely so that a file-level guard can reach them — and it does, comparing from the
+//! first item's `///` on each side rather than from the end of a shared module header.
+//!
+//! Landed so far (plan `doc/devel/ng/impl_plan/hidden_paralog_filter.md`, Milestone A):
+//!
+//! - **A1:** the constants and grids ([`ParalogModelParams`] in [`model_params`]), and
+//!   the per-sample fit of what one copy's depth looks like
+//!   ([`SingleCopyCoverageModel`] in [`coverage_model`]).
+//! - **A2:** the per-locus score ([`score_locus_for_paralogy`] in [`locus_score`]) and its
+//!   per-pass tables, with the differential against production's that is the port's real
+//!   proof.
+//! - **A3:** how common hidden duplications are in this run and where to cut them
+//!   ([`ParalogPrior`] and [`ParalogFdrCurve`] in [`prior`], [`calibration::ParalogCalibration`]).
 
+pub mod calibrate;
+pub mod calibration;
 pub mod coverage_model;
-pub mod inbreeding;
 pub mod locus_score;
+pub mod model_params;
 pub mod prior;
 
+/// **ng's, not a copy** — the differential that proves the copied scorer computes what
+/// production's did, against production's answers frozen in a fixture: the log-likelihoods
+/// within 1e-9 nats, everything else by bit pattern (spec §10).
+#[cfg(test)]
+mod production_parity;
+
+// Production's own surface (`src/paralog/mod.rs`), name for name, so that the call sites
+// arriving with the later steps resolve unchanged.
+pub use calibrate::calibrate_from_the_ratio_histogram;
+pub use calibration::{CalibrationConfig, DEFAULT_FALLBACK_PARALOG_PRIOR, ParalogCalibration};
 pub use coverage_model::{
     CoverageFitConfig, CoverageModelError, ModeMedianRatioBounds, SingleCopyCoverageModel,
 };
-pub use inbreeding::{inbreeding_coefficient, obs_het};
 pub use locus_score::{
     LocusObservations, ParalogScore, ParalogScorePrecompute, SampleObservation,
     score_locus_for_paralogy,
 };
-pub use prior::{EmConfig, ParalogFdrCurve, ParalogLrHistogram, ParalogPrior};
+pub use model_params::{
+    DEFAULT_ALLELE_FREQ_PRIOR_POINTS, DEFAULT_CARRIER_COPY_NUMBERS, DEFAULT_CARRIER_FREQ_HI,
+    DEFAULT_CARRIER_FREQ_LO, DEFAULT_CARRIER_FREQ_POINTS, DEFAULT_HOMALT_MIN_DEPTH,
+    DEFAULT_HOMALT_VAF_THRESHOLD, DEFAULT_MAX_RELATIVE_COPY_NUMBER, DEFAULT_PSEUDOCOUNT_VAF,
+    GridSpec, ParalogModelParams, SfsPriorSpec,
+};
+pub use prior::{
+    DEFAULT_LR_HISTOGRAM_BINS, DEFAULT_LR_HISTOGRAM_HI, DEFAULT_LR_HISTOGRAM_LO, EmConfig,
+    ParalogFdrCurve, ParalogLrHistogram, ParalogPrior,
+};
 
-/// A per-read allele error floor (`ε`): the VAF assigned to a genotype's
-/// "should be absent" allele (hom-ref / non-carrier), and, as `1 − ε`, the
-/// VAF of a "should be fully present" allele (hom-alt). It keeps the
-/// binomial allele factor away from the `ln 0` singularity. Prototype
-/// `EPS`.
-pub const DEFAULT_PSEUDOCOUNT_VAF: f64 = 0.01;
-
-/// Winsor cap on `relative_copy_number` for the Normal coverage tail: any
-/// window at or above this many copies reads as "looks like the top carrier
-/// configuration" (`T/2 = 4` for `T = 8`). Above it the model no longer
-/// distinguishes 4× from 8×+, which is fine for *detection* (all such
-/// windows are paralog-like). If the carrier set or cap is retuned, keep the
-/// cap above the top carrier mean + a few σ (arch Premise 2).
-pub const DEFAULT_MAX_RELATIVE_COPY_NUMBER: f64 = 4.0;
-
-/// Hidden-paralog total copy numbers `T` enumerated under H2 (coverage
-/// `1.5×, 2×, 3×, 4×`; `T ≤ 8` so the top mean equals the winsor cap).
-/// Prototype `T_CARRIER`.
-pub const DEFAULT_CARRIER_COPY_NUMBERS: &[u32] = &[3, 4, 6, 8];
-
-/// Grid resolution for marginalising the allele frequency `p` under the
-/// folded site-frequency-spectrum prior. Dense because the `1/(p(1−p))`
-/// prior concentrates weight at low `p`. Prototype `NGRID`.
-pub const DEFAULT_ALLELE_FREQ_PRIOR_POINTS: usize = 200;
-
-/// Lower endpoint of the default carrier-frequency `q` grid (rare).
-/// Prototype `QEXT` lower bound.
-pub const DEFAULT_CARRIER_FREQ_LO: f64 = 0.004;
-
-/// Upper endpoint of the default carrier-frequency `q` grid (common; cannot
-/// reach fixation — a fixed duplication is caught by absolute coverage, not
-/// this term). Prototype `QEXT` upper bound.
-pub const DEFAULT_CARRIER_FREQ_HI: f64 = 0.6;
-
-/// Number of points in the default carrier-frequency `q` grid. Prototype
-/// `QEXT` length.
-pub const DEFAULT_CARRIER_FREQ_POINTS: usize = 40;
-
-/// VAF threshold for a "confident hom-alt" sample in the hom-alt veto (a
-/// sample this saturated cannot be a `VAF = m/T < 1` paralog carrier).
-/// Prototype `af > 0.9`.
-pub const DEFAULT_HOMALT_VAF_THRESHOLD: f64 = 0.9;
-
-/// Total-read-depth threshold for the hom-alt veto — below it a high VAF is
-/// not "confident". Prototype `nn >= 5`.
-pub const DEFAULT_HOMALT_MIN_DEPTH: u32 = 5;
-
-/// The folded site-frequency-spectrum prior on the allele frequency `p`,
-/// under which H1 marginalises `p`. The shape is fixed — proportional to
-/// `1/(p(1−p))` over `p ∈ [1/2N, 1−1/2N]`, where `N` is the number of
-/// samples (real variants are mostly rare, and the `1/2N` floor — a
-/// singleton, the finest frequency the panel can resolve — replaces an
-/// arbitrary low-frequency cutoff; spec §5.2). The only free parameter is
-/// the grid resolution; the `N`-dependent bounds and weights are derived at
-/// scoring time.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SfsPriorSpec {
-    /// Number of `p` grid points on `[1/2N, 1−1/2N]` (uniform in `p`).
-    pub n_points: usize,
-}
-
-impl Default for SfsPriorSpec {
-    fn default() -> Self {
-        Self {
-            n_points: DEFAULT_ALLELE_FREQ_PRIOR_POINTS,
-        }
-    }
-}
-
-/// A uniform (flat) linear grid `[lo, hi]` with `n_points` samples,
-/// inclusive of both ends. Used for the carrier-frequency `q` under H2.
-///
-/// A well-formed grid has `lo < hi` and `n_points >= 2` (so it spans the
-/// interval rather than collapsing to a point / empty set); [`new`]
-/// enforces that at the construction boundary. The fields stay public
-/// because the scorer (Q3) reads `lo`/`hi`/`n_points` directly to lay out
-/// the linspace — but callers building a grid from untrusted input should
-/// go through [`new`] rather than a raw literal.
-///
-/// (Unlike [`SfsPriorSpec`], which has one canonical default and so gets a
-/// [`Default`] impl, `GridSpec` is a generic grid with no universal
-/// default; its one named default is [`GridSpec::DEFAULT_CARRIER_FREQ`], an
-/// associated `const` usable in `const` context.)
-///
-/// [`new`]: GridSpec::new
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GridSpec {
-    /// Lower endpoint (included).
-    pub lo: f64,
-    /// Upper endpoint (included).
-    pub hi: f64,
-    /// Number of grid points (`>= 2` to span the interval).
-    pub n_points: usize,
-}
-
-impl GridSpec {
-    /// The default carrier-frequency grid: 40 flat points on `[0.004, 0.6]`
-    /// (rare to common). The `0.6` ceiling cannot reach fixation, but a
-    /// fully-fixed duplication is caught by absolute coverage, not the
-    /// carrier-frequency term — raising it barely moves π (spec §7).
-    /// Prototype `QEXT = linspace(0.004, 0.6, 40)`.
-    pub const DEFAULT_CARRIER_FREQ: Self = Self {
-        lo: DEFAULT_CARRIER_FREQ_LO,
-        hi: DEFAULT_CARRIER_FREQ_HI,
-        n_points: DEFAULT_CARRIER_FREQ_POINTS,
-    };
-
-    /// Build a grid, returning `None` for a degenerate spec (`lo >= hi`, a
-    /// non-finite endpoint, or `n_points < 2`) that would give an empty or
-    /// point-collapsed integration. The trusted [`DEFAULT_CARRIER_FREQ`]
-    /// bypasses this (a compile-time literal); use `new` for anything
-    /// derived from input.
-    ///
-    /// [`DEFAULT_CARRIER_FREQ`]: GridSpec::DEFAULT_CARRIER_FREQ
-    pub fn new(lo: f64, hi: f64, n_points: usize) -> Option<Self> {
-        (lo.is_finite() && hi.is_finite() && lo < hi && n_points >= 2).then_some(Self {
-            lo,
-            hi,
-            n_points,
-        })
-    }
-}
-
-/// The fixed model constants and integration grids for the hidden-paralog
-/// likelihood ratio. Every field defaults to the value the validated
-/// tomato2 prototype used; [`ParalogModelParams::default`] reproduces that
-/// configuration. The scoring function (Q3) takes this by reference so it
-/// depends only on its arguments (arch Premise 2).
-#[derive(Debug, Clone, PartialEq)]
-pub struct ParalogModelParams {
-    /// VAF error floor `ε` for hom-ref / non-carrier alleles (and `1 − ε`
-    /// for hom-alt). See [`DEFAULT_PSEUDOCOUNT_VAF`].
-    pub pseudocount_vaf: f64,
-    /// Winsor cap on `relative_copy_number` for the Normal coverage tail.
-    /// See [`DEFAULT_MAX_RELATIVE_COPY_NUMBER`].
-    pub max_relative_copy_number: f64,
-    /// Hidden-paralog total copy numbers `T` enumerated under H2. See
-    /// [`DEFAULT_CARRIER_COPY_NUMBERS`].
-    pub carrier_copy_numbers: Vec<u32>,
-    /// The folded-SFS prior on the allele frequency `p` marginalised under
-    /// H1.
-    pub allele_freq_prior: SfsPriorSpec,
-    /// The flat carrier-frequency `q` grid marginalised under H2.
-    pub carrier_freq_grid: GridSpec,
-    /// VAF threshold for the hom-alt veto. See
-    /// [`DEFAULT_HOMALT_VAF_THRESHOLD`].
-    pub homalt_vaf_threshold: f64,
-    /// Depth threshold for the hom-alt veto. See
-    /// [`DEFAULT_HOMALT_MIN_DEPTH`].
-    pub homalt_min_depth: u32,
-}
-
-impl Default for ParalogModelParams {
-    fn default() -> Self {
-        Self {
-            pseudocount_vaf: DEFAULT_PSEUDOCOUNT_VAF,
-            max_relative_copy_number: DEFAULT_MAX_RELATIVE_COPY_NUMBER,
-            carrier_copy_numbers: DEFAULT_CARRIER_COPY_NUMBERS.to_vec(),
-            allele_freq_prior: SfsPriorSpec::default(),
-            carrier_freq_grid: GridSpec::DEFAULT_CARRIER_FREQ,
-            homalt_vaf_threshold: DEFAULT_HOMALT_VAF_THRESHOLD,
-            homalt_min_depth: DEFAULT_HOMALT_MIN_DEPTH,
-        }
-    }
-}
-
+/// **ng's own tests, beside production's transcribed ones** — the cases the copied suite
+/// does not reach. They live here rather than in [`model_params`] because that file is
+/// production's byte for byte and may not gain a line.
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Pin the default model configuration to the validated prototype
-    /// constants (`build_paralog_lr.py`): `EPS`, `T_CARRIER`, the `q` grid
-    /// `linspace(0.004, 0.6, 40)`, `NGRID = 200`, the `4×` cap, and the
-    /// hom-alt veto `(af > 0.9, depth >= 5)`. A drift in any of these
-    /// changes the score, so it is asserted rather than left implicit.
+    /// **A locus is flagged when its tail false-discovery rate is at or below the target,
+    /// and never on a ratio that is not a number.**
+    ///
+    /// ng's own, because production's tests for this type live in the same file as the
+    /// spill-streaming driver ng does not copy. The `NaN` half is spec §6 trap 4's input
+    /// side: a locus with no usable evidence never entered the histogram, so it contributed
+    /// to neither π nor the curve, and classifying on it here would judge it by a rule the
+    /// calibration never applied.
     #[test]
-    fn default_params_match_prototype_constants() {
-        let p = ParalogModelParams::default();
-        assert_eq!(p.pseudocount_vaf, 0.01);
-        assert_eq!(p.max_relative_copy_number, 4.0);
-        assert_eq!(p.carrier_copy_numbers, vec![3, 4, 6, 8]);
-        assert_eq!(p.allele_freq_prior.n_points, 200);
-        assert_eq!(
-            p.carrier_freq_grid,
-            GridSpec {
-                lo: 0.004,
-                hi: 0.6,
-                n_points: 40,
+    fn a_locus_is_flagged_only_when_its_q_value_meets_the_target() {
+        let mut histogram = ParalogLrHistogram::with_defaults();
+        for step in 0..2_000 {
+            // A tenth strongly positive, the rest well negative — a run with duplications
+            // in it, so the curve has somewhere to put a cut.
+            histogram.push(if step % 10 == 0 { 18.0 } else { -8.0 });
+        }
+        let prior = ParalogPrior::estimate(&histogram, &EmConfig::default());
+        let curve = ParalogFdrCurve::from_histogram(&histogram, &prior);
+        // **Sweep the operator's knob rather than fixing it.** With one target, an
+        // implementation that read a literal `0.01` in place of `self.target_fdr` — ignoring
+        // the knob entirely — answers every probe exactly as the real one does.
+        for target_fdr in [0.0, 0.001, 0.01, 0.5, 1.0] {
+            let calibration = calibration::ParalogCalibration {
+                prior,
+                curve: curve.clone(),
+                lr_threshold: curve.lr_threshold_for_fdr(target_fdr),
+                target_fdr,
+            };
+            for lr in [-30.0, -8.0, 0.0, 8.0, 18.0, 40.0] {
+                assert_eq!(
+                    calibration.flags(lr),
+                    curve.q_of_lr(lr) <= target_fdr,
+                    "at a target of {target_fdr}, a locus at a ratio of {lr} must be flagged \
+                     exactly when its tail FDR meets it"
+                );
             }
-        );
-        assert_eq!(p.homalt_vaf_threshold, 0.9);
-        assert_eq!(p.homalt_min_depth, 5);
-    }
+        }
 
-    /// The two grid specs default independently to their documented shapes.
-    #[test]
-    fn grid_specs_have_expected_defaults() {
-        assert_eq!(SfsPriorSpec::default().n_points, 200);
-        let q = GridSpec::DEFAULT_CARRIER_FREQ;
-        assert_eq!((q.lo, q.hi, q.n_points), (0.004, 0.6, 40));
-        assert!(q.lo < q.hi && q.n_points >= 2);
-    }
-
-    /// The carrier copy numbers and the winsor cap are not independent: the
-    /// top configuration's coverage mean `max(T)/2` must equal
-    /// `max_relative_copy_number`, or the top carrier is pinned at (or past)
-    /// the clip boundary (arch Premise 2). A retune that raised `T` without
-    /// the cap — or vice versa — would break the coverage model Q2/Q3 rely
-    /// on; this pins the relationship the per-value tests miss.
-    #[test]
-    fn default_carrier_copy_numbers_ascending_and_top_mean_equals_cap() {
-        let p = ParalogModelParams::default();
+        let target_fdr = 0.01;
+        let calibration = calibration::ParalogCalibration {
+            prior,
+            curve: curve.clone(),
+            lr_threshold: curve.lr_threshold_for_fdr(target_fdr),
+            target_fdr,
+        };
         assert!(
-            p.carrier_copy_numbers.windows(2).all(|w| w[0] < w[1]),
-            "carrier copy numbers must be strictly ascending"
+            calibration.flags(18.0),
+            "the duplicated end of this run must be flagged at all, or this test asserts \
+             nothing about the rule it is checking"
         );
-        let top_mean = f64::from(*p.carrier_copy_numbers.iter().max().unwrap()) / 2.0;
-        assert_eq!(
-            top_mean, p.max_relative_copy_number,
-            "top carrier mean (max T / 2) must equal the winsor cap"
+        assert!(!calibration.flags(-30.0), "the variant end must not be");
+
+        // **The boundary is `<=`, not `<`**, and a target set exactly to a q-value the curve
+        // produces is the only input that separates the two.
+        let exactly_a_q_value_the_curve_produces = curve.q_of_lr(-8.0);
+        let at_the_boundary = calibration::ParalogCalibration {
+            prior,
+            curve: curve.clone(),
+            lr_threshold: None,
+            target_fdr: exactly_a_q_value_the_curve_produces,
+        };
+        assert!(
+            at_the_boundary.flags(-8.0),
+            "a locus whose tail FDR is exactly the target is flagged: the rule is `<=`"
+        );
+
+        for unscorable in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                !calibration.flags(unscorable),
+                "a ratio that is not a number entered neither pi nor the curve, so it is \
+                 never flagged"
+            );
+            assert_eq!(
+                calibration.posterior(unscorable),
+                None,
+                "and it has no posterior either"
+            );
+        }
+    }
+
+    /// **The recorded cut and the flag agree to within one histogram bin, and no closer.**
+    ///
+    /// `calibration.rs` documents `flags` as *"equivalent to `lr >= lr_threshold` by the
+    /// curve's monotonicity"*. **That is true only up to the bin.** `lr_threshold_for_fdr`
+    /// returns the crossing bin's *centre* while `flags` decides on the bin, so every ratio
+    /// in the lower half of that bin is flagged while sitting below the recorded cut — a
+    /// window half a bin wide, `0.05` on the likelihood-ratio axis at the shipped resolution
+    /// of 2,000 bins over `[-100, 100]`.
+    ///
+    /// It matters because `lr_threshold` is what the run writes into the VCF header for
+    /// provenance (spec §3.3): an operator reading *"records at or above this ratio were
+    /// dropped"* is wrong for every record inside that half-bin. Nothing in ng read the field
+    /// at all before this test, and step C3 will wire it into the header.
+    #[test]
+    fn the_recorded_cut_and_the_flag_agree_to_within_one_bin() {
+        let mut histogram = ParalogLrHistogram::with_defaults();
+        for step in 0..2_000 {
+            histogram.push(if step % 10 == 0 { 18.0 } else { -8.0 });
+        }
+        let prior = ParalogPrior::estimate(&histogram, &EmConfig::default());
+        let curve = ParalogFdrCurve::from_histogram(&histogram, &prior);
+        let target_fdr = 0.01;
+        let calibration = calibration::ParalogCalibration {
+            prior,
+            curve: curve.clone(),
+            lr_threshold: curve.lr_threshold_for_fdr(target_fdr),
+            target_fdr,
+        };
+        let cut = calibration
+            .lr_threshold
+            .expect("this fixture's target is reachable, or the test asserts nothing");
+        let half_a_bin = 0.5 * (100.0 - -100.0) / 2_000.0;
+
+        let mut disagreements = 0usize;
+        for step in -20..=20 {
+            let lr = cut + 0.01 * f64::from(step);
+            if calibration.flags(lr) != (lr >= cut) {
+                disagreements += 1;
+                assert!(
+                    (lr - cut).abs() <= half_a_bin,
+                    "the flag and the recorded cut may disagree only inside the crossing \
+                     bin; at a ratio of {lr} they disagree {} away from a cut of {cut}",
+                    (lr - cut).abs(),
+                );
+            }
+        }
+        assert!(
+            disagreements > 0,
+            "they do disagree inside the bin — if this fixture stops showing it, the claim \
+             above is no longer being tested"
+        );
+        assert!(calibration.flags(cut), "the recorded cut is itself flagged");
+        assert!(
+            !calibration.flags(cut - 2.0 * half_a_bin - 1.0),
+            "a ratio a whole bin below the cut is not"
         );
     }
 
-    /// `GridSpec::new` accepts a well-formed grid and rejects every
-    /// degenerate spec (reversed / collapsed bounds, non-finite endpoint,
-    /// fewer than two points).
+    /// **The posterior is the prior's log-odds shifted by the likelihood ratio**, and is
+    /// withheld where that shift is undefined.
+    ///
+    /// `σ(LR + logit π)`. Asserted against the formula rather than against stored values, so
+    /// that it pins the relation and not one arithmetic path through it; and at a degenerate
+    /// π the field is omitted rather than emitted saturated at 0 or 1.
     #[test]
-    fn grid_spec_new_validates_bounds() {
-        assert!(GridSpec::new(0.004, 0.6, 40).is_some()); // well-formed
-        assert!(GridSpec::new(0.004, 0.6, 2).is_some()); // minimal valid
-        assert!(GridSpec::new(0.6, 0.004, 40).is_none()); // lo > hi
-        assert!(GridSpec::new(0.004, 0.004, 40).is_none()); // lo == hi
-        assert!(GridSpec::new(0.004, 0.6, 1).is_none()); // < 2 points
-        assert!(GridSpec::new(f64::NAN, 0.6, 40).is_none()); // non-finite
+    fn the_posterior_is_the_logistic_of_the_ratio_shifted_by_the_prior_odds() {
+        let mut histogram = ParalogLrHistogram::with_defaults();
+        for step in 0..1_000 {
+            histogram.push(if step % 8 == 0 { 12.0 } else { -6.0 });
+        }
+        let prior = ParalogPrior::estimate(&histogram, &EmConfig::default());
+        let pi = prior.prior_probability;
+        assert!(
+            pi > 0.0 && pi < 1.0,
+            "this fixture must fit a usable pi, or the comparison below is vacuous; got {pi}"
+        );
+        let calibration = calibration::ParalogCalibration {
+            prior,
+            curve: ParalogFdrCurve::from_histogram(
+                &histogram,
+                &ParalogPrior::estimate(&histogram, &EmConfig::default()),
+            ),
+            lr_threshold: None,
+            target_fdr: 0.01,
+        };
+
+        for lr in [-20.0, -1.0, 0.0, 1.0, 12.0, 35.0] {
+            let log_odds = lr + (pi / (1.0 - pi)).ln();
+            let expected = 1.0 / (1.0 + (-log_odds).exp());
+            assert_eq!(
+                calibration.posterior(lr).map(f64::to_bits),
+                Some(expected.to_bits()),
+                "at a ratio of {lr} the posterior must be the logistic of the ratio plus \
+                 the prior's log-odds"
+            );
+        }
+
+        for degenerate in [0.0, 1.0] {
+            let mut with_a_degenerate_prior = calibration.clone();
+            with_a_degenerate_prior.prior.prior_probability = degenerate;
+            assert_eq!(
+                with_a_degenerate_prior.posterior(3.0),
+                None,
+                "at a prior of {degenerate} the log-odds are undefined, so the field is \
+                 omitted rather than saturated"
+            );
+        }
+    }
+
+    /// **An infinite endpoint is the input that tests the finiteness guard; `NaN` is not.**
+    /// The transcribed `grid_spec_new_validates_bounds` asserts only
+    /// `GridSpec::new(f64::NAN, 0.6, 40)`, and `NAN < 0.6` is `false`, so that call is
+    /// refused by the `lo < hi` clause whether or not `is_finite` is there at all —
+    /// deleting both `is_finite` calls leaves the whole transcribed suite green. An
+    /// infinite `hi` is what separates them: it passes `lo < hi` and would otherwise build
+    /// a carrier-frequency grid with no finite upper end, so H2's marginalisation would
+    /// integrate over `[0.004, ∞)`.
+    #[test]
+    fn grid_spec_new_refuses_an_infinite_endpoint() {
+        assert!(GridSpec::new(0.004, f64::INFINITY, 40).is_none());
+        assert!(GridSpec::new(f64::NEG_INFINITY, 0.6, 40).is_none());
+        assert!(GridSpec::new(0.004, f64::NAN, 40).is_none());
     }
 }

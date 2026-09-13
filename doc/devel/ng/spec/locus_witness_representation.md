@@ -259,7 +259,8 @@ path" — the same oracle that caught the `PartialLeft`/`PartialRight` reshape a
 B. For the generic path, the anchor
 (`parity::ng_agrees_with_production_where_production_fabricated_nothing`) must stay green, and the
 divergence census must gain a class for "ng now emits an observation where it used to count the read out"
-rather than absorbing it into an existing one.
+rather than absorbing it into an existing one. *(Both were retired at promotion plan step C1, 2026-09-13, with
+production's walker; see `locus_generation_pileup.md` §3.)*
 
 ---
 

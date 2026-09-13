@@ -68,7 +68,7 @@ BENCHMARKS="$(cd "$ROOT/.." && pwd)"
 REPO="$SCRIPT_REPO"
 GIAB_ROOT="${GIAB_ROOT:-$BENCHMARKS/giab}"
 REFERENCE="$GIAB_ROOT/ref_genome_GRCh38/GCA_000001405.15_GRCh38_no_alt_plus_hs38d1_analysis_set.fna"
-NG_BIN="${NG_BIN:-$SCRIPT_REPO/target-container/release/pop_var_caller_exp}"
+NG_BIN="${NG_BIN:-$SCRIPT_REPO/target-container/release/pop_var_caller}"
 SCORER="$SCRIPT_REPO/benchmarks/lib/tract_qual_experiment.py"
 PYTHON=$(command -v python3 > /dev/null && echo python3 || echo "uv run --no-project python")
 

@@ -1,657 +1,469 @@
-//! [`CohortVcfWriter`] — the runtime that ties sink, header, and
-//! record-encoder together.
+//! **Writing the file** — the header, then records in genome order, to a file that appears
+//! whole or not at all.
 //!
-//! `new` opens `<output>.tmp`, builds the header, writes it, and
-//! parks the encoder; `write_record` encodes one `PosteriorRecord`
-//! into a noodles `RecordBuf` and feeds it to the underlying VCF
-//! writer; `finish` flushes the sink (including the bgzf EOF block
-//! for gzipped paths), `fsync`s the file and the parent directory,
-//! then atomic-renames into place.
+//! Two jobs, and they are separate on purpose. **Ordering** is a property of the record stream
+//! and is checked here, because a VCF whose records run backwards is not a VCF and no consumer
+//! would notice until it indexed one. **Durability** is a property of the file and is the
+//! sink's: bytes go to `<output>.tmp` and are renamed into place only once they are on disk, so
+//! a crash leaves no half-written VCF for anyone to mistake for a finished run.
 //!
-//! Forgetting `finish` leaves `<output>.tmp` on disk and no
-//! `<output>` — intended loud failure. The `#[must_use]` attribute
-//! on [`CohortVcfWriter`] gives the compiler a chance to catch the
-//! forgotten-finish case at the construction site.
+//! **What "checked here" means for a caller holding a line rather than a record.** The check
+//! reads a [`RecordPlace`], not the bytes, so it is only as good as the place it is handed:
+//! [`VcfWriter::write_line`] will write a backwards file if given ascending places for
+//! descending lines. Both ways of building a place — [`place_of`] from a record, and
+//! `From<&SpillEntry>` from a spill entry — derive it from the same thing the line came from,
+//! which is what keeps the two in step.
+//!
+//! Encoding, by contrast, happens in [`encode`](super::encode) and cannot fail — everything
+//! that could make a record unwritable was refused when the record was built. So this module is
+//! where the `Result`s live, and all of them are about the file rather than about the data.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::fs::{self, File};
+use std::io::{self, BufWriter, Write};
+use std::path::{Path, PathBuf};
 
-use noodles_vcf::Header as VcfHeader;
-use noodles_vcf::variant::io::Write as _;
-use noodles_vcf::variant::record_buf::samples::Keys;
+use thiserror::Error;
 
-use super::WriterConfig;
-use super::errors::VcfWriteError;
-use super::header::{CohortMetadata, build_vcf_header};
-use super::record_encode::{build_format_keys, encode};
-use super::sink::{SinkKind, tmp_path_for};
-use super::writable::VcfWritable;
-use crate::psp::header::ParsedChromosome;
-use crate::var_calling::per_group_merger::genotype_order;
+use super::VcfRecord;
+use super::encode::record_line;
+use super::header::{VcfHeaderMetadata, header_text};
+use crate::types::{GenomePosition, Ploidy, Position};
 
-/// Streams `PosteriorRecord` items to a VCF file.
+/// The 28-byte empty-block marker every well-formed bgzf file ends with.
 ///
-/// Construction opens `<output>.tmp`, builds the noodles header, and
-/// writes it immediately so a subsequent `write_record` does not pay
-/// header-build cost. Per-record encoding goes through
-/// [`super::record_encode::encode`]. The writer's
-/// non-decreasing-locus order check is the last line of defence
-/// against an upstream that surfaces records out of order.
+/// `noodles_bgzf`'s writer emits it on finish; the constant exists so a test can assert the
+/// bytes are there without reaching into the library, since it is what makes `tabix` and
+/// `bcftools` accept the file at all.
+#[cfg(test)]
+pub(crate) const BGZF_EOF: &[u8; 28] = &[
+    0x1f, 0x8b, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x06, 0x00, 0x42, 0x43, 0x02, 0x00,
+    0x1b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// Buffer size for the plain-text sink, so per-record writes coalesce before reaching the
+/// kernel. The bgzf sink does its own block-level buffering.
+const WRITE_BUFFER_BYTES: usize = 64 * 1024;
+
+/// Where one record sits in the file's order: the base it is *written* on, and whether it is a
+/// repeat tract.
 ///
-/// **The writer must be finalised with [`CohortVcfWriter::finish`].**
-/// Otherwise the output is left at `<output>.tmp` and no `<output>`
-/// is produced; the `#[must_use]` attribute warns at the construction
-/// site if the value is dropped without `finish`.
-#[must_use = "CohortVcfWriter must be finalised by calling `.finish()`; \
-              otherwise the output is left at `<output>.tmp` and no \
-              `<output>` is produced"]
-pub struct CohortVcfWriter {
-    /// noodles' line-oriented VCF writer wraps our sink directly. The
-    /// sink (plain or bgzf) is owned by the writer and recovered on
-    /// `finish`.
-    inner: noodles_vcf::io::Writer<SinkKind>,
-    /// Built once at construction; passed to noodles per record because
-    /// `write_variant_record` takes `&Header`.
-    header: VcfHeader,
-    /// Cohort metadata frozen at construction. Only the `contigs`
-    /// slice is read on the per-record path (to map `chrom_id` →
-    /// CHROM string); the sample-name vector is consumed by the
-    /// header build at construction and not re-read.
-    contigs: Vec<ParsedChromosome>,
-    /// Cohort size, re-checked against every record's `n_samples`.
-    expected_samples: usize,
-    /// Final path; tmp is `<final_path>.tmp`. Held until `finish`.
+/// **The written position, not the record's own span start.** A left-padded deletion is written
+/// one base before its span (spec §5), and it is the written position a consumer sorts on — so
+/// it is the one the order has to be checked against.
+///
+/// **Public because a line can be written without its record.** The hidden-duplication filter
+/// parks finished lines on a spill and writes them back a pass later, by which time the record
+/// they came from is gone; this is what the ordering check reads, and carrying it is what lets
+/// [`VcfWriter::write_line`] run the same check (`hidden_paralog_filter.md` §6 trap 6).
+///
+/// **Do not build one field by field beside a line it is meant to describe.** The check cannot
+/// tell a place that disagrees with its line from one that agrees, so the two must come from one
+/// source: `From<&SpillEntry>` for a spilled line, [`place_of`] for a record.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RecordPlace {
+    /// Which base the record is written on, after the padding rule has moved it.
+    pub at: GenomePosition,
+    /// Whether it is a repeat tract, which is what admits the one legal tie.
+    pub is_repeat_tract: bool,
+}
+
+/// **The file's writer: a header, then records in genome order.**
+///
+/// Records must arrive non-decreasing in (contig, written position). Two records may share a
+/// position, and exactly one shape of tie is legal — see [`Self::write_record`].
+pub struct VcfWriter {
+    sink: Sink,
     final_path: PathBuf,
-    /// FORMAT keys list — built once from `config.emit_gp` and reused
-    /// per record.
-    format_keys: Keys,
-    /// Whole-run config — held by value for the per-record encoder and
-    /// surfaced via [`CohortVcfWriter::config`] for runtime inspection.
-    config: WriterConfig,
-    /// Latches the most recent `(chrom_id, start)` so the next
-    /// record can be checked for non-decreasing order.
-    last_locus: Option<(u32, u32)>,
-    /// Mi17: cache of `genotype_order(ploidy, n_alleles)` tables keyed
-    /// by the pair. Per-record encoding looks up here instead of
-    /// rebuilding the table; in steady state (cohort with constant
-    /// ploidy and a small range of `n_alleles`) every record beyond
-    /// the first hits the cache.
-    genotype_tables: HashMap<(u8, usize), Vec<Vec<u8>>>,
+    ploidy: Ploidy,
+    metadata: VcfHeaderMetadata,
+    last: Option<RecordPlace>,
+    records_written: u64,
 }
 
-impl std::fmt::Debug for CohortVcfWriter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Exhaustive destructure: a new field on the struct fails to
-        // compile here so the omission from Debug output is explicit
-        // rather than silent.
-        let Self {
-            inner: _,
-            header: _,
-            contigs,
-            expected_samples,
-            final_path,
-            format_keys,
-            config,
-            last_locus,
-            genotype_tables,
-        } = self;
-        f.debug_struct("CohortVcfWriter")
-            .field("config", config)
-            .field("expected_samples", expected_samples)
-            .field("contigs_len", &contigs.len())
-            .field("format_keys", format_keys)
-            .field("final_path", final_path)
-            .field("last_locus", last_locus)
-            .field("cached_genotype_tables", &genotype_tables.len())
-            .finish_non_exhaustive()
-    }
-}
-
-impl CohortVcfWriter {
-    /// Open `<config.output>.tmp`, build the VCF header, and write
-    /// it. If the header write fails the tmp file is removed before
-    /// the error bubbles, so a constructor failure is not
-    /// indistinguishable from "user forgot to call finish".
+impl VcfWriter {
+    /// Open the output and write the header.
+    ///
+    /// The path's suffix chooses the encoding: `.vcf.gz` or `.vcf.bgz` (either case) is bgzf,
+    /// anything else is plain text. Bytes go to `<path>.tmp` until [`Self::finish`].
     ///
     /// # Errors
     ///
-    /// * [`VcfWriteError::InvalidMetadata`] — cohort metadata fails
-    ///   validation (empty sample names, duplicate sample/contig
-    ///   name).
-    /// * [`VcfWriteError::ContigLengthOverflow`] — a contig length
-    ///   exceeds `i32::MAX`.
-    /// * [`VcfWriteError::Encode`] — noodles refuses a header value
-    ///   (`##source` / `##commandline` parse or insert).
-    /// * [`VcfWriteError::CreateTmp`] — `File::create` on
-    ///   `<output>.tmp` failed.
-    /// * [`VcfWriteError::WriteHeader`] — writing the header bytes
-    ///   to the sink failed; the tmp file is removed on this path.
-    pub fn new(metadata: CohortMetadata, config: WriterConfig) -> Result<Self, VcfWriteError> {
-        let header = build_vcf_header(&metadata, &config)?;
-        let format_keys = build_format_keys(&config);
-        let expected_samples = metadata.sample_names.len();
-        // Mi9: move the field out of `metadata` instead of cloning.
-        let contigs = metadata.contigs;
-        let final_path = config.output.clone();
-
-        let sink = SinkKind::open_tmp(&final_path)?;
-        let mut inner = noodles_vcf::io::Writer::new(sink);
-        // M13: a header-write failure must remove the tmp file so a
-        // constructor crash is not confused with "user forgot to
-        // call finish".
-        if let Err(write_err) = inner.write_header(&header) {
-            let tmp = tmp_path_for(&final_path);
-            let _ = std::fs::remove_file(&tmp); // best-effort cleanup
-            return Err(VcfWriteError::WriteHeader {
-                tmp_path: tmp,
-                source: write_err,
-            });
-        }
+    /// If the temporary file cannot be created or the header cannot be written.
+    pub fn create(
+        final_path: &Path,
+        metadata: VcfHeaderMetadata,
+        ploidy: Ploidy,
+    ) -> Result<Self, VcfWriteError> {
+        let mut sink = Sink::open_tmp(final_path)?;
+        let header = header_text(&metadata);
+        sink.write_all(header.as_bytes())
+            .map_err(|source| VcfWriteError::Write {
+                tmp_path: tmp_path_for(final_path),
+                source,
+            })?;
         Ok(Self {
-            inner,
-            header,
-            contigs,
-            expected_samples,
-            final_path,
-            format_keys,
-            config,
-            last_locus: None,
-            genotype_tables: HashMap::new(),
+            sink,
+            final_path: final_path.to_path_buf(),
+            ploidy,
+            metadata,
+            last: None,
+            records_written: 0,
         })
     }
 
-    /// The config this writer was constructed with (frozen at `new`).
-    /// Useful for runtime inspection ("is GP enabled?", "what path?")
-    /// when the caller no longer holds the original `WriterConfig`.
-    #[must_use]
-    pub fn config(&self) -> &WriterConfig {
-        &self.config
-    }
-
-    /// Encode and write one record.
+    /// Write one record, checking it does not run backwards.
     ///
-    /// Latches the locus order; an upstream regression surfaces as
-    /// [`VcfWriteError::RecordOutOfOrder`] and the writer keeps
-    /// running (the next call gets a fresh order check against the
-    /// previous accepted record). `last_locus` is *not* updated on
-    /// any error path, so a rejected record does not corrupt the
-    /// order-check baseline.
+    /// **The order is non-decreasing, not strictly increasing, and the difference is exactly one
+    /// case.** Production's generic writer demands strictly increasing positions and can, because
+    /// it never shares a file with repeat-tract records. ng interleaves the two, and the padding
+    /// rule creates one legal collision: a tract whose record moved one base left can land on the
+    /// position of the generic locus that owns the anchor base. The two describe different
+    /// bases — the reference partition guarantees it — so both belong in the file.
+    ///
+    /// So a tie is admitted **once**, and only generic-then-tract: the generic record's span
+    /// genuinely starts there and the tract's starts one base later. A second record at the same
+    /// position, a tract followed by a generic one, or two tracts, are refused.
     ///
     /// # Errors
     ///
-    /// * [`VcfWriteError::RecordOutOfOrder`] — `record.locus` does
-    ///   not strictly exceed the previous accepted record's locus.
-    /// * [`VcfWriteError::SampleCountMismatch`] — `record.n_samples`
-    ///   differs from the cohort metadata's sample count.
-    /// * [`VcfWriteError::InconsistentRecord`] — a per-record
-    ///   vector length doesn't match the record's declared shape.
-    /// * [`VcfWriteError::UnknownChromId`] — `record.locus.chrom_id`
-    ///   is out of bounds for the contig table.
-    /// * [`VcfWriteError::GenotypeIndexOutOfBounds`] /
-    ///   [`VcfWriteError::AlleleIndexOutOfBounds`] — a decoded
-    ///   `best_genotype` cell references a non-existent slot.
-    /// * [`VcfWriteError::DepthOverflow`] — a depth (per-sample DP,
-    ///   per-allele AD, or cohort total) overflows `i32`.
-    /// * [`VcfWriteError::Encode`] — noodles refused a value
-    ///   (non-UTF-8 allele bytes, invalid `Position`, …).
-    /// * [`VcfWriteError::WriteRecord`] — the sink rejected the
-    ///   serialised bytes.
-    ///
-    /// The final (refined + clamped) QUAL this writer would emit for
-    /// `record`, computed via the same path as [`write_record`] and reusing
-    /// the cached genotype table. The filtering layer calls this so it gates
-    /// `--min-qual` on the exact value that lands in the QUAL column, rather
-    /// than the engine's pre-refinement baseline.
-    ///
-    /// [`write_record`]: Self::write_record
-    pub fn final_qual<R: VcfWritable>(&mut self, record: &R) -> f32 {
-        let table = self
-            .genotype_tables
-            .entry((record.ploidy(), record.n_alleles()))
-            .or_insert_with(|| genotype_order(record.ploidy(), record.n_alleles()));
-        super::record_encode::final_qual(record, table)
+    /// If the record runs backwards, if it forms a tie that is not the legal one, or if the
+    /// write fails.
+    pub fn write_record(&mut self, record: &VcfRecord) -> Result<(), VcfWriteError> {
+        let line = record_line(record, self.metadata.contigs(), self.ploidy);
+        self.write_line(place_of(record), line.as_bytes())
     }
 
-    pub fn write_record<R: VcfWritable>(&mut self, record: &R) -> Result<(), VcfWriteError> {
-        let locus = (record.chrom_id(), record.pos_1based());
-        if let Some(prev) = self.last_locus
-            && locus <= prev
-        {
-            return Err(VcfWriteError::RecordOutOfOrder {
-                chrom_id: locus.0,
-                pos: locus.1,
-                prev_chrom_id: prev.0,
-                prev_pos: prev.1,
-            });
+    /// **Write a line that has already been encoded**, saying where it sits.
+    ///
+    /// The ordering check is the same one [`Self::write_record`] runs — that method is this one
+    /// with the line built first — so a line written this way cannot slip past a check the
+    /// record would have met. That is the point: the hidden-duplication filter parks finished
+    /// lines on a spill and writes them back a pass later, and by then the record is gone
+    /// (`hidden_paralog_filter.md` §3.5, §6 trap 6).
+    ///
+    /// **The line is written as given, with a newline after it** — no encoding, no validation of
+    /// its columns. Whoever hands it over owns its shape; the writer owns the order and the
+    /// bytes' destination.
+    ///
+    /// **What the writer cannot check, and it is not only the columns.** The order is checked
+    /// against the `place`, never against the line: **a place that disagrees with its line writes
+    /// a VCF whose `POS` column runs backwards, and the check passes** — as does a place that
+    /// lies about tract-ness, which admits a tie this method exists to refuse. Build the place
+    /// from the same thing the line came from — `RecordPlace::from(&entry)` for a spill entry,
+    /// [`place_of`] for a record — rather than typing the fields at the call site. Separately, a
+    /// line holding a `\n` becomes two record lines in the file and counts as one.
+    ///
+    /// # Errors
+    ///
+    /// If the `place` runs backwards, if it forms a tie that is not the legal one, or if the
+    /// write fails. Note that these are properties of the `place`, not of the line's bytes.
+    pub fn write_line(&mut self, place: RecordPlace, line: &[u8]) -> Result<(), VcfWriteError> {
+        if let Some(last) = self.last {
+            self.check_order(last, place)?;
         }
 
-        let table = self
-            .genotype_tables
-            .entry((record.ploidy(), record.n_alleles()))
-            .or_insert_with(|| genotype_order(record.ploidy(), record.n_alleles()))
-            .clone();
-        let buf = encode(
-            record,
-            &self.contigs,
-            &self.config,
-            &self.format_keys,
-            self.expected_samples,
-            &table,
-        )?;
-        self.inner
-            .write_variant_record(&self.header, &buf)
-            .map_err(|source| VcfWriteError::WriteRecord {
-                chrom_id: locus.0,
-                pos: locus.1,
+        self.sink
+            .write_all(line)
+            .and_then(|()| self.sink.write_all(b"\n"))
+            .map_err(|source| VcfWriteError::Write {
+                tmp_path: tmp_path_for(&self.final_path),
                 source,
             })?;
-        self.last_locus = Some(locus);
+
+        self.last = Some(place);
+        self.records_written += 1;
         Ok(())
     }
 
-    /// A read-only, thread-shareable snapshot of the per-record encoding context
-    /// (header, contigs, config, FORMAT keys, cohort size). Hand a clone to each
-    /// parallel format worker — cloning shares the header/contigs via `Arc`, so it
-    /// is cheap. A worker formats a record to bytes with [`DetachedFormatter::format`]
-    /// (byte-identical to [`write_record`](Self::write_record) — same `encode`,
-    /// same header, same noodles serialisation) and the owning writer then commits
-    /// those bytes in genomic order via [`write_preformatted`](Self::write_preformatted).
-    pub fn detached_formatter(&self) -> DetachedFormatter {
-        DetachedFormatter {
-            header: Arc::new(self.header.clone()),
-            contigs: Arc::new(self.contigs.clone()),
-            config: self.config.clone(),
-            format_keys: self.format_keys.clone(),
-            expected_samples: self.expected_samples,
+    /// The ordering rule, in one place so the refusals cannot disagree with each other.
+    ///
+    /// **Both places are destructured exhaustively**, so a fourth component of the ordering key
+    /// cannot be added to [`RecordPlace`] without this function — the one whose correctness
+    /// depends on the whole field set — being made to think about it.
+    fn check_order(&self, last: RecordPlace, next: RecordPlace) -> Result<(), VcfWriteError> {
+        let RecordPlace {
+            at: last_at,
+            is_repeat_tract: last_is_tract,
+        } = last;
+        let RecordPlace {
+            at: next_at,
+            is_repeat_tract: next_is_tract,
+        } = next;
+
+        // `GenomePosition`'s derived `Ord` is genome order, so this is the whole backwards test.
+        if next_at < last_at {
+            return Err(VcfWriteError::OutOfOrder {
+                previous_contig: last_at.contig.0,
+                previous_position: last_at.position.get(),
+                contig: next_at.contig.0,
+                position: next_at.position.get(),
+            });
         }
+        let tied = next_at == last_at;
+        if tied && !(!last_is_tract && next_is_tract) {
+            return Err(VcfWriteError::IllegalTie {
+                contig: next_at.contig.0,
+                position: next_at.position.get(),
+                previous_was_repeat_tract: last_is_tract,
+                is_repeat_tract: next_is_tract,
+            });
+        }
+        Ok(())
     }
 
-    /// Commit one already-serialised record line (produced by
-    /// [`DetachedFormatter::format`]) to the sink, in genomic order. Enforces the
-    /// same non-decreasing-`(chrom_id, pos)` invariant as
-    /// [`write_record`](Self::write_record) and writes the pre-formatted bytes
-    /// straight to the underlying sink, so the emitted byte stream — and thus the
-    /// bgzf output — is identical to the serial path. `pos` is 1-based (as
-    /// `pos_1based`).
-    pub fn write_preformatted(
+    /// **Write a whole stream of records, in the order it yields them.**
+    ///
+    /// This is the shape the run is built around: variants come off the caller, pass through
+    /// filters and through the mappers that attach genotypes and annotations
+    /// ([`assemble_record`](super::assemble::assemble_record) being the last of them), and end
+    /// here. Ordering is still checked per record, so a filter or mapper that reorders the
+    /// stream is refused rather than silently written.
+    ///
+    /// **Takes the records by value and one at a time**, so the stream can be lazy: nothing
+    /// requires the whole cohort's records to exist at once, which is what keeps the writer off
+    /// the memory budget at three thousand samples.
+    ///
+    /// # Errors
+    ///
+    /// The first record that runs backwards, forms an illegal tie, or cannot be written stops
+    /// the stream and returns.
+    pub fn write_stream(
         &mut self,
-        bytes: &[u8],
-        chrom_id: u32,
-        pos: u32,
+        records: impl IntoIterator<Item = VcfRecord>,
     ) -> Result<(), VcfWriteError> {
-        use std::io::Write as _;
-        let locus = (chrom_id, pos);
-        if let Some(prev) = self.last_locus
-            && locus <= prev
-        {
-            return Err(VcfWriteError::RecordOutOfOrder {
-                chrom_id,
-                pos,
-                prev_chrom_id: prev.0,
-                prev_pos: prev.1,
-            });
+        for record in records {
+            self.write_record(&record)?;
         }
-        self.inner
-            .get_mut()
-            .write_all(bytes)
-            .map_err(|source| VcfWriteError::WriteRecord {
-                chrom_id,
-                pos,
-                source,
-            })?;
-        self.last_locus = Some(locus);
         Ok(())
     }
 
-    /// Flush, emit the bgzf EOF block when applicable, sync the file
-    /// and parent directory, then atomic-rename `<output>.tmp` →
-    /// `<output>`.
+    /// How many records have been written.
+    #[must_use]
+    pub fn records_written(&self) -> u64 {
+        self.records_written
+    }
+
+    /// Flush everything, make it durable, and move the finished file into place.
     ///
-    /// Consumes `self`, so a forgotten call leaves `<output>.tmp` on
-    /// disk and no `<output>` — see the type-level `#[must_use]`
-    /// note.
+    /// **Consumes the writer**, so a forgotten `finish` shows up as a missing output rather than
+    /// as a silently truncated file.
     ///
     /// # Errors
     ///
-    /// * [`VcfWriteError::FinishBgzf`] — the bgzf sink failed to
-    ///   emit its EOF block / flush its tail.
-    /// * [`VcfWriteError::WriteHeader`] — the `BufWriter` tail flush
-    ///   failed on the plain-text path (the operation is "writing
-    ///   the buffered tail").
-    /// * [`VcfWriteError::FsyncFile`] — `File::sync_all` on the tmp
-    ///   file failed.
-    /// * [`VcfWriteError::Rename`] — `fs::rename` from the tmp path
-    ///   to the final path failed.
-    /// * [`VcfWriteError::FsyncDir`] — opening or fsyncing the
-    ///   parent directory failed (without this fsync the rename is
-    ///   not durable across a crash).
+    /// If any of the flush, the bgzf terminator, the `fsync`s or the rename fails.
     pub fn finish(self) -> Result<(), VcfWriteError> {
-        let sink = self.inner.into_inner();
-        sink.finish(&self.final_path)?;
-        Ok(())
-    }
-
-    /// Abandon the in-progress run: drop the sink (which closes the
-    /// tmp file handle) and delete the tmp file at the exact path
-    /// this writer used (`tmp_path_for(&self.final_path)`).
-    ///
-    /// Pair with [`finish`](Self::finish): a driver that returns
-    /// early on error should call `abort()` instead of leaving the
-    /// `<output>.tmp` file behind. Both consume `self`, so the type
-    /// system forces a single terminal call.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err(io::Error)` if `std::fs::remove_file` failed
-    /// (typically `NotFound` if the tmp file was never created, or a
-    /// permission/IO failure). Callers should generally log and
-    /// continue — the original driver error is the operator-facing
-    /// one to surface.
-    pub fn abort(self) -> std::io::Result<()> {
-        let tmp = tmp_path_for(&self.final_path);
-        drop(self.inner); // close the file handle
-        std::fs::remove_file(tmp)
+        self.sink.finish(&self.final_path)
     }
 }
 
-/// Cache of `genotype_order(ploidy, n_alleles)` tables. One per format worker
-/// (never shared), so each thread memoises the small tables it needs without a
-/// lock — steady-state cohorts hit the cache after the first record.
-pub type GenotypeTableCache = HashMap<(u8, usize), Vec<Vec<u8>>>;
-
-/// A read-only, `Send + Sync`, cheaply-cloneable snapshot of the per-record VCF
-/// encoding context, detached from the owning [`CohortVcfWriter`] so parallel
-/// workers can format records into byte lines off the writer thread. Build one
-/// with [`CohortVcfWriter::detached_formatter`]; the owning writer commits the
-/// produced bytes in order via [`CohortVcfWriter::write_preformatted`].
+/// Where a record is written, after the padding rule has moved it.
 ///
-/// The produced bytes are **identical** to [`CohortVcfWriter::write_record`]:
-/// same [`encode`] over the same context, serialised through the same noodles
-/// header — so routing a record through a worker + `write_preformatted` yields
-/// the exact byte stream the serial writer would.
-#[derive(Clone)]
-pub struct DetachedFormatter {
-    header: Arc<VcfHeader>,
-    contigs: Arc<Vec<ParsedChromosome>>,
-    config: WriterConfig,
-    format_keys: Keys,
-    expected_samples: usize,
+/// **The position comes from the function that writes the `POS` column**
+/// ([`written_position`](super::encode::written_position)) rather than from a second copy of the
+/// padding rule. The two used to be spelled separately, so a record's ordering key and its own
+/// `POS` could drift apart under an edit to either.
+fn place_of(record: &VcfRecord) -> RecordPlace {
+    RecordPlace {
+        at: GenomePosition {
+            contig: record.region().contig,
+            position: Position(super::encode::written_position(record)),
+        },
+        is_repeat_tract: record.is_repeat_tract(),
+    }
 }
 
-impl DetachedFormatter {
-    /// The genotype-order table for `(ploidy, n_alleles)`, memoised in `cache`.
-    fn table(cache: &mut GenotypeTableCache, ploidy: u8, n_alleles: usize) -> &[Vec<u8>] {
-        cache
-            .entry((ploidy, n_alleles))
-            .or_insert_with(|| genotype_order(ploidy, n_alleles))
+/// Where the in-flight bytes live before the file is finished.
+fn tmp_path_for(final_path: &Path) -> PathBuf {
+    let mut name = final_path.as_os_str().to_os_string();
+    name.push(".tmp");
+    PathBuf::from(name)
+}
+
+/// Whether the path names a bgzf-compressed VCF, matched case-insensitively.
+fn path_is_bgzf(path: &Path) -> bool {
+    let name = path.to_string_lossy().to_lowercase();
+    name.ends_with(".vcf.gz") || name.ends_with(".vcf.bgz")
+}
+
+/// The bytes' destination: plain text or bgzf, fixed at creation by the path's suffix.
+enum Sink {
+    Plain(BufWriter<File>),
+    Bgzf(Box<noodles_bgzf::io::Writer<File>>),
+}
+
+impl Sink {
+    fn open_tmp(final_path: &Path) -> Result<Self, VcfWriteError> {
+        let tmp_path = tmp_path_for(final_path);
+        let file = File::create(&tmp_path).map_err(|source| VcfWriteError::CreateTmp {
+            tmp_path: tmp_path.clone(),
+            source,
+        })?;
+        Ok(if path_is_bgzf(final_path) {
+            Self::Bgzf(Box::new(noodles_bgzf::io::Writer::new(file)))
+        } else {
+            Self::Plain(BufWriter::with_capacity(WRITE_BUFFER_BYTES, file))
+        })
     }
 
-    /// The final (artifact-refined, clamped) QUAL the record would carry —
-    /// identical to [`CohortVcfWriter::final_qual`], for the min-QUAL gate the
-    /// worker applies before formatting.
-    pub fn final_qual<R: VcfWritable>(&self, record: &R, cache: &mut GenotypeTableCache) -> f32 {
-        let table = Self::table(cache, record.ploidy(), record.n_alleles());
-        super::record_encode::final_qual(record, table)
-    }
+    /// Flush, terminate, `fsync`, rename, then `fsync` the parent directory.
+    ///
+    /// **The parent-directory sync is the part that is easy to leave out and hard to notice
+    /// missing.** Without it a crash between the rename returning and the directory's journal
+    /// reaching disk leaves the file's contents durable and the name pointing at nothing.
+    fn finish(self, final_path: &Path) -> Result<(), VcfWriteError> {
+        let tmp_path = tmp_path_for(final_path);
 
-    /// Serialise one record to its VCF text line (bytes), byte-identical to what
-    /// [`CohortVcfWriter::write_record`] would emit for it. `cache` is the
-    /// worker's own genotype-table memo.
-    pub fn format<R: VcfWritable>(
-        &self,
-        record: &R,
-        cache: &mut GenotypeTableCache,
-    ) -> Result<Vec<u8>, VcfWriteError> {
-        let table = Self::table(cache, record.ploidy(), record.n_alleles());
-        let buf = encode(
-            record,
-            &self.contigs,
-            &self.config,
-            &self.format_keys,
-            self.expected_samples,
-            table,
-        )?;
-        // A throwaway noodles writer over a `Vec` gives exactly the bytes the
-        // shared writer would write for this record (same header, same buf).
-        let mut w = noodles_vcf::io::Writer::new(Vec::new());
-        w.write_variant_record(&self.header, &buf)
-            .map_err(|source| VcfWriteError::WriteRecord {
-                chrom_id: record.chrom_id(),
-                pos: record.pos_1based(),
+        let file = match self {
+            Self::Plain(buffered) => {
+                buffered
+                    .into_inner()
+                    .map_err(|error| VcfWriteError::Write {
+                        tmp_path: tmp_path.clone(),
+                        source: error.into_error(),
+                    })?
+            }
+            Self::Bgzf(bgzf) => bgzf.finish().map_err(|source| VcfWriteError::FinishBgzf {
+                tmp_path: tmp_path.clone(),
                 source,
-            })?;
-        Ok(w.into_inner())
+            })?,
+        };
+
+        file.sync_all().map_err(|source| VcfWriteError::Fsync {
+            path: tmp_path.clone(),
+            source,
+        })?;
+        drop(file);
+
+        fs::rename(&tmp_path, final_path).map_err(|source| VcfWriteError::Rename {
+            tmp_path: tmp_path.clone(),
+            final_path: final_path.to_path_buf(),
+            source,
+        })?;
+
+        sync_parent_directory(final_path)
     }
+}
+
+impl Write for Sink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(sink) => sink.write(buf),
+            Self::Bgzf(sink) => sink.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(sink) => sink.flush(),
+            Self::Bgzf(sink) => sink.flush(),
+        }
+    }
+}
+
+/// `fsync` the directory the output now lives in, so the rename survives a crash.
+fn sync_parent_directory(final_path: &Path) -> Result<(), VcfWriteError> {
+    let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
+    let directory = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    File::open(directory)
+        .and_then(|handle| handle.sync_all())
+        .map_err(|source| VcfWriteError::Fsync {
+            path: directory.to_path_buf(),
+            source,
+        })
+}
+
+/// What can go wrong writing the file. **All of it is about the file**, not about the records:
+/// a record that could not be written was refused when it was built.
+#[derive(Debug, Error)]
+pub enum VcfWriteError {
+    /// The temporary file could not be created.
+    #[error("could not create the in-flight output `{tmp_path}`")]
+    CreateTmp {
+        /// The path that could not be created.
+        tmp_path: PathBuf,
+        /// What the filesystem said.
+        source: io::Error,
+    },
+
+    /// A write to the temporary file failed.
+    #[error("could not write to the in-flight output `{tmp_path}`")]
+    Write {
+        /// The path being written.
+        tmp_path: PathBuf,
+        /// What the filesystem said.
+        source: io::Error,
+    },
+
+    /// The bgzf terminator could not be written.
+    #[error("could not finish the bgzf stream in `{tmp_path}`")]
+    FinishBgzf {
+        /// The path being finished.
+        tmp_path: PathBuf,
+        /// What the filesystem said.
+        source: io::Error,
+    },
+
+    /// A file or directory could not be made durable.
+    #[error("could not flush `{path}` to disk")]
+    Fsync {
+        /// What was being synced.
+        path: PathBuf,
+        /// What the filesystem said.
+        source: io::Error,
+    },
+
+    /// The finished file could not be moved into place.
+    #[error("could not move `{tmp_path}` into place as `{final_path}`")]
+    Rename {
+        /// The in-flight path.
+        tmp_path: PathBuf,
+        /// The intended output path.
+        final_path: PathBuf,
+        /// What the filesystem said.
+        source: io::Error,
+    },
+
+    /// **A record ran backwards.** A VCF's records are in genome order, and a consumer that
+    /// indexes one would find the index disagreeing with the file rather than fail here.
+    #[error(
+        "records run in genome order and this one goes backwards: contig {contig} position \
+         {position} after contig {previous_contig} position {previous_position}"
+    )]
+    OutOfOrder {
+        /// The previous record's contig.
+        previous_contig: u32,
+        /// The previous record's written position.
+        previous_position: u64,
+        /// This record's contig.
+        contig: u32,
+        /// This record's written position.
+        position: u64,
+    },
+
+    /// **Two records shared a position in a way the format does not allow.** The one legal tie
+    /// is a generic locus followed by a repeat tract whose padding moved it onto that position.
+    #[error(
+        "two records share contig {contig} position {position}, and the only tie the format \
+         allows is a SNP or indel followed by a repeat tract padded onto it — this is a {} \
+         after a {}",
+        if *is_repeat_tract { "repeat tract" } else { "SNP or indel" },
+        if *previous_was_repeat_tract { "repeat tract" } else { "SNP or indel" }
+    )]
+    IllegalTie {
+        /// The shared contig.
+        contig: u32,
+        /// The shared written position.
+        position: u64,
+        /// Whether the record already at this position was a repeat tract.
+        previous_was_repeat_tract: bool,
+        /// Whether the arriving record is a repeat tract.
+        is_repeat_tract: bool,
+    },
 }
 
 #[cfg(test)]
-mod tests {
-    use tempfile::tempdir;
-
-    use super::*;
-    use crate::pileup_record::AlleleSupportStats;
-    use crate::var_calling::per_group_merger::MergedAllele;
-    use crate::var_calling::posterior_engine::{EmDiagnostics, PosteriorRecord, RecordLocus};
-
-    fn ref_allele(seq: &[u8]) -> MergedAllele {
-        MergedAllele {
-            seq: seq.to_vec(),
-            is_compound: false,
-            constituents: Vec::new(),
-        }
-    }
-    fn alt_allele(seq: &[u8]) -> MergedAllele {
-        ref_allele(seq)
-    }
-    fn support(num_obs: u32) -> AlleleSupportStats {
-        AlleleSupportStats {
-            num_obs,
-            q_sum: 0.0,
-            fwd: 0,
-            placed_left: 0,
-            placed_start: 0,
-
-            mapq_sum: 0,
-            mapq_sum_sq: 0,
-        }
-    }
-    fn fixture_metadata() -> CohortMetadata {
-        CohortMetadata {
-            sample_names: vec!["S0".into(), "S1".into()],
-            contigs: vec![ParsedChromosome {
-                name: "chr1".into(),
-                length: 1_000_000,
-                md5: "00000000000000000000000000000001".into(),
-            }],
-            tool_string: "pop_var_caller test".into(),
-            command_line: String::new(),
-            paralog_provenance: String::new(),
-        }
-    }
-    fn mk_record(start: u32) -> PosteriorRecord {
-        PosteriorRecord {
-            locus: RecordLocus {
-                chrom_id: 0,
-                start,
-                end: start,
-            },
-            alleles: vec![ref_allele(b"A"), alt_allele(b"T")],
-            ploidy: 2,
-            n_samples: 2,
-            n_genotypes: 3,
-            allele_frequencies: vec![0.75, 0.25],
-            compound_frequencies: vec![None, None],
-            posteriors: vec![0.98, 0.01, 0.01, 0.05, 0.90, 0.05],
-            best_genotype: vec![0, 1],
-            gq_phred: vec![60.0, 40.0],
-            qual_phred: 100.0,
-            scalars: vec![support(20), support(0), support(10), support(10)],
-            other_scalars: vec![],
-            chain_anchor_flags: vec![false; 4],
-            diagnostics: EmDiagnostics {
-                iterations: 5,
-                final_max_delta_p: 1e-6,
-                converged: true,
-            },
-            paralog_posterior: None,
-        }
-    }
-
-    fn cfg_for(out: PathBuf) -> WriterConfig {
-        WriterConfig::new(out)
-    }
-
-    #[test]
-    fn full_round_trip_plain_text() {
-        let dir = tempdir().unwrap();
-        let out = dir.path().join("out.vcf");
-        let metadata = fixture_metadata();
-
-        let mut writer = CohortVcfWriter::new(metadata, cfg_for(out.clone())).unwrap();
-        writer.write_record(&mk_record(100)).unwrap();
-        writer.write_record(&mk_record(200)).unwrap();
-        writer.finish().unwrap();
-
-        let text = std::fs::read_to_string(&out).unwrap();
-        assert!(text.contains("##fileformat=VCFv4.4"));
-        let data_lines: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
-        assert_eq!(data_lines.len(), 2);
-        assert!(data_lines[0].starts_with("chr1\t100\t"));
-        assert!(data_lines[1].starts_with("chr1\t200\t"));
-        assert!(!out.with_extension("vcf.tmp").exists());
-    }
-
-    /// B1: `abort()` removes the writer's tmp file (the exact path it
-    /// used, derived from `tmp_path_for(&final_path)`) and leaves no
-    /// final output behind. Compare against `finish()`'s success-path
-    /// guarantee (the previous test asserts the tmp does not exist
-    /// after `finish` because the rename consumed it).
-    #[test]
-    fn abort_removes_tmp_file_and_leaves_no_final_output() {
-        let dir = tempdir().unwrap();
-        let out = dir.path().join("out.vcf");
-        let tmp = tmp_path_for(&out);
-        let metadata = fixture_metadata();
-
-        let writer = CohortVcfWriter::new(metadata, cfg_for(out.clone())).unwrap();
-        // Constructor wrote the header into `tmp` already.
-        assert!(tmp.exists(), "tmp file present after constructor");
-
-        writer.abort().expect("abort succeeded");
-        assert!(!tmp.exists(), "abort removed the tmp file");
-        assert!(!out.exists(), "abort did not rename to final path");
-    }
-
-    /// B1: a second `abort()` call (or, equivalently, calling `abort`
-    /// after the tmp file was already removed elsewhere) surfaces the
-    /// underlying `io::Error` so the driver can log it rather than
-    /// silently swallow it.
-    #[test]
-    fn abort_surfaces_remove_file_error_when_tmp_already_gone() {
-        let dir = tempdir().unwrap();
-        let out = dir.path().join("out.vcf");
-        let tmp = tmp_path_for(&out);
-        let metadata = fixture_metadata();
-
-        let writer = CohortVcfWriter::new(metadata, cfg_for(out)).unwrap();
-        std::fs::remove_file(&tmp).expect("manual remove succeeded");
-        let err = writer.abort().unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
-    }
-
-    #[test]
-    fn out_of_order_record_errors() {
-        let dir = tempdir().unwrap();
-        let out = dir.path().join("out.vcf");
-        let metadata = fixture_metadata();
-        let mut writer = CohortVcfWriter::new(metadata, cfg_for(out)).unwrap();
-        writer.write_record(&mk_record(200)).unwrap();
-        let err = writer.write_record(&mk_record(100)).unwrap_err();
-        assert!(matches!(
-            err,
-            VcfWriteError::RecordOutOfOrder {
-                chrom_id: 0,
-                pos: 100,
-                prev_chrom_id: 0,
-                prev_pos: 200,
-            }
-        ));
-    }
-
-    #[test]
-    fn equal_locus_records_also_error() {
-        let dir = tempdir().unwrap();
-        let out = dir.path().join("out.vcf");
-        let metadata = fixture_metadata();
-        let mut writer = CohortVcfWriter::new(metadata, cfg_for(out)).unwrap();
-        writer.write_record(&mk_record(200)).unwrap();
-        let err = writer.write_record(&mk_record(200)).unwrap_err();
-        assert!(matches!(err, VcfWriteError::RecordOutOfOrder { .. }));
-    }
-
-    /// Mi1: an `RecordOutOfOrder` error does not advance
-    /// `last_locus`. A subsequent record at a position past the
-    /// *previous accepted* locus must still error against that
-    /// locus, not the rejected one.
-    #[test]
-    fn out_of_order_does_not_advance_last_locus() {
-        let dir = tempdir().unwrap();
-        let out = dir.path().join("out.vcf");
-        let metadata = fixture_metadata();
-        let mut writer = CohortVcfWriter::new(metadata, cfg_for(out)).unwrap();
-        writer.write_record(&mk_record(200)).unwrap();
-        let _ = writer.write_record(&mk_record(100)).unwrap_err();
-        // Subsequent record at 150 should still error against last
-        // accepted (200), not against the rejected 100.
-        let err = writer.write_record(&mk_record(150)).unwrap_err();
-        assert!(matches!(
-            err,
-            VcfWriteError::RecordOutOfOrder {
-                prev_pos: 200,
-                pos: 150,
-                ..
-            }
-        ));
-        // And a record at 201 should succeed.
-        writer.write_record(&mk_record(201)).unwrap();
-        writer.finish().unwrap();
-    }
-
-    /// M12: `config()` accessor returns the frozen config; useful for
-    /// runtime inspection without having to keep the original
-    /// `WriterConfig` around.
-    #[test]
-    fn config_accessor_exposes_frozen_settings() {
-        let dir = tempdir().unwrap();
-        let out = dir.path().join("out.vcf");
-        let metadata = fixture_metadata();
-        let writer = CohortVcfWriter::new(metadata, cfg_for(out.clone())).unwrap();
-        let cfg = writer.config();
-        assert_eq!(cfg.output, out);
-        assert!(!cfg.emit_gp);
-        writer.finish().unwrap();
-    }
-
-    /// Mi17: the second record at the same `(ploidy, n_alleles)` is
-    /// served from the cache. Asserted indirectly by observing that
-    /// the cache grows from 0 → 1 across the first record and then
-    /// stays at 1 across the second (same shape).
-    #[test]
-    fn genotype_table_cache_is_keyed_by_ploidy_and_n_alleles() {
-        let dir = tempdir().unwrap();
-        let out = dir.path().join("out.vcf");
-        let metadata = fixture_metadata();
-        let mut writer = CohortVcfWriter::new(metadata, cfg_for(out)).unwrap();
-        assert_eq!(writer.genotype_tables.len(), 0);
-        writer.write_record(&mk_record(100)).unwrap();
-        assert_eq!(writer.genotype_tables.len(), 1, "biallelic table cached");
-        writer.write_record(&mk_record(200)).unwrap();
-        assert_eq!(
-            writer.genotype_tables.len(),
-            1,
-            "second biallelic record reuses cache"
-        );
-        writer.finish().unwrap();
-    }
-}
+mod tests;

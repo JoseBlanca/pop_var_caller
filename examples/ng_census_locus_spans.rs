@@ -5,7 +5,7 @@
 //! ([`cohort_merge.md`](../doc/devel/ng/spec/cohort_merge.md) §3.2). A census works the other way
 //! round — its sites are single reference positions chosen before a read is seen — so a record
 //! wider than one base is taken apart by
-//! [`CensusWriter::add_generic`](../src/ng/parameter_estimation/joint/census.rs), which records
+//! [`CensusWriter::add_generic`](../src/parameter_estimation/joint/census.rs), which records
 //! that record's depth at every position it covers and its **alleles at none of them**, because
 //! the observations describe the whole span and not any one base of it.
 //!
@@ -25,19 +25,17 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use pop_var_caller::ng::parameter_estimation::joint::loci::UnambiguousRuns;
-use pop_var_caller::ng::psp::PspReader;
-use pop_var_caller::ng::reference_info::{
-    ReferenceCheck, read_reference_observing_or_creating_fai,
-};
-use pop_var_caller::ng::region_typing::DEFAULT_MAX_STR_LEN;
-use pop_var_caller::ng::region_typing::segment_criteria::{
+use pop_var_caller::cli::run_ground::{self, GroundRequest, RepeatRouting};
+use pop_var_caller::parameter_estimation::joint::loci::UnambiguousRuns;
+use pop_var_caller::psp::PspReader;
+use pop_var_caller::reference_info::{ReferenceCheck, read_reference_observing_or_creating_fai};
+use pop_var_caller::region_typing::DEFAULT_MAX_STR_LEN;
+use pop_var_caller::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
-use pop_var_caller::ng::repeat_catalog::RepeatCatalog;
-use pop_var_caller::ng::run::{CensusPlan, CensusSelection};
-use pop_var_caller::ng::types::{GenomePosition, GenomeRegion};
-use pop_var_caller::pop_var_caller_exp::run_ground::{self, GroundRequest, RepeatRouting};
+use pop_var_caller::repeat_catalog::RepeatCatalog;
+use pop_var_caller::run::{CensusPlan, CensusSelection};
+use pop_var_caller::types::{GenomePosition, GenomeRegion};
 
 fn main() -> ExitCode {
     let mut positional: Vec<String> = Vec::new();
@@ -193,7 +191,8 @@ fn run(
         "so of every kept position the census sees carrying non-reference evidence, \
          {} of {} have that evidence dropped",
         kept_under_a_wide_record_with_a_disagreeing_read,
-        kept_under_one_base_with_a_disagreeing_read + kept_under_a_wide_record_with_a_disagreeing_read,
+        kept_under_one_base_with_a_disagreeing_read
+            + kept_under_a_wide_record_with_a_disagreeing_read,
     );
     Ok(())
 }

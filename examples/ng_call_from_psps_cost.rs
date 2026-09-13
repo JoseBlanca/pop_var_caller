@@ -58,29 +58,25 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
-use pop_var_caller::ng::calling::allele_candidates::CandidateSelectionConfig;
-use pop_var_caller::ng::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
-use pop_var_caller::ng::calling::inference::CallingLoopConfig;
-use pop_var_caller::ng::calling::inference::summarise_condition::SummariseConditionLoop;
-use pop_var_caller::ng::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
-use pop_var_caller::ng::calling::parameters_file::DeclaredInbreeding;
-use pop_var_caller::ng::calling::run_parameters::RunParameters;
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::calling::allele_candidates::CandidateSelectionConfig;
+use pop_var_caller::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
+use pop_var_caller::calling::inference::CallingLoopConfig;
+use pop_var_caller::calling::inference::summarise_condition::SummariseConditionLoop;
+use pop_var_caller::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
+use pop_var_caller::calling::parameters_file::DeclaredInbreeding;
+use pop_var_caller::calling::run_parameters::RunParameters;
+use pop_var_caller::cli::run_ground::{self, GroundRequest, RepeatRouting};
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::DEFAULT_MAX_STR_LEN;
-use pop_var_caller::ng::region_typing::segment_criteria::{
+use pop_var_caller::region_typing::DEFAULT_MAX_STR_LEN;
+use pop_var_caller::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
-use pop_var_caller::ng::run::cohort_merge::timing;
-use pop_var_caller::ng::run::{
-    MergeParameters, OpenPspCohort, PspVariantCaller, StoredCohortInputs,
-};
-use pop_var_caller::ng::types::Ploidy;
-use pop_var_caller::pop_var_caller_exp::run_ground::{
-    self, GroundRequest, RepeatRouting,
-};
+use pop_var_caller::run::cohort_merge::timing;
+use pop_var_caller::run::{MergeParameters, OpenPspCohort, PspVariantCaller, StoredCohortInputs};
+use pop_var_caller::types::Ploidy;
 
 /// How many psps a run takes when nothing says otherwise.
 ///

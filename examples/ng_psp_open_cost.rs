@@ -35,7 +35,7 @@
 
 use std::path::PathBuf;
 
-use pop_var_caller::ng::psp::{PspReader, RecordIter};
+use pop_var_caller::psp::{PspReader, RecordIter};
 
 /// How many records each reader is advanced by default.
 ///

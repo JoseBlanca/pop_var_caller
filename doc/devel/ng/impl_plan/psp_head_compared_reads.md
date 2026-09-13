@@ -43,7 +43,7 @@ checks, the fixtures, the owning documents — and the re-measurement of the hea
   [`decode_the_body_of`, `record.rs:1992-2002`](../../../../src/ng/psp/record.rs).
 - The byte-pinning fixture that must move deliberately:
   `the_fixture_encodes_to_these_exact_bytes` ([`record.rs:2282`](../../../../src/ng/psp/record.rs)).
-- The cost probes: [`examples/ng_psp_head_encoding.rs`](../../../../examples/ng_psp_head_encoding.rs)
+- The cost probes: `examples/ng_psp_head_encoding.rs` (deleted at promotion step C14)
   (head bytes, varint vs fixed, from a production `.psp`) and
   [`examples/ng_psp_skip_value.rs`](../../../../examples/ng_psp_skip_value.rs) (the skipping
   walk on a real `.ngpsp`).

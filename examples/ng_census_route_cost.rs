@@ -18,7 +18,7 @@
 //! file it came from. A census that *is* its psp's trailer has nothing left to pair wrongly with
 //! (`psp_census_pair.md` §3), so no shipped route writes one and this harness writes one on
 //! neither side. What separates the routes is therefore only what they cost. The module
-//! `ng::run::census_from_psp::the_two_producers_agree` holds them to that agreement on fixtures;
+//! `run::census_from_psp::the_two_producers_agree` holds them to that agreement on fixtures;
 //! this harness is where it is checked on real reads, which is why **both routes leave a
 //! `<sample>.census` file for the wrapping script to compare** even though neither writes such a
 //! file in a real run — `regenerate-census` puts its census in the psp's trailer too. On the
@@ -63,24 +63,22 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
-use pop_var_caller::ng::locus_generation::pileup::PileupGeneratorConfig;
-use pop_var_caller::ng::parameter_estimation::joint::census_file::write_census;
-use pop_var_caller::ng::parameter_estimation::joint::loci::UnambiguousRuns;
-use pop_var_caller::ng::psp::{ParameterValue, PspReader, WriterProvenance};
-use pop_var_caller::ng::read::ReadFilterConfig;
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::reference_info::{
-    ReferenceCheck, read_reference_observing_or_creating_fai,
-};
-use pop_var_caller::ng::region_typing::DEFAULT_MAX_STR_LEN;
-use pop_var_caller::ng::region_typing::segment_criteria::{
+use pop_var_caller::cli::run_ground::{self, GroundRequest, RepeatRouting};
+use pop_var_caller::locus_generation::pileup::PileupGeneratorConfig;
+use pop_var_caller::parameter_estimation::joint::census_file::write_census;
+use pop_var_caller::parameter_estimation::joint::loci::UnambiguousRuns;
+use pop_var_caller::psp::{ParameterValue, PspReader, WriterProvenance};
+use pop_var_caller::read::ReadFilterConfig;
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::reference_info::{ReferenceCheck, read_reference_observing_or_creating_fai};
+use pop_var_caller::region_typing::DEFAULT_MAX_STR_LEN;
+use pop_var_caller::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
-use pop_var_caller::ng::repeat_catalog::RepeatCatalog;
-use pop_var_caller::ng::run::{
+use pop_var_caller::repeat_catalog::RepeatCatalog;
+use pop_var_caller::run::{
     CensusPlan, CensusSelection, SampleObservationGatherer, SampleWalkInputs, census_from_psp,
 };
-use pop_var_caller::pop_var_caller_exp::run_ground::{self, GroundRequest, RepeatRouting};
 
 const SAMPLES_BY_DEFAULT: usize = 1;
 const REGIONS_BY_DEFAULT: usize = 2;

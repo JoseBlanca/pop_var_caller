@@ -25,13 +25,13 @@
 //! an indel of **a different base** (an interruption the arithmetic in-frame test mis-routes
 //! as stutter) — averaged together the two effects cancel (spec §4.2).
 
-use pop_var_caller::ng::alignment::ssr_best_path_flat_gap::{SsrFlatGapAligner, ViterbiScratch};
-use pop_var_caller::ng::alignment::ssr_best_path_unit_slip::{SsrUnitSlipAligner, UnitSlipScratch};
-use pop_var_caller::ng::alignment::{
+use pop_var_caller::alignment::ssr_best_path_flat_gap::{SsrFlatGapAligner, ViterbiScratch};
+use pop_var_caller::alignment::ssr_best_path_unit_slip::{SsrUnitSlipAligner, UnitSlipScratch};
+use pop_var_caller::alignment::{
     BestPathAligner, PerQualityEmission, ReadBases, RepeatContext, RepeatGeometry, RepeatSpan,
     StutterModel, StutterRates,
 };
-use pop_var_caller::ng::types::{Bp, Motif};
+use pop_var_caller::types::{Bp, Motif};
 
 /// Deterministic PRNG (SplitMix64) so the whole comparison is reproducible from its seed.
 struct Rng(u64);

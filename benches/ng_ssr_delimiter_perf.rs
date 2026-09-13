@@ -45,12 +45,12 @@ use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use pop_var_caller::ng::alignment::ssr_unit_robust::{SsrUnitRobustAligner, UnitRobustScratch};
-use pop_var_caller::ng::alignment::{
+use pop_var_caller::alignment::ssr_unit_robust::{SsrUnitRobustAligner, UnitRobustScratch};
+use pop_var_caller::alignment::{
     BestPathAligner, PerQualityEmission, ReadBases, RepeatContext, RepeatGeometry, RepeatSpan,
     StutterModel,
 };
-use pop_var_caller::ng::types::{Bp, Motif};
+use pop_var_caller::types::{Bp, Motif};
 
 /// The flank the generator fetches either side of the tract, per
 /// `SsrGeneratorConfig::default()` (= `DEFAULT_BUNDLE_THRESHOLD`). The DP's reference frame is

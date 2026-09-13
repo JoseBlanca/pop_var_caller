@@ -38,31 +38,16 @@ private_intra_doc_links = "allow"
 # sites. Re-enable when those modules get their own clippy pass.
 fallible_impl_from = "warn"
 fn_params_excessive_bools = "warn"
-# cohort_block review M4 (Wave 3): `ChunkDriverError` carries `PathBuf`
-# + operation-context fields + a nested `VcfWriteError` / `PspReadError`
-# per variant so the operator-facing message names *what* the driver
-# was doing when the error fired (review §M4). The result is an
-# `Err`-arm wider than clippy's default 128-byte threshold; the
-# alternative is wrapping every typed-error inner field in `Box<…>`,
-# which pays a heap allocation per error and breaks the `#[source]`
-# chain anyhow-style rendering. Allow this lint cohort-wide — the
-# cost lives only on error paths and the diagnostic value is the
-# whole point.
+# ng's error enums carry paths and operation context per variant so the
+# operator-facing message names *what* was being done when the error fired —
+# the parameters file's validation, the run's callers and the psp writer most
+# of all. The result is an `Err`-arm wider than clippy's default 128-byte
+# threshold: without this allow the lint fires 152 times (measured at
+# promotion step D6, after production's own error types — where the rule was
+# first adopted — were deleted). The alternative is a `Box<…>` around every
+# inner field, a heap allocation per error; the cost lives only on error paths
+# and the diagnostic value is the whole point.
 result_large_err = "allow"
-
-# Two lints 1.98's clippy added, both of which fire almost entirely inside the
-# frozen production caller (`src/var_calling/`, `src/vcf/`, `src/genetics.rs`),
-# which is not edited — see `src/ng/mod.rs`'s freeze paragraph. Nine of the
-# twelve `chunks_exact` sites are production's, and two of them sit under
-# comments explaining that the constant chunk size is what removes the bounds
-# check from the EM inner loop; rewriting those to `as_chunks` would be a
-# change to code whose whole value right now is that it does not change.
-#
-# `as_chunks::<N>()` is the better form and is stable from 1.98 — prefer it in
-# new ng code even though the lint no longer asks for it. Drop both `allow`s
-# when production is retired.
-chunks_exact_to_as_chunks = "allow"
-manual_slice_fill = "allow"
 
 [profile.release]
 lto = "fat"
@@ -75,7 +60,7 @@ inherits = "release"
 debug = true
 
 # **The test suite is a numerical workload, and unoptimised it costs fifteen
-# minutes.** `ng::parameter_estimation::joint` alone is essentially the whole
+# minutes.** `parameter_estimation::joint` alone is essentially the whole
 # suite — 190 tests, each a search or a maximisation over a count table, because
 # that module has no parity oracle and no legible fixture, so its check is the
 # estimator's bias computed exactly. Measured 2026-08-24: that module ran in
@@ -118,7 +103,7 @@ debug = true
 # rather than a crash. Fat LTO is dropped because a soak is a correctness run, not
 # a measurement — link time is the dominant cost otherwise.
 #
-#     PVC_PARITY_CASES=5000 cargo test --profile soak --lib ng::locus_generation::pileup::parity
+#     PVC_PARITY_CASES=5000 cargo test --profile soak --lib locus_generation::pileup::parity
 #
 # Host-native: `scripts/dev.sh` forwards only `CARGO_TARGET_DIR` and `HOME`, so
 # `PVC_PARITY_CASES` does not reach the container and a soak run through it
@@ -132,7 +117,6 @@ overflow-checks = true
 
 [dependencies]
 ahash = "0.8.12"
-anyhow = "1.0.102"
 # `arrow-array` / `arrow-schema`: the in-memory column batches ng's repeat
 # catalog is written from and read into (doc/devel/ng/spec/repeat_catalog.md
 # §3.5). Promoted from transitive (via `parquet`'s `arrow` feature) to
@@ -141,16 +125,12 @@ anyhow = "1.0.102"
 # `parquet`: the arrow-rs crates release together.
 arrow-array = "59.2"
 arrow-schema = "59.2"
-# bytemuck: zero-copy `cast_slice` in PSP's `encode_list_column_csr`
-# fast path (src/psp/block.rs). Avoids user-side `unsafe`; single
-# dependent call site.
-bytemuck = "1"
 clap = { version = "4", features = ["derive"] }
-# crossbeam-channel: bounded MPMC for the re-architected cohort pipeline's
-# producer→caller (1→W) hand-off (src/var_calling_new/pipeline.rs).
+# crossbeam-channel: the bounded channels of ng's psp writer
+# (src/psp/writer.rs, src/run/psp_writer_line.rs).
 crossbeam-channel = "0.5"
 dhat = { version = "0.3", optional = true }
-# libm: `lgamma` for the SFS genotype prior's Dirichlet-multinomial log-priors
+# libm: `lgamma` for the genotype prior's Dirichlet-multinomial log-priors
 # (src/genetics.rs). Rust std has no log-gamma and the crate's `ln_factorial` is
 # integer-only; the prior's concentration `α` is non-integer. libm is the
 # rust-lang port of musl's libm — zero transitive deps, exact to f64 precision.
@@ -169,7 +149,6 @@ noodles-cram = "0.93.0"
 noodles-csi = "0.56.0"
 noodles-fasta = "0.61.0"
 noodles-sam = "0.85.0"
-noodles-vcf = "0.88.0"
 # `parquet`: the wire format of ng's reference repeat catalog
 # (doc/devel/ng/spec/repeat_catalog.md §3.5). Only the Arrow writer/reader
 # API and zstd framing are used — the other codecs and `simdutf8` would be
@@ -187,7 +166,7 @@ rayon = "1.10"
 # is a safe wrapper — no `unsafe` reaches this crate.
 rustix = { version = "1", features = ["process"] }
 serde = { version = "1", features = ["derive"] }
-# Only the experiment binary's `estimate-contamination` writes JSON. Already in the
+# Only the binary's `estimate-contamination` writes JSON. Already in the
 # lock file through other crates, so it costs no new build.
 serde_json = "1"
 smallvec = "1.13"
@@ -196,8 +175,8 @@ thiserror = "2.0.18"
 toml = "1.1"
 # `wide`: portable SIMD primitives — AVX2 on x86_64 (production
 # server), NEON on aarch64 (Apple Silicon dev laptop). Single
-# source for both ISAs. Used by posterior_engine::simd for the
-# lane-parallel ln/exp tables.
+# source for both ISAs. Used by the joint fit's four-lane dot product
+# (src/parameter_estimation/joint/ssr_fit.rs).
 wide = "1.4"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zstd = "0.13"
@@ -209,7 +188,7 @@ zstd = "0.13"
 # how long it took — which is what `examples/ng_cram_decode_layers.rs` prints
 # and the only way to tell one codec's cost from another's.
 cram-perf-counters = ["noodles-cram/perf-counters"]
-# Enable in `cargo run --example dhat_pileup --features dhat-heap` to swap
+# Enable in `cargo run --example dhat_ng_psp --no-default-features --features dhat-heap` to swap
 # the global allocator for `dhat::Alloc` and produce `dhat-heap.json`.
 # Off by default so production builds carry no dhat code.
 dhat-heap = ["dep:dhat"]
@@ -220,7 +199,7 @@ dhat-heap = ["dep:dhat"]
 # 8 threads and from 451 and 453 to 270 and 270 on one, while the most
 # memory the process ever holds falls from 5.66 GB to 5.12 GB and from
 # 5.45 to 5.09. The production `var-calling` path had already measured the
-# same 9% off peak resident (`src/main.rs`). What it costs is a vendored C
+# same 9% off peak resident (production's `src/main.rs`, since deleted). What it costs is a vendored C
 # allocator compiled into every build; `--no-default-features` opts out.
 #
 # The reason it pays is what the merge does to memory rather than how much
@@ -258,7 +237,7 @@ default = ["alloc-mimalloc"]
 #
 #     cargo bench --features bench-fixtures --bench ng_joint_fit_perf
 bench-fixtures = []
-# Compile the cohort merge's stopwatches (`src/ng/run/cohort_merge/timing.rs`), so a
+# Compile the cohort merge's stopwatches (`src/run/cohort_merge/timing.rs`), so a
 # probe can ask a merge where its own wall time went: drawing the readers forward,
 # evicting, the builders' own work, the wait for each round's slowest builder, and
 # what launching them costs.
@@ -275,45 +254,16 @@ merge-timing = []
 bstr = "1"
 criterion = "0.8.2"
 proptest = "1"
-serial_test = "3"
 
+# The caller's binary. It was ng's experiment binary, `pop_var_caller_exp`,
+# until promotion step E2 gave it this name, which the deleted production
+# binary had; the subcommands kept theirs.
 [[bin]]
 name = "pop_var_caller"
 path = "src/main.rs"
 
-# The ng experiment binary: ng's command surface, kept separate from the
-# production `pop_var_caller` CLI so ng's experiment knobs never grow it
-# (see doc/devel/ng/spec/typed_regions_cli.md §2). Same crate, same library.
-[[bin]]
-name = "pop_var_caller_exp"
-path = "src/main_exp.rs"
-
-[[bench]]
-name = "pileup_walker_scaling"
-harness = false
-
 [[bench]]
 name = "freebayes_bookkeeping"
-harness = false
-
-[[bench]]
-name = "baq_perf"
-harness = false
-
-[[bench]]
-name = "psp_writer_perf"
-harness = false
-
-[[bench]]
-name = "psp_reader_perf"
-harness = false
-
-[[bench]]
-name = "cohort_var_calling_perf"
-harness = false
-
-[[bench]]
-name = "paralog_scoring_perf"
 harness = false
 
 [[bench]]
@@ -351,22 +301,6 @@ harness = false
 # criterion benches. `test = true` adds this one example to the default selection.
 [[example]]
 name = "ng_generic_walk_probe"
-test = true
-
-# The head-encoding harness carries its own tests for the same reason: it produced the
-# measurement that closed arch §7's open question about the record head's encoding, and the
-# fixed-width arm it compares against has no other oracle. `test = true` puts them in a plain
-# `cargo test`, which is the command a developer types.
-[[example]]
-name = "ng_psp_head_encoding"
-test = true
-
-# The parity harness carries its own tests because the one thing it cannot show by passing is
-# that it is able to fail: it reports a clean run over millions of records, and a comparison that
-# had quietly stopped looking at a field would report exactly the same thing. Its tests change one
-# field at a time and require the refusal. `test = true` puts them in a plain `cargo test`.
-[[example]]
-name = "ng_psp_parity"
 test = true
 
 # The open-cost harness carries a test on the one piece of logic it has: which field of

@@ -52,10 +52,10 @@ newest_release_build_of() {
     printf '%s' "$found"
 }
 
-bin=$(newest_release_build_of pop_var_caller_exp)
+bin=$(newest_release_build_of pop_var_caller)
 if [[ -z "$bin" ]]; then
-    echo "no release build of pop_var_caller_exp; build one with" >&2
-    echo "  ./scripts/dev.sh cargo build --release --bin pop_var_caller_exp" >&2
+    echo "no release build of pop_var_caller; build one with" >&2
+    echo "  ./scripts/dev.sh cargo build --release --bin pop_var_caller" >&2
     exit 1
 fi
 # **The last step's oracle needs a psp owed a rebuild**, and nothing that ships empties a psp's

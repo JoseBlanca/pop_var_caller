@@ -44,10 +44,10 @@ pub const STREAMING_REF_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// FASTA-read buffer used by [`StreamingChromRefFetcher::refill`] for
 /// raw on-disk bytes (sequence + newlines) before they're stripped
-/// and uppercased into the streamer's `buf`. 64 KiB matches the
-/// streaming MD5 verify in
-/// [`crate::pop_var_caller::common::compute_contig_md5_streaming`]
-/// and the project-wide buffered I/O capacity.
+/// and uppercased into the streamer's `buf`. 64 KiB matched the
+/// streaming MD5 verify in production's `compute_contig_md5_streaming`
+/// (deleted with `src/pop_var_caller/`) and is the project-wide buffered
+/// I/O capacity.
 const STREAMING_REF_FILE_READ_CHUNK: usize = 64 * 1024;
 
 // ---------------------------------------------------------------------
@@ -1251,8 +1251,8 @@ fn read_uppercased_bases(reader: &mut File, dst: &mut Vec<u8>, n_bases: usize) -
 mod tests {
     use super::*;
 
+    use crate::bam::cram_files::{ContigSpec, build_fasta};
     use crate::fasta::{ContigEntry, ContigList};
-    use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
 
     fn contig_list(entries: &[(&str, u64)]) -> ContigList {
         ContigList {

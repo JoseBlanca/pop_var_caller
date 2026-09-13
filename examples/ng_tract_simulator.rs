@@ -52,7 +52,7 @@
 //!    repeats is one with probability `one_step_share`, two with `(1 - one_step_share) *
 //!    one_step_share`, and so on. **`one_step_share` is the share of the slips that moved by
 //!    exactly one step, not a per-step multiplier** — the same spelling
-//!    [`StutterModel`](pop_var_caller::ng::alignment::StutterModel) uses, and inverting it
+//!    [`StutterModel`](pop_var_caller::alignment::StutterModel) uses, and inverting it
 //!    makes large slips common while nothing crashes.
 //! 2. **mis-reads a base** — every base of the read, in the tract and in its flanks, is
 //!    replaced by a different one with probability `substitution_rate`.
@@ -962,9 +962,9 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
     println!("next, from the output directory:");
     println!("  samtools faidx reference.fa");
     println!("  for bam in sim*.bam; do samtools index \"$bam\"; done");
-    println!("  pop_var_caller_exp repeat-catalog --reference reference.fa");
+    println!("  pop_var_caller repeat-catalog --reference reference.fa");
     println!(
-        "  pop_var_caller_exp call-from-alignments --reference reference.fa \\\n    \
+        "  pop_var_caller call-from-alignments --reference reference.fa \\\n    \
          --alignment sim000.bam --regions confident.bed --output calls.vcf --defaults"
     );
     Ok(())

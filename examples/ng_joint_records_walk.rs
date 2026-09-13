@@ -46,44 +46,40 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use pop_var_caller::fasta::ContigList;
-use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
-use pop_var_caller::ng::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
-use pop_var_caller::ng::locus_generation::{
+use pop_var_caller::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
+use pop_var_caller::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
+use pop_var_caller::locus_generation::{
     GeneratorSet, GeneratorSlot, LocusKind, SampleLocusObservationsIterator, UnhandledReason,
 };
-use pop_var_caller::ng::parameter_estimation::depth_bins::DepthBinEdges;
-use pop_var_caller::ng::parameter_estimation::joint::census::{
+use pop_var_caller::parameter_estimation::depth_bins::DepthBinEdges;
+use pop_var_caller::parameter_estimation::joint::census::{
     CensusWriter, CohortCensusEvidence, DepthCap, DepthCode, NamedReadGroup, ReadCap,
     SampleCensusEvidence,
 };
-use pop_var_caller::ng::parameter_estimation::joint::contamination::{
+use pop_var_caller::parameter_estimation::joint::contamination::{
     ContaminationConfig, ContaminationEstimate, OwnCoordinates, fit_contamination,
 };
-use pop_var_caller::ng::parameter_estimation::joint::fit::{JointFit, JointFitConfig, fit_jointly};
-use pop_var_caller::ng::parameter_estimation::joint::loci::{
+use pop_var_caller::parameter_estimation::joint::fit::{JointFit, JointFitConfig, fit_jointly};
+use pop_var_caller::parameter_estimation::joint::loci::{
     CatalogBuildSettings, CensusLoci, ReferenceDigest, RegionSetDigest, SelectableRegions,
     SelectionTerms, UnambiguousRuns, select_kept_loci,
 };
-use pop_var_caller::ng::parameter_estimation::joint::ssr_fit;
-use pop_var_caller::ng::read::ReadFilterConfig;
-use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::read_groups::{
-    ReadGroups, SampleReadGroups, build_read_groups,
-};
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
-use pop_var_caller::ng::ref_seq::WindowedRefSeq;
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::parameter_estimation::joint::ssr_fit;
+use pop_var_caller::read::ReadFilterConfig;
+use pop_var_caller::read::input::SampleReads;
+use pop_var_caller::read::input::read_groups::{ReadGroups, SampleReadGroups, build_read_groups};
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::read::left_align::LeftAlignPreparer;
+use pop_var_caller::ref_seq::WindowedRefSeq;
+use pop_var_caller::reference_info::{
     ReferenceInfo, ReferenceSource, read_reference_info_observing,
 };
-use pop_var_caller::ng::region_typing::{
-    GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig,
-};
-use pop_var_caller::ng::repeat_catalog::{
+use pop_var_caller::region_typing::{GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig};
+use pop_var_caller::regions::ContigBounds;
+use pop_var_caller::repeat_catalog::{
     ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria,
 };
-use pop_var_caller::ng::types::{Bp, ContigId};
-use pop_var_caller::regions::ContigBounds;
+use pop_var_caller::types::{Bp, ContigId};
 
 /// The seed the locus selection is drawn with. One number, shared by every sample, and part
 /// of what the fit refuses to pool across.
@@ -396,7 +392,7 @@ fn depth_ladder_occupancy(cohort: &mut CohortCensusEvidence) {
 fn fit_the_cohort(
     cohort: &mut CohortCensusEvidence,
     coverage_odds: Vec<Arc<[f32]>>,
-    kept: &[pop_var_caller::ng::types::GenomePosition],
+    kept: &[pop_var_caller::types::GenomePosition],
     contigs: &ContigList,
 ) -> Option<JointFit> {
     println!("\n--- the joint fit, ordinary positions ---");
@@ -1010,7 +1006,7 @@ fn walk_one(
     read_groups: &ReadGroups,
     typed: &[TypedRegion],
     _generic_domain: &SelectableRegions,
-    kept: &pop_var_caller::ng::parameter_estimation::joint::loci::CensusLoci,
+    kept: &pop_var_caller::parameter_estimation::joint::loci::CensusLoci,
     terms: &SelectionTerms,
 ) -> SampleCensusEvidence {
     let reference = OpenReference::new(Arc::clone(info));
@@ -1098,7 +1094,7 @@ fn walk_one(
         &contig_of,
         terms.clone(),
         DepthBinEdges::for_census(),
-        ReadCap(pop_var_caller::ng::locus_generation::ssr::DEFAULT_SSR_MAX_READS_PER_LOCUS),
+        ReadCap(pop_var_caller::locus_generation::ssr::DEFAULT_SSR_MAX_READS_PER_LOCUS),
         // **Not the ladder's top any more, and the two are separate knobs.** The depth code
         // records what the position held, all the way to the ladder's ceiling near 1,500; this
         // is where a position's *reads* stop being counted one by one, and the allele counts
@@ -1145,7 +1141,7 @@ fn refit_from_files(
     config: &JointFitConfig,
     from_memory: &JointFit,
 ) {
-    use pop_var_caller::ng::parameter_estimation::joint::census_file::{
+    use pop_var_caller::parameter_estimation::joint::census_file::{
         bytes_read, open_census, reset_bytes_read, write_census,
     };
 
@@ -1230,7 +1226,7 @@ fn refit_from_files(
 /// **Separately and not as a total**, because `parameter_prepass_joint_records.md` §6 claims
 /// the STR set is the larger half and a single number would hide that being wrong.
 fn report_sizes(records: &mut SampleCensusEvidence) {
-    use pop_var_caller::ng::parameter_estimation::joint::census::{
+    use pop_var_caller::parameter_estimation::joint::census::{
         AlleleObservation, OffsetCounts, TractDifference,
     };
 

@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use pop_var_caller::ng::parameter_estimation::joint::share_curve::{
+use pop_var_caller::parameter_estimation::joint::share_curve::{
     FittedShare, ShareCurveConfig, ShareCurveSource, ShareShape, choose_share_shape,
 };
 

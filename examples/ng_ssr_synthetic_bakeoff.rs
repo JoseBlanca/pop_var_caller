@@ -23,13 +23,13 @@
 
 use std::process::ExitCode;
 
-use pop_var_caller::ng::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner;
-use pop_var_caller::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
-use pop_var_caller::ng::alignment::{
+use pop_var_caller::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner;
+use pop_var_caller::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
+use pop_var_caller::alignment::{
     PerQualityEmission, ReadBases, RepeatContext, RepeatGeometry, RepeatSpan, StutterModel,
 };
-use pop_var_caller::ng::locus_generation::ssr::RepeatDelimiter;
-use pop_var_caller::ng::types::{Bp, Motif};
+use pop_var_caller::locus_generation::ssr::RepeatDelimiter;
+use pop_var_caller::types::{Bp, Motif};
 
 /// Two flank bodies (aperiodic, no long homopolymer at the junction). The junction base is
 /// overwritten per scenario so it either **breaks** the motif (clean) or **continues** it (the
@@ -700,22 +700,21 @@ fn main() -> ExitCode {
     // A new algorithm registers one line here: (name, evaluate(&aligner, &scen, &stutter)).
     // Winner = highest composite with clean == 1.000. Composite is the mean of partial,
     // partial_noise, noise, and flank_indel — the four axes that matter on real data.
-    let anchor_firm = pop_var_caller::ng::alignment::ssr_anchor_firm::SsrAnchorFirmAligner::new(
+    let anchor_firm = pop_var_caller::alignment::ssr_anchor_firm::SsrAnchorFirmAligner::new(
         PerQualityEmission::new(),
     );
-    let noise_robust = pop_var_caller::ng::alignment::ssr_noise_robust::SsrNoiseRobustAligner::new(
+    let noise_robust = pop_var_caller::alignment::ssr_noise_robust::SsrNoiseRobustAligner::new(
         PerQualityEmission::new(),
     );
-    let robust_indel = pop_var_caller::ng::alignment::ssr_robust_indel::SsrRobustIndelAligner::new(
+    let robust_indel = pop_var_caller::alignment::ssr_robust_indel::SsrRobustIndelAligner::new(
         PerQualityEmission::new(),
     );
-    let unit_robust = pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner::new(
+    let unit_robust = pop_var_caller::alignment::ssr_unit_robust::SsrUnitRobustAligner::new(
         PerQualityEmission::new(),
     );
-    let anchor_robust =
-        pop_var_caller::ng::alignment::ssr_anchor_robust::SsrAnchorRobustAligner::new(
-            PerQualityEmission::new(),
-        );
+    let anchor_robust = pop_var_caller::alignment::ssr_anchor_robust::SsrAnchorRobustAligner::new(
+        PerQualityEmission::new(),
+    );
     let cards: Vec<(&str, Card)> = vec![
         ("flat_gap (algo 3)", evaluate(&flat, &scen, &stutter)),
         ("unit_slip (algo 4)", evaluate(&unit, &scen, &stutter)),

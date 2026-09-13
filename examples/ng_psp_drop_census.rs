@@ -38,7 +38,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use pop_var_caller::ng::psp::{PspReader, replace_trailer};
+use pop_var_caller::psp::{PspReader, replace_trailer};
 
 fn main() -> ExitCode {
     let psps: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();

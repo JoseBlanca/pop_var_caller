@@ -66,23 +66,39 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Instant;
 
-use pop_var_caller::ng::locus_generation::{
+use pop_var_caller::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
 };
-use pop_var_caller::ng::run::cohort_merge::observation_cache::ObservationCache;
-use pop_var_caller::ng::run::cohort_merge::parallel::merge_cohort_in_parallel;
-use pop_var_caller::ng::run::cohort_merge::serial::{
+use pop_var_caller::ref_seq::InMemoryRefSeq;
+use pop_var_caller::run::cohort_merge::observation_cache::{
+    MergeReference, ObservationCache, ReferenceUnreadable,
+};
+use pop_var_caller::run::cohort_merge::parallel::merge_cohort_in_parallel;
+use pop_var_caller::run::cohort_merge::serial::{
     merge_cohort_serially, merge_cohort_through_cache,
 };
-use pop_var_caller::ng::run::cohort_merge::{
+use pop_var_caller::run::cohort_merge::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
     MinAltReads,
 };
-use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
+use pop_var_caller::types::{ContigId, GenomeRegion, Position, ReadGroupId};
 
 /// This probe cannot fail, so its source never errors.
 #[derive(Debug)]
 struct Never;
+
+/// The cache reads the reference itself now, and can refuse; this probe's cannot.
+///
+/// [`reference_over`] hands the cache every base the fixture's records sit on and a window's
+/// slack past the last of them, and it is a `Vec<u8>` already in memory — so there is no file
+/// to fail on and no coordinate to run off. The conversion exists because
+/// `merge_cohort_through_cache` asks the source's error type to absorb the cache's own, not
+/// because this probe has a failure to absorb.
+impl From<ReferenceUnreadable> for Never {
+    fn from(unreadable: ReferenceUnreadable) -> Self {
+        unreachable!("an in-memory reference over the fixture's own ground refused: {unreadable}")
+    }
+}
 
 /// How many repeats each number is the median of.
 const REPEATS: usize = 5;
@@ -102,7 +118,7 @@ fn record_at(position: u64, observed: &[u8]) -> SampleLocusObservations {
             read_group: ReadGroupId(0),
             num_obs: 3,
             num_fwd: 3,
-            q_sum: pop_var_caller::ng::types::SummedLogError::from_nats(-6.0),
+            q_sum: pop_var_caller::types::SummedLogError::from_nats(-6.0),
             mapq_sum: 180,
             mapq_sum_sq: 10_800,
             placed_left: 0,
@@ -179,6 +195,30 @@ fn timed<T>(mut prepare: impl FnMut() -> T, mut one_merge: impl FnMut(T)) -> (f6
 /// One sample's source: its records, owned, in coordinate order.
 type SampleSource = std::vec::IntoIter<Result<SampleLocusObservations, Never>>;
 
+/// The ground the cache reads bases from, as one in-memory contig of `A`.
+///
+/// **A window's slack past the last record, because the cache covers further than it is
+/// asked.** It reads half a building window past the region's end
+/// ([`ObservationCache::cover`]), so a reference stopping at the last record would refuse the
+/// final region of the contig. Every record the fixture builds says its reference base is
+/// `A` ([`record_at`]), so a contig of `A` is the ground those records describe.
+fn reference_over(ground: &Ground) -> Box<dyn MergeReference + Send + Sync> {
+    let slack = 10_000;
+    Box::new(InMemoryRefSeq::from_contigs(vec![vec![
+        b'A';
+        (ground.last_base + slack)
+            as usize
+    ]]))
+}
+
+/// A cache over `cohort`'s records and the ground they sit on — what every driver below takes.
+fn cache_over(
+    cohort: &[Vec<SampleLocusObservations>],
+    ground: &Ground,
+) -> ObservationCache<SampleSource> {
+    ObservationCache::over(sources_over(cohort), reference_over(ground))
+}
+
 /// A fresh set of sources over `cohort` — one copy of every record, which the cache then owns.
 fn sources_over(cohort: &[Vec<SampleLocusObservations>]) -> Vec<SampleSource> {
     cohort
@@ -212,7 +252,7 @@ fn threads_sweep(
     let bases = width.get();
 
     let (median, fastest, slowest) = timed(
-        || ObservationCache::over(sources_over(cohort)),
+        || cache_over(cohort, ground),
         |mut cache| {
             let outcome = merge_cohort_through_cache(
                 &analysed,
@@ -238,7 +278,7 @@ fn threads_sweep(
             CohortLocusBuilderRegionsInFlight(NonZeroUsize::new(threads).expect("non-zero"));
         let (median, fastest, slowest) = pool.install(|| {
             timed(
-                || ObservationCache::over(sources_over(cohort)),
+                || cache_over(cohort, ground),
                 |mut cache| {
                     let outcome = merge_cohort_in_parallel(
                         &analysed,
@@ -340,7 +380,7 @@ fn main() {
             for &width in &widths {
                 let bases = width.get();
                 let (median, fastest, slowest) = timed(
-                    || ObservationCache::over(sources_over(&cohort)),
+                    || cache_over(&cohort, ground),
                     |mut cache| {
                         let outcome = merge_cohort_through_cache(
                             &analysed,
@@ -363,7 +403,7 @@ fn main() {
                         NonZeroUsize::new(in_flight).expect("non-zero"),
                     );
                     let (median, fastest, slowest) = timed(
-                        || ObservationCache::over(sources_over(&cohort)),
+                        || cache_over(&cohort, ground),
                         |mut cache| {
                             let outcome = merge_cohort_in_parallel(
                                 &analysed,

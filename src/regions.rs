@@ -6,22 +6,20 @@
 //! they do not, the set is one full-length span per contig
 //! ([`RegionSet::whole_contigs`]). "Whole genome" is not a special
 //! case — it is the region set whose every span covers an entire
-//! contig. Both stages (`pileup`, `var-calling`) build a `RegionSet`
-//! and seek to its spans rather than walking the genome.
+//! contig. A caller builds a `RegionSet` and seeks to its spans rather
+//! than walking the genome.
 //!
 //! **Coordinate convention.** Spans are **1-based inclusive**
-//! `[start, end]`, matching the PSP reader's region API
-//! ([`crate::psp::PspReader::region_records`]) and the pileup walker's
-//! position convention. A BED file is 0-based half-open `[start, end)`;
+//! `[start, end]`, matching the pileup walk's position convention (and production's PSP reader's
+//! region API, deleted in promotion Milestone D). A BED file is 0-based half-open `[start, end)`;
 //! the parser converts a BED span `[b_start, b_end)` to the 1-based
 //! inclusive span `[b_start + 1, b_end]` at the single boundary where
 //! BED text is read.
 //!
-//! This module is a top-level peer consumed by both pipeline stages,
-//! so it deliberately does not depend on any stage's contig type
-//! (`fasta::ContigList`, `psp::header::ChromosomeEntry`). Callers
-//! adapt their own contig list into a slice of the neutral
-//! [`ContigBounds`].
+//! This module is a top-level peer of its callers, so it deliberately
+//! does not depend on any caller's contig type (`fasta::ContigList`,
+//! or the deleted production caller's psp header). Callers adapt their
+//! own contig list into a slice of the neutral [`ContigBounds`].
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -50,9 +48,8 @@ pub struct Region {
 /// matched against a BED `chrom` column, and the length spans are
 /// clamped to. The position in the slice handed to a [`RegionSet`]
 /// constructor is the resulting `chrom_id`, so callers must pass
-/// contigs in the same order the downstream reader uses (the
-/// reference/`.fai` order for pileup, the PSP header order for
-/// var-calling).
+/// contigs in the same order the downstream reader uses (for
+/// example the reference's `.fai` order).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContigBounds<'a> {
     /// Contig name, matched verbatim against the BED `chrom` column.

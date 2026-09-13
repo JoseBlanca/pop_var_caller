@@ -23,7 +23,46 @@ use crate::bam::index_preflight::{
     AlignmentFileKind, AlignmentIndex, load_alignment_index, preflight_alignment_indexes,
 };
 use crate::fasta::{ContigEntry, ContigList};
-use crate::pileup::walker::CigarOp;
+/// One step of a read's CIGAR: what the aligner did there, and for how many bases.
+///
+/// A read's placement against the reference is spelled out as a run of these — so many bases
+/// lined up, so many inserted, so many deleted — and the length each carries counts
+/// *reference* bases or *read* bases depending on which step it is. `Match`, `SeqMatch` and
+/// `SeqMismatch` consume both; `Insertion` and `SoftClip` consume read only; `Deletion` and
+/// `Skip` consume reference only; `HardClip` and `Padding` consume neither.
+///
+/// The set is SAM's, so htslib's and noodles' too. **`Match` is SAM's `M`, which means
+/// *aligned*, not *equal*** — a mismatched base is still `M`, and most aligners emit nothing
+/// else. `SeqMatch` and `SeqMismatch` are SAM's `=` and `X`, which do distinguish the two.
+///
+/// **It lives here because this module is where a CIGAR becomes one**: [`cigar_to_ops`] builds
+/// the run from a record, [`MappedRead::cigar`] holds it, and [`cigar_ref_span`] and
+/// [`cigar_is_bad`] read it back. Consumers downstream — the pileup walk, the left-aligner,
+/// ng's read filters and alignment algorithms — all name the type this decoder produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CigarOp {
+    /// SAM `M`: aligned to the reference, matching or not. Consumes both.
+    Match(u32),
+    /// SAM `I`: bases the read has and the reference does not. Consumes read only.
+    Insertion(u32),
+    /// SAM `D`: bases the reference has and the read does not. Consumes reference only.
+    Deletion(u32),
+    /// SAM `N`: reference the read skips over — an intron, in spliced alignment. Consumes
+    /// reference only, and differs from [`Deletion`](Self::Deletion) in what it means rather
+    /// than in what it consumes.
+    Skip(u32),
+    /// SAM `S`: read bases left out of the alignment but still carried in the record.
+    /// Consumes read only.
+    SoftClip(u32),
+    /// SAM `H`: read bases the aligner cut from the record altogether. Consumes neither.
+    HardClip(u32),
+    /// SAM `P`: padding against a multiple alignment. Consumes neither.
+    Padding(u32),
+    /// SAM `=`: aligned *and* equal to the reference. Consumes both.
+    SeqMatch(u32),
+    /// SAM `X`: aligned and *not* equal to the reference. Consumes both.
+    SeqMismatch(u32),
+}
 
 // ---------------------------------------------------------------------
 // Defaults
@@ -127,9 +166,9 @@ pub struct FilterCounts {
     pub bad_cigar: u64,
     /// Reads dropped because the BAQ stage refused to produce a usable
     /// per-base posterior (HMM overflow, ref window past chrom end,
-    /// CIGAR with `N`/no-match, etc.). One bucket per
-    /// [`BaqSkipReason`](crate::pileup::per_sample::baq_engine::BaqSkipReason) currently does not
-    /// exist — every BAQ skip reason rolls up into this counter. Split
+    /// CIGAR with `N`/no-match, etc.). There is no per-reason bucket (production's
+    /// `BaqSkipReason`, deleted with `src/pileup/`, had several); every BAQ skip reason
+    /// rolls up into this counter. Split
     /// later if a deployment cares which reason dominates.
     pub baq_rejected: u64,
 }
@@ -798,7 +837,7 @@ pub(super) enum FilterBucket {
 // ---------------------------------------------------------------------
 
 // `pub(crate)` (widened from `pub(super)`) so the ng read-filtering adapter
-// (`crate::ng::read::filtering`) can reuse this decode path — the ng → existing
+// (`crate::read::filtering`) can reuse this decode path — the ng → existing
 // code dependency the read-filtering spec §7 (decision a) calls for.
 pub(crate) fn record_buf_to_mapped_read(
     rb: &sam::alignment::RecordBuf,
@@ -1047,7 +1086,7 @@ pub(crate) fn cigar_is_bad(cigar: &[CigarOp]) -> bool {
 /// decoding; `ref_seq` is the reference slice covering
 /// `[read.pos, read.pos + cigar_ref_span(cigar))`. Indexing into
 /// these slices uses the standard CIGAR semantics — see
-/// [`crate::pileup::walker::decompose`] for the
+/// `src/locus_generation/pileup/decompose.rs` for the
 /// reference walk pattern this function mirrors.
 pub(crate) fn read_exceeds_mismatch_fraction(
     cigar: &[CigarOp],
@@ -1150,7 +1189,7 @@ pub(crate) fn read_exceeds_mismatch_fraction(
 }
 
 /// `pub(crate)` for ng's own decode, which reuses this rather than copying the
-/// CIGAR translation (`src/ng/read/aligned_read.rs`).
+/// CIGAR translation (`src/read/aligned_read.rs`).
 pub(crate) fn cigar_to_ops(cigar: &sam::alignment::record_buf::Cigar) -> Vec<CigarOp> {
     use sam::alignment::record::cigar::op::Kind;
     cigar
@@ -1180,7 +1219,7 @@ pub(crate) fn cigar_to_ops(cigar: &sam::alignment::record_buf::Cigar) -> Vec<Cig
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pileup::per_sample::record_specs::{RecordSpec, record_spec};
+    use crate::bam::record_specs::{RecordSpec, record_spec};
 
     fn default_seq(len: usize) -> Vec<u8> {
         b"A".repeat(len)
@@ -1318,7 +1357,11 @@ mod tests {
 
         // A fixed generator rather than a crate: the sequence is the same on every machine
         // and every run, so a disagreement can be reproduced from the seed alone.
-        let mut state: u64 = 0x2026_09_08_u64;
+        // The seed is the date this fixture was written, 2026-09-08, so that it reads as a
+        // seed rather than as a number somebody tuned. Grouped in fours because that is what
+        // `clippy::unusual_byte_groupings` accepts, which still leaves the year and the
+        // month-day legible either side of the underscore.
+        let mut state: u64 = 0x2026_0908_u64;
         let mut next = move || {
             state ^= state << 13;
             state ^= state >> 7;
@@ -1882,9 +1925,7 @@ mod tests {
 
     // --- Real CRAM + FASTA fixtures (shared by Group C3) -------------
 
-    use crate::pileup::per_sample::cram_files::{
-        ContigSpec, HeaderOverrides, build_cram, build_fasta,
-    };
+    use crate::bam::cram_files::{ContigSpec, HeaderOverrides, build_cram, build_fasta};
 
     fn one_contig_chr1() -> Vec<ContigSpec> {
         vec![ContigSpec {

@@ -15,10 +15,10 @@
 
 use std::path::PathBuf;
 
-use pop_var_caller::ng::types::{
+use pop_var_caller::types::{
     AlleleId, ContigId, GenomeRegion, Genotype, Motif, Phred, Ploidy, Position,
 };
-use pop_var_caller::ng::vcf::{
+use pop_var_caller::vcf::{
     FilterVerdict, HeaderContig, MapqPool, PaddingBase, SampleCall, SampleColumn, SampleReadCounts,
     TractAnnotation, VcfHeaderMetadata, VcfRecord, VcfWriter,
 };

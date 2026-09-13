@@ -20,6 +20,21 @@
 //! stays flat in variant count. Because the posterior is strictly monotone in
 //! the LR, ranking by posterior is ranking by LR, so the histogram (bins
 //! ordered by LR) reproduces the tail FDR exactly up to bin resolution.
+//!
+//! ---
+//!
+//! **ng's copy.** Everything above and below this note is line for line and byte for byte
+//! `src/paralog/prior.rs`, as a textual guard (`copy_fidelity.rs`, deleted at promotion step C3)
+//! asserted until then — ng appends this note
+//! to production's header and changes nothing else. The EM's start, tolerance and iteration
+//! cap, and the histogram's shape, are the tomato2 prototype's, inherited and **not
+//! re-measured** (`doc/devel/ng/spec/hidden_paralog_filter.md` §3.3, plan step A3).
+//!
+//! **What reads this in ng, and when.** Pass two of the filter folds every finite likelihood
+//! ratio into the histogram, estimates π from it, builds the tail-FDR curve and resolves the
+//! cut — all after the calling pass has ended, because the verdict on the first record
+//! depends on the last record's score (spec §2). `calibration.rs` beside this file holds
+//! what that pass settles.
 
 /// Default EM start for `π` (paralogs are rare; the fixed point is unique so
 /// the start only affects iteration count — prototype `pi = 0.03`).

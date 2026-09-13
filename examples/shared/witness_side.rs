@@ -39,7 +39,7 @@
 //! case now has a name, so a tool has to spell it and a consumer has to handle it. `Complete`
 //! remains the only "the length is pinned" test. See the note on `ReadWitness` itself.
 
-use pop_var_caller::ng::locus_generation::{LocusLen, ReadWitness};
+use pop_var_caller::locus_generation::{LocusLen, ReadWitness};
 
 /// The border constraint a witness carries, once the side is a **derivation** rather than a
 /// variant: a run flush with the left border is a prefix constraint on the allele, one flush

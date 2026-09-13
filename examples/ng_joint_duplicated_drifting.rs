@@ -38,19 +38,19 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use pop_var_caller::ng::parameter_estimation::depth_bins::DepthBinEdges;
-use pop_var_caller::ng::parameter_estimation::joint::census::{
+use pop_var_caller::parameter_estimation::depth_bins::DepthBinEdges;
+use pop_var_caller::parameter_estimation::joint::census::{
     AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
     GenericEvidence, NamedReadGroup, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,
     SampleCensusEvidence, Section, SectionKey, SelectionTermsDigest,
 };
-use pop_var_caller::ng::parameter_estimation::joint::fit::{JointFitConfig, fit_jointly};
-use pop_var_caller::ng::parameter_estimation::joint::loci::{
+use pop_var_caller::parameter_estimation::joint::fit::{JointFitConfig, fit_jointly};
+use pop_var_caller::parameter_estimation::joint::loci::{
     CatalogBuildSettings, CensusLociDigester, ReferenceDigest, RegionSetDigest, SelectionTerms,
 };
-use pop_var_caller::ng::repeat_catalog::StrRepeatCriteria;
-use pop_var_caller::ng::tandem_repeat::ScanParams;
-use pop_var_caller::ng::types::ReadGroupId;
+use pop_var_caller::repeat_catalog::StrRepeatCriteria;
+use pop_var_caller::tandem_repeat::ScanParams;
+use pop_var_caller::types::ReadGroupId;
 
 /// How often a read misreads a base at an ordinary position, and at a mismapped one, and how
 /// many positions mismap. The tomato panel's own fitted values.

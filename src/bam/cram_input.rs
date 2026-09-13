@@ -79,7 +79,7 @@ pub(super) fn open_cram_reader_with_header(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pileup::per_sample::cram_files::build_cram_with_major_version;
+    use crate::bam::cram_files::build_cram_with_major_version;
 
     /// The shared CRAM open path must fire the CRAM-version gate
     /// (rejecting major-version != 3) before returning a header, so

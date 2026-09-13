@@ -49,16 +49,16 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
-use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
-use pop_var_caller::ng::read::ReadFilterConfig;
-use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
-use pop_var_caller::ng::ref_seq::WindowedRefSeq;
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
+use pop_var_caller::read::ReadFilterConfig;
+use pop_var_caller::read::input::SampleReads;
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::read::left_align::LeftAlignPreparer;
+use pop_var_caller::ref_seq::WindowedRefSeq;
+use pop_var_caller::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
+use pop_var_caller::types::{ContigId, GenomeRegion, Position};
 
 /// The fixture builders, shared with `examples/ng_generic_walk_probe.rs` so a bench
 /// number and that probe's assertions describe the same reads.

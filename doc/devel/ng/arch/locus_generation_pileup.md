@@ -53,15 +53,19 @@ src/ng/locus_generation/pileup/
                           to assert on SampleLocusObservations directly.
   mock_reference.rs     – #[cfg(test)] ng's own: ng's RefSeq over tests.rs's MockFasta, so
                           production's copied suite can drive ng's walker (A0)
-  copy_fidelity.rs      – #[cfg(test)] ng's own: the textual check that the copies still
-                          listed in PAIRS are production's, from outside the files it checks
-  parity.rs             – #[cfg(test)] the differential harness (spec §3)
+  parity.rs             – #[cfg(test)] what is left of the differential harness (spec §3):
+                          determinism, the generated cases' coverage floor, production's
+                          error stream frozen
 ```
 
-**Three files are still guarded copies**, not eight: `cigar_cursor.rs`, `decompose.rs` and
-`chain_id_allocator.rs` — the `PAIRS` array at
-[copy_fidelity.rs:102](../../../../src/ng/locus_generation/pileup/copy_fidelity.rs#L102) is the
-list, and it is authoritative because a released file is **deleted** from it rather than commented
+> **2026-09-13, promotion plan steps C1–C2:** `copy_fidelity.rs` is deleted and `parity.rs` is cut
+> down to what does not need production's walker. The next two paragraphs are history, and were
+> already stale before that: by commit `d9e7b076` the guard covered `decompose.rs` alone, the other
+> two having been released on 2026-08-05.
+
+**Three files were once still guarded copies**, not eight: `cigar_cursor.rs`, `decompose.rs` and
+`chain_id_allocator.rs` — the `pairs` array in `copy_fidelity.rs` (see `d9e7b076`) was the
+list, and it was authoritative because a released file is **deleted** from it rather than commented
 out. Five started as copies and have been released as ng changed them: three at A0, `tests.rs` at
 B2, `active_read_set.rs` at D2. `genome_walk.rs`, `open_record.rs` and `errors.rs` began as copies
 and carry ng's changes now; **`mod.rs`, `generator.rs`, `mock_reference.rs`, `copy_fidelity.rs` and
@@ -576,10 +580,9 @@ worth stating because the weight is not where a reader would guess:
 
 | where | what it is |
 |---|---|
-| `parity.rs` | the differential: the forward projection, the permanent anchor, the six-class census, the determinism digest, and the `#[ignore]`d real-data run. The largest file in the module. |
+| `parity.rs` | since promotion step C1, the determinism digest, the generated cases' coverage floor, two ng-only observation checks, and production's malformed-input error stream frozen. Until then it also held the forward projection, the permanent anchor, the six-class census and the `#[ignore]`d real-data run. |
 | `tests.rs` | production's end-to-end suite, now asserting on `SampleLocusObservations` through four test-only accessors rather than through a lossy projection (Checkpoint D) |
 | `generator.rs`'s own `mod tests` | the generator's knobs, counters, region walk, halo and stop rule |
-| `copy_fidelity.rs` | the textual guard over `PAIRS` |
 | `examples/ng_generic_loci_dump.rs` | the dump tool **and its ten asserted fixtures** — a `#[cfg(test)] mod` inside the example, so `cargo test --example ng_generic_loci_dump` is a second suite that `cargo test --lib` does not run |
 
 **`benches/ng_generic_pileup_perf.rs` drives this generator** (2026-07-30), which closes the

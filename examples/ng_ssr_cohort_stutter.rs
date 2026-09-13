@@ -61,25 +61,25 @@ use std::sync::Arc;
 
 use pop_var_caller::fasta::ContigList;
 #[cfg(test)]
-use pop_var_caller::ng::locus_generation::WitnessedLocusPositions;
-use pop_var_caller::ng::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
-use pop_var_caller::ng::locus_generation::{
+use pop_var_caller::locus_generation::WitnessedLocusPositions;
+use pop_var_caller::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
+use pop_var_caller::locus_generation::{
     LocusGenerator, LocusKind, LocusLen, ReadWitness, SampleLocusObservations,
 };
-use pop_var_caller::ng::read::ReadFilterConfig;
-use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::read_groups::{NameOrigin, build_read_groups};
-use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::ref_seq::WindowedRefSeq;
-use pop_var_caller::ng::reference_info::{
+use pop_var_caller::read::ReadFilterConfig;
+use pop_var_caller::read::input::SampleReads;
+use pop_var_caller::read::input::read_groups::{NameOrigin, build_read_groups};
+use pop_var_caller::read::input::reference::OpenReference;
+use pop_var_caller::ref_seq::WindowedRefSeq;
+use pop_var_caller::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::segment_criteria::SsrSegment;
-use pop_var_caller::ng::region_typing::{GenomeRegions, RegionKind, TypedRegionConfig};
-use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
-use pop_var_caller::ng::types::GenomeRegion;
-use pop_var_caller::ng::types::{Bp, ContigId};
+use pop_var_caller::region_typing::segment_criteria::SsrSegment;
+use pop_var_caller::region_typing::{GenomeRegions, RegionKind, TypedRegionConfig};
 use pop_var_caller::regions::ContigBounds;
+use pop_var_caller::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::types::GenomeRegion;
+use pop_var_caller::types::{Bp, ContigId};
 
 #[path = "shared/catalog_regions.rs"]
 mod catalog_regions;

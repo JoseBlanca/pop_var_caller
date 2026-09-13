@@ -1,31 +1,46 @@
-// Mi5: this module is `pub(crate)`; its decoder primitives plus
-// the signed-varint codecs are reader-side surface awaiting the
-// not-yet-built `PspReader`. They're exercised by tests but are
-// not yet reached from any production code path.
-#![allow(dead_code)]
 //! LEB128 / zig-zag-LEB128 encoders and decoders.
 //!
-//! The `.psp` body uses unsigned LEB128 for every variable-length
-//! integer and zig-zag-LEB128 ("svarint") for the handful of signed
-//! deltas. Both encodings are bounded at 10 bytes — the cap for
-//! `u64` / `i64`. See the spec's §"Encoding conventions / Body
-//! (binary)" rows for the canonical definitions.
+//! A psp's body uses unsigned LEB128 for every variable-length integer and
+//! zig-zag-LEB128 ("svarint") for the handful of signed deltas. Both encodings are
+//! bounded at 10 bytes — the cap for `u64` / `i64`. See
+//! `doc/devel/ng/spec/psp_file_format.md`'s encoding-conventions rows for the
+//! canonical definitions.
 //!
-//! This module is the only place in the `.psp` codebase that
-//! understands those byte sequences. The writer pipes integers
-//! through [`encode_u64_leb128`] / [`encode_i64_svarint`] into per-
-//! column buffers; the reader pipes the same buffers back through
+//! This module is the only place in ng that understands those byte sequences. The
+//! writer pipes integers through [`encode_u64_leb128`] / [`encode_i64_svarint`] into
+//! per-column buffers; the reader pipes the same buffers back through
 //! [`decode_u64_leb128`] / [`decode_i64_svarint`].
 //!
-//! Both decoders return `(value, bytes_consumed)` on success and a
-//! [`VarintError`] on a truncated or over-long encoding. The caller
-//! adds context (block index, column, record index) when wrapping
-//! the error into the relevant [`super::errors::PspReadError`]
-//! variant — `IndexEntryDecode`, `BlockHeaderField`, or
-//! `ColumnElementDecode`, depending on which file region was being
-//! decoded.
+//! Both decoders return `(value, bytes_consumed)` on success and a [`VarintError`] on a
+//! truncated or over-long encoding. The caller adds context — which block, which column,
+//! which record — when wrapping it into [`BlockHeadDecodeError`](super::block), an
+//! [`IndexDecodeError`](super::index) or a [`RecordLayoutError`](super::record),
+//! depending on which region of the file was being decoded.
+//!
+//! # This is production's codec, copied
+//!
+//! The arithmetic below is `src/psp/varint.rs` unchanged, down to the cold-path split
+//! and the comments explaining it, because the two must agree byte for byte or ng could
+//! not read a file production wrote and the reverse. What is ng's own is the module
+//! header, and [`VarintError`], which lives here rather than in a shared errors module
+//! because every other error in `psp` is declared in the file that raises it.
 
-use super::errors::VarintError;
+/// What a decoder can find wrong with a varint. Nothing else can go wrong: a decode
+/// either finds a terminating byte inside the cap or it does not.
+#[non_exhaustive]
+#[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarintError {
+    /// The buffer ran out mid-varint: a continuation bit was set on the last byte
+    /// available, and no more bytes were present.
+    #[error("varint truncated: continuation bit set on the final available byte")]
+    Truncated,
+
+    /// More than [`MAX_VARINT_BYTES`] continuation bytes were consumed. A longer
+    /// encoding cannot represent a valid `u64`, so it is either corruption or a writer
+    /// bug, and neither is something a reader can carry on from.
+    #[error("varint overflow: continuation bytes exceeded the 10-byte cap")]
+    Overflow,
+}
 
 /// Maximum number of LEB128 bytes a `u64` can occupy: `ceil(64 / 7) =
 /// 10`. The spec pins this cap (§"Encoding conventions / Body
