@@ -21,7 +21,7 @@
 //!
 //! An indel can slide one base left only by **crossing an aligned column that is a real match**
 //! — left-alignment is a *lossless* re-placement that never moves a mismatch (production's port
-//! asserts the read's mismatch count is unchanged, [indel_norm.rs](crate::pileup::walker)). So an
+//! asserts the read's mismatch count is unchanged, [`indel_norm`](crate::ng::alignment::indel_norm)). So an
 //! indel with the aligned column `(read[q-1] ↔ reference[r-1])` immediately to its left can shift
 //! one base left iff that column matches **and** the base leaving the indel on the left equals the
 //! base entering it from the right:

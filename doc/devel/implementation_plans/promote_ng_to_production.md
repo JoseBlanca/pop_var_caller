@@ -287,7 +287,12 @@ carries a header line naming the production commit that wrote it.
     what validated `BAND_HEADROOM` (a band one cell too narrow first diverged near case 28,307).
     The docs now say the margin must not be lowered until a production-free reference exists — ng's
     aligner with the band opened to the whole matrix is the candidate.
-  - ☐ C11 · ☐ C12 · ☐ C13
+  - ✅ **C11** `alignment/leftmost_property.rs` — **one doc link repointed; nothing frozen, nothing
+    deleted.** As the row said, the file uses no production code: `CigarOp` has lived in
+    `bam::alignment_input` since B5, and `normalize_alleles` is named through ng's copy. The one
+    production path left was a link to `pileup::walker`'s `indel_norm.rs` for the mismatch-count
+    assertion, which ng's own `alignment::indel_norm` carries; the link now points there.
+  - ☐ C12 · ☐ C13
 - ☐ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
   `ng_psp_head_encoding.rs` (`test = true` in `Cargo.toml`), `paralog_score_parity.rs` — are
   deleted with a line each in the report saying which document already holds their result.
