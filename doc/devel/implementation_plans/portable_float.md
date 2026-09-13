@@ -85,7 +85,7 @@ cover.
 
 ### Milestone A — measure; change nothing shipped
 
-- ☐ **A1. The call-site inventory.** A report listing every transcendental call in `src/` outside
+- ✅ **A1. The call-site inventory.** A report listing every transcendental call in `src/` outside
   tests: function, file and line, the function it sits in, and how often it runs — per base, per
   read, per locus, per fitting iteration, once per run, once per table — and whether its argument
   is a constant computed from literals (writable as bits at no speed cost, as `75722336` did). It
