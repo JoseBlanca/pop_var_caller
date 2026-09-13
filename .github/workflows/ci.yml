@@ -65,7 +65,7 @@ jobs:
         # `genetics::tests::lgamma_panics_on_non_positive_in_debug` — `#[should_panic]`
         # tests on checks that are debug-only by design and lack
         # `#[cfg(debug_assertions)]`. Gating those three would let this step run crate-wide.
-        run: cargo test --release --lib calling:: --all-features
+        run: 'cargo test --release --lib calling:: --all-features'
 
       - name: Doc build (deny warnings)
         env:
