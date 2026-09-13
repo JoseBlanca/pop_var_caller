@@ -27,8 +27,8 @@
 //! released [`active_read_set`] for the per-read "ever contributed" flag. **Three are
 //! still guarded**, and `copy_fidelity.rs`'s release table is the list that stays true.
 //!
-//! What the copy was proven to *compute* is the stage-1 differential
-//! (`parity.rs`); what it is proven to *be* is `copy_fidelity.rs`. The two are
+//! What the copy was proven to *compute* was, until promotion step C1, the stage-1
+//! differential (`parity.rs`); what it is proven to *be* is `copy_fidelity.rs`. The two are
 //! different claims. Both are named as files rather than linked: they are
 //! `#[cfg(test)]` modules, so an intra-doc link to them breaks `cargo doc`.
 //!
@@ -431,7 +431,7 @@ impl Default for WalkerConfig {
 // `max_record_span = 983_025`, **15× the ceiling `check()` enforces**.
 //
 // `generator.rs` imports `PileupWalker` and `RunSummary` from `genome_walk` directly, and
-// `parity.rs` now names `genome_walk::run` the same way, so nothing needed a replacement
+// `parity.rs` calls `super::run`, so nothing needed a replacement
 // binding.
 pub use errors::WalkerError;
 pub use generator::{

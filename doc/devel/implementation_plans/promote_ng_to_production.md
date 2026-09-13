@@ -35,9 +35,12 @@ Three words carry the whole plan, so they are fixed here.
   heaviest consumer (`fasta`: 18 ng files against 12 in `pileup`). **They stay where they are
   and are not touched by this plan.**
 - **An oracle test** — a test in `src/ng/` that runs production's code and asserts ng's copy
-  agrees with it. Thirteen files, 103 tests, about 11,900 lines. Two of them (`copy_fidelity.rs`
-  in `paralog/` and in `locus_generation/pileup/`) compare production's *source text* through
-  `include_str!`; the other eleven compare *computed results*.
+  agrees with it. Thirteen files are named for it — 103 tests, 11,927 lines — and two of those
+  (`copy_fidelity.rs` in `paralog/` and in `locus_generation/pileup/`) compare production's
+  *source text* through `include_str!` while the other eleven compare *computed results*.
+  **A sweep before C1 found 46 more such tests in 18 ordinary modules**, plus seven files whose
+  dependency on production is not an oracle at all; §5.C's second table lists them and says why
+  the count moved.
 
 ## 2. Scope
 
@@ -170,7 +173,8 @@ and makes ng's version the only one.
 
 ### Milestone C — the oracle tests keep their comparisons and lose their dependency
 
-One step per file. The rule applied to each: **if the test computes production's answer at test
+**Twenty-six steps, one per file or per group of files that share one production item** — the
+first table's thirteen, then the twelve the sweep added. The rule applied to each: **if the test computes production's answer at test
 time from inputs the test builds, freeze that answer into a fixture and compare against the
 fixture; if it compares source text, delete it; if it uses production only as a helper, copy the
 helper.** Fixtures live beside the test in a `testdata/` directory as the module's existing
@@ -195,14 +199,88 @@ carries a header line naming the production commit that wrote it.
 | `scanner_parity.rs` | 1 | ng's scanner against a golden catalog already committed under `tests/data/tandem_repeat/` | **copy** production's post-filter `build_loci` and `TrfRecord::for_test` into the test; the golden file is already the fixture |
 | `window_coverage/production_parity.rs` | 1 | window means against `SlidingWindowCoverageAccumulator` on generated streams | **freeze** |
 
-- ☐ **C1–C13**, one checkbox per row, in table order. Each: *Depends:* B9 · *Source:* the
+- **C1–C13**, one checkbox per row, in table order. Each: *Depends:* B9 · *Source:* the
   file's own header, which names the spec section it guards.
+  - ✅ **C1** `locus_generation/pileup/parity.rs` — **14 tests → 8, and one of the 8 frozen.**
+    What building found, recorded 2026-09-13: of the 14, three were already `#[ignore]`d under
+    the 2026-09-11 retirement (the two whole-output differentials and the real-data one), and
+    three more tested only the harness that compared two walkers (the census, the projection,
+    the shared reference bytes). Those six were deleted with the citation, as the row allowed,
+    and the harness went with them — the file is 1,900 lines, from 4,669. Of the eight that
+    stay, **one** still compared ng against production — the malformed-input error stream — and
+    it is frozen: production's five outcomes measured at `d9e7b076` and written as literals in
+    the test, and a mutation of one literal shown to fail it. Four never touched production and
+    three read production's walk only to count what the case generator reaches; those three
+    now read ng's walk. Two ng-only checks the retired census ran — at least half as many chain
+    ids as reads, and partial-witness runs inside their locus — moved into
+    `every_emitted_observation_carries_a_read` rather than going unrun.
+  - ☐ C2 · ☐ C3 · ☐ C4 · ☐ C5 · ☐ C6 · ☐ C7 · ☐ C8 · ☐ C9 · ☐ C10 · ☐ C11 · ☐ C12 · ☐ C13
 - ☐ **C14. The four parity examples** — `ng_psp_against_production.rs`, `ng_psp_parity.rs`,
   `ng_psp_head_encoding.rs` (`test = true` in `Cargo.toml`), `paralog_score_parity.rs` — are
   deleted with a line each in the report saying which document already holds their result.
   *Depends:* — · *Source:* PROJECT_STATUS entries for each.
 
-> **Checkpoint C: production is now imported only by production.** `grep -rn 'crate::\(pileup\|psp\|…\)' src/ng` is empty; `cargo test` runs the frozen tests green; A2's md5s equal A1's.
+#### The rest of C, found by sweeping for oracles outside the thirteen dedicated files
+
+**Recorded 2026-09-12, before C1 was started.** §1 said "thirteen files, 103 tests"; that counted
+only the files whose *name* says parity. Sweeping `src/ng/` and `src/pop_var_caller_exp/` for every
+site that names a production module found **25 further files**. Measured on the tree at `d9e7b076`:
+
+```
+grep -rnE 'crate::(pileup|psp|pileup_record|genetics|pop_var_caller|var_calling|vcf|ssr|
+           paralog|sample_summary|baq|norm_seqs)(::|;| )' src/ng src/pop_var_caller_exp src/main_exp.rs
+```
+
+128 lines, of which 13 are doc comments. The thirteen dedicated files hold 103 tests over 11,927
+lines; the twenty-five further files hold **46 more tests that execute production code**, spread
+over 18 of them. The other seven are not oracles at all, and they are the reason this sweep
+mattered:
+
+- **Three of them are shipped code, not tests.** `src/pop_var_caller_exp/` — ng's own command
+  surface, which §1 counts as part of ng — still imports `crate::pop_var_caller::common`. B9's
+  guard is scoped to `src/ng` and cannot see them, so Checkpoint B passed with them present. They
+  must land before D1 deletes `src/pop_var_caller/`.
+- **One is a test-fixture builder that shared infrastructure also uses.** `cram_files` writes
+  synthetic FASTA and CRAM files to a tempdir. It lives in `src/pileup/per_sample/`, which D3
+  deletes, and `src/bam/` (three files) and `src/fasta/` (one) call it from their own tests. Those
+  are modules §2 keeps, so it is rehomed, not frozen.
+- **Two are B3 repoints that were listed and not made.** B3's row named
+  `benches/ng_psp_perf.rs` and `examples/dhat_ng_psp.rs`; both still say
+  `pop_var_caller::pileup_record::ChainId`.
+
+| step | file(s) | tests | what it runs from production | action |
+|---|---|---:|---|---|
+| C15 | `pop_var_caller_exp/{generate_psps,typed_regions,calling_run}.rs` | — | `pop_var_caller::common::{current_command_line, rfc3339_now, DEFAULT_BUFFERED_IO_CAPACITY}` | **copy into ng.** Shipped code — **own commit**, and it is Milestone B's work arriving late |
+| C16 | `pileup/per_sample/cram_files.rs` and its nine callers | — | the synthetic FASTA/CRAM builder itself | **rehome to `src/bam/`** — see the deviation note below |
+| C17 | `benches/ng_psp_perf.rs`, `examples/dhat_ng_psp.rs` | — | `pileup_record::ChainId` | **repoint** to `ng::types::ChainId`, finishing B3 |
+| C18 | `alignment/stutter.rs`, `calling/likelihood/mod.rs`, `locus_generation/pileup/{generator,mod}.rs`, `psp/{mod,header}.rs` | 6 | six constants asserted equal to ng's copies: `MAX_SLIP`, `MIN_BASE_ERROR`, five walker `DEFAULT_*`, `psp::header::HEAD_MAGIC` | **freeze** — the fixture is the literal value, with the production commit that wrote it |
+| C19 | `repeat_catalog/anchor.rs`, `region_typing/mod.rs`, `reference_info.rs` | 3 | `ssr::catalog::io::CatalogReader`, reading the committed `tests/data/tandem_repeat/golden.ssr_catalog.bed.gz` | **freeze the file's contents** — the loci, the header's build settings, and its reference md5 — so the golden catalog stays the oracle without production's parser |
+| C20 | `calling/likelihood/generic.rs` | 1 | `var_calling::per_group_merger::standard_log_likelihood`, `pileup_record::AlleleSupportStats` | **freeze** |
+| C21 | `calling/genotype_prior/dirichlet_multinomial.rs` | 1 | `genetics::dirichlet_multinomial_log_priors` | **freeze** |
+| C22 | `alignment/ssr_marginal_sequence.rs` | 3 | `ssr::cohort::pair_hmm::{HmmScratch, align_subst}` | **freeze** |
+| C23 | `locus_generation/ssr.rs` | 6 | `ssr::pileup::{fetch_reads, alignment, footprint, locus_tally}`, `ssr::types` | **freeze** |
+| C24 | `region_typing/segment_criteria.rs` | 9 | `ssr::catalog::postprocess::build_loci`, `ssr::catalog::{CatalogParams, trf::TrfRecord}`, `ssr::types::{Locus, Motif}` | **freeze.** A further 21 tests in the file only reach production through the helper that builds *both* sides' settings from one source; those need the helper split, not a fixture |
+| C25 | `ref_seq.rs` | 1 | `pileup::per_sample::read_processor::RawContigRefCache` | **freeze** |
+| C26 | `read/prepared_read.rs` | 6 | `pileup::walker::{PreparedRead, MateRole}` through the four `#[cfg(test)]` bridges B7 left in place | **freeze**, and delete the bridges. *Depends:* C1 and C9, which consume them |
+
+- ☐ **C15** · **own commit** · *Depends:* B9 · *Source:* §1 (ng includes `pop_var_caller_exp`).
+- ☐ **C16** · *Depends:* — · *Source:* the B5 deviation, which settled the same question for `CigarOp`.
+- ☐ **C17** · *Depends:* — · *Source:* B3's row.
+- ☐ **C18**–**C25**, one checkbox each, in table order · *Depends:* B9.
+- ☐ **C26** · *Depends:* C1, C9.
+
+  **Deviation, recorded 2026-09-12: `cram_files` goes to `src/bam/`, and §2's "shared
+  infrastructure is not touched" gives way.** The alternative is a copy in ng and a second copy
+  left behind for `bam` and `fasta` to use — two builders of the same synthetic CRAM, drifting.
+  §2 excluded shared infrastructure to keep this plan from *pruning* it; taking in a file whose
+  four non-ng callers already live there is not pruning, and B5 already crossed this line for
+  `CigarOp` for the same reason. Production's own `ssr` callers keep compiling through the move
+  because the new path is a `use`, and they go at D4 regardless.
+
+> **Checkpoint C: production is now imported only by production.** The sweep command at the head
+> of the second table, run over `src/ng`, `src/pop_var_caller_exp`, `src/main_exp.rs`, `tests/ng_*`,
+> `benches/ng_*` and `examples/ng_*`, returns nothing; `cargo test` runs the frozen tests green;
+> A2's md5s equal A1's.
 > Pause for review — this is the last checkpoint where the owner can ask for another oracle to be
 > frozen, because after D there is nothing to freeze it from.
 
@@ -289,7 +367,7 @@ Leaves first, so each commit compiles. `lib.rs` loses its `pub mod` line with ea
 |---|---|
 | A — baseline | A2 run twice against one binary gives identical md5s |
 | B — sever | md5s = A1; test totals = A1; `left_align_parity` and `pileup/parity` green with production still present |
-| C — freeze | md5s = A1; frozen tests green; `grep` for production paths in `src/ng` outside `#[cfg(test)]` is empty |
+| C — freeze | md5s = A1; frozen tests green; the sweep at the head of §5.C's second table, run over ng's source, command surface and `ng_*` tests/benches/examples, returns nothing |
 | D — delete | md5s = A1; all five cargo gates green; test total = A1 − production − deleted oracles, both numbers stated |
 | E — move | md5s = A1 except `##commandline`; `git log --follow` on a moved file reaches its ng history |
 

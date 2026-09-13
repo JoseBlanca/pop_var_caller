@@ -30,12 +30,10 @@
 //!
 //! On every inherited fixture the two coincide: the copied suite's references are
 //! uppercase `ACGT` throughout, so canonicalisation is the identity and the walk
-//! sees exactly what production's walk sees. That coincidence is *pinned*, not
-//! assumed — see `parity.rs`'s
-//! `both_sides_of_the_differential_are_served_the_same_bytes`, which fails if a
-//! fixture ever grows a lower-case or ambiguity-coded base. Without that pin such
-//! a fixture would surface as "the two walkers disagree" and be chased into the
-//! walk.
+//! sees exactly what production's walk sees. Until promotion step C1 that coincidence
+//! was pinned by a test in `parity.rs` that compared the two views byte for byte; it
+//! went when production's walker stopped being run beside ng's, since the coincidence
+//! only mattered while two walkers were being compared.
 
 use crate::fasta::MultiChromRefFetcher;
 use crate::fasta::fetcher::{ChromRefFetchError, canonicalise};
@@ -306,7 +304,7 @@ mod tests {
     /// Compared through the `Debug` rendering rather than by value: it names the field
     /// that moved when it fails. (`PileupRecord` *does* have a hand-written `PartialEq`
     /// — [pileup_record.rs:208](crate::pileup_record) — which an earlier version of this
-    /// comment denied; `parity.rs` relies on it. The `Debug` comparison is a
+    /// comment denied. The `Debug` comparison is a
     /// diagnostics choice here, not a necessity.)
     #[test]
     fn a_walk_over_the_double_matches_the_same_walk_over_a_real_reference() {

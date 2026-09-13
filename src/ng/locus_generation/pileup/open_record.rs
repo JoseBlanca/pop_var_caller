@@ -201,9 +201,9 @@ impl FoldedReads {
 /// It was reconstructed at the `PileupRecord` boundary through Milestone A, from a per-read
 /// flag on [`FoldedReadState`], so the stage-1 differential could keep comparing every field
 /// of every record while A2–A5 changed the fold underneath it. **B2 removed that boundary**
-/// and both went with it. `parity.rs` now zeroes the field on *both* sides and names the
-/// removal where it does so, which is what keeps a deliberate absence distinguishable from
-/// the oversight the Milestone A review found.
+/// and both went with it. The removal is recorded here, which is what keeps a deliberate
+/// absence distinguishable from the oversight the Milestone A review found; the projection in
+/// `parity.rs` that also named it went at promotion step C1.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct AlleleSupportStats {
     /// Number of supporting reads for this allele in this record.

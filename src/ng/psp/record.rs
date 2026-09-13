@@ -688,8 +688,8 @@ pub struct DecodedRecordBody {
 ///
 /// The inequality is kept beside it, because it is a second, independent statement: it says the
 /// *declared* count could describe those reads at all. ⚠ It is the same inequality the walk's own
-/// differential against production asserts **on one side only** — `parity.rs` asserts the lower
-/// bound; the upper is this reader's own.
+/// tests assert **on one side only** — `parity.rs`'s `every_emitted_observation_carries_a_read`
+/// asserts the lower bound; the upper is this reader's own.
 fn check_a_derived_read_list(
     body: &FieldReader<'_>,
     derived: &[ChainId],
