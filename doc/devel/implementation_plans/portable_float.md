@@ -100,7 +100,7 @@ cover.
   file so the macOS and Linux runs can be compared bit for bit — showing how often the two
   platforms' std disagree today, and that libm's outputs match across them. Run on both machines.
   *Depends:* A1. *Source:* brief, "Milestone A", second bullet.
-- ☐ **A3. The caller's speed baseline.** The five criterion benches (`ng_site_quality_perf`,
+- ✅ **A3. The caller's speed baseline.** The five criterion benches (`ng_site_quality_perf`,
   `ng_ssr_delimiter_perf`, `ng_generic_pileup_perf`, `ng_psp_perf`, `ng_joint_fit_perf` with
   `--features bench-fixtures`) on both machines, each at its native parallelism and run twice to
   see run-to-run noise; and wall time and peak memory of `call-from-alignments`, `generate-psps`
@@ -164,4 +164,21 @@ identity oracle. On macOS: `cargo test --lib --tests --all-features` (4,786 pass
 
 ## 8. Deviations
 
-None yet.
+Recorded as they happened; each step's report gives the detail.
+
+- **A2's ranges were revised twice.** Once when A1 reported which arguments the hot calls receive,
+  and again after A2's review asked for the extremes A1 leaves unbounded. The review also found the
+  first runs' argument order was a sawtooth the branch predictor learned, so every timing was
+  retaken.
+- **A2 checks constants the compiler computes while building.** `powi` with literal operands folds
+  to different bits from its run-time value in 15 of 20 cases; B1's handling of `powi` depends on it.
+- **A3's baseline includes `estimate-parameters`** and a 160-region set beside the oracle's 20
+  regions. The plan named only the calling commands, but a profile put about 30% of the parameter
+  fit's CPU in `exp` and `log`, and the fit takes about a hundred times as long as calling the psps
+  it reads.
+- **A3 measured the change on the caller before Checkpoint A**, with a build that was never
+  committed. That build defines the C maths symbols itself, calling libm, so every call goes
+  through libm with no call site edited. It gives each command's slowdown and the output change
+  directly, where the plan would have left Checkpoint A to estimate them from A2's per-function
+  timings. Milestone B's own measurement step still stands, because the real conversion can
+  inline libm and the substitution cannot.
