@@ -114,25 +114,57 @@ cover.
 
 ### Milestone B — convert (only if approved at A)
 
-Provisional; its grouping is revised at Checkpoint A from A1's inventory.
+**Approved at Checkpoint A (owner, 2026-09-14): convert every call.** The fit's slowdown of about 30%
+is accepted because a run fits once; up to 3% on the calling commands is accepted.
 
-- ☐ **B1. The `float` module.** `src/float.rs`: one function per transcendental the caller uses,
-  each delegating to `libm`, plus `powi` as an explicit multiplication loop if A2 shows std's `powi`
-  is not bit-stable; unit tests pin a handful of outputs as bits.
-  *Depends:* A. *Source:* brief, fix step 1.
-- ☐ **B2…Bn. Convert call sites, one group per commit.** Groups follow the module tree (alignment;
-  calling likelihoods; calling inference, prior and quality; parameter estimation; the rest), with
-  constants computed from literals written as bits where A1 marked them. **Own commit each, do not
-  bundle**; the identity oracle runs before and after each, and each commit message records whether
-  the digests moved.
-  *Depends:* B1. *Source:* brief, fix step 1.
-- ☐ **B(n+1). The clippy ban.** `clippy.toml` `disallowed-methods` on the std methods, with the
-  scope over examples as decided at Checkpoint A.
-  *Depends:* all conversion steps. *Source:* brief, fix step 2.
-- ☐ **B(n+2). Measure the change.** A3's benches and runs repeated on the same machines; the identity
-  oracle's VCFs diffed against A's, counting changed records, genotypes and repeat-tract calls and
-  explaining each; the GIAB benchmark if the output moved; the full test suite on both platforms.
-  *Depends:* B(n+1). *Source:* brief, "Milestone B".
+Revised at the checkpoint from what Milestone A found:
+
+- **Constants are not written out as bits.** Once a call goes through libm, anything the compiler
+  computes while building is libm's own arithmetic — additions, multiplications, comparisons —
+  which rounds identically on every machine. A2's hazard was the compiler folding *std's* calls with
+  the build machine's library. The per-quality table `75722336` wrote as glibc's bits stays as it is:
+  already portable, and changing it would move output for no gain.
+- **Test code converts too.** The ban (B6) covers every target, and a test that computes its
+  expected value with std's `ln` beside code using libm's would compare two libraries.
+- **Examples are not converted.** Each example that calls a banned method gets a file-level
+  `allow`, stating that examples are research tools outside the portability guarantee. 22 files.
+- **A parity oracle for the conversion.** Step A3's libm build sends every std maths call through
+  libm, so a correct conversion must reproduce its outputs byte for byte:
+  - the parameters file it fitted on the macOS 20-region psps (checksum `3f5e5e7f`);
+  - the VCF it called from them with that file (`tmp/calls_libm/libm.records`, checksum `1e40bd1e`);
+  - the identity oracle's five baseline checksums.
+
+  Where the conversion differs, the difference must be explained: `powi` as a Rust loop, or a call
+  the compiler folded.
+
+The groups follow A1's count of calls, shipped and test, in `src/` (426 in all):
+
+- ✅ **B1. The `float` module.** `src/float.rs`: `ln`, `exp`, `powf`, `powi`, `log10`, `ln_1p`,
+  `exp_m1`, `sin` and `cos` as free functions, each delegating to `libm`. `powi` is the
+  square-and-multiply loop, which A2 found bit-identical to std's run-time `powi`. Unit tests pin
+  outputs as bits, and check `powi` against std's at run time. Nothing calls the module yet, so no
+  output moves.
+  *Depends:* A. *Source:* brief, fix step 1; A2 §"Constants the compiler computes while building".
+- ☐ **B2. Convert `alignment` and `locus_generation`** (101 calls). **Own commit.**
+  *Depends:* B1. *Source:* brief, fix step 1; A1 §2.1.
+- ☐ **B3. Convert `calling`, `genetics.rs` and `types.rs`** (162 calls). **Own commit.**
+  *Depends:* B1. *Source:* A1 §2.2–2.6.
+- ☐ **B4. Convert `paralog`** (38 calls). **Own commit.** *Depends:* B1. *Source:* A1 §2.7.
+- ☐ **B5. Convert `parameter_estimation`** (125 calls). **Own commit** — this is the step that moves
+  the fitted parameters, so the parity oracle's parameters file is checked here.
+  *Depends:* B1. *Source:* A1 §2.8–2.10.
+- ☐ **B6. The clippy ban.** `clippy.toml` `disallowed-methods` on `f64::{ln, exp, powf, powi, log10,
+  log2, log, ln_1p, exp_m1, sin, cos, tan, …}` and the `f32` twins, each pointing at `crate::float`;
+  the examples' `allow`s.
+  *Depends:* B2–B5. *Source:* brief, fix step 2.
+- ☐ **B7. Measure the change.** A3's runs, fit and benches repeated with
+  `scripts/portable_float_baseline.sh` on the same machines. The identity oracle and the parity
+  oracle, both platforms. The full test suite on both platforms. The GIAB benchmark if a genotype
+  moves.
+  *Depends:* B6. *Source:* brief, "Milestone B".
+
+Each conversion step runs the module's tests, the whole suite, and the identity oracle, and says in
+its commit which recorded test answers moved and why.
 
 > **Checkpoint B: the cost is paid or refused.** Report the speed cost, the output change and a
 > recommendation. Pause for the owner's decision.

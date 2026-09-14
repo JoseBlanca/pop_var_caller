@@ -81,6 +81,7 @@ pub mod calling;
 pub mod cli;
 pub mod error_render;
 pub mod fasta;
+pub mod float;
 pub mod genetics;
 pub mod iter_ext;
 pub mod locus_generation;
