@@ -44,6 +44,7 @@
 //! round-trips that defeat parity.)
 
 use super::MarginalAligner;
+use crate::float;
 use crate::types::{DomainError, LogProb};
 
 /// Bases of slop tolerated at each end of a sequence: a gap is admitted only within this
@@ -142,7 +143,7 @@ impl SsrSequenceMarginal {
             "equal_length_probability is the same-length case; the unequal-length forward is B2"
         );
         if read == reference {
-            return (1.0 - self.eps).powi(read.len() as i32);
+            return float::powi(1.0 - self.eps, read.len() as i32);
         }
         substitution_product(read, reference, self.eps)
     }
@@ -291,7 +292,7 @@ impl MarginalAligner for SsrSequenceMarginal {
         _context: (),
         scratch: &mut Self::Scratch,
     ) -> LogProb {
-        LogProb(self.linear_probability(read, reference, scratch).ln())
+        LogProb(float::ln(self.linear_probability(read, reference, scratch)))
     }
 }
 
@@ -331,7 +332,7 @@ mod tests {
     fn an_exact_match_scores_one_minus_eps_to_the_length() {
         let seq = b"CACACACA";
         let got = aligner(EPS).equal_length_probability(seq, seq);
-        assert!((got - (1.0 - EPS).powi(8)).abs() < 1e-15, "got {got}");
+        assert!((got - float::powi(1.0 - EPS, 8)).abs() < 1e-15, "got {got}");
     }
 
     /// One substitution costs **exactly** a factor `(ε/3)/(1−ε)` against the exact match —
@@ -344,7 +345,7 @@ mod tests {
         let got = a.equal_length_probability(read, reference);
 
         // Absolute form: seven matches, one mismatch.
-        let expected = (1.0 - EPS).powi(7) * (EPS / 3.0);
+        let expected = float::powi(1.0 - EPS, 7) * (EPS / 3.0);
         assert!(
             (got - expected).abs() < 1e-15,
             "got {got}, expected {expected}"
@@ -389,7 +390,7 @@ mod tests {
         // bit; a port that got the arithmetic *wrong* would be out by far more than four
         // steps.
         assert!(
-            ulps_apart(all_mismatch, (1.0f64 / 3.0).powi(4)) <= 4,
+            ulps_apart(all_mismatch, float::powi(1.0 / 3.0, 4)) <= 4,
             "got {all_mismatch}"
         );
         // A mismatch outscores a match at ε = 1: (1/3)^4 > 0 = 0^4.
@@ -418,7 +419,7 @@ mod tests {
     fn an_all_mismatch_line_up_scores_eps_over_three_to_the_length() {
         // AAAA vs CCCC: four mismatches, no shared base.
         let got = aligner(EPS).equal_length_probability(b"AAAA", b"CCCC");
-        assert!((got - (EPS / 3.0).powi(4)).abs() < 1e-18, "got {got}");
+        assert!((got - float::powi(EPS / 3.0, 4)).abs() < 1e-18, "got {got}");
     }
 
     /// The checked constructor rejects the same out-of-range rates `FlatEmission::try_new`
@@ -481,7 +482,7 @@ mod tests {
         let reference = b"CACACACA";
         let read = b"CACACACAC"; // one extra base at the trailing flank
         let got = a.linear_probability(read, reference, &mut scratch);
-        let clean_end_gap_path = (1.0 - EPS).powi(8) * EPS;
+        let clean_end_gap_path = float::powi(1.0 - EPS, 8) * EPS;
         assert!(got > 0.0);
         assert!(
             (got / clean_end_gap_path - 1.0).abs() < 0.05,
@@ -649,7 +650,7 @@ mod tests {
             scratch: &mut HmmScratch,
         ) -> f64 {
             if obs == variant {
-                return (1.0 - eps).powi(obs.len() as i32);
+                return crate::float::powi(1.0 - eps, obs.len() as i32);
             }
             if obs.len() == variant.len() {
                 return substitution_product(obs, variant, eps);
@@ -781,7 +782,7 @@ mod tests {
             let mut ours = SequenceMarginalScratch::new();
             let mut prod = HmmScratch::new();
             let marginal = a.marginal_probability(read, reference, (), &mut ours);
-            let prod_log = align_subst(read, reference, EPS, &mut prod).ln();
+            let prod_log = float::ln(align_subst(read, reference, EPS, &mut prod));
             assert!(
                 ulps_apart(marginal.get(), prod_log) <= 16,
                 "{read:?} against {reference:?}: {} against {prod_log}",
@@ -808,7 +809,7 @@ mod tests {
             let mut s2 = SequenceMarginalScratch::new();
             let marginal = a.marginal_probability(read, reference, (), &mut s1);
             let linear = a.linear_probability(read, reference, &mut s2);
-            assert_eq!(marginal.get().to_bits(), linear.ln().to_bits());
+            assert_eq!(marginal.get().to_bits(), float::ln(linear).to_bits());
         }
     }
 

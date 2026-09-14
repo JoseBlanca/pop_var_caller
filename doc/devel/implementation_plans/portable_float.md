@@ -145,7 +145,7 @@ The groups follow A1's count of calls, shipped and test, in `src/` (426 in all):
   outputs as bits, and check `powi` against std's at run time. Nothing calls the module yet, so no
   output moves.
   *Depends:* A. *Source:* brief, fix step 1; A2 §"Constants the compiler computes while building".
-- ☐ **B2. Convert `alignment` and `locus_generation`** (101 calls). **Own commit.**
+- ✅ **B2. Convert `alignment` and `locus_generation`** (101 calls). **Own commit.**
   *Depends:* B1. *Source:* brief, fix step 1; A1 §2.1.
 - ☐ **B3. Convert `calling`, `genetics.rs` and `types.rs`** (162 calls). **Own commit.**
   *Depends:* B1. *Source:* A1 §2.2–2.6.
@@ -214,3 +214,12 @@ Recorded as they happened; each step's report gives the detail.
   directly, where the plan would have left Checkpoint A to estimate them from A2's per-function
   timings. Milestone B's own measurement step still stands, because the real conversion can
   inline libm and the substitution cannot.
+- **B2 writes one constant out as bits after all.** The revised Milestone B said constants would
+  not be. But the flat-gap aligner's tract gap-open cost, `ln(0.01)`, sits almost exactly halfway
+  between two `f64`s. glibc and Apple give the correctly rounded `0xc0126bb1bbb55515`; libm gives
+  `…516`, half a step off. That one unit flipped a tie in `alignment::delimit_parity`: seed `0x5eed0001`, case 28,
+  started its tract a base earlier than the answer the deleted older caller recorded, on both
+  platforms. The cost is now `f64::from_bits(0xc0126bb1bbb55515)`, which is portable and keeps
+  every recorded answer. **The rule from here on:** a constant is written out as its old bits only
+  where converting it moves a recorded answer. A test ties each such constant to `float::ln` within
+  one step.

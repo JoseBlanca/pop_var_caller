@@ -52,6 +52,7 @@
 use super::emission::{Emission, FlatEmission};
 use super::ssr_best_path_flat_gap::TransitionCosts;
 use super::{MarginalAligner, RepeatContext, RepeatGeometry};
+use crate::float;
 use crate::types::{BaseQual, LogProb};
 
 /// The fixed synthetic quality every base is scored at. Its numeric value is **immaterial**:
@@ -236,7 +237,7 @@ fn ln_sum2(a: f64, b: f64) -> f64 {
         return a;
     }
     let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
-    hi + (lo - hi).exp().ln_1p()
+    hi + float::ln_1p(float::exp(lo - hi))
 }
 
 /// Add three log-probabilities.
@@ -535,9 +536,9 @@ mod tests {
         assert_eq!(ln_sum2(-1.0, ni), -1.0);
         assert_eq!(ln_sum2(ni, ni), ni);
         // ln(exp(0) + exp(0)) = ln 2.
-        assert!((ln_sum2(0.0, 0.0) - 2.0f64.ln()).abs() < 1e-15);
+        assert!((ln_sum2(0.0, 0.0) - float::ln(2.0)).abs() < 1e-15);
         // Three-way, with one impossible term ignored.
-        assert!((ln_sum3(0.0, 0.0, ni) - 2.0f64.ln()).abs() < 1e-15);
+        assert!((ln_sum3(0.0, 0.0, ni) - float::ln(2.0)).abs() < 1e-15);
     }
 
     /// **C2 — the whole-read forward scores its own generating allele highest.** A read

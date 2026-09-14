@@ -73,6 +73,7 @@
 
 use super::emission::Emission;
 use super::{BestPathAligner, ReadBases, RepeatContext, RepeatSpan};
+use crate::float;
 use std::sync::LazyLock;
 
 /// Which of the pair-HMM's three states a cell was entered in.
@@ -193,12 +194,30 @@ const GAP_OPEN_PROB: f64 = 2.9e-5;
 /// decide here (spec §4.2).
 ///
 /// **Provisional development calibration, not a finding.**
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the shipped cost is LN_GAP_OPEN_PROB_TRACT, written out; a test ties it to this"
+    )
+)]
 const GAP_OPEN_PROB_TRACT: f64 = 1e-2;
+
+/// `ln(GAP_OPEN_PROB_TRACT)`, **written out as the bits glibc and Apple's libm produce**, not
+/// computed. The logarithm of the `f64` nearest 0.01 lies almost halfway between two adjacent
+/// `f64`s, 0.488 of a step from `0xc0126bb1bbb55515`: glibc and Apple's libm both return that
+/// correctly rounded value, and the libm crate, which [`crate::float`] uses, returns `…516`, half
+/// a step off. That one unit breaks a tie in the repeat-tract delimiter: in
+/// `alignment::delimit_parity`, seed `0x5eed0001`, case 28 starts its tract a base earlier than the
+/// answer the older caller recorded, and those answers cannot be recorded again. Written out, the
+/// cost is the same on every platform and the recorded answers hold. A test keeps it within one
+/// unit of `float::ln(GAP_OPEN_PROB_TRACT)`.
+const LN_GAP_OPEN_PROB_TRACT: f64 = f64::from_bits(0xc012_6bb1_bbb5_5515);
 
 /// Gap-extension probability: Dindel's fixed `e⁻¹ ≈ 0.368`. Shared by both regimes —
 /// **only the open cost switches regime**, because the open is the dominant fixed cost and
 /// the extension is a knob nobody has yet needed to turn (spec §4.2).
-static GAP_EXTEND_PROB: LazyLock<f64> = LazyLock::new(|| (-1.0f64).exp());
+static GAP_EXTEND_PROB: LazyLock<f64> = LazyLock::new(|| float::exp(-1.0));
 
 /// The pair-HMM's log-space transition probabilities, with a **tract-aware gap-open**.
 ///
@@ -218,11 +237,11 @@ impl Default for TransitionCosts {
     fn default() -> Self {
         let extend = *GAP_EXTEND_PROB;
         Self {
-            ln_match_to_match: (1.0 - 2.0 * GAP_OPEN_PROB).ln(),
-            ln_gap_open: GAP_OPEN_PROB.ln(),
-            ln_gap_open_tract: GAP_OPEN_PROB_TRACT.ln(),
-            ln_gap_close: (1.0 - extend).ln(),
-            ln_gap_extend: extend.ln(),
+            ln_match_to_match: float::ln(1.0 - 2.0 * GAP_OPEN_PROB),
+            ln_gap_open: float::ln(GAP_OPEN_PROB),
+            ln_gap_open_tract: LN_GAP_OPEN_PROB_TRACT,
+            ln_gap_close: float::ln(1.0 - extend),
+            ln_gap_extend: float::ln(extend),
         }
     }
 }
@@ -930,7 +949,7 @@ mod tests {
         let aligner = SsrFlatGapAligner {
             emission: PerQualityEmission::new(),
             costs: TransitionCosts {
-                ln_gap_open_tract: GAP_OPEN_PROB.ln(),
+                ln_gap_open_tract: float::ln(GAP_OPEN_PROB),
                 ..TransitionCosts::new()
             },
         };
@@ -952,6 +971,25 @@ mod tests {
         );
     }
 
+    /// The written-out tract gap-open cost is `ln(GAP_OPEN_PROB_TRACT)` to within one unit in the
+    /// last place — the unit libm and the platform libraries disagree by — so a change to the
+    /// probability cannot leave a stale constant behind.
+    #[test]
+    fn the_written_out_tract_gap_open_cost_is_the_log_of_its_probability() {
+        let computed = float::ln(GAP_OPEN_PROB_TRACT);
+        let steps_apart =
+            (computed.to_bits() as i64 - LN_GAP_OPEN_PROB_TRACT.to_bits() as i64).abs();
+        assert!(
+            steps_apart <= 1,
+            "LN_GAP_OPEN_PROB_TRACT {LN_GAP_OPEN_PROB_TRACT:e} is {steps_apart} steps from \
+             ln({GAP_OPEN_PROB_TRACT}) = {computed:e}"
+        );
+        assert_eq!(
+            TransitionCosts::new().ln_gap_open_tract,
+            LN_GAP_OPEN_PROB_TRACT
+        );
+    }
+
     /// The match→match cost is built from the **flank** gap-open and never recomputed under
     /// the tract regime, so inside the tract the three transitions leaving a match sum to
     /// about 1.02. Reproduced from production deliberately; pinned so that fixing it is a
@@ -959,13 +997,14 @@ mod tests {
     #[test]
     fn the_tract_transitions_leaving_a_match_sum_past_one() {
         let costs = TransitionCosts::new();
-        let flank_total = costs.ln_match_to_match.exp() + 2.0 * costs.ln_gap_open.exp();
+        let flank_total = float::exp(costs.ln_match_to_match) + 2.0 * float::exp(costs.ln_gap_open);
         assert!(
             (flank_total - 1.0).abs() < 1e-12,
             "the flank transitions should sum to exactly one, summed to {flank_total}"
         );
 
-        let tract_total = costs.ln_match_to_match.exp() + 2.0 * costs.ln_gap_open_tract.exp();
+        let tract_total =
+            float::exp(costs.ln_match_to_match) + 2.0 * float::exp(costs.ln_gap_open_tract);
         assert!(
             (tract_total - 1.02).abs() < 1e-4,
             "expected the known ~1.02 tract total, got {tract_total}"
