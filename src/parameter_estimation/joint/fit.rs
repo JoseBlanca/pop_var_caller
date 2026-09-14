@@ -2257,9 +2257,9 @@ fn one_position(
         //
         // **⚠ No test enters this branch, and none of the fixtures can.** Every logarithm on the
         // way here is taken through `float::ln(p.max(f64::MIN_POSITIVE))`, which floors a read's
-        // term at about −708, and `ln_sum_exp` returns `−∞` only when every input already is one — so
-        // reaching `!position_ln.is_finite()` from well-formed evidence would take on the order of
-        // 1e305 reads at a position. What the two lines below maintain is tested where it can be:
+        // term at about −708, and `ln_sum_exp` returns `−∞` only when every input already is one —
+        // so reaching `!position_ln.is_finite()` from well-formed evidence would take on the order
+        // of 1e305 reads at a position. What the two lines below maintain is tested where it can be:
         // an all-zero position counts and contributes nothing, in `census_moments`'s
         // all-reference fixtures, which build the identical buffer. Replacing this block with a
         // `panic!` leaves the suite green, and that is a statement about the branch's

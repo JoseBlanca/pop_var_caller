@@ -153,7 +153,7 @@ The groups follow A1's count of calls, shipped and test, in `src/` (426 in all):
 - ✅ **B5. Convert `parameter_estimation`** (125 calls). **Own commit** — this is the step that moves
   the fitted parameters, so the parity oracle's parameters file is checked here.
   *Depends:* B1. *Source:* A1 §2.8–2.10.
-- ☐ **B6. The clippy ban.** `clippy.toml` `disallowed-methods` on `f64::{ln, exp, powf, powi, log10,
+- ✅ **B6. The clippy ban.** `clippy.toml` `disallowed-methods` on `f64::{ln, exp, powf, powi, log10,
   log2, log, ln_1p, exp_m1, sin, cos, tan, …}` and the `f32` twins, each pointing at `crate::float`;
   the examples' `allow`s.
   *Depends:* B2–B5. *Source:* brief, fix step 2.

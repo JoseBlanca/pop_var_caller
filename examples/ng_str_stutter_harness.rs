@@ -47,6 +47,11 @@
 //!
 //! Sections: `gates`, `identify`, `origin`, `saturation`, `shape`, `strata`, `composition`.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 use std::collections::HashMap;
 use std::fmt::Write as _;
 

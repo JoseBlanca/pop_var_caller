@@ -37,6 +37,10 @@
 //! ng_joint_contamination_harness [null|spike|budget] [samples] [depth] [loci] [groups] [fst]
 //! ```
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
 // The fits below are dense linear algebra written the way the textbooks write it — a Gram
 // matrix, a Cholesky solve, a Gaussian elimination — where the loop index *is* the matrix
 // index and two or three arrays are addressed by the same `k` at once. Clippy's rewrite of

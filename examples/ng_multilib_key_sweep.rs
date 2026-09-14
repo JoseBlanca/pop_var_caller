@@ -24,6 +24,11 @@
 //! cargo run --release --example ng_multilib_key_sweep
 //! ```
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 use std::collections::BTreeMap;
 
 /// SplitMix64 — dependency-free and reproducible, as `src/ssr/cohort/sim.rs` uses.

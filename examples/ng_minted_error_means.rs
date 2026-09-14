@@ -85,6 +85,11 @@
 //! Single-threaded, one sample at a time, and it takes a mutex per read while the census is
 //! armed. Nothing in the caller reads it.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

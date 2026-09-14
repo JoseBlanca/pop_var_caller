@@ -32,6 +32,10 @@
 //! predates it and still carries its own copy of the kernel; reconciling the two is worth doing and
 //! is not required for the checking story above.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
 #![allow(dead_code)]
 
 // ---------------------------------------------------------------------------

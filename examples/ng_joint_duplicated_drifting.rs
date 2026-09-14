@@ -35,6 +35,11 @@
 //! ng_joint_duplicated_drifting [positions] [panel sizes, comma separated]
 //! ```
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 use std::collections::BTreeMap;
 use std::time::Instant;
 

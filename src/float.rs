@@ -25,6 +25,12 @@
 //! to 3.3 ns more, on an Apple M5 Pro and in an arm64 Linux VM. That made the parameter fit about 30%
 //! slower and the calling commands at most 3% slower (report
 //! `portable_float_A3_caller_baseline_2026-09-14.md`).
+//!
+//! **Nothing else may call std's versions.** `clippy.toml` refuses `f64::ln`, `exp`, `powf`, `powi`
+//! and the other transcendental methods, and their `f32` twins, in every target, each with a message
+//! pointing here. Two places allow them on purpose: this module's tests, which compare against
+//! std, and the examples, which are research tools outside the guarantee.
+//! `scripts/check_float_ban.sh` proves every entry still refuses its method.
 
 /// The natural logarithm, `ln x`.
 #[inline]
@@ -102,6 +108,10 @@ pub fn cos(x: f64) -> f64 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "these tests compare crate::float with std's methods on purpose"
+)]
 mod tests {
     use super::*;
     use std::hint::black_box;

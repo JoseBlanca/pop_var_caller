@@ -23,6 +23,11 @@
 //! which either expands it or calls its runtime's `__powidf2`. It is measured against the same
 //! square-and-multiply loop written in Rust.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 use std::hint::black_box;
 use std::path::Path;
 use std::time::Instant;

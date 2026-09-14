@@ -89,6 +89,11 @@
 //! recovers known parameters from. Nothing here asserts a fitted value, and
 //! nothing here should be read as an accuracy check.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
