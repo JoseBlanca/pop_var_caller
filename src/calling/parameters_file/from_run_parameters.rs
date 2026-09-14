@@ -949,6 +949,7 @@ mod tests {
     use super::*;
     use crate::calling::genotype_prior::SpectrumSeed;
     use crate::calling::likelihood::ssr::{DEFAULT_OUTLIER_WEIGHT, RepeatTractOutlierWeight};
+    use crate::float;
     use crate::parameter_estimation::calibration::MintedReadErrors;
     use crate::parameter_estimation::joint::contamination::{
         ContaminationEstimate, NotIdentifiedReason,
@@ -994,7 +995,7 @@ mod tests {
 
     /// The accumulator's total for a read group whose reads averaged `mean_reported_error` apiece.
     fn a_read_groups_minted_totals(mean_reported_error: f64, reads: u32) -> MintedReadErrors {
-        MintedReadErrors::of_observation(mean_reported_error.ln() * f64::from(reads), reads)
+        MintedReadErrors::of_observation(float::ln(mean_reported_error) * f64::from(reads), reads)
     }
 
     /// **Three fitted rates whose scales all differ**, so a row written under the wrong read

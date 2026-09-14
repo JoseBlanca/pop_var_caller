@@ -36,6 +36,7 @@ pub mod artifact_correction;
 use crate::calling::genotype_prior::SpectrumSeed;
 use crate::calling::genotype_prior::dirichlet_multinomial::log_sum_exp_2;
 use crate::calling::{GenotypeIdx, GenotypeTableView};
+use crate::float;
 use crate::genetics::{MIN_ALT_CONCENTRATION, lgamma};
 use crate::types::{AlleleId, DomainError, LogProb, Phred};
 
@@ -188,7 +189,7 @@ pub(crate) fn score_best_genotype(posterior_row: &[f64]) -> (GenotypeIdx, Phred)
     // One unit in the last place below one, so the logarithm below is finite even where the
     // reads made every other genotype impossible.
     let best_below_one = best.min(1.0 - f64::EPSILON);
-    let quality = -10.0 * (1.0 - best_below_one).log10();
+    let quality = -10.0 * float::log10(1.0 - best_below_one);
     let capped = (quality as f32).clamp(0.0, MAX_GENOTYPE_QUALITY);
     (
         GenotypeIdx(u32::try_from(winner).expect("a genotype index fits a u32")),
@@ -559,7 +560,7 @@ fn fold_samples_into_allele_counts<'a>(
         next[..ploidy + live].fill(0.0);
         for (copies, &log_weight) in copy_counts.iter().enumerate() {
             let weight = if log_weight > f64::NEG_INFINITY {
-                (log_weight - largest).exp()
+                float::exp(log_weight - largest)
             } else {
                 0.0
             };
@@ -585,7 +586,7 @@ fn fold_samples_into_allele_counts<'a>(
             for value in next[ploidy..ploidy + live].iter_mut() {
                 *value *= inverse;
             }
-            log_scale += peak.ln();
+            log_scale += float::ln(peak);
         }
 
         std::mem::swap(&mut current, &mut next);
@@ -594,7 +595,7 @@ fn fold_samples_into_allele_counts<'a>(
     for (count, slot) in log_allele_count_distribution.iter_mut().enumerate() {
         let value = current[ploidy + count];
         *slot = if value > 0.0 {
-            value.ln() + log_scale
+            float::ln(value) + log_scale
         } else {
             f64::NEG_INFINITY
         };
@@ -609,8 +610,8 @@ fn log_sum_exp_over(values: &[f64]) -> f64 {
     if largest == f64::NEG_INFINITY {
         return f64::NEG_INFINITY;
     }
-    let total: f64 = values.iter().map(|value| (value - largest).exp()).sum();
-    largest + total.ln()
+    let total: f64 = values.iter().map(|value| float::exp(value - largest)).sum();
+    largest + float::ln(total)
 }
 
 #[cfg(test)]
@@ -792,8 +793,8 @@ mod tests {
             .iter()
             .copied()
             .fold(f64::NEG_INFINITY, f64::max);
-        let total: f64 = unnormalised.iter().map(|v| (v - largest).exp()).sum();
-        let log_total = largest + total.ln();
+        let total: f64 = unnormalised.iter().map(|v| float::exp(v - largest)).sum();
+        let log_total = largest + float::ln(total);
         let want = -10.0 * (unnormalised[0] - log_total) / std::f64::consts::LN_10;
 
         assert!(

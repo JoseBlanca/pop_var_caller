@@ -859,6 +859,7 @@ pub trait GenotypePriorModel {
 mod tests {
     use super::*;
     use crate::calling::GenotypeTable;
+    use crate::float;
     use crate::types::Ploidy;
     use crate::types::{AlleleId, LogProb};
     use std::sync::Arc;
@@ -908,10 +909,10 @@ mod tests {
             assert!(out.iter().all(|entry| entry.get().is_finite()), "{out:?}");
             // Normalised, because a row is defined only up to a shared additive constant and the
             // two carry different ones.
-            let total: f64 = out.iter().map(|entry| entry.get().exp()).sum();
+            let total: f64 = out.iter().map(|entry| float::exp(entry.get())).sum();
             rows.push(
                 out.iter()
-                    .map(|entry| entry.get().exp() / total)
+                    .map(|entry| float::exp(entry.get()) / total)
                     .collect::<Vec<f64>>(),
             );
             names.push(arm.name());
@@ -988,7 +989,7 @@ mod tests {
     /// the homozygous lookup naming the allele every copy is.
     #[test]
     fn the_prior_trait_takes_the_genotype_tables_views_unadapted() {
-        let ln2 = 2.0_f64.ln();
+        let ln2 = float::ln(2.0);
         // Triallelic diploid in VCF genotype order: 0/0, 0/1, 1/1, 0/2, 1/2, 2/2. Only the
         // three heterozygotes have two orderings, and they sit at 1, 3 and 4.
         assert_eq!(
@@ -1042,7 +1043,10 @@ mod tests {
         let model: &dyn GenotypePriorModel = &CoefficientOnlyPrior;
         model.fill_genotype_log_priors(&mut row, InbreedingF::try_new(0.5).unwrap());
 
-        assert_eq!(out, vec![LogProb(0.0), LogProb(2.0_f64.ln()), LogProb(0.0)]);
+        assert_eq!(
+            out,
+            vec![LogProb(0.0), LogProb(float::ln(2.0)), LogProb(0.0)]
+        );
     }
 
     /// **The shapes this caller commits to, not only the one the tests are convenient at.**

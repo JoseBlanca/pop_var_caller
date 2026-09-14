@@ -24,6 +24,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
+use crate::float;
 use crate::types::{AlleleId, Ploidy};
 
 /// The most alleles one locus can be called over: an [`AlleleId`] names exactly this
@@ -532,7 +533,7 @@ fn push_genotypes_with_highest_allele_below(
 fn log_factorial(n: u32) -> f64 {
     let mut acc = 0.0_f64;
     for i in 2..=n {
-        acc += f64::from(i).ln();
+        acc += float::ln(f64::from(i));
     }
     acc
 }
@@ -799,7 +800,7 @@ mod tests {
                     let orderings = counts
                         .iter()
                         .fold(factorial(u32::from(copies)), |acc, &k| acc / factorial(k));
-                    let expected = (orderings as f64).ln();
+                    let expected = float::ln(orderings as f64);
                     let got = table.log_multinomial_coeffs()[row];
                     assert!(
                         (got - expected).abs() < 1e-12,
@@ -1013,7 +1014,7 @@ mod tests {
         // `genotype_table_parity`; what this row is here to catch is a coefficient off
         // by whole nats.
         assert!(
-            (deep.log_multinomial_coeffs()[1] - 9.0_f64.ln()).abs() < 1e-12,
+            (deep.log_multinomial_coeffs()[1] - float::ln(9.0)).abs() < 1e-12,
             "ploidy 9, row 1 [8, 1] should be ln 9, got {}",
             deep.log_multinomial_coeffs()[1]
         );

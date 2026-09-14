@@ -7,6 +7,7 @@
 //! plan step B2 wraps around it (`doc/devel/ng/spec/calling_priors.md` §3.2).
 
 use crate::calling::genotype_prior::{GenotypePriorModel, PriorRow};
+use crate::float;
 use crate::genetics::PROBABILITY_FLOOR;
 #[cfg(test)]
 use crate::genetics::lgamma;
@@ -75,7 +76,7 @@ pub fn fill_random_mating_log_priors(row: &mut PriorRow<'_>) {
     // ln(α_a) once per allele — the first factor of every genotype's rising factorial, and
     // the whole term for an allele the genotype carries one copy of.
     for (slot, &alpha) in lgamma_concentration.iter_mut().zip(concentration) {
-        *slot = alpha.ln();
+        *slot = float::ln(alpha);
     }
 
     for ((slot, copies_of), &log_coeff) in out
@@ -133,7 +134,7 @@ fn one_genotypes_log_prior(
                     for step in 1..copies {
                         rising *= alpha + f64::from(step);
                     }
-                    acc + rising.ln()
+                    acc + float::ln(rising)
                 }
             },
         )
@@ -279,7 +280,7 @@ fn fill_inbreeding_mixture_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
     let concentration_total = concentration.iter().sum::<f64>();
     // ln(Σα), so the identical-by-descent branch's α_a / Σα costs one `ln` per homozygous
     // genotype rather than a division and a logarithm.
-    let log_concentration_total = concentration_total.ln();
+    let log_concentration_total = float::ln(concentration_total);
     // The genotype-independent term the primitive drops, `lgamma(Σα + m) − lgamma(Σα)`, put
     // back — on this branch rather than taken off the other, so that at `F = 0` the row is the
     // primitive's bit for bit and nothing downstream of an outbred sample shifts. See the
@@ -289,7 +290,7 @@ fn fill_inbreeding_mixture_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
         for step in 1..row.ploidy() {
             rising *= concentration_total + f64::from(step);
         }
-        rising.ln()
+        float::ln(rising)
     };
     // The two mixture weights, and they are floored differently on purpose.
     //
@@ -304,8 +305,8 @@ fn fill_inbreeding_mixture_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
     // identical-by-descent branch impossible, and `log_sum_exp_2` returns the other branch exactly.
     // Flooring it would replace that short-circuit with two `exp` and a `ln` per homozygous
     // genotype on every outbred sample — the ordinary case — to move nothing.
-    let log_weight_identical_by_descent = inbreeding.ln();
-    let log_weight_independent_draws = (1.0 - inbreeding).max(PROBABILITY_FLOOR).ln();
+    let log_weight_identical_by_descent = float::ln(inbreeding);
+    let log_weight_independent_draws = float::ln((1.0 - inbreeding).max(PROBABILITY_FLOOR));
 
     let (_, out) = row.scratch_and_out();
     // `zip` would truncate to the shorter of the two, which is the silent failure this module's
@@ -319,7 +320,7 @@ fn fill_inbreeding_mixture_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
             // place to change (spec §3.3).
             Some(allele) => {
                 let identical_by_descent = log_weight_identical_by_descent
-                    + concentration[usize::from(allele.0)].ln()
+                    + float::ln(concentration[usize::from(allele.0)])
                     - log_concentration_total
                     + shared_normalising_term;
                 log_sum_exp_2(independent_draws, identical_by_descent)
@@ -369,7 +370,7 @@ pub(crate) fn log_sum_exp_2(a: f64, b: f64) -> f64 {
         return a;
     }
     let larger = a.max(b);
-    larger + ((a - larger).exp() + (b - larger).exp()).ln()
+    larger + float::ln(float::exp(a - larger) + float::exp(b - larger))
 }
 
 #[cfg(test)]
@@ -386,7 +387,7 @@ mod tests {
     /// independent implementation rather than a table of golden values, which is what lets it
     /// keep checking after a constant moves or the concentration is fitted differently.
     fn pochhammer_ln(alpha: f64, copies: u32) -> f64 {
-        (0..copies).map(|j| (alpha + f64::from(j)).ln()).sum()
+        (0..copies).map(|j| float::ln(alpha + f64::from(j))).sum()
     }
 
     /// One genotype's log-prior the second way: `log_coeff + Σ_a pochhammer_ln(α_a, k_a)`.
@@ -621,61 +622,65 @@ mod tests {
 
     /// **Where the exact answer is knowable, ours is never the further from it.**
     ///
-    /// The second half of the claim above, and it needs no bignum: when every concentration
-    /// entry is a whole number and the rising product `α(α+1)…(α+k−1)` stays under 2^53, that
-    /// product is exact in an `f64` and its logarithm is a correctly rounded reference. Both
-    /// implementations are compared against it, so "ours is the more accurate spelling" is a
-    /// measurement here rather than an argument about cancellation.
+    /// The second half of the claim above, and it needs no bignum at test time: when every
+    /// concentration entry is a whole number and the rising product `α(α+1)…(α+k−1)` stays under
+    /// 2^53, that product is exact in an `f64`, and its logarithm has one correctly rounded value.
+    /// **Those values are written out below, computed outside `f64`** (100-digit decimal
+    /// arithmetic, rounded to the nearest `f64`) — not with this crate's `ln`, which would make the
+    /// reference the code's own arithmetic and the comparison unable to fail. Both implementations
+    /// are measured against them, so "ours is the more accurate spelling" is a measurement rather
+    /// than an argument about cancellation.
     ///
     /// **The concentrations are the ones a real cohort produces.** A leave-one-out entry is the
     /// seed plus the cohort's expected copies, so 3 is a tiny panel, 125 is the 63 diploid
     /// tomato accessions, and 2,001 and 6,001 are a thousand and three thousand — the top of the
     /// range `design_principles.md` §0 commits to. **This is where the two spellings separate**:
-    /// at 3 they are the same answer, and by 6,001 the difference form is thousands of units in
-    /// the last place adrift while the product form is at most one.
+    /// at 3 they are the same answer to within a unit, and by 6,001 the difference form is
+    /// thousands of units in the last place adrift while the product form is at most one. libm's
+    /// `ln` is itself one unit from the correctly rounded value at `ln 3`, the (3, 1) cell, which
+    /// is why the per-cell comparison allows ours one unit even where the difference form is exact.
     #[test]
     fn the_rising_product_is_at_least_as_close_to_exact_as_the_difference_of_two_lgammas() {
         let mut worst_ours_ulp = 0_i64;
         let mut worst_theirs_ulp = 0_i64;
         let mut cells = 0_u32;
-        for alpha in [3_u64, 125, 2_001, 6_001] {
-            for copies in 1_u32..=8 {
-                // The rising product as an integer, so that turning it into an `f64` is exact.
-                let exact_product: u128 = (0..u128::from(copies))
-                    .map(|step| u128::from(alpha) + step)
-                    .product();
-                // **Past 2^53 the product stops being exact and the reference stops being a
-                // reference**, so those cells are skipped rather than checked against a number
-                // that is itself rounded. At a concentration of 6,001 that leaves 4 copies;
-                // the count below is what says the grid did not quietly empty out.
-                if exact_product >= (1_u128 << 53) {
-                    continue;
+        for (alpha, copies, exact_bits) in EXACT_LN_OF_RISING_PRODUCT {
+            // The rising product as an integer: the grid holds only products under 2^53, so
+            // turning it into an `f64` is exact. Past that the reference would itself be rounded.
+            let exact_product: u128 = (0..u128::from(copies))
+                .map(|step| u128::from(alpha) + step)
+                .product();
+            assert!(
+                exact_product < (1_u128 << 53),
+                "cell ({alpha}, {copies}) is past 2^53 and cannot have an exact reference"
+            );
+            cells += 1;
+
+            let alpha = alpha as f64;
+            let ours = {
+                let mut rising = alpha;
+                for step in 1..copies {
+                    rising *= alpha + f64::from(step);
                 }
-                cells += 1;
-                let exact = (exact_product as f64).ln();
-
-                let alpha = alpha as f64;
-                let ours = {
-                    let mut rising = alpha;
-                    for step in 1..copies {
-                        rising *= alpha + f64::from(step);
-                    }
-                    rising.ln()
-                };
-                let theirs = lgamma(alpha + f64::from(copies)) - lgamma(alpha);
-
-                let apart_in_ulp =
-                    |value: f64| -> i64 { (value.to_bits() as i64 - exact.to_bits() as i64).abs() };
-                let (ours_ulp, theirs_ulp) = (apart_in_ulp(ours), apart_in_ulp(theirs));
-                assert!(
-                    ours_ulp <= theirs_ulp,
-                    "at concentration {alpha} and {copies} copies the rising product is \
-                     {ours_ulp} units in the last place from exact and the lgamma difference is \
-                     {theirs_ulp}, so the change made this cell worse",
+                assert_eq!(
+                    rising, exact_product as f64,
+                    "the rising product lost exactness"
                 );
-                worst_ours_ulp = worst_ours_ulp.max(ours_ulp);
-                worst_theirs_ulp = worst_theirs_ulp.max(theirs_ulp);
-            }
+                float::ln(rising)
+            };
+            let theirs = lgamma(alpha + f64::from(copies)) - lgamma(alpha);
+
+            let apart_in_ulp =
+                |value: f64| -> i64 { (value.to_bits() as i64 - exact_bits as i64).abs() };
+            let (ours_ulp, theirs_ulp) = (apart_in_ulp(ours), apart_in_ulp(theirs));
+            assert!(
+                ours_ulp <= theirs_ulp.max(1),
+                "at concentration {alpha} and {copies} copies the rising product is \
+                 {ours_ulp} units in the last place from exact and the lgamma difference is \
+                 {theirs_ulp}, so the change made this cell worse",
+            );
+            worst_ours_ulp = worst_ours_ulp.max(ours_ulp);
+            worst_theirs_ulp = worst_theirs_ulp.max(theirs_ulp);
         }
         // **Pinned so that the gap is visible rather than merely asserted.** Ours is within one
         // unit in the last place everywhere on this grid; the difference of two `lgamma` is
@@ -696,6 +701,35 @@ mod tests {
              this grid stopped reaching the cohort sizes it was written for",
         );
     }
+
+    /// `ln` of each exact rising product `α(α+1)…(α+k−1)`, as `(α, k, bits)`, correctly rounded
+    /// to `f64` from 100-digit decimal arithmetic: every whole concentration in {3, 125, 2,001,
+    /// 6,001} and copy count 1 to 8 whose product stays under 2^53.
+    const EXACT_LN_OF_RISING_PRODUCT: [(u64, u32, u64); 23] = [
+        (3, 1, 0x3ff1_93ea_7aad_030b),
+        (3, 2, 0x4003_e116_bcd3_9e7d),
+        (3, 3, 0x4010_609b_dc65_328b),
+        (3, 4, 0x4017_8b5e_daef_ba8c),
+        (3, 5, 0x401f_53fb_867c_5122),
+        (3, 6, 0x4023_d2aa_530d_136e),
+        (3, 7, 0x4028_37a4_f1b8_5430),
+        (3, 8, 0x402c_d291_60a5_a976),
+        (125, 1, 0x4013_5031_79f2_29e7),
+        (125, 2, 0x4023_5445_e15a_44a0),
+        (125, 3, 0x402d_047f_2b8a_5bc1),
+        (125, 4, 0x4033_5c5e_3d8b_ea8d),
+        (125, 5, 0x4038_387a_e7f9_5840),
+        (125, 6, 0x403d_1691_a4d6_346c),
+        (125, 7, 0x4040_fb4f_49af_7342),
+        (2_001, 1, 0x401e_67d6_037b_19ca),
+        (2_001, 2, 0x402e_6817_801f_acb6),
+        (2_001, 3, 0x4036_ce42_b963_96b7),
+        (2_001, 4, 0x403e_689a_68ab_805f),
+        (6_001, 1, 0x4021_663c_a3fd_bd25),
+        (6_001, 2, 0x4031_6647_8f7e_b5ff),
+        (6_001, 3, 0x403a_197b_b808_4ca2),
+        (6_001, 4, 0x4041_665d_6592_3982),
+    ];
 
     /// **An allele the genotype carries no copy of is skipped, and the skip is bit-exact.**
     ///
@@ -753,7 +787,7 @@ mod tests {
     fn the_heterozygote_is_twice_the_homozygous_alternative_at_every_realistic_diversity() {
         for alternative_total in [1e-4, 6e-4, 1e-3, 1e-2] {
             let (row, _) = row_for(2, 2, 1.0, alternative_total);
-            let ratio = (row[1].get() - row[2].get()).exp();
+            let ratio = float::exp(row[1].get() - row[2].get());
             let want = 2.0 / (1.0 + alternative_total);
             assert!(
                 (ratio / want - 1.0).abs() < 1e-12,
@@ -765,7 +799,7 @@ mod tests {
         // 2% is the band the whole loop fits inside and 1% is not. Asserted at that one point
         // rather than inside the loop, so adding a wilder diversity cannot silently widen it.
         let (widest, _) = row_for(2, 2, 1.0, 1e-2);
-        let widest_ratio = (widest[1].get() - widest[2].get()).exp();
+        let widest_ratio = float::exp(widest[1].get() - widest[2].get());
         assert!(
             (widest_ratio - 2.0).abs() < 0.02,
             "at 1 in 100 the ratio should still be within 2% of 2:1, got {widest_ratio}"
@@ -774,7 +808,7 @@ mod tests {
         // And the same function at a reference of 1.5 is not near 2:1 at all, which is what
         // makes the assertions above a check on the input rather than an identity.
         let (raised, _) = row_for(2, 2, 1.5, 1e-3);
-        let raised_ratio = (raised[1].get() - raised[2].get()).exp();
+        let raised_ratio = float::exp(raised[1].get() - raised[2].get());
         assert!(
             (raised_ratio - 2.997).abs() < 1e-3,
             "at a reference of 1.5 the ratio should be about 2.997, got {raised_ratio}"
@@ -802,8 +836,8 @@ mod tests {
                 .iter()
                 .map(|p| p.get())
                 .fold(f64::NEG_INFINITY, f64::max);
-            let total: f64 = row.iter().map(|p| (p.get() - largest).exp()).sum();
-            let hom_reference_weight = (row[0].get() - largest).exp() / total;
+            let total: f64 = row.iter().map(|p| float::exp(p.get() - largest)).sum();
+            let hom_reference_weight = float::exp(row[0].get() - largest) / total;
 
             assert!(
                 (hom_reference_weight - (1.0 - 1.5 * theta)).abs() < 3.0 * theta * theta,
@@ -928,7 +962,10 @@ mod tests {
                             alternative_total,
                             inbreeding,
                         );
-                        let mass: f64 = row.iter().map(|p| (p.get() - shared_constant).exp()).sum();
+                        let mass: f64 = row
+                            .iter()
+                            .map(|p| float::exp(p.get() - shared_constant))
+                            .sum();
                         assert!(
                             (mass - 1.0).abs() < 1e-9,
                             "ploidy {copies}, {allele_count} alleles, F {inbreeding}, reference \
@@ -1058,7 +1095,7 @@ mod tests {
                 "the heterozygote must be impossible at F = 1 but finite, got {}",
                 row[1].get()
             );
-            let ratio = (row[0].get() - row[2].get()).exp();
+            let ratio = float::exp(row[0].get() - row[2].get());
             assert!(
                 (ratio - 1.0 / alternative_total).abs() / (1.0 / alternative_total) < 1e-12,
                 "hom-ref : hom-alt was {ratio}, not the concentration ratio {}",
@@ -1102,7 +1139,7 @@ mod tests {
         fill_inbreeding_mixture_log_priors(&mut row, inbreeding);
 
         let (random_mating, _) = row_for(2, 2, 1.0, 1e-2);
-        let log_outbreeding = (1.0 - inbreeding).ln();
+        let log_outbreeding = float::ln(1.0 - inbreeding);
         for (genotype, entry) in lied_to.iter().enumerate() {
             assert_eq!(
                 entry.get().to_bits(),
@@ -1131,7 +1168,7 @@ mod tests {
         let mut previous = f64::INFINITY;
         for inbreeding in [0.0, 0.2, 0.5, 0.8, 0.95] {
             let row = mixed_row_for(2, 2, 1.0, alternative_total, inbreeding);
-            let het_over_hom_alt = (row[1].get() - row[2].get()).exp();
+            let het_over_hom_alt = float::exp(row[1].get() - row[2].get());
             assert!(
                 het_over_hom_alt < previous,
                 "at F {inbreeding} the het:hom-alt ratio was {het_over_hom_alt}, not below the \
@@ -1144,7 +1181,7 @@ mod tests {
         // is far under the 2:1 an outbred sample sees.
         let outbred = mixed_row_for(2, 2, 1.0, alternative_total, 0.0);
         assert!(
-            (outbred[1].get() - outbred[2].get()).exp() > 1.9,
+            float::exp(outbred[1].get() - outbred[2].get()) > 1.9,
             "an outbred sample should still see about 2:1"
         );
         assert!(
@@ -1218,7 +1255,7 @@ mod tests {
         // And the coefficient is not merely passed but used: at a biallelic diploid locus an
         // implementation that dropped it would leave the outbred 2:1 ratio in place.
         let inbred = seam_row_for(2, 2, 1.0, 1e-2, InbreedingF::try_new(0.95).unwrap());
-        let ratio = (inbred[1].get() - inbred[2].get()).exp();
+        let ratio = float::exp(inbred[1].get() - inbred[2].get());
         assert!(
             ratio < 0.1,
             "at F = 0.95 the het:hom-alt ratio through the seam should be far under 2:1, got \
@@ -1251,7 +1288,7 @@ mod tests {
         let outbred = InbreedingF::try_new(0.0).expect("zero is a coefficient");
         // `1 − F` is exact here: the f64 below one is one ulp down, and 1.0 minus it is 2⁻⁵³.
         let heterozygote_weight = 1.0 - greatest.get();
-        assert_eq!(heterozygote_weight, 2.0f64.powi(-53));
+        assert_eq!(heterozygote_weight, float::powi(2.0, -53));
         for alternative_total in [1e-3, 1e-2, 0.25] {
             let row = seam_row_for(2, 2, 1.0, alternative_total, greatest);
             // The heterozygote has one branch and it is weighted `1 − F`, so the whole cost is
@@ -1259,9 +1296,9 @@ mod tests {
             let outbred_row = seam_row_for(2, 2, 1.0, alternative_total, outbred);
             let cost_nats = outbred_row[1].get() - row[1].get();
             assert!(
-                (cost_nats + heterozygote_weight.ln()).abs() < 1e-9,
+                (cost_nats + float::ln(heterozygote_weight)).abs() < 1e-9,
                 "the heterozygote should lose ln(1 − F) = {} nats, lost {cost_nats}",
-                -heterozygote_weight.ln()
+                -float::ln(heterozygote_weight)
             );
             assert!(
                 row[1].get().is_finite(),
@@ -1280,7 +1317,7 @@ mod tests {
                 "no entry may be −∞ once the weight is floored: {:?}",
                 row.iter().map(|p| p.get()).collect::<Vec<_>>()
             );
-            let ratio = (row[0].get() - row[2].get()).exp();
+            let ratio = float::exp(row[0].get() - row[2].get());
             assert!(
                 (ratio - 1.0 / alternative_total).abs() / (1.0 / alternative_total) < 1e-12,
                 "hom-ref : hom-alt was {ratio}, not the concentration ratio {}",

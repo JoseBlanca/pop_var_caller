@@ -26,6 +26,9 @@
 //! production's `dirichlet_multinomial_log_priors`: ng has its own in
 //! [`calling::genotype_prior::dirichlet_multinomial`](crate::calling::genotype_prior),
 //! and production's survives only as that port's test oracle.
+
+use crate::float;
+
 /// A tiny floor clamping an analytically-positive probability away from
 /// `ln(0) = −∞`. The clamp is equivalent to `f64` precision for any realistic
 /// probability and never bites on the default grids.
@@ -83,9 +86,9 @@ pub fn wright_genotype_log_priors(p: f64, f: f64) -> (f64, f64, f64) {
     let hom_ref = q * q + f * p * q;
     let hom_alt = p * p + f * p * q;
     (
-        hom_ref.max(PROBABILITY_FLOOR).ln(),
-        het.max(PROBABILITY_FLOOR).ln(),
-        hom_alt.max(PROBABILITY_FLOOR).ln(),
+        float::ln(hom_ref.max(PROBABILITY_FLOOR)),
+        float::ln(het.max(PROBABILITY_FLOOR)),
+        float::ln(hom_alt.max(PROBABILITY_FLOOR)),
     )
 }
 
@@ -223,7 +226,7 @@ mod tests {
         for (n, fact) in [(3u32, 6.0_f64), (5, 120.0), (6, 720.0)] {
             let got = lgamma(n as f64 + 1.0);
             assert!(
-                (got - fact.ln()).abs() < 1e-10,
+                (got - float::ln(fact)).abs() < 1e-10,
                 "lgamma({}) = {got}, want ln {fact}",
                 n + 1
             );
@@ -231,18 +234,18 @@ mod tests {
         // Half-integer absolute anchors — closed forms with √π, so a shared
         // systematic error (which the relative recurrence test cannot see)
         // would show up here.
-        let half_ln_pi = std::f64::consts::PI.ln() / 2.0;
+        let half_ln_pi = float::ln(std::f64::consts::PI) / 2.0;
         // ln Γ(1/2) = ln √π.
         assert!((lgamma(0.5) - half_ln_pi).abs() < 1e-12, "Γ(1/2)");
         // ln Γ(3/2) = ½ln π − ln 2.
         assert!(
-            (lgamma(1.5) - (half_ln_pi - 2.0_f64.ln())).abs() < 1e-12,
+            (lgamma(1.5) - (half_ln_pi - float::ln(2.0))).abs() < 1e-12,
             "Γ(3/2) = {}",
             lgamma(1.5)
         );
         // ln Γ(5/2) = ln(3/4) + ½ln π.
         assert!(
-            (lgamma(2.5) - ((3.0_f64 / 4.0).ln() + half_ln_pi)).abs() < 1e-12,
+            (lgamma(2.5) - (float::ln(3.0 / 4.0) + half_ln_pi)).abs() < 1e-12,
             "Γ(5/2) = {}",
             lgamma(2.5)
         );
@@ -262,7 +265,7 @@ mod tests {
     fn lgamma_satisfies_recurrence_at_small_args() {
         for &x in &[1e-3, 0.01, 0.3, 1.7] {
             let lhs = lgamma(x + 1.0);
-            let rhs = x.ln() + lgamma(x);
+            let rhs = float::ln(x) + lgamma(x);
             assert!((lhs - rhs).abs() < 1e-10, "x={x}: {lhs} vs {rhs}");
         }
     }
@@ -274,7 +277,7 @@ mod tests {
         for &p in &[0.01, 0.2, 0.5, 0.9] {
             for &f in &[0.0, 0.3, 0.99] {
                 let (a, b, c) = wright_genotype_log_priors(p, f);
-                let sum = a.exp() + b.exp() + c.exp();
+                let sum = float::exp(a) + float::exp(b) + float::exp(c);
                 assert!((sum - 1.0).abs() < 1e-12, "p={p} F={f} sum={sum}");
             }
         }

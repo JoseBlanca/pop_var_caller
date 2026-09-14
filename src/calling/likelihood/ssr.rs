@@ -69,6 +69,7 @@ use super::ContaminationView;
 use super::ssr_emission::{SsrCandidate, SsrEmissionModel, SsrScoringContext};
 use super::{SsrRowScratch, SsrSampleEvidence};
 use crate::calling::GenotypeTableView;
+use crate::float;
 use crate::locus_generation::{ReadWitness, SequenceObservation};
 use crate::parameter_estimation::Provenance;
 use crate::types::{LogProb, ReadGroupId};
@@ -730,10 +731,11 @@ pub fn genotype_log_likelihood_row<Model: SsrEmissionModel>(
                     copy_share[copies as usize] * scratch.emission_at(position, candidate);
             }
             slot.0 += reads
-                * (from_this_individual * explained_by_this_genotype
-                    + from_the_junk_distribution
-                    + from_the_contaminant)
-                    .ln();
+                * float::ln(
+                    from_this_individual * explained_by_this_genotype
+                        + from_the_junk_distribution
+                        + from_the_contaminant,
+                );
         }
     }
 }
@@ -1460,7 +1462,7 @@ mod tests {
                     .map(|(observation, entry)| {
                         let explained =
                             first * scored[observation][0] + second * scored[observation][1];
-                        f64::from(entry.num_obs) * (own * explained + junk_of(entry)).ln()
+                        f64::from(entry.num_obs) * float::ln(own * explained + junk_of(entry))
                     })
                     .sum()
             })
@@ -1829,7 +1831,7 @@ mod tests {
             2,
         );
 
-        let floor = (with_junk[0].0 - row[0].0).exp();
+        let floor = float::exp(with_junk[0].0 - row[0].0);
         let from_the_locus = DEFAULT_OUTLIER_WEIGHT / 31.0;
         assert!(
             (floor - from_the_locus).abs() < 1e-12,
@@ -2033,7 +2035,7 @@ mod tests {
         let mut seed = vec![0.0; lengths.len()];
         for (index, share) in seed.iter_mut().enumerate() {
             let away = index.abs_diff(at) as i32;
-            *share = 0.5f64.powi(away);
+            *share = float::powi(0.5, away);
         }
         let total: f64 = seed.iter().sum();
         for share in &mut seed {
@@ -2125,7 +2127,7 @@ mod tests {
             .expect("eight bases is reachable");
         let mut seed = vec![0.0; lengths.len()];
         for (index, share) in seed.iter_mut().enumerate() {
-            *share = 0.5f64.powi(index as i32);
+            *share = float::powi(0.5, index as i32);
         }
         let total: f64 = seed.iter().sum();
         for share in &mut seed {

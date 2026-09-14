@@ -147,7 +147,7 @@ The groups follow A1's count of calls, shipped and test, in `src/` (426 in all):
   *Depends:* A. *Source:* brief, fix step 1; A2 §"Constants the compiler computes while building".
 - ✅ **B2. Convert `alignment` and `locus_generation`** (101 calls). **Own commit.**
   *Depends:* B1. *Source:* brief, fix step 1; A1 §2.1.
-- ☐ **B3. Convert `calling`, `genetics.rs` and `types.rs`** (162 calls). **Own commit.**
+- ✅ **B3. Convert `calling`, `genetics.rs` and `types.rs`** (162 calls). **Own commit.**
   *Depends:* B1. *Source:* A1 §2.2–2.6.
 - ☐ **B4. Convert `paralog`** (38 calls). **Own commit.** *Depends:* B1. *Source:* A1 §2.7.
 - ☐ **B5. Convert `parameter_estimation`** (125 calls). **Own commit** — this is the step that moves

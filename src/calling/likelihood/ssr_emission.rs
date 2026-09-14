@@ -34,6 +34,7 @@ use std::num::{NonZeroU8, NonZeroU32};
 
 use crate::alignment::StutterModel;
 use crate::alignment::emission::{Emission, FlatEmission};
+use crate::float;
 use crate::parameter_estimation::Provenance;
 use crate::types::{BaseQual, ErrorRate, Motif};
 
@@ -626,7 +627,7 @@ fn substitution_probability(
         .zip(resized_candidate)
         .map(|(&read_base, &candidate_base)| scores.pick(read_base, candidate_base))
         .sum();
-    total_ln.exp()
+    float::exp(total_ln)
 }
 
 /// Every placement-distinct realisation of `candidate` with `repeats` whole repeats added to
@@ -893,10 +894,16 @@ mod tests {
                     .placements
                     .iter()
                     .map(|placement| {
-                        each * aligner
-                            .marginal_probability(observation, placement, (), &mut scratch.aligner)
-                            .get()
-                            .exp()
+                        each * float::exp(
+                            aligner
+                                .marginal_probability(
+                                    observation,
+                                    placement,
+                                    (),
+                                    &mut scratch.aligner,
+                                )
+                                .get(),
+                        )
                     })
                     .sum();
                 total += length_probability * letters;
@@ -1251,8 +1258,9 @@ mod tests {
 
     /// **Spec §12's first test: a read matching its allele is dominated by the same-length
     /// term.** A read identical to the candidate scores at least
-    /// `same_length_share × (1 − ε)^length` and within 5% of it — the two factors and nothing
-    /// else, with no placement multiplicity to dilute it.
+    /// `same_length_share × (1 − ε)^length` — to within rounding, since the score reaches that
+    /// product by a sum of logarithms — and within 5% of it: the two factors and nothing else, with
+    /// no placement multiplicity to dilute it.
     #[test]
     fn a_read_identical_to_its_candidate_is_dominated_by_the_same_length_term() {
         let model = a_model();
@@ -1260,8 +1268,13 @@ mod tests {
         let epsilon = 0.001;
         let scored = score(tract, tract, 6, b"CAG", &model, epsilon);
 
-        let floor = model.same_length_share() * (1.0 - epsilon).powi(tract.len() as i32);
-        assert!(scored >= floor, "{scored} fell below {floor}");
+        let floor = model.same_length_share() * float::powi(1.0 - epsilon, tract.len() as i32);
+        // The score and the floor reach the same product by different routes (a sum of logarithms
+        // against repeated multiplication), so they may round a few units in the last place apart.
+        assert!(
+            scored >= floor * (1.0 - 1e-12),
+            "{scored} fell below {floor}"
+        );
         assert!(
             scored <= floor * 1.05,
             "{scored} exceeded {floor} by more than a twentieth"
@@ -1429,7 +1442,7 @@ mod tests {
 
         for epsilon in [1e-4, 1e-3, 1e-2] {
             let scored = score(tract, tract, 6, b"CAG", &model, epsilon);
-            let letters = (1.0 - epsilon).powi(tract.len() as i32);
+            let letters = float::powi(1.0 - epsilon, tract.len() as i32);
             let expected = model.same_length_share() * letters;
             assert!(
                 (scored - expected).abs() <= expected * 1e-12,
@@ -1442,7 +1455,7 @@ mod tests {
         let mismatched = b"TAGCAGCAGCAGCAGCAG";
         let scored = score(mismatched, tract, 6, b"CAG", &model, epsilon);
         let expected = model.same_length_share()
-            * (1.0 - epsilon).powi(tract.len() as i32 - 1)
+            * float::powi(1.0 - epsilon, tract.len() as i32 - 1)
             * (epsilon / 3.0);
         assert!(
             (scored - expected).abs() <= expected * 1e-12,
@@ -1682,9 +1695,9 @@ mod tests {
                         }
 
                         let complete_separation =
-                            (complete_shorter.ln() - complete_longer.ln()).abs();
+                            (float::ln(complete_shorter) - float::ln(complete_longer)).abs();
                         let censored_separation =
-                            (censored_shorter.ln() - censored_longer.ln()).abs();
+                            (float::ln(censored_shorter) - float::ln(censored_longer)).abs();
                         let gap = (censored_separation - complete_separation).abs();
                         assert!(
                             gap < 5e-2,
@@ -1765,8 +1778,8 @@ mod tests {
         let censored_shorter = score_censored(&observation, &shorter, 4, motif, &model, epsilon);
         let censored_longer = score_censored(&observation, &longer, 6, motif, &model, epsilon);
 
-        let complete_separation = (complete_shorter.ln() - complete_longer.ln()).abs();
-        let censored_separation = (censored_shorter.ln() - censored_longer.ln()).abs();
+        let complete_separation = (float::ln(complete_shorter) - float::ln(complete_longer)).abs();
+        let censored_separation = (float::ln(censored_shorter) - float::ln(censored_longer)).abs();
 
         assert!(
             censored_separation > complete_separation,
@@ -2051,7 +2064,7 @@ mod tests {
 
         let scored = score_censored(b"CAG", b"CAG", 1, b"CAG", &model, 1e-3);
         let reachable = 1.0 - model.unreachable_mass(period_of(&motif), repeats(1));
-        let letters = (1.0f64 - 1e-3).powi(3);
+        let letters = float::powi(1.0 - 1e-3, 3);
         assert!(
             (scored - reachable * letters).abs() <= scored * 1e-12,
             "{scored} against {}",

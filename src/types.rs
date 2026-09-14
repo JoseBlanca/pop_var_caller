@@ -1513,6 +1513,7 @@ impl Genotype {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::float;
 
     #[test]
     fn mismatch_fraction_accepts_boundary_values() {
@@ -2322,7 +2323,7 @@ mod tests {
     /// place only as the one expected value that is not a round number.
     #[test]
     fn phred_from_log_prob_matches_the_hand_computed_scale() {
-        let phred_of = |p: f64| Phred::from_log_prob(LogProb(p.ln())).unwrap().get();
+        let phred_of = |p: f64| Phred::from_log_prob(LogProb(float::ln(p))).unwrap().get();
         assert!((phred_of(0.001) - 30.0).abs() < 1e-4, "{}", phred_of(0.001));
         assert!((phred_of(0.01) - 20.0).abs() < 1e-4, "{}", phred_of(0.01));
         assert!((phred_of(0.5) - 3.010_3).abs() < 1e-4, "{}", phred_of(0.5));
@@ -2338,7 +2339,7 @@ mod tests {
     /// invariant has no test behind it.
     #[test]
     fn phred_from_log_prob_keeps_full_f64_width_before_narrowing() {
-        let quality = Phred::from_log_prob(LogProb(1e-300f64.ln())).expect("a finite quality");
+        let quality = Phred::from_log_prob(LogProb(float::ln(1e-300))).expect("a finite quality");
         assert_eq!(
             quality.get().to_bits(),
             3000.0f32.to_bits(),

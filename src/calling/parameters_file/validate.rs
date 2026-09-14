@@ -1265,6 +1265,7 @@ mod tests {
         ShareSmoothing, Warrant, WarrantedValue,
     };
     use super::*;
+    use crate::float;
 
     /// The fixture with one edit, refused — returning the refusal so a test can read its field.
     #[track_caller]
@@ -2010,7 +2011,7 @@ mod tests {
         fn normalised(offsets: usize) -> Vec<f64> {
             let middle = offsets / 2;
             let raw: Vec<f64> = (0..offsets)
-                .map(|at| 0.6_f64.powi((at as i32 - middle as i32).abs()))
+                .map(|at| float::powi(0.6, (at as i32 - middle as i32).abs()))
                 .collect();
             let total: f64 = raw.iter().sum();
             raw.iter().map(|share| share / total).collect()

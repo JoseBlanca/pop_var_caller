@@ -27,10 +27,10 @@
 //! each side, equal today because two edits agree rather than because anything holds them
 //! together — so [`tests::the_two_loops_run_under_the_same_threshold_and_the_same_cap`] asserts
 //! the four values, and a fixture that set one side's would be hiding the other's. **The
-//! transcendental backend is genuinely different and is left that way**: production interpolates
-//! `ln` and `exp` from a table and ng calls the library's, which is a difference of units in the
-//! last place — far below the nat-scale margins every fixture here is built on, and not something
-//! a parity oracle should paper over by making ng use production's approximation.
+//! transcendental backend is genuinely different and is left that way**: production interpolated
+//! `ln` and `exp` from a table and ng calls libm's through [`crate::float`], a difference far below
+//! the nat-scale margins every fixture here is built on, and not something a parity oracle should
+//! paper over by making ng use production's approximation.
 //!
 //! **The concentrations are the same construction rather than two numbers that happen to
 //! agree.** Production derives `α = [ALPHA_REF, θ/k, …]` from `nucleotide_diversity`
