@@ -38,7 +38,8 @@
 //! quietly stops comparing.
 //!
 //! The three log-likelihoods are compared within [`NATS_THE_TWO_TREES_MAY_DIFFER_BY`] and
-//! everything else — the prior, the curve, the cut, the verdict — **by bit pattern**.
+//! the prior and the verdict's probabilities within [`PROBABILITIES_MAY_DIFFER_BY_UNITS`] of each
+//! other; the counts, the flags and the cut **by bit pattern**.
 //!
 //! # The cohort sizes, and why one sample is among them
 //!
@@ -80,8 +81,8 @@
 //! by an EM — the tail false-discovery curve built over the same histogram bins, and the cut
 //! that curve resolves for an operator's target. Each is a pure function of a stream of
 //! likelihood ratios, so the differential folds one randomised stream into ng's histogram and
-//! compares π, the convergence flag, the curve and the cut against production's, again by
-//! bit pattern.
+//! compares π, the convergence flag, the curve and the cut against production's: the flag and the
+//! cut by bit pattern, π and the curve to within rounding.
 //!
 //! # What the stream must contain
 //!
@@ -431,8 +432,8 @@ fn assert_the_same_score(case: &str, theirs: &TheirScore, ng_score: &ng::Paralog
         ),
     ] {
         // **A tolerance, and it stopped being bit equality on 2026-09-09.** ng's
-        // `log_add_exp` skips `log1p` where its own cubic series is exact in the sum, which
-        // is this port's one departure from production's arithmetic.
+        // `log_add_exp` skips `log1p` where its own cubic series is exact in the sum, and since
+        // 2026-09-14 ng's `exp`, `ln` and `log1p` are libm's where production's were glibc's.
         let apart = (ours - theirs).abs();
         assert!(
             apart <= NATS_THE_TWO_TREES_MAY_DIFFER_BY,
@@ -456,8 +457,8 @@ fn assert_the_same_score(case: &str, theirs: &TheirScore, ng_score: &ng::Paralog
 /// **How far ng's scorer and production's may sit apart, in nats.**
 ///
 /// **This was bit equality until 2026-09-09**, when ng's `log_add_exp` began skipping `log1p`
-/// where its cubic series is exact in the sum — the one place the two trees now round
-/// differently.
+/// where its cubic series is exact in the sum. Since 2026-09-14 the two trees also round
+/// differently because ng's `exp`, `ln` and `log1p` go through [`crate::float`] (libm).
 ///
 /// **The bound is what the departure cannot exceed, not what it measures.** The series
 /// truncates at under 1e-16 per call and the errors of a locus's calls neither share a sign nor
@@ -529,21 +530,24 @@ fn the_copied_scorer_agrees_with_productions() {
          written — at cohort sizes {COHORT_SIZES:?}, out of {LOCI_PER_COHORT_SIZE} loci each"
     );
 
-    // **What the departure actually costs, rather than what it is allowed to — and it is
-    // nothing.** `assert_the_same_score`'s 1e-9 is a wall derived from the series' truncation
-    // term; this is the measurement, and over these 800 loci ng returns **production's `f64`,
-    // bit for bit, on every field**. So the series shortcut is not observably an approximation on
-    // anything this differential draws: it is below the rounding of the sum it goes into, which
-    // is what its threshold was chosen to guarantee.
+    // **What the departure actually costs, rather than what it is allowed to.**
+    // `assert_the_same_score`'s 1e-9 is a wall derived from the series' truncation term; this is
+    // the measurement. Until the maths moved to libm, ng returned **production's `f64`, bit for
+    // bit, on every field** of these 800 loci, so the series shortcut is not observably an
+    // approximation on anything this differential draws: it is below the rounding of the sum it
+    // goes into, which is what its threshold was chosen to guarantee.
     //
-    // **Pinned at one part in 1e15 rather than at zero**, six orders inside the wall. `exp` and
-    // `log1p` are the platform's, so a last-bit difference on another libm is a reason to be
-    // told and not a reason to fail a build; a change that actually moved the arithmetic would
-    // clear this by orders of magnitude.
+    // **Pinned at 1e-10 nats, ten times inside the wall.** Until step B4 of the portable-float
+    // plan this gap was exactly zero. ng's `exp`, `ln` and `log1p` now go through
+    // [`crate::float`] (libm), production's answers were written with glibc's, and over these
+    // loci the widest field moved by 3.6e-12 nats (measured 2026-09-14, the same on macOS and
+    // Linux). A change that actually moved the arithmetic would clear 1e-10 by orders of
+    // magnitude.
     assert!(
-        widest_gap <= 1e-15,
+        widest_gap <= 1e-10,
         "the widest gap between ng and production over {loci_scored} randomised loci was \
-         {widest_gap:e} nats, where it has been exactly zero; the port's arithmetic has moved"
+         {widest_gap:e} nats, where it has been 3.6e-12 since the maths moved to libm; the \
+         port's arithmetic has moved"
     );
 }
 
@@ -907,13 +911,80 @@ fn our_histogram_of(ratios: &[f64]) -> ng::ParalogLrHistogram {
     histogram
 }
 
-/// Assert ng's fitted prior matches production's answer under `key`, by bit pattern.
+/// **Probabilities agree to within rounding, not bit for bit, since step B4 of the portable-float
+/// plan.** Production's answers were written with glibc's `exp` and `ln`; ng's go through
+/// [`crate::float`], the libm crate, which rounds some last places the other way, and the EM carries
+/// such a unit forward. Every *decision* — which record is dropped, whether the EM converged, how
+/// many ratios were folded, the cut itself — is still compared exactly.
+///
+/// **How far they moved, measured 2026-09-14** by counting, in these tests, every probability whose
+/// bits differ from production's: 17 of the 465 compared, identically on macOS and Linux — 10 by one
+/// representable number, 5 by two, 1 by eight, and π by twenty-two (a relative 3.6e-15). The
+/// allowance of 64 leaves room for that and still refuses any real change to the arithmetic, which
+/// moves a posterior by a relative 1e-3 or more.
+const PROBABILITIES_MAY_DIFFER_BY_UNITS: u64 = 64;
+
+/// Both `NaN`; or the same infinity; or finite, of one sign, and at most
+/// [`PROBABILITIES_MAY_DIFFER_BY_UNITS`] representable numbers apart (`+0.0` and `−0.0` are equal).
+/// Counting representable numbers rather than a relative tolerance keeps the check as tight next to
+/// 1 (π can be `1 − 2e-13`) as next to 1e-56, and an infinity can match only an infinity.
+fn within_rounding(ours: f64, theirs: f64) -> bool {
+    if ours.is_nan() || theirs.is_nan() {
+        return ours.is_nan() && theirs.is_nan();
+    }
+    if !ours.is_finite() || !theirs.is_finite() {
+        return ours == theirs;
+    }
+    ours == theirs
+        || (ours.is_sign_negative() == theirs.is_sign_negative()
+            && ours.to_bits().abs_diff(theirs.to_bits()) <= PROBABILITIES_MAY_DIFFER_BY_UNITS)
+}
+
+/// The comparison refuses what a port defect would produce: an infinity against a finite value, a
+/// sign change, a number past the allowance, and a value against no value.
+#[test]
+fn within_rounding_refuses_infinities_sign_changes_and_distant_values() {
+    let half = 0.5_f64;
+    let steps_away = |value: f64, steps: u64| f64::from_bits(value.to_bits() + steps);
+    assert!(within_rounding(half, half));
+    assert!(within_rounding(
+        half,
+        steps_away(half, PROBABILITIES_MAY_DIFFER_BY_UNITS)
+    ));
+    assert!(!within_rounding(
+        half,
+        steps_away(half, PROBABILITIES_MAY_DIFFER_BY_UNITS + 1)
+    ));
+    assert!(within_rounding(0.0, -0.0));
+    assert!(!within_rounding(1e-300, -1e-300));
+    assert!(within_rounding(f64::NAN, f64::NAN));
+    assert!(!within_rounding(f64::NAN, half));
+    assert!(within_rounding(f64::INFINITY, f64::INFINITY));
+    assert!(!within_rounding(f64::INFINITY, half));
+    assert!(!within_rounding(f64::INFINITY, f64::MAX));
+    assert!(!within_rounding(f64::NEG_INFINITY, f64::INFINITY));
+    assert!(within_rounding(1.0 - 2e-13, steps_away(1.0 - 2e-13, 1)));
+    assert!(!within_rounding(1.0 - 2e-13, 1.0));
+    assert!(optional_within_rounding(None, None));
+    assert!(!optional_within_rounding(Some(half), None));
+}
+
+/// [`within_rounding`] for an optional value: both absent, or both present and within rounding.
+fn optional_within_rounding(ours: Option<f64>, theirs: Option<f64>) -> bool {
+    match (ours, theirs) {
+        (None, None) => true,
+        (Some(ours), Some(theirs)) => within_rounding(ours, theirs),
+        _ => false,
+    }
+}
+
+/// Assert ng's fitted prior matches production's answer under `key`: π to within rounding, and
+/// whether the EM converged exactly.
 #[track_caller]
 fn assert_the_same_prior(case: &str, key: &str, ours: &ng::ParalogPrior) {
     let theirs = their_f64(&format!("{key}/prior_probability"));
-    assert_eq!(
-        ours.prior_probability.to_bits(),
-        theirs.to_bits(),
+    assert!(
+        within_rounding(ours.prior_probability, theirs),
         "{case}: pi differs — ng {}, production {theirs}",
         ours.prior_probability,
     );
@@ -924,7 +995,7 @@ fn assert_the_same_prior(case: &str, key: &str, ours: &ng::ParalogPrior) {
     );
 }
 
-/// **The prior, the curve and the cut agree with production's, bit for bit.**
+/// **The prior, the curve and the cut agree with production's, to within rounding.**
 ///
 /// One randomised stream of likelihood ratios per shape, folded into ng's histogram and taken
 /// through the EM, the curve and the threshold. Everything is compared: the number of ratios
@@ -932,7 +1003,7 @@ fn assert_the_same_prior(case: &str, key: &str, ours: &ng::ParalogPrior) {
 /// the axis, including values outside it that the curve saturates; and the resolved cut at five
 /// targets, `None` included, since an unreachable target must be unreachable for both.
 #[test]
-fn the_copied_prior_and_curve_agree_with_productions_bit_for_bit() {
+fn the_copied_prior_and_curve_agree_with_productions_to_within_rounding() {
     let mut streams_folded = 0usize;
     for shape in [
         RatioStream::NothingIsDuplicated,
@@ -961,9 +1032,8 @@ fn the_copied_prior_and_curve_agree_with_productions_bit_for_bit() {
             0.5,
         ] {
             let theirs = their_f64(&format!("{key}/q_of_lr/{probe:?}"));
-            assert_eq!(
-                our_curve.q_of_lr(probe).to_bits(),
-                theirs.to_bits(),
+            assert!(
+                within_rounding(our_curve.q_of_lr(probe), theirs),
                 "{case}: the tail FDR at a ratio of {probe} differs — ng {}, production {theirs}",
                 our_curve.q_of_lr(probe),
             );
@@ -1065,9 +1135,8 @@ fn a_narrow_histogram_agrees_on_both_sides_where_the_shipped_one_saturates() {
             let probe = NARROW_LO - 2.0
                 + step as f64 * (NARROW_HI - NARROW_LO + 4.0) / (NARROW_BINS + 4) as f64;
             let theirs = their_f64(&format!("{key}/q_of_lr/{probe:?}"));
-            assert_eq!(
-                our_curve.q_of_lr(probe).to_bits(),
-                theirs.to_bits(),
+            assert!(
+                within_rounding(our_curve.q_of_lr(probe), theirs),
                 "{case}: the tail FDR at a ratio of {probe} differs — ng {}, production {theirs}",
                 our_curve.q_of_lr(probe),
             );
@@ -1092,7 +1161,7 @@ fn a_narrow_histogram_agrees_on_both_sides_where_the_shipped_one_saturates() {
 /// Everything above stops one step short of the decision. These two functions are the
 /// decision: whether a record is dropped, and what number goes in its `PARALOG_POST` field.
 #[test]
-fn the_copied_verdict_agrees_with_productions_bit_for_bit() {
+fn the_copied_verdict_agrees_with_productions_to_within_rounding() {
     let mut compared = 0usize;
     for shape in [
         RatioStream::NothingIsDuplicated,
@@ -1139,9 +1208,8 @@ fn the_copied_verdict_agrees_with_productions_bit_for_bit() {
                     "{case}: ng and production disagree about whether this record is dropped"
                 );
                 let theirs = their_optional_f64(&format!("{key}/posterior"));
-                assert_eq!(
-                    ours.posterior(lr).map(f64::to_bits),
-                    theirs.map(f64::to_bits),
+                assert!(
+                    optional_within_rounding(ours.posterior(lr), theirs),
                     "{case}: ng and production disagree about the probability that goes in \
                      PARALOG_POST — ng {:?}, production {theirs:?}",
                     ours.posterior(lr),
@@ -1199,7 +1267,7 @@ fn an_empty_histogram_and_an_unconverged_em_agree_on_both_sides() {
     assert_every_answer_was_read("empty_and_unconverged");
 }
 
-/// **The fallback, the curve and the cut agree with production's, bit for bit.**
+/// **The fallback, the curve and the cut agree with production's, to within rounding.**
 ///
 /// The three pieces underneath are copies, compared with production's above. What is ng's own is
 /// [`calibrate_from_the_ratio_histogram`](ng::calibrate_from_the_ratio_histogram) — the four lines
@@ -1212,7 +1280,7 @@ fn an_empty_histogram_and_an_unconverged_em_agree_on_both_sides() {
 /// configuration separates them; the third also cramps the iteration so that the substitution
 /// happens. Production was handed the same three, field for field.
 #[test]
-fn the_fallback_and_the_cut_agree_with_productions_bit_for_bit() {
+fn the_fallback_and_the_cut_agree_with_productions_to_within_rounding() {
     /// A fallback rate that is not the iteration's starting guess, so a substitution reading the
     /// wrong field of the configuration shows up as a different number.
     const A_FALLBACK_THAT_IS_NOT_THE_SEED: f64 = 0.41;

@@ -19,7 +19,8 @@
 //! (`doc/devel/specs/hidden_paralog_filter.md`, reformulated for one sample by
 //! `doc/devel/architecture/hidden_paralog_single_sample_scoring.md`). Three of the five files
 //! beside this one are production's source, line for line and byte for byte: [`coverage_model`],
-//! 1,157 lines past its module header; [`locus_score`], 797; and [`model_params`], 236. Two files
+//! 1,157 lines past its module header; [`locus_score`], 797, apart from its maths calls, which go
+//! through [`crate::float`] since 2026-09-14; and [`model_params`], 236. Two files
 //! of ng's own asserted the copies: `copy_fidelity.rs` textually, until promotion step C3 deleted
 //! it, and `production_parity` numerically, which still does — it scores randomised loci and
 //! compares every number against production's answers, frozen at promotion step C4. What ng changes
@@ -84,6 +85,7 @@ pub use prior::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::float;
 
     /// **A locus is flagged when its tail false-discovery rate is at or below the target,
     /// and never on a ratio that is not a number.**
@@ -252,8 +254,8 @@ mod tests {
         };
 
         for lr in [-20.0, -1.0, 0.0, 1.0, 12.0, 35.0] {
-            let log_odds = lr + (pi / (1.0 - pi)).ln();
-            let expected = 1.0 / (1.0 + (-log_odds).exp());
+            let log_odds = lr + float::ln(pi / (1.0 - pi));
+            let expected = 1.0 / (1.0 + float::exp(-log_odds));
             assert_eq!(
                 calibration.posterior(lr).map(f64::to_bits),
                 Some(expected.to_bits()),

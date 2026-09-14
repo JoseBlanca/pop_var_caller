@@ -48,6 +48,12 @@
 //! wants the same treatment this one got: a reason that is a measurement, a bound derived from
 //! the arithmetic rather than from a sweep, and the differential below re-read afterwards.
 //!
+//! **The second departure (2026-09-14): every `exp`, `ln` and `ln_1p` here goes through
+//! [`crate::float`]**, the libm crate, so the score is the same on macOS and Linux; production
+//! used the platform's library. The reason is `doc/devel/implementation_plans/portable_float.md`,
+//! and the measurements are its step A2 and A3 reports. The differential's widest gap over its 800
+//! randomised loci went from exactly zero to 3.6e-12 nats, and it is pinned at 1e-10.
+//!
 //! **What proves the copy computes what it was copied from is not this file's tests.**
 //! They are production's, transcribed, so they pass on both trees whatever either does.
 //! `production_parity.rs` feeds ng's copy the randomised inputs production was run on, and
@@ -55,12 +61,13 @@
 //! cohort sizes 1, 2, 10 and 63, with absent samples, zero-read samples and degenerate σ₀
 //! among them — and asserts the two counts equal exactly and the likelihood ratio and both
 //! log-likelihoods **within 1e-9 nats**, a wall derived from the series' truncation term.
-//! **The gap it measures is exactly zero**, so on everything that differential draws the two
-//! trees still return the same `f64`. **One sample is in that set deliberately** (spec §4): the
+//! **The gap it measures was exactly zero** until the maths moved to libm on 2026-09-14, and is
+//! now 3.6e-12 nats. **One sample is in that set deliberately** (spec §4): the
 //! folded site-frequency-spectrum grid degenerates to a single point at `N = 1`, and
 //! nothing had exercised the copied precompute there.
 
 use super::ParalogModelParams;
+use crate::float;
 use crate::genetics::{
     PROBABILITY_FLOOR, linear_grid_point, sfs_grid_point, wright_genotype_log_priors,
 };
@@ -166,7 +173,7 @@ struct CarrierConfig {
 /// Build it once with [`ParalogScorePrecompute::new`] from the same
 /// `ParalogModelParams` and cohort-length inbreeding slice the pass uses, then
 /// pass `&self` to [`score_locus_for_paralogy`]. Because the values stored are
-/// the exact `.ln()` results the old inline code produced (same grids, same `F`,
+/// the exact logarithms the old inline code produced (same grids, same `F`,
 /// same helper functions), the per-locus likelihood ratio is **bit-identical**
 /// to recomputing them.
 #[derive(Debug, Clone)]
@@ -223,7 +230,7 @@ impl ParalogScorePrecompute {
         let mut wright = Vec::with_capacity(sfs_points * cohort_size);
         for i in 0..sfs_points {
             let p = sfs_grid_point(i, sfs_points, inv2n);
-            sfs_log_weight.push(-(p * (1.0 - p)).ln());
+            sfs_log_weight.push(-float::ln(p * (1.0 - p)));
             for &f in inbreeding {
                 let (log_homref, log_het, log_homalt) = wright_genotype_log_priors(p, f);
                 wright.push([log_homref, log_het, log_homalt]);
@@ -239,12 +246,12 @@ impl ParalogScorePrecompute {
             let q = linear_grid_point(iq, carrier_freq_points, grid.lo, grid.hi);
             for &f in inbreeding {
                 // Wright dosage HWE: P(non-carrier) = (1−q)² + F·q(1−q), floored
-                // exactly as the old inline code did so the `.ln()` is identical.
+                // exactly as the old inline code did so the logarithm is identical.
                 let p_noncarrier =
                     ((1.0 - q) * (1.0 - q) + f * q * (1.0 - q)).max(PROBABILITY_FLOOR);
                 carrier_probs.push((
-                    p_noncarrier.ln(),
-                    (1.0 - p_noncarrier).max(PROBABILITY_FLOOR).ln(),
+                    float::ln(p_noncarrier),
+                    float::ln((1.0 - p_noncarrier).max(PROBABILITY_FLOOR)),
                 ));
             }
         }
@@ -257,13 +264,13 @@ impl ParalogScorePrecompute {
             sfs_points,
             sfs_log_weight,
             wright,
-            log_vaf_h1: [eps.ln(), 0.5f64.ln(), (1.0 - eps).ln()],
-            log1m_vaf_h1: [(1.0 - eps).ln(), 0.5f64.ln(), eps.ln()],
+            log_vaf_h1: [float::ln(eps), float::ln(0.5), float::ln(1.0 - eps)],
+            log1m_vaf_h1: [float::ln(1.0 - eps), float::ln(0.5), float::ln(eps)],
             configs,
             carrier_freq_points,
             carrier_probs,
-            log_eps: eps.ln(),
-            log1m_eps: (1.0 - eps).ln(),
+            log_eps: float::ln(eps),
+            log1m_eps: float::ln(1.0 - eps),
         }
     }
 }
@@ -451,7 +458,7 @@ fn h2_log_likelihood(usable: &[UsableSample], precompute: &ParalogScorePrecomput
         }
     }
 
-    lse.value() - (cells as f64).ln()
+    lse.value() - float::ln(cells as f64)
 }
 
 /// Enumerate the kept H2 carrier configurations: for each `T`, the single-PSV
@@ -476,8 +483,8 @@ fn enumerate_carrier_configs(params: &ParalogModelParams) -> Vec<CarrierConfig> 
             out.push(CarrierConfig {
                 coverage_mean,
                 coverage_sigma_factor,
-                log_vaf: vaf.ln(),
-                log1m_vaf: (1.0 - vaf).ln(),
+                log_vaf: float::ln(vaf),
+                log1m_vaf: float::ln(1.0 - vaf),
             });
         }
     }
@@ -487,7 +494,7 @@ fn enumerate_carrier_configs(params: &ParalogModelParams) -> Vec<CarrierConfig> 
 /// A Normal log-density `ln N(x; μ, σ)`. `σ` must be `> 0`.
 fn ln_normal(x: f64, mu: f64, sigma: f64) -> f64 {
     let z = (x - mu) / sigma;
-    -0.5 * z * z - sigma.ln() - LN_SQRT_2PI
+    -0.5 * z * z - float::ln(sigma) - LN_SQRT_2PI
 }
 
 /// `ln(exp(a) + exp(b))`, stable and `−∞`-safe.
@@ -508,7 +515,8 @@ fn ln_normal(x: f64, mu: f64, sigma: f64) -> f64 {
 /// **On the inputs a real cohort produces it does not move at all**, which is the claim that
 /// matters and is measured next door: `production_parity`'s differential scores 800 randomised loci
 /// at cohort sizes 1, 2, 10 and 63 through this tree, against production's frozen answers, and the
-/// widest gap on any field is **exactly zero**. On the 63-accession tomato cohort the VCF, the
+/// widest gap on any field was **exactly zero** before the maths moved to libm (3.6e-12 nats
+/// since 2026-09-14). On the 63-accession tomato cohort the VCF, the
 /// 29,212 records dropped, the fitted duplication rate and the cut are all unchanged.
 ///
 /// **Why it is worth a departure**: `log1p` was **52.6% of the hidden-duplication filter's
@@ -525,11 +533,11 @@ fn log_add_exp(a: f64, b: f64) -> f64 {
         return a;
     }
     let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
-    let x = (lo - hi).exp();
+    let x = float::exp(lo - hi);
     if x < SERIES_INSTEAD_OF_LOG1P_BELOW {
         return hi + x * (1.0 - x * (0.5 - x * (1.0 / 3.0)));
     }
-    hi + x.ln_1p()
+    hi + float::ln_1p(x)
 }
 
 /// Where `ln(1 + x)` stops being worth a `log1p` call, because its cubic series is already
@@ -567,10 +575,10 @@ impl LogSumExp {
             return;
         }
         if x > self.max {
-            self.sum = self.sum * (self.max - x).exp() + 1.0;
+            self.sum = self.sum * float::exp(self.max - x) + 1.0;
             self.max = x;
         } else {
-            self.sum += (x - self.max).exp();
+            self.sum += float::exp(x - self.max);
         }
     }
 
@@ -578,7 +586,7 @@ impl LogSumExp {
         if self.max == f64::NEG_INFINITY {
             f64::NEG_INFINITY
         } else {
-            self.max + self.sum.ln()
+            self.max + float::ln(self.sum)
         }
     }
 }
@@ -745,7 +753,7 @@ mod tests {
         let means: Vec<f64> = configs.iter().map(|c| c.coverage_mean).collect();
         assert_eq!(means, vec![1.5, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0]);
         // VAF = exp(log_vaf); check the balanced m≈T/2 configs are ½.
-        let vafs: Vec<f64> = configs.iter().map(|c| c.log_vaf.exp()).collect();
+        let vafs: Vec<f64> = configs.iter().map(|c| float::exp(c.log_vaf)).collect();
         assert!((vafs[1] - 0.25).abs() < 1e-12); // (4,1)
         assert!((vafs[2] - 0.5).abs() < 1e-12); // (4,2)
         assert!((vafs[6] - 0.5).abs() < 1e-12); // (8,4)
@@ -756,7 +764,7 @@ mod tests {
     fn ln_normal_matches_closed_form() {
         // At the mean: −ln(σ√2π).
         assert!(
-            (ln_normal(1.0, 1.0, 0.5) - (-(0.5f64 * (2.0 * std::f64::consts::PI).sqrt()).ln()))
+            (ln_normal(1.0, 1.0, 0.5) - (-float::ln(0.5f64 * (2.0 * std::f64::consts::PI).sqrt())))
                 .abs()
                 < 1e-12
         );
@@ -788,7 +796,7 @@ mod tests {
         while x > f64::MIN_POSITIVE {
             for hi in [-1000.0, -100.0, -10.0, -1.0, 1.0, 10.0, 100.0, 1000.0] {
                 let shortcut: f64 = hi + x * (1.0 - x * (0.5 - x * (1.0 / 3.0)));
-                let with_log1p: f64 = hi + x.ln_1p();
+                let with_log1p: f64 = hi + float::ln_1p(x);
                 let apart_in_ulp = (shortcut.to_bits() as i64 - with_log1p.to_bits() as i64).abs();
                 assert!(
                     apart_in_ulp <= 1,
@@ -830,7 +838,7 @@ mod tests {
     fn log_add_exp_is_stable_and_neg_inf_safe() {
         assert_eq!(log_add_exp(f64::NEG_INFINITY, -3.0), -3.0);
         assert_eq!(log_add_exp(-3.0, f64::NEG_INFINITY), -3.0);
-        let naive = (1.0f64.exp() + 2.0f64.exp()).ln();
+        let naive = float::ln(float::exp(1.0) + float::exp(2.0));
         assert!((log_add_exp(1.0, 2.0) - naive).abs() < 1e-12);
     }
 
@@ -844,7 +852,7 @@ mod tests {
             lse.push(x);
         }
         let max = xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let batch = max + xs.iter().map(|x| (x - max).exp()).sum::<f64>().ln();
+        let batch = max + float::ln(xs.iter().map(|x| float::exp(x - max)).sum::<f64>());
         assert!((lse.value() - batch).abs() < 1e-12);
         assert_eq!(LogSumExp::new().value(), f64::NEG_INFINITY);
     }
@@ -947,7 +955,7 @@ mod tests {
             ..Default::default()
         };
         let configs = enumerate_carrier_configs(&params);
-        let vafs: Vec<f64> = configs.iter().map(|c| c.log_vaf.exp()).collect();
+        let vafs: Vec<f64> = configs.iter().map(|c| float::exp(c.log_vaf)).collect();
         assert_eq!(configs.len(), 4);
         assert!((vafs[0] - 1.0 / 5.0).abs() < 1e-12);
         assert!((vafs[1] - 2.0 / 5.0).abs() < 1e-12);

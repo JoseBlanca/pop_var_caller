@@ -3,7 +3,7 @@
 //!
 //! [`ParalogPrior::estimate`], [`ParalogFdrCurve::from_histogram`] and
 //! [`ParalogFdrCurve::lr_threshold_for_fdr`] are production's, transcribed into
-//! [`super::prior`] and compared with production's bit for bit. What is ng's own is here: the
+//! [`super::prior`] and compared with production's to within rounding. What is ng's own is here: the
 //! **fallback**. An estimate that did not settle is replaced by the documented rate rather than
 //! used, because an unconverged iterate is not distinguishable from a real estimate by its value
 //! alone and would otherwise calibrate the whole run. `converged` stays `false`, so the run report
@@ -13,7 +13,7 @@
 //! counterpart (`calibrate_from_histogram`) in `src/var_calling/paralog_filter/calibrate.rs`, below
 //! four items ng deliberately does not port, so it fell outside the span the copy guard compared.
 //! It is checked against production's frozen answers all the same:
-//! `the_fallback_and_the_cut_agree_with_productions_bit_for_bit` in `production_parity` is the
+//! `the_fallback_and_the_cut_agree_with_productions_to_within_rounding` in `production_parity` is the
 //! oracle, beside the nine other differentials.
 //!
 //! It lives in this module rather than beside its caller because it is statistics: it reads a
