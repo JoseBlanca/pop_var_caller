@@ -157,7 +157,7 @@ The groups follow A1's count of calls, shipped and test, in `src/` (426 in all):
   log2, log, ln_1p, exp_m1, sin, cos, tan, …}` and the `f32` twins, each pointing at `crate::float`;
   the examples' `allow`s.
   *Depends:* B2–B5. *Source:* brief, fix step 2.
-- ☐ **B7. Measure the change.** A3's runs, fit and benches repeated with
+- ✅ **B7. Measure the change.** A3's runs, fit and benches repeated with
   `scripts/portable_float_baseline.sh` on the same machines. The identity oracle and the parity
   oracle, both platforms. The full test suite on both platforms. The GIAB benchmark if a genotype
   moves.
@@ -223,3 +223,11 @@ Recorded as they happened; each step's report gives the detail.
   every recorded answer. **The rule from here on:** a constant is written out as its old bits only
   where converting it moves a recorded answer. A test ties each such constant to `float::ln` within
   one step.
+- **B7 timed the two builds interleaved, not with `scripts/portable_float_baseline.sh`.** That script
+  times one build at a time; another application's load made its fits swing by more than the effect
+  being measured. The baseline script's runs supply peak memory only. A3's libm build was left out of
+  the timing, the joint-fit, site-quality and (on Linux) delimiter benches were compared against the
+  unchanged tree in the same session, and the 20-region commands were not re-timed.
+- **B7 could not check `estimate-contamination`'s output.** On the four-sample data it refuses every
+  sample, so both builds write a file with no estimate in it. Report:
+  [`portable_float_B7_measurements_2026-09-15.md`](../reports/implementations/portable_float_B7_measurements_2026-09-15.md).
