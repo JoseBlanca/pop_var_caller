@@ -899,6 +899,7 @@ fn nei_heterozygosity(expected_copies: f64, copy_count_variance: f64, chromosome
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::float;
 
     /// A panel of unrelated individuals: an inbreeding coefficient of zero, where the correction
     /// is exactly one and every test above is measuring something else.
@@ -1369,7 +1370,7 @@ mod tests {
             "the hard version's test is `expected copies above zero`, and it passes here at \
              {expected_copies}"
         );
-        let all_reference = 0.99_f64.powi(5);
+        let all_reference = float::powi(0.99, 5);
         assert!(
             (soft - (1.0 - all_reference)).abs() < 1e-12,
             "the panel is all-reference at 0.99^5 = {all_reference}, so it segregates at {}; got \

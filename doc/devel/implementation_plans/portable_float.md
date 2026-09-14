@@ -150,7 +150,7 @@ The groups follow A1's count of calls, shipped and test, in `src/` (426 in all):
 - ✅ **B3. Convert `calling`, `genetics.rs` and `types.rs`** (162 calls). **Own commit.**
   *Depends:* B1. *Source:* A1 §2.2–2.6.
 - ✅ **B4. Convert `paralog`** (38 calls). **Own commit.** *Depends:* B1. *Source:* A1 §2.7.
-- ☐ **B5. Convert `parameter_estimation`** (125 calls). **Own commit** — this is the step that moves
+- ✅ **B5. Convert `parameter_estimation`** (125 calls). **Own commit** — this is the step that moves
   the fitted parameters, so the parity oracle's parameters file is checked here.
   *Depends:* B1. *Source:* A1 §2.8–2.10.
 - ☐ **B6. The clippy ban.** `clippy.toml` `disallowed-methods` on `f64::{ln, exp, powf, powi, log10,

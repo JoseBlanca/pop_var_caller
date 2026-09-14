@@ -68,6 +68,7 @@ use std::collections::BTreeMap;
 
 use rayon::prelude::*;
 
+use crate::float;
 use crate::parameter_estimation::joint::census::{
     CensusError, CohortCensusEvidence, RECORDED_OFFSET_RANGE, SsrEvidence, SsrLocusState,
 };
@@ -122,12 +123,12 @@ impl Slippage {
                 (read_span - allele_offset).max(0)
             };
             for step in 1..=inside_steps {
-                let weight = (1.0 - self.fall_off) * self.fall_off.powi(step - 1);
+                let weight = (1.0 - self.fall_off) * float::powi(self.fall_off, step - 1);
                 out[slot(allele_offset + direction * step)] += self.level * share * weight;
             }
             // Everything at least `inside_steps + 1` steps away, whose weight telescopes to
             // `fall_off^inside_steps`, lands in the end bucket.
-            let tail = self.fall_off.powi(inside_steps);
+            let tail = float::powi(self.fall_off, inside_steps);
             out[slot(allele_offset + direction * (inside_steps + 1))] += self.level * share * tail;
         }
         out
@@ -981,31 +982,31 @@ fn climb_one_round(
 
     // The spectrum, one class at a time on a log scale, renormalised each time.
     for class in 0..classes {
-        let current = parameters.length_spectrum[class].max(1e-9).ln();
+        let current = float::ln(parameters.length_spectrum[class].max(1e-9));
         let moved = climb_scalar(
             |x| {
                 let mut trial = parameters.clone();
-                trial.length_spectrum[class] = x.exp();
+                trial.length_spectrum[class] = float::exp(x);
                 normalise(&mut trial.length_spectrum);
                 scorer.score(&trial)
             },
             current,
             2.0,
         );
-        parameters.length_spectrum[class] = moved.exp();
+        parameters.length_spectrum[class] = float::exp(moved);
         normalise(&mut parameters.length_spectrum);
     }
 
     let moved = climb_scalar(
         |x| {
             let mut trial = parameters.clone();
-            trial.concentration = x.exp();
+            trial.concentration = float::exp(x);
             scorer.score(&trial)
         },
-        parameters.concentration.ln(),
+        float::ln(parameters.concentration),
         2.5,
     );
-    parameters.concentration = moved.exp();
+    parameters.concentration = float::exp(moved);
 }
 
 fn read_slippage(slippage: &Slippage, which: usize) -> f64 {
@@ -1945,7 +1946,7 @@ impl TractLikelihoods {
                         }
                         let probability =
                             0.5 * (per_allele[*first][bucket] + per_allele[*second][bucket]);
-                        total += f64::from(*reads) * probability.max(1e-300).ln();
+                        total += f64::from(*reads) * float::ln(probability.max(1e-300));
                     }
                 }
                 total
@@ -1954,7 +1955,7 @@ impl TractLikelihoods {
             let largest = row.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             ln_offset += largest;
             for value in row {
-                *value = (*value - largest).exp();
+                *value = float::exp(*value - largest);
             }
             excess.push(
                 *homozygote_excess
@@ -2070,7 +2071,7 @@ fn ln_tract(
         terms.push(if vanished {
             f64::NEG_INFINITY
         } else {
-            quadrature.ln_weight + product.ln() + scaled_by
+            quadrature.ln_weight + float::ln(product) + scaled_by
         });
     }
     ln_sum_exp(&terms) + likelihoods.ln_offset
@@ -2302,7 +2303,7 @@ fn dirichlet_points(
     Quadrature {
         frequencies,
         classes,
-        ln_weight: -(points as f64).ln(),
+        ln_weight: -float::ln(points as f64),
         independent,
         diagonal,
     }
@@ -2329,7 +2330,7 @@ fn ln_sum_exp(values: &[f64]) -> f64 {
     if !largest.is_finite() {
         return largest;
     }
-    largest + values.iter().map(|v| (v - largest).exp()).sum::<f64>().ln()
+    largest + float::ln(values.iter().map(|v| float::exp(v - largest)).sum::<f64>())
 }
 
 fn ln_gamma(x: f64) -> f64 {
@@ -2346,7 +2347,8 @@ fn ln_gamma(x: f64) -> f64 {
         1.505_632_735_149_311_6e-7,
     ];
     if x < 0.5 {
-        return (std::f64::consts::PI / (std::f64::consts::PI * x).sin()).ln() - ln_gamma(1.0 - x);
+        return float::ln(std::f64::consts::PI / float::sin(std::f64::consts::PI * x))
+            - ln_gamma(1.0 - x);
     }
     let x = x - 1.0;
     let mut series = COEFFICIENTS[0];
@@ -2354,7 +2356,7 @@ fn ln_gamma(x: f64) -> f64 {
         series += coefficient / (x + index as f64);
     }
     let t = x + 7.5;
-    0.5 * std::f64::consts::TAU.ln() + (x + 0.5) * t.ln() - t + series.ln()
+    0.5 * float::ln(std::f64::consts::TAU) + (x + 0.5) * float::ln(t) - t + float::ln(series)
 }
 
 /// `ln B(a, b)`, the constant in front of the incomplete Beta.
@@ -2385,7 +2387,7 @@ fn regularised_incomplete_beta_with(x: f64, a: f64, b: f64, ln_beta: f64) -> f64
     if x > (a + 1.0) / (a + b + 2.0) {
         return 1.0 - regularised_incomplete_beta_with(1.0 - x, b, a, ln_beta);
     }
-    let front = (a * x.ln() + b * (1.0 - x).ln() + ln_beta).exp() / a;
+    let front = float::exp(a * float::ln(x) + b * float::ln(1.0 - x) + ln_beta) / a;
     let (mut f, mut c, mut d) = (1.0_f64, 1.0_f64, 0.0_f64);
     for index in 0..=200 {
         let m = index / 2;
@@ -2449,11 +2451,11 @@ fn beta_quantile_with(p: f64, a: f64, b: f64, ln_beta: f64) -> f64 {
 
 fn logit(p: f64) -> f64 {
     let p = p.clamp(1e-9, 1.0 - 1e-9);
-    (p / (1.0 - p)).ln()
+    float::ln(p / (1.0 - p))
 }
 
 fn expit(x: f64) -> f64 {
-    1.0 / (1.0 + (-x).exp())
+    1.0 / (1.0 + float::exp(-x))
 }
 
 /// Golden-section on one coordinate, over a bracket of `span` either side of `start`.
@@ -2712,18 +2714,18 @@ pub mod bench_fixtures {
         fn gamma(&mut self, shape: f64) -> f64 {
             if shape < 1.0 {
                 let u = self.uniform().max(1e-300);
-                return self.gamma(shape + 1.0) * u.powf(1.0 / shape);
+                return self.gamma(shape + 1.0) * float::powf(u, 1.0 / shape);
             }
             let d = shape - 1.0 / 3.0;
             let c = 1.0 / (9.0 * d).sqrt();
             loop {
                 let x = self.normal();
-                let v = (1.0 + c * x).powi(3);
+                let v = float::powi(1.0 + c * x, 3);
                 if v <= 0.0 {
                     continue;
                 }
                 let u = self.uniform().max(1e-300);
-                if u.ln() < 0.5 * x * x + d - d * v + d * (v.ln()) {
+                if float::ln(u) < 0.5 * x * x + d - d * v + d * float::ln(v) {
                     return d * v;
                 }
             }
@@ -2732,7 +2734,7 @@ pub mod bench_fixtures {
         fn normal(&mut self) -> f64 {
             let u1 = self.uniform().max(1e-300);
             let u2 = self.uniform();
-            (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+            (-2.0 * float::ln(u1)).sqrt() * float::cos(std::f64::consts::TAU * u2)
         }
 
         fn dirichlet(&mut self, alpha: &[f64]) -> Vec<f64> {
@@ -2833,7 +2835,7 @@ pub mod bench_fixtures {
     pub fn spectrum_of(classes: usize) -> Vec<f64> {
         let middle = classes / 2;
         let mut spectrum: Vec<f64> = (0..classes)
-            .map(|class| 0.55_f64.powi((class as i32 - middle as i32).abs()))
+            .map(|class| float::powi(0.55, (class as i32 - middle as i32).abs()))
             .collect();
         normalise(&mut spectrum);
         spectrum

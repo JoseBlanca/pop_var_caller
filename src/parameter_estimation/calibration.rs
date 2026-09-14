@@ -82,6 +82,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::float;
 use crate::locus_generation::{LocusKind, SampleLocusObservations};
 use crate::types::ReadGroupId;
 
@@ -235,7 +236,7 @@ impl MintedReadErrors {
     /// there is none. A caller that treated it as one would divide the fitted rate by nothing.
     #[must_use]
     pub fn mean_error_probability(self) -> Option<f64> {
-        self.mean_log_error().map(f64::exp)
+        self.mean_log_error().map(float::exp)
     }
 
     /// The mean minted error in log space, which is what the mean above is the exponential of.
@@ -400,7 +401,7 @@ mod tests {
         assert_eq!(out[1].1.reads(), 2);
         assert_eq!(out[1].1.mean_log_error(), Some(-1.5));
         assert!(
-            (out[1].1.mean_error_probability().expect("two reads") - (-1.5_f64).exp()).abs()
+            (out[1].1.mean_error_probability().expect("two reads") - float::exp(-1.5)).abs()
                 < 1e-12,
         );
     }
