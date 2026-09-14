@@ -93,7 +93,7 @@ cover.
   and any `mul_add`. Hot-loop classification is checked against a sampling profile of one run of the
   caller where the code reading is not decisive.
   *Depends:* preconditions. *Source:* brief, "Milestone A", first bullet.
-- ☐ **A2. std against libm, per function.** An example program, `examples/float_libm_vs_std.rs`,
+- ✅ **A2. std against libm, per function.** An example program, `examples/float_libm_vs_std.rs`,
   that for each function the inventory found evaluates std and libm over the input ranges the
   inventory names, (a) timing both in repeated trials and reporting the median and spread, (b)
   counting inputs where the two return different bits, and (c) writing each side's outputs to a
