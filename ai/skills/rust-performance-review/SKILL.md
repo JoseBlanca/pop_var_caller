@@ -18,6 +18,7 @@ The review is split across focused per-category checklists in `ai/skills/rust-pe
 - **Complexity is a cost.** Every fix names the complexity it introduces (extra type, lifetime gymnastics, `unsafe`, build-config knob, dependency) and weighs it against the expected gain. A fix that doubles maintenance for a 2% wall-time win is a bad trade in critical lab code.
 - **Hot-path discipline.** Optimizations in code that runs once at startup, in a CLI flag handler, or in error-handling paths are noise. Be explicit about the call-frequency assumption and downgrade severity when call frequency is unverified.
 - **Correctness first.** Never recommend an optimization that weakens invariants, introduces `unsafe`, or relaxes atomic ordering without a separate, justified safety review. Performance findings that touch correctness boundaries are flagged as such and held to the evidence bar of a correctness review.
+- **The same bytes on every machine.** An optimization must not make the caller's output depend on the platform's maths library, the pool's width, the target's vector width or hash-map order. Each floating-point proposal states its effect on output bits and on which machines (`float_portability` category).
 - **One change per measurement.** Bundling allocator switch + LTO + a code refactor in the same PR produces an unreadable result. Each PR names the single hypothesis being tested.
 
 The severity rubric and per-finding format are defined in `ai/skills/rust-performance-review/performance_review/_finding_format.md`. Read it once at the start of every review — both you (for synthesis) and every sub-agent you dispatch will follow it.
@@ -82,6 +83,7 @@ Decide which per-category checklists apply. Each lives at `ai/skills/rust-perfor
 | `concurrency` | Code uses `Arc`, `Mutex`, `RwLock`, atomics, channels, `rayon`, `tokio`, `async fn`, or `spawn`. Skip otherwise. |
 | `hot_loops` | Hot path contains tight numeric or byte-processing loops — including float reductions (sums, dot products, likelihood accumulations) and filters branching on data-dependent predicates — slice indexing, iterator chains, generic dispatch, `format!`, or anywhere autovectorization or branch layout could plausibly matter. |
 | `io_and_syscalls` | Code performs file or socket I/O, reads/writes large data, or makes per-record syscalls. |
+| `float_portability` | Any finding or proposal touching floating-point code whose result reaches output: reordering or parallelising a float sum, chunk sizes, a faster maths function, build-profile changes, or benchmarks of code using `crate::float`. **Required from 2026-09-15**: a speed-up must not make the output differ between platforms or thread counts. |
 
 When in doubt, dispatch — a sub-agent that finds nothing applicable writes `No findings.` and is cheap.
 

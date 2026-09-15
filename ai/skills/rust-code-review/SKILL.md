@@ -15,6 +15,7 @@ The review is split across focused per-category checklists in `ai/skills/rust-co
 - **No silent assumptions.** When the code leaves something unspecified — invariants on inputs, call-site guarantees, threading context, whether a collection is sorted, whether a value can be zero or empty — do not silently pick an answer and review as if it were fact. State the assumption explicitly in the finding and lower its severity until it can be verified.
 - **Evidence-first findings.** Do not invent file paths, line numbers, logs, or command results. If you cannot verify, label as "Needs verification".
 - **Actionability.** Every non-trivial finding must include a concrete fix (diff/snippet, test, or refactor step), or — if the right fix depends on intent the reviewer cannot infer — a specific question whose answer would determine the fix.
+- **The same bytes on every machine.** For the same input the caller writes the same output on macOS and Linux, arm64 and x86_64, at any thread count. A change that makes output depend on the platform's maths library, the pool's width or hash-map order is a correctness defect even when every test on one machine passes; the `float_portability` category holds the rules and what was measured.
 - **Scope discipline.** Review what was asked. For a diff or PR, focus on changed lines and their direct callers/callees; flag pre-existing issues in untouched code separately under "Out of scope observations". Exception: pre-existing Blocker-severity issues (security, data loss, undefined behavior) are raised under Findings regardless of scope.
 
 The severity rubric and per-finding format are defined in `ai/skills/rust-code-review/code_review/_finding_format.md`. Read it once at the start of every review — both you (for synthesis) and every sub-agent you dispatch will follow it.
@@ -67,6 +68,7 @@ Decide which per-category checklists apply. Each lives at `ai/skills/rust-code-r
 | `refactor_safety` | Always. |
 | `module_structure` | Scope spans multiple files (crate / PR / module-level review). Skip pure single-file snippets. |
 | `unsafe_concurrency` | Code uses `unsafe`, `Arc`, `Mutex`/`RwLock`, atomics, channels, `async`, or thread spawning. Skip otherwise. |
+| `float_portability` | Scope contains `f64`/`f32` arithmetic whose result reaches output (a written number, a call or filter decision, a fitted parameter), a transcendental function call or constant, parallel float totals, or a test comparing floats against recorded answers. **Required from 2026-09-15**: the caller must write the same bytes on every platform and at every thread count, and these defects pass every single-machine test. |
 | `smells` | Always. |
 | `tooling` | Scope is a crate (has `Cargo.toml`). Skip pure snippets. |
 | `extras` | Scope contains parsers/validators/security boundaries; accepts untrusted input; produces stable output; is on a hot path; is a public crate; or is a PR (for "Diff matches stated intent"). Apply per item. |

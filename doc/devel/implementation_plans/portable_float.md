@@ -171,12 +171,41 @@ its commit which recorded test answers moved and why.
 
 ### Milestone C — lock it in (only if approved at B)
 
-- ☐ **C1.** A macOS job in `.github/workflows/ci.yml` running the test suite. *Source:* fix step 3.
-- ☐ **C2.** A cross-platform end-to-end test: a synthetic cohort called, the VCF's digest asserted.
-  *Source:* fix step 4.
-- ☐ **C3.** A new identity baseline and a PROJECT_STATUS entry. *Source:* brief, "Milestone C".
+**Approved at Checkpoint B (owner, 2026-09-15), with two amendments.** The end-to-end test and the
+identity baseline must cover the parameter fit, not only calling: B7 found that default-parameter
+calls were already identical across platforms before the conversion, so a calling-only check would
+pass with the defect back in place. And the review skills are amended to require the lessons of this
+work from now on.
+
+- ✅ **C1.** A macOS job in `.github/workflows/ci.yml` running the test suite. *Source:* fix step 3.
+- ✅ **C2.** A cross-platform end-to-end test: a synthetic cohort walked, **fitted**, and called with
+  its fit; the digests of the parameters file and of the VCF asserted, and shown to differ across
+  platforms on the tree before the conversion. *Source:* fix step 4; owner at Checkpoint B.
+- ✅ **C3.** A new identity baseline that **also fits the oracle's cohort and calls with the fit**,
+  recorded in a file the oracle compares against, and a PROJECT_STATUS entry. *Source:* brief,
+  "Milestone C"; owner at Checkpoint B.
+- ✅ **C4.** The code-review and performance-review skills gain a floating-point portability
+  checklist holding this work's lessons, required when floating-point code reaches output.
+  *Source:* owner at Checkpoint B.
 
 > **Checkpoint C: done.** Pause for review.
+
+### Milestone D — a faster `exp` (owner, 2026-09-15)
+
+Checkpoint B offered, as a separate decision, a table-driven `exp` in `src/float.rs` following
+glibc's algorithm, written in Rust: `exp` was about 20% of the unchanged fit's CPU time and libm's
+takes 1.3 to 2.1 times as long a call as glibc's. The owner asked for it to be implemented and
+measured once Milestone C is in.
+
+- ☐ **D1.** `float::exp` computed by the table-driven algorithm, portable Rust with no platform
+  maths call, pinned by unit tests to bits, and checked against libm's `exp` for accuracy over the
+  ranges A1 found (how many arguments round differently, and by how many steps).
+- ☐ **D2.** Measure: the fit and the calling commands interleaved against the Milestone B build on
+  both platforms, the joint-fit and site-quality benches, the cross-platform digest test and the
+  identity oracle; the output change explained. Report, review, and a recommendation to keep or
+  revert.
+
+> **Checkpoint D.** Pause for the owner's decision on keeping it.
 
 ## 6. Verification summary
 
@@ -184,7 +213,8 @@ its commit which recorded test answers moved and why.
 |---|---|
 | A | the identity oracle reproducing the brief's five digests on the untouched tree; every figure in the reports traceable to a log under `tmp/` and the command that made it |
 | B | the test suite green on Linux and macOS; A2's libm output files identical across the two machines; the oracle's VCF diff explained call by call; benches against A3 with noise stated |
-| C | the macOS CI job green; the digest test passing on both platforms |
+| C | the macOS CI job green; the digest test passing on both platforms, and failing across platforms on the tree before the conversion; the identity oracle matching its recorded baseline on both platforms |
+| D | the digest test and the identity oracle identical across platforms with the new `exp`; interleaved timings against the Milestone B build on both platforms |
 
 ## 7. Gates for every commit
 
@@ -231,3 +261,19 @@ Recorded as they happened; each step's report gives the detail.
 - **B7 could not check `estimate-contamination`'s output.** On the four-sample data it refuses every
   sample, so both builds write a file with no estimate in it. Report:
   [`portable_float_B7_measurements_2026-09-15.md`](../reports/implementations/portable_float_B7_measurements_2026-09-15.md).
+- **C2 found the SNP/indel fit's output depended on the pool's width, and the fix is its own commit
+  before Milestone C's.** The fit's expectation pass sized its chunks from the thread count when a
+  census was small, and joined their floating-point totals with rayon's `reduce`, in a tree the pool
+  chose. The two-sample fixture fitted to three different files at one, four and eight threads
+  (`tmp/digests_C/pool_width_cd056a3f.log`). The chunk size now depends only on the census's length
+  (128 chunks, at least 256 positions), and the chunks are joined in a fixed tree (commit
+  `f04f7c43`; two faster-looking shapes were measured and rejected, report
+  [`portable_float_C_lock_in_2026-09-15.md`](../reports/implementations/portable_float_C_lock_in_2026-09-15.md) §2). That moved the
+  tomato fit from `0fb3e50d` to `9e0e7a4a` (7 of 574 lines), identically on macOS and Linux, so
+  **B7's recorded fit checksum is superseded**. It costs the fit +2.2 to +2.8% on macOS and −1.8 to
+  −5.7% on Linux, interleaved. B7's macOS and Linux fits had matched while running on 18 and 8 threads, which did
+  not show width independence: at two million positions both widths cut the census alike, and only
+  the fixture at several widths exposed the defect.
+- **C3 extends the identity oracle script**, so principle 5's "unchanged" no longer holds for it: it
+  now also fits the cohort and calls with the fit, and compares its checksums with a committed
+  baseline file.

@@ -1,0 +1,21 @@
+# Identity-oracle baseline for scripts/promote_ng_oracle.sh, recorded 2026-09-15 at commit f04f7c43
+# (the fit's fixed chunking), identical in the Linux container (arm64, glibc) and on macOS (arm64).
+# Replace it only when the output is meant to change, and say in the commit which lines moved and why.
+# promote-ng identity oracle
+# reference: S_lycopersicum_chromosomes.4.00.fa
+# catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
+# regions kept: 20 (of 160 in benchmarks/tomato2/regions_n160_200kb.bed)
+# alignments: 4
+#   SRR5079906.p1.bench.cram
+#   SRR5079864.p1.bench.cram
+#   SRR5079878.p1.bench.cram
+#   SRR5079876.p1.bench.cram
+slice: 20 regions, 4 alignments
+# records: 7787
+b74f3edf9026fa756621e2492baf019a  from_alignments.comparable
+b74f3edf9026fa756621e2492baf019a  from_psps.comparable
+5e6d874da147f898eda134ce342424b8  from_alignments.parameters.toml
+25d388c83819321a023deb57663c2208  from_alignments.windows.sorted
+259baf040610b33f7ead595da7b26a3b  from_alignments.windows.histograms
+502c3d5e6c53acd7da2f66c29d430545  fitted.parameters.toml
+b7cbf43308722894dd47940e1611c0af  from_fit.comparable

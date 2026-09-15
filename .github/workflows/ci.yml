@@ -77,6 +77,34 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  macos:
+    # **The same source must give the same bytes on macOS as on Linux.** Rust's `f64::ln`, `exp`
+    # and the rest call the operating system's maths library, and Apple's and glibc's round
+    # differently in the last binary place; on 2026-09-13 that moved a repeat tract by a base on
+    # macOS only. Every such call now goes through `crate::float` (the `libm` crate) and clippy
+    # refuses the std methods (doc/devel/implementation_plans/portable_float.md). This job is what
+    # keeps it true: `cli::cross_platform_digests` pins the checksum of a fitted parameters file and
+    # of the calls made with it, and the Linux job above runs the same test against the same
+    # recorded checksums.
+    #
+    # `--examples` is left out here: examples are research tools outside the portability guarantee,
+    # and three of their tests (`ng_generic_loci_dump` twice, `ng_ssr_loci_dump` once) fail on `main`
+    # on every platform measured — natively on macOS and in the arm64 Linux container (2026-09-14/15,
+    # doc/devel/reports/implementations/portable_float_B7_measurements_2026-09-15.md §4). That makes
+    # the Linux job's `--examples` step above likely to fail on `main` too; it is not changed here.
+    #
+    # `macos-15` rather than `macos-latest`, so the arm64 in the job's name is a fact of the image
+    # and not of GitHub's current default.
+    name: test on macOS (arm64)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (lib + integration)
+        run: cargo test --lib --tests --all-features
+
   msrv:
     name: MSRV build (rust-version from Cargo.toml)
     runs-on: ubuntu-latest
