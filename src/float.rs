@@ -7,12 +7,12 @@
 //! one did, and a repeat tract measured a base longer on macOS than on Linux. A caller whose output
 //! depends on the machine cannot be checked on one machine for another.
 //!
-//! Every function here computes in Rust instead — through the [`libm`] crate, or for `powi` as plain
-//! multiplication — so the same argument gives the same bits wherever the binary runs. On aarch64
+//! Every function here computes in Rust instead — through the [`libm`] crate, for `exp` by a
+//! table-driven algorithm written here, or for `powi` as plain multiplication — so the same argument
+//! gives the same bits wherever the binary runs. On aarch64
 //! and x86_64, libm's only processor-specific code is `sqrt`, `fma` and (on aarch64) `rint`, which
 //! IEEE 754 requires to be rounded exactly; `pow` calls `sqrt`, and none of the functions this module
-//! uses calls `fma`. (On 32-bit x86 without SSE libm swaps in an x87 `exp`; the caller does not
-//! target it.) The pinned bits in the tests were recorded on aarch64 macOS and aarch64 Linux; x86_64
+//! uses calls `fma`. The pinned bits in the tests were recorded on aarch64 macOS and aarch64 Linux; x86_64
 //! is covered by the source, not yet by a run. The measurements behind this module — speed, and how
 //! often each function's bits differ from each platform's library — are in
 //! `doc/devel/reports/implementations/portable_float_A2_libm_vs_std_2026-09-14.md`.
@@ -24,13 +24,16 @@
 //! **What it costs.** libm's `ln` takes 0.5 to 1.5 ns a call more than the platform's, and `exp` up
 //! to 3.3 ns more, on an Apple M5 Pro and in an arm64 Linux VM. That made the parameter fit about 30%
 //! slower and the calling commands at most 3% slower (report
-//! `portable_float_A3_caller_baseline_2026-09-14.md`).
+//! `portable_float_A3_caller_baseline_2026-09-14.md`), which is why `exp` was later replaced by the
+//! table-driven version (`doc/devel/implementation_plans/portable_float.md`, Milestone D).
 //!
 //! **Nothing else may call std's versions.** `clippy.toml` refuses `f64::ln`, `exp`, `powf`, `powi`
 //! and the other transcendental methods, and their `f32` twins, in every target, each with a message
 //! pointing here. Two places allow them on purpose: this module's tests, which compare against
 //! std, and the examples, which are research tools outside the guarantee.
 //! `scripts/check_float_ban.sh` proves every entry still refuses its method.
+
+mod table_exp;
 
 /// The natural logarithm, `ln x`.
 #[inline]
@@ -39,9 +42,14 @@ pub fn ln(x: f64) -> f64 {
 }
 
 /// `e` raised to `x`.
+///
+/// **Computed by table lookup, not by `libm::exp`**: the algorithm glibc and musl use, written in
+/// Rust in [`table_exp`]. `libm`'s rational-function `exp` takes 1.3 to 2.1 times as long a call as
+/// glibc's outside underflow, and `exp` took about a fifth of the parameter fit's CPU time. Plain
+/// Rust arithmetic, so the same argument gives the same bits on every platform.
 #[inline]
 pub fn exp(x: f64) -> f64 {
-    libm::exp(x)
+    table_exp::exp(x)
 }
 
 /// `base` raised to the real power `exponent`.
@@ -117,7 +125,8 @@ mod tests {
     use std::hint::black_box;
 
     /// Outputs pinned as bits. They were produced by this module and were the same on both
-    /// platforms recorded, so a change here means libm, or the function a name delegates to, changed.
+    /// platforms recorded, so a change here means libm, the table-driven `exp`, or the function a
+    /// name delegates to, changed.
     #[test]
     fn outputs_are_pinned_to_the_bit() {
         let pinned: [(&str, f64, u64); 16] = [
@@ -168,14 +177,17 @@ mod tests {
     }
 
     /// Recorded on 2026-09-14 on macOS (aarch64) and in the Linux container (aarch64, glibc); both
-    /// gave these bits.
+    /// gave these bits. `exp(13.5)` was re-recorded on 2026-09-15 for the table-driven `exp`; the
+    /// other two `exp` values did not move.
     const PINNED: [u64; 16] = [
         0xbff3_4378_fcbd_a721,
         0xc085_9634_47f8_7fb5,
         0x4022_d795_5979_1e31,
         0x3fdf_c80d_b9dd_5542,
         0x00ca_f5fe_9a48_5c8e,
-        0x4126_4290_bd5c_ad8c,
+        // exp(13.5): the table-driven `exp` gives the correctly rounded bits (0.44 of a step from
+        // the true value, computed at 200 bits); libm's `exp` gave the next double up, `…ad8c`.
+        0x4126_4290_bd5c_ad8b,
         0x3f60_585e_4c78_b079,
         0x3feb_86dd_50c8_818a,
         0x3fe7_b9f2_2a00_1e23,

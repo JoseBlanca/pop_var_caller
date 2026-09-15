@@ -38,9 +38,13 @@ Skills and agents are instructed to leave it untouched.
 > a macOS job; `scripts/promote_ng_oracle.sh` now also fits and compares against
 > `scripts/promote_ng_oracle.baseline`.
 >
-> **What it cost and moved**, on four tomato accessions at about 3× (one low-depth corner):
-> `estimate-parameters` about 27% slower on macOS and 29% on Linux (the owner accepted about 30%);
-> `call-from-psps` 1.7–2.0% slower; `call-from-alignments` and `generate-psps` within about 1%. The
+> **What it cost and moved**, on four tomato accessions at about 3× (one low-depth corner): with
+> `libm`'s `exp`, `estimate-parameters` became about 27% slower on macOS and 29% on Linux (the owner
+> accepted about 30%); `call-from-psps` 1.7–2.0% slower; `call-from-alignments` and `generate-psps`
+> within about 1%. **Milestone D then replaced `exp` with the table-driven algorithm glibc and musl
+> use, ported to Rust** ([report](doc/devel/reports/implementations/portable_float_D_table_exp_2026-09-15.md)):
+> the fit is now +3.4% (macOS) and +8.0% (Linux) against the unchanged caller, measured directly, and
+> that `exp` rounds correctly on all but about 1 argument in 1,000 where `libm`'s missed about 1 in 10. The
 > fitted parameters moved — 56 of 574 lines on Linux against the unchanged build, and 7 lines again
 > with the chunking fix — and are now the same file on both platforms. Calls with default parameters
 > did not move. Calling with each build's own fit changed 30 of 6,735 records against the unchanged
@@ -49,8 +53,10 @@ Skills and agents are instructed to leave it untouched.
 > Tests: Linux 4,799 passed, macOS 4,798 passed, 0 failed.
 >
 > **Not done:** x86_64 is unmeasured until CI runs the branch; GIAB was not run (no genotype moved);
-> `estimate-contamination`'s output could not be compared on four samples. Next: Milestone D, a
-> table-driven `exp` in `crate::float` to win back most of the fit's slowdown.
+> `estimate-contamination`'s output could not be compared on four samples. The fitted parameters
+> moved again with the table `exp` (32 of 574 lines from the unchanged caller's, calls made with it 18
+> of 6,735 records, no genotype); the tests are Linux 4,804 and macOS 4,803 passed after it. Awaiting
+> the owner's decision to keep it (Checkpoint D).
 >
 > - **Earlier (2026-09-13):** **macOS and Linux measure repeat tracts alike** — the aligner's
 > per-quality score table written out as glibc's bits, the first platform difference found; the

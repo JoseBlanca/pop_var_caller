@@ -60,17 +60,20 @@ mod tests {
 
     /// The checksum of the parameters file the fit writes.
     ///
-    /// Recorded 2026-09-15, the same on macOS (arm64) and in the Linux container (arm64, glibc).
-    /// **Measured to have teeth:** the same test on the tree before the maths went through `libm`
+    /// Recorded 2026-09-15 with `float::exp` computed by table lookup
+    /// (`doc/devel/implementation_plans/portable_float.md`, Milestone D), the same on macOS (arm64)
+    /// and in the Linux container (arm64, glibc) (`tmp/digests_D1/{macos,linux}.log`); with
+    /// `libm`'s `exp` it was `28722984e6600bd0cb5ba588506a9c81`. **Measured to have teeth:** the same test on the tree before the maths went through `libm`
     /// (`c6a4394b`, with the fit's fixed chunks and fixed join applied) wrote
     /// `f3f66a488983669e9e7e7a038338c010` on macOS and `cbcb75afaa4e1a25d5f314b581373028` on Linux
     /// (`tmp/digests_C/{macos,linux}_c6a4394b_final.log`).
-    const FITTED_PARAMETERS_MD5: &str = "28722984e6600bd0cb5ba588506a9c81";
+    const FITTED_PARAMETERS_MD5: &str = "3edab375185d74ad84ab52255b418c0b";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
     ///
-    /// Recorded with the checksum above. **This one did not tell the platforms apart** before the
+    /// Recorded with `libm`'s `exp`, and unchanged when `exp` moved to the table-driven version,
+    /// which moved only the parameters file. **This one did not tell the platforms apart** before the
     /// maths went through `libm`: each platform's calls, made with its own differing fit, came to
     /// this same checksum. It is pinned because the calls are what the caller is for, and a change
     /// to them must be seen; the fit's checksum is the one guarding portability.

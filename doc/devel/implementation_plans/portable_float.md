@@ -197,10 +197,10 @@ glibc's algorithm, written in Rust: `exp` was about 20% of the unchanged fit's C
 takes 1.3 to 2.1 times as long a call as glibc's. The owner asked for it to be implemented and
 measured once Milestone C is in.
 
-- ☐ **D1.** `float::exp` computed by the table-driven algorithm, portable Rust with no platform
+- ✅ **D1.** `float::exp` computed by the table-driven algorithm, portable Rust with no platform
   maths call, pinned by unit tests to bits, and checked against libm's `exp` for accuracy over the
   ranges A1 found (how many arguments round differently, and by how many steps).
-- ☐ **D2.** Measure: the fit and the calling commands interleaved against the Milestone B build on
+- ✅ **D2.** Measure: the fit and the calling commands interleaved against the Milestone B build on
   both platforms, the joint-fit and site-quality benches, the cross-platform digest test and the
   identity oracle; the output change explained. Report, review, and a recommendation to keep or
   revert.
@@ -277,3 +277,9 @@ Recorded as they happened; each step's report gives the detail.
 - **C3 extends the identity oracle script**, so principle 5's "unchanged" no longer holds for it: it
   now also fits the cohort and calls with the fit, and compares its checksums with a committed
   baseline file.
+- **D2 measured against the Milestone C build, not B, and added a direct comparison with the
+  unchanged build.** Milestone C changed the fit's chunking, so B was no longer the tree D changes;
+  and the owner's question was whether the table `exp` recovers the conversion's cost, which only the
+  unchanged build answers. Result: the fit is +3.4% (macOS) and +8.0% (Linux) against the unchanged
+  build, where `libm`'s `exp` had been +27% and +29%. Report
+  [`portable_float_D_table_exp_2026-09-15.md`](../reports/implementations/portable_float_D_table_exp_2026-09-15.md).
