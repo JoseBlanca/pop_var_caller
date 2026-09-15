@@ -42,8 +42,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rayon::prelude::*;
-
 use crate::float;
 use crate::parameter_estimation::depth_bins::DepthBinEdges;
 use crate::parameter_estimation::{Estimate, Provenance};
@@ -1758,9 +1756,9 @@ fn expectation(
 
 /// The same pass, told whether to keep each position's probability of being mismapped.
 ///
-/// **Kept only on the last pass of a run.** Keeping it costs one four-byte value a position,
-/// and the chunks have to be held until they can be joined in position order rather than
-/// summed as they arrive — so the iterating passes use the streaming sum and pay neither.
+/// **Kept only on the last pass of a run.** Keeping it costs one four-byte value a position.
+/// Every pass, this one included, joins its chunks' totals in a tree fixed by the number of
+/// positions, so the totals do not depend on the pool's width.
 fn expectation_pass(
     samples: &[SampleGenericSections<'_>],
     depth_cap: DepthCap,
@@ -1792,7 +1790,15 @@ fn expectation_pass(
         })
         .collect();
     let positions = EvidenceCursor::position_count(samples);
-    let chunk = POSITIONS_PER_CHUNK.min(positions.div_ceil(rayon::current_num_threads()).max(1));
+    // **The chunks do not depend on the pool's width.** Every total below is a floating-point sum,
+    // and a sum's last bits depend on where it is split and in what order the parts are added.
+    // Chunks sized from the thread count, joined by `reduce` in whatever tree the pool chose, made
+    // the same census fit to a different file at one, four and eight threads (measured on the
+    // two-sample fixture of `cli::cross_platform_digests`). The test
+    // `a_census_of_many_chunks_fits_to_the_same_bits_at_any_pool_width` holds it.
+    let chunk = positions
+        .div_ceil(CHUNKS_PER_CENSUS)
+        .max(MIN_POSITIONS_PER_CHUNK);
     let bounds: Vec<(usize, usize)> = (0..positions)
         .step_by(chunk)
         .map(|first| (first, (first + chunk).min(positions)))
@@ -1865,10 +1871,17 @@ fn expectation_pass(
         statistics
     };
 
+    if bounds.is_empty() {
+        return empty();
+    }
+    // **The chunks' totals are joined in an order that depends only on how many chunks there are.**
+    // `reduce` may join them in any tree it likes, which is wrong for the per-position lists and,
+    // for the sums, makes their last bits depend on the pool.
     if collect_noisy_posterior {
-        // `reduce` may join chunks in any order it likes, which is fine for a sum and wrong
-        // for a list in position order, so the chunks are collected first.
-        let chunks: Vec<Statistics> = bounds.into_par_iter().map(one_chunk).collect();
+        // The reported pass: the chunks are collected in position order and added once each into
+        // a total sized for the whole census, so each per-position list is copied once.
+        use rayon::prelude::*;
+        let chunks: Vec<Statistics> = bounds.par_iter().copied().map(one_chunk).collect();
         let mut into = empty();
         into.noisy_posterior.reserve(positions);
         if collect_genotype_posterior {
@@ -1879,22 +1892,42 @@ fn expectation_pass(
         for chunk in &chunks {
             into.absorb(chunk);
         }
-        into
-    } else {
-        bounds
-            .into_par_iter()
-            .map(one_chunk)
-            .reduce(empty, |mut into, from| {
-                into.absorb(&from);
-                into
-            })
+        return into;
     }
+    // The iterating passes, which keep sums only: the chunk list is halved at fixed points, the
+    // halves are computed with `rayon::join`, and the right half's totals are added to the left's.
+    // The same additions in the same order at any width, and one partial total held per level.
+    fn joined<S, F>(bounds: &[(usize, usize)], one_chunk: &F, absorb: fn(&mut S, &S)) -> S
+    where
+        S: Send,
+        F: Fn((usize, usize)) -> S + Sync,
+    {
+        if let [only] = bounds {
+            return one_chunk(*only);
+        }
+        let (left, right) = bounds.split_at(bounds.len() / 2);
+        let (mut into, from) = rayon::join(
+            || joined(left, one_chunk, absorb),
+            || joined(right, one_chunk, absorb),
+        );
+        absorb(&mut into, &from);
+        into
+    }
+    joined(&bounds, &one_chunk, Statistics::absorb)
 }
 
-/// How many positions one core takes at a time. Large enough that the per-chunk binary search
-/// into each sample's sparse list disappears against the work, small enough that a cohort of
-/// fifty still fills every core.
-const POSITIONS_PER_CHUNK: usize = 16_384;
+/// How many chunks a census is cut into. **The chunk size comes from the census's length and
+/// these two constants, never from the pool's width**, so a census is cut at the same positions on
+/// every machine. 128 chunks keep up to about a hundred threads busy while each chunk's setup — a
+/// scratch, a set of totals, one binary search into each sample's sparse list — stays small against
+/// its work: on four tomato samples' two-million-position census, 7,813 chunks of 256 positions
+/// made the fit 28% slower than 123 chunks of 16,384 (one run each, not interleaved).
+const CHUNKS_PER_CENSUS: usize = 128;
+
+/// The smallest chunk, so a census of a few thousand positions is not cut into chunks whose setup
+/// outweighs their work. Measured on the joint-fit bench at four threads: 256-position chunks
+/// matched the thread-sized chunks they replaced to within about 2% on every SNP/indel case.
+const MIN_POSITIONS_PER_CHUNK: usize = 256;
 
 /// At most three non-reference bases can be the segregating one, so the candidate list never
 /// exceeds three however many the samples showed reads on.
@@ -3712,6 +3745,57 @@ mod whole_fit_tests {
             .map(|noise| of(&noise.value))
             .sum::<f64>()
             / fit.noise.len() as f64
+    }
+
+    /// **A census cut into several chunks fits to the same bits at one thread as at four.**
+    ///
+    /// Every total of the expectation pass is a floating-point sum over positions, so how the
+    /// positions are split and in what order the parts are added reaches the fitted numbers' last
+    /// bits. Before 2026-09-15 the chunks were sized from the pool's width and joined by `reduce`,
+    /// and a fixture fitted to three different files at one, four and eight threads. This census
+    /// spans many chunks, so it can see both halves of that: a chunk size taken from the thread
+    /// count, and chunks joined in an order the pool chooses. Measured: with the old chunking and
+    /// `reduce` put back, it fails. The cross-platform test in `cli::cross_platform_digests` covers
+    /// the whole command at several widths too.
+    #[test]
+    fn a_census_of_many_chunks_fits_to_the_same_bits_at_any_pool_width() {
+        let positions = 12 * MIN_POSITIONS_PER_CHUNK + 100;
+        let cohort = draw_cohort(
+            3,
+            positions,
+            8.0,
+            (0.002, 0.06, 0.02),
+            FrequencyDensity {
+                p_invariant: 0.90,
+                p_fixed_alt: 0.01,
+                a: 0.7,
+                b: 2.5,
+            },
+            0.2,
+            0x5EED_0C4A_4C5E_0001,
+        );
+        let config = JointFitConfig {
+            quadrature_nodes: 8,
+            max_passes: 3,
+            ..JointFitConfig::default()
+        };
+        let fitted_at = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("a pool of the asked-for width");
+            let fit = pool
+                .install(|| fit_jointly(&mut as_cohort(&cohort.samples), &config))
+                .expect("the cohort pools");
+            // `Debug` prints every `f64` as its shortest round-trip form, so two equal strings are
+            // two equal sets of bits; `==` would also call `0.0` and `-0.0` equal.
+            format!("{fit:?}")
+        };
+        let at_one = fitted_at(1);
+        assert!(
+            at_one == fitted_at(4),
+            "the census fitted to different numbers at one thread and at four"
+        );
     }
 
     /// **The whole chain, on a cohort drawn from the fit's own family: the census average and the
