@@ -31,6 +31,8 @@
 
 use std::fmt;
 
+use crate::float;
+
 // ---------------------------------------------------------------------
 // The shape number
 // ---------------------------------------------------------------------
@@ -204,14 +206,14 @@ impl SlippageCurve {
     fn level_on_the_line(&self, repeats: f64) -> f64 {
         let line = self.intercept + self.slope * repeats;
         let level = if self.rise_shape.is_multiplying() {
-            line.exp()
+            float::exp(line)
         } else {
             // `level ^ s = line`, so `level = line ^ (1/s)`; a line at or below zero has no
             // real root and means the level has fallen off the bottom of the family.
             if line <= 0.0 {
                 0.0
             } else {
-                line.powf(1.0 / self.rise_shape.get())
+                float::powf(line, 1.0 / self.rise_shape.get())
             }
         };
         if level.is_finite() {
@@ -300,9 +302,9 @@ pub fn fit_line(cells: &[FittedCell], rise_shape: RiseShape) -> Result<SlippageC
 
     let transform = |level: f64| {
         if rise_shape.is_multiplying() {
-            level.ln()
+            float::ln(level)
         } else {
-            level.powf(rise_shape.get())
+            float::powf(level, rise_shape.get())
         }
     };
 
@@ -605,7 +607,7 @@ pub fn blend_level(
             let cell_error = cell.relative_standard_error();
             let curve_error = curve.held_out_error.max(CURVE_ERROR_FLOOR);
 
-            let gap = (cell.level.ln() - from_curve.ln()).abs()
+            let gap = (float::ln(cell.level) - float::ln(from_curve)).abs()
                 / (cell_error * cell_error + curve_error * curve_error).sqrt();
             let trust = if gap > config.disagreement_knee {
                 let over = gap / config.disagreement_knee;
@@ -619,9 +621,10 @@ pub fn blend_level(
             let total = cell_weight + curve_weight;
             let share_of_curve = curve_weight / total;
             Some(BlendedLevel {
-                level: ((1.0 - share_of_curve) * cell.level.ln()
-                    + share_of_curve * from_curve.ln())
-                .exp()
+                level: float::exp(
+                    (1.0 - share_of_curve) * float::ln(cell.level)
+                        + share_of_curve * float::ln(from_curve),
+                )
                 .clamp(LEVEL_FLOOR, LEVEL_CEILING),
                 source: LevelSource::Blend {
                     curve_weight: share_of_curve,
@@ -847,8 +850,8 @@ mod tests {
         };
         let at_eight = curve.level_at(8);
         let at_nine = curve.level_at(9);
-        assert!(((-6.5_f64 + 0.4 * 8.0).exp() - at_eight).abs() < 1e-15);
-        assert!((at_nine / at_eight - 0.4_f64.exp()).abs() < 1e-12);
+        assert!((float::exp(-6.5 + 0.4 * 8.0) - at_eight).abs() < 1e-15);
+        assert!((at_nine / at_eight - float::exp(0.4)).abs() < 1e-12);
     }
 
     /// Beyond the repeat counts the curve saw, the level is the nearer fitted end's — never the
@@ -873,7 +876,7 @@ mod tests {
         // repeats — the shape of the failure that made holding flat the rule — where held it
         // stays at its 12-repeat value of 0.1827.
         assert_eq!(curve.level_on_the_line(30.0), LEVEL_CEILING);
-        assert!((curve.level_at(30) - (-6.5_f64 + 0.4 * 12.0).exp()).abs() < 1e-15);
+        assert!((curve.level_at(30) - float::exp(-6.5 + 0.4 * 12.0)).abs() < 1e-15);
         assert!((curve.level_at(30) - 0.1827).abs() < 1e-4);
     }
 
@@ -885,9 +888,12 @@ mod tests {
         for shape in SlippageCurveConfig::default().rise_shape_grid() {
             let (low, high) = (0.004_f64, 0.12_f64);
             let (low_t, high_t) = if shape.is_multiplying() {
-                (low.ln(), high.ln())
+                (float::ln(low), float::ln(high))
             } else {
-                (low.powf(shape.get()), high.powf(shape.get()))
+                (
+                    float::powf(low, shape.get()),
+                    float::powf(high, shape.get()),
+                )
             };
             let slope = (high_t - low_t) / (30.0 - 8.0);
             let curve = SlippageCurve {
@@ -981,7 +987,7 @@ mod tests {
     fn a_shape_number_between_the_ends_round_trips_through_its_root() {
         let shape = RiseShape::new(0.8).expect("inside the range");
         // Build the line so that it passes exactly through 0.03 at 12 repeats and 0.06 at 25.
-        let (low, high) = (0.03_f64.powf(0.8), 0.06_f64.powf(0.8));
+        let (low, high) = (float::powf(0.03, 0.8), float::powf(0.06, 0.8));
         let slope = (high - low) / (25.0 - 12.0);
         let curve = SlippageCurve {
             rise_shape: shape,
@@ -1025,12 +1031,12 @@ mod tests {
         let cells: Vec<FittedCell> = (8..=12)
             .map(|repeats| FittedCell {
                 repeats,
-                level: 0.002 * 1.47_f64.powi(repeats as i32 - 8),
+                level: 0.002 * float::powi(1.47, repeats as i32 - 8),
                 slipped_reads: 500.0,
             })
             .collect();
         let curve = fit_line(&cells, RiseShape::MULTIPLYING).expect("a rising line");
-        assert!((curve.slope - 1.47_f64.ln()).abs() < 1e-12);
+        assert!((curve.slope - float::ln(1.47)).abs() < 1e-12);
         for cell in &cells {
             assert!((curve.level_at(cell.repeats) / cell.level - 1.0).abs() < 1e-12);
         }
@@ -1080,7 +1086,7 @@ mod tests {
         let mut cells: Vec<FittedCell> = (8..=12)
             .map(|repeats| FittedCell {
                 repeats,
-                level: 0.002 * 1.47_f64.powi(repeats as i32 - 8),
+                level: 0.002 * float::powi(1.47, repeats as i32 - 8),
                 slipped_reads: 500.0,
             })
             .collect();
@@ -1158,7 +1164,7 @@ mod tests {
         let compounding: Vec<FittedCell> = (8..=30)
             .map(|repeats| FittedCell {
                 repeats,
-                level: 0.002 * 1.15_f64.powi(repeats as i32 - 8),
+                level: 0.002 * float::powi(1.15, repeats as i32 - 8),
                 slipped_reads: 5_000.0,
             })
             .collect();

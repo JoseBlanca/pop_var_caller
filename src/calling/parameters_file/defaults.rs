@@ -485,6 +485,7 @@ mod tests {
         THE_REFERENCE_A_RUN_FITTED_AGAINST, a_file_using_every_shape, unwrapped_comments,
     };
     use crate::calling::run_parameters::RunParameters;
+    use crate::float;
     use crate::parameter_estimation::Estimate;
     use crate::parameter_estimation::Provenance;
     use crate::parameter_estimation::joint::census::Stratum as CensusStratum;
@@ -546,10 +547,10 @@ mod tests {
         assert_eq!(defaulted.provenance, Provenance::Defaulted);
 
         // Three reads spanning Phred 40 to Phred 13, as the calibration's own fixture does.
-        let minted = [1e-4_f64, 10f64.powf(-2.0), 10f64.powf(-1.3)];
-        let q_sum: f64 = minted.iter().map(|error| error.ln()).sum();
+        let minted = [1e-4_f64, float::powf(10.0, -2.0), float::powf(10.0, -1.3)];
+        let q_sum: f64 = minted.iter().map(|error| float::ln(*error)).sum();
         let reads = u32::try_from(minted.len()).expect("three reads fit in a u32");
-        let geometric_mean = (q_sum / f64::from(reads)).exp();
+        let geometric_mean = float::exp(q_sum / f64::from(reads));
         assert!(
             geometric_mean > MIN_BASE_ERROR,
             "the fixture must sit above the floor, or this asserts the floor instead"

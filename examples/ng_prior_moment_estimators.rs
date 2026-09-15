@@ -65,6 +65,11 @@
 //!
 //! Run: `./scripts/dev.sh cargo run --release --example ng_prior_moment_estimators`
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 use std::env;
 
 use pop_var_caller::genetics::lgamma;

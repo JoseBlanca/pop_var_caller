@@ -431,6 +431,7 @@ pub fn fill_locus_concentration<'a>(
 #[cfg(test)]
 mod seed_tests {
     use super::*;
+    use crate::float;
     use crate::genetics::lgamma;
     use crate::parameter_estimation::joint::fit::FrequencyDensity;
 
@@ -457,7 +458,7 @@ mod seed_tests {
     fn implied_heterozygosity(seed: SpectrumSeed) -> f64 {
         let (a, b) = (seed.alpha_alt_total(), seed.alpha_ref());
         let ln_beta = |x: f64, y: f64| lgamma(x) + lgamma(y) - lgamma(x + y);
-        2.0 * (ln_beta(1.0 + a, 1.0 + b) - ln_beta(a, b)).exp()
+        2.0 * float::exp(ln_beta(1.0 + a, 1.0 + b) - ln_beta(a, b))
     }
 
     /// The seed the shipped builder returns for a measured mean frequency and a measured

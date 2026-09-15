@@ -53,6 +53,7 @@ use super::emission::Emission;
 use super::ssr_best_path_flat_gap::{TractReadout, TransitionCosts};
 use super::stutter::StutterModel;
 use super::{BestPathAligner, ReadBases, RepeatContext, RepeatSpan};
+use crate::float;
 
 /// The five states a cell can be entered in — algorithm 4's, unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,19 +194,17 @@ struct SlipCosts {
 
 impl SlipCosts {
     fn from_model(model: &StutterModel, margin: f64) -> Self {
-        let ln_same_length_share = model.same_length_share().ln();
+        let ln_same_length_share = float::ln(model.same_length_share());
         Self {
-            open_expansion: (model.whole_repeat_longer_share()
-                * model.whole_repeat_one_step_share())
-            .ln()
-                - ln_same_length_share
+            open_expansion: float::ln(
+                model.whole_repeat_longer_share() * model.whole_repeat_one_step_share(),
+            ) - ln_same_length_share
                 - margin,
-            open_contraction: (model.whole_repeat_shorter_share()
-                * model.whole_repeat_one_step_share())
-            .ln()
-                - ln_same_length_share
+            open_contraction: float::ln(
+                model.whole_repeat_shorter_share() * model.whole_repeat_one_step_share(),
+            ) - ln_same_length_share
                 - margin,
-            extend: (1.0 - model.whole_repeat_one_step_share()).ln(),
+            extend: float::ln(1.0 - model.whole_repeat_one_step_share()),
         }
     }
 }
@@ -842,19 +841,19 @@ mod tests {
         let model = contraction_biased();
         let slip = SlipCosts::from_model(&model, 0.0);
         let period = std::num::NonZeroU8::new(3).unwrap();
-        let ln_same_length_share = model.same_length_share().ln();
+        let ln_same_length_share = float::ln(model.same_length_share());
 
         for n in 1..=5i64 {
             // Expansion of n units: one open plus (n − 1) extends, relative to no slip.
             let reconstructed = slip.open_expansion + (n - 1) as f64 * slip.extend;
-            let expected = model.probability(n * 3, period).ln() - ln_same_length_share;
+            let expected = float::ln(model.probability(n * 3, period)) - ln_same_length_share;
             assert!(
                 (reconstructed - expected).abs() < 1e-12,
                 "expansion of {n} units diverged: {reconstructed} vs {expected}"
             );
             // Contraction likewise, and it is the direction the fixture makes cheaper.
             let reconstructed = slip.open_contraction + (n - 1) as f64 * slip.extend;
-            let expected = model.probability(-n * 3, period).ln() - ln_same_length_share;
+            let expected = float::ln(model.probability(-n * 3, period)) - ln_same_length_share;
             assert!(
                 (reconstructed - expected).abs() < 1e-12,
                 "contraction of {n} units diverged"
@@ -945,7 +944,7 @@ mod tests {
     /// worth several mismatches at Q40 — otherwise this is algorithm 4 again.
     #[test]
     fn the_shipped_penalty_is_worth_more_than_two_mismatches() {
-        let mismatch = (1e-4f64 / 3.0).ln().abs();
+        let mismatch = float::ln(1e-4 / 3.0).abs();
         let penalty = RobustIndelConfig::default().flank_gap_open_penalty;
         assert!(
             penalty > 2.0 * mismatch,

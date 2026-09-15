@@ -36,6 +36,11 @@
 //! ng_joint_sample_count_sweep [positions] [depth] [noisy-share] [het-per-kb] [noisy-rate]
 //! ```
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 use std::collections::BTreeMap;
 use std::time::Instant;
 

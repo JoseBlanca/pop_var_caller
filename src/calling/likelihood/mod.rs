@@ -130,6 +130,7 @@ pub mod ssr_emission;
 pub mod stutter_rates;
 
 use crate::calling::genotype_prior::{COUNT_PATH_DESYNC_THRESHOLD, SampleAlleleCopies};
+use crate::float;
 use crate::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
 use crate::parameter_estimation::calibration::MintedReadErrors;
 use crate::parameter_estimation::joint::contamination::{
@@ -435,7 +436,7 @@ impl ReadGroupCalibration {
     /// arithmetic in between that could round.
     #[must_use]
     pub fn log_scale(&self) -> f64 {
-        self.scale.ln()
+        float::ln(self.scale)
     }
 
     /// **The error probability the row actually charges an observation** — this read group's
@@ -507,7 +508,7 @@ impl ReadGroupCalibration {
             self.scale
         );
         let mean_log_error = q_sum / f64::from(num_reads);
-        (self.scale * mean_log_error.exp()).max(MIN_BASE_ERROR)
+        (self.scale * float::exp(mean_log_error)).max(MIN_BASE_ERROR)
     }
 }
 
@@ -2721,10 +2722,10 @@ mod tests {
         let mut reads = 0u32;
         for &(q_sum, num_reads) in &observations {
             let charge = calibration.charged_error(q_sum, num_reads);
-            weighted_log_sum += f64::from(num_reads) * charge.ln();
+            weighted_log_sum += f64::from(num_reads) * float::ln(charge);
             reads += num_reads;
         }
-        let group_average = (weighted_log_sum / f64::from(reads)).exp();
+        let group_average = float::exp(weighted_log_sum / f64::from(reads));
 
         let relative_gap = (group_average - rate).abs() / rate;
         assert!(
@@ -2785,7 +2786,7 @@ mod tests {
 
         // Phred 13 against Phred 40 is a factor of 10^2.7 either side of the scale.
         assert!(
-            (poor / good - 10f64.powf(2.7)).abs() < 1e-6,
+            (poor / good - float::powf(10.0, 2.7)).abs() < 1e-6,
             "ratio {}",
             poor / good
         );
@@ -2912,7 +2913,7 @@ mod tests {
         let (q_sum, num_reads) = minted_reads_at_phred(&[30]);
 
         assert_eq!(tiny.charged_error(q_sum, num_reads), MIN_BASE_ERROR);
-        assert!(tiny.charged_error(q_sum, num_reads).ln().is_finite());
+        assert!(float::ln(tiny.charged_error(q_sum, num_reads)).is_finite());
         assert!(
             huge.charged_error(q_sum, num_reads) > 1.0,
             "an uncapped charge at a scale of 1e30 is {}",
@@ -4222,9 +4223,9 @@ mod tests {
             "a charge past a half is what a cap would have removed, and this is {charged}"
         );
         assert!(
-            ((charged / 0.5_f64).ln() - 0.462_89).abs() < 1e-4,
+            (float::ln(charged / 0.5) - 0.462_89).abs() < 1e-4,
             "production's ceiling would be worth {} nats on this read",
-            (charged / 0.5_f64).ln()
+            float::ln(charged / 0.5)
         );
     }
 
@@ -4264,7 +4265,7 @@ mod tests {
         };
 
         let charged = scaled.charged_error(q_sum, reads);
-        let by_hand = 2.5 * (-3.0_f64).exp();
+        let by_hand = 2.5 * float::exp(-3.0);
 
         assert!((charged - by_hand).abs() <= f64::EPSILON * by_hand);
     }

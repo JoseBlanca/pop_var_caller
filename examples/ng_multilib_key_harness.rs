@@ -86,6 +86,10 @@
 //! cargo run --release --example ng_multilib_key_harness -- --only=balance
 //! ```
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
 // `j` here is a **genotype** — how many of the individual's copies are non-reference —
 // and the arrays it steps through are indexed by it. Rewriting those loops as
 // `iter_mut().enumerate()` would hide the quantity behind an iterator position, on the

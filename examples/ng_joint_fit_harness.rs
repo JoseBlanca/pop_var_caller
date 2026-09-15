@@ -59,6 +59,11 @@
 //! Diploid throughout: the Hardy–Weinberg-with-inbreeding genotype prior is diploid-only
 //! and the spec defers its restatement above `P = 2` (§10).
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 use rayon::prelude::*;
 use std::time::Instant;
 

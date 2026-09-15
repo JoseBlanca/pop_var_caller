@@ -79,6 +79,11 @@
 //!
 //! Run: `./scripts/dev.sh cargo run --release --example ng_prior_moments_from_reads`
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 use std::collections::BTreeMap;
 use std::env;
 use std::time::Instant;

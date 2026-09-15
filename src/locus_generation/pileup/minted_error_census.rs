@@ -47,6 +47,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
+use crate::float;
 use crate::types::ReadGroupId;
 
 /// One read group's minted error in both summable shapes, over the reads this census saw.
@@ -82,7 +83,7 @@ impl MintedErrorTotals {
     /// (`doc/devel/ng/spec/read_likelihoods.md` §3.2). `None` where no read was seen.
     #[must_use]
     pub fn geometric_mean(self) -> Option<f64> {
-        (self.reads > 0).then(|| (self.log_error_sum / self.reads as f64).exp())
+        (self.reads > 0).then(|| float::exp(self.log_error_sum / self.reads as f64))
     }
 
     /// The arithmetic mean of the same probabilities — what §3.2 asked for before the correction
@@ -148,7 +149,7 @@ pub fn record_read(locus_start: u64, read_group: ReadGroupId, log_error: f64) {
         .entry(read_group)
         .or_default();
     totals.log_error_sum += log_error;
-    totals.error_sum += log_error.exp();
+    totals.error_sum += float::exp(log_error);
     totals.reads += 1;
     // `>= 0.0` and not `== 0.0`: `phred_to_ln_perr(0)` is pinned to `+0.0` and the mint takes a
     // `max`, so a silenced read arrives as exactly `+0.0` and nothing can arrive above it — the
@@ -235,7 +236,7 @@ mod tests {
     fn the_two_means_differ_by_the_specs_own_example() {
         let mut totals = MintedErrorTotals::default();
         for error in [0.01_f64, 0.000_1] {
-            totals.log_error_sum += error.ln();
+            totals.log_error_sum += float::ln(error);
             totals.error_sum += error;
             totals.reads += 1;
         }
@@ -276,7 +277,7 @@ mod tests {
     fn one_silenced_read_owns_the_arithmetic_mean_and_barely_moves_the_geometric_one() {
         let mut totals = MintedErrorTotals::default();
         for _ in 0..99 {
-            totals.log_error_sum += 0.000_1_f64.ln();
+            totals.log_error_sum += float::ln(0.000_1);
             totals.error_sum += 0.000_1;
             totals.reads += 1;
         }
@@ -316,7 +317,7 @@ mod tests {
     fn one_repeated_error_makes_the_two_means_equal() {
         let mut totals = MintedErrorTotals::default();
         for _ in 0..97 {
-            totals.log_error_sum += 0.003_f64.ln();
+            totals.log_error_sum += float::ln(0.003);
             totals.error_sum += 0.003;
             totals.reads += 1;
         }

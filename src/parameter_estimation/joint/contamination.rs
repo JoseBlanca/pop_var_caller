@@ -148,6 +148,7 @@ use rayon::prelude::*;
 
 use std::collections::BTreeMap;
 
+use crate::float;
 use crate::parameter_estimation::depth_bins::DepthBinEdges;
 use crate::types::ReadGroupId;
 
@@ -1247,7 +1248,7 @@ fn ln_marker(
                 total += binomial(alternative, depth, p);
             }
             terms[own * 3 + other] =
-                weight.ln() + (total / widest as f64).max(f64::MIN_POSITIVE).ln();
+                float::ln(weight) + float::ln((total / widest as f64).max(f64::MIN_POSITIVE));
         }
     }
     ln_sum_exp(&terms)
@@ -1275,7 +1276,7 @@ fn genotype_priors(frequency: f64, hom_excess: f64) -> [f64; 3] {
 /// every genotype pair and every `α`, so it cancels out of both the sum and the search.
 fn binomial(k: u32, n: u32, p: f64) -> f64 {
     let p = p.clamp(1e-12, 1.0 - 1e-12);
-    p.powi(k as i32) * (1.0 - p).powi((n - k.min(n)) as i32)
+    float::powi(p, k as i32) * float::powi(1.0 - p, (n - k.min(n)) as i32)
 }
 
 fn ln_sum_exp(values: &[f64]) -> f64 {
@@ -1283,7 +1284,7 @@ fn ln_sum_exp(values: &[f64]) -> f64 {
     if largest == f64::NEG_INFINITY {
         return f64::NEG_INFINITY;
     }
-    largest + values.iter().map(|v| (v - largest).exp()).sum::<f64>().ln()
+    largest + float::ln(values.iter().map(|v| float::exp(v - largest)).sum::<f64>())
 }
 
 /// The `wanted` eigenvectors of largest eigenvalue of a small symmetric matrix, by cyclic
@@ -1483,19 +1484,20 @@ mod tests {
         fn gamma(&mut self, shape: f64) -> f64 {
             if shape < 1.0 {
                 let u = self.uniform().max(1e-12);
-                return self.gamma(shape + 1.0) * u.powf(1.0 / shape);
+                return self.gamma(shape + 1.0) * float::powf(u, 1.0 / shape);
             }
             let d = shape - 1.0 / 3.0;
             let c = 1.0 / (9.0 * d).sqrt();
             loop {
                 let u1 = self.uniform().max(1e-12);
                 let u2 = self.uniform();
-                let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-                let v = (1.0 + c * z).powi(3);
+                let z = (-2.0 * float::ln(u1)).sqrt() * float::cos(2.0 * std::f64::consts::PI * u2);
+                let v = float::powi(1.0 + c * z, 3);
                 if v <= 0.0 {
                     continue;
                 }
-                if self.uniform().max(1e-12).ln() < 0.5 * z * z + d - d * v + d * v.ln() {
+                if float::ln(self.uniform().max(1e-12)) < 0.5 * z * z + d - d * v + d * float::ln(v)
+                {
                     return d * v;
                 }
             }
@@ -1512,7 +1514,7 @@ mod tests {
         }
 
         fn poisson(&mut self, mean: f64) -> u32 {
-            let limit = (-mean).exp();
+            let limit = float::exp(-mean);
             let mut product = self.uniform();
             let mut count = 0;
             while product > limit && count < 200 {

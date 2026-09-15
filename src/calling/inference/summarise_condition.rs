@@ -47,6 +47,7 @@ use crate::calling::{
     SampleGenotypeCall, SampleScoringBuffers, SsrSampleEvidence, fill_batch_allele_copies,
     fill_contaminant_allele_frequencies, fill_error_spreads,
 };
+use crate::float;
 use crate::locus_generation::SsrDetail;
 use crate::parameter_estimation::Provenance;
 use crate::parameter_estimation::joint::ssr_fit::Slippage;
@@ -361,7 +362,7 @@ pub(crate) fn score_one_sample(
 
     let mut total_weight = 0.0;
     for slot in posterior_row.iter_mut() {
-        *slot = (*slot - largest_score).exp();
+        *slot = float::exp(*slot - largest_score);
         total_weight += *slot;
     }
     // **Release-held, and it is the module's only `NaN` detector.** The finiteness check
@@ -3865,8 +3866,8 @@ mod tests {
     fn the_sum_runs_in_ascending_sample_order() {
         let half_an_ulp_at_one = f64::from_bits(0x3CA0_0000_0000_0000); // 2^-53
         let one_ulp_at_one = f64::from_bits(0x3CB0_0000_0000_0000); // 2^-52
-        assert_eq!(half_an_ulp_at_one, 2.0_f64.powi(-53));
-        assert_eq!(one_ulp_at_one, 2.0_f64.powi(-52));
+        assert_eq!(half_an_ulp_at_one, float::powi(2.0, -53));
+        assert_eq!(one_ulp_at_one, float::powi(2.0, -52));
 
         // Sample-major, two alleles: the reference column is what carries the property, and
         // the alternative column is three-and-a-bit copies of an order-invariant `1.0`.
@@ -5486,7 +5487,7 @@ mod tests {
 
         let (genotype, quality) = called(&inference, 0);
         assert_eq!(genotype.alleles(), [AlleleId(1), AlleleId(1)]);
-        let by_hand = 10.0 * (7.0_f64 / 3.0).log10();
+        let by_hand = 10.0 * float::log10(7.0 / 3.0);
         assert!(
             (f64::from(quality.get()) - by_hand).abs() < 1e-4,
             "the genotype quality is {} and the arithmetic gives {by_hand}",

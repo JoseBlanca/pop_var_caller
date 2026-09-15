@@ -45,6 +45,8 @@
 
 use std::num::{NonZeroU8, NonZeroU32};
 
+use crate::float;
+
 /// Largest **whole-repeat** slip this model scores at all, counted in **repeats**; anything
 /// past it is **zero**, so an implausibly large change is not explained away as stutter —
 /// such a read falls to the genotyping's outlier handling instead
@@ -483,7 +485,7 @@ impl StutterModel {
         // A geometric's first `steps` terms, `1 − (1 − one_step)^steps` — which is already
         // `0.0` at no steps at all, since `powi(0)` is one.
         let reached = |one_step: f64, steps: u32| -> f64 {
-            1.0 - (1.0 - one_step).powi(i32::try_from(steps).unwrap_or(i32::MAX))
+            1.0 - float::powi(1.0 - one_step, i32::try_from(steps).unwrap_or(i32::MAX))
         };
 
         // How far a read of this candidate can contract. See the doc above for why this
@@ -780,7 +782,7 @@ impl Regime {
         // `size >= 1` here, so the exponent cannot underflow. `unsigned_abs` also means
         // `i64::MIN` is safe, which a `-steps - 1` form would not be. The `max_steps` early
         // return above is what makes the cast safe: any future cutoff must keep the guard.
-        share * self.one_step_share * (1.0 - self.one_step_share).powi((size - 1) as i32)
+        share * self.one_step_share * float::powi(1.0 - self.one_step_share, (size - 1) as i32)
     }
 }
 
@@ -934,7 +936,7 @@ mod tests {
         let model = all_distinct();
         let period = period(3);
         for repeats in 1..=5i64 {
-            let decay = 0.05f64.powi((repeats - 1) as i32);
+            let decay = float::powi(0.05, (repeats - 1) as i32);
             let bp = repeats * i64::from(period.get());
             assert!((model.probability(bp, period) - 0.03 * 0.95 * decay).abs() < 1e-15);
             assert!((model.probability(-bp, period) - 0.07 * 0.95 * decay).abs() < 1e-15);
@@ -953,7 +955,7 @@ mod tests {
         let period = period(3);
         for bp_diff in [1i64, 2, 4, 5, 7] {
             let effective = bp_diff - bp_diff / i64::from(period.get());
-            let decay = 0.2f64.powi((effective - 1) as i32);
+            let decay = float::powi(0.2, (effective - 1) as i32);
             assert!((model.probability(bp_diff, period) - 0.004 * 0.8 * decay).abs() < 1e-15);
             assert!((model.probability(-bp_diff, period) - 0.012 * 0.8 * decay).abs() < 1e-15);
         }
@@ -1207,7 +1209,7 @@ mod tests {
         for bp_diff in [-3i64, -1, 1, 2, 5] {
             let share = if bp_diff < 0 { 0.07 } else { 0.03 };
             let steps = bp_diff.unsigned_abs();
-            let expected = share * 0.95 * 0.05f64.powi((steps - 1) as i32);
+            let expected = share * 0.95 * float::powi(0.05, (steps - 1) as i32);
             assert!((model.probability(bp_diff, period(1)) - expected).abs() < 1e-15);
         }
         // Direction asymmetry survives at period 1 — the one-penalty model cannot express

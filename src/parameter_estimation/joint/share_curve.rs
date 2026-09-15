@@ -37,6 +37,7 @@
 //! `doc/devel/ng/impl_plan/str_slippage_level_curve.md`, Milestone E.
 
 use super::slippage_curve::CurveReach;
+use crate::float;
 
 // ---------------------------------------------------------------------
 // The shape a share follows
@@ -130,7 +131,7 @@ impl FittedShare {
     /// This stratum's share on the logit scale.
     pub fn logit(&self) -> f64 {
         let share = self.bounded();
-        (share / (1.0 - share)).ln()
+        float::ln(share / (1.0 - share))
     }
 
     /// **How precisely this stratum holds its own share, in the units the curve is fitted in.**
@@ -287,7 +288,7 @@ impl ShareCurve {
         let from_centre = repeats - self.centre;
         let logit =
             self.intercept + self.slope * from_centre + self.bend * from_centre * from_centre;
-        let share = 1.0 / (1.0 + (-logit).exp());
+        let share = 1.0 / (1.0 + float::exp(-logit));
         if share.is_finite() {
             share.clamp(SHARE_FLOOR, SHARE_CEILING)
         } else if logit > 0.0 {
@@ -492,7 +493,7 @@ fn held_out_error_of(strata: &[FittedShare], shape: ShareShape) -> Option<f64> {
             continue;
         };
         let predicted = curve.share_on_the_curve(strata[held].repeats as f64);
-        let predicted_logit = (predicted / (1.0 - predicted)).ln();
+        let predicted_logit = float::ln(predicted / (1.0 - predicted));
         let error = (predicted_logit - strata[held].logit()).abs();
         if error.is_finite() {
             errors.push(error);
@@ -555,7 +556,7 @@ pub fn share_curve_for_a_period(
     let bounded = fallback.clamp(SHARE_FLOOR, SHARE_CEILING);
     ShareCurve {
         shape: ShareShape::Flat,
-        intercept: (bounded / (1.0 - bounded)).ln(),
+        intercept: float::ln(bounded / (1.0 - bounded)),
         slope: 0.0,
         bend: 0.0,
         centre: 0.0,
@@ -663,7 +664,7 @@ pub fn blend_share(
             }
             let own_error = stratum.logit_standard_error();
             let curve_error = curve.held_out_error.max(SHARE_CURVE_ERROR_FLOOR);
-            let curve_logit = (from_curve / (1.0 - from_curve)).ln();
+            let curve_logit = float::ln(from_curve / (1.0 - from_curve));
 
             let gap = (stratum.logit() - curve_logit).abs()
                 / (own_error * own_error + curve_error * curve_error).sqrt();
@@ -680,7 +681,7 @@ pub fn blend_share(
             let blended_logit =
                 (1.0 - share_of_curve) * stratum.logit() + share_of_curve * curve_logit;
             Some(BlendedShare {
-                share: (1.0 / (1.0 + (-blended_logit).exp())).clamp(SHARE_FLOOR, SHARE_CEILING),
+                share: (1.0 / (1.0 + float::exp(-blended_logit))).clamp(SHARE_FLOOR, SHARE_CEILING),
                 source: ShareSource::Blend {
                     curve_weight: share_of_curve,
                 },
@@ -795,11 +796,11 @@ mod tests {
     }
 
     fn logit(share: f64) -> f64 {
-        (share / (1.0 - share)).ln()
+        float::ln(share / (1.0 - share))
     }
 
     fn expit(value: f64) -> f64 {
-        1.0 / (1.0 + (-value).exp())
+        1.0 / (1.0 + float::exp(-value))
     }
 
     /// Strata lying exactly on a logit line, drawn over eight repeat counts.

@@ -45,6 +45,8 @@
 
 use std::ops::RangeInclusive;
 
+use crate::float;
+
 /// The deepest depth that keeps a bin to itself: depths `0..=8` are never merged with
 /// anything, which is nine bins.
 ///
@@ -230,7 +232,10 @@ impl Default for DepthBinEdges {
 /// and a second derivation that drifted in the last decimal would round a shared rung
 /// differently and break the property that makes the two ladders one.
 fn widening_ratio(exact_limit: u32, cap: u32, widening_bins: usize) -> f64 {
-    (f64::from(cap) / f64::from(exact_limit)).powf(1.0 / widening_bins as f64)
+    float::powf(
+        f64::from(cap) / f64::from(exact_limit),
+        1.0 / widening_bins as f64,
+    )
 }
 
 fn ladder_tops(exact_limit: u32, cap: u32, bin_count: usize) -> Vec<u32> {
@@ -238,7 +243,7 @@ fn ladder_tops(exact_limit: u32, cap: u32, bin_count: usize) -> Vec<u32> {
     let ratio = widening_ratio(exact_limit, cap, widening_bins);
 
     let widening = (1..=widening_bins).scan(exact_limit, |previous, step| {
-        let top = (f64::from(exact_limit) * ratio.powi(step as i32)).round() as u32;
+        let top = (f64::from(exact_limit) * float::powi(ratio, step as i32)).round() as u32;
         *previous = top.min(cap).max(*previous + 1);
         Some(*previous)
     });
@@ -296,7 +301,8 @@ impl DepthBinEdges {
             DEPTH_BIN_COUNT - EXACT_DEPTH_LIMIT as usize - 1,
         );
         for step in 1..=CENSUS_REACH_BINS {
-            let top = (f64::from(MAX_BINNED_DEPTH) * ratio.powi(step as i32)).round() as u32;
+            let top =
+                (f64::from(MAX_BINNED_DEPTH) * float::powi(ratio, step as i32)).round() as u32;
             // PANIC-FREE: the vector above always holds the cap.
             let previous = *bin_tops.last().expect("the ladder has at least one bin");
             bin_tops.push(top.max(previous + 1));

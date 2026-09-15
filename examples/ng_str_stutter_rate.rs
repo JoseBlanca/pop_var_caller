@@ -64,6 +64,11 @@
 //! Output: one row per (library, period, reference repeat count) with the fitted slippage rate, the
 //! direction split, the fall-off, the spread across starting points, and the evidence behind it.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{BufWriter, Write};

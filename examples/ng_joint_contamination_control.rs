@@ -54,6 +54,11 @@
 //! so the numbers already published from this program can be reproduced from the same command
 //! line — checked, and the whole table matched.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 use std::collections::BTreeMap;
 use std::time::Instant;
 

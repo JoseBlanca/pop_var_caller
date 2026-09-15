@@ -42,8 +42,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rayon::prelude::*;
-
+use crate::float;
 use crate::parameter_estimation::depth_bins::DepthBinEdges;
 use crate::parameter_estimation::{Estimate, Provenance};
 use crate::types::{ExpectedAlternativeFrequency, ExpectedHeterozygosity, Ploidy, ReadGroupId};
@@ -1048,7 +1047,7 @@ impl ReadLogs {
     fn of(error_rate: f64, ploidy: Ploidy) -> Self {
         // The same clamp `count_times_ln` applied before taking a logarithm, so the table holds
         // the values the per-call arithmetic held.
-        let ln = |p: f64| p.max(f64::MIN_POSITIVE).ln();
+        let ln = |p: f64| float::ln(p.max(f64::MIN_POSITIVE));
         let mut ln_candidate = [0.0; 3];
         let mut reference = [0.0; 3];
         let mut ln_reference = [0.0; 3];
@@ -1164,7 +1163,7 @@ fn ln_reference_reads(
         total += weight * power;
         power *= probability;
     }
-    shallowest + total.ln()
+    shallowest + float::ln(total)
 }
 
 /// `count · ln p`, with a count of zero contributing nothing — otherwise a category no read
@@ -1173,7 +1172,7 @@ fn count_times_ln(count: f64, probability: f64) -> f64 {
     if count == 0.0 {
         0.0
     } else {
-        count * probability.max(f64::MIN_POSITIVE).ln()
+        count * float::ln(probability.max(f64::MIN_POSITIVE))
     }
 }
 
@@ -1196,7 +1195,7 @@ fn ln_sum_exp(values: &[f64]) -> f64 {
     if largest == f64::NEG_INFINITY {
         return f64::NEG_INFINITY;
     }
-    largest + values.iter().map(|v| (v - largest).exp()).sum::<f64>().ln()
+    largest + float::ln(values.iter().map(|v| float::exp(v - largest)).sum::<f64>())
 }
 
 // ---------------------------------------------------------------------
@@ -1757,9 +1756,9 @@ fn expectation(
 
 /// The same pass, told whether to keep each position's probability of being mismapped.
 ///
-/// **Kept only on the last pass of a run.** Keeping it costs one four-byte value a position,
-/// and the chunks have to be held until they can be joined in position order rather than
-/// summed as they arrive — so the iterating passes use the streaming sum and pay neither.
+/// **Kept only on the last pass of a run.** Keeping it costs one four-byte value a position.
+/// Every pass, this one included, joins its chunks' totals in a tree fixed by the number of
+/// positions, so the totals do not depend on the pool's width.
 fn expectation_pass(
     samples: &[SampleGenericSections<'_>],
     depth_cap: DepthCap,
@@ -1791,7 +1790,15 @@ fn expectation_pass(
         })
         .collect();
     let positions = EvidenceCursor::position_count(samples);
-    let chunk = POSITIONS_PER_CHUNK.min(positions.div_ceil(rayon::current_num_threads()).max(1));
+    // **The chunks do not depend on the pool's width.** Every total below is a floating-point sum,
+    // and a sum's last bits depend on where it is split and in what order the parts are added.
+    // Chunks sized from the thread count, joined by `reduce` in whatever tree the pool chose, made
+    // the same census fit to a different file at one, four and eight threads (measured on the
+    // two-sample fixture of `cli::cross_platform_digests`). The test
+    // `a_census_of_many_chunks_fits_to_the_same_bits_at_any_pool_width` holds it.
+    let chunk = positions
+        .div_ceil(CHUNKS_PER_CENSUS)
+        .max(MIN_POSITIONS_PER_CHUNK);
     let bounds: Vec<(usize, usize)> = (0..positions)
         .step_by(chunk)
         .map(|first| (first, (first + chunk).min(positions)))
@@ -1841,13 +1848,12 @@ fn expectation_pass(
         let mut index = first;
         while cursor.next_position(&mut scratch.evidence) {
             for (slot, sample) in odds.iter_mut().enumerate() {
-                *sample = f64::from(
+                *sample = float::exp(f64::from(
                     config.coverage_odds[slot]
                         .get(index)
                         .copied()
                         .unwrap_or(0.0),
-                )
-                .exp();
+                ));
             }
             one_position(
                 &mut scratch,
@@ -1865,10 +1871,17 @@ fn expectation_pass(
         statistics
     };
 
+    if bounds.is_empty() {
+        return empty();
+    }
+    // **The chunks' totals are joined in an order that depends only on how many chunks there are.**
+    // `reduce` may join them in any tree it likes, which is wrong for the per-position lists and,
+    // for the sums, makes their last bits depend on the pool.
     if collect_noisy_posterior {
-        // `reduce` may join chunks in any order it likes, which is fine for a sum and wrong
-        // for a list in position order, so the chunks are collected first.
-        let chunks: Vec<Statistics> = bounds.into_par_iter().map(one_chunk).collect();
+        // The reported pass: the chunks are collected in position order and added once each into
+        // a total sized for the whole census, so each per-position list is copied once.
+        use rayon::prelude::*;
+        let chunks: Vec<Statistics> = bounds.par_iter().copied().map(one_chunk).collect();
         let mut into = empty();
         into.noisy_posterior.reserve(positions);
         if collect_genotype_posterior {
@@ -1879,22 +1892,42 @@ fn expectation_pass(
         for chunk in &chunks {
             into.absorb(chunk);
         }
-        into
-    } else {
-        bounds
-            .into_par_iter()
-            .map(one_chunk)
-            .reduce(empty, |mut into, from| {
-                into.absorb(&from);
-                into
-            })
+        return into;
     }
+    // The iterating passes, which keep sums only: the chunk list is halved at fixed points, the
+    // halves are computed with `rayon::join`, and the right half's totals are added to the left's.
+    // The same additions in the same order at any width, and one partial total held per level.
+    fn joined<S, F>(bounds: &[(usize, usize)], one_chunk: &F, absorb: fn(&mut S, &S)) -> S
+    where
+        S: Send,
+        F: Fn((usize, usize)) -> S + Sync,
+    {
+        if let [only] = bounds {
+            return one_chunk(*only);
+        }
+        let (left, right) = bounds.split_at(bounds.len() / 2);
+        let (mut into, from) = rayon::join(
+            || joined(left, one_chunk, absorb),
+            || joined(right, one_chunk, absorb),
+        );
+        absorb(&mut into, &from);
+        into
+    }
+    joined(&bounds, &one_chunk, Statistics::absorb)
 }
 
-/// How many positions one core takes at a time. Large enough that the per-chunk binary search
-/// into each sample's sparse list disappears against the work, small enough that a cohort of
-/// fifty still fills every core.
-const POSITIONS_PER_CHUNK: usize = 16_384;
+/// How many chunks a census is cut into. **The chunk size comes from the census's length and
+/// these two constants, never from the pool's width**, so a census is cut at the same positions on
+/// every machine. 128 chunks keep up to about a hundred threads busy while each chunk's setup — a
+/// scratch, a set of totals, one binary search into each sample's sparse list — stays small against
+/// its work: on four tomato samples' two-million-position census, 7,813 chunks of 256 positions
+/// made the fit 28% slower than 123 chunks of 16,384 (one run each, not interleaved).
+const CHUNKS_PER_CENSUS: usize = 128;
+
+/// The smallest chunk, so a census of a few thousand positions is not cut into chunks whose setup
+/// outweighs their work. Measured on the joint-fit bench at four threads: 256-position chunks
+/// matched the thread-sized chunks they replaced to within about 2% on every SNP/indel case.
+const MIN_POSITIONS_PER_CHUNK: usize = 256;
 
 /// At most three non-reference bases can be the segregating one, so the candidate list never
 /// exceeds three however many the samples showed reads on.
@@ -2095,7 +2128,7 @@ fn one_position(
                 let slot = scratch.max_at(class, candidate, s);
                 scratch.lik_max[slot] = largest;
                 for j in 0..3 {
-                    scratch.lik[base + j] = (scratch.ell[base + j] - largest).exp();
+                    scratch.lik[base + j] = float::exp(scratch.ell[base + j] - largest);
                 }
             }
         }
@@ -2129,7 +2162,7 @@ fn one_position(
                 scratch.node_ln[slot] = if product <= 0.0 {
                     f64::NEG_INFINITY
                 } else {
-                    product.ln() + scale + offset + quadrature.ln_weights[node]
+                    float::ln(product) + scale + offset + quadrature.ln_weights[node]
                 };
             }
         }
@@ -2172,7 +2205,7 @@ fn one_position(
                     scratch.carrier_node_ln[slot] = if product <= 0.0 {
                         f64::NEG_INFINITY
                     } else {
-                        product.ln() + scale + offset + carrier.ln_weights[node]
+                        float::ln(product) + scale + offset + carrier.ln_weights[node]
                     };
                 }
             }
@@ -2180,20 +2213,20 @@ fn one_position(
     }
 
     // ---- the four branches, and the two classes ---------------------------------------------
-    let ln_three = (CANDIDATE_ALTERNATIVES as f64).ln();
+    let ln_three = float::ln(CANDIDATE_ALTERNATIVES as f64);
     let duplicated_share = parameters.duplicated.map_or(0.0, |d| d.share);
     for class in 0..2 {
         scratch.shares.clear();
         for candidate in 0..candidates {
             scratch.shares.push(
                 scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
-                    + scratch.multiplicity[candidate].ln(),
+                    + float::ln(scratch.multiplicity[candidate]),
             );
         }
         let fixed_alt = ln_sum_exp(&scratch.shares) - ln_three;
         scratch.shares.clear();
         for candidate in 0..candidates {
-            let multiplicity = scratch.multiplicity[candidate].ln();
+            let multiplicity = float::ln(scratch.multiplicity[candidate]);
             for node in 0..nodes {
                 scratch
                     .shares
@@ -2204,18 +2237,18 @@ fn one_position(
         let density = &parameters.density;
         // The three ordinary branches share what is left when the duplicated class has taken
         // its share, so the four still sum to one.
-        let ordinary = (1.0 - duplicated_share).max(f64::MIN_POSITIVE).ln();
+        let ordinary = float::ln((1.0 - duplicated_share).max(f64::MIN_POSITIVE));
         scratch.branch_ln[class * BRANCHES] = ordinary
-            + density.p_invariant.max(f64::MIN_POSITIVE).ln()
+            + float::ln(density.p_invariant.max(f64::MIN_POSITIVE))
             + scratch.invariant_ln[class];
         scratch.branch_ln[class * BRANCHES + 1] =
-            ordinary + density.p_fixed_alt.max(f64::MIN_POSITIVE).ln() + fixed_alt;
+            ordinary + float::ln(density.p_fixed_alt.max(f64::MIN_POSITIVE)) + fixed_alt;
         scratch.branch_ln[class * BRANCHES + 2] =
-            ordinary + density.p_segregating().max(f64::MIN_POSITIVE).ln() + segregating;
+            ordinary + float::ln(density.p_segregating().max(f64::MIN_POSITIVE)) + segregating;
         scratch.branch_ln[class * BRANCHES + DUPLICATED] = if let Some(carrier) = carrier {
             scratch.shares.clear();
             for candidate in 0..candidates {
-                let multiplicity = scratch.multiplicity[candidate].ln();
+                let multiplicity = float::ln(scratch.multiplicity[candidate]);
                 for node in 0..carrier.nodes.len() {
                     scratch.shares.push(
                         scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
@@ -2223,7 +2256,8 @@ fn one_position(
                     );
                 }
             }
-            duplicated_share.max(f64::MIN_POSITIVE).ln() + ln_sum_exp(&scratch.shares) - ln_three
+            float::ln(duplicated_share.max(f64::MIN_POSITIVE)) + ln_sum_exp(&scratch.shares)
+                - ln_three
         } else {
             f64::NEG_INFINITY
         };
@@ -2232,7 +2266,7 @@ fn one_position(
         } else {
             parameters.noisy_share
         };
-        scratch.class_ln[class] = share.max(f64::MIN_POSITIVE).ln()
+        scratch.class_ln[class] = float::ln(share.max(f64::MIN_POSITIVE))
             + ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
     }
     let position_ln = ln_sum_exp(&scratch.class_ln);
@@ -2255,10 +2289,10 @@ fn one_position(
         // alternative copies rather than skip it, or the two would divide by different counts.
         //
         // **⚠ No test enters this branch, and none of the fixtures can.** Every logarithm on the
-        // way here is taken through `p.max(f64::MIN_POSITIVE).ln()`, which floors a read's term at
-        // about −708, and `ln_sum_exp` returns `−∞` only when every input already is one — so
-        // reaching `!position_ln.is_finite()` from well-formed evidence would take on the order of
-        // 1e305 reads at a position. What the two lines below maintain is tested where it can be:
+        // way here is taken through `float::ln(p.max(f64::MIN_POSITIVE))`, which floors a read's
+        // term at about −708, and `ln_sum_exp` returns `−∞` only when every input already is one —
+        // so reaching `!position_ln.is_finite()` from well-formed evidence would take on the order
+        // of 1e305 reads at a position. What the two lines below maintain is tested where it can be:
         // an all-zero position counts and contributes nothing, in `census_moments`'s
         // all-reference fixtures, which build the identical buffer. Replacing this block with a
         // `panic!` leaves the suite green, and that is a statement about the branch's
@@ -2275,12 +2309,12 @@ fn one_position(
     if statistics.collect_noisy_posterior {
         statistics
             .noisy_posterior
-            .push((scratch.class_ln[1] - position_ln).exp() as f32);
+            .push(float::exp(scratch.class_ln[1] - position_ln) as f32);
     }
 
     // ---- attribute it -------------------------------------------------------------------------
     for class in 0..2 {
-        let class_posterior = (scratch.class_ln[class] - position_ln).exp();
+        let class_posterior = float::exp(scratch.class_ln[class] - position_ln);
         if class_posterior <= 1e-12 {
             continue;
         }
@@ -2290,10 +2324,10 @@ fn one_position(
         let branches = &scratch.branch_ln[class * BRANCHES..][..BRANCHES];
         let within = ln_sum_exp(branches);
         let branch = [
-            class_posterior * (branches[0] - within).exp(),
-            class_posterior * (branches[1] - within).exp(),
-            class_posterior * (branches[2] - within).exp(),
-            class_posterior * (branches[DUPLICATED] - within).exp(),
+            class_posterior * float::exp(branches[0] - within),
+            class_posterior * float::exp(branches[1] - within),
+            class_posterior * float::exp(branches[2] - within),
+            class_posterior * float::exp(branches[DUPLICATED] - within),
         ];
         statistics.invariant += branch[0];
         statistics.fixed_alt += branch[1];
@@ -2324,12 +2358,12 @@ fn one_position(
             for candidate in 0..candidates {
                 scratch.shares.push(
                     scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
-                        + scratch.multiplicity[candidate].ln(),
+                        + float::ln(scratch.multiplicity[candidate]),
                 );
             }
             let total = ln_sum_exp(&scratch.shares);
             for candidate in 0..candidates {
-                let share = branch[1] * (scratch.shares[candidate] - total).exp();
+                let share = branch[1] * float::exp(scratch.shares[candidate] - total);
                 if share <= 1e-12 {
                     continue;
                 }
@@ -2361,7 +2395,7 @@ fn one_position(
         if branch[2] > 1e-12 {
             scratch.shares.clear();
             for candidate in 0..candidates {
-                let multiplicity = scratch.multiplicity[candidate].ln();
+                let multiplicity = float::ln(scratch.multiplicity[candidate]);
                 for node in 0..nodes {
                     scratch.shares.push(
                         scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity,
@@ -2374,7 +2408,7 @@ fn one_position(
             for candidate in 0..candidates {
                 for node in 0..nodes {
                     let share =
-                        branch[2] * (scratch.shares[candidate * nodes + node] - total).exp();
+                        branch[2] * float::exp(scratch.shares[candidate * nodes + node] - total);
                     if share <= 1e-12 {
                         continue;
                     }
@@ -2439,7 +2473,7 @@ fn one_position(
                 let carrier_nodes = carrier.nodes.len();
                 scratch.shares.clear();
                 for candidate in 0..candidates {
-                    let multiplicity = scratch.multiplicity[candidate].ln();
+                    let multiplicity = float::ln(scratch.multiplicity[candidate]);
                     for node in 0..carrier_nodes {
                         scratch.shares.push(
                             scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
@@ -2453,7 +2487,7 @@ fn one_position(
                 for candidate in 0..candidates {
                     for node in 0..carrier_nodes {
                         let share = branch[DUPLICATED]
-                            * (scratch.shares[candidate * carrier_nodes + node] - total).exp();
+                            * float::exp(scratch.shares[candidate * carrier_nodes + node] - total);
                         if share <= 1e-12 {
                             continue;
                         }
@@ -2821,11 +2855,11 @@ impl BetaQuadrature {
             .collect();
         let total: f64 = w.iter().sum();
         let weights: Vec<f64> = w.iter().map(|w| w / total).collect();
-        let ln_nodes = nodes.iter().map(|f| f.ln()).collect();
-        let ln_one_minus_nodes = nodes.iter().map(|f| (1.0 - f).ln()).collect();
+        let ln_nodes = nodes.iter().map(|f| float::ln(*f)).collect();
+        let ln_one_minus_nodes = nodes.iter().map(|f| float::ln(1.0 - f)).collect();
         let ln_weights = weights
             .iter()
-            .map(|w| w.max(f64::MIN_POSITIVE).ln())
+            .map(|w| float::ln(w.max(f64::MIN_POSITIVE)))
             .collect();
         Self {
             nodes,
@@ -2947,7 +2981,7 @@ fn digamma(x: f64) -> f64 {
     }
     let inverse = 1.0 / x;
     let square = inverse * inverse;
-    result + x.ln()
+    result + float::ln(x)
         - 0.5 * inverse
         - square * (1.0 / 12.0 - square * (1.0 / 120.0 - square / 252.0))
 }
@@ -3021,13 +3055,13 @@ mod tests {
                 .nodes
                 .iter()
                 .zip(rule.weights.iter())
-                .map(|(f, w)| w * f.ln())
+                .map(|(f, w)| w * float::ln(*f))
                 .sum();
             let mean_ln_one_minus: f64 = rule
                 .nodes
                 .iter()
                 .zip(rule.weights.iter())
-                .map(|(f, w)| w * (1.0 - f).ln())
+                .map(|(f, w)| w * float::ln(1.0 - f))
                 .sum();
             let (fitted_a, fitted_b) = fit_beta_shapes(mean_ln_f, mean_ln_one_minus, 1.0, 1.0);
             assert!(
@@ -3392,18 +3426,18 @@ pub mod bench_fixtures {
         fn gamma(&mut self, shape: f64) -> f64 {
             if shape < 1.0 {
                 let u = self.uniform().max(1e-12);
-                return self.gamma(shape + 1.0) * u.powf(1.0 / shape);
+                return self.gamma(shape + 1.0) * float::powf(u, 1.0 / shape);
             }
             let d = shape - 1.0 / 3.0;
             let c = 1.0 / (9.0 * d).sqrt();
             loop {
                 let z = self.normal();
-                let v = (1.0 + c * z).powi(3);
+                let v = float::powi(1.0 + c * z, 3);
                 if v <= 0.0 {
                     continue;
                 }
                 let u = self.uniform().max(1e-12);
-                if u.ln() < 0.5 * z * z + d - d * v + d * (v.ln()) {
+                if float::ln(u) < 0.5 * z * z + d - d * v + d * float::ln(v) {
                     return d * v;
                 }
             }
@@ -3412,11 +3446,11 @@ pub mod bench_fixtures {
         fn normal(&mut self) -> f64 {
             let u1 = self.uniform().max(1e-12);
             let u2 = self.uniform();
-            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+            (-2.0 * float::ln(u1)).sqrt() * float::cos(2.0 * std::f64::consts::PI * u2)
         }
 
         fn poisson(&mut self, mean: f64) -> u32 {
-            let limit = (-mean).exp();
+            let limit = float::exp(-mean);
             let mut product = self.uniform();
             let mut count = 0;
             while product > limit && count < 200 {
@@ -3711,6 +3745,57 @@ mod whole_fit_tests {
             .map(|noise| of(&noise.value))
             .sum::<f64>()
             / fit.noise.len() as f64
+    }
+
+    /// **A census cut into several chunks fits to the same bits at one thread as at four.**
+    ///
+    /// Every total of the expectation pass is a floating-point sum over positions, so how the
+    /// positions are split and in what order the parts are added reaches the fitted numbers' last
+    /// bits. Before 2026-09-15 the chunks were sized from the pool's width and joined by `reduce`,
+    /// and a fixture fitted to three different files at one, four and eight threads. This census
+    /// spans many chunks, so it can see both halves of that: a chunk size taken from the thread
+    /// count, and chunks joined in an order the pool chooses. Measured: with the old chunking and
+    /// `reduce` put back, it fails. The cross-platform test in `cli::cross_platform_digests` covers
+    /// the whole command at several widths too.
+    #[test]
+    fn a_census_of_many_chunks_fits_to_the_same_bits_at_any_pool_width() {
+        let positions = 12 * MIN_POSITIONS_PER_CHUNK + 100;
+        let cohort = draw_cohort(
+            3,
+            positions,
+            8.0,
+            (0.002, 0.06, 0.02),
+            FrequencyDensity {
+                p_invariant: 0.90,
+                p_fixed_alt: 0.01,
+                a: 0.7,
+                b: 2.5,
+            },
+            0.2,
+            0x5EED_0C4A_4C5E_0001,
+        );
+        let config = JointFitConfig {
+            quadrature_nodes: 8,
+            max_passes: 3,
+            ..JointFitConfig::default()
+        };
+        let fitted_at = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("a pool of the asked-for width");
+            let fit = pool
+                .install(|| fit_jointly(&mut as_cohort(&cohort.samples), &config))
+                .expect("the cohort pools");
+            // `Debug` prints every `f64` as its shortest round-trip form, so two equal strings are
+            // two equal sets of bits; `==` would also call `0.0` and `-0.0` equal.
+            format!("{fit:?}")
+        };
+        let at_one = fitted_at(1);
+        assert!(
+            at_one == fitted_at(4),
+            "the census fitted to different numbers at one thread and at four"
+        );
     }
 
     /// **The whole chain, on a cohort drawn from the fit's own family: the census average and the

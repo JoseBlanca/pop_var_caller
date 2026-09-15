@@ -34,6 +34,10 @@
 //! constant** — differences between candidates are exact, absolute values are not comparable with
 //! the harness's.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;

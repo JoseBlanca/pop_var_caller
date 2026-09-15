@@ -11,6 +11,7 @@ pub mod call_from_alignments;
 pub mod call_from_psps;
 pub mod calling_run;
 pub mod command_line;
+mod cross_platform_digests;
 pub mod estimate_contamination;
 pub mod estimate_parameters;
 pub mod generate_psps;

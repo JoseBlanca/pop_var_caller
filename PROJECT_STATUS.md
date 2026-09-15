@@ -22,17 +22,45 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-13):** **macOS and Linux measure repeat tracts alike.** The
-> aligner's per-quality score table was computed with `f64::powf` and `f64::ln`, which call the
-> platform's maths library; at quality 4 macOS's match score sat two units in the last place away
-> from glibc's, and that flipped a tie, so on macOS one generated read's tract measured a byte longer
-> than the recorded answer (`alignment::delimit_parity`, the one failing test of 4,787 on a native
-> macOS run). The table is now the 256 score pairs written out as the bits glibc produced
-> (`src/alignment/emission.rs`), so Linux output is unchanged — the identity oracle's five digests are
-> byte-identical — and macOS runs the whole suite green: 4,786 passed, 0 failed, 4 ignored (one
-> test, `psp::writer`'s failed-flush check, is Linux-only). **Not done:** 340 other `ln`/`exp`/`powf`
-> calls in 40 files can still round differently across platforms; the five `ln` constants of the
-> flat-gap aligner's transition costs are the closest to this one.
+> - **Last completed task (2026-09-15):** **the caller writes the same bytes on macOS and Linux, and
+> at any thread count** (branch `portable-float`,
+> [plan](doc/devel/implementation_plans/portable_float.md), Milestones A–C; reports
+> [B7](doc/devel/reports/implementations/portable_float_B7_measurements_2026-09-15.md) and
+> [C](doc/devel/reports/implementations/portable_float_C_lock_in_2026-09-15.md)).
+>
+> **What changed.** Every `ln`, `exp`, `powf`, `powi`, `log10`, `ln_1p`, `exp_m1`, `sin` and `cos`
+> in `src/` goes through `crate::float`, which computes them in Rust (the `libm` crate) instead of the
+> platform's maths library, and `clippy.toml` refuses std's versions. Separately, the SNP/indel
+> fit's chunks were sized from the thread count and joined in an order the pool chose, so a small
+> cohort fitted to different files at one, four and eight threads; the chunking now depends only on
+> the census's length. `cli::cross_platform_digests` pins the checksums of a fitted parameters file
+> and the calls made with it, and fails on the tree before the conversion across platforms; CI gains
+> a macOS job; `scripts/promote_ng_oracle.sh` now also fits and compares against
+> `scripts/promote_ng_oracle.baseline`.
+>
+> **What it cost and moved**, on four tomato accessions at about 3× (one low-depth corner): with
+> `libm`'s `exp`, `estimate-parameters` became about 27% slower on macOS and 29% on Linux (the owner
+> accepted about 30%); `call-from-psps` 1.7–2.0% slower; `call-from-alignments` and `generate-psps`
+> within about 1%. **Milestone D then replaced `exp` with the table-driven algorithm glibc and musl
+> use, ported to Rust** ([report](doc/devel/reports/implementations/portable_float_D_table_exp_2026-09-15.md)):
+> the fit is now +3.4% (macOS) and +8.0% (Linux) against the unchanged caller, measured directly, and
+> that `exp` rounds correctly on all but about 1 argument in 1,000 where `libm`'s missed about 1 in 10. The
+> fitted parameters moved — 56 of 574 lines on Linux against the unchanged build, and 7 lines again
+> with the chunking fix — and are now the same file on both platforms. Calls with default parameters
+> did not move. Calling with each build's own fit changed 30 of 6,735 records against the unchanged
+> build (printed decimals only), and the chunking fix changed 13 against that (printed decimals and
+> one QUAL, 104.0 to 104.1); no genotype moved.
+> Tests: Linux 4,799 passed, macOS 4,798 passed, 0 failed.
+>
+> **Not done:** x86_64 is unmeasured until CI runs the branch; GIAB was not run (no genotype moved);
+> `estimate-contamination`'s output could not be compared on four samples. The fitted parameters
+> moved again with the table `exp` (32 of 574 lines from the unchanged caller's, calls made with it 18
+> of 6,735 records, no genotype); the tests are Linux 4,804 and macOS 4,803 passed after it. Awaiting
+> the owner's decision to keep it (Checkpoint D).
+>
+> - **Earlier (2026-09-13):** **macOS and Linux measure repeat tracts alike** — the aligner's
+> per-quality score table written out as glibc's bits, the first platform difference found; the
+> work above generalised it.
 >
 > - **Earlier (2026-09-13):** **the project has one caller.** The older caller is
 > deleted, ng's modules sit at the crate root, and its binary is `pop_var_caller` (branch

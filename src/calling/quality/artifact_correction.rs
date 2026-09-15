@@ -28,6 +28,7 @@
 //! is unwritten. This module supplies the arithmetic and nothing else.
 
 use crate::calling::quality::ArtifactTestCounts;
+use crate::float;
 use crate::genetics::lgamma;
 use crate::types::Phred;
 
@@ -136,7 +137,7 @@ const _: () = assert!(
 ///
 /// Production's [`tail_phred`](../../../../src/vcf/qual_refine.rs).
 pub fn two_sided_binomial_tail_phred(observed: f64, total: f64, expected_share: f64) -> f64 {
-    (-10.0 * two_sided_binomial_tail(observed, total, expected_share).log10()).max(0.0)
+    (-10.0 * float::log10(two_sided_binomial_tail(observed, total, expected_share))).max(0.0)
 }
 
 /// **The probability of every outcome no more likely than `observed`**, for `observed` out of
@@ -306,7 +307,7 @@ fn log_binomial_probability(count: f64, total: f64, share: f64) -> f64 {
         };
     }
     let log_ways = lgamma(total + 1.0) - lgamma(count + 1.0) - lgamma(total - count + 1.0);
-    log_ways + count * share.ln() + (total - count) * (1.0 - share).ln()
+    log_ways + count * float::ln(share) + (total - count) * float::ln(1.0 - share)
 }
 
 /// The regularised incomplete beta `I_x(a, b)` — which is the exact binomial cumulative
@@ -324,8 +325,9 @@ fn regularised_incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
     if x >= 1.0 {
         return 1.0;
     }
-    let log_front = lgamma(a + b) - lgamma(a) - lgamma(b) + a * x.ln() + b * (1.0 - x).ln();
-    let front = log_front.exp();
+    let log_front =
+        lgamma(a + b) - lgamma(a) - lgamma(b) + a * float::ln(x) + b * float::ln(1.0 - x);
+    let front = float::exp(log_front);
     // Each branch is the one the continued fraction converges quickly on; the other is reached
     // through the symmetry `I_x(a, b) = 1 − I_{1−x}(b, a)`.
     if x < (a + 1.0) / (a + b + 2.0) {
@@ -664,7 +666,7 @@ mod tests {
         for outcome in 0..=total_reads {
             let log_probability = log_binomial_probability(outcome as f64, total_f, share);
             if log_probability <= log_observed + tolerance {
-                accumulated += log_probability.exp();
+                accumulated += float::exp(log_probability);
             }
         }
         accumulated.clamp(1e-300, 1.0)
@@ -699,10 +701,17 @@ mod tests {
             for &share in &[0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99] {
                 for observed in 0..=total {
                     let closed = -10.0
-                        * two_sided_binomial_tail(observed as f64, total as f64, share).log10();
+                        * float::log10(two_sided_binomial_tail(
+                            observed as f64,
+                            total as f64,
+                            share,
+                        ));
                     let exact = -10.0
-                        * exact_two_sided_binomial_tail(observed as f64, total as f64, share)
-                            .log10();
+                        * float::log10(exact_two_sided_binomial_tail(
+                            observed as f64,
+                            total as f64,
+                            share,
+                        ));
                     let difference = (closed - exact).abs();
                     if difference > worst {
                         worst = difference;

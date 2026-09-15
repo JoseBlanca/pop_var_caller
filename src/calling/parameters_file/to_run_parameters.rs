@@ -1335,6 +1335,7 @@ mod the_north_star_round_trip {
     use super::tests::the_counts_the_projection_out_reads;
     use super::*;
     use crate::calling::genotype_prior::{SeedRegime, SpectrumSeed};
+    use crate::float;
     use crate::parameter_estimation::calibration::MintedReadErrors;
     use crate::parameter_estimation::joint::contamination::{
         ContaminationEstimate, ContaminationSource, NotIdentifiedReason,
@@ -1465,7 +1466,7 @@ mod the_north_star_round_trip {
             let reported = a_number(0.0025, &[group, 1]);
             minted.insert(
                 id,
-                MintedReadErrors::of_observation(reported.ln() * f64::from(reads), reads),
+                MintedReadErrors::of_observation(float::ln(reported) * f64::from(reads), reads),
             );
         }
         (rates, minted)

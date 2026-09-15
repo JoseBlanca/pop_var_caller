@@ -52,6 +52,7 @@
 
 use crate::calling::genotype_prior::dirichlet_multinomial::log_sum_exp_2;
 use crate::calling::genotype_prior::{GenotypePriorModel, PriorRow};
+use crate::float;
 use crate::genetics::PROBABILITY_FLOOR;
 use crate::types::{InbreedingF, LogProb};
 
@@ -142,12 +143,12 @@ fn fill_plug_in_mixture_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
 
     // Floored for the same reason the default floors `1 − F`, and to the same constant: a
     // genotype the prior rules out gets a finite, very negative log-prior rather than `−∞`.
-    let log_weight_identical_by_descent = inbreeding.ln();
-    let log_weight_independent_draws = (1.0 - inbreeding).max(PROBABILITY_FLOOR).ln();
+    let log_weight_identical_by_descent = float::ln(inbreeding);
+    let log_weight_independent_draws = float::ln((1.0 - inbreeding).max(PROBABILITY_FLOOR));
 
     let (log_frequency, out) = row.scratch_and_out();
     for (slot, &alpha) in log_frequency.iter_mut().zip(concentration) {
-        *slot = (alpha / concentration_total).max(PROBABILITY_FLOOR).ln();
+        *slot = float::ln((alpha / concentration_total).max(PROBABILITY_FLOOR));
     }
 
     // `zip` would truncate to the shorter of the two, which is the silent failure this module's
@@ -274,8 +275,8 @@ mod tests {
     /// `Σα(Σα + 1)`: measured, the default's raw row sums to 2.00180036 at `α = (1, 6e-4)`, and
     /// `1.0006 × 2.0006` is 2.00180036. The comparator's row is already a distribution.
     fn normalised(row: &[f64]) -> Vec<f64> {
-        let total: f64 = row.iter().map(|entry| entry.exp()).sum();
-        row.iter().map(|entry| entry.exp() / total).collect()
+        let total: f64 = row.iter().map(|entry| float::exp(*entry)).sum();
+        row.iter().map(|entry| float::exp(*entry) / total).collect()
     }
 
     /// The genotype table's order for a biallelic diploid is `0/0`, `0/1`, `1/1`, which is the
@@ -349,14 +350,14 @@ mod tests {
             let counts = &view.genotype_allele_counts()[genotype * 3..][..3];
             let mut log_random = view.log_multinomial_coeffs()[genotype];
             for (&copies, &p) in counts.iter().zip(&frequency) {
-                log_random += f64::from(copies) * p.ln();
+                log_random += f64::from(copies) * float::ln(p);
             }
-            let independent = (1.0 - inbreeding).ln() + log_random;
+            let independent = float::ln(1.0 - inbreeding) + log_random;
             expected.push(match view.homozygous_alleles()[genotype] {
                 Some(allele) => {
-                    let ibd = inbreeding.ln() + frequency[usize::from(allele.0)].ln();
+                    let ibd = float::ln(inbreeding) + float::ln(frequency[usize::from(allele.0)]);
                     let peak = independent.max(ibd);
-                    peak + ((independent - peak).exp() + (ibd - peak).exp()).ln()
+                    peak + float::ln(float::exp(independent - peak) + float::exp(ibd - peak))
                 }
                 None => independent,
             });
@@ -533,7 +534,7 @@ mod tests {
             "{row:?}"
         );
         // The two homozygotes stand in the ratio of the frequencies themselves.
-        let odds = (row[0] - row[2]).exp();
+        let odds = float::exp(row[0] - row[2]);
         assert!(
             (odds / (concentration[0] / concentration[1]) - 1.0).abs() < 1e-9,
             "{odds} against {}",
@@ -541,7 +542,7 @@ mod tests {
         );
         // And with the heterozygote gone the two homozygotes carry the whole row, which is the
         // clearest statement that the mixture's inbreeding branch is a true probability.
-        assert!((row.iter().map(|entry| entry.exp()).sum::<f64>() - 1.0).abs() < 1e-9);
+        assert!((row.iter().map(|entry| float::exp(*entry)).sum::<f64>() - 1.0).abs() < 1e-9);
         let _ = total;
     }
 
@@ -574,7 +575,7 @@ mod tests {
         // `row_under` already refuses a non-finite entry, so reaching here is the assertion; what
         // this adds is that the floored entries are the floor's own value and not something the
         // arithmetic wandered to.
-        let floored = 2.0 * PROBABILITY_FLOOR.ln();
+        let floored = 2.0 * float::ln(PROBABILITY_FLOOR);
         assert!(
             (row[2] - floored).abs() < 1.0,
             "{} against {floored}",

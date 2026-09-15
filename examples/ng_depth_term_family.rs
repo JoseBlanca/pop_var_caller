@@ -72,6 +72,11 @@
 //! Lines beginning `TSV` carry the same numbers in a machine-readable form, so a run over
 //! several accessions can be assembled into one table.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

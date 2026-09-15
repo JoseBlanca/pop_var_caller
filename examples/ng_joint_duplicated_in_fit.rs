@@ -32,6 +32,11 @@
 //! ng_joint_duplicated_in_fit [positions] [depth] [inbreeding] [aligned-bases-a-window]
 //! ```
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;

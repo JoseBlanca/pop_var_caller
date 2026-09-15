@@ -21,6 +21,7 @@
 //! so they are the same on every platform, and `per_quality_table_matches_the_dindel_model`
 //! checks them against the formula.
 
+use crate::float;
 use crate::types::{BaseQual, DomainError};
 
 /// What a base is worth at one quality: the score if it agrees with the reference, and
@@ -145,7 +146,7 @@ const PROBABILITY_FLOOR: f64 = f64::MIN_POSITIVE;
 /// A `const` rather than a lazily-computed static: this is read on the hot path, and the
 /// module's whole argument against `dyn` is that per-cell overhead is not affordable — an
 /// atomic initialisation check would be the same kind of cost. `uniform_base_ln_is_ln_of_a_quarter`
-/// pins the literal against `0.25f64.ln()`.
+/// pins the literal against `float::ln(0.25)`.
 const UNIFORM_BASE_LN: f64 = -1.386_294_361_119_890_6;
 
 /// Per-Phred-quality emission scores, indexed by the raw quality byte — all 256 of them,
@@ -165,8 +166,9 @@ const UNIFORM_BASE_LN: f64 = -1.386_294_361_119_890_6;
 /// delimitation to break a tie the other way on macOS — the tract measured one byte longer than
 /// on Linux (`alignment::delimit_parity`, seed `0x5eed0001`, case 287). These are the bits
 /// glibc produced on aarch64 Linux with Rust 1.98, the values every run had used on Linux
-/// before; `per_quality_table_matches_the_dindel_model` re-derives them from the formula, to
-/// within rounding everywhere and bit for bit on Linux.
+/// before; `per_quality_table_matches_the_dindel_model` re-derives them from the formula through
+/// [`crate::float`], to within rounding. They stay glibc's bits rather than libm's: already the same on
+/// every platform, and changing them would move measured tracts for no gain.
 static PER_QUALITY_LN: [BaseScores; 256] = [
     scores(0xc086232bdd7abcd2, 0xbff193ea7aad030b), // Q0
     scores(0xbff94db76c25f264, 0xbff5430e069e140f), // Q1
@@ -555,8 +557,8 @@ impl FlatEmission {
         };
         Self {
             scores: BaseScores {
-                match_ln: (1.0 - error_rate).max(PROBABILITY_FLOOR).ln(),
-                mismatch_ln: (error_rate / 3.0).max(PROBABILITY_FLOOR).ln(),
+                match_ln: float::ln((1.0 - error_rate).max(PROBABILITY_FLOOR)),
+                mismatch_ln: float::ln((error_rate / 3.0).max(PROBABILITY_FLOOR)),
             },
         }
     }
@@ -594,44 +596,37 @@ mod tests {
     /// Phred quality to error probability, spelled out independently of the table under
     /// test so the test cannot pass by sharing the implementation's mistake.
     fn error_probability(quality: u8) -> f64 {
-        10f64.powf(-f64::from(quality) / 10.0)
+        float::powf(10.0, -f64::from(quality) / 10.0)
     }
 
-    /// **The written-out table is the Dindel model.** Re-derived from the formula with the running
-    /// platform's `powf` and `ln`, spelled independently of the table: on Linux, where the table's
-    /// bits were produced, every entry must be bit-identical; elsewhere, whose maths library may
-    /// round the last place differently, every entry must agree to within `4 · f64::EPSILON` of its
-    /// magnitude, or of 1.0 where the magnitude is smaller — high qualities' match scores are near
-    /// zero but are computed from `1 − ε`, whose rounding step is about `1.1e-16` in absolute
-    /// terms. That still catches a wrong row (adjacent rows' mismatch scores differ by about 0.23),
-    /// a transposed pair or a changed floor. `assert_eq!` on `f64` is deliberate on Linux: the repeat-aware aligner
-    /// breaks ties on these values, so a table that is merely close moves measured repeats.
+    /// **The written-out table is the Dindel model.** Re-derived from the formula through
+    /// [`crate::float`], spelled independently of the table. The table holds the bits glibc
+    /// produced, and libm rounds some entries' last place differently, so every entry must agree
+    /// to within `4 · f64::EPSILON` of its magnitude, or of 1.0 where the magnitude is smaller —
+    /// high qualities' match scores are near zero but are computed from `1 − ε`, whose rounding
+    /// step is about `1.1e-16` in absolute terms. That still catches a wrong row (adjacent rows'
+    /// mismatch scores differ by about 0.23), a transposed pair or a changed floor. The exact bits,
+    /// which the repeat-aware aligner breaks ties on, are fixed by the literal itself and are the
+    /// same on every platform.
     #[test]
     fn per_quality_table_matches_the_dindel_model() {
         let emission = PerQualityEmission::new();
         for quality in 0..=u8::MAX {
             let error_rate = error_probability(quality);
             let expected = BaseScores {
-                match_ln: (1.0 - error_rate).max(f64::MIN_POSITIVE).ln(),
-                mismatch_ln: (error_rate / 3.0).max(f64::MIN_POSITIVE).ln(),
+                match_ln: float::ln((1.0 - error_rate).max(f64::MIN_POSITIVE)),
+                mismatch_ln: float::ln((error_rate / 3.0).max(f64::MIN_POSITIVE)),
             };
             let written = emission.scores_for(BaseQual(quality));
-            if cfg!(target_os = "linux") {
-                assert_eq!(
-                    written, expected,
-                    "table diverged from the Dindel model at Q{quality}"
+            for (name, got, want) in [
+                ("match", written.match_ln, expected.match_ln),
+                ("mismatch", written.mismatch_ln, expected.mismatch_ln),
+            ] {
+                assert!(
+                    (got - want).abs() <= 4.0 * f64::EPSILON * want.abs().max(1.0),
+                    "table's {name} score diverged from the Dindel model at Q{quality}: \
+                     {got:e} against {want:e}"
                 );
-            } else {
-                for (name, got, want) in [
-                    ("match", written.match_ln, expected.match_ln),
-                    ("mismatch", written.mismatch_ln, expected.mismatch_ln),
-                ] {
-                    assert!(
-                        (got - want).abs() <= 4.0 * f64::EPSILON * want.abs().max(1.0),
-                        "table's {name} score diverged from the Dindel model at Q{quality}: \
-                         {got:e} against {want:e}"
-                    );
-                }
             }
         }
     }
@@ -645,17 +640,37 @@ mod tests {
         let emission = PerQualityEmission::new();
         for (quality, error_rate) in [(10u8, 0.1f64), (20, 0.01), (30, 0.001)] {
             assert!(
-                (emission.emit_ln(b'A', b'A', BaseQual(quality)) - (1.0 - error_rate).ln()).abs()
+                (emission.emit_ln(b'A', b'A', BaseQual(quality)) - float::ln(1.0 - error_rate))
+                    .abs()
                     < 1e-12,
                 "match score at Q{quality}"
             );
             assert!(
-                (emission.emit_ln(b'A', b'C', BaseQual(quality)) - (error_rate / 3.0).ln()).abs()
+                (emission.emit_ln(b'A', b'C', BaseQual(quality)) - float::ln(error_rate / 3.0))
+                    .abs()
                     < 1e-12,
                 "mismatch score at Q{quality}"
             );
         }
     }
+
+    /// **The table's exact bits.** The tolerance test above cannot see an entry moved by a few units
+    /// in the last place, and the repeat-aware aligner breaks ties on exactly those units. A digest
+    /// over all 512 bit patterns — FNV-1a over the 64-bit words, match then mismatch, Q0 to Q255 —
+    /// recorded from the table as `75722336` wrote it, fails on any single changed bit.
+    #[test]
+    fn per_quality_table_keeps_its_written_bits() {
+        let emission = PerQualityEmission::new();
+        let digest = (0..=u8::MAX)
+            .map(|quality| emission.scores_for(BaseQual(quality)))
+            .flat_map(|scores| [scores.match_ln.to_bits(), scores.mismatch_ln.to_bits()])
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, word| {
+                (hash ^ word).wrapping_mul(0x0000_0100_0000_01b3)
+            });
+        assert_eq!(digest, WRITTEN_TABLE_DIGEST, "digest {digest:#018x}");
+    }
+
+    const WRITTEN_TABLE_DIGEST: u64 = 0x0454_3206_1128_dbc0;
 
     /// **The floor, which is the reason this is a table.** At Q0 the error probability is
     /// 1, so an unfloored `ln(1 − ε)` is `ln(0) = -inf`, and one such cell annihilates
@@ -674,10 +689,10 @@ mod tests {
         // otherwise editing the constant would move both sides of the assertion. The
         // floor is documented as the smallest positive normal f64, ~2.2250738585072014e-308.
         assert_eq!(PROBABILITY_FLOOR, 2.225_073_858_507_201_4e-308);
-        assert_eq!(match_ln, 2.225_073_858_507_201_4e-308f64.ln());
+        assert_eq!(match_ln, float::ln(2.225_073_858_507_201_4e-308));
         assert!((match_ln - -708.396_418_532_264_1).abs() < 1e-9);
         // A Q0 mismatch (ε/3 = 1/3) stays an ordinary, unfloored score.
-        assert!((emission.emit_ln(b'A', b'C', BaseQual(0)) - (1.0f64 / 3.0).ln()).abs() < 1e-12);
+        assert!((emission.emit_ln(b'A', b'C', BaseQual(0)) - float::ln(1.0 / 3.0)).abs() < 1e-12);
     }
 
     /// The port floors the mismatch term where production does not. That is safe only
@@ -827,8 +842,8 @@ mod tests {
         let at_low = flat.emit_ln(b'A', b'A', BaseQual(2));
         let at_high = flat.emit_ln(b'A', b'A', BaseQual(60));
         assert_eq!(at_low, at_high);
-        assert!((at_low - 0.98f64.ln()).abs() < 1e-12);
-        assert!((flat.emit_ln(b'A', b'G', BaseQual(2)) - (0.02f64 / 3.0).ln()).abs() < 1e-12);
+        assert!((at_low - float::ln(0.98)).abs() < 1e-12);
+        assert!((flat.emit_ln(b'A', b'G', BaseQual(2)) - float::ln(0.02 / 3.0)).abs() < 1e-12);
     }
 
     /// The flat model's degenerate endpoints are floored rather than annihilating, the
@@ -839,13 +854,13 @@ mod tests {
         assert_eq!(perfect.emit_ln(b'A', b'A', BaseQual(30)), 0.0); // ln(1)
         assert_eq!(
             perfect.emit_ln(b'A', b'C', BaseQual(30)),
-            PROBABILITY_FLOOR.ln()
+            float::ln(PROBABILITY_FLOOR)
         );
 
         let hopeless = FlatEmission::try_new(1.0).expect("a valid test error rate");
         assert_eq!(
             hopeless.emit_ln(b'A', b'A', BaseQual(30)),
-            PROBABILITY_FLOOR.ln()
+            float::ln(PROBABILITY_FLOOR)
         );
         assert!(hopeless.emit_ln(b'A', b'C', BaseQual(30)).is_finite());
     }
@@ -868,7 +883,7 @@ mod tests {
     /// it honest.
     #[test]
     fn uniform_base_ln_is_ln_of_a_quarter() {
-        assert_eq!(UNIFORM_BASE_LN, 0.25f64.ln());
+        assert_eq!(UNIFORM_BASE_LN, float::ln(0.25));
     }
 
     /// **The caller's precondition, pinned so it is recorded rather than discovered.**

@@ -6,6 +6,7 @@
 
 use super::MAX_PLOIDY_COPIES;
 use crate::calling::{CandidateAlleles, GenotypeIdx, GenotypeTableView};
+use crate::float;
 use crate::locus_generation::{LocusKind, LocusLen, WitnessedLocusPositions};
 use crate::types::{AlleleId, LogProb};
 
@@ -807,7 +808,7 @@ pub fn assemble_genotype_log_likelihood_row(
             .skip(1)
         {
             *log_mixture =
-                (from_this_individual * share + from_somebody_else_carrying_this_allele).ln();
+                float::ln(from_this_individual * share + from_somebody_else_carrying_this_allele);
         }
 
         // **Two columns, walked together.** For a fixed observation the allele is fixed, so
@@ -825,9 +826,10 @@ pub fn assemble_genotype_log_likelihood_row(
                 } else {
                     // The one thing that depends on the genotype: how many things this wrong
                     // read could have shown, given what this genotype carries.
-                    (this_individuals_charged_error / spread
-                        + from_somebody_else_carrying_this_allele)
-                        .ln()
+                    float::ln(
+                        this_individuals_charged_error / spread
+                            + from_somebody_else_carrying_this_allele,
+                    )
                 };
         }
     }
@@ -899,17 +901,19 @@ fn score_partials(
         // is taken once per copy count rather than once per genotype — at a six-allele diploid,
         // 3 against 21. **Slot 0 is the error case**, which leaves the genotype loop with no
         // branch at all.
-        log_mixture[0] =
-            (this_individuals_charged_error + from_somebody_else_carrying_a_compatible_allele).ln();
+        log_mixture[0] = float::ln(
+            this_individuals_charged_error + from_somebody_else_carrying_a_compatible_allele,
+        );
         for (copies, log_term) in log_mixture
             .iter_mut()
             .enumerate()
             .take(copies_of_the_genome + 1)
             .skip(1)
         {
-            *log_term = (from_this_individual * copy_share[copies]
-                + from_somebody_else_carrying_a_compatible_allele)
-                .ln();
+            *log_term = float::ln(
+                from_this_individual * copy_share[copies]
+                    + from_somebody_else_carrying_a_compatible_allele,
+            );
         }
 
         for (genotype, slot) in out.iter_mut().enumerate() {
@@ -1423,8 +1427,8 @@ mod tests {
     /// the spread and one that does not, at the same locus and the same genotype.
     ///
     /// It is 1.0986 nats, 4.77 on the Phred scale — the number spec §3.5 uses to argue the
-    /// choice matters. Computed from `3.0_f64.ln()` instead, this would be a test of
-    /// `f64::ln`: it would pass with the fill deleted and the divisor hardcoded, which is
+    /// choice matters. Computed from `float::ln(3.0)` instead, this would be a test of
+    /// the logarithm: it would pass with the fill deleted and the divisor hardcoded, which is
     /// exactly the shape of test the plan's production differential must also avoid.
     #[test]
     fn the_spread_is_worth_one_point_one_nats_per_wrongly_explained_read() {
@@ -1434,9 +1438,10 @@ mod tests {
         let out = spreads(&alleles, &table);
         let hom_ref = genotype_carrying(&table, &[2, 0, 0]);
 
-        let spread = (table_over(&out, &table).at(hom_ref, AlleleId(1))
-            / table_over(&out, &table).at(hom_ref, AlleleId(2)))
-        .ln();
+        let spread = float::ln(
+            table_over(&out, &table).at(hom_ref, AlleleId(1))
+                / table_over(&out, &table).at(hom_ref, AlleleId(2)),
+        );
 
         assert!(
             (spread - 1.0986).abs() < 5e-5,
@@ -1578,7 +1583,7 @@ mod tests {
         let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
         let het = genotype_carrying(&table, &[1, 1]).get() as usize;
         let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
-        let half = 0.5_f64.ln();
+        let half = float::ln(0.5);
 
         assert!((scored[hom_ref] - (-7.0 - LOG_SPREAD)).abs() < 1e-12);
         assert!((scored[het] - 3.0 * half).abs() < 1e-12);
@@ -1591,7 +1596,7 @@ mod tests {
         // defaulted calibration — so every assertion above is blind to what the row does with
         // it. At a scale of 2.5 each error-side read is charged `ln 2.5` more.
         let calibrated_scored = row(&evidence, &alleles, &table, &calibrated(2.5));
-        let log_scale = 2.5_f64.ln();
+        let log_scale = float::ln(2.5);
         assert!((calibrated_scored[hom_ref] - (-7.0 + log_scale - LOG_SPREAD)).abs() < 1e-12);
         assert!(
             (calibrated_scored[hom_alt] - (-6.0 + 2.0 * log_scale - 2.0 * LOG_SPREAD)).abs()
@@ -1676,9 +1681,9 @@ mod tests {
         let per_read_errors: Vec<f64> = [40u8, 31, 22, 15, 9]
             .iter()
             .map(|&phred| {
-                (-f64::from(phred) / 10.0 * std::f64::consts::LN_10)
-                    .exp()
-                    .ln()
+                float::ln(float::exp(
+                    -f64::from(phred) / 10.0 * std::f64::consts::LN_10,
+                ))
             })
             .collect();
 
@@ -1955,7 +1960,7 @@ mod tests {
         /// wrong entry in its table would be invisible to this test — which is the whole thing
         /// a differential is for.
         fn ln_factorial(n: u64) -> f64 {
-            (2..=n).map(|i| (i as f64).ln()).sum()
+            (2..=n).map(|i| float::ln(i as f64)).sum()
         }
 
         let alleles = locus(&[b"A", b"C", b"G"]);
@@ -1978,7 +1983,7 @@ mod tests {
         // used to be blind to it. Measured worst case for that mutation, on a four-allele
         // fixture at scale 0.37: 372.84 nats, about 1,620 Phred, with every test green.
         let scale = 2.5_f64;
-        let log_scale = scale.ln();
+        let log_scale = float::ln(scale);
         let spread_values = spreads(&alleles, &table);
         let spread_table = ErrorSpreadTable::over(&spread_values, &view);
         let mut ours = vec![LogProb(f64::NAN); view.genotype_count()];
@@ -2025,7 +2030,7 @@ mod tests {
                 .filter(|o| counts[usize::from(o.allele.get())] == 0)
                 .map(|o| {
                     f64::from(o.num_reads)
-                        * spread_table.at(GenotypeIdx(genotype as u32), o.allele).ln()
+                        * float::ln(spread_table.at(GenotypeIdx(genotype as u32), o.allele))
                 })
                 .sum();
 
@@ -2081,13 +2086,16 @@ mod tests {
     /// **The table stored this and now stores `ERROR_SPREAD_BASES` instead** (owner,
     /// 2026-08-24). The logarithm survives only here, in the fixtures that state spec §3.3's
     /// log-space form by hand.
-    const LOG_SPREAD: f64 = 1.098_612_288_668_109_7;
+    ///
+    /// **The literal is libm's `ln 3`, one unit below the correctly rounded `…109_7`**, because
+    /// the test below ties it to [`crate::float::ln`] exactly. Do not round it back.
+    const LOG_SPREAD: f64 = 1.098_612_288_668_109_6;
 
     #[test]
     fn the_log_spread_the_fixtures_use_is_the_logarithm_of_what_the_table_stores() {
-        assert_eq!(LOG_SPREAD, ERROR_SPREAD_BASES.ln());
+        assert_eq!(LOG_SPREAD, float::ln(ERROR_SPREAD_BASES));
         assert_eq!(NO_ERROR_SPREAD, 1.0);
-        assert_eq!(NO_ERROR_SPREAD.ln(), 0.0);
+        assert_eq!(float::ln(NO_ERROR_SPREAD), 0.0);
     }
 
     /// **At a scale of three the calibration and the spread cancel exactly**, so a wrongly
@@ -2147,8 +2155,10 @@ mod tests {
         let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
 
         assert!((scored[hom_ref] - (-1.0 - 6.0 * LOG_SPREAD)).abs() < 1e-12);
-        assert!((scored[het] - 11.0 * 0.5_f64.ln()).abs() < 1e-12);
-        assert!((scored[hom_alt] - (-1.0 + 5.0 * 0.01_f64.ln() - 5.0 * LOG_SPREAD)).abs() < 1e-12);
+        assert!((scored[het] - 11.0 * float::ln(0.5)).abs() < 1e-12);
+        assert!(
+            (scored[hom_alt] - (-1.0 + 5.0 * float::ln(0.01) - 5.0 * LOG_SPREAD)).abs() < 1e-12
+        );
         assert!(
             scored[hom_ref] > scored[het] && scored[hom_ref] > scored[hom_alt],
             "the reference homozygote should win: {scored:?}"
@@ -2173,9 +2183,9 @@ mod tests {
         let at = |copies: &[u32]| scored[genotype_carrying(&table, copies).get() as usize];
 
         assert!((at(&[4, 0]) - (-7.0 - LOG_SPREAD)).abs() < 1e-12);
-        assert!((at(&[3, 1]) - (3.0 * 0.75_f64.ln() + 0.25_f64.ln())).abs() < 1e-12);
-        assert!((at(&[2, 2]) - 4.0 * 0.5_f64.ln()).abs() < 1e-12);
-        assert!((at(&[1, 3]) - (3.0 * 0.25_f64.ln() + 0.75_f64.ln())).abs() < 1e-12);
+        assert!((at(&[3, 1]) - (3.0 * float::ln(0.75) + float::ln(0.25))).abs() < 1e-12);
+        assert!((at(&[2, 2]) - 4.0 * float::ln(0.5)).abs() < 1e-12);
+        assert!((at(&[1, 3]) - (3.0 * float::ln(0.25) + float::ln(0.75))).abs() < 1e-12);
         assert!((at(&[0, 4]) - (-6.0 - 3.0 * LOG_SPREAD)).abs() < 1e-12);
         assert!(
             scored.iter().all(|&value| value < 0.0),
@@ -2606,12 +2616,12 @@ mod tests {
                     let copies = counts[genotype * allele_count + allele];
                     let reads = f64::from(observation.num_reads);
                     total += if copies > 0 {
-                        reads * (f64::from(copies) / ploidy).ln()
+                        reads * float::ln(f64::from(copies) / ploidy)
                     } else {
                         let scale = calibration[observation.read_group.get() as usize];
-                        let log_spread = spread_table
-                            .at(GenotypeIdx(genotype as u32), observation.allele)
-                            .ln();
+                        let log_spread = float::ln(
+                            spread_table.at(GenotypeIdx(genotype as u32), observation.allele),
+                        );
                         observation.q_sum + reads * (scale.log_scale() - log_spread)
                     };
                 }
@@ -2770,19 +2780,20 @@ mod tests {
 
         let (own, other) = (0.97_f64, 0.03_f64);
         let (q_ref, q_alt) = (0.999_f64, 0.001_f64);
-        let (error_ref, error_alt) = ((-6.0_f64 / 2.0).exp(), (-7.0_f64).exp());
+        let (error_ref, error_alt) = (float::exp(-6.0 / 2.0), float::exp(-7.0));
 
         // The reference homozygote: both reference reads explained at a full copy share, the
         // alternative read wrong with its error spread three ways.
-        let expected_hom_ref = 2.0 * (own * 1.0 + other * q_ref).ln()
-            + (own * error_alt / ERROR_SPREAD_BASES + other * q_alt).ln();
+        let expected_hom_ref = 2.0 * float::ln(own * 1.0 + other * q_ref)
+            + float::ln(own * error_alt / ERROR_SPREAD_BASES + other * q_alt);
         // The heterozygote explains every read at half a copy share, so no error term at all.
         let expected_het =
-            2.0 * (own * 0.5 + other * q_ref).ln() + (own * 0.5 + other * q_alt).ln();
+            2.0 * float::ln(own * 0.5 + other * q_ref) + float::ln(own * 0.5 + other * q_alt);
         // The alternative homozygote: the alternative read explained, both reference reads
         // wrong — and `q_sum` is −6 over two reads, so each is charged the geometric mean e⁻³.
-        let expected_hom_alt = 2.0 * (own * error_ref / ERROR_SPREAD_BASES + other * q_ref).ln()
-            + (own * 1.0 + other * q_alt).ln();
+        let expected_hom_alt = 2.0
+            * float::ln(own * error_ref / ERROR_SPREAD_BASES + other * q_ref)
+            + float::ln(own * 1.0 + other * q_alt);
 
         assert!((scored[hom_ref] - expected_hom_ref).abs() < 1e-12);
         assert!((scored[het] - expected_het).abs() < 1e-12);
@@ -2955,7 +2966,7 @@ mod tests {
 
         // Two reads the genotype explains at a quarter share, each charged
         // `ln(0.95 · 0.25 + 0.05 · 0.2)`.
-        let expected = 2.0 * (0.95_f64 * 0.25 + 0.05 * 0.2).ln();
+        let expected = 2.0 * float::ln(0.95 * 0.25 + 0.05 * 0.2);
         assert!((scored[one_copy] - expected).abs() < 1e-12);
     }
 
@@ -3483,7 +3494,7 @@ mod tests {
 
         // Only the alternative is compatible, so the contaminant explains the read at
         // `0.05 × 0.3`, against a misread's `0.95 × e⁻⁷`.
-        let expected = 3.0 * (0.95 * (-7.0_f64).exp() + 0.05 * 0.3).ln();
+        let expected = 3.0 * float::ln(0.95 * float::exp(-7.0) + 0.05 * 0.3);
         assert!((contaminated[hom_ref] - expected).abs() < 1e-12);
     }
 
@@ -3684,9 +3695,9 @@ mod tests {
         // Two copies each of two compatible alleles — all four copies, so `ln 1` is zero.
         assert_eq!(scored[carries(&[2, 2, 0])], 0.0);
         // One compatible copy in four.
-        assert!((scored[carries(&[1, 0, 3])] - 2.0 * 0.25_f64.ln()).abs() < 1e-12);
+        assert!((scored[carries(&[1, 0, 3])] - 2.0 * float::ln(0.25)).abs() < 1e-12);
         // Three compatible copies in four.
-        assert!((scored[carries(&[2, 1, 1])] - 2.0 * 0.75_f64.ln()).abs() < 1e-12);
+        assert!((scored[carries(&[2, 1, 1])] - 2.0 * float::ln(0.75)).abs() < 1e-12);
         // None — charged the reads' own quality, with no spread.
         assert!((scored[carries(&[0, 0, 4])] - 2.0 * (-7.0)).abs() < 1e-12);
     }

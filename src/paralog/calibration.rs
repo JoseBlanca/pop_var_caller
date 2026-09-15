@@ -16,7 +16,9 @@
 //! (`copy_fidelity.rs`, deleted at promotion step C3) declared and checked: one path into
 //! production, one rustdoc link to the driver ng leaves behind, and five items whose `pub(crate)`
 //! is widened to `pub` because ng re-exports them from a public module and a `pub use` cannot
-//! re-export a crate-private item. The file was guarded there like every other copy.
+//! re-export a crate-private item. The file was guarded there like every other copy. Since
+//! 2026-09-14 its `exp` and `ln` also go through [`crate::float`], so the posterior is the same on
+//! macOS and Linux.
 //!
 //! **ng's `F` is per sample where production's is one cohort number** — the parameters file
 //! carries a fitted coefficient for each sample (`doc/devel/ng/spec/hidden_paralog_filter.md`
@@ -26,6 +28,7 @@
 //! copied: it is the piece ng replaces rather than ports.
 
 use super::{EmConfig, ParalogFdrCurve, ParalogPrior};
+use crate::float;
 
 /// Default fallback `π` used when the EM does not converge — a rare-paralog
 /// prior deliberately low so a pathological dataset yields a conservative
@@ -106,7 +109,7 @@ impl ParalogCalibration {
         if !lr.is_finite() || pi <= 0.0 || pi >= 1.0 {
             return None;
         }
-        let log_odds = lr + (pi / (1.0 - pi)).ln(); // LR + logit(π)
-        Some(1.0 / (1.0 + (-log_odds).exp())) // σ(·)
+        let log_odds = lr + float::ln(pi / (1.0 - pi)); // LR + logit(π)
+        Some(1.0 / (1.0 + float::exp(-log_odds))) // σ(·)
     }
 }

@@ -62,6 +62,11 @@
 //!     [samples] [depth] [loci] [classes] [kappa]
 //! ```
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "examples are research tools outside the portable-float guarantee (clippy.toml)"
+)]
+
 use rayon::prelude::*;
 use std::time::Instant;
 

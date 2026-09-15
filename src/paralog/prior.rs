@@ -26,8 +26,9 @@
 //! **ng's copy.** Everything above and below this note is line for line and byte for byte
 //! `src/paralog/prior.rs`, as a textual guard (`copy_fidelity.rs`, deleted at promotion step C3)
 //! asserted until then — ng appends this note
-//! to production's header and changes nothing else. The EM's start, tolerance and iteration
-//! cap, and the histogram's shape, are the tomato2 prototype's, inherited and **not
+//! to production's header and changes nothing else, except that since 2026-09-14 its `exp` and
+//! `ln` go through [`crate::float`] so that macOS and Linux fit the same π. The EM's start,
+//! tolerance and iteration cap, and the histogram's shape, are the tomato2 prototype's, inherited and **not
 //! re-measured** (`doc/devel/ng/spec/hidden_paralog_filter.md` §3.3, plan step A3).
 //!
 //! **What reads this in ng, and when.** Pass two of the filter folds every finite likelihood
@@ -35,6 +36,8 @@
 //! cut — all after the calling pass has ended, because the verdict on the first record
 //! depends on the last record's score (spec §2). `calibration.rs` beside this file holds
 //! what that pass settles.
+
+use crate::float;
 
 /// Default EM start for `π` (paralogs are rare; the fixed point is unique so
 /// the start only affects iteration count — prototype `pi = 0.03`).
@@ -298,9 +301,9 @@ impl ParalogFdrCurve {
 /// The logistic function `σ(x) = 1 / (1 + e^{−x})`, `−∞`/`+∞`-safe.
 fn sigmoid(x: f64) -> f64 {
     if x >= 0.0 {
-        1.0 / (1.0 + (-x).exp())
+        1.0 / (1.0 + float::exp(-x))
     } else {
-        let e = x.exp();
+        let e = float::exp(x);
         e / (1.0 + e)
     }
 }
@@ -308,7 +311,7 @@ fn sigmoid(x: f64) -> f64 {
 /// The logit `ln(p / (1 − p))`. Callers clamp `p` into the open unit interval
 /// first via [`clamp_probability`].
 fn logit(p: f64) -> f64 {
-    (p / (1.0 - p)).ln()
+    float::ln(p / (1.0 - p))
 }
 
 /// Clamp a probability into the open unit interval so `logit` stays finite.

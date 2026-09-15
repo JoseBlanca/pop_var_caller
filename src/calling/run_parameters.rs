@@ -714,6 +714,7 @@ fn checked_read_group_count_of(
 mod tests {
     use super::*;
     use crate::calling::genotype_prior::SeedRegime;
+    use crate::float;
     use crate::parameter_estimation::Provenance;
     use crate::parameter_estimation::joint::contamination::NotIdentifiedReason;
     use crate::parameter_estimation::joint::fit::FrequencyDensity;
@@ -957,7 +958,7 @@ mod tests {
 
     /// The accumulator's total for a read group whose reads averaged `error` per read.
     fn minted(error: f64, reads: u32) -> MintedReadErrors {
-        MintedReadErrors::of_observation(error.ln() * f64::from(reads), reads)
+        MintedReadErrors::of_observation(float::ln(error) * f64::from(reads), reads)
     }
 
     /// A contamination fraction this read group's own reads produced.

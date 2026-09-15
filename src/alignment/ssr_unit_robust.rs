@@ -57,6 +57,7 @@ use super::emission::Emission;
 use super::ssr_best_path_flat_gap::{TractReadout, TransitionCosts};
 use super::stutter::StutterModel;
 use super::{BestPathAligner, ReadBases, RepeatContext, RepeatSpan};
+use crate::float;
 use crate::types::MAX_MOTIF_LEN;
 
 /// The five states a cell can be entered in — algorithm 4's, unchanged.
@@ -275,17 +276,15 @@ struct SlipCosts {
 
 impl SlipCosts {
     fn from_model(model: &StutterModel) -> Self {
-        let ln_same_length_share = model.same_length_share().ln();
+        let ln_same_length_share = float::ln(model.same_length_share());
         Self {
-            open_expansion: (model.whole_repeat_longer_share()
-                * model.whole_repeat_one_step_share())
-            .ln()
-                - ln_same_length_share,
-            open_contraction: (model.whole_repeat_shorter_share()
-                * model.whole_repeat_one_step_share())
-            .ln()
-                - ln_same_length_share,
-            extend: (1.0 - model.whole_repeat_one_step_share()).ln(),
+            open_expansion: float::ln(
+                model.whole_repeat_longer_share() * model.whole_repeat_one_step_share(),
+            ) - ln_same_length_share,
+            open_contraction: float::ln(
+                model.whole_repeat_shorter_share() * model.whole_repeat_one_step_share(),
+            ) - ln_same_length_share,
+            extend: float::ln(1.0 - model.whole_repeat_one_step_share()),
         }
     }
 }
@@ -1191,14 +1190,14 @@ mod tests {
         let model = contraction_biased();
         let slip = SlipCosts::from_model(&model);
         let period = std::num::NonZeroU8::new(3).unwrap();
-        let ln_same_length_share = model.same_length_share().ln();
+        let ln_same_length_share = float::ln(model.same_length_share());
 
         for n in 1..=5i64 {
             let reconstructed = slip.open_expansion + (n - 1) as f64 * slip.extend;
-            let expected = model.probability(n * 3, period).ln() - ln_same_length_share;
+            let expected = float::ln(model.probability(n * 3, period)) - ln_same_length_share;
             assert!((reconstructed - expected).abs() < 1e-12);
             let reconstructed = slip.open_contraction + (n - 1) as f64 * slip.extend;
-            let expected = model.probability(-n * 3, period).ln() - ln_same_length_share;
+            let expected = float::ln(model.probability(-n * 3, period)) - ln_same_length_share;
             assert!((reconstructed - expected).abs() < 1e-12);
         }
     }
