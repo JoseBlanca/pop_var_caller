@@ -58,6 +58,7 @@ use crate::cli::run_ground::{self, GroundError};
 use crate::parameter_estimation::joint::fit::JointFitConfig;
 use crate::parameter_estimation::joint::loci::{ReferenceDigest, SelectionError, UnambiguousRuns};
 use crate::parameter_estimation::joint::ssr_fit::SsrFitConfig;
+use crate::parameter_estimation::progress::StageProgress;
 use crate::reference_info::{
     ReferenceCheck, ReferenceInfoError, read_reference_observing_or_creating_fai,
 };
@@ -378,6 +379,10 @@ fn fit_and_assemble(
     // other, and a refusal from that names two samples and nothing to do. Judged against this
     // run's own settings once the selection is rebuilt, below, every stale sample is named and so
     // is the fix (plan step C5).
+    let setup = StageProgress::begin(format!(
+        "reading the censuses of {} psp(s) and the reference",
+        paths.len()
+    ));
     let censuses = each_census_in_the_cohorts_psps(&cohort).map_err(|source| {
         EstimateParametersCliError::Cohort {
             source: Box::new(source),
@@ -507,6 +512,7 @@ fn fit_and_assemble(
             .position(|entry| entry.name == name)
             .map(|index| ContigId(index as u32))
     };
+    setup.always(|into| format!("censuses and reference read; {into}"));
     let pooled = every_read_group_pooled(&evidence);
     let fit = fit_a_cohort(
         &mut evidence,

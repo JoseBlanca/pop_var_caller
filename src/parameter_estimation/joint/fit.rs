@@ -44,6 +44,7 @@ use std::sync::Arc;
 
 use crate::float;
 use crate::parameter_estimation::depth_bins::DepthBinEdges;
+use crate::parameter_estimation::progress::StageProgress;
 use crate::parameter_estimation::{Estimate, Provenance};
 use crate::types::{ExpectedAlternativeFrequency, ExpectedHeterozygosity, Ploidy, ReadGroupId};
 
@@ -1462,6 +1463,10 @@ pub fn fit_jointly(
     // **Every section the generic half needs, lent for the length of one call.** The estimator
     // reads a position from every sample at once, so what it borrows is one row a sample — and
     // when this call returns, a file-backed census has nothing left decoded.
+    let stage = StageProgress::begin(format!(
+        "SNP/indel fit: reading the evidence of {} sample(s)",
+        names.len()
+    ));
     let (score, parameters, statistics, passes, converged, trace, contamination) = cohort
         .with_generic(&groups, |lent| {
             // Which read group each sample's own groups are, in the order the cursor visits them.
@@ -1484,8 +1489,22 @@ pub fn fit_jointly(
             // stored code's range is weighted with when the likelihood sums over it.
             let coverage = EvidenceCursor::mean_depth(lent, &config.edges, depth_cap);
 
+            stage.always(|into| {
+                format!(
+                    "SNP/indel fit: evidence read, {into}; fitting from {} starting point(s), at \
+                     most {} passes each",
+                    config.starting_points.len(),
+                    config.max_passes
+                )
+            });
             let mut best: Option<(f64, Parameters, Statistics, u32, bool, Vec<PassSummary>)> = None;
-            for start in &config.starting_points {
+            for (number, start) in config.starting_points.iter().enumerate() {
+                let which = WhichStart {
+                    number: number + 1,
+                    of: config.starting_points.len(),
+                    point: start,
+                    stage: &stage,
+                };
                 let (parameters, statistics, passes, converged, trace) = maximise(
                     lent,
                     depth_cap,
@@ -1493,9 +1512,22 @@ pub fn fit_jointly(
                     &groups,
                     &group_index,
                     &coverage,
-                    start,
+                    &which,
                 );
                 let score = statistics.log_likelihood;
+                stage.always(|into| {
+                    format!(
+                        "SNP/indel fit, start {} of {}: {} after {passes} pass(es), \
+                         log-likelihood {score:.6e}; {into}",
+                        which.number,
+                        which.of,
+                        if converged {
+                            "converged"
+                        } else {
+                            "stopped at the pass limit"
+                        },
+                    )
+                });
                 if best.as_ref().is_none_or(|(current, ..)| score > *current) {
                     best = Some((score, parameters, statistics, passes, converged, trace));
                 }
@@ -1522,6 +1554,9 @@ pub fn fit_jointly(
             // sample, which is the contamination signature exactly; measured over 63 tomato
             // accessions with those positions left in, the median accession came back 6.5%
             // contaminated.
+            stage.always(|into| {
+                format!("SNP/indel fit: fitting each sample's contamination; {into}")
+            });
             let contamination = fit_contamination_over(
                 lent,
                 depth_cap,
@@ -1541,6 +1576,7 @@ pub fn fit_jointly(
                 contamination,
             )
         })?;
+    stage.always(|into| format!("SNP/indel fit: done; {into}"));
     let mut statistics = statistics;
     let genotype_posterior = std::mem::take(&mut statistics.genotype_posterior);
     let duplicated_posterior = std::mem::take(&mut statistics.duplicated_posterior);
@@ -1632,6 +1668,17 @@ pub fn fit_jointly(
     })
 }
 
+/// Which of the fit's starting points a run of the alternation is, and the stage clock its
+/// progress lines are printed against.
+struct WhichStart<'a> {
+    /// Counted from one, as the progress line prints it.
+    number: usize,
+    of: usize,
+    /// The point the run starts from.
+    point: &'a StartingPoint,
+    stage: &'a StageProgress,
+}
+
 /// One run of the alternation, from one starting point.
 fn maximise(
     samples: &[SampleGenericSections<'_>],
@@ -1640,8 +1687,9 @@ fn maximise(
     groups: &[ReadGroupId],
     group_index: &[Vec<usize>],
     coverage: &[f64],
-    start: &StartingPoint,
+    which: &WhichStart<'_>,
 ) -> (Parameters, Statistics, u32, bool, Vec<PassSummary>) {
+    let start = which.point;
     let mut parameters = Parameters {
         clean: vec![start.clean; groups.len()],
         noisy: vec![start.noisy; groups.len()],
@@ -1666,6 +1714,7 @@ fn maximise(
     let mut trace = Vec::new();
     for pass in 1..=config.max_passes {
         passes = pass;
+        let pass_began = std::time::Instant::now();
         statistics = expectation(
             samples,
             depth_cap,
@@ -1709,8 +1758,28 @@ fn maximise(
         }
         let gain = statistics.log_likelihood - previous;
         previous = statistics.log_likelihood;
-        if moved < config.stillness && gain.abs() < config.stillness * statistics.positions.max(1.0)
-        {
+        let gain_to_stop = config.stillness * statistics.positions.max(1.0);
+        // Both numbers the stop rule below compares, beside their thresholds, so a person can
+        // see how far the fit is from stopping and not only that it is still going.
+        which.stage.now_and_then(|into| {
+            // The first pass has nothing to have moved from.
+            let gain = if gain.is_finite() {
+                format!("{:.2e}", gain.abs())
+            } else {
+                "nothing yet".to_owned()
+            };
+            format!(
+                "SNP/indel fit, start {} of {}, pass {pass} of at most {}: log-likelihood moved \
+                 {gain} (stops below {gain_to_stop:.2e}), largest parameter move {moved:.2e} \
+                 (stops below {:.0e}); {} a pass, {into}",
+                which.number,
+                which.of,
+                config.max_passes,
+                config.stillness,
+                crate::parameter_estimation::progress::duration(pass_began.elapsed()),
+            )
+        });
+        if moved < config.stillness && gain.abs() < gain_to_stop {
             converged = true;
             break;
         }
