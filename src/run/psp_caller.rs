@@ -581,6 +581,7 @@ impl PspVariantCaller {
         // record and this one at the cover, and one accessor serving both would have two
         // callers sliding a single window in two directions (`spec/window_coverage.md` §3.2).
         let reference_for_the_merge = walk_reference.accessor();
+        let contigs = walk_reference.contigs();
         // **Destructured rather than reached through accessors**, so that the readers can be
         // borrowed mutably while the table they are renumbered through is borrowed by the
         // same expression: they are separate fields, and only a destructuring says so.
@@ -618,6 +619,7 @@ impl PspVariantCaller {
             calling_loop_config: &calling_loop_config,
             candidate_selection: &candidate_selection,
             padding_reference,
+            contigs: &contigs,
         };
         let CohortCallingOutcome {
             calling,
