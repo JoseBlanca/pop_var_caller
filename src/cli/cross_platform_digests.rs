@@ -67,7 +67,13 @@ mod tests {
     /// (`c6a4394b`, with the fit's fixed chunks and fixed join applied) wrote
     /// `f3f66a488983669e9e7e7a038338c010` on macOS and `cbcb75afaa4e1a25d5f314b581373028` on Linux
     /// (`tmp/digests_C/{macos,linux}_c6a4394b_final.log`).
-    const FITTED_PARAMETERS_MD5: &str = "3edab375185d74ad84ab52255b418c0b";
+    ///
+    /// **Re-recorded 2026-09-25** when the SNP/indel fit gained SQUAREM acceleration and stopped at
+    /// one part in a thousand rather than ten thousand — a deliberate change to the fit's
+    /// arithmetic, measured on four tomato accessions before it was recorded (the fit ends 40
+    /// log-likelihood units higher for the same passes). Recorded in the Linux container (arm64,
+    /// glibc) only; it was `3edab375185d74ad84ab52255b418c0b`.
+    const FITTED_PARAMETERS_MD5: &str = "70e634849f232de2fb32200dd21e0ab5";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -77,7 +83,10 @@ mod tests {
     /// maths went through `libm`: each platform's calls, made with its own differing fit, came to
     /// this same checksum. It is pinned because the calls are what the caller is for, and a change
     /// to them must be seen; the fit's checksum is the one guarding portability.
-    const CALLS_MD5: &str = "3432b4219342c6277ec1d0072945e423";
+    ///
+    /// **Re-recorded 2026-09-25** with the fit above, whose different numbers this file is called
+    /// with; it was `3432b4219342c6277ec1d0072945e423`.
+    const CALLS_MD5: &str = "dad5ff61fad91ca1d3d6a0e7587de946";
 
     /// Hex MD5 of some bytes.
     fn md5_hex(bytes: &[u8]) -> String {

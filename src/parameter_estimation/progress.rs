@@ -34,7 +34,7 @@ pub(crate) struct StageProgress {
 impl StageProgress {
     /// Start a stage, announcing it with `line`.
     pub(crate) fn begin(line: impl std::fmt::Display) -> Self {
-        eprintln!("estimating: {line}");
+        eprintln!("estimating: {line}{}", memory());
         let now = Instant::now();
         Self {
             started: now,
@@ -54,18 +54,65 @@ impl StageProgress {
         }
         *last = Instant::now();
         drop(last);
-        eprintln!("estimating: {}", line(&self.time_into_the_stage()));
+        eprintln!(
+            "estimating: {}{}",
+            line(&self.time_into_the_stage()),
+            memory()
+        );
     }
 
     /// Say something unconditionally — a milestone inside the stage, such as a start that ended.
     pub(crate) fn always(&self, line: impl FnOnce(&str) -> String) {
-        eprintln!("estimating: {}", line(&self.time_into_the_stage()));
+        eprintln!(
+            "estimating: {}{}",
+            line(&self.time_into_the_stage()),
+            memory()
+        );
     }
 
     /// The time since the stage began, as `9m38s into this stage`.
     fn time_into_the_stage(&self) -> String {
         format!("{} into this stage", duration(self.started.elapsed()))
     }
+}
+
+/// The process's memory, as `; memory 7.5 GiB, at most 9.1 GiB so far` — or nothing where the
+/// system does not say.
+///
+/// **Read from `/proc/self/status`, so on Linux only**, which is where cohorts large enough for
+/// memory to matter are run. `VmRSS` is what is resident now and `VmHWM` the most that has been at
+/// any moment; the second is what an out-of-memory kill is decided against, and printing both at
+/// every stage boundary says which stage grew. Reading the file costs microseconds and happens
+/// only when a line is printed.
+fn memory() -> String {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return String::new();
+    };
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| {
+                rest.trim()
+                    .trim_end_matches("kB")
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
+    };
+    match (field("VmRSS:"), field("VmHWM:")) {
+        (Some(now), Some(most)) => format!(
+            "; memory {}, at most {} so far",
+            gibibytes(now),
+            gibibytes(most)
+        ),
+        _ => String::new(),
+    }
+}
+
+/// Kibibytes as gibibytes to one decimal.
+fn gibibytes(kibibytes: u64) -> String {
+    format!("{:.1} GiB", kibibytes as f64 / (1024.0 * 1024.0))
 }
 
 /// A duration as `1h12m`, `12m05s`, `42s` or `350ms`.

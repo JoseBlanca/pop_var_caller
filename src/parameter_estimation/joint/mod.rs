@@ -38,6 +38,7 @@ pub mod census_file;
 pub mod census_moments;
 pub mod contamination;
 pub mod fit;
+pub mod fit_trace;
 pub mod loci;
 pub mod sequencing_batches;
 pub mod share_curve;

@@ -2608,6 +2608,7 @@ pub fn gather_strata(
         names.len()
     ));
     cohort.with_strata(&band, |lent| {
+        stage.always(|into| format!("repeat-tract evidence: every sample's sections read; {into}"));
         // Each sample's tract sections, gathered by stratum. **One row a sample and not one
         // value**, because a stratum is fitted from every sample with reads in it at once.
         let by_sample: Vec<BTreeMap<Stratum, Vec<(ReadGroupId, &SsrEvidence)>>> = lent
