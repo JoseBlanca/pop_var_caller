@@ -1197,6 +1197,60 @@ fn every_stratum_from_every_start(
 // Thin strata: every slippage number from its period's curve
 // ---------------------------------------------------------------------
 
+/// **The bytes of the largest likelihood table any one stratum's walk will build** — one row a
+/// sample with reads a tract, over the genotype pairs, eight bytes each ([`TractLikelihoods`]).
+///
+/// Counted from the evidence rather than estimated from the cohort's size, because how many
+/// samples have reads at a tract is what fills the table: at three reads a position most do, at
+/// a thin corner of a stratum few.
+fn largest_table_bytes(strata: &[StratumEvidence], config: &SsrFitConfig) -> u64 {
+    let width = genotype_pairs((2 * config.allele_span.max(0) + 1) as usize).len() as u64;
+    strata
+        .iter()
+        .map(|stratum| {
+            stratum
+                .tracts
+                .iter()
+                .map(|tract| tract.samples.len() as u64)
+                .sum::<u64>()
+                * width
+                * std::mem::size_of::<f64>() as u64
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// **Which arm this run can afford**: the one asked for, unless it is
+/// [`AcrossStrata`](WhereTheThreadsGo::AcrossStrata) and `threads` of the largest table at once
+/// would take more than half the memory the system has available — then one stratum at a time,
+/// whose peak is one table.
+///
+/// **Neither arm moves a result** ([`WhereTheThreadsGo`]), so this chooses a schedule and never
+/// an answer. It exists because the parallel arm's peak grows with the cohort: a stratum's
+/// table is `tracts × samples × 91 × 8` bytes, 0.36 GB for 5,000 tracts at 100 samples and 7.9 GB
+/// at 2,169, and 96 threads of the second killed a run on a 125 GiB machine
+/// (`estimate-parameters` on 2,169 tomato samples, 2026-09-25).
+///
+/// **Half, not all**, because the tables are not the whole process — the cohort's tract
+/// evidence stays resident beside them — and a machine that is swapping is barely faster than
+/// one stratum at a time. **Where the system does not say what it has available** (anything but
+/// Linux) the arm asked for is kept: that is the laptop-sized run, not the one that needs this.
+fn arm_that_fits(
+    asked: WhereTheThreadsGo,
+    largest_table: u64,
+    threads: usize,
+    available: Option<u64>,
+) -> WhereTheThreadsGo {
+    match (asked, available) {
+        (WhereTheThreadsGo::AcrossStrata, Some(available))
+            if (threads as u64).saturating_mul(largest_table) > available / 2 =>
+        {
+            WhereTheThreadsGo::AcrossTheTractsOfOneStratum
+        }
+        _ => asked,
+    }
+}
+
 /// Fit every stratum on its own tracts, then draw a curve a motif period through what they
 /// measured and re-emit every number through it.
 ///
@@ -1255,11 +1309,27 @@ pub fn fit_strata(
             },
         }
     };
-    let across_strata = config.threads == WhereTheThreadsGo::AcrossStrata && strata.len() > 1;
+    let largest = largest_table_bytes(strata, config);
+    let threads = rayon::current_num_threads();
+    let available = crate::parameter_estimation::progress::memory_available();
+    let arm = arm_that_fits(config.threads, largest, threads, available);
+    let across_strata = arm == WhereTheThreadsGo::AcrossStrata && strata.len() > 1;
     let stage = StageProgress::begin(format!(
-        "repeat-tract fit: fitting {} strata from {} starting point(s) each",
+        "repeat-tract fit: fitting {} strata from {} starting point(s) each, {}",
         strata.len(),
-        config.starting_points.len()
+        config.starting_points.len(),
+        match (across_strata, arm == config.threads) {
+            (true, _) => "strata in parallel".to_owned(),
+            (false, true) => "one stratum at a time".to_owned(),
+            (false, false) => format!(
+                "one stratum at a time because {threads} strata at once, each with a table of up \
+                 to {}, would need more than half the {} available",
+                crate::parameter_estimation::progress::gibibytes(largest / 1024),
+                crate::parameter_estimation::progress::gibibytes(
+                    available.unwrap_or_default() / 1024
+                ),
+            ),
+        }
     ));
     let mut outcomes: Vec<StratumOutcome> = if across_strata {
         every_stratum_from_every_start(strata, homozygote_excess, config, &stage)
@@ -3902,5 +3972,100 @@ mod tests {
         more_groups.groups = 2;
         let strata = [drawn_at(stratum_at(2, 8), &spectrum, 20, 99), more_groups];
         let _ = fit_period_length_spectra(&strata, &[0.4; 8], &pooling_config());
+    }
+}
+
+#[cfg(test)]
+mod the_arm_that_fits {
+    use super::*;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    /// A stratum whose tracts have reads from `samples[t]` samples each.
+    fn stratum_with(samples: &[usize]) -> StratumEvidence {
+        StratumEvidence {
+            stratum: Stratum {
+                period: 2,
+                reference_repeats: 8,
+            },
+            tracts: samples
+                .iter()
+                .map(|&count| TractReads {
+                    samples: (0..count as u32)
+                        .map(|sample| SampleTractReads {
+                            sample,
+                            by_group: vec![(0, vec![1])],
+                        })
+                        .collect(),
+                })
+                .collect(),
+            read_span: RECORDED_OFFSET_RANGE,
+            groups: 1,
+            tracts_over_guard_threshold: 0,
+            reads_reaching_not_crossing: 0,
+            guard_reads: 0,
+            bases_compared: 0,
+            mismatching_bases: 0,
+        }
+    }
+
+    /// One row a sample with reads a tract, 91 genotype pairs at the default span of six, eight
+    /// bytes each — and the largest stratum's, not the sum.
+    #[test]
+    fn the_table_is_rows_times_genotypes_times_eight_bytes_for_the_largest_stratum() {
+        let config = SsrFitConfig::default();
+        assert_eq!(
+            config.allele_span, 6,
+            "the arithmetic below assumes the default span"
+        );
+        let strata = [stratum_with(&[3, 5]), stratum_with(&[10, 0, 2])];
+        assert_eq!(largest_table_bytes(&strata, &config), 12 * 91 * 8);
+    }
+
+    /// The run that was killed: 96 threads of a 7.9 GB table on a machine with about 110 GiB
+    /// available goes one stratum at a time; the same machine at a hundred samples does not.
+    #[test]
+    fn a_cohort_whose_tables_would_not_fit_is_fitted_one_stratum_at_a_time() {
+        let available = Some(110 * GIB);
+        let at_2169_samples = 5_000 * 2_169 * 91 * 8;
+        let at_100_samples = 5_000 * 100 * 91 * 8;
+        assert_eq!(
+            arm_that_fits(
+                WhereTheThreadsGo::AcrossStrata,
+                at_2169_samples,
+                96,
+                available
+            ),
+            WhereTheThreadsGo::AcrossTheTractsOfOneStratum
+        );
+        assert_eq!(
+            arm_that_fits(
+                WhereTheThreadsGo::AcrossStrata,
+                at_100_samples,
+                96,
+                available
+            ),
+            WhereTheThreadsGo::AcrossStrata
+        );
+    }
+
+    /// Where the system does not say what it has, and where one stratum at a time was asked for,
+    /// the choice is left alone.
+    #[test]
+    fn the_arm_asked_for_stands_where_nothing_forces_it() {
+        let huge = 1_000 * GIB;
+        assert_eq!(
+            arm_that_fits(WhereTheThreadsGo::AcrossStrata, huge, 96, None),
+            WhereTheThreadsGo::AcrossStrata
+        );
+        assert_eq!(
+            arm_that_fits(
+                WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+                0,
+                96,
+                Some(GIB)
+            ),
+            WhereTheThreadsGo::AcrossTheTractsOfOneStratum
+        );
     }
 }
