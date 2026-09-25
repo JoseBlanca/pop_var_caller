@@ -110,8 +110,23 @@ fn memory() -> String {
     }
 }
 
+/// The memory the system could hand this process now without swapping, in bytes — `MemAvailable`
+/// from `/proc/meminfo` — or `None` where the system does not say (anything but Linux).
+pub(crate) fn memory_available() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kibibytes: u64 = meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("MemAvailable:"))?
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse()
+        .ok()?;
+    Some(kibibytes * 1024)
+}
+
 /// Kibibytes as gibibytes to one decimal.
-fn gibibytes(kibibytes: u64) -> String {
+pub(crate) fn gibibytes(kibibytes: u64) -> String {
     format!("{:.1} GiB", kibibytes as f64 / (1024.0 * 1024.0))
 }
 
