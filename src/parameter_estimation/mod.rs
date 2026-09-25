@@ -48,6 +48,7 @@
 pub mod calibration;
 pub mod depth_bins;
 pub mod joint;
+pub(crate) mod progress;
 pub mod repeat_strata;
 
 /// Where a parameter came from.

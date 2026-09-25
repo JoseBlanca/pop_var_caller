@@ -73,6 +73,7 @@ use crate::parameter_estimation::joint::census::{
     CensusError, CohortCensusEvidence, RECORDED_OFFSET_RANGE, SsrEvidence, SsrLocusState,
 };
 use crate::parameter_estimation::joint::loci::CensusLoci;
+use crate::parameter_estimation::progress::StageProgress;
 use crate::types::{ContigId, ReadGroupId};
 
 // ---------------------------------------------------------------------
@@ -1095,6 +1096,7 @@ fn every_stratum_from_every_start(
     strata: &[StratumEvidence],
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
+    stage: &StageProgress,
 ) -> Vec<StratumOutcome> {
     // **The same precondition `fit_pooled` states**, checked here because this arm does not go
     // through it. See there for why a span below one is refused rather than fitted.
@@ -1140,13 +1142,16 @@ fn every_stratum_from_every_start(
         .flat_map(|(stratum, _)| (0..starts).map(move |start| (stratum, start)))
         .collect();
 
+    // Counted as walks finish, which is not the order they were listed in — so a line says how
+    // many are done rather than which one this was.
+    let walked = std::sync::atomic::AtomicUsize::new(0);
     let climbed: Vec<Climb> = walks
         .par_iter()
         .map(|(stratum, start)| {
             let live = before_walking[*stratum]
                 .as_ref()
                 .expect_err("only the strata that will walk are in this list");
-            climb_from(
+            let climb = climb_from(
                 &strata[*stratum],
                 config.starting_points[*start],
                 homozygote_excess,
@@ -1154,7 +1159,17 @@ fn every_stratum_from_every_start(
                 live,
                 config,
                 WhereTheThreadsGo::AcrossStrata,
-            )
+            );
+            let done = walked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            stage.now_and_then(|into| {
+                format!(
+                    "repeat-tract fit: {done} of {} walks done ({} strata from {starts} starting \
+                     point(s) each); {into}",
+                    walks.len(),
+                    walks.len() / starts.max(1),
+                )
+            });
+            climb
         })
         .collect();
 
@@ -1241,16 +1256,35 @@ pub fn fit_strata(
         }
     };
     let across_strata = config.threads == WhereTheThreadsGo::AcrossStrata && strata.len() > 1;
+    let stage = StageProgress::begin(format!(
+        "repeat-tract fit: fitting {} strata from {} starting point(s) each",
+        strata.len(),
+        config.starting_points.len()
+    ));
     let mut outcomes: Vec<StratumOutcome> = if across_strata {
-        every_stratum_from_every_start(strata, homozygote_excess, config)
+        every_stratum_from_every_start(strata, homozygote_excess, config, &stage)
     } else {
-        strata.iter().map(one_at_a_time).collect()
+        strata
+            .iter()
+            .enumerate()
+            .map(|(index, evidence)| {
+                stage.now_and_then(|into| {
+                    format!(
+                        "repeat-tract fit: stratum {} of {}; {into}",
+                        index + 1,
+                        strata.len()
+                    )
+                });
+                one_at_a_time(evidence)
+            })
+            .collect()
     };
 
     // **The curves are drawn after every stratum has its own answer, never during.** Stage one
     // is untouched by this — a stratum's own fitted numbers are the same whether curves are drawn
     // or not, which is the property the parity oracle checks.
     if config.curve.draw_curves {
+        stage.always(|into| format!("repeat-tract fit: strata fitted, drawing the curves; {into}"));
         // **All three curves are drawn here, before either blend runs**, and both read fits that
         // nothing has touched. Drawing a curve after the levels had been blended would fit a
         // curve to the previous curve's output, which is the circularity
@@ -1264,6 +1298,7 @@ pub fn fit_strata(
         // furnished from its period's curves rather than refused.
         derive_thin_strata(&mut outcomes, strata, &levels, &shares);
     }
+    stage.always(|into| format!("repeat-tract fit: done; {into}"));
     outcomes
 }
 
@@ -2566,6 +2601,12 @@ pub fn gather_strata(
     // (`fit_strata`), so it is handed every stratum together; how many may be resident at once
     // is a measurement the fit specification owns (§11, questions 8 and 10) and not something
     // this call can decide.
+    let stage = StageProgress::begin(format!(
+        "repeat-tract evidence: gathering {} tract(s) in {} strata from {} sample(s)",
+        strata.len(),
+        tracts_in.len(),
+        names.len()
+    ));
     cohort.with_strata(&band, |lent| {
         // Each sample's tract sections, gathered by stratum. **One row a sample and not one
         // value**, because a stratum is fitted from every sample with reads in it at once.
@@ -2598,7 +2639,15 @@ pub fn gather_strata(
 
         tracts_in
             .iter()
-            .map(|(stratum, tracts)| {
+            .enumerate()
+            .map(|(index, (stratum, tracts))| {
+                stage.now_and_then(|into| {
+                    format!(
+                        "repeat-tract evidence: stratum {} of {}; {into}",
+                        index + 1,
+                        tracts_in.len()
+                    )
+                });
                 let mut evidence = StratumEvidence {
                     stratum: *stratum,
                     tracts: Vec::new(),
