@@ -29,6 +29,7 @@
 //! nothing — psp mode's walk half, whose calling half reads a cohort of those files back.
 
 pub mod callers;
+mod calling_progress;
 pub mod census_cohort;
 pub mod census_fit;
 pub mod census_freshness;

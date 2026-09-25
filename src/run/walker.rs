@@ -1542,6 +1542,12 @@ impl WalkReference {
         &self.fasta
     }
 
+    /// The contig table, shared — the names a run prints its progress against.
+    #[must_use]
+    pub(crate) fn contigs(&self) -> Arc<crate::fasta::ContigList> {
+        Arc::clone(&self.contigs)
+    }
+
     /// One accessor of its own, over the shared index and contig table.
     #[must_use]
     pub(crate) fn accessor(&self) -> WindowedRefSeq {

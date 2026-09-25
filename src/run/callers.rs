@@ -39,6 +39,7 @@ use crate::calling::evidence_shaping::{
 use crate::calling::inference::{LocusGenotyper, RunnableCallingLoopConfig};
 use crate::calling::run_parameters::RunParameters;
 use crate::calling::{CallingScratch, FrozenParameters, LocusInference};
+use crate::fasta::ContigList;
 use crate::locus_generation::pileup::{PileupGeneratorConfig, PileupGeneratorCounts};
 use crate::locus_generation::{
     GeneratorCounts, LocusCounts, LocusKind, SequenceObservation, SsrDetail,
@@ -68,6 +69,7 @@ use crate::vcf::assemble::assemble_record;
 use crate::window_coverage::{SampleHistogram, WindowCoverage};
 
 use super::RunError;
+use super::calling_progress::CallingProgress;
 use super::records::{
     a_written_genotype_carries_an_alternative, evidence_for_output, padding_base_beside,
 };
@@ -700,6 +702,7 @@ impl AlignedFilesVariantCaller {
         // record and this one at the cover, and one accessor serving both would have two
         // callers sliding a single window in two directions (`spec/window_coverage.md` §3.2).
         let reference_for_the_merge = self.walk_reference.accessor();
+        let contigs = self.walk_reference.contigs();
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -718,6 +721,7 @@ impl AlignedFilesVariantCaller {
             calling_loop_config: &calling_loop_config,
             candidate_selection: &candidate_selection,
             padding_reference,
+            contigs: &contigs,
         };
         let CohortCallingOutcome {
             calling,
@@ -760,6 +764,8 @@ pub(crate) struct CohortCallingInputs<'a> {
     /// This walks forward with the merge and releases what it has passed; sharing one between
     /// callers would collapse their windows onto each other.
     pub padding_reference: WindowedRefSeq,
+    /// The reference's contig names, which the progress lines print the position against.
+    pub contigs: &'a ContigList,
 }
 
 /// What calling a cohort produced, and the spent sources it was read from.
@@ -854,6 +860,7 @@ where
         calling_loop_config,
         candidate_selection,
         padding_reference,
+        contigs,
     } = inputs;
     // **The cohort's size is read off the cache rather than passed beside it**, so the number
     // the genotyper is told and the number of sources actually being merged cannot become two
@@ -890,6 +897,7 @@ where
     // first chromosome it is the rest of the genome decoded for nothing. Fixing it means the
     // merge's sink saying *stop* — one `ControlFlow` through both drivers and the region
     // builder — which is a change to the merge's interface and not this step's.
+    let mut progress = CallingProgress::new(contigs, segmentation.analysed_regions());
     let mut stopped: Option<RunError> = None;
     // **One buffer for the run, refilled per record.** It is dense over the run's samples and
     // lives only from `evidence_for_output` to the sink, which is why the sink takes a slice
@@ -955,6 +963,7 @@ where
                     Ok(Some(assemble_record(&inference, evidence)))
                 },
             );
+            progress.locus_passed(region, records_written);
             match built {
                 LocusOutcome::NobodyToCall => loci_with_nobody_to_call.push(region),
                 // Both counted inside the dispatch, where the verdict that decided them is.
@@ -993,6 +1002,7 @@ where
         return Err(stopped);
     }
     merged?;
+    progress.finished(records_written);
 
     // **After the two error returns, so a run that failed never finishes an accumulator.** A
     // half-walked sample's histogram would describe the ground the run reached and say nothing
@@ -5555,6 +5565,7 @@ mod records_handed_over_as_the_run_finishes_them {
         // minted side by side: the merge reads the reference at the cover and the record writer
         // at the record, and one accessor cannot serve both.
         let reference_for_the_merge = caller.walk_reference.accessor();
+        let contigs = caller.walk_reference.contigs();
         let RunReadyToWalk {
             segmentation: _,
             mut merge_parameters,
@@ -5619,6 +5630,7 @@ mod records_handed_over_as_the_run_finishes_them {
             calling_loop_config: &calling_loop_config,
             candidate_selection: &candidate_selection,
             padding_reference,
+            contigs: &contigs,
         };
         let mut handed = 0;
         let outcome = call_cohort_from_sources_handing_each_record_over(
@@ -6878,10 +6890,10 @@ impl<S> Drop for RoundCallScratch<'_, S> {
 enum RoundLocusOutcome {
     /// No sample of the run can be called here; the span goes in the run's list.
     NobodyToCall(GenomeRegion),
-    /// Counted inside the dispatch, nothing for the calling thread to do.
-    CountedInside,
+    /// Counted inside the dispatch, nothing for the calling thread to do but count the locus.
+    CountedInside(GenomeRegion),
     /// Called, and no written genotype carried an alternative.
-    CalledNotWritten,
+    CalledNotWritten(GenomeRegion),
     /// The padding fetch refused.
     CalledFailed(RunError),
     /// A record, its per-sample windows, and the locus it came from.
@@ -6916,6 +6928,7 @@ where
         calling_loop_config,
         candidate_selection,
         padding_reference,
+        contigs,
     } = inputs;
     let run_sample_count = cache.sample_count();
     let frozen = parameters.view();
@@ -6928,6 +6941,7 @@ where
     let mut loci_too_wide_to_assemble = Vec::new();
     let mut loci_with_nobody_to_call = Vec::new();
     let tract_totals = std::sync::Mutex::new(TractOutcomes::default());
+    let mut progress = CallingProgress::new(contigs, segmentation.analysed_regions());
     let mut stopped: Option<RunError> = None;
 
     let padding_reference = &padding_reference;
@@ -7006,10 +7020,10 @@ where
             match built {
                 LocusOutcome::NobodyToCall => RoundLocusOutcome::NobodyToCall(region),
                 LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {
-                    RoundLocusOutcome::CountedInside
+                    RoundLocusOutcome::CountedInside(region)
                 }
                 LocusOutcome::Called(Err(error)) => RoundLocusOutcome::CalledFailed(error),
-                LocusOutcome::Called(Ok(None)) => RoundLocusOutcome::CalledNotWritten,
+                LocusOutcome::Called(Ok(None)) => RoundLocusOutcome::CalledNotWritten(region),
                 LocusOutcome::Called(Ok(Some(record))) => RoundLocusOutcome::CalledRecord(
                     Box::new(record),
                     std::mem::take(window_coverage),
@@ -7018,9 +7032,17 @@ where
             }
         },
         &mut |outcome| match outcome {
-            RoundLocusOutcome::NobodyToCall(region) => loci_with_nobody_to_call.push(region),
-            RoundLocusOutcome::CountedInside => {}
-            RoundLocusOutcome::CalledNotWritten => loci_called_but_not_written += 1,
+            RoundLocusOutcome::NobodyToCall(region) => {
+                loci_with_nobody_to_call.push(region);
+                progress.locus_passed(region, records_written);
+            }
+            RoundLocusOutcome::CountedInside(region) => {
+                progress.locus_passed(region, records_written);
+            }
+            RoundLocusOutcome::CalledNotWritten(region) => {
+                loci_called_but_not_written += 1;
+                progress.locus_passed(region, records_written);
+            }
             RoundLocusOutcome::CalledFailed(error) => {
                 if stopped.is_none() {
                     stopped = Some(error);
@@ -7030,6 +7052,7 @@ where
                 if stopped.is_some() {
                     return;
                 }
+                progress.locus_passed(region, records_written);
                 record_the_windows_at(
                     GenomePosition {
                         contig: region.contig,
@@ -7054,6 +7077,7 @@ where
         return Err(stopped);
     }
     let displaced = merged?;
+    progress.finished(records_written);
     // **Spec §6.1's frontier rule says this cannot happen and the count is how a run would say
     // it had**, which is `Organiser::displaced_locus_count`'s own stance. It is checked rather
     // than reported because no field of the run report carries it yet, and a silent drop is the
