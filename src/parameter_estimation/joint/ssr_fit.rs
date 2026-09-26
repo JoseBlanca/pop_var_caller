@@ -207,6 +207,35 @@ pub struct StratumEvidence {
     pub mismatching_bases: u64,
 }
 
+/// One stratum's substitution counts: its bases compared against a read and, of those, the ones
+/// the read disagreed with.
+///
+/// **Two numbers a stratum, where [`StratumEvidence`] holds every sample's reads at every
+/// tract.** The substitution rate needs only these two, so they can be kept after the evidence
+/// is gone. On kimura's 100 tomato samples at about three reads a position, gathering the
+/// evidence added 0.7 GiB (`doc/devel/implementation_plans/estimation_memory.md` §1), and it
+/// grows with every sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StratumSubstitutionCounts {
+    /// Which stratum these were counted over.
+    pub stratum: Stratum,
+    /// Bases of tract sequence a read was compared against, over every tract and sample.
+    pub bases_compared: u64,
+    /// Of those bases, how many the read disagreed with, on reads whose tract was the
+    /// reference's length.
+    pub mismatching_bases: u64,
+}
+
+impl StratumSubstitutionCounts {
+    /// Mismatching bases over bases compared — the stratum's substitution rate (spec §4.2).
+    ///
+    /// `None` where no read was compared against a tract at all.
+    pub fn substitution_rate(&self) -> Option<f64> {
+        (self.bases_compared > 0)
+            .then(|| self.mismatching_bases as f64 / self.bases_compared as f64)
+    }
+}
+
 impl StratumEvidence {
     /// Tracts carrying at least one spanning read — the count the per-stratum floor is
     /// measured in.
@@ -254,8 +283,17 @@ impl StratumEvidence {
     ///
     /// `None` where no read was compared against a tract at all.
     pub fn substitution_rate(&self) -> Option<f64> {
-        (self.bases_compared > 0)
-            .then(|| self.mismatching_bases as f64 / self.bases_compared as f64)
+        self.substitution_counts().substitution_rate()
+    }
+
+    /// The two counts the stratum's substitution rate is made of, without the tracts — what
+    /// outlives the evidence once the fit is done.
+    pub fn substitution_counts(&self) -> StratumSubstitutionCounts {
+        StratumSubstitutionCounts {
+            stratum: self.stratum,
+            bases_compared: self.bases_compared,
+            mismatching_bases: self.mismatching_bases,
+        }
     }
 
     /// Which slippage groups put a read in this stratum.
@@ -2966,6 +3004,44 @@ pub mod bench_fixtures {
 mod tests {
     use super::*;
     use bench_fixtures::{draw_stratum, spectrum_of};
+
+    // -----------------------------------------------------------------
+    // What outlives the evidence
+    // -----------------------------------------------------------------
+
+    /// The counts kept after the evidence is dropped carry its stratum and both counts, and give
+    /// the rate the evidence gives — including `None` where nothing was compared, which must not
+    /// turn into a fitted zero on the way.
+    #[test]
+    fn substitution_counts_give_the_rate_the_evidence_gives() {
+        let spectrum = spectrum_of(3);
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let mut evidence = draw_stratum(truth, &spectrum, 0.5, 0.4, 4, 3, 6, 1, 7);
+        let nothing_compared = evidence.substitution_counts();
+        assert_eq!(nothing_compared.substitution_rate(), None);
+        assert_eq!(evidence.substitution_rate(), None);
+
+        evidence.stratum = Stratum {
+            period: 3,
+            reference_repeats: 7,
+        };
+        evidence.bases_compared = 4_000;
+        evidence.mismatching_bases = 3;
+        let counts = evidence.substitution_counts();
+        assert_eq!(
+            counts,
+            StratumSubstitutionCounts {
+                stratum: evidence.stratum,
+                bases_compared: 4_000,
+                mismatching_bases: 3,
+            }
+        );
+        assert_eq!(counts.substitution_rate(), Some(3.0 / 4_000.0));
+    }
 
     // -----------------------------------------------------------------
     // The answer does not depend on how the work was divided
