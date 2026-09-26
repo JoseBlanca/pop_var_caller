@@ -1521,10 +1521,53 @@ pub fn fit_jointly(
             // stored code's range is weighted with when the likelihood sums over it.
             let coverage = EvidenceCursor::mean_depth(lent, &config.edges, depth_cap);
 
+            // **What the evidence holds and how deep the samples are**, printed because both set
+            // this step's memory and neither is otherwise visible from a run's output.
+            let read_groups_held: usize = lent.iter().map(Vec::len).sum();
+            let evidence_bytes: usize = lent
+                .iter()
+                .flatten()
+                .map(|(_, records)| records.heap_bytes())
+                .sum();
+            let observations: usize = lent
+                .iter()
+                .flatten()
+                .map(|(_, records)| records.non_reference().len())
+                .sum();
+            // A sample with no walked position has no depth, and `mean_depth` stands it in at one
+            // read; it is counted apart so that it cannot read as a real sample at 1×.
+            let without_data = lent
+                .iter()
+                .filter(|sections| {
+                    sections.iter().all(|(_, records)| {
+                        (0..records.depth().len())
+                            .all(|index| records.depth().get(index) == DepthCode::NeverWalked)
+                    })
+                })
+                .count();
+            let mut depths = coverage.clone();
+            depths.sort_by(f64::total_cmp);
+            let depth_at = |share: f64| {
+                depths
+                    .get(((depths.len().saturating_sub(1)) as f64 * share).round() as usize)
+                    .copied()
+                    .unwrap_or(0.0)
+            };
             stage.always(|into| {
                 format!(
-                    "SNP/indel fit: evidence read, {into}; fitting from {} starting point(s), at \
-                     most {} passes each",
+                    "SNP/indel fit: evidence read, {into}; {read_groups_held} read group(s) hold \
+                     {} ({} a read group), {observations} non-reference observations; the \
+                     samples' mean depth, read from the stored codes after the cap, runs from \
+                     {:.1} to {:.1}, median {:.1}, and {without_data} sample(s) have no walked \
+                     position (read there as 1.0); fitting from {} starting point(s), at most {} \
+                     passes each",
+                    crate::parameter_estimation::progress::size(evidence_bytes as u64),
+                    crate::parameter_estimation::progress::size(
+                        (evidence_bytes / read_groups_held.max(1)) as u64
+                    ),
+                    depth_at(0.0),
+                    depth_at(1.0),
+                    depth_at(0.5),
                     config.starting_points.len(),
                     config.max_passes
                 )

@@ -110,6 +110,26 @@ fn memory() -> String {
     }
 }
 
+/// Say one thing, with the process's memory — for a step that is not a stage of its own, such
+/// as what contamination kept.
+pub(crate) fn note(line: impl std::fmt::Display) {
+    eprintln!("estimating: {line}{}", memory());
+}
+
+/// A size in bytes as the progress lines print it: whole mebibytes below one gibibyte, where one
+/// decimal of a gibibyte would read `0.0` for a cohort of a few hundred samples, and gibibytes to
+/// one decimal above.
+pub(crate) fn size(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * MIB;
+    let bytes = bytes as f64;
+    if bytes < GIB {
+        format!("{:.0} MiB", bytes / MIB)
+    } else {
+        format!("{:.1} GiB", bytes / GIB)
+    }
+}
+
 /// Kibibytes as gibibytes to one decimal.
 pub(crate) fn gibibytes(kibibytes: u64) -> String {
     format!("{:.1} GiB", kibibytes as f64 / (1024.0 * 1024.0))
@@ -133,6 +153,13 @@ pub(crate) fn duration(took: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whole mebibytes below a gibibyte, gibibytes to one decimal above.
+    #[test]
+    fn a_size_reads_in_mebibytes_below_a_gibibyte() {
+        assert_eq!(size(364_000_000), "347 MiB");
+        assert_eq!(size(7_895_160_000), "7.4 GiB");
+    }
 
     #[test]
     fn durations_are_read_at_the_largest_unit() {

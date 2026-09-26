@@ -539,7 +539,13 @@ fn fit_and_assemble(
             .position(|entry| entry.name == name)
             .map(|index| ContigId(index as u32))
     };
-    setup.always(|into| format!("censuses and reference read; {into}"));
+    setup.always(|into| {
+        format!(
+            "censuses and reference read, {into}; {} sample(s) holding {} read group(s)",
+            evidence.len(),
+            evidence.read_groups().len()
+        )
+    });
     let pooled = every_read_group_pooled(&evidence);
     let fit = fit_a_cohort(
         &mut evidence,

@@ -593,6 +593,28 @@ pub(super) fn fit_contamination_over(
         noisy_posterior,
         config,
     );
+    // **What the markers hold**: per library four read counts a marker, per sample a dosage —
+    // the part of contamination that still grows with the cohort.
+    let held: usize = markers.capacity() * std::mem::size_of::<Marker>()
+        + markers
+            .iter()
+            .map(|marker| {
+                (marker.alternative.capacity()
+                    + marker.depth.capacity()
+                    + marker.depth_low.capacity()
+                    + marker.depth_high.capacity())
+                    * std::mem::size_of::<u32>()
+                    + marker.dosage.capacity() * std::mem::size_of::<f64>()
+            })
+            .sum::<usize>();
+    crate::parameter_estimation::progress::note(format!(
+        "contamination: {} markers of {} positions, over {} unit(s) a fraction is fitted for \
+         (a library each, or a sample each at the sample grain); the markers hold {}",
+        markers.len(),
+        positions_in(samples),
+        units.len(),
+        crate::parameter_estimation::progress::size(held as u64),
+    ));
     if markers.len() < 100 {
         return refused(NotIdentifiedReason::TooFewMarkers);
     }
