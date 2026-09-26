@@ -323,6 +323,14 @@ pub struct GenericEvidence {
 }
 
 impl GenericEvidence {
+    /// **The bytes this read group's evidence holds**: its depth codes and its list of
+    /// non-reference observations, counted by what their vectors reserved. What
+    /// `estimate-parameters` reports, so a run can see what one read group costs.
+    pub fn heap_bytes(&self) -> usize {
+        self.depth.bits.capacity()
+            + self.non_reference.capacity() * std::mem::size_of::<AlleleObservation>()
+    }
+
     /// Records assembled from the two halves directly — **the door a reader comes in
     /// through, and the one a test that draws its own evidence uses.**
     ///
@@ -2822,6 +2830,25 @@ impl CensusWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A read group's evidence counts its depth codes and its observations, by what they
+    /// reserved.
+    #[test]
+    fn a_read_groups_evidence_counts_its_codes_and_its_observations() {
+        let depth = PackedDepthCodes::never_walked(1_000);
+        let codes = depth.bits.capacity();
+        let mut observations = Vec::with_capacity(10);
+        observations.push(AlleleObservation {
+            index: 3,
+            allele: ObservedAllele::C,
+            reads: 1,
+        });
+        let evidence = GenericEvidence::from_parts(depth, observations);
+        assert_eq!(
+            evidence.heap_bytes(),
+            codes + 10 * std::mem::size_of::<AlleleObservation>()
+        );
+    }
 
     // ---- the depth code, and the state a depth cannot express ----------------
 

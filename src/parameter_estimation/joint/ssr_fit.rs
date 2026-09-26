@@ -238,6 +238,40 @@ impl StratumSubstitutionCounts {
 }
 
 impl StratumEvidence {
+    /// **Rows with reads**: one for each (tract, sample) pair where the sample has a read that
+    /// crossed the tract — what the evidence and the stratum's likelihood table grow with.
+    pub fn rows_with_reads(&self) -> usize {
+        self.tracts.iter().map(|tract| tract.samples.len()).sum()
+    }
+
+    /// **The bytes this stratum's evidence holds**, counted by what its vectors reserved:
+    /// the tract list, each tract's rows, each row's slippage groups and each group's counts.
+    /// The allocator rounds every block up, so the process holds somewhat more.
+    pub fn heap_bytes(&self) -> usize {
+        self.tracts.capacity() * std::mem::size_of::<TractReads>()
+            + self
+                .tracts
+                .iter()
+                .map(|tract| {
+                    tract.samples.capacity() * std::mem::size_of::<SampleTractReads>()
+                        + tract
+                            .samples
+                            .iter()
+                            .map(|row| {
+                                row.by_group.capacity() * std::mem::size_of::<(u32, Vec<u32>)>()
+                                    + row
+                                        .by_group
+                                        .iter()
+                                        .map(|(_, counts)| {
+                                            counts.capacity() * std::mem::size_of::<u32>()
+                                        })
+                                        .sum::<usize>()
+                            })
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+    }
+
     /// Tracts carrying at least one spanning read — the count the per-stratum floor is
     /// measured in.
     pub fn tracts_with_reads(&self) -> usize {
@@ -1284,14 +1318,7 @@ fn largest_table_bytes(strata: &[StratumEvidence], config: &SsrFitConfig) -> u64
 /// cohort of a few hundred samples sits and one decimal of a gibibyte would read `0.0`, and
 /// gibibytes to one decimal above.
 fn table_size(bytes: u64) -> String {
-    const MIB: f64 = 1024.0 * 1024.0;
-    const GIB: f64 = 1024.0 * MIB;
-    let bytes = bytes as f64;
-    if bytes < GIB {
-        format!("{:.0} MiB", bytes / MIB)
-    } else {
-        format!("{:.1} GiB", bytes / GIB)
-    }
+    crate::parameter_estimation::progress::size(bytes)
 }
 
 /// **The pool several strata at once run on, and how the progress line names the schedule.**
@@ -2863,7 +2890,7 @@ pub fn gather_strata(
             })
             .collect();
 
-        tracts_in
+        let gathered: Vec<StratumEvidence> = tracts_in
             .iter()
             .enumerate()
             .map(|(index, (stratum, tracts))| {
@@ -2943,7 +2970,34 @@ pub fn gather_strata(
                 }
                 evidence
             })
-            .collect()
+            .collect();
+
+        // **What the arranged evidence holds, and what it grows with**: how many (tract, sample)
+        // pairs have reads, out of how many there are. Printed because it is the number that
+        // sets both this evidence's size and each stratum's likelihood table.
+        let rows: usize = gathered.iter().map(StratumEvidence::rows_with_reads).sum();
+        let pairs = gathered
+            .iter()
+            .map(|stratum| stratum.tracts.len())
+            .sum::<usize>()
+            * names.len();
+        let bytes: usize = gathered.iter().map(StratumEvidence::heap_bytes).sum();
+        let dropped: u64 = gathered
+            .iter()
+            .map(|stratum| stratum.tracts_over_guard_threshold)
+            .sum();
+        stage.always(|into| {
+            format!(
+                "repeat-tract evidence: arranged, {into}; {dropped} tract(s) left out by the \
+                 guard; {rows} (tract, sample) pairs with reads of the {pairs} the kept tracts \
+                 make ({:.1} in every 100), holding {} by the vectors' sizes, {:.0} bytes a pair \
+                 with reads",
+                100.0 * rows as f64 / pairs.max(1) as f64,
+                crate::parameter_estimation::progress::size(bytes as u64),
+                bytes as f64 / rows.max(1) as f64,
+            )
+        });
+        gathered
     })
 }
 
@@ -4380,6 +4434,20 @@ mod the_largest_table {
             bases_compared: 0,
             mismatching_bases: 0,
         }
+    }
+
+    /// Rows with reads are counted over every tract, and the bytes over every vector a row owns.
+    #[test]
+    fn a_stratums_rows_and_bytes_are_counted_over_every_tract() {
+        let stratum = stratum_with(&[3, 0, 2]);
+        assert_eq!(stratum.rows_with_reads(), 5);
+        let row = std::mem::size_of::<SampleTractReads>()
+            + std::mem::size_of::<(u32, Vec<u32>)>()
+            + std::mem::size_of::<u32>();
+        assert_eq!(
+            stratum.heap_bytes(),
+            3 * std::mem::size_of::<TractReads>() + 5 * row
+        );
     }
 
     /// One row a sample with reads a tract, 91 genotype pairs at the default span of six, eight
