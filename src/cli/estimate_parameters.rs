@@ -46,6 +46,7 @@
 //!   run lands here even though the fit ran**, because one genome's totals cannot identify an
 //!   excess and it comes out zero whatever the truth.
 
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -57,7 +58,7 @@ use crate::cli::psp_inputs::{PspArgumentRefusal, psps_named};
 use crate::cli::run_ground::{self, GroundError};
 use crate::parameter_estimation::joint::fit::JointFitConfig;
 use crate::parameter_estimation::joint::loci::{ReferenceDigest, SelectionError, UnambiguousRuns};
-use crate::parameter_estimation::joint::ssr_fit::SsrFitConfig;
+use crate::parameter_estimation::joint::ssr_fit::{DEFAULT_STRATA_AT_ONCE, SsrFitConfig};
 use crate::parameter_estimation::progress::StageProgress;
 use crate::reference_info::{
     ReferenceCheck, ReferenceInfoError, read_reference_observing_or_creating_fai,
@@ -124,6 +125,23 @@ pub struct EstimateParametersArgs {
     /// which is a claim, and saying nothing is *use what you measured*, which is a different one.
     #[arg(long)]
     pub inbreeding: Option<f64>,
+
+    /// How many repeat-tract strata the fit works on at once; 1 uses the least memory.
+    ///
+    /// A stratum is every repeat tract with one motif length and one reference copy number, and
+    /// the fit estimates each stratum's slippage on its own. **This decides how much memory that
+    /// step needs.** Fitting one stratum holds one table, with a row for each tract and each
+    /// sample with reads there, 91 numbers wide (one for each pair of allele lengths a sample can
+    /// carry): for a 5,000-tract stratum, about 0.34 GiB at 100 samples and 7.4 GiB at 2,169.
+    /// N strata at once hold up to N of those tables.
+    ///
+    /// At 1, the default, the fit works on one stratum at a time with every thread on its tracts.
+    /// Above 1, N threads each fit a stratum of their own, and the other cores are idle during
+    /// this step when N is below the core count. The step's first progress line prints the
+    /// largest stratum's table, so a run can choose N from that number. No value changes a fitted
+    /// number.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_STRATA_AT_ONCE)]
+    pub str_param_estimates_at_once: NonZeroUsize,
 }
 
 /// Everything that can stop an `estimate-parameters` run.
@@ -313,6 +331,15 @@ pub fn run_estimate_parameters(
         args.output.display(),
     );
     Ok(())
+}
+
+/// The repeat-tract fit's settings this run asked for: the defaults, with the number of strata
+/// fitted at once from `--str-param-estimates-at-once`.
+fn repeat_tract_config(args: &EstimateParametersArgs) -> SsrFitConfig {
+    SsrFitConfig {
+        strata_at_once: args.str_param_estimates_at_once,
+        ..SsrFitConfig::default()
+    }
 }
 
 /// The run itself, with the writing left to the caller — which is what lets a test read the file
@@ -523,7 +550,7 @@ fn fit_and_assemble(
             ploidy,
             ..JointFitConfig::default()
         },
-        &SsrFitConfig::default(),
+        &repeat_tract_config(args),
     )
     .map_err(|source| EstimateParametersCliError::Fit {
         source: Box::new(source),

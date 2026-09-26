@@ -1,5 +1,5 @@
 //! **Where the repeat-tract fit's threads are better spent: on one repeat-length class's
-//! tracts, or on the classes at once.**
+//! tracts, or on several classes at once.**
 //!
 //! The parameters fit has two halves. The first reads ordinary positions; the second reads
 //! repeat tracts, one **repeat-length class** at a time — every tract of one motif period whose
@@ -11,7 +11,8 @@
 //!
 //! - **one class at a time, its tracts split across the pool** — what the fit did until
 //!   2026-09-11;
-//! - **every class at once, each on one thread** — [`WhereTheThreadsGo::AcrossStrata`].
+//! - **`THREADS` classes at once, each on one thread** — `SsrFitConfig::strata_at_once` set to
+//!   `THREADS`.
 //!
 //! **Both arms return the same bits** (`ssr_fit`'s own
 //! `the_two_ways_of_spending_the_pool_give_the_same_bits`), so what is measured here is wall
@@ -43,8 +44,7 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::{
     draw_stratum, spectrum_of,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    Slippage, SsrFitConfig, StartingPoint, StratumEvidence, StratumOutcome, WhereTheThreadsGo,
-    fit_strata,
+    Slippage, SsrFitConfig, StartingPoint, StratumEvidence, StratumOutcome, fit_strata,
 };
 
 /// Tomato's own dinucleotide numbers, which every drawn class here is drawn at.
@@ -114,9 +114,9 @@ fn main() {
     let starts: usize = from_env("STARTS", 1);
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "skewed".to_string());
     let arm = std::env::var("ARM").unwrap_or_else(|_| "across_classes".to_string());
-    let where_the_threads_go = match arm.as_str() {
-        "across_classes" => WhereTheThreadsGo::AcrossStrata,
-        "across_tracts" => WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+    let strata_at_once = match arm.as_str() {
+        "across_classes" => std::num::NonZeroUsize::new(threads).expect("THREADS is at least one"),
+        "across_tracts" => std::num::NonZeroUsize::MIN,
         other => panic!("ARM must be across_classes or across_tracts, not {other}"),
     };
 
@@ -154,7 +154,7 @@ fn main() {
         // Eight is production's floor. Every class in every profile clears it, so nothing here
         // is timing a refusal.
         refusal_floor: 8,
-        threads: where_the_threads_go,
+        strata_at_once,
         ..SsrFitConfig::default()
     };
 
