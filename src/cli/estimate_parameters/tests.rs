@@ -94,6 +94,7 @@ fn args_over(cohort: &AVaryingCohort, psps: &Path, output: PathBuf) -> EstimateP
         ploidy: 2,
         inbreeding: None,
         str_param_estimates_at_once: std::num::NonZeroUsize::MIN,
+        skip_contamination: false,
     }
 }
 
@@ -138,6 +139,19 @@ fn strata_are_fitted_one_at_a_time_unless_the_run_asks_for_more() {
         repeat_tract_config(&args_of(&a_shortest_run())).strata_at_once,
         crate::parameter_estimation::joint::ssr_fit::DEFAULT_STRATA_AT_ONCE
     );
+
+    assert!(
+        !args_of(&a_shortest_run()).skip_contamination,
+        "contamination is estimated unless the run says not to"
+    );
+    let mut skipping = a_shortest_run();
+    skipping.push("--skip-contamination");
+    assert!(args_of(&skipping).skip_contamination);
+    // **And the choice reaches the fit.** The fixture cohorts refuse contamination either way,
+    // so no file-level test here can see a flipped switch; this is where it is caught.
+    let diploid = Ploidy::try_new(2).expect("two is a ploidy");
+    assert!(ordinary_position_config(&args_of(&a_shortest_run()), diploid).estimate_contamination);
+    assert!(!ordinary_position_config(&args_of(&skipping), diploid).estimate_contamination);
 
     let mut zero = a_shortest_run();
     zero.extend(["--str-param-estimates-at-once", "0"]);

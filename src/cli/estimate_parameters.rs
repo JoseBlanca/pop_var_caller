@@ -142,6 +142,19 @@ pub struct EstimateParametersArgs {
     /// number.
     #[arg(long, value_name = "N", default_value_t = DEFAULT_STRATA_AT_ONCE)]
     pub str_param_estimates_at_once: NonZeroUsize,
+
+    /// Do not estimate contamination: every read group is taken as uncontaminated.
+    ///
+    /// Contamination is the share of a library's reads that came from another individual.
+    /// Estimating it holds, at each position where the cohort varies, an expected allele count for
+    /// every sample and four read counts for every read group; a run that estimates it prints what
+    /// that takes on its `contamination:` progress line. With this option the parameters file
+    /// carries no contamination table, which a calling run reads as "no read group is
+    /// contaminated" — the same model it uses when nothing was found, not a fraction measured at
+    /// zero. Use it when the samples are known to be clean or when contamination would not change
+    /// the calls you need.
+    #[arg(long)]
+    pub skip_contamination: bool,
 }
 
 /// Everything that can stop an `estimate-parameters` run.
@@ -331,6 +344,16 @@ pub fn run_estimate_parameters(
         args.output.display(),
     );
     Ok(())
+}
+
+/// The SNP/indel fit's settings this run asked for: the defaults, at the run's ploidy, and with
+/// contamination estimated unless `--skip-contamination` said not to.
+fn ordinary_position_config(args: &EstimateParametersArgs, ploidy: Ploidy) -> JointFitConfig {
+    JointFitConfig {
+        ploidy,
+        estimate_contamination: !args.skip_contamination,
+        ..JointFitConfig::default()
+    }
 }
 
 /// The repeat-tract fit's settings this run asked for: the defaults, with the number of strata
@@ -552,10 +575,7 @@ fn fit_and_assemble(
         &plan.loci,
         &contig_of,
         &pooled,
-        &JointFitConfig {
-            ploidy,
-            ..JointFitConfig::default()
-        },
+        &ordinary_position_config(args, ploidy),
         &repeat_tract_config(args),
     )
     .map_err(|source| EstimateParametersCliError::Fit {
