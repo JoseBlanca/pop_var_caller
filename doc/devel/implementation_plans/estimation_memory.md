@@ -72,7 +72,7 @@ in half the available memory. Issue 2 replaces that guess with the user's explic
 
 1. ✅ **Issue 1: release the repeat-tract evidence as soon as the fit no longer needs it.** (§4)
 2. ✅ **Issue 2: the user says how many strata are fitted at once.** (§5)
-3. ☐ **Issue 3: build contamination's markers in two passes, without the S × 2 million arrays.** (§6)
+3. ✅ **Issue 3: build contamination's markers in two passes, without the S × 2 million arrays.** (§6)
 4. ☐ **Final step: simulate cohorts of growing size and check the memory against what §7 expects.** (§7)
 
 The owner's order. Each issue is one branch, merged before the next starts, so a checksum that moves
