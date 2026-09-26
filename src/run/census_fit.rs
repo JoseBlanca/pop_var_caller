@@ -43,7 +43,8 @@ use crate::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::parameter_estimation::joint::loci::{CensusLoci, CensusLociDigester};
 use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::parameter_estimation::joint::ssr_fit::{
-    self, SsrFitConfig, StratumEvidence, StratumOutcome, gather_strata, strata_of_kept_loci,
+    self, SsrFitConfig, StratumOutcome, StratumSubstitutionCounts, gather_strata,
+    strata_of_kept_loci,
 };
 use crate::parameter_estimation::joint::stratum_fits::StratumFits;
 use crate::parameter_estimation::repeat_strata::{RepeatCount, Stratum as SsrStratum, StratumKey};
@@ -66,9 +67,14 @@ pub struct CohortFit {
     /// How many kept tracts the strata were rebuilt over, which is what says whether the
     /// repeat-tract half had anything to read.
     pub tracts: usize,
-    /// The evidence the tract half was fitted from, kept because the per-stratum substitution
-    /// rates are read off it and not out of the fit.
-    pub tract_evidence: Vec<StratumEvidence>,
+    /// Each stratum's bases compared and bases mismatching, one entry a stratum the tract half
+    /// gathered, in the order it gathered them.
+    ///
+    /// **Measured from the evidence, not fitted**: a stratum whose fit was refused still has
+    /// these counts, and its substitution rate is written from them. They are the only part of
+    /// the evidence the parameters file needs, which is why the evidence itself can be dropped
+    /// as soon as the fit returns.
+    pub substitution_counts: Vec<StratumSubstitutionCounts>,
 }
 
 /// Why a cohort could not be fitted.
@@ -197,12 +203,20 @@ pub fn fit_a_cohort(
         }
     })?;
     let outcomes = ssr_fit::fit_strata(&evidence, &homozygote_excess, tracts);
+    // **The evidence is the largest thing the tract half holds and nothing after the fit needs
+    // more of it than these two counts a stratum**, so it goes here rather than when the
+    // parameters file has been written.
+    let substitution_counts = evidence
+        .iter()
+        .map(|evidence| evidence.substitution_counts())
+        .collect();
+    drop(evidence);
 
     Ok(CohortFit {
         generic: fit,
         strata: outcomes,
         tracts: strata.len(),
-        tract_evidence: evidence,
+        substitution_counts,
     })
 }
 
@@ -292,12 +306,12 @@ pub fn parameters_from_the_fit(
         .flat_map(|of_sample| of_sample.iter().cloned())
         .collect();
 
-    // **One rate per (read group, stratum, ploidy)**, read off the evidence the tract half was
-    // fitted from rather than out of the fit: a stratum whose fit was refused still measured a
-    // substitution rate, and a run that dropped it would score its tracts against nothing.
+    // **One rate per (read group, stratum, ploidy)**, from the counts the evidence measured
+    // rather than out of the fit: a stratum whose fit was refused still measured a substitution
+    // rate, and a run that dropped it would score its tracts against nothing.
     let mut ssr_substitution_rate: BTreeMap<StratumKey, Estimate<ErrorRate>> = BTreeMap::new();
-    for stratum in &fit.tract_evidence {
-        let Some(rate) = stratum.substitution_rate() else {
+    for counts in &fit.substitution_counts {
+        let Some(rate) = counts.substitution_rate() else {
             continue;
         };
         let Ok(rate) = ErrorRate::try_new(rate) else {
@@ -308,8 +322,8 @@ pub fn parameters_from_the_fit(
         // the calling key names it by the checked types. A stratum the census holds but the
         // checked types reject is skipped rather than coerced.
         let (Ok(period), Ok(repeats)) = (
-            SsrPeriod::try_new(stratum.stratum.period as usize),
-            u32::try_from(stratum.stratum.reference_repeats),
+            SsrPeriod::try_new(counts.stratum.period as usize),
+            u32::try_from(counts.stratum.reference_repeats),
         ) else {
             continue;
         };
@@ -324,7 +338,7 @@ pub fn parameters_from_the_fit(
                 Estimate {
                     value: rate,
                     provenance: Provenance::FittedHere,
-                    observations: stratum.bases_compared,
+                    observations: counts.bases_compared,
                 },
             );
         }
@@ -679,6 +693,28 @@ mod tests {
             "one cohort fitted twice gives one answer",
         );
         assert_eq!(twice.tracts, fit.tracts);
+
+        // **What outlives the evidence**: one entry a stratum, in the fit's order, and at least
+        // one stratum whose reads were compared at all — otherwise the parameters file's
+        // substitution-rate loop has nothing to read on this fixture.
+        assert_eq!(
+            fit.substitution_counts
+                .iter()
+                .map(|counts| counts.stratum)
+                .collect::<Vec<_>>(),
+            fit.strata
+                .iter()
+                .map(StratumOutcome::stratum)
+                .collect::<Vec<_>>(),
+            "one substitution count a stratum the tract half gathered, in its order",
+        );
+        assert!(
+            fit.substitution_counts
+                .iter()
+                .any(|counts| counts.bases_compared > 0),
+            "the fixture's tracts compared no base, so no substitution rate is tested end to end",
+        );
+        assert_eq!(twice.substitution_counts, fit.substitution_counts);
     }
 
     /// **A cohort fitted against another selection is refused before a tract is read.**
@@ -853,8 +889,78 @@ mod writing_the_parameters_file {
         );
     }
 
+    /// **A stratum that compared no base gets no substitution rate, and one that did gets its
+    /// own**, for every read group, counted over the bases it compared.
+    ///
+    /// The fixture's one stratum compares 460 bases and finds none disagreeing, so on its own it
+    /// reaches neither case: its rate is zero and no stratum lacks one. Two strata are added to
+    /// the fit's counts before the file is assembled — one with nothing compared, which must be
+    /// skipped rather than written as a fitted zero, and one with 3 disagreeing in 4,000.
+    #[test]
+    fn a_stratum_with_nothing_compared_gets_no_rate_and_one_with_mismatches_gets_its_own() {
+        use crate::parameter_estimation::joint::census::Stratum as CensusStratum;
+
+        let nothing = CensusStratum {
+            period: 3,
+            reference_repeats: 7,
+        };
+        let some = CensusStratum {
+            period: 4,
+            reference_repeats: 6,
+        };
+        let (parameters, _) = a_fitted_cohorts_parameters_with(&[
+            StratumSubstitutionCounts {
+                stratum: nothing,
+                bases_compared: 0,
+                mismatching_bases: 0,
+            },
+            StratumSubstitutionCounts {
+                stratum: some,
+                bases_compared: 4_000,
+                mismatching_bases: 3,
+            },
+        ]);
+        let rates: Vec<_> = parameters.ssr_substitution_rate().collect();
+        let of_period = |period: u8| {
+            rates
+                .iter()
+                .filter(|(key, _)| key.stratum.period.get() == period)
+                .collect::<Vec<_>>()
+        };
+
+        assert!(
+            of_period(3).is_empty(),
+            "a stratum that compared no base has no rate, not a fitted zero"
+        );
+        let fixtures_own = of_period(2);
+        assert!(
+            !fixtures_own.is_empty(),
+            "the fixture's own stratum is written, which is what the count below is measured by"
+        );
+        let added = of_period(4);
+        assert_eq!(
+            added.len(),
+            fixtures_own.len(),
+            "one rate a read group, as the fixture's own stratum has"
+        );
+        for (key, estimate) in added {
+            assert_eq!(key.stratum.repeats, RepeatCount(6));
+            assert_eq!(estimate.value.get(), 3.0 / 4_000.0);
+            assert_eq!(estimate.observations, 4_000);
+            assert_eq!(estimate.provenance, Provenance::FittedHere);
+        }
+    }
+
     /// Fit the fixture cohort and assemble its parameters file.
     fn a_fitted_cohorts_parameters() -> (RunParameters, ParametersFile) {
+        a_fitted_cohorts_parameters_with(&[])
+    }
+
+    /// Fit the fixture cohort, add `extra` to the substitution counts the fit measured, and
+    /// assemble its parameters file.
+    fn a_fitted_cohorts_parameters_with(
+        extra: &[StratumSubstitutionCounts],
+    ) -> (RunParameters, ParametersFile) {
         use crate::types::InbreedingF;
 
         let (cohort, psps) = a_fitted_cohorts_inputs();
@@ -873,7 +979,7 @@ mod writing_the_parameters_file {
                 .map(|index| ContigId(index as u32))
         };
         let pooled = every_read_group_pooled(&open);
-        let fit = fit_a_cohort(
+        let mut fit = fit_a_cohort(
             &mut open,
             &plan.loci,
             &contig_of,
@@ -882,6 +988,7 @@ mod writing_the_parameters_file {
             &SsrFitConfig::default(),
         )
         .expect("the cohort fits");
+        fit.substitution_counts.extend_from_slice(extra);
 
         let read_groups = read_groups_of(&open, &psps);
         // **Each sample's read groups name that sample's psp** — the column exists only so a
