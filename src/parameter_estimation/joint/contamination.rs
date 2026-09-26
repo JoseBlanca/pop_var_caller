@@ -685,13 +685,24 @@ pub(super) fn fit_contamination_over(
 
 /// The positions the cohort varies at, with each library's reads and each sample's dosage there.
 ///
-/// **Two passes, because the two grains want different things.** Choosing the markers, the
-/// frequency at each and every sample's dosage are all questions about a *plant*, so the first
-/// pass pools each sample's libraries and walks every kept position. The reads one *fraction* is
-/// fitted from are per library, and only at the positions that survived — so the second pass
-/// fills those, and costs one number per library per marker rather than per library per
-/// position. On a 400,000-position run keeping 9,000 markers that is the difference between a
-/// few megabytes and a few hundred.
+/// **Choosing the markers, the frequency at each and every sample's dosage are questions about a
+/// plant; the reads one fraction is fitted from are per library.** So a sample's libraries are
+/// pooled for the first and kept apart for the second, and the per-library reads are gathered only
+/// at the positions that survived — one number per library per marker rather than per library per
+/// position.
+///
+/// **Nothing here holds a number per sample per position.** Choosing a marker needs only sums
+/// across samples — how many have any depth there, their alternative reads and their depth — so
+/// the first pass adds each sample into three position-length totals and moves on, reusing one
+/// pair of scratch arrays for every sample. A sample's genotype is needed only at the markers, so
+/// the second pass pools each sample again and reads its dosage at those alone. Holding every
+/// sample's pooled counts at once instead cost 8 bytes a sample a position: 35 GB for 2,169
+/// samples at 2 million positions (`doc/devel/implementation_plans/estimation_memory.md` §6).
+///
+/// **The answer is the one the dense layout gave, to the bit**: the counts are integers, summed in
+/// sample order as `u64`; each sample's pooled counts come from the same code; and each dosage is
+/// the same formula over the same two counts and the same `pooled`, with no floating-point value
+/// summed across samples or markers. A test keeps the dense layout as its oracle.
 fn markers(
     samples: &[SampleGenericSections<'_>],
     units: &Units,
@@ -702,67 +713,32 @@ fn markers(
     config: &ContaminationConfig,
 ) -> Vec<Marker> {
     let count = samples.len();
-    let positions = samples
-        .first()
-        .and_then(|sections| sections.first())
-        .map_or(0, |(_, records)| records.depth().len());
+    let positions = positions_in(samples);
+    let major = major_alleles(samples, positions);
 
-    // Which non-reference allele the cohort carries at each position: the one the most reads
-    // across the whole panel fell on.
-    let mut totals = vec![[0_u32; 5]; positions];
+    // One sample's reads, pooled over its libraries — refilled for every sample in both passes.
+    let mut alternative = vec![0_u32; positions];
+    let mut depth = vec![0_u32; positions];
+
+    // **First pass: what choosing a marker reads, as sums across samples.**
+    let mut covered = vec![0_usize; positions];
+    let mut total_alternative = vec![0_u64; positions];
+    let mut total_depth = vec![0_u64; positions];
     for sections in samples {
-        for (_, group) in sections {
-            for observation in group.non_reference() {
-                totals[observation.index as usize][usize::from(observation.allele.code())] +=
-                    u32::from(observation.reads);
+        pool_one_sample(sections, &major, edges, cap, &mut alternative, &mut depth);
+        for index in 0..positions {
+            if depth[index] > 0 {
+                covered[index] += 1;
             }
-        }
-    }
-    let major: Vec<u8> = totals
-        .iter()
-        .map(|counts| {
-            counts
-                .iter()
-                .take(4)
-                .enumerate()
-                .max_by_key(|(_, n)| **n)
-                .map(|(allele, _)| allele as u8)
-                .unwrap_or(0)
-        })
-        .collect();
-
-    // **First pass: every kept position, with each plant's libraries pooled.** Only the middle
-    // of the depth range is wanted here — the two things it feeds, which positions the cohort
-    // varies at and how many copies of the allele each plant carries, each need one number. The
-    // ends of the range are per library and are gathered in the second pass.
-    let mut alternative = vec![vec![0_u32; positions]; count];
-    let mut depth = vec![vec![0_u32; positions]; count];
-    for (s, sections) in samples.iter().enumerate() {
-        for (_, group) in sections {
-            for (index, code) in group.depth().iter().enumerate() {
-                if let DepthCode::Binned(bin) = code {
-                    // The denominator the alternative counts below were taken out of: those
-                    // were thinned to the cap, and the depth code is now the position's own.
-                    let range = cap.denominator_for(edges.depth_range(bin));
-                    let (low, high) = (*range.start(), *range.end());
-                    depth[s][index] =
-                        depth[s][index].saturating_add(low + (high - low).div_ceil(2));
-                }
-            }
-            for observation in group.non_reference() {
-                let index = observation.index as usize;
-                if observation.allele.code() == major[index] {
-                    alternative[s][index] =
-                        alternative[s][index].saturating_add(u32::from(observation.reads));
-                }
-            }
+            total_alternative[index] += u64::from(alternative[index]);
+            total_depth[index] += u64::from(depth[index]);
         }
     }
 
-    /// Where a position that did not become a marker points.
-    const DROPPED: u32 = u32::MAX;
     let mut marker_at = vec![DROPPED; positions];
-
+    // Where each marker sits and its genotype prior, both read again in the second pass.
+    let mut marker_positions: Vec<usize> = Vec::new();
+    let mut priors: Vec<[f64; 3]> = Vec::new();
     let mut out = Vec::new();
     for index in 0..positions {
         // A mismapped position reads part non-reference in every sample at once, which is
@@ -777,16 +753,10 @@ fn markers(
         } else {
             1.0
         };
-        let covered = (0..count).filter(|&s| depth[s][index] > 0).count();
-        if covered < MIN_SAMPLES_WITH_DATA {
+        if covered[index] < MIN_SAMPLES_WITH_DATA {
             continue;
         }
-        let (alt, total): (u64, u64) = (0..count).fold((0, 0), |(a, d), s| {
-            (
-                a + u64::from(alternative[s][index]),
-                d + u64::from(depth[s][index]),
-            )
-        });
+        let (alt, total) = (total_alternative[index], total_depth[index]);
         if total == 0 {
             continue;
         }
@@ -797,43 +767,145 @@ fn markers(
         if !(MIN_FREQUENCY..=1.0 - MIN_FREQUENCY).contains(&pooled) {
             continue;
         }
-        let priors = genotype_priors(pooled, 0.0);
-        let dosage: Vec<f64> = (0..count)
-            .map(|s| {
-                let mut weights = [0.0_f64; 3];
-                for (copies, weight) in weights.iter_mut().enumerate() {
-                    *weight = priors[copies]
-                        * binomial(
-                            alternative[s][index],
-                            depth[s][index],
-                            read_share(copies, error),
-                        );
-                }
-                let total: f64 = weights.iter().sum();
-                if total > 0.0 {
-                    (weights[1] + 2.0 * weights[2]) / total
-                } else {
-                    2.0 * pooled
-                }
-            })
-            .collect();
         marker_at[index] = u32::try_from(out.len()).expect("fewer markers than a u32 can index");
+        marker_positions.push(index);
+        priors.push(genotype_priors(pooled, 0.0));
         out.push(Marker {
-            // Filled by the second pass, one entry per unit.
+            // Filled by the per-library pass, one entry per unit.
             alternative: vec![0; units.len()],
             depth: vec![0; units.len()],
             depth_low: vec![0; units.len()],
             depth_high: vec![0; units.len()],
             pooled,
-            dosage,
+            // Filled by the second pass, one entry per sample.
+            dosage: vec![0.0; count],
             cleanliness,
         });
     }
 
-    // **Second pass: the reads each fraction is fitted from, at the surviving markers only.**
-    // A unit's counts are added rather than assigned, because at the sample grain every library
-    // of one plant pours into the same unit — which is exactly what that grain means, and it is
-    // why one gather serves both.
+    // **Second pass: each sample's dosage, at the markers only.**
+    for (s, sections) in samples.iter().enumerate() {
+        pool_one_sample(sections, &major, edges, cap, &mut alternative, &mut depth);
+        for ((marker, &index), prior) in out.iter_mut().zip(&marker_positions).zip(&priors) {
+            marker.dosage[s] = dosage_of(
+                alternative[index],
+                depth[index],
+                prior,
+                marker.pooled,
+                error,
+            );
+        }
+    }
+
+    fill_the_reads_of_each_library(&mut out, &marker_at, samples, units, &major, edges, cap);
+    out
+}
+
+/// Where a position that did not become a marker points.
+const DROPPED: u32 = u32::MAX;
+
+/// How many kept positions the cohort's sections cover.
+fn positions_in(samples: &[SampleGenericSections<'_>]) -> usize {
+    samples
+        .first()
+        .and_then(|sections| sections.first())
+        .map_or(0, |(_, records)| records.depth().len())
+}
+
+/// Which non-reference allele the cohort carries at each position: the one the most reads across
+/// the whole panel fell on.
+fn major_alleles(samples: &[SampleGenericSections<'_>], positions: usize) -> Vec<u8> {
+    let mut totals = vec![[0_u32; 5]; positions];
+    for sections in samples {
+        for (_, group) in sections {
+            for observation in group.non_reference() {
+                totals[observation.index as usize][usize::from(observation.allele.code())] +=
+                    u32::from(observation.reads);
+            }
+        }
+    }
+    totals
+        .iter()
+        .map(|counts| {
+            counts
+                .iter()
+                .take(4)
+                .enumerate()
+                .max_by_key(|(_, n)| **n)
+                .map(|(allele, _)| allele as u8)
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// **One sample's reads at every kept position, with its libraries pooled**: its reads on the
+/// cohort's common alternative allele into `alternative`, and its depth into `depth`, each
+/// overwriting what the buffers held.
+///
+/// Only the middle of each depth code's range is wanted — the two things it feeds, which positions
+/// the cohort varies at and how many copies of the allele each plant carries, each need one
+/// number. The ends of the range are per library and are gathered with the library's own reads.
+fn pool_one_sample(
+    sections: &SampleGenericSections<'_>,
+    major: &[u8],
+    edges: &DepthBinEdges,
+    cap: DepthCap,
+    alternative: &mut [u32],
+    depth: &mut [u32],
+) {
+    alternative.fill(0);
+    depth.fill(0);
+    for (_, group) in sections {
+        for (index, code) in group.depth().iter().enumerate() {
+            if let DepthCode::Binned(bin) = code {
+                // The denominator the alternative counts below were taken out of: those were
+                // thinned to the cap, and the depth code is now the position's own.
+                let range = cap.denominator_for(edges.depth_range(bin));
+                let (low, high) = (*range.start(), *range.end());
+                depth[index] = depth[index].saturating_add(low + (high - low).div_ceil(2));
+            }
+        }
+        for observation in group.non_reference() {
+            let index = observation.index as usize;
+            if observation.allele.code() == major[index] {
+                alternative[index] =
+                    alternative[index].saturating_add(u32::from(observation.reads));
+            }
+        }
+    }
+}
+
+/// The posterior mean number of alternative copies a sample carries at one marker, from its reads
+/// there and a genotype prior at the marker's panel frequency — or twice that frequency where
+/// every genotype's weight comes out zero.
+fn dosage_of(alternative: u32, depth: u32, priors: &[f64; 3], pooled: f64, error: f64) -> f64 {
+    let mut weights = [0.0_f64; 3];
+    for (copies, weight) in weights.iter_mut().enumerate() {
+        *weight = priors[copies] * binomial(alternative, depth, read_share(copies, error));
+    }
+    let total: f64 = weights.iter().sum();
+    if total > 0.0 {
+        (weights[1] + 2.0 * weights[2]) / total
+    } else {
+        2.0 * pooled
+    }
+}
+
+/// **The reads each fraction is fitted from, at the markers only**, into each marker's per-unit
+/// lists.
+///
+/// A unit's counts are added rather than assigned, because at the sample grain every library of
+/// one plant pours into the same unit — which is exactly what that grain means, and it is why one
+/// gather serves both.
+fn fill_the_reads_of_each_library(
+    markers: &mut [Marker],
+    marker_at: &[u32],
+    samples: &[SampleGenericSections<'_>],
+    units: &Units,
+    major: &[u8],
+    edges: &DepthBinEdges,
+    cap: DepthCap,
+) {
     for (s, sections) in samples.iter().enumerate() {
         for (ordinal, (_, group)) in sections.iter().enumerate() {
             let unit = units.unit_of[s][ordinal];
@@ -845,7 +917,7 @@ fn markers(
                 if let DepthCode::Binned(bin) = code {
                     let range = cap.denominator_for(edges.depth_range(bin));
                     let (low, high) = (*range.start(), *range.end());
-                    let marker = &mut out[marker as usize];
+                    let marker = &mut markers[marker as usize];
                     marker.depth[unit] =
                         marker.depth[unit].saturating_add(low + (high - low).div_ceil(2));
                     marker.depth_low[unit] = marker.depth_low[unit].saturating_add(low);
@@ -858,13 +930,12 @@ fn markers(
                 if marker == DROPPED || observation.allele.code() != major[index] {
                     continue;
                 }
-                let marker = &mut out[marker as usize];
+                let marker = &mut markers[marker as usize];
                 marker.alternative[unit] =
                     marker.alternative[unit].saturating_add(u32::from(observation.reads));
             }
         }
     }
-    out
 }
 
 /// Each sample's coordinates in the cohort's own axes of variation.
@@ -1391,6 +1462,461 @@ mod tests {
     use super::super::census::NamedReadGroup;
     use super::*;
 
+    /// **The markers as they were chosen until 2026-09-26, kept as the oracle for the two-pass
+    /// [`markers`].** It fills every sample's pooled counts at every position — two arrays of
+    /// samples × positions — and reads the totals and the dosages off them. The two-pass version
+    /// must return the same markers to the bit.
+    fn markers_dense(
+        samples: &[SampleGenericSections<'_>],
+        units: &Units,
+        edges: &DepthBinEdges,
+        cap: DepthCap,
+        error: f64,
+        noisy_posterior: &[f32],
+        config: &ContaminationConfig,
+    ) -> Vec<Marker> {
+        let count = samples.len();
+        let positions = samples
+            .first()
+            .and_then(|sections| sections.first())
+            .map_or(0, |(_, records)| records.depth().len());
+
+        // Which non-reference allele the cohort carries at each position: the one the most reads
+        // across the whole panel fell on.
+        let mut totals = vec![[0_u32; 5]; positions];
+        for sections in samples {
+            for (_, group) in sections {
+                for observation in group.non_reference() {
+                    totals[observation.index as usize][usize::from(observation.allele.code())] +=
+                        u32::from(observation.reads);
+                }
+            }
+        }
+        let major: Vec<u8> = totals
+            .iter()
+            .map(|counts| {
+                counts
+                    .iter()
+                    .take(4)
+                    .enumerate()
+                    .max_by_key(|(_, n)| **n)
+                    .map(|(allele, _)| allele as u8)
+                    .unwrap_or(0)
+            })
+            .collect();
+
+        // **First pass: every kept position, with each plant's libraries pooled.** Only the middle
+        // of the depth range is wanted here — the two things it feeds, which positions the cohort
+        // varies at and how many copies of the allele each plant carries, each need one number. The
+        // ends of the range are per library and are gathered in the second pass.
+        let mut alternative = vec![vec![0_u32; positions]; count];
+        let mut depth = vec![vec![0_u32; positions]; count];
+        for (s, sections) in samples.iter().enumerate() {
+            for (_, group) in sections {
+                for (index, code) in group.depth().iter().enumerate() {
+                    if let DepthCode::Binned(bin) = code {
+                        // The denominator the alternative counts below were taken out of: those
+                        // were thinned to the cap, and the depth code is now the position's own.
+                        let range = cap.denominator_for(edges.depth_range(bin));
+                        let (low, high) = (*range.start(), *range.end());
+                        depth[s][index] =
+                            depth[s][index].saturating_add(low + (high - low).div_ceil(2));
+                    }
+                }
+                for observation in group.non_reference() {
+                    let index = observation.index as usize;
+                    if observation.allele.code() == major[index] {
+                        alternative[s][index] =
+                            alternative[s][index].saturating_add(u32::from(observation.reads));
+                    }
+                }
+            }
+        }
+
+        /// Where a position that did not become a marker points.
+        const DROPPED: u32 = u32::MAX;
+        let mut marker_at = vec![DROPPED; positions];
+
+        let mut out = Vec::new();
+        for index in 0..positions {
+            // A mismapped position reads part non-reference in every sample at once, which is
+            // both what makes it look like a segregating marker and what makes every sample look
+            // contaminated at it. It is condemned before anything else is asked of it.
+            let noisy = noisy_posterior.get(index).copied().unwrap_or(0.0) as f64;
+            if noisy > config.max_noisy_posterior {
+                continue;
+            }
+            let cleanliness = if config.weight_by_posterior {
+                1.0 - noisy
+            } else {
+                1.0
+            };
+            let covered = (0..count).filter(|&s| depth[s][index] > 0).count();
+            if covered < MIN_SAMPLES_WITH_DATA {
+                continue;
+            }
+            let (alt, total): (u64, u64) = (0..count).fold((0, 0), |(a, d), s| {
+                (
+                    a + u64::from(alternative[s][index]),
+                    d + u64::from(depth[s][index]),
+                )
+            });
+            if total == 0 {
+                continue;
+            }
+            let share = alt as f64 / total as f64;
+            // The read share is the frequency blurred by the error rate; inverting it is what a
+            // spectrum fitted over the same positions converges to.
+            let pooled = ((share - error) / (1.0 - 2.0 * error)).clamp(1e-3, 1.0 - 1e-3);
+            if !(MIN_FREQUENCY..=1.0 - MIN_FREQUENCY).contains(&pooled) {
+                continue;
+            }
+            let priors = genotype_priors(pooled, 0.0);
+            let dosage: Vec<f64> = (0..count)
+                .map(|s| {
+                    let mut weights = [0.0_f64; 3];
+                    for (copies, weight) in weights.iter_mut().enumerate() {
+                        *weight = priors[copies]
+                            * binomial(
+                                alternative[s][index],
+                                depth[s][index],
+                                read_share(copies, error),
+                            );
+                    }
+                    let total: f64 = weights.iter().sum();
+                    if total > 0.0 {
+                        (weights[1] + 2.0 * weights[2]) / total
+                    } else {
+                        2.0 * pooled
+                    }
+                })
+                .collect();
+            marker_at[index] =
+                u32::try_from(out.len()).expect("fewer markers than a u32 can index");
+            out.push(Marker {
+                // Filled by the second pass, one entry per unit.
+                alternative: vec![0; units.len()],
+                depth: vec![0; units.len()],
+                depth_low: vec![0; units.len()],
+                depth_high: vec![0; units.len()],
+                pooled,
+                dosage,
+                cleanliness,
+            });
+        }
+
+        // **Second pass: the reads each fraction is fitted from, at the surviving markers only.**
+        // A unit's counts are added rather than assigned, because at the sample grain every library
+        // of one plant pours into the same unit — which is exactly what that grain means, and it is
+        // why one gather serves both.
+        for (s, sections) in samples.iter().enumerate() {
+            for (ordinal, (_, group)) in sections.iter().enumerate() {
+                let unit = units.unit_of[s][ordinal];
+                for (index, code) in group.depth().iter().enumerate() {
+                    let marker = marker_at[index];
+                    if marker == DROPPED {
+                        continue;
+                    }
+                    if let DepthCode::Binned(bin) = code {
+                        let range = cap.denominator_for(edges.depth_range(bin));
+                        let (low, high) = (*range.start(), *range.end());
+                        let marker = &mut out[marker as usize];
+                        marker.depth[unit] =
+                            marker.depth[unit].saturating_add(low + (high - low).div_ceil(2));
+                        marker.depth_low[unit] = marker.depth_low[unit].saturating_add(low);
+                        marker.depth_high[unit] = marker.depth_high[unit].saturating_add(high);
+                    }
+                }
+                for observation in group.non_reference() {
+                    let index = observation.index as usize;
+                    let marker = marker_at[index];
+                    if marker == DROPPED || observation.allele.code() != major[index] {
+                        continue;
+                    }
+                    let marker = &mut out[marker as usize];
+                    marker.alternative[unit] =
+                        marker.alternative[unit].saturating_add(u32::from(observation.reads));
+                }
+            }
+        }
+        out
+    }
+
+    /// Two marker lists that must be the same: every field of every marker, floating-point
+    /// fields compared by their bits.
+    fn the_same_markers(two_pass: &[Marker], dense: &[Marker], what: &str) {
+        assert_eq!(two_pass.len(), dense.len(), "{what}: how many markers");
+        let bits = |values: &[f64]| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        for (index, (left, right)) in two_pass.iter().zip(dense).enumerate() {
+            // Destructured, so a field added to `Marker` is a compile error here rather than a
+            // field the comparison silently skips.
+            let Marker {
+                alternative,
+                depth,
+                depth_low,
+                depth_high,
+                pooled,
+                dosage,
+                cleanliness,
+            } = left;
+            assert_eq!(
+                alternative, &right.alternative,
+                "{what}: marker {index} alternative"
+            );
+            assert_eq!(depth, &right.depth, "{what}: marker {index} depth");
+            assert_eq!(
+                depth_low, &right.depth_low,
+                "{what}: marker {index} depth_low"
+            );
+            assert_eq!(
+                depth_high, &right.depth_high,
+                "{what}: marker {index} depth_high"
+            );
+            assert_eq!(
+                pooled.to_bits(),
+                right.pooled.to_bits(),
+                "{what}: marker {index} pooled"
+            );
+            assert_eq!(
+                bits(dosage),
+                bits(&right.dosage),
+                "{what}: marker {index} dosage"
+            );
+            assert_eq!(
+                cleanliness.to_bits(),
+                right.cleanliness.to_bits(),
+                "{what}: marker {index} cleanliness"
+            );
+        }
+    }
+
+    /// Both ways of choosing the markers over one drawn panel, at both grains, with the given
+    /// mismapping posteriors; asserts they agree and returns how many markers there were.
+    fn both_ways(panel: &[SampleCensusEvidence], noisy_posterior: &[f32], what: &str) -> usize {
+        let mut cohort = as_cohort(panel);
+        let cap = cohort
+            .terms()
+            .map_or(DepthCap::MAX, |terms| terms.depth_cap);
+        let groups = cohort.read_groups().to_vec();
+        let edges = DepthBinEdges::for_census();
+        cohort
+            .with_generic(&groups, |samples| {
+                let mut found = 0;
+                for grain in [ContaminationGrain::ReadGroup, ContaminationGrain::Sample] {
+                    let config = ContaminationConfig {
+                        grain,
+                        ..ContaminationConfig::default()
+                    };
+                    let units = Units::of(samples, grain);
+                    let args = (
+                        samples,
+                        &units,
+                        &edges,
+                        cap,
+                        0.002,
+                        noisy_posterior,
+                        &config,
+                    );
+                    let two_pass = markers(args.0, args.1, args.2, args.3, args.4, args.5, args.6);
+                    let dense =
+                        markers_dense(args.0, args.1, args.2, args.3, args.4, args.5, args.6);
+                    the_same_markers(&two_pass, &dense, &format!("{what}, {grain:?}"));
+                    found = two_pass.len();
+                }
+                found
+            })
+            .expect("a resident census has no file to fail on")
+    }
+
+    /// **The two-pass markers are the dense layout's, to the bit** — on a panel of one library a
+    /// plant at three reads a position, and on one of two libraries a plant, where each sample's
+    /// counts are pooled over its read groups and the per-library reads are kept apart.
+    #[test]
+    fn two_passes_choose_the_markers_the_dense_layout_chose() {
+        let one_library = structured_panel(30, 3_000, 3.0, 3, 0.2, Some((0, 0.05)), 0x2A55_0001);
+        let markers = both_ways(&one_library, &[], "one library a plant");
+        assert!(
+            markers > 100,
+            "the panel must yield markers to compare, found {markers}"
+        );
+
+        let two_libraries = structured_panel_of_libraries(
+            30,
+            3_000,
+            6.0,
+            3,
+            0.2,
+            &[
+                DrawnLibrary {
+                    depth_share: 0.7,
+                    spiked: Some((0, 0.05)),
+                },
+                DrawnLibrary {
+                    depth_share: 0.3,
+                    spiked: None,
+                },
+            ],
+            0x2A55_0002,
+        );
+        let markers = both_ways(&two_libraries, &[], "two libraries a plant");
+        assert!(
+            markers > 100,
+            "the panel must yield markers to compare, found {markers}"
+        );
+    }
+
+    /// **At the edge of the coverage floor and at mismapped positions, too.** At a third of a
+    /// read a position over thirty samples, a position has reads in about eight of them, so the
+    /// panel holds positions covered by exactly [`MIN_SAMPLES_WITH_DATA`] samples and by one
+    /// fewer — the test asserts both occur. And every tenth position is given a mismapping
+    /// posterior above the refusal, every seventh one below it, so both the refusal and the
+    /// weighting by cleanliness are reached.
+    #[test]
+    fn two_passes_agree_at_the_coverage_floor_and_at_mismapped_positions() {
+        let positions = 4_000;
+        let thin = structured_panel(30, positions, 0.33, 3, 0.2, None, 0x2A55_0003);
+        // How many samples put a read at each position, counted as `markers` counts it.
+        let mut cohort = as_cohort(&thin);
+        let cap = cohort
+            .terms()
+            .map_or(DepthCap::MAX, |terms| terms.depth_cap);
+        let groups = cohort.read_groups().to_vec();
+        let covered: Vec<usize> = cohort
+            .with_generic(&groups, |samples| {
+                let major = major_alleles(samples, positions);
+                let edges = DepthBinEdges::for_census();
+                let (mut alternative, mut depth) = (vec![0; positions], vec![0; positions]);
+                let mut covered = vec![0; positions];
+                for sections in samples {
+                    pool_one_sample(sections, &major, &edges, cap, &mut alternative, &mut depth);
+                    for (count, reads) in covered.iter_mut().zip(&depth) {
+                        *count += usize::from(*reads > 0);
+                    }
+                }
+                covered
+            })
+            .expect("a resident census has no file to fail on");
+        assert!(
+            covered.contains(&MIN_SAMPLES_WITH_DATA),
+            "some position is covered by exactly the floor"
+        );
+        assert!(
+            covered.contains(&(MIN_SAMPLES_WITH_DATA - 1)),
+            "and some by one sample fewer"
+        );
+        both_ways(&thin, &[], "a third of a read a position");
+
+        let noisy: Vec<f32> = (0..positions)
+            .map(|index| match (index % 10, index % 7) {
+                (0, _) => 0.9,
+                (_, 0) => 0.3,
+                _ => 0.0,
+            })
+            .collect();
+        let panel = structured_panel(30, positions, 3.0, 3, 0.2, None, 0x2A55_0004);
+        let with = both_ways(&panel, &noisy, "with mismapped positions");
+        let without = both_ways(&panel, &[], "the same panel, none mismapped");
+        assert!(
+            with < without,
+            "the refused positions must be missing from the markers: {with} against {without}"
+        );
+    }
+
+    /// **Deep reads and a second alternative allele, too** — the two things a shallow panel with
+    /// one alternative allele never reaches. At 150 reads a position most depth codes stand for a
+    /// range above the cap of 124, so the depth is the clamped middle of a range; and in every
+    /// third sample, at every fourth position, the alternative reads are `G` rather than `C`, so
+    /// the common alternative allele is chosen between two and the other's reads are left out.
+    /// The test asserts the panel reaches both before comparing.
+    #[test]
+    fn two_passes_agree_on_deep_reads_and_a_second_alternative_allele() {
+        let positions = 1_000;
+        let panel = structured_panel_with_a_second_allele(
+            30,
+            positions,
+            150.0,
+            3,
+            0.2,
+            &[DrawnLibrary {
+                depth_share: 1.0,
+                spiked: None,
+            }],
+            0x2A55_0005,
+            &|s, index| s % 3 == 0 && index % 4 == 0,
+        );
+
+        let mut cohort = as_cohort(&panel);
+        let cap = cohort
+            .terms()
+            .map_or(DepthCap::MAX, |terms| terms.depth_cap);
+        let groups = cohort.read_groups().to_vec();
+        let edges = DepthBinEdges::for_census();
+        let (g_chosen, g_left_out, clamped) = cohort
+            .with_generic(&groups, |samples| {
+                let major = major_alleles(samples, positions);
+                let g = ObservedAllele::G.code();
+                let mut g_left_out = false;
+                let mut clamped = false;
+                for sections in samples {
+                    for (_, group) in sections {
+                        g_left_out |= group.non_reference().iter().any(|observation| {
+                            observation.allele.code() == g && major[observation.index as usize] != g
+                        });
+                        clamped |= group.depth().iter().any(|code| match code {
+                            DepthCode::Binned(bin) => {
+                                let range = edges.depth_range(bin);
+                                cap.denominator_for(range.clone()) != range
+                            }
+                            _ => false,
+                        });
+                    }
+                }
+                (major.contains(&g), g_left_out, clamped)
+            })
+            .expect("a resident census has no file to fail on");
+        assert!(g_chosen, "some position's common alternative allele is G");
+        assert!(
+            g_left_out,
+            "and somewhere G reads are not the common allele's"
+        );
+        assert!(clamped, "some depth code stands for a range the cap clamps");
+
+        let markers = both_ways(&panel, &[], "150 reads a position, two alternative alleles");
+        assert!(
+            markers > 100,
+            "the panel must yield markers to compare, found {markers}"
+        );
+    }
+
+    /// **Below the coverage floor there are no markers either way** — a panel of five samples,
+    /// and one of a single sample, cannot put reads in eight samples anywhere.
+    #[test]
+    fn two_passes_agree_on_a_panel_below_the_coverage_floor() {
+        for samples in [1, 5] {
+            let panel = structured_panel(samples, 500, 3.0, 1, 0.2, None, 0x2A55_0006);
+            assert_eq!(both_ways(&panel, &[], &format!("{samples} sample(s)")), 0);
+        }
+    }
+
+    /// **Where every genotype's weight comes out zero, the dosage is twice the panel
+    /// frequency.** A thousand alternative reads in two thousand underflow all three: the
+    /// binomial terms are `0.002^1000`, `0.5^2000` and `0.998^1000 × 0.002^1000`.
+    #[test]
+    fn a_dosage_whose_weights_all_underflow_is_twice_the_panel_frequency() {
+        let priors = genotype_priors(0.3, 0.0);
+        assert_eq!(dosage_of(1_000, 2_000, &priors, 0.3, 0.002), 0.6);
+        let ordinary = dosage_of(3, 6, &priors, 0.3, 0.002);
+        assert!(
+            ordinary > 0.9 && ordinary < 1.1,
+            "three reads in six is a heterozygote: {ordinary}"
+        );
+    }
+
     /// **`(components + 1) / samples` is the panel's *mean* leverage, not every sample's.**
     /// Twenty samples spread evenly along one axis average exactly 0.10 and range from 0.05 at
     /// the middle to 0.19 at the ends — a sample at the end of an axis always supplies more of
@@ -1580,6 +2106,35 @@ mod tests {
         libraries: &[DrawnLibrary],
         seed: u64,
     ) -> Vec<SampleCensusEvidence> {
+        structured_panel_with_a_second_allele(
+            samples,
+            markers,
+            depth,
+            groups,
+            fst,
+            libraries,
+            seed,
+            &|_, _| false,
+        )
+    }
+
+    /// The same, with the alternative reads of sample `s` at position `index` recorded as `G`
+    /// rather than `C` wherever `on_g(s, index)` says so — a position where the cohort carries
+    /// two alternative alleles.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the panel's own list plus the one thing this variant changes"
+    )]
+    fn structured_panel_with_a_second_allele(
+        samples: usize,
+        markers: usize,
+        depth: f64,
+        groups: usize,
+        fst: f64,
+        libraries: &[DrawnLibrary],
+        seed: u64,
+        on_g: &dyn Fn(usize, usize) -> bool,
+    ) -> Vec<SampleCensusEvidence> {
         const ERROR: f64 = 0.002;
         let sections = samples * libraries.len();
         let slot = |sample: usize, library: usize| sample * libraries.len() + library;
@@ -1626,7 +2181,11 @@ mod tests {
                     if alternative > 0 {
                         sparse[here].push(AlleleObservation {
                             index: index as u32,
-                            allele: ObservedAllele::C,
+                            allele: if on_g(s, index) {
+                                ObservedAllele::G
+                            } else {
+                                ObservedAllele::C
+                            },
                             reads: u8::try_from(alternative)
                                 .expect("a drawn count fits the census's one-byte field"),
                         });
