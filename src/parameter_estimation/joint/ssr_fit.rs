@@ -65,6 +65,7 @@
 //! [`spec/parameter_prepass_joint_fit.md`]: ../../../../doc/devel/ng/spec/parameter_prepass_joint_fit.md
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 
 use rayon::prelude::*;
 
@@ -575,6 +576,13 @@ pub const QUADRATURE_POINTS: usize = 256;
 /// (`parameter_prepass_joint_records.md` §3.2).
 pub const ALLELE_SPAN: i32 = 6;
 
+/// How many strata are fitted at once when the run says nothing: **one**, the schedule whose
+/// memory is one likelihood table whatever the cohort ([`SsrFitConfig::strata_at_once`]).
+///
+/// The safe value is the one to fall back on: a run that was told nothing should not be able to
+/// run out of memory in the repeat-tract fit.
+pub const DEFAULT_STRATA_AT_ONCE: NonZeroUsize = NonZeroUsize::MIN;
+
 /// Where one run of the climb starts.
 ///
 /// **The starting points are part of the estimator, not a tuning detail.** They are spread
@@ -627,7 +635,9 @@ impl StartingPoint {
 /// [`AcrossTheTractsOfOneStratum`](Self::AcrossTheTractsOfOneStratum) one stratum is resident;
 /// under [`AcrossStrata`](Self::AcrossStrata) one per pool thread is, because a thread never
 /// leaves a stratum part-way through. So the second arm's peak is bounded by `threads × the
-/// largest stratum`, and the thread count is the knob that bounds it.
+/// largest stratum`, and [`fit_strata`] runs it on a pool of exactly
+/// [`SsrFitConfig::strata_at_once`] threads so that the run, not the machine's core count, says
+/// what that bound is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WhereTheThreadsGo {
     /// One stratum at a time, its tracts spread across the pool.
@@ -635,8 +645,8 @@ pub enum WhereTheThreadsGo {
     /// **What the fit did before 2026-09-11**, and still the right arm when there is one stratum
     /// to fit: there is no other grain to spread then, and this one keeps the whole pool busy.
     AcrossTheTractsOfOneStratum,
-    /// Every stratum at once, and every starting point of every stratum — each walk on one
-    /// thread ([`every_stratum_from_every_start`]).
+    /// Several strata at once — [`SsrFitConfig::strata_at_once`] of them — and every starting
+    /// point of every stratum, each walk on one thread ([`every_stratum_from_every_start`]).
     ///
     /// **The arm that reaches a pool wider than a thin stratum has tracts.** A stratum the fit
     /// will touch at all holds at least [`DEFAULT_REFUSAL_FLOOR`] tracts, which is 8 — so on an
@@ -677,13 +687,20 @@ pub struct SsrFitConfig {
     /// fitted depends on this, so a stratum's own level moving between the two arms is a defect
     /// in the plumbing rather than a consequence of the design.
     pub curve: SlippageCurveConfig,
-    /// Which of the fit's two independent grains the thread pool is spread over; see
-    /// [`WhereTheThreadsGo`].
+    /// **How many strata are fitted at once**, each on one thread of a pool of that many built
+    /// for the step. One means one stratum at a time with every thread of the caller's pool on
+    /// its tracts; see [`WhereTheThreadsGo`] for the two schedules.
+    ///
+    /// **This is what decides whether the fit's memory fits the machine, so the run states it and
+    /// nothing guesses it.** A stratum's fit holds one likelihood table, `tracts × samples with
+    /// reads × 91 genotype pairs × 8 bytes` — 7.4 GiB for a 5,000-tract stratum at 2,169 samples —
+    /// and `N` strata at once hold up to `N` of them. One, the default, holds one table whatever
+    /// the cohort. **No choice moves a number**: both schedules return the same bits.
     ///
     /// **Read by [`fit_strata`] alone.** [`fit_stratum`] is handed one stratum and has no second
     /// grain to choose, so it always spreads the pool over that stratum's tracts whatever this
     /// says.
-    pub threads: WhereTheThreadsGo,
+    pub strata_at_once: NonZeroUsize,
 }
 
 impl Default for SsrFitConfig {
@@ -697,7 +714,7 @@ impl Default for SsrFitConfig {
             share_curve: ShareCurveConfig::default(),
             refusal_floor: DEFAULT_REFUSAL_FLOOR,
             curve: SlippageCurveConfig::default(),
-            threads: WhereTheThreadsGo::AcrossStrata,
+            strata_at_once: DEFAULT_STRATA_AT_ONCE,
         }
     }
 }
@@ -791,8 +808,8 @@ pub fn fit_stratum(
     config: &SsrFitConfig,
 ) -> Option<StratumFit> {
     // **One stratum has no second grain to spread the pool over**, so this entry ignores
-    // `config.threads` and always splits this stratum's tracts. `fit_strata` is the caller that
-    // has a choice to make.
+    // `config.strata_at_once` and always splits this stratum's tracts. `fit_strata` is the caller
+    // that has a choice to make.
     fit_pooled(
         evidence,
         &[],
@@ -1122,10 +1139,15 @@ fn refused_before_any_walk(
 /// difference is small — seventy-nine strata on eighteen threads go from fifteen walk-lengths to
 /// fourteen.
 ///
-/// **The memory bound is the one [`WhereTheThreadsGo::AcrossStrata`] states, unchanged.** A walk
-/// holds one stratum's likelihood tables and a thread runs one walk at a time, so two threads
-/// walking the same stratum from two starting points hold two copies of that stratum's tables —
-/// which is still `threads × the largest stratum` and not more.
+/// **The memory bound is the one [`WhereTheThreadsGo::AcrossStrata`] states.** A walk holds one
+/// stratum's likelihood table and a thread runs one walk at a time, so two threads walking the
+/// same stratum from two starting points hold two copies of that stratum's table — which is still
+/// one table a thread of the pool this runs on, [`SsrFitConfig::strata_at_once`] of them.
+///
+/// **That bound rests on a walk making no call into the pool.** Under this arm every parallel site
+/// inside a walk runs serially. A walk that split its own tracts over the pool it runs on would let
+/// a thread waiting on that split steal another walk and build a second table: measured in review,
+/// six tables at four strata at once.
 ///
 /// **And the answer is the one the serial loop gives.** Each stratum's walks are folded in
 /// starting-point order by [`the_better_walk`] — the same rule reading the same values in the
@@ -1258,34 +1280,52 @@ fn largest_table_bytes(strata: &[StratumEvidence], config: &SsrFitConfig) -> u64
         .unwrap_or(0)
 }
 
-/// **Which arm this run can afford**: the one asked for, unless it is
-/// [`AcrossStrata`](WhereTheThreadsGo::AcrossStrata) and `threads` of the largest table at once
-/// would take more than half the memory the system has available — then one stratum at a time,
-/// whose peak is one table.
+/// A table's size as the progress line prints it: whole mebibytes below one gibibyte, where a
+/// cohort of a few hundred samples sits and one decimal of a gibibyte would read `0.0`, and
+/// gibibytes to one decimal above.
+fn table_size(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * MIB;
+    let bytes = bytes as f64;
+    if bytes < GIB {
+        format!("{:.0} MiB", bytes / MIB)
+    } else {
+        format!("{:.1} GiB", bytes / GIB)
+    }
+}
+
+/// **The pool several strata at once run on, and how the progress line names the schedule.**
 ///
-/// **Neither arm moves a result** ([`WhereTheThreadsGo`]), so this chooses a schedule and never
-/// an answer. It exists because the parallel arm's peak grows with the cohort: a stratum's
-/// table is `tracts × samples × 91 × 8` bytes, 0.36 GB for 5,000 tracts at 100 samples and 7.9 GB
-/// at 2,169, and 96 threads of the second killed a run on a 125 GiB machine
-/// (`estimate-parameters` on 2,169 tomato samples, 2026-09-25).
-///
-/// **Half, not all**, because the tables are not the whole process — the cohort's tract
-/// evidence stays resident beside them — and a machine that is swapping is barely faster than
-/// one stratum at a time. **Where the system does not say what it has available** (anything but
-/// Linux) the arm asked for is kept: that is the laptop-sized run, not the one that needs this.
-fn arm_that_fits(
-    asked: WhereTheThreadsGo,
-    largest_table: u64,
-    threads: usize,
-    available: Option<u64>,
-) -> WhereTheThreadsGo {
-    match (asked, available) {
-        (WhereTheThreadsGo::AcrossStrata, Some(available))
-            if (threads as u64).saturating_mul(largest_table) > available / 2 =>
-        {
-            WhereTheThreadsGo::AcrossTheTractsOfOneStratum
-        }
-        _ => asked,
+/// `None` is one stratum at a time: asked for, or the only schedule a single stratum has, or what
+/// is left when a pool of `at_once` threads cannot be built — the schedule with the smallest
+/// memory, which returns the same bits, and the line says why. `build` is the pool's builder, a
+/// parameter so that a test can make it fail.
+fn a_pool_for(
+    at_once: usize,
+    strata: usize,
+    build: impl FnOnce(usize) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuildError>,
+) -> (Option<rayon::ThreadPool>, String) {
+    if at_once == 1 {
+        return (None, "one stratum at a time".to_owned());
+    }
+    if strata <= 1 {
+        return (
+            None,
+            format!("one stratum at a time, since there is {strata} to fit"),
+        );
+    }
+    match build(at_once) {
+        Ok(pool) => (
+            Some(pool),
+            format!("{at_once} strata at once, each on one thread"),
+        ),
+        Err(error) => (
+            None,
+            format!(
+                "one stratum at a time, because a pool of {at_once} threads could not be built: \
+                 {error}"
+            ),
+        ),
     }
 }
 
@@ -1319,10 +1359,10 @@ pub fn fit_strata(
     // (`str_slippage_level_curve.md` §5.1). What that removes is the run's expensive arm: the
     // same cohort took 1,036.8 s with pooled borrowing against 155.5 s without.
     //
-    // **Every stratum at once where the run asks for it** (`config.threads`). A stratum's answer
-    // is a function of its own tracts and of the per-sample homozygote excess, and of nothing
-    // another stratum produces — the curves below are drawn afterwards, from the finished
-    // answers — so fitting them together changes no number and no order. What it changes is
+    // **Several strata at once where the run asks for it** (`config.strata_at_once`). A
+    // stratum's answer is a function of its own tracts and of the per-sample homozygote excess,
+    // and of nothing another stratum produces — the curves below are drawn afterwards, from the
+    // finished answers — so fitting them together changes no number and no order. What it changes is
     // which of the fit's two grains the pool is spread over; see [`WhereTheThreadsGo`].
     //
     // **One stratum at a time is still the arm for a run holding one stratum**: spreading the
@@ -1347,32 +1387,23 @@ pub fn fit_strata(
             },
         }
     };
-    let largest = largest_table_bytes(strata, config);
-    let threads = rayon::current_num_threads();
-    let available = crate::parameter_estimation::progress::memory_available();
-    let arm = arm_that_fits(config.threads, largest, threads, available);
-    let across_strata = arm == WhereTheThreadsGo::AcrossStrata && strata.len() > 1;
+    let table = table_size(largest_table_bytes(strata, config));
+    // **A pool of exactly `strata_at_once` threads**, so the number of tables resident together
+    // is the number the run asked for and not the machine's core count.
+    let (pool, schedule) = a_pool_for(config.strata_at_once.get(), strata.len(), |threads| {
+        rayon::ThreadPoolBuilder::new().num_threads(threads).build()
+    });
     let stage = StageProgress::begin(format!(
-        "repeat-tract fit: fitting {} strata from {} starting point(s) each, {}",
+        "repeat-tract fit: fitting {} strata from {} starting point(s) each, {schedule}; the \
+         largest stratum's table is {table}, so --str-param-estimates-at-once N needs about \
+         N × {table}",
         strata.len(),
         config.starting_points.len(),
-        match (across_strata, arm == config.threads) {
-            (true, _) => "strata in parallel".to_owned(),
-            (false, true) => "one stratum at a time".to_owned(),
-            (false, false) => format!(
-                "one stratum at a time because {threads} strata at once, each with a table of up \
-                 to {}, would need more than half the {} available",
-                crate::parameter_estimation::progress::gibibytes(largest / 1024),
-                crate::parameter_estimation::progress::gibibytes(
-                    available.unwrap_or_default() / 1024
-                ),
-            ),
-        }
     ));
-    let mut outcomes: Vec<StratumOutcome> = if across_strata {
-        every_stratum_from_every_start(strata, homozygote_excess, config, &stage)
-    } else {
-        strata
+    let mut outcomes: Vec<StratumOutcome> = match &pool {
+        Some(pool) => pool
+            .install(|| every_stratum_from_every_start(strata, homozygote_excess, config, &stage)),
+        None => strata
             .iter()
             .enumerate()
             .map(|(index, evidence)| {
@@ -1385,7 +1416,7 @@ pub fn fit_strata(
                 });
                 one_at_a_time(evidence)
             })
-            .collect()
+            .collect(),
     };
 
     // **The curves are drawn after every stratum has its own answer, never during.** Stage one
@@ -2234,6 +2265,84 @@ const LN_RESCALE: f64 = 345.398_899_014_487; // ln(1e150)
 struct Prepared {
     slippage: Vec<Slippage>,
     tracts: Vec<TractLikelihoods>,
+    /// Which evidence these tables were built from, so a test can count the tables one fit
+    /// holds at once ([`table_census`]).
+    #[cfg(test)]
+    evidence: usize,
+}
+
+#[cfg(test)]
+impl Drop for Prepared {
+    fn drop(&mut self) {
+        table_census::dropped(self.evidence);
+    }
+}
+
+/// **How many likelihood tables are alive at once, counted for the strata one test names.**
+///
+/// The only thing [`SsrFitConfig::strata_at_once`] changes is how many tables the fit holds
+/// together — every schedule returns the same bits — so a test of the option has to count them.
+/// Tables are counted only for the evidence a test registered, by address, because the library's
+/// tests run at the same time and build tables of their own.
+#[cfg(test)]
+mod table_census {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use std::sync::{Mutex, MutexGuard};
+
+    static ONE_COUNT_AT_A_TIME: Mutex<()> = Mutex::new(());
+    static COUNTED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    static LIVE: AtomicUsize = AtomicUsize::new(0);
+    static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+    fn is_counted(evidence: usize) -> bool {
+        COUNTED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&evidence)
+    }
+
+    /// Start counting the tables built from `strata`, and stop any other test counting until the
+    /// returned guard is dropped.
+    pub(super) fn count_the_tables_of(
+        strata: &[super::StratumEvidence],
+    ) -> MutexGuard<'static, ()> {
+        let guard = ONE_COUNT_AT_A_TIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *COUNTED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = strata
+            .iter()
+            .map(|evidence| std::ptr::from_ref(evidence) as usize)
+            .collect();
+        LIVE.store(0, SeqCst);
+        PEAK.store(0, SeqCst);
+        guard
+    }
+
+    /// Count again from nothing, over the same strata.
+    pub(super) fn restart() {
+        LIVE.store(0, SeqCst);
+        PEAK.store(0, SeqCst);
+    }
+
+    /// The most tables alive at once since counting started.
+    pub(super) fn peak() -> usize {
+        PEAK.load(SeqCst)
+    }
+
+    pub(super) fn built(evidence: usize) {
+        if is_counted(evidence) {
+            let now = LIVE.fetch_add(1, SeqCst) + 1;
+            PEAK.fetch_max(now, SeqCst);
+        }
+    }
+
+    pub(super) fn dropped(evidence: usize) {
+        if is_counted(evidence) {
+            LIVE.fetch_sub(1, SeqCst);
+        }
+    }
 }
 
 /// The evidence plus whichever slippage the last question was about.
@@ -2329,6 +2438,10 @@ impl<'a> Scorer<'a> {
         {
             return;
         }
+        // **The old tables go before the new ones are built**, which halves what a walk holds at
+        // its peak: nothing reads them while the new ones are filled, so holding both would cost
+        // a second table for nothing — and make the size the fit prints for one table untrue.
+        self.prepared = None;
         let per_group_allele: Vec<Vec<Vec<f64>>> = slippage
             .iter()
             .map(|group| {
@@ -2351,9 +2464,13 @@ impl<'a> Scorer<'a> {
             }
             WhereTheThreadsGo::AcrossStrata => self.evidence.tracts.iter().map(build).collect(),
         };
+        #[cfg(test)]
+        table_census::built(std::ptr::from_ref(self.evidence) as usize);
         self.prepared = Some(Prepared {
             slippage: slippage.to_vec(),
             tracts,
+            #[cfg(test)]
+            evidence: std::ptr::from_ref(self.evidence) as usize,
         });
     }
 }
@@ -3080,12 +3197,12 @@ mod tests {
         strata
     }
 
-    fn a_two_round_config(threads: WhereTheThreadsGo) -> SsrFitConfig {
+    fn a_two_round_config(strata_at_once: usize) -> SsrFitConfig {
         SsrFitConfig {
             allele_span: 1,
             max_rounds: 2,
             refusal_floor: 8,
-            threads,
+            strata_at_once: NonZeroUsize::new(strata_at_once).expect("at least one stratum"),
             ..SsrFitConfig::default()
         }
     }
@@ -3167,50 +3284,232 @@ mod tests {
     fn the_two_ways_of_spending_the_pool_give_the_same_bits() {
         let strata = classes_of_unequal_size();
         let excess = [0.4; 8];
-        let one_class_at_a_time = fitted_in_a_pool(
-            &strata,
-            &excess,
-            &a_two_round_config(WhereTheThreadsGo::AcrossTheTractsOfOneStratum),
-            4,
-        );
-        let every_class_at_once = fitted_in_a_pool(
-            &strata,
-            &excess,
-            &a_two_round_config(WhereTheThreadsGo::AcrossStrata),
-            4,
-        );
+        let one_class_at_a_time = fitted_in_a_pool(&strata, &excess, &a_two_round_config(1), 4);
+        let four_at_once = fitted_in_a_pool(&strata, &excess, &a_two_round_config(4), 4);
         assert!(
             one_class_at_a_time.contains(&1.0),
             "the fixture must fit at least one class, or the comparison is between two empties"
         );
         the_same_bits(
             &one_class_at_a_time,
-            &every_class_at_once,
-            "one class at a time against every class at once",
+            &four_at_once,
+            "one class at a time against four at once",
         );
     }
 
-    /// **And neither arm's answer depends on how wide the pool is.**
+    /// **And one stratum at a time does not depend on how wide the caller's pool is.**
     ///
     /// A fit whose answer moved with the machine's core count would be one no two runs could be
-    /// compared across, which is the property the census oracles rest on.
+    /// compared across, which is the property the census oracles rest on. **Only this schedule
+    /// runs on the caller's pool**: several strata at once build a pool of their own, whose width
+    /// is `strata_at_once` itself, and
+    /// [`any_number_of_strata_at_once_gives_the_same_bits`] varies that.
     #[test]
-    fn neither_arm_moves_with_the_width_of_the_pool() {
+    fn one_stratum_at_a_time_does_not_move_with_the_width_of_the_pool() {
         let strata = classes_of_unequal_size();
         let excess = [0.4; 8];
-        for threads in [
-            WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
-            WhereTheThreadsGo::AcrossStrata,
-        ] {
-            let config = a_two_round_config(threads);
-            let narrow = fitted_in_a_pool(&strata, &excess, &config, 1);
-            let wide = fitted_in_a_pool(&strata, &excess, &config, 8);
+        let config = a_two_round_config(1);
+        let narrow = fitted_in_a_pool(&strata, &excess, &config, 1);
+        let wide = fitted_in_a_pool(&strata, &excess, &config, 8);
+        the_same_bits(
+            &narrow,
+            &wide,
+            "one stratum at a time, at one thread against eight",
+        );
+    }
+
+    /// **However many strata the run fits at once, the answer is the same bits** — one, two,
+    /// four and seven, over the fixture's six strata from three starting points (eighteen walks);
+    /// and from one starting point (six walks) at seven and at sixty-four, where most of the
+    /// pool has nothing to do.
+    ///
+    /// This is the contract `--str-param-estimates-at-once` rests on: the option chooses how much
+    /// memory the fit holds and never what it returns.
+    #[test]
+    fn any_number_of_strata_at_once_gives_the_same_bits() {
+        let strata = classes_of_unequal_size();
+        let excess = [0.4; 8];
+        let one = fitted_in_a_pool(&strata, &excess, &a_two_round_config(1), 4);
+        assert!(
+            one.contains(&1.0),
+            "the fixture must fit at least one class, or the comparison is between two empties"
+        );
+        for strata_at_once in [2, 4, 7] {
+            let several =
+                fitted_in_a_pool(&strata, &excess, &a_two_round_config(strata_at_once), 4);
             the_same_bits(
-                &narrow,
-                &wide,
-                &format!("{threads:?} at one thread against eight"),
+                &one,
+                &several,
+                &format!("one stratum at a time against {strata_at_once} at once"),
             );
         }
+
+        let from_one_start = |strata_at_once: usize| SsrFitConfig {
+            starting_points: vec![StartingPoint::spanning_the_monomorphic_range()[1]],
+            ..a_two_round_config(strata_at_once)
+        };
+        let one = fitted_in_a_pool(&strata, &excess, &from_one_start(1), 4);
+        for strata_at_once in [7, 64] {
+            the_same_bits(
+                &one,
+                &fitted_in_a_pool(&strata, &excess, &from_one_start(strata_at_once), 4),
+                &format!("one start: one stratum at a time against {strata_at_once} at once"),
+            );
+        }
+    }
+
+    /// **`N` strata at once hold `N` likelihood tables at most, and more than one when `N` is**,
+    /// with the caller's pool at eight threads — wider than any `N` here, so a schedule that
+    /// escaped onto the caller's pool, or sized its pool from the machine, would show.
+    ///
+    /// Every schedule returns the same bits, so this is the only test that sees what the option
+    /// is for. Review measured what it catches: running the walks on the caller's pool held eight
+    /// tables at two at once, and building the new tables before dropping the old held two at one
+    /// at a time.
+    #[test]
+    fn n_strata_at_once_hold_at_most_n_tables() {
+        let strata = classes_of_unequal_size();
+        let excess = [0.4; 8];
+        let _counting = table_census::count_the_tables_of(&strata);
+        for strata_at_once in 1..=4 {
+            table_census::restart();
+            let _ = fitted_in_a_pool(&strata, &excess, &a_two_round_config(strata_at_once), 8);
+            let peak = table_census::peak();
+            assert!(
+                peak <= strata_at_once,
+                "{strata_at_once} at once held {peak} tables together"
+            );
+            assert!(
+                strata_at_once == 1 || peak >= 2,
+                "{strata_at_once} at once never held two tables together, so it ran one at a time"
+            );
+        }
+    }
+
+    /// **A single stratum is fitted one at a time whatever the run asked for** — there is nothing
+    /// to spread several threads over — so it holds one table, and gives the bits it gives at one.
+    #[test]
+    fn a_single_stratum_is_fitted_one_at_a_time_whatever_was_asked() {
+        let strata = classes_of_unequal_size();
+        let alone = &strata[..1];
+        let excess = [0.4; 8];
+        let at_one = fitted_in_a_pool(alone, &excess, &a_two_round_config(1), 8);
+        let _counting = table_census::count_the_tables_of(alone);
+        let at_four = fitted_in_a_pool(alone, &excess, &a_two_round_config(4), 8);
+        assert_eq!(table_census::peak(), 1);
+        the_same_bits(&at_one, &at_four, "one stratum, asked for one and for four");
+    }
+
+    /// **A pool that cannot be built leaves one stratum at a time, and the line says why.**
+    #[test]
+    fn a_pool_that_cannot_be_built_is_one_stratum_at_a_time_and_says_why() {
+        let (pool, schedule) = a_pool_for(4, 6, |threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .spawn_handler(|_| Err(std::io::Error::other("refused")))
+                .build()
+        });
+        assert!(pool.is_none());
+        assert!(
+            schedule.starts_with(
+                "one stratum at a time, because a pool of 4 threads could not be built"
+            ),
+            "{schedule}"
+        );
+
+        let (pool, schedule) = a_pool_for(4, 6, |threads| {
+            rayon::ThreadPoolBuilder::new().num_threads(threads).build()
+        });
+        assert_eq!(pool.map(|pool| pool.current_num_threads()), Some(4));
+        assert_eq!(schedule, "4 strata at once, each on one thread");
+        assert_eq!(
+            a_pool_for(4, 1, |_| unreachable!("one stratum builds no pool")).1,
+            "one stratum at a time, since there is 1 to fit"
+        );
+        assert_eq!(
+            a_pool_for(1, 6, |_| unreachable!("one at a time builds no pool")).1,
+            "one stratum at a time"
+        );
+    }
+
+    /// Whole mebibytes below a gibibyte, where one decimal of a gibibyte would read `0.0`.
+    #[test]
+    fn a_table_size_reads_in_mebibytes_below_a_gibibyte() {
+        assert_eq!(table_size(364_000_000), "347 MiB");
+        assert_eq!(table_size(7_895_160_000), "7.4 GiB");
+    }
+
+    /// **A scorer that moved to new slippage holds the tables a fresh scorer builds for it.**
+    ///
+    /// The tables after a move are compared, bit for bit, with those built straight at the new
+    /// slippage — and with the old ones, which must differ, or the move tested nothing. That the
+    /// old tables are gone *before* the new ones are built is a claim about memory, not about
+    /// these values, and [`n_strata_at_once_hold_at_most_n_tables`] is what checks it.
+    #[test]
+    fn a_refreshed_scorer_holds_the_tables_a_fresh_one_builds() {
+        let strata = classes_of_unequal_size();
+        let evidence = &strata[2];
+        let excess = [0.4; 8];
+        let config = a_two_round_config(1);
+        let genotypes = genotype_pairs((2 * config.allele_span + 1) as usize);
+        let at = |level: f64| {
+            vec![
+                Slippage {
+                    level,
+                    shorter_share: 0.8,
+                    fall_off: 0.3,
+                };
+                evidence.groups
+            ]
+        };
+        let tables_of = |scorer: &Scorer<'_>| -> Vec<(Vec<u64>, usize, Vec<u64>, u64)> {
+            scorer
+                .prepared
+                .as_ref()
+                .expect("refreshed")
+                .tracts
+                .iter()
+                .map(|tract| {
+                    (
+                        tract.scaled.iter().map(|value| value.to_bits()).collect(),
+                        tract.width,
+                        tract
+                            .homozygote_excess
+                            .iter()
+                            .map(|value| value.to_bits())
+                            .collect(),
+                        tract.ln_offset.to_bits(),
+                    )
+                })
+                .collect()
+        };
+        let a_scorer = || {
+            Scorer::new(
+                evidence,
+                &excess,
+                &genotypes,
+                &config,
+                WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+            )
+        };
+
+        let mut moved = a_scorer();
+        moved.refresh(&at(0.05));
+        let before = tables_of(&moved);
+        moved.refresh(&at(0.12));
+        let mut fresh = a_scorer();
+        fresh.refresh(&at(0.12));
+
+        assert!(
+            !before.is_empty(),
+            "the stratum has tracts to build tables for"
+        );
+        assert_ne!(before, tables_of(&moved), "the move changed the tables");
+        assert_eq!(tables_of(&moved), tables_of(&fresh));
+        assert_eq!(
+            moved.prepared.as_ref().map(|held| held.slippage.clone()),
+            Some(at(0.12))
+        );
     }
 
     /// Every read distribution is a distribution: it sums to one, whatever the allele's
@@ -4052,10 +4351,8 @@ mod tests {
 }
 
 #[cfg(test)]
-mod the_arm_that_fits {
+mod the_largest_table {
     use super::*;
-
-    const GIB: u64 = 1024 * 1024 * 1024;
 
     /// A stratum whose tracts have reads from `samples[t]` samples each.
     fn stratum_with(samples: &[usize]) -> StratumEvidence {
@@ -4096,52 +4393,5 @@ mod the_arm_that_fits {
         );
         let strata = [stratum_with(&[3, 5]), stratum_with(&[10, 0, 2])];
         assert_eq!(largest_table_bytes(&strata, &config), 12 * 91 * 8);
-    }
-
-    /// The run that was killed: 96 threads of a 7.9 GB table on a machine with about 110 GiB
-    /// available goes one stratum at a time; the same machine at a hundred samples does not.
-    #[test]
-    fn a_cohort_whose_tables_would_not_fit_is_fitted_one_stratum_at_a_time() {
-        let available = Some(110 * GIB);
-        let at_2169_samples = 5_000 * 2_169 * 91 * 8;
-        let at_100_samples = 5_000 * 100 * 91 * 8;
-        assert_eq!(
-            arm_that_fits(
-                WhereTheThreadsGo::AcrossStrata,
-                at_2169_samples,
-                96,
-                available
-            ),
-            WhereTheThreadsGo::AcrossTheTractsOfOneStratum
-        );
-        assert_eq!(
-            arm_that_fits(
-                WhereTheThreadsGo::AcrossStrata,
-                at_100_samples,
-                96,
-                available
-            ),
-            WhereTheThreadsGo::AcrossStrata
-        );
-    }
-
-    /// Where the system does not say what it has, and where one stratum at a time was asked for,
-    /// the choice is left alone.
-    #[test]
-    fn the_arm_asked_for_stands_where_nothing_forces_it() {
-        let huge = 1_000 * GIB;
-        assert_eq!(
-            arm_that_fits(WhereTheThreadsGo::AcrossStrata, huge, 96, None),
-            WhereTheThreadsGo::AcrossStrata
-        );
-        assert_eq!(
-            arm_that_fits(
-                WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
-                0,
-                96,
-                Some(GIB)
-            ),
-            WhereTheThreadsGo::AcrossTheTractsOfOneStratum
-        );
     }
 }

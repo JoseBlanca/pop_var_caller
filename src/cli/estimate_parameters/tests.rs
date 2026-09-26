@@ -93,6 +93,7 @@ fn args_over(cohort: &AVaryingCohort, psps: &Path, output: PathBuf) -> EstimateP
         force: false,
         ploidy: 2,
         inbreeding: None,
+        str_param_estimates_at_once: std::num::NonZeroUsize::MIN,
     }
 }
 
@@ -108,6 +109,41 @@ fn the_subcommand_is_spelled_estimate_parameters() {
             .to_string()
             .contains(SUBCOMMAND),
         "the name this module records is the one clap answers to",
+    );
+}
+
+/// **One stratum at a time unless the run says otherwise**, and the run says it as a count of at
+/// least one.
+///
+/// The default is the smallest memory whatever the cohort, so a run told nothing cannot run out
+/// of memory in this step for want of a flag; zero strata at once is not a schedule and is refused
+/// when the command line is read.
+#[test]
+fn strata_are_fitted_one_at_a_time_unless_the_run_asks_for_more() {
+    assert_eq!(
+        args_of(&a_shortest_run()).str_param_estimates_at_once.get(),
+        1
+    );
+
+    let mut asked = a_shortest_run();
+    asked.extend(["--str-param-estimates-at-once", "4"]);
+    assert_eq!(args_of(&asked).str_param_estimates_at_once.get(), 4);
+
+    assert_eq!(
+        repeat_tract_config(&args_of(&asked)).strata_at_once.get(),
+        4,
+        "the count the run asked for reaches the repeat-tract fit"
+    );
+    assert_eq!(
+        repeat_tract_config(&args_of(&a_shortest_run())).strata_at_once,
+        crate::parameter_estimation::joint::ssr_fit::DEFAULT_STRATA_AT_ONCE
+    );
+
+    let mut zero = a_shortest_run();
+    zero.extend(["--str-param-estimates-at-once", "0"]);
+    assert!(
+        Cli::try_parse_from(zero).is_err(),
+        "zero strata at once is refused, not read as one"
     );
 }
 

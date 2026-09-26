@@ -158,6 +158,10 @@ const HOM_EXCESS: f64 = 0.4;
 /// evaluations of the same objective. Cutting to one and one divides the wall time by roughly
 /// fifteen and changes nothing about the loop being measured — the objective, its quadrature,
 /// its allele classes and its genotypes are all production's.
+///
+/// **The strata are fitted one at a time**, the default since 2026-09-26
+/// (`SsrFitConfig::strata_at_once`); results saved before that date timed every stratum at once
+/// over the whole pool, and do not compare with these.
 #[cfg(feature = "bench-fixtures")]
 fn ssr_config() -> SsrFitConfig {
     SsrFitConfig {
