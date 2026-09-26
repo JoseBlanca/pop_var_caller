@@ -53,7 +53,8 @@ use super::census::{
 };
 use super::census_moments::CensusMomentSums;
 use super::contamination::{
-    ContaminationConfig, SampleContaminationEstimates, fit_contamination_over,
+    ContaminationConfig, NotIdentifiedReason, SampleContaminationEstimates, fit_contamination_over,
+    not_identified_anywhere,
 };
 
 // ---------------------------------------------------------------------
@@ -559,6 +560,15 @@ pub struct JointFitConfig {
     /// How the share of a sample's reads that came from another individual is measured
     /// ([`contamination`](super::contamination)), which the fit runs once it has converged.
     pub contamination: ContaminationConfig,
+    /// **Whether contamination is estimated at all.** Off, every read group is returned as
+    /// [`NotIdentifiedReason::NotAsked`](super::contamination::NotIdentifiedReason::NotAsked):
+    /// no fraction anywhere, which the parameters file writes as no contamination table and a
+    /// calling run reads as uncontaminated. On by default.
+    ///
+    /// **What turning it off saves** is contamination's markers — per marker an expected allele
+    /// count a sample and four read counts a read group. A run that estimates it prints what they
+    /// hold, on its `contamination:` progress line.
+    pub estimate_contamination: bool,
     /// Whether positions a sample carries more copies of than the reference get a class of
     /// their own ([`DuplicatedPositions`]).
     ///
@@ -618,6 +628,7 @@ impl Default for JointFitConfig {
             // a coarser reading of the same codes, it would be the wrong depths.
             edges: Arc::new(DepthBinEdges::for_census()),
             contamination: ContaminationConfig::default(),
+            estimate_contamination: true,
             duplicated_positions: true,
             coverage_odds: Vec::new(),
             genotype_posteriors: false,
@@ -1629,18 +1640,28 @@ pub fn fit_jointly(
             // sample, which is the contamination signature exactly; measured over 63 tomato
             // accessions with those positions left in, the median accession came back 6.5%
             // contaminated.
-            stage.always(|into| {
-                format!("SNP/indel fit: fitting each sample's contamination; {into}")
-            });
-            let contamination = fit_contamination_over(
-                lent,
-                depth_cap,
-                &config.edges,
-                &error_rate,
-                &parameters.hom_excess,
-                &statistics.noisy_posterior,
-                &config.contamination,
-            );
+            let contamination = if config.estimate_contamination {
+                stage.always(|into| {
+                    format!("SNP/indel fit: fitting each sample's contamination; {into}")
+                });
+                fit_contamination_over(
+                    lent,
+                    depth_cap,
+                    &config.edges,
+                    &error_rate,
+                    &parameters.hom_excess,
+                    &statistics.noisy_posterior,
+                    &config.contamination,
+                )
+            } else {
+                stage.always(|into| {
+                    format!(
+                        "SNP/indel fit: contamination not estimated, as the run asked; every \
+                         read group is taken as uncontaminated; {into}"
+                    )
+                });
+                not_identified_anywhere(lent, NotIdentifiedReason::NotAsked)
+            };
             (
                 score,
                 parameters,

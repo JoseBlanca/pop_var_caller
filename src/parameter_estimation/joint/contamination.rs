@@ -492,6 +492,11 @@ pub enum NotIdentifiedReason {
     /// This sample supplies most of its own fitted frequency, so an estimate from it would be a
     /// reading of its own noise (`MAX_LEVERAGE`).
     OwnFrequencyIsItsOwnEcho,
+    /// The run was told not to estimate contamination (`estimate-parameters
+    /// --skip-contamination`). **Not a measurement of zero**: no read group has a fraction, so
+    /// the parameters file writes no contamination table and a calling run treats every read
+    /// group as uncontaminated (`parameters_file.md` §3.4).
+    NotAsked,
 }
 
 impl std::fmt::Display for NotIdentifiedReason {
@@ -502,6 +507,7 @@ impl std::fmt::Display for NotIdentifiedReason {
             Self::OwnFrequencyIsItsOwnEcho => {
                 "this sample supplies most of its own fitted allele frequency"
             }
+            Self::NotAsked => "the run was told not to estimate contamination",
         };
         f.write_str(text)
     }
@@ -544,6 +550,24 @@ pub fn fit_contamination(
     })
 }
 
+/// **No fraction for any read group, for one reason** — every (sample, read group) in the order
+/// the sections are lent. What a refused panel returns, and what a run told not to estimate
+/// contamination returns without looking.
+pub(super) fn not_identified_anywhere(
+    samples: &[SampleGenericSections<'_>],
+    reason: NotIdentifiedReason,
+) -> Vec<SampleContaminationEstimates> {
+    samples
+        .iter()
+        .map(|sections| {
+            sections
+                .iter()
+                .map(|(group, _)| (*group, ContaminationEstimate::NotIdentified { reason }))
+                .collect()
+        })
+        .collect()
+}
+
 /// The same, over sections a caller has already been lent — **what the fit itself calls**, so
 /// that one run does not gather every sample's sections twice.
 #[allow(
@@ -561,17 +585,7 @@ pub(super) fn fit_contamination_over(
 ) -> Vec<SampleContaminationEstimates> {
     let count = samples.len();
     let units = Units::of(samples, config.grain);
-    let refused = |reason: NotIdentifiedReason| -> Vec<SampleContaminationEstimates> {
-        samples
-            .iter()
-            .map(|sections| {
-                sections
-                    .iter()
-                    .map(|(group, _)| (*group, ContaminationEstimate::NotIdentified { reason }))
-                    .collect()
-            })
-            .collect()
-    };
+    let refused = |reason| not_identified_anywhere(samples, reason);
     if count < 2 {
         return refused(NotIdentifiedReason::NoPanel);
     }
@@ -1923,6 +1937,57 @@ mod tests {
             let panel = structured_panel(samples, 500, 3.0, 1, 0.2, None, 0x2A55_0006);
             assert_eq!(both_ways(&panel, &[], &format!("{samples} sample(s)")), 0);
         }
+    }
+
+    /// **A fit told not to estimate contamination returns no fraction for any read group**, and
+    /// says why; the same panel fitted with it on returns fractions, so the switch is what made
+    /// the difference.
+    #[test]
+    fn a_fit_told_not_to_estimate_contamination_returns_no_fraction_anywhere() {
+        use super::super::fit::{JointFitConfig, fit_jointly};
+
+        let panel = structured_panel(30, 3_000, 3.0, 3, 0.2, Some((0, 0.05)), 0x2A55_0007);
+        let fit_with = |estimate_contamination| {
+            fit_jointly(
+                &mut as_cohort(&panel),
+                &JointFitConfig {
+                    max_passes: 3,
+                    starting_points: JointFitConfig::default()
+                        .starting_points
+                        .into_iter()
+                        .take(1)
+                        .collect(),
+                    estimate_contamination,
+                    ..JointFitConfig::default()
+                },
+            )
+            .expect("the drawn panel fits")
+        };
+
+        let estimates = |fit: &super::super::fit::JointFit| -> Vec<ContaminationEstimate> {
+            fit.contamination
+                .values()
+                .flat_map(|of_sample| of_sample.iter().map(|(_, estimate)| estimate.clone()))
+                .collect()
+        };
+        let skipped = estimates(&fit_with(false));
+        assert_eq!(
+            skipped.len(),
+            30,
+            "one entry a read group, even when skipped"
+        );
+        assert!(skipped.iter().all(|estimate| matches!(
+            estimate,
+            ContaminationEstimate::NotIdentified {
+                reason: NotIdentifiedReason::NotAsked
+            }
+        )));
+        assert!(
+            estimates(&fit_with(true))
+                .iter()
+                .any(|estimate| matches!(estimate, ContaminationEstimate::Estimated { .. })),
+            "the same panel, estimated, gives fractions"
+        );
     }
 
     /// **Where every genotype's weight comes out zero, the dosage is twice the panel

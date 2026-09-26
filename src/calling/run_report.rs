@@ -159,7 +159,9 @@ pub enum ContaminationUsed {
     /// scored on the plain formula with no mixture at all.
     ///
     /// *Absent, not a fitted zero.* At one sample it is the only possible answer, since
-    /// contamination is a comparison between samples.
+    /// contamination is a comparison between samples. It is also what a run told not to estimate
+    /// contamination (`estimate-parameters --skip-contamination`) reports: the file does not
+    /// record which of the two it was, only the progress log does.
     NoneFitted,
     /// One row per read group of the run, in the run's sample order and, within a sample, in
     /// read-group order.
