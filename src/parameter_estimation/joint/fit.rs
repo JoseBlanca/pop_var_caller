@@ -57,6 +57,8 @@ use super::contamination::{
     not_identified_anywhere,
 };
 
+mod information;
+
 // ---------------------------------------------------------------------
 // What the route emits
 // ---------------------------------------------------------------------
@@ -1069,8 +1071,7 @@ impl ReadLogs {
         let mut reference = [0.0; 3];
         let mut ln_reference = [0.0; 3];
         for copies in 0..3_usize {
-            let carried = copies as f64 / f64::from(ploidy.get());
-            let on_candidate = carried * (1.0 - error_rate) + (1.0 - carried) * error_rate / 3.0;
+            let on_candidate = candidate_read_probability(copies as u8, ploidy, error_rate);
             let on_reference = reference_read_probability(copies as u8, ploidy, error_rate);
             ln_candidate[copies] = ln(on_candidate);
             reference[copies] = on_reference;
@@ -1122,6 +1123,26 @@ fn fill_depth_weights(weights: &mut [f64], coverage: f64, fewest_reference: f64)
 fn reference_read_probability(alt_copies: u8, ploidy: Ploidy, error_rate: f64) -> f64 {
     let carried = f64::from(alt_copies) / f64::from(ploidy.get());
     (1.0 - carried) * (1.0 - error_rate) + carried * error_rate / 3.0
+}
+
+/// How [`reference_read_probability`] moves with the error rate. Kept beside it so the standard
+/// errors' slopes (`information`) follow any change to the read model.
+fn reference_read_probability_slope(alt_copies: u8, ploidy: Ploidy) -> f64 {
+    let carried = f64::from(alt_copies) / f64::from(ploidy.get());
+    -(1.0 - carried) + carried / 3.0
+}
+
+/// The chance one read shows the candidate allele, from an individual carrying `alt_copies`
+/// copies of it — the probability [`ReadLogs::of`] takes the logarithm of.
+fn candidate_read_probability(alt_copies: u8, ploidy: Ploidy, error_rate: f64) -> f64 {
+    let carried = f64::from(alt_copies) / f64::from(ploidy.get());
+    carried * (1.0 - error_rate) + (1.0 - carried) * error_rate / 3.0
+}
+
+/// How [`candidate_read_probability`] moves with the error rate.
+fn candidate_read_probability_slope(alt_copies: u8, ploidy: Ploidy) -> f64 {
+    let carried = f64::from(alt_copies) / f64::from(ploidy.get());
+    -carried + (1.0 - carried) / 3.0
 }
 
 /// **How many reference reads this sample is expected to have had**, given its genotype and
@@ -1205,6 +1226,26 @@ fn genotype_frequencies(f: f64, excess: f64) -> [f64; 3] {
     let heterozygous = 2.0 * f * (1.0 - f) * (1.0 - excess);
     let shift = excess * f * (1.0 - f);
     [(1.0 - f) * (1.0 - f) + shift, heterozygous, f * f + shift]
+}
+
+/// How [`genotype_frequencies`] moves as the frequency `f` moves, genotype by genotype — what the
+/// standard errors' slopes in the Beta shapes read (`information`). **Kept beside the function it
+/// differentiates**, so a change to one is made to both; a test compares the two by a finite
+/// difference.
+fn genotype_frequencies_slope_in_frequency(f: f64, excess: f64) -> [f64; 3] {
+    [
+        -2.0 * (1.0 - f) + excess * (1.0 - 2.0 * f),
+        2.0 * (1.0 - 2.0 * f) * (1.0 - excess),
+        2.0 * f + excess * (1.0 - 2.0 * f),
+    ]
+}
+
+/// How [`genotype_frequencies`] moves as the homozygote excess moves: the heterozygote loses
+/// `2f(1 − f)` and each homozygote gains `f(1 − f)`. Kept beside it for the same reason as its
+/// sibling above.
+fn genotype_frequencies_slope_in_excess(f: f64) -> [f64; 3] {
+    let moved = f * (1.0 - f);
+    [moved, -2.0 * moved, moved]
 }
 
 fn ln_sum_exp(values: &[f64]) -> f64 {
@@ -2401,6 +2442,18 @@ struct Scratch {
     invariant_ln: Vec<f64>,
     branch_ln: Vec<f64>,
     class_ln: Vec<f64>,
+    /// `[class]` — the log-likelihood of the branch where every sample is fixed for a
+    /// non-reference base, before its share multiplies it. **Kept for the scores**
+    /// ([`information`]), which differentiate the position's likelihood in the shares and need
+    /// each branch apart from the share it is weighted by; likewise the next two fields.
+    fixed_alt_ln: [f64; 2],
+    /// `[class]` — the integral over a segregating frequency, before its share multiplies it.
+    segregating_ln: [f64; 2],
+    /// `[class]` — the integral over how much of the panel carries an extra copy, before the
+    /// duplicated share multiplies it; `−∞` when the class is not fitted.
+    duplicated_ln: [f64; 2],
+    /// The position's whole log-likelihood, once [`one_position`] has computed it.
+    position_ln: f64,
     /// The candidate alleles this position sums over, and how many alleles each stands for.
     candidates: Vec<usize>,
     multiplicity: Vec<f64>,
@@ -2439,6 +2492,10 @@ impl Scratch {
             invariant_ln: vec![0.0; 2],
             branch_ln: vec![0.0; BRANCHES * 2],
             class_ln: vec![0.0; 2],
+            fixed_alt_ln: [f64::NEG_INFINITY; 2],
+            segregating_ln: [f64::NEG_INFINITY; 2],
+            duplicated_ln: [f64::NEG_INFINITY; 2],
+            position_ln: f64::NEG_INFINITY,
             candidates: Vec::with_capacity(MAX_CANDIDATES),
             multiplicity: Vec::with_capacity(MAX_CANDIDATES),
             genotype_weight: vec![0.0; samples * 3],
@@ -2670,6 +2727,8 @@ fn one_position(
             }
         }
         let segregating = ln_sum_exp(&scratch.shares) - ln_three;
+        scratch.fixed_alt_ln[class] = fixed_alt;
+        scratch.segregating_ln[class] = segregating;
         let density = &parameters.density;
         // The three ordinary branches share what is left when the duplicated class has taken
         // its share, so the four still sum to one.
@@ -2692,9 +2751,13 @@ fn one_position(
                     );
                 }
             }
-            float::ln(duplicated_share.max(f64::MIN_POSITIVE)) + ln_sum_exp(&scratch.shares)
-                - ln_three
+            let summed = ln_sum_exp(&scratch.shares);
+            // Kept for the scores, and not reused below: `ln d + summed − ln 3` is added left to
+            // right, and taking `summed − ln 3` first would move the branch's last bits.
+            scratch.duplicated_ln[class] = summed - ln_three;
+            float::ln(duplicated_share.max(f64::MIN_POSITIVE)) + summed - ln_three
         } else {
+            scratch.duplicated_ln[class] = f64::NEG_INFINITY;
             f64::NEG_INFINITY
         };
         let share = if class == 0 {
@@ -2706,6 +2769,7 @@ fn one_position(
             + ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
     }
     let position_ln = ln_sum_exp(&scratch.class_ln);
+    scratch.position_ln = position_ln;
     if !position_ln.is_finite() {
         // A position whose likelihood underflowed contributes nothing to any parameter, and it
         // must still contribute an entry, or every position after it in the chunk would be

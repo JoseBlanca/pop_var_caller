@@ -56,7 +56,7 @@ repeat-tract guard.
 
 ### Milestone A — the SNP/indel fit's standard errors, as a diagnostic
 
-1. ☐ **A1 — the per-position scores.** For each parameter kind of spec §3.2's table, the observed-data
+1. ✅ **A1 — the per-position scores.** For each parameter kind of spec §3.2's table, the observed-data
    score at one position (the posterior expectation of the complete-data score). Unit-tested against
    a central finite difference of the total log-likelihood on a small drawn cohort, one test per
    kind. *Depends:* —. *Source:* spec §3.2.
