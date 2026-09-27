@@ -1,7 +1,12 @@
 //! Each SNP/indel parameter's **standard error**, from the information a pass summed in blocks.
 //!
-//! Design: `doc/devel/ng/spec/fit_precision.md` §3.2. Build order:
-//! `doc/devel/implementation_plans/fit_precision.md`, step A3.
+//! Design: `doc/devel/ng/spec/fit_precision.md` §3.2–3.3. Build order:
+//! `doc/devel/implementation_plans/fit_precision.md`, steps A3 and A5.
+//!
+//! Every fit computes them once, at the parameters it returns, from the information its final pass
+//! sums ([`fit_jointly`](super::fit_jointly)); it prints them as one line of the run's log
+//! ([`StandardErrors::described`]) and, when the per-pass trace is on, one row a parameter
+//! ([`StandardErrors::named`]).
 //!
 //! # From information to errors
 //!
@@ -55,18 +60,10 @@
 //! remainder that is only rounding would be inverted into an error of millions (measured: 2 × 10⁶
 //! on a carrier shape, 13.5 on a share that lives in [0, 1], at two samples and 300,000 positions).
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only this module's tests compute the errors until the fit does, at plan step A5"
-    )
-)]
-
-use super::information::{COHORT_PARAMETERS, InformationSums, SAMPLE_PARAMETERS, sample};
+use super::information::{COHORT_PARAMETERS, InformationSums, SAMPLE_PARAMETERS, cohort, sample};
 use super::{
     BETA_SHAPE_BOUNDS, CLEAN_ERROR_BOUNDS, DUPLICATED_SHARE_BOUNDS, HOM_EXCESS_BOUNDS,
-    NOISY_ERROR_BOUNDS, NOISY_SHARE_BOUNDS, P_FIXED_ALT_BOUNDS, P_INVARIANT_BOUNDS,
+    NOISY_ERROR_BOUNDS, NOISY_SHARE_BOUNDS, P_FIXED_ALT_BOUNDS, P_INVARIANT_BOUNDS, Parameters,
     fits_homozygote_excess,
 };
 
@@ -99,10 +96,73 @@ impl StandardError {
             | Self::WiderThanItsRange(_) => None,
         }
     }
+
+    /// Why there is no error, in the words the run's log uses; `None` when there is one.
+    fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::Estimated(_) => None,
+            Self::NoInformation => Some(NO_INFORMATION),
+            Self::HeldFixed => Some(HELD_FIXED),
+            Self::NotIdentified => Some(NOT_IDENTIFIED),
+            Self::WiderThanItsRange(_) => Some(WIDER_THAN_ITS_RANGE),
+        }
+    }
+
+    /// A parameter as the run's log prints it: its `value`, and its standard error or why it has
+    /// none.
+    fn printed_with(self, value: f64) -> String {
+        let why = match self {
+            Self::Estimated(error) => return format!("{value:.4e} ± {error:.2e}"),
+            Self::WiderThanItsRange(width) => {
+                return format!(
+                    "{value:.4e}, no standard error (it came out at {width:.2e}, \
+                     {WIDER_THAN_ITS_RANGE})"
+                );
+            }
+            Self::NoInformation => NO_INFORMATION,
+            Self::HeldFixed => HELD_FIXED,
+            Self::NotIdentified => NOT_IDENTIFIED,
+        };
+        format!("{value:.4e}, no standard error ({why})")
+    }
 }
 
+/// Why a parameter has no standard error, in the words the run's log uses.
+const NO_INFORMATION: &str = "no information";
+const HELD_FIXED: &str = "held fixed";
+const NOT_IDENTIFIED: &str = "not identified";
+const WIDER_THAN_ITS_RANGE: &str = "wider than the parameter's whole range";
+
+/// The reasons in the order the run's log counts them.
+const ABSENT_REASONS: [&str; 4] = [
+    NO_INFORMATION,
+    HELD_FIXED,
+    NOT_IDENTIFIED,
+    WIDER_THAN_ITS_RANGE,
+];
+
+/// What the run's log calls each cohort-level parameter, by slot
+/// ([`cohort`](super::information::cohort)).
+const COHORT_PARAMETER_NAMES: [&str; COHORT_PARAMETERS] = [
+    "mismapped share",
+    "invariant share",
+    "fixed non-reference share",
+    "allele-frequency shape a",
+    "allele-frequency shape b",
+    "duplicated share",
+    "carrier-frequency shape a",
+    "carrier-frequency shape b",
+];
+
+/// What the run's log calls each kind of a sample's own parameters, by slot ([`sample`]).
+const SAMPLE_PARAMETER_NAMES: [&str; SAMPLE_PARAMETERS] = [
+    "error rates at ordinary positions",
+    "error rates at mismapped positions",
+    "homozygote excesses",
+];
+
 /// Every fitted parameter's standard error, or why it has none.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct StandardErrors {
     /// The cohort's eight, indexed by [`cohort`](super::information::cohort).
     pub cohort: [StandardError; COHORT_PARAMETERS],
@@ -236,6 +296,147 @@ impl StandardErrors {
         }
         errors
     }
+
+    /// **Every parameter's error, under the name the per-pass trace gives its value**
+    /// ([`Parameters::named`], prefixed `standard_error:`, in its order), and NaN where it has none
+    /// — so the trace can be read in units of each parameter's error. `group_index` says which read
+    /// groups each sample's sections are, as the pass reads them: a sample's first read group carries
+    /// the sample's two rates' errors, and a later one NaN, since the likelihood never reads its
+    /// rates.
+    pub(super) fn named(
+        &self,
+        parameters: &Parameters,
+        group_index: &[Vec<usize>],
+    ) -> Vec<(String, f64)> {
+        let value = |error: StandardError| error.value().unwrap_or(f64::NAN);
+        let mut errors: Vec<f64> = self.cohort[..cohort_parameters_fitted(parameters)]
+            .iter()
+            .map(|&error| value(error))
+            .collect();
+        let mut first_group_of = vec![None; parameters.clean.len()];
+        for (s, own) in group_index.iter().enumerate() {
+            if let Some(&first) = own.first() {
+                first_group_of[first] = Some(s);
+            }
+        }
+        for sample_of in first_group_of {
+            let [clean, noisy] = match sample_of {
+                Some(s) => [
+                    self.samples[s][sample::CLEAN_ERROR_RATE],
+                    self.samples[s][sample::NOISY_ERROR_RATE],
+                ],
+                None => [StandardError::NoInformation; 2],
+            };
+            errors.extend([value(clean), value(noisy)]);
+        }
+        errors.extend(
+            self.samples
+                .iter()
+                .map(|row| value(row[sample::HOMOZYGOTE_EXCESS])),
+        );
+        let names = parameters.named();
+        assert_eq!(
+            names.len(),
+            errors.len(),
+            "one error for every parameter the trace names"
+        );
+        names
+            .into_iter()
+            .zip(errors)
+            .map(|((name, _), error)| (format!("standard_error:{name}"), error))
+            .collect()
+    }
+
+    /// **The errors as one line of the run's log**: each cohort-level parameter's value and
+    /// standard error, or why it has none; for each kind of a sample's own parameters, the median
+    /// and the largest standard error and how many have none, by reason; and how many read groups
+    /// have none because they are a sample's second or later (module doc of
+    /// [`information`](super::information): the likelihood reads only a sample's first).
+    /// `group_index` says which read groups each sample's sections are. The duplicated class's three
+    /// are left out when the run does not fit it. The median of an even count is the lower of the
+    /// middle two.
+    pub(super) fn described(&self, parameters: &Parameters, group_index: &[Vec<usize>]) -> String {
+        let values = parameters.named();
+        let mut parts = vec![
+            (0..cohort_parameters_fitted(parameters))
+                .map(|i| {
+                    format!(
+                        "{} {}",
+                        COHORT_PARAMETER_NAMES[i],
+                        self.cohort[i].printed_with(values[i].1)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        ];
+        for (which, name) in SAMPLE_PARAMETER_NAMES.iter().enumerate() {
+            parts.push(format!(
+                "{name} ({} samples): {}",
+                self.samples.len(),
+                summary_of(
+                    &self
+                        .samples
+                        .iter()
+                        .map(|row| row[which])
+                        .collect::<Vec<_>>()
+                )
+            ));
+        }
+        let later_read_groups: usize = group_index
+            .iter()
+            .map(|own| own.len().saturating_sub(1))
+            .sum();
+        if later_read_groups > 0 {
+            parts.push(format!(
+                "{later_read_groups} read group(s) after a sample's first: no standard error \
+                 ({NO_INFORMATION})"
+            ));
+        }
+        parts.join("; ")
+    }
+}
+
+/// How many of the cohort's slots are parameters of this fit: all eight with the duplicated class,
+/// the first five without it — the order [`Parameters::named`] lists them in.
+fn cohort_parameters_fitted(parameters: &Parameters) -> usize {
+    if parameters.duplicated.is_some() {
+        COHORT_PARAMETERS
+    } else {
+        cohort::DUPLICATED_SHARE
+    }
+}
+
+/// The median and the largest of `errors`' standard errors, and how many have none, by reason.
+fn summary_of(errors: &[StandardError]) -> String {
+    let mut values: Vec<f64> = errors.iter().filter_map(|error| error.value()).collect();
+    values.sort_by(f64::total_cmp);
+    let reasons: Vec<String> = ABSENT_REASONS
+        .iter()
+        .map(|&reason| {
+            let count = errors
+                .iter()
+                .filter(|error| error.reason() == Some(reason))
+                .count();
+            (count, reason)
+        })
+        .filter(|&(count, _)| count > 0)
+        .map(|(count, reason)| format!("{count} {reason}"))
+        .collect();
+    let reasons = reasons.join(", ");
+    match values.as_slice() {
+        [] => format!("none has a standard error ({reasons})"),
+        some => {
+            let spread = format!(
+                "median standard error {:.2e}, largest {:.2e}",
+                some[(some.len() - 1) / 2],
+                some[some.len() - 1]
+            );
+            match errors.len() - some.len() {
+                0 => format!("{spread}, none missing"),
+                missing => format!("{spread}, {missing} missing ({reasons})"),
+            }
+        }
+    }
 }
 
 /// One sample's own block inverted: which of its parameters were kept, the inverse over them, and
@@ -357,6 +558,7 @@ pub(super) fn invert_identified(matrix: &[f64], n: usize, reference: &[f64]) -> 
 /// The inverse of a symmetric positive-definite `n × n` matrix (row-major), by its Cholesky factor;
 /// `None` when any pivot is not above zero — the matrix has no inverse a variance could be read
 /// from. The full-matrix comparison in the tests uses it.
+#[cfg(test)]
 pub(super) fn inverse_of_positive_definite(matrix: &[f64], n: usize) -> Option<Vec<f64>> {
     inverse_by_cholesky(matrix, n, &vec![0.0; n]).ok()
 }
@@ -519,10 +721,6 @@ mod tests {
         (sums, full)
     }
 
-    /// **The blocks give exactly the errors of the whole arrow inverted at once**: on an arrow of
-    /// five samples (23 parameters), every error agrees with the square root of the dense inverse's
-    /// diagonal to 10⁻¹² relative. A cohort term with its sign flipped, or a sample's own inverse
-    /// without the cohort's uncertainty carried into it, fails.
     /// The error of layout parameter `i` — the cohort's eight, then each sample's three.
     fn error_at(errors: &StandardErrors, i: usize) -> StandardError {
         if i < COHORT_PARAMETERS {
@@ -833,6 +1031,136 @@ mod tests {
             &errors,
             &dense_errors_without(&full, n, |i| i == at || i == excess_of_one),
         );
+    }
+
+    /// A fit's parameters over `groups` read groups and `samples` samples, with or without the
+    /// duplicated class; the cohort's values all differ.
+    fn parameters_for_the_log(duplicated: bool, groups: usize, samples: usize) -> Parameters {
+        use crate::parameter_estimation::joint::fit::{DuplicatedPositions, FrequencyDensity};
+        Parameters {
+            clean: vec![0.001; groups],
+            noisy: vec![0.05; groups],
+            noisy_share: 0.0312,
+            density: FrequencyDensity {
+                p_invariant: 0.9,
+                p_fixed_alt: 0.0125,
+                a: 0.5,
+                b: 61.0,
+            },
+            hom_excess: vec![0.1; samples],
+            duplicated: duplicated.then_some(DuplicatedPositions {
+                share: 0.01,
+                carrier_a: 1.5,
+                carrier_b: 5.0,
+            }),
+        }
+    }
+
+    /// **The run's log line gives every cohort parameter's value and standard error by name, and
+    /// summarises each sample kind**: the median (the lower middle of an even count) and the largest
+    /// standard error, and how many are missing, by reason — with values chosen so a median taken as
+    /// the mean, the upper middle, or the largest taken as the last listed, prints a different line.
+    /// The duplicated class's three appear only when the run fits it, and the later read groups
+    /// only when there are some: one here, a sample's second read group.
+    #[test]
+    fn the_logged_line_summarises_each_kind() {
+        use StandardError::{
+            Estimated, HeldFixed, NoInformation, NotIdentified, WiderThanItsRange,
+        };
+        let errors = StandardErrors {
+            cohort: [
+                Estimated(2e-4),
+                Estimated(3.25e-3),
+                NotIdentified,
+                WiderThanItsRange(61.0),
+                Estimated(0.5),
+                Estimated(1e-3),
+                NoInformation,
+                NotIdentified,
+            ],
+            samples: vec![
+                [Estimated(4e-4), Estimated(0.01), HeldFixed],
+                [Estimated(1e-4), NoInformation, HeldFixed],
+                [Estimated(3e-4), NotIdentified, HeldFixed],
+                [Estimated(2e-4), Estimated(0.02), HeldFixed],
+            ],
+        };
+        let one_group_each = vec![vec![0], vec![1], vec![2], vec![3]];
+        assert_eq!(
+            errors.described(&parameters_for_the_log(false, 4, 4), &one_group_each),
+            "mismapped share 3.1200e-2 ± 2.00e-4, invariant share 9.0000e-1 ± 3.25e-3, fixed \
+             non-reference share 1.2500e-2, no standard error (not identified), allele-frequency \
+             shape a 5.0000e-1, no standard error (it came out at 6.10e1, wider than the \
+             parameter's whole range), allele-frequency shape b 6.1000e1 ± 5.00e-1; error rates at \
+             ordinary positions (4 samples): median standard error 2.00e-4, largest 4.00e-4, none \
+             missing; error rates at mismapped positions (4 samples): median standard error \
+             1.00e-2, largest 2.00e-2, 2 missing (1 no information, 1 not identified); homozygote \
+             excesses (4 samples): none has a standard error (4 held fixed)"
+        );
+        let second_group_of_sample_0 = vec![vec![0, 2], vec![1], vec![3], vec![4]];
+        let with_the_class = errors.described(
+            &parameters_for_the_log(true, 5, 4),
+            &second_group_of_sample_0,
+        );
+        assert!(
+            with_the_class.contains(
+                "allele-frequency shape b 6.1000e1 ± 5.00e-1, duplicated share 1.0000e-2 ± 1.00e-3, \
+                 carrier-frequency shape a 1.5000e0, no standard error (no information), \
+                 carrier-frequency shape b 5.0000e0, no standard error (not identified); error \
+                 rates at ordinary positions"
+            ),
+            "{with_the_class}"
+        );
+        assert!(
+            with_the_class.ends_with(
+                "; 1 read group(s) after a sample's first: no standard error (no information)"
+            ),
+            "{with_the_class}"
+        );
+    }
+
+    /// **The trace names each error after the value it belongs to**: the same names as
+    /// [`Parameters::named`](crate::parameter_estimation::joint::fit::Parameters), in the same order,
+    /// with and without the duplicated class. Two samples over three read groups, the first sample
+    /// holding groups 0 and 2: group 0 carries sample 0's rates' errors, group 1 sample 1's, and group
+    /// 2 — sample 0's second — NaN.
+    #[test]
+    fn the_trace_names_each_error_after_its_value() {
+        use StandardError::{Estimated, HeldFixed, NoInformation};
+        let errors = StandardErrors {
+            cohort: [Estimated(1.0); COHORT_PARAMETERS],
+            samples: vec![
+                [Estimated(0.1), Estimated(0.2), Estimated(0.3)],
+                [Estimated(0.4), NoInformation, HeldFixed],
+            ],
+        };
+        let group_index = vec![vec![0, 2], vec![1]];
+        for duplicated in [false, true] {
+            let parameters = parameters_for_the_log(duplicated, 3, 2);
+            let named = errors.named(&parameters, &group_index);
+            let expected: Vec<String> = parameters
+                .named()
+                .into_iter()
+                .map(|(name, _)| format!("standard_error:{name}"))
+                .collect();
+            let got: Vec<String> = named.iter().map(|(name, _)| name.clone()).collect();
+            assert_eq!(got, expected);
+            let value_of = |name: &str| {
+                named
+                    .iter()
+                    .find(|(n, _)| n == &format!("standard_error:{name}"))
+                    .map(|(_, value)| *value)
+                    .expect("named")
+            };
+            assert_eq!(value_of("clean_error_0"), 0.1);
+            assert_eq!(value_of("noisy_error_0"), 0.2);
+            assert_eq!(value_of("clean_error_1"), 0.4);
+            assert!(value_of("noisy_error_1").is_nan());
+            assert!(value_of("clean_error_2").is_nan());
+            assert!(value_of("noisy_error_2").is_nan());
+            assert_eq!(value_of("hom_excess_0"), 0.3);
+            assert!(value_of("hom_excess_1").is_nan());
+        }
     }
 
     /// **The threshold does not depend on a parameter's units**: one cohort parameter's scores

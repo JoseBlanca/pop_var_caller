@@ -72,7 +72,7 @@ repeat-tract guard.
    checkpoint) drawing 200 cohorts from known parameters at 3 and at 30 reads a position, reporting
    the share of estimates within one and two errors of the truth, per parameter kind. *Depends:* A3.
    *Source:* spec §3.6 item 3.
-5. ☐ **A5 — compute and print them at the end of a fit.** The final pass accumulates the blocks; the
+5. ✅ **A5 — compute and print them at the end of a fit.** The final pass accumulates the blocks; the
    fit prints, per parameter kind, the median and largest error, and the count with none. No fitted
    number moves; **the checksums pass unchanged.** *Depends:* A3. *Source:* spec §3.3 (the final
    pass), §3.5.

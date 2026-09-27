@@ -61,6 +61,7 @@ mod information;
 mod standard_errors;
 
 use information::{InformationSums, PositionScores, ScoringTables, score_position};
+use standard_errors::StandardErrors;
 
 // ---------------------------------------------------------------------
 // What the route emits
@@ -363,6 +364,15 @@ pub struct JointFit {
     pub converged: bool,
     /// The log-likelihood at the returned parameters.
     pub log_likelihood: f64,
+    /// **Every parameter's standard error at the returned parameters, or why it has none** —
+    /// computed from the information the final pass sums (`fit_precision.md` §3.3). In the fit's
+    /// own layout: the cohort's eight by slot — the duplicated class's three saying no
+    /// information when the run does not fit it — then each sample's first read group's two error
+    /// rates and its homozygote excess, the samples in the order the census lists them. A sample's
+    /// second and later read groups have none: the likelihood never reads their rates.
+    ///
+    /// Private until each [`Estimate`] carries its own error (plan step E1), which reads it.
+    standard_errors: StandardErrors,
 }
 
 impl JointFit {
@@ -1565,169 +1575,212 @@ pub fn fit_jointly(
         "SNP/indel fit: reading the evidence of {} sample(s)",
         names.len()
     ));
-    let (score, parameters, statistics, passes, converged, trace, contamination) = cohort
-        .with_generic(&groups, |lent| {
-            // Which read group each sample's own groups are, in the order the cursor visits them.
-            let group_index: Vec<Vec<usize>> = lent
-                .iter()
-                .map(|sections| {
-                    sections
-                        .iter()
-                        .map(|(id, _)| {
-                            groups
-                                .iter()
-                                .position(|g| g == id)
-                                .expect("every group came from this list")
-                        })
-                        .collect()
-                })
-                .collect();
-
-            // Each sample's own mean depth, read once from the codes: the centre of the prior a
-            // stored code's range is weighted with when the likelihood sums over it.
-            let coverage = EvidenceCursor::mean_depth(lent, &config.edges, depth_cap);
-
-            // **What the evidence holds and how deep the samples are**, printed because both set
-            // this step's memory and neither is otherwise visible from a run's output.
-            let read_groups_held: usize = lent.iter().map(Vec::len).sum();
-            let evidence_bytes: usize = lent
-                .iter()
-                .flatten()
-                .map(|(_, records)| records.heap_bytes())
-                .sum();
-            let observations: usize = lent
-                .iter()
-                .flatten()
-                .map(|(_, records)| records.non_reference().len())
-                .sum();
-            // A sample with no walked position has no depth, and `mean_depth` stands it in at one
-            // read; it is counted apart so that it cannot read as a real sample at 1×.
-            let without_data = lent
-                .iter()
-                .filter(|sections| {
-                    sections.iter().all(|(_, records)| {
-                        (0..records.depth().len())
-                            .all(|index| records.depth().get(index) == DepthCode::NeverWalked)
+    let FittedCohort {
+        parameters,
+        statistics,
+        passes,
+        converged,
+        trace,
+        contamination,
+        standard_errors,
+    } = cohort.with_generic(&groups, |lent| {
+        // Which read group each sample's own groups are, in the order the cursor visits them.
+        let group_index: Vec<Vec<usize>> = lent
+            .iter()
+            .map(|sections| {
+                sections
+                    .iter()
+                    .map(|(id, _)| {
+                        groups
+                            .iter()
+                            .position(|g| g == id)
+                            .expect("every group came from this list")
                     })
+                    .collect()
+            })
+            .collect();
+
+        // Each sample's own mean depth, read once from the codes: the centre of the prior a
+        // stored code's range is weighted with when the likelihood sums over it.
+        let coverage = EvidenceCursor::mean_depth(lent, &config.edges, depth_cap);
+
+        // **What the evidence holds and how deep the samples are**, printed because both set
+        // this step's memory and neither is otherwise visible from a run's output.
+        let read_groups_held: usize = lent.iter().map(Vec::len).sum();
+        let evidence_bytes: usize = lent
+            .iter()
+            .flatten()
+            .map(|(_, records)| records.heap_bytes())
+            .sum();
+        let observations: usize = lent
+            .iter()
+            .flatten()
+            .map(|(_, records)| records.non_reference().len())
+            .sum();
+        // A sample with no walked position has no depth, and `mean_depth` stands it in at one
+        // read; it is counted apart so that it cannot read as a real sample at 1×.
+        let without_data = lent
+            .iter()
+            .filter(|sections| {
+                sections.iter().all(|(_, records)| {
+                    (0..records.depth().len())
+                        .all(|index| records.depth().get(index) == DepthCode::NeverWalked)
                 })
-                .count();
-            let mut depths = coverage.clone();
-            depths.sort_by(f64::total_cmp);
-            let depth_at = |share: f64| {
-                depths
-                    .get(((depths.len().saturating_sub(1)) as f64 * share).round() as usize)
-                    .copied()
-                    .unwrap_or(0.0)
-            };
-            stage.always(|into| {
-                format!(
-                    "SNP/indel fit: evidence read, {into}; {read_groups_held} read group(s) hold \
+            })
+            .count();
+        let mut depths = coverage.clone();
+        depths.sort_by(f64::total_cmp);
+        let depth_at = |share: f64| {
+            depths
+                .get(((depths.len().saturating_sub(1)) as f64 * share).round() as usize)
+                .copied()
+                .unwrap_or(0.0)
+        };
+        stage.always(|into| {
+            format!(
+                "SNP/indel fit: evidence read, {into}; {read_groups_held} read group(s) hold \
                      {} ({} a read group), {observations} non-reference observations; the \
                      samples' mean depth, read from the stored codes after the cap, runs from \
                      {:.1} to {:.1}, median {:.1}, and {without_data} sample(s) have no walked \
                      position (read there as 1.0); fitting from {} starting point(s), at most {} \
                      passes each",
-                    crate::parameter_estimation::progress::size(evidence_bytes as u64),
-                    crate::parameter_estimation::progress::size(
-                        (evidence_bytes / read_groups_held.max(1)) as u64
-                    ),
-                    depth_at(0.0),
-                    depth_at(1.0),
-                    depth_at(0.5),
-                    config.starting_points.len(),
-                    config.max_passes
+                crate::parameter_estimation::progress::size(evidence_bytes as u64),
+                crate::parameter_estimation::progress::size(
+                    (evidence_bytes / read_groups_held.max(1)) as u64
+                ),
+                depth_at(0.0),
+                depth_at(1.0),
+                depth_at(0.5),
+                config.starting_points.len(),
+                config.max_passes
+            )
+        });
+        let mut best: Option<(usize, StartOutcome)> = None;
+        for (number, start) in config.starting_points.iter().enumerate() {
+            let which = WhichStart {
+                number: number + 1,
+                of: config.starting_points.len(),
+                point: start,
+                stage: &stage,
+            };
+            let began = std::time::Instant::now();
+            let outcome = maximise(
+                lent,
+                depth_cap,
+                config,
+                &groups,
+                &group_index,
+                &coverage,
+                &which,
+            );
+            let score = outcome.statistics.log_likelihood;
+            stage.always(|into| {
+                format!(
+                    "SNP/indel fit, start {} of {}: {} after {} pass(es), log-likelihood \
+                         {score:.6e}; its last pass, which also collects what the standard errors \
+                         are computed from, {}; {into}",
+                    which.number,
+                    which.of,
+                    if outcome.converged {
+                        "converged"
+                    } else {
+                        "stopped at the pass limit"
+                    },
+                    outcome.passes,
+                    cost_of_the_last_pass(began.elapsed(), outcome.last_pass_took, outcome.passes),
                 )
             });
-            let mut best: Option<(f64, Parameters, Statistics, u32, bool, Vec<PassSummary>)> = None;
-            for (number, start) in config.starting_points.iter().enumerate() {
-                let which = WhichStart {
-                    number: number + 1,
-                    of: config.starting_points.len(),
-                    point: start,
-                    stage: &stage,
-                };
-                let (parameters, statistics, passes, converged, trace) = maximise(
-                    lent,
-                    depth_cap,
-                    config,
-                    &groups,
-                    &group_index,
-                    &coverage,
-                    &which,
-                );
-                let score = statistics.log_likelihood;
-                stage.always(|into| {
-                    format!(
-                        "SNP/indel fit, start {} of {}: {} after {passes} pass(es), \
-                         log-likelihood {score:.6e}; {into}",
-                        which.number,
-                        which.of,
-                        if converged {
-                            "converged"
-                        } else {
-                            "stopped at the pass limit"
-                        },
-                    )
-                });
-                if best.as_ref().is_none_or(|(current, ..)| score > *current) {
-                    best = Some((score, parameters, statistics, passes, converged, trace));
-                }
+            if best
+                .as_ref()
+                .is_none_or(|(_, current)| score > current.statistics.log_likelihood)
+            {
+                best = Some((which.number, outcome));
             }
-            let (score, parameters, statistics, passes, converged, trace) =
-                best.expect("a run always has at least one starting point");
-
-            // **Contamination is fitted after the alternation, not inside it** (spec §3.4). It reads
-            // the converged error rates and the converged homozygote excess, and nothing it produces
-            // feeds back into them — a sample's stray reads are a property of the tube it was in
-            // rather than of the population, so the density has no business being told about them.
-            // It runs here, inside the same call, so that the sections are lent once rather than
-            // twice.
-            // **The error rate goes in per read group, which is the grain it was fitted at.**
-            // Until 2026-08-20 this handed the estimator one rate a sample — its *first* read
-            // group's — which was exact only because every benchmark sample has one library.
-            let error_rate: BTreeMap<ReadGroupId, f64> = groups
-                .iter()
-                .zip(&parameters.clean)
-                .map(|(group, rate)| (*group, *rate))
-                .collect();
-            // **The mismapped positions are kept out of it.** A position where two stretches of
-            // genome pile up on one place puts a small share of unexpected reads into *every*
-            // sample, which is the contamination signature exactly; measured over 63 tomato
-            // accessions with those positions left in, the median accession came back 6.5%
-            // contaminated.
-            let contamination = if config.estimate_contamination {
-                stage.always(|into| {
-                    format!("SNP/indel fit: fitting each sample's contamination; {into}")
-                });
-                fit_contamination_over(
-                    lent,
-                    depth_cap,
-                    &config.edges,
-                    &error_rate,
-                    &parameters.hom_excess,
-                    &statistics.noisy_posterior,
-                    &config.contamination,
-                )
-            } else {
-                stage.always(|into| {
-                    format!(
-                        "SNP/indel fit: contamination not estimated, as the run asked; every \
-                         read group is taken as uncontaminated; {into}"
-                    )
-                });
-                not_identified_anywhere(lent, NotIdentifiedReason::NotAsked)
-            };
-            (
-                score,
+        }
+        let (
+            winning_start,
+            StartOutcome {
                 parameters,
                 statistics,
+                information,
                 passes,
                 converged,
                 trace,
-                contamination,
+                last_pass_took: _,
+            },
+        ) = best.expect("a run always has at least one starting point");
+
+        // **Every parameter's standard error, at the parameters the fit returns**, from the
+        // information the winning start's final pass summed (spec §3.3).
+        let standard_errors = StandardErrors::of(&information);
+        stage.always(|into| {
+            format!(
+                "SNP/indel fit: standard errors at the returned values: {}; {into}",
+                standard_errors.described(&parameters, &group_index)
             )
-        })?;
+        });
+        trace_the_returned_fit(
+            winning_start,
+            passes,
+            statistics.log_likelihood,
+            &parameters,
+            &standard_errors,
+            &group_index,
+        );
+
+        // **Contamination is fitted after the alternation, not inside it** (spec §3.4). It reads
+        // the converged error rates and the converged homozygote excess, and nothing it produces
+        // feeds back into them — a sample's stray reads are a property of the tube it was in
+        // rather than of the population, so the density has no business being told about them.
+        // It runs here, inside the same call, so that the sections are lent once rather than
+        // twice.
+        // **The error rate goes in per read group, which is the grain it was fitted at.**
+        // Until 2026-08-20 this handed the estimator one rate a sample — its *first* read
+        // group's — which was exact only because every benchmark sample has one library.
+        let error_rate: BTreeMap<ReadGroupId, f64> = groups
+            .iter()
+            .zip(&parameters.clean)
+            .map(|(group, rate)| (*group, *rate))
+            .collect();
+        // **The mismapped positions are kept out of it.** A position where two stretches of
+        // genome pile up on one place puts a small share of unexpected reads into *every*
+        // sample, which is the contamination signature exactly; measured over 63 tomato
+        // accessions with those positions left in, the median accession came back 6.5%
+        // contaminated.
+        let contamination = if config.estimate_contamination {
+            stage.always(|into| {
+                format!("SNP/indel fit: fitting each sample's contamination; {into}")
+            });
+            fit_contamination_over(
+                lent,
+                depth_cap,
+                &config.edges,
+                &error_rate,
+                &parameters.hom_excess,
+                &statistics.noisy_posterior,
+                &config.contamination,
+            )
+        } else {
+            stage.always(|into| {
+                format!(
+                    "SNP/indel fit: contamination not estimated, as the run asked; every \
+                         read group is taken as uncontaminated; {into}"
+                )
+            });
+            not_identified_anywhere(lent, NotIdentifiedReason::NotAsked)
+        };
+        FittedCohort {
+            parameters,
+            statistics,
+            passes,
+            converged,
+            trace,
+            contamination,
+            standard_errors,
+        }
+    })?;
     stage.always(|into| format!("SNP/indel fit: done; {into}"));
+    let score = statistics.log_likelihood;
     let mut statistics = statistics;
     let genotype_posterior = std::mem::take(&mut statistics.genotype_posterior);
     let duplicated_posterior = std::mem::take(&mut statistics.duplicated_posterior);
@@ -1816,6 +1869,7 @@ pub fn fit_jointly(
         passes,
         converged,
         log_likelihood: score,
+        standard_errors,
     })
 }
 
@@ -1873,7 +1927,7 @@ fn maximise(
     group_index: &[Vec<usize>],
     coverage: &[f64],
     which: &WhichStart<'_>,
-) -> (Parameters, Statistics, u32, bool, Vec<PassSummary>) {
+) -> StartOutcome {
     let start = which.point;
     let mut parameters = Parameters {
         clean: vec![start.clean; groups.len()],
@@ -1964,8 +2018,9 @@ fn maximise(
     // The reported statistics must be the ones the reported parameters produce, so the last
     // cycle is followed by one more pass rather than by a pass that preceded it — and it is
     // this pass, at the parameters that will be reported, that keeps each position's
-    // probability of being mismapped.
-    let statistics = expectation_pass(
+    // probability of being mismapped, and the information their standard errors come from.
+    let last_pass_began = std::time::Instant::now();
+    let mut statistics = expectation_pass(
         samples,
         depth_cap,
         config,
@@ -1974,11 +2029,113 @@ fn maximise(
         &parameters,
         PassKeeps {
             per_position_posteriors: true,
-            information: false,
+            information: true,
         },
     );
+    let last_pass_took = last_pass_began.elapsed();
+    // PANIC-FREE: the pass above was asked to keep the information, and a pass that is asked
+    // starts every chunk's statistics, and its empty total, with the sums in place.
+    let information = statistics
+        .information
+        .take()
+        .expect("the pass above keeps the information");
     let Alternation { passes, trace, .. } = alternation;
-    (parameters, statistics, passes, converged, trace)
+    StartOutcome {
+        parameters,
+        statistics,
+        information,
+        passes,
+        converged,
+        trace,
+        last_pass_took,
+    }
+}
+
+/// Where one start of the alternation ended ([`maximise`]).
+struct StartOutcome {
+    parameters: Parameters,
+    /// The final pass's, at `parameters`: the log-likelihood, the counts and the per-position
+    /// posteriors.
+    statistics: Statistics,
+    /// The information the same pass summed, which the standard errors come from.
+    information: InformationSums,
+    passes: u32,
+    converged: bool,
+    trace: Vec<PassSummary>,
+    /// How long the final pass took ([`cost_of_the_last_pass`]).
+    last_pass_took: std::time::Duration,
+}
+
+/// **What a start's last pass took, against the average pass before it** — the whole start's
+/// time less the last pass's, over its passes, each with its maximisation and counting SQUAREM's
+/// jump passes. Measured in review (one thread, median of five interleaved runs), neither the
+/// maximisation nor keeping the per-position posteriors adds a measurable share of a pass, so the
+/// ratio is what collecting the information costs: 1.42 times a plain pass at 4 samples, 1.72 at
+/// 64. A run that keeps each sample's genotype posteriors pays for writing them in the last pass
+/// too, unmeasured.
+fn cost_of_the_last_pass(
+    whole: std::time::Duration,
+    last: std::time::Duration,
+    passes: u32,
+) -> String {
+    let average = whole.saturating_sub(last) / passes.max(1);
+    if passes == 0 || average.is_zero() {
+        return format!("took {}, with no pass before it to compare", finely(last));
+    }
+    format!(
+        "took {}, {:.2} times the average pass before it ({})",
+        finely(last),
+        last.as_secs_f64() / average.as_secs_f64(),
+        finely(average)
+    )
+}
+
+/// A duration to a tenth of a millisecond below a second and a hundredth of a second below a
+/// minute, where the log's own form floors to whole milliseconds and whole seconds.
+fn finely(took: std::time::Duration) -> String {
+    let seconds = took.as_secs_f64();
+    if seconds < 1.0 {
+        format!("{:.1}ms", seconds * 1e3)
+    } else if seconds < 60.0 {
+        format!("{seconds:.2}s")
+    } else {
+        crate::parameter_estimation::progress::duration(took)
+    }
+}
+
+/// **The per-pass trace's last rows** ([`fit_trace`](super::fit_trace)): under the winning start
+/// and the pass after its last, the values the fit returns — not always the last pass's, since a
+/// start whose last accelerated step is refused at the pass limit returns the step before it — and
+/// each one's standard error. Nothing when the trace is off.
+fn trace_the_returned_fit(
+    winning_start: usize,
+    passes: u32,
+    log_likelihood: f64,
+    parameters: &Parameters,
+    standard_errors: &StandardErrors,
+    group_index: &[Vec<usize>],
+) {
+    if !super::fit_trace::is_on() {
+        return;
+    }
+    for rows in [
+        parameters.named(),
+        standard_errors.named(parameters, group_index),
+    ] {
+        super::fit_trace::write_the_pass(winning_start, passes + 1, log_likelihood, &rows);
+    }
+}
+
+/// What the SNP/indel half of [`fit_jointly`] hands back from inside the evidence's loan.
+struct FittedCohort {
+    parameters: Parameters,
+    /// The winning start's final pass.
+    statistics: Statistics,
+    passes: u32,
+    converged: bool,
+    trace: Vec<PassSummary>,
+    contamination: Vec<SampleContaminationEstimates>,
+    standard_errors: StandardErrors,
 }
 
 /// The plain alternation's one step — a pass over the data, then every parameter maximised
@@ -3830,6 +3987,40 @@ mod tests {
         assert_eq!(no_variation.expected_alternative_frequency(), 0.0);
     }
 
+    /// **A start's last pass reads as a ratio to the average pass before it**, the last pass left
+    /// out of that average: ten seconds over four passes and a last pass of two is two seconds a
+    /// pass before it, so a ratio of one (an average taken with the last pass in, 2.5 seconds, would give 0.80);
+    /// short passes print in tenths of a millisecond rather than as "0ms"; and with no pass before
+    /// it, or none measurable, there is no ratio to print.
+    #[test]
+    fn the_last_passes_cost_reads_as_a_ratio() {
+        use std::time::Duration;
+        assert_eq!(
+            cost_of_the_last_pass(Duration::from_secs(10), Duration::from_secs(2), 4),
+            "took 2.00s, 1.00 times the average pass before it (2.00s)"
+        );
+        assert_eq!(
+            cost_of_the_last_pass(
+                Duration::from_micros(3_000),
+                Duration::from_micros(1_500),
+                3
+            ),
+            "took 1.5ms, 3.00 times the average pass before it (0.5ms)"
+        );
+        assert_eq!(
+            cost_of_the_last_pass(Duration::from_secs(2), Duration::from_secs(2), 0),
+            "took 2.00s, with no pass before it to compare"
+        );
+        assert_eq!(
+            cost_of_the_last_pass(Duration::from_secs(2), Duration::from_secs(2), 4),
+            "took 2.00s, with no pass before it to compare"
+        );
+        assert_eq!(
+            cost_of_the_last_pass(Duration::from_secs(300), Duration::from_secs(75), 3),
+            "took 1m15s, 1.00 times the average pass before it (1m15s)"
+        );
+    }
+
     /// A `JointFit` carrying one density and one heterozygosity, with everything else empty —
     /// the two fields [`JointFit::fitted_diversity`] reads and nothing more.
     ///
@@ -3857,6 +4048,7 @@ mod tests {
             passes: 1,
             converged: true,
             log_likelihood: -1.0,
+            standard_errors: StandardErrors::of(&InformationSums::new(0)),
         }
     }
 

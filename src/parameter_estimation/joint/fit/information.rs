@@ -727,10 +727,10 @@ mod tests {
         StandardError, StandardErrors, inverse_of_positive_definite,
     };
     use crate::parameter_estimation::joint::fit::{
-        DuplicatedPositions, EvidenceCursor, FrequencyDensity, JointFitConfig, MAX_RECORDED_SPREAD,
-        MIN_POSITIONS_PER_CHUNK, Parameters, PassKeeps, SampleAtPosition, Statistics,
-        candidate_read_probability, digamma, expectation_pass, fit_jointly, genotype_frequencies,
-        one_position,
+        DuplicatedPositions, EvidenceCursor, FrequencyDensity, JointFit, JointFitConfig,
+        MAX_RECORDED_SPREAD, MIN_POSITIONS_PER_CHUNK, Parameters, PassKeeps, SampleAtPosition,
+        Statistics, candidate_read_probability, digamma, expectation_pass, fit_jointly,
+        genotype_frequencies, one_position,
     };
 
     use super::*;
@@ -1862,11 +1862,16 @@ mod tests {
         cohort: &DrawnCohort,
         config: &JointFitConfig,
     ) -> (Parameters, bool) {
+        let (fit, parameters) = fitted(cohort, config);
+        (parameters, fit.converged)
+    }
+
+    /// A drawn cohort's whole fit, and its fitted parameters in the pass's own layout.
+    fn fitted(cohort: &DrawnCohort, config: &JointFitConfig) -> (JointFit, Parameters) {
         let mut census = as_cohort(&cohort.samples);
         let names: Vec<String> = census.sample_names().map(str::to_string).collect();
         let groups = census.read_groups().to_vec();
         let fit = fit_jointly(&mut census, config).expect("a drawn cohort fits");
-        let converged = fit.converged;
         let parameters = Parameters {
             clean: groups.iter().map(|g| fit.noise[g].value.clean).collect(),
             noisy: groups.iter().map(|g| fit.noise[g].value.noisy).collect(),
@@ -1876,9 +1881,9 @@ mod tests {
                 .iter()
                 .map(|name| fit.hom_excess[name].value.get())
                 .collect(),
-            duplicated: fit.duplicated.map(|d| d.value),
+            duplicated: fit.duplicated.as_ref().map(|d| d.value),
         };
-        (parameters, converged)
+        (fit, parameters)
     }
 
     /// The kinds of parameter the comparisons report on.
@@ -2275,6 +2280,211 @@ mod tests {
                         "{samples} sample(s): share {share} has an error of {error}"
                     );
                 }
+            }
+        }
+    }
+
+    /// **A fit carries the errors at the parameters it returns** (plan step A5, spec §3.3): the
+    /// errors on the `JointFit` are, bit for bit, those of one more pass at its returned parameters
+    /// that sums the information — so they belong to the returned values, and not to another start
+    /// or an earlier pass. Four samples with the duplicated class on, as runs are, where three starts
+    /// end close together but not at the same bits, and one sample. At four samples every error rate
+    /// and every homozygote excess has an error; at one, the excess says it is held fixed and the
+    /// two rates keep theirs.
+    #[test]
+    fn a_fit_carries_the_errors_at_the_parameters_it_returns() {
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            estimate_contamination: false,
+            ..JointFitConfig::default()
+        };
+        for samples in [1, 4] {
+            let cohort = draw_cohort_with_duplications(
+                samples,
+                3_000,
+                8.0,
+                (0.003, 0.06, 0.03),
+                FrequencyDensity {
+                    p_invariant: 0.88,
+                    p_fixed_alt: 0.01,
+                    a: 0.6,
+                    b: 2.2,
+                },
+                0.3,
+                0.01,
+                0x0F17_5C03_A500_0000 + samples as u64,
+            );
+            let (fit, parameters) = fitted(&cohort, &config);
+            let at_the_returned_parameters =
+                with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+                    let statistics = expectation_pass(
+                        lent,
+                        depth_cap,
+                        &config,
+                        group_index,
+                        coverage,
+                        &parameters,
+                        PassKeeps {
+                            per_position_posteriors: true,
+                            information: true,
+                        },
+                    );
+                    StandardErrors::of(&statistics.information.expect("asked for"))
+                });
+            // `Debug` prints every `f64` as its shortest round-trip form: equal strings are equal bits.
+            assert_eq!(
+                format!("{:?}", fit.standard_errors),
+                format!("{at_the_returned_parameters:?}"),
+                "{samples} sample(s)"
+            );
+            for row in &fit.standard_errors.samples {
+                for which in [sample::CLEAN_ERROR_RATE, sample::NOISY_ERROR_RATE] {
+                    assert!(row[which].value().is_some(), "{samples} sample(s): {row:?}");
+                }
+                if samples == 1 {
+                    assert_eq!(row[sample::HOMOZYGOTE_EXCESS], StandardError::HeldFixed);
+                } else {
+                    assert!(
+                        row[sample::HOMOZYGOTE_EXCESS].value().is_some(),
+                        "{samples} samples: {row:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **The trace files what the fit returns under the winning start, one pass after its last**:
+    /// on the four-sample fixture of the test above, whose winner is start 2 of 3 (so a slip to the
+    /// first or the last start is a different start), the rows after the winner's last pass are
+    /// exactly the returned values and their errors, under the names the value rows use, with the
+    /// final pass's log-likelihood; and the winner's last pass left the returned values too (its
+    /// last accelerated step was kept, not refused at the pass limit).
+    #[test]
+    fn the_trace_files_the_returned_fit_after_the_winning_starts_last_pass() {
+        use crate::parameter_estimation::joint::fit_trace::captured;
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            estimate_contamination: false,
+            ..JointFitConfig::default()
+        };
+        let cohort = draw_cohort_with_duplications(
+            4,
+            3_000,
+            8.0,
+            (0.003, 0.06, 0.03),
+            FrequencyDensity {
+                p_invariant: 0.88,
+                p_fixed_alt: 0.01,
+                a: 0.6,
+                b: 2.2,
+            },
+            0.3,
+            0.01,
+            0x0F17_5C03_A500_0004,
+        );
+        let ((fit, parameters), rows) = captured(|| fitted(&cohort, &config));
+        let is_error = |name: &str| name.starts_with("standard_error:");
+        let error_rows: Vec<_> = rows.iter().filter(|row| is_error(&row.3)).collect();
+        let (start, pass) = (error_rows[0].0, error_rows[0].1);
+        assert_eq!(start, 2, "the fixture's winner");
+        assert_eq!(pass, fit.passes + 1);
+        let values_at = |at: u32| -> Vec<(String, f64)> {
+            rows.iter()
+                .filter(|row| (row.0, row.1) == (start, at) && !is_error(&row.3))
+                .map(|row| (row.3.clone(), row.4))
+                .collect()
+        };
+        // `Debug` prints every `f64` as its shortest round-trip form: equal strings are equal bits.
+        let returned = format!("{:?}", parameters.named());
+        assert_eq!(format!("{:?}", values_at(pass)), returned);
+        assert_eq!(format!("{:?}", values_at(fit.passes)), returned);
+        let group_index: Vec<Vec<usize>> = (0..4).map(|s| vec![s]).collect();
+        let errors: Vec<(String, f64)> = error_rows
+            .iter()
+            .map(|row| (row.3.clone(), row.4))
+            .collect();
+        assert_eq!(
+            format!("{errors:?}"),
+            format!("{:?}", fit.standard_errors.named(&parameters, &group_index))
+        );
+        assert!(
+            rows.iter()
+                .filter(|row| (row.0, row.1) == (start, pass))
+                .all(|row| row.2 == fit.log_likelihood),
+            "the returned fit's rows carry the final pass's log-likelihood"
+        );
+    }
+
+    /// **A fit without the duplicated class says its three have no information, and the log leaves
+    /// them out** — two samples, the class off in the draw and the fit.
+    #[test]
+    fn a_fit_without_the_duplicated_class_says_so() {
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            duplicated_positions: false,
+            estimate_contamination: false,
+            ..JointFitConfig::default()
+        };
+        let cohort = draw_cohort_with_duplications(
+            2,
+            3_000,
+            8.0,
+            (0.003, 0.06, 0.03),
+            FrequencyDensity {
+                p_invariant: 0.88,
+                p_fixed_alt: 0.01,
+                a: 0.6,
+                b: 2.2,
+            },
+            0.3,
+            0.0,
+            0x0F17_5C03_A500_0102,
+        );
+        let (fit, parameters) = fitted(&cohort, &config);
+        assert_eq!(
+            fit.standard_errors.cohort[cohort::DUPLICATED_SHARE..],
+            [StandardError::NoInformation; 3]
+        );
+        let line = with_sections(&cohort, None, |_, _, group_index, _| {
+            fit.standard_errors.described(&parameters, group_index)
+        });
+        assert!(
+            !line.contains("duplicated") && !line.contains("carrier"),
+            "{line}"
+        );
+    }
+
+    /// **A fit that runs no pass still reports its errors, at its starting point** — a pass limit
+    /// below one cycle's three passes, so every start returns where it began; each sample's two
+    /// error rates still have an error.
+    #[test]
+    fn a_fit_with_no_pass_reports_errors_at_its_start() {
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            max_passes: 2,
+            estimate_contamination: false,
+            ..JointFitConfig::default()
+        };
+        let cohort = draw_cohort_with_duplications(
+            2,
+            3_000,
+            8.0,
+            (0.003, 0.06, 0.03),
+            FrequencyDensity {
+                p_invariant: 0.88,
+                p_fixed_alt: 0.01,
+                a: 0.6,
+                b: 2.2,
+            },
+            0.3,
+            0.01,
+            0x0F17_5C03_A500_0202,
+        );
+        let (fit, _) = fitted(&cohort, &config);
+        assert_eq!(fit.passes, 0);
+        for row in &fit.standard_errors.samples {
+            for which in [sample::CLEAN_ERROR_RATE, sample::NOISY_ERROR_RATE] {
+                assert!(row[which].value().is_some(), "{row:?}");
             }
         }
     }
