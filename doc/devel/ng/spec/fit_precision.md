@@ -539,8 +539,8 @@ a write and a read.
 4. **One subset order for all strata, or one per stratum?** — decided one for all (§4.4); revisit if
    Part B's validation finds a stratum whose error the fixed subset leaves much larger than a
    per-stratum draw would.
-5. **Which of a stratum's numbers the subset's precision target is set on** — decided the slippage
-   level (§4.4), without a measurement behind the choice. *Alternative:* the largest relative error of
+5. **Which of a stratum's numbers the subset's precision target is set on** — the slippage level
+   (§4.4), **confirmed by the owner for now, 2026-09-27**, without a measurement behind the choice. *Alternative:* the largest relative error of
    the three slippage numbers, capped so a barely determined one cannot force every sample in.
    **Settled by:** checkpoint D's comparison, which reports all three numbers' errors at each subset
    size.
