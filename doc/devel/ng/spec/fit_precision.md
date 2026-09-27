@@ -518,21 +518,16 @@ a write and a read.
   grows with the number of samples: 45,432 of 86,688 on kimura. The records spec does not say whether
   the threshold is per section or pooled ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md)
   §3.3). Home: its own investigation and an amendment to that section.
-- **A parameter with no information written as `defaulted`.** Today a read group with no reads keeps
-  its starting error rate and is written as `fitted_here`
-  ([`fit.rs:1686-1694`](../../../../src/parameter_estimation/joint/fit.rs#L1686)). Part A makes the
-  absence of information visible (no error); whether the warrant should also change is question 1
-  below.
 
 ---
 
 ## 8. Open questions
 
-1. **Should a parameter with no information be written with warrant `defaulted` and the default
-   value, instead of `fitted_here` and its starting value?** — OPEN. *Leaning:* yes; a value the data
-   never touched is a default, and calling it fitted is the confident-and-wrong case the project rules
-   out. It changes what the file says for read groups with no reads, not what any other read group
-   gets. Owner to decide; **confirm before code**.
+1. **A parameter with no information is written with warrant `defaulted` and the default value**,
+   not `fitted_here` and its starting value — **decided, owner, 2026-09-27.** A value the data never
+   touched is a default, and calling it fitted is the confident-and-wrong case the project rules out.
+   It changes what the file says for read groups and samples with no reads, not what any other gets.
+   Built in the plan's step E2.
 2. **The soft constants** — `SETTLED_FRACTION` (0.1), `MAX_CONTRACTION` (0.95),
    `AGREEMENT_FRACTION` (0.5), `ERROR_REFRESH_CYCLES` (10), `FIRST_SUBSET` (256),
    `LEVEL_RELATIVE_ERROR_TARGET` (0.02), `MIN_SAMPLES_A_GROUP` (8). All starting values, none

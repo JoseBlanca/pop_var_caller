@@ -49,8 +49,8 @@ repeat-tract guard.
 - `scripts/promote_ng_oracle.sh` runs in the dev container and its baseline passes.
 - For checkpoints B and D: the owner can run `estimate-parameters` on kimura (the 2,169-sample
   cohort), as for the memory plan.
-- **Open question 1 of the spec** (a parameter with no information written as `defaulted`) is
-  answered by the owner before E2; the rest of the plan does not depend on it.
+- Spec question 1 is decided (owner, 2026-09-27): a parameter with no information is written as
+  `defaulted` with the default value, built in E2.
 
 ## 4. The steps
 
@@ -149,8 +149,9 @@ repeat-tract guard.
 2. ☐ **E2 — the parameters file, version 2.** `standard_error` in the value tables and
    `own_fit_standard_error` in the slippage origin blocks (spec §5.2's table), each start's outcome
    in `fitted_from`, `FORMAT_VERSION` = 2, the reader accepting versions 1 and 2, the golden files
-   updated. The fitted-parameters checksum is re-recorded (the key and the version move it; no fitted
-   number does — the commit shows the file's diff). *Depends:* E1, spec open question 1 answered.
+   updated; a parameter with no information written as `defaulted` with the default value (spec
+   question 1). The fitted-parameters checksum is re-recorded (the key and the version move it; no fitted
+   number does — the commit shows the file's diff). *Depends:* E1.
    *Source:* spec §5.2–5.3.
 
 > **Checkpoint E — pause for review.** The written file on the oracle cohort, and the owner's full
