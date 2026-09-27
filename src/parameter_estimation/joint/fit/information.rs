@@ -62,22 +62,21 @@
 //! position — they carry no information, and no standard error can be computed for them. What a
 //! sample contributes to this module is therefore three parameters, whatever its read groups:
 //! its first read group's clean and mismapped error rates, and its homozygote excess.
-
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only this module's tests call the scorer until the expectation pass does, at \
-                  plan step A2"
-    )
-)]
+//!
+//! # From scores to information
+//!
+//! The information is the sum, over positions, of each position's scores multiplied pairwise
+//! ([`InformationSums`]). **Only the blocks the standard errors need are kept** (spec §3.2's block
+//! approximation): the cohort's eight parameters with each other, each sample's three with each
+//! other, and each sample's three with the cohort's eight. A product of two different samples'
+//! scores is never formed — the full matrix at 2,169 samples would be about 450 MB, these blocks
+//! are 264 bytes a sample.
 
 use crate::float;
-use crate::types::Ploidy;
 
 use super::{
-    BRANCHES, BetaQuadrature, CANDIDATE_ALTERNATIVES, MAX_CANDIDATES, Parameters, Scratch,
-    candidate_read_probability, candidate_read_probability_slope, class_rate,
+    BRANCHES, BetaQuadrature, CANDIDATE_ALTERNATIVES, MAX_CANDIDATES, Parameters, PassModel,
+    Scratch, candidate_read_probability, candidate_read_probability_slope, class_rate,
     expected_reference_reads, genotype_frequencies_slope_in_excess,
     genotype_frequencies_slope_in_frequency, ln_sum_exp, reference_read_probability,
     reference_read_probability_slope,
@@ -94,9 +93,12 @@ const RULE_STEP: f64 = 1e-4;
 /// How a quadrature rule's nodes and weights move as its Beta's two shapes move.
 ///
 /// **A property of the rule and not of any position**, so it is computed once a pass, from the
-/// rule at each shape nudged up and down.
+/// rule at each shape nudged up and down. It records the shapes it was computed at, so a scorer
+/// handed the slopes of another rule can be caught.
 #[derive(Clone, Debug)]
 pub(super) struct RuleSlopes {
+    /// The two shapes the rule was built at.
+    shapes: (f64, f64),
     /// `[shape][node]` — how far a node moves per unit of the shape; shape 0 is `a`, 1 is `b`.
     node_slope: [Vec<f64>; 2],
     /// `[shape][node]` — how the logarithm of a node's weight moves per unit of the shape.
@@ -127,8 +129,40 @@ impl RuleSlopes {
         let (node_a, ln_weight_a) = along(RULE_STEP * a, 0.0);
         let (node_b, ln_weight_b) = along(0.0, RULE_STEP * b);
         Self {
+            shapes: (a, b),
             node_slope: [node_a, node_b],
             ln_weight_slope: [ln_weight_a, ln_weight_b],
+        }
+    }
+
+    /// Whether these are the slopes of `rule`, built at `shapes`.
+    fn describes(&self, rule: &BetaQuadrature, shapes: (f64, f64)) -> bool {
+        self.shapes == shapes && self.node_slope[0].len() == rule.nodes.len()
+    }
+}
+
+/// **What the scorer needs that depends on the parameters alone**, built once a pass: how the two
+/// rules move with their shapes (the frequency density's and, when the run fits the duplicated
+/// class, the carrier Beta's), and the log of each branch's share.
+#[derive(Debug)]
+pub(super) struct ScoringTables {
+    density: RuleSlopes,
+    carrier: Option<RuleSlopes>,
+    branches: BranchShares,
+}
+
+impl ScoringTables {
+    /// The tables for the rules and parameters `model` carries, at the node count its rules were
+    /// built with.
+    pub(super) fn of(model: &PassModel<'_>) -> Self {
+        let parameters = model.parameters;
+        let count = model.quadrature.nodes.len();
+        Self {
+            density: RuleSlopes::of(parameters.density.a, parameters.density.b, count),
+            carrier: parameters
+                .duplicated
+                .map(|d| RuleSlopes::of(d.carrier_a, d.carrier_b, count)),
+            branches: BranchShares::of(model),
         }
     }
 }
@@ -176,36 +210,17 @@ pub(super) mod sample {
 /// Every parameter's slope at one position: the cohort's eight, and each sample's three.
 ///
 /// **One value reused over every position**: [`score_position`] clears and refills it, so a
-/// pass allocates it once per chunk. It also holds the per-sample working numbers the error
-/// rates' slopes are built from, for the same reason.
+/// pass allocates it once per chunk. It also holds the table of each read's slope the error
+/// rates' scores are built from, for the same reason.
 #[derive(Clone, Debug)]
 pub(super) struct PositionScores {
     /// The cohort's parameters, indexed by [`cohort`].
     pub cohort: [f64; COHORT_PARAMETERS],
     /// Per sample, in the order the fit iterates samples, indexed by [`sample`].
     pub samples: Vec<[f64; SAMPLE_PARAMETERS]>,
-    /// Per sample and noise class, the parts of a read's log-probability slope in the error rate
-    /// that depend on the genotype but not on the candidate allele (see [`ReadSlopes`]).
-    slopes: Vec<[ReadSlopes; 2]>,
-}
-
-/// The pieces of `d ln P(this sample's reads | genotype) / d ε` that do not depend on which base
-/// the alternative is, for one sample, one noise class and each of the three genotypes.
-///
-/// The slope a whole genotype contributes is
-/// `candidate reads · candidate[j] + other reads / ε + reference[j]`: the candidate allele's reads
-/// each move by the slope of their log-probability, the reads on the two bases that are neither
-/// move by `1/ε` (each is `ε/3`), and the reference reads move by their expected count times
-/// their own log-probability's slope — the expected count, because the depth a stored code
-/// stands for is a range and the likelihood sums over it.
-#[derive(Copy, Clone, Debug, Default)]
-struct ReadSlopes {
-    /// `d ln P(a read shows the candidate) / d ε`, by how many copies of it the sample carries.
-    candidate: [f64; 3],
-    /// The expected reference reads times `d ln P(a read shows the reference) / d ε`.
-    reference: [f64; 3],
-    /// `1/ε` — the slope of `ln(ε/3)`, which every read on a base that is neither shares.
-    per_other_read: f64,
+    /// `[class][candidate][sample][genotype]` — the slope of the log-probability of one sample's
+    /// reads in its error rate, if the sample held that genotype with that candidate allele.
+    read_slopes: Vec<f64>,
 }
 
 impl PositionScores {
@@ -213,7 +228,7 @@ impl PositionScores {
         Self {
             cohort: [0.0; COHORT_PARAMETERS],
             samples: vec![[0.0; SAMPLE_PARAMETERS]; samples],
-            slopes: vec![[ReadSlopes::default(); 2]; samples],
+            read_slopes: vec![0.0; read_slope_table_len(samples)],
         }
     }
 
@@ -221,268 +236,485 @@ impl PositionScores {
         self.cohort = [0.0; COHORT_PARAMETERS];
         self.samples.fill([0.0; SAMPLE_PARAMETERS]);
     }
+
+    /// The slope of sample `s`'s reads under genotype `genotype` with the position's
+    /// `candidate`-th candidate allele, in noise class `class`'s error rate.
+    fn read_slope(&self, class: usize, candidate: usize, s: usize, genotype: usize) -> f64 {
+        self.read_slopes[read_slope_index(self.samples.len(), class, candidate, s, genotype)]
+    }
+}
+
+/// How many entries the read-slope table holds for `samples` samples.
+const fn read_slope_table_len(samples: usize) -> usize {
+    2 * MAX_CANDIDATES * samples * 3
+}
+
+/// Where the slope for (class, candidate, sample, genotype) sits in the read-slope table.
+const fn read_slope_index(
+    samples: usize,
+    class: usize,
+    candidate: usize,
+    s: usize,
+    genotype: usize,
+) -> usize {
+    ((class * MAX_CANDIDATES + candidate) * samples + s) * 3 + genotype
 }
 
 /// Every parameter's slope at the position [`one_position`](super::one_position) has just
 /// scored, written into `into`.
 ///
 /// **Reads the scratch `one_position` left behind and changes nothing in it**, so calling it or
-/// not calling it cannot move a fitted number. A position whose likelihood underflowed carries
-/// no slope at all: it contributes nothing to any parameter, exactly as it contributes nothing to
-/// the counts.
+/// not calling it cannot move a fitted number; `model` must be the one `one_position` was given,
+/// and `tables` built from it. A position whose likelihood underflowed carries no slope
+/// at all: it contributes nothing to any parameter, exactly as it contributes nothing to the
+/// counts.
 ///
 /// **No posterior is dropped for being small.** When the pass credits each branch and node its
 /// share of the position's counts, it skips any below one part in 10¹², which costs those counts
-/// nothing; a slope divides by a share that
-/// can itself be 10⁻¹², so here every posterior is kept. Each is formed as one exponential of a
-/// difference of logarithms, which never divides by a share at all.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one position's whole problem, as `one_position` takes it"
-)]
-#[allow(
-    clippy::needless_range_loop,
-    reason = "the sample index addresses the scratch, the read-group map and the score rows at \
-              once, as in `one_position`"
-)]
+/// nothing; a slope divides by a share that can itself be 10⁻¹², so here every posterior is kept.
+/// Each is formed as one exponential of a difference of logarithms, which never divides by a
+/// share at all.
 pub(super) fn score_position(
     scratch: &Scratch,
-    group_index: &[Vec<usize>],
-    ploidy: Ploidy,
-    density_rule: SlopedRule<'_>,
-    carrier_rule: Option<SlopedRule<'_>>,
+    model: &PassModel<'_>,
+    tables: &ScoringTables,
     coverage_odds: &[f64],
-    parameters: &Parameters,
     into: &mut PositionScores,
 ) {
-    let quadrature = density_rule.rule;
-    let carrier = carrier_rule.map(|carrier| carrier.rule);
+    let parameters = model.parameters;
+    debug_assert!(
+        tables.density.describes(
+            &model.quadrature,
+            (parameters.density.a, parameters.density.b)
+        ),
+        "the density rule's slopes were built for another rule"
+    );
+    debug_assert_eq!(
+        model.carrier.is_some(),
+        tables.carrier.is_some(),
+        "the carrier rule and its slopes must come together"
+    );
     into.clear();
-    let position_ln = scratch.position_ln;
-    if !position_ln.is_finite() {
+    if !scratch.position_ln.is_finite() {
         return;
     }
-    let samples = scratch.samples;
-    let nodes = scratch.nodes;
-    let candidates = scratch.candidates.len();
-    let ln = |p: f64| float::ln(p.max(f64::MIN_POSITIVE));
-    let ln_three = float::ln(CANDIDATE_ALTERNATIVES as f64);
-
-    let density = &parameters.density;
-    let duplicated_share = parameters.duplicated.map_or(0.0, |d| d.share);
-    let ln_ordinary = ln(1.0 - duplicated_share);
-    let ln_invariant = ln(density.p_invariant);
-    let ln_fixed_alt = ln(density.p_fixed_alt);
-    let ln_segregating = ln(density.p_segregating());
-    let ln_duplicated = ln(duplicated_share);
-
-    // ---- the per-sample slopes the error rates are built from -------------------------------
-    for s in 0..samples {
-        let sample = &scratch.evidence.samples[s];
-        let weights = scratch.evidence.weights_of(s);
-        for class in 0..2 {
-            let rate = class_rate(parameters, class, group_index[s][0]);
-            let slopes = &mut into.slopes[s][class];
-            slopes.per_other_read = 1.0 / rate;
-            for j in 0..3_u8 {
-                let on_candidate = candidate_read_probability(j, ploidy, rate);
-                slopes.candidate[usize::from(j)] = candidate_read_probability_slope(j, ploidy)
-                    / on_candidate.max(f64::MIN_POSITIVE);
-                let on_reference = reference_read_probability(j, ploidy, rate);
-                let expected = expected_reference_reads(sample, weights, on_reference);
-                slopes.reference[usize::from(j)] = expected
-                    * reference_read_probability_slope(j, ploidy)
-                    / on_reference.max(f64::MIN_POSITIVE);
-            }
+    fill_read_slopes(scratch, model, into);
+    let branches = &tables.branches;
+    for class in 0..2 {
+        let class_terms = NoiseClassTerms::of(scratch, branches, parameters, class);
+        score_the_shares(scratch, branches, &class_terms, into);
+        score_the_invariant_and_fixed_branches(scratch, branches, &class_terms, into);
+        score_the_segregating_branch(
+            scratch,
+            model,
+            &tables.density,
+            branches,
+            &class_terms,
+            into,
+        );
+        if let (Some(rule), Some(rule_slopes)) = (model.carrier.as_ref(), &tables.carrier) {
+            debug_assert!(
+                parameters
+                    .duplicated
+                    .is_some_and(|d| rule_slopes.describes(rule, (d.carrier_a, d.carrier_b))),
+                "the carrier rule's slopes were built for another rule"
+            );
+            score_the_duplicated_branch(
+                scratch,
+                rule,
+                rule_slopes,
+                coverage_odds,
+                branches,
+                &class_terms,
+                into,
+            );
         }
     }
-    // The slope of one sample's reads under genotype `j` with candidate allele `allele`.
-    let read_slope = |into: &PositionScores, s: usize, class: usize, j: usize, allele: usize| {
-        let sample = &scratch.evidence.samples[s];
-        let slopes = &into.slopes[s][class];
-        let candidate_reads = sample.on[allele];
-        let other_reads = sample.non_reference() - candidate_reads - sample.on[4];
-        candidate_reads * slopes.candidate[j]
-            + other_reads * slopes.per_other_read
-            + slopes.reference[j]
-    };
+}
 
-    // A class's error rate is that class's slot in the sample's row: the clean rate is class
-    // zero's, the mismapped rate class one's. The slopes are accumulated straight into it.
-    const _: () = assert!(sample::CLEAN_ERROR_RATE == 0 && sample::NOISY_ERROR_RATE == 1);
+/// The log of each branch's share, the same for both noise classes and every position of a pass.
+#[derive(Debug)]
+struct BranchShares {
+    /// Whether the run fits the duplicated class.
+    duplicated_fitted: bool,
+    ln_ordinary: f64,
+    ln_invariant: f64,
+    ln_fixed_alt: f64,
+    ln_segregating: f64,
+    ln_duplicated: f64,
+    ln_three: f64,
+}
 
-    for class in 0..2 {
+impl BranchShares {
+    fn of(model: &PassModel<'_>) -> Self {
+        let ln = |p: f64| float::ln(p.max(f64::MIN_POSITIVE));
+        let density = &model.parameters.density;
+        let duplicated_share = model.parameters.duplicated.map_or(0.0, |d| d.share);
+        Self {
+            duplicated_fitted: model.carrier.is_some(),
+            ln_ordinary: ln(1.0 - duplicated_share),
+            ln_invariant: ln(density.p_invariant),
+            ln_fixed_alt: ln(density.p_fixed_alt),
+            ln_segregating: ln(density.p_segregating()),
+            ln_duplicated: ln(duplicated_share),
+            ln_three: float::ln(CANDIDATE_ALTERNATIVES as f64),
+        }
+    }
+}
+
+/// One noise class at this position: its index, the log of its share, and the log of any
+/// ordinary branch's posterior with that branch's own share divided back out.
+struct NoiseClassTerms {
+    class: usize,
+    ln_class: f64,
+    /// `ln(class share) + ln(1 − duplicated share) − ln(position likelihood)`: added to a branch's
+    /// log-likelihood it gives that branch's posterior over its own share — exactly the slope of
+    /// the position's log-likelihood in that share.
+    ln_posterior_per_share: f64,
+}
+
+impl NoiseClassTerms {
+    fn of(
+        scratch: &Scratch,
+        branches: &BranchShares,
+        parameters: &Parameters,
+        class: usize,
+    ) -> Self {
         let share = if class == 0 {
             1.0 - parameters.noisy_share
         } else {
             parameters.noisy_share
         };
-        let ln_class = ln(share);
-        // Each branch's posterior with its own share divided back out, which is exactly the
-        // slope of the position's log-likelihood in that share.
-        let ln_posterior_per_share = ln_class + ln_ordinary - position_ln;
-
-        // ---- the class share, and the density's two masses ------------------------------------
-        let within = ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
-        let slope_of_class = float::exp(within - position_ln);
-        into.cohort[cohort::NOISY_SHARE] += if class == 1 {
-            slope_of_class
-        } else {
-            -slope_of_class
-        };
-        let on_segregating_per_share =
-            float::exp(ln_posterior_per_share + scratch.segregating_ln[class]);
-        into.cohort[cohort::P_INVARIANT] +=
-            float::exp(ln_posterior_per_share + scratch.invariant_ln[class])
-                - on_segregating_per_share;
-        into.cohort[cohort::P_FIXED_ALT] +=
-            float::exp(ln_posterior_per_share + scratch.fixed_alt_ln[class])
-                - on_segregating_per_share;
-        if carrier.is_some() {
-            let ordinary = ln_sum_exp(&[
-                ln_invariant + scratch.invariant_ln[class],
-                ln_fixed_alt + scratch.fixed_alt_ln[class],
-                ln_segregating + scratch.segregating_ln[class],
-            ]);
-            into.cohort[cohort::DUPLICATED_SHARE] +=
-                float::exp(ln_class + scratch.duplicated_ln[class] - position_ln)
-                    - float::exp(ln_class + ordinary - position_ln);
+        let ln_class = float::ln(share.max(f64::MIN_POSITIVE));
+        Self {
+            class,
+            ln_class,
+            ln_posterior_per_share: ln_class + branches.ln_ordinary - scratch.position_ln,
         }
+    }
+}
 
-        // ---- the invariant branch: every sample homozygous reference ---------------------------
-        let invariant =
-            float::exp(ln_posterior_per_share + ln_invariant + scratch.invariant_ln[class]);
-        let any_allele = scratch.candidates[0];
-        for s in 0..samples {
-            let slope = read_slope(into, s, class, 0, any_allele);
-            into.samples[s][class] += invariant * slope;
-        }
-
-        // ---- the fixed branch: every sample carries two copies of the candidate ----------------
-        for candidate in 0..candidates {
-            let allele = scratch.candidates[candidate];
-            let fixed = float::exp(
-                ln_posterior_per_share
-                    + ln_fixed_alt
-                    + scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
-                    + float::ln(scratch.multiplicity[candidate])
-                    - ln_three,
-            );
-            for s in 0..samples {
-                let slope = read_slope(into, s, class, 2, allele);
-                into.samples[s][class] += fixed * slope;
+/// Each read's slope in its error rate, for every (class, candidate, sample, genotype), into
+/// `into.read_slopes`.
+///
+/// The slope a genotype's reads contribute is
+/// `candidate reads · candidate[j] + other reads / ε + reference[j]`: the candidate allele's reads
+/// each move by the slope of their log-probability, the reads on the two bases that are neither
+/// move by `1/ε` (each is `ε/3`), and the reference reads move by their expected count times their
+/// own log-probability's slope — the expected count, because the depth a stored code stands for is
+/// a range and the likelihood sums over it. Reads held out of the model (indels, spanning
+/// deletions, `N`) do not move at all.
+#[allow(
+    clippy::needless_range_loop,
+    reason = "the sample index addresses the evidence, the read-group map and the table at once"
+)]
+fn fill_read_slopes(scratch: &Scratch, model: &PassModel<'_>, into: &mut PositionScores) {
+    let samples = scratch.samples;
+    for s in 0..samples {
+        let sample = &scratch.evidence.samples[s];
+        let weights = scratch.evidence.weights_of(s);
+        for class in 0..2 {
+            let rate = class_rate(model.parameters, class, model.group_index[s][0]);
+            let per_other_read = 1.0 / rate;
+            let mut candidate = [0.0; 3];
+            let mut reference = [0.0; 3];
+            for j in 0..3_u8 {
+                let on_candidate = candidate_read_probability(j, model.ploidy, rate);
+                candidate[usize::from(j)] = candidate_read_probability_slope(j, model.ploidy)
+                    / on_candidate.max(f64::MIN_POSITIVE);
+                let on_reference = reference_read_probability(j, model.ploidy, rate);
+                let expected = expected_reference_reads(sample, weights, on_reference);
+                reference[usize::from(j)] = expected
+                    * reference_read_probability_slope(j, model.ploidy)
+                    / on_reference.max(f64::MIN_POSITIVE);
             }
-        }
-
-        // ---- the segregating branch, node by node ----------------------------------------------
-        for candidate in 0..candidates {
-            let allele = scratch.candidates[candidate];
-            let multiplicity = float::ln(scratch.multiplicity[candidate]);
-            for node in 0..nodes {
-                let at_node = float::exp(
-                    ln_posterior_per_share
-                        + ln_segregating
-                        + scratch.node_ln[scratch.node_at(class, candidate, node)]
-                        + multiplicity
-                        - ln_three,
-                );
-                if at_node == 0.0 {
-                    continue;
-                }
-                let f = quadrature.nodes[node];
-                let prior_along_excess = genotype_frequencies_slope_in_excess(f);
-                // How the node's whole product over samples moves with the frequency — each
-                // sample's term's slope in `f` over the term, summed.
-                let mut along_frequency = 0.0;
-                for s in 0..samples {
-                    let prior = &quadrature.priors[(node * samples + s) * 3..][..3];
-                    let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
-                    let joint = [prior[0] * lik[0], prior[1] * lik[1], prior[2] * lik[2]];
-                    let total = joint[0] + joint[1] + joint[2];
-                    if total <= 0.0 {
-                        continue;
-                    }
-                    let excess_slope = (prior_along_excess[0] * lik[0]
-                        + prior_along_excess[1] * lik[1]
-                        + prior_along_excess[2] * lik[2])
-                        / total;
-                    into.samples[s][sample::HOMOZYGOTE_EXCESS] += at_node * excess_slope;
-                    let prior_along_f =
-                        genotype_frequencies_slope_in_frequency(f, parameters.hom_excess[s]);
-                    along_frequency += (prior_along_f[0] * lik[0]
-                        + prior_along_f[1] * lik[1]
-                        + prior_along_f[2] * lik[2])
-                        / total;
-                    let mut reads = 0.0;
-                    for (j, weight) in joint.iter().enumerate() {
-                        reads += weight * read_slope(into, s, class, j, allele);
-                    }
-                    into.samples[s][class] += at_node * reads / total;
-                }
-                for (shape, slot) in [cohort::DENSITY_A, cohort::DENSITY_B]
-                    .into_iter()
-                    .enumerate()
-                {
-                    let slopes = density_rule.slopes;
-                    into.cohort[slot] += at_node
-                        * (slopes.ln_weight_slope[shape][node]
-                            + along_frequency * slopes.node_slope[shape][node]);
-                }
-            }
-        }
-
-        // ---- the duplicated branch, node by node over the carrier frequency --------------------
-        if let Some(carrier_rule) = carrier_rule {
-            let carrier = carrier_rule.rule;
-            for candidate in 0..candidates {
-                let allele = scratch.candidates[candidate];
-                let multiplicity = float::ln(scratch.multiplicity[candidate]);
-                for node in 0..carrier.nodes.len() {
-                    let at_node = float::exp(
-                        ln_class + ln_duplicated - position_ln
-                            + scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
-                            + multiplicity
-                            - ln_three,
-                    );
-                    if at_node == 0.0 {
-                        continue;
-                    }
-                    let q = carrier.nodes[node];
-                    let mut along_frequency = 0.0;
-                    for s in 0..samples {
-                        let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
-                        let odds = coverage_odds.get(s).copied().unwrap_or(1.0);
-                        let joint = [(1.0 - q) * lik[0], q * odds * lik[1]];
-                        let total = joint[0] + joint[1];
-                        if total <= 0.0 {
-                            continue;
-                        }
-                        along_frequency += (odds * lik[1] - lik[0]) / total;
-                        let reads = joint[0] * read_slope(into, s, class, 0, allele)
-                            + joint[1] * read_slope(into, s, class, 1, allele);
-                        into.samples[s][class] += at_node * reads / total;
-                    }
-                    for (shape, slot) in [cohort::CARRIER_A, cohort::CARRIER_B]
-                        .into_iter()
-                        .enumerate()
-                    {
-                        let slopes = carrier_rule.slopes;
-                        into.cohort[slot] += at_node
-                            * (slopes.ln_weight_slope[shape][node]
-                                + along_frequency * slopes.node_slope[shape][node]);
-                    }
+            for (position_candidate, &allele) in scratch.candidates.iter().enumerate() {
+                let candidate_reads = sample.on[allele];
+                let other_reads = sample.non_reference() - candidate_reads - sample.on[4];
+                for j in 0..3 {
+                    into.read_slopes[read_slope_index(samples, class, position_candidate, s, j)] =
+                        candidate_reads * candidate[j]
+                            + other_reads * per_other_read
+                            + reference[j];
                 }
             }
         }
     }
 }
 
-/// A quadrature rule beside how its nodes and weights move with its two shapes — the pair a
-/// shape's slope is read from.
-#[derive(Copy, Clone)]
-pub(super) struct SlopedRule<'a> {
-    pub rule: &'a BetaQuadrature,
-    pub slopes: &'a RuleSlopes,
+/// The class share's slope, and the three shares the class's branches are weighted by.
+fn score_the_shares(
+    scratch: &Scratch,
+    branches: &BranchShares,
+    class_terms: &NoiseClassTerms,
+    into: &mut PositionScores,
+) {
+    let class = class_terms.class;
+    let position_ln = scratch.position_ln;
+    let within = ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
+    let slope_of_class = float::exp(within - position_ln);
+    into.cohort[cohort::NOISY_SHARE] += if class == 1 {
+        slope_of_class
+    } else {
+        -slope_of_class
+    };
+    let on_segregating_per_share =
+        float::exp(class_terms.ln_posterior_per_share + scratch.segregating_ln[class]);
+    into.cohort[cohort::P_INVARIANT] +=
+        float::exp(class_terms.ln_posterior_per_share + scratch.invariant_ln[class])
+            - on_segregating_per_share;
+    into.cohort[cohort::P_FIXED_ALT] +=
+        float::exp(class_terms.ln_posterior_per_share + scratch.fixed_alt_ln[class])
+            - on_segregating_per_share;
+    if branches.duplicated_fitted {
+        let ordinary = ln_sum_exp(&[
+            branches.ln_invariant + scratch.invariant_ln[class],
+            branches.ln_fixed_alt + scratch.fixed_alt_ln[class],
+            branches.ln_segregating + scratch.segregating_ln[class],
+        ]);
+        into.cohort[cohort::DUPLICATED_SHARE] +=
+            float::exp(class_terms.ln_class + scratch.duplicated_ln[class] - position_ln)
+                - float::exp(class_terms.ln_class + ordinary - position_ln);
+    }
+}
+
+/// The error rates' slopes on the two branches where every sample holds the same genotype: all
+/// homozygous for the reference, or all for a candidate allele.
+fn score_the_invariant_and_fixed_branches(
+    scratch: &Scratch,
+    branches: &BranchShares,
+    class_terms: &NoiseClassTerms,
+    into: &mut PositionScores,
+) {
+    // A class's error rate is that class's slot in the sample's row: the clean rate is class
+    // zero's, the mismapped rate class one's.
+    const _: () = assert!(sample::CLEAN_ERROR_RATE == 0 && sample::NOISY_ERROR_RATE == 1);
+    let class = class_terms.class;
+    let invariant = float::exp(
+        class_terms.ln_posterior_per_share + branches.ln_invariant + scratch.invariant_ln[class],
+    );
+    // At genotype 0 no read's slope depends on which allele is the candidate — the candidate's
+    // `(1/3)/(ε/3)` is the other bases' `1/ε` — so the first candidate stands for all (in exact
+    // arithmetic; another candidate's table entry can differ in its last bits).
+    for s in 0..scratch.samples {
+        let slope = into.read_slope(class, 0, s, 0);
+        into.samples[s][class] += invariant * slope;
+    }
+    for candidate in 0..scratch.candidates.len() {
+        let fixed = float::exp(
+            class_terms.ln_posterior_per_share
+                + branches.ln_fixed_alt
+                + scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
+                + float::ln(scratch.multiplicity[candidate])
+                - branches.ln_three,
+        );
+        for s in 0..scratch.samples {
+            let slope = into.read_slope(class, candidate, s, 2);
+            into.samples[s][class] += fixed * slope;
+        }
+    }
+}
+
+/// The segregating branch, node by node: each sample's error rate and homozygote excess, and the
+/// density's two shapes.
+fn score_the_segregating_branch(
+    scratch: &Scratch,
+    model: &PassModel<'_>,
+    rule_slopes: &RuleSlopes,
+    branches: &BranchShares,
+    class_terms: &NoiseClassTerms,
+    into: &mut PositionScores,
+) {
+    let class = class_terms.class;
+    let quadrature = &model.quadrature;
+    let samples = scratch.samples;
+    for candidate in 0..scratch.candidates.len() {
+        let multiplicity = float::ln(scratch.multiplicity[candidate]);
+        for node in 0..scratch.nodes {
+            let at_node = float::exp(
+                class_terms.ln_posterior_per_share
+                    + branches.ln_segregating
+                    + scratch.node_ln[scratch.node_at(class, candidate, node)]
+                    + multiplicity
+                    - branches.ln_three,
+            );
+            if at_node == 0.0 {
+                continue;
+            }
+            let f = quadrature.nodes[node];
+            let prior_along_excess = genotype_frequencies_slope_in_excess(f);
+            // How the node's whole product over samples moves with the frequency — each
+            // sample's term's slope in `f` over the term, summed.
+            let mut along_frequency = 0.0;
+            for s in 0..samples {
+                let prior = &quadrature.priors[(node * samples + s) * 3..][..3];
+                let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
+                let joint = [prior[0] * lik[0], prior[1] * lik[1], prior[2] * lik[2]];
+                let total = joint[0] + joint[1] + joint[2];
+                if total <= 0.0 {
+                    continue;
+                }
+                let excess_slope = (prior_along_excess[0] * lik[0]
+                    + prior_along_excess[1] * lik[1]
+                    + prior_along_excess[2] * lik[2])
+                    / total;
+                into.samples[s][sample::HOMOZYGOTE_EXCESS] += at_node * excess_slope;
+                let prior_along_f =
+                    genotype_frequencies_slope_in_frequency(f, model.parameters.hom_excess[s]);
+                along_frequency += (prior_along_f[0] * lik[0]
+                    + prior_along_f[1] * lik[1]
+                    + prior_along_f[2] * lik[2])
+                    / total;
+                let mut reads = 0.0;
+                for (j, weight) in joint.iter().enumerate() {
+                    reads += weight * into.read_slope(class, candidate, s, j);
+                }
+                into.samples[s][class] += at_node * reads / total;
+            }
+            for (shape, slot) in [cohort::DENSITY_A, cohort::DENSITY_B]
+                .into_iter()
+                .enumerate()
+            {
+                into.cohort[slot] += at_node
+                    * (rule_slopes.ln_weight_slope[shape][node]
+                        + along_frequency * rule_slopes.node_slope[shape][node]);
+            }
+        }
+    }
+}
+
+/// The duplicated branch, node by node over the carrier frequency: each sample's error rate and
+/// the carrier Beta's two shapes.
+fn score_the_duplicated_branch(
+    scratch: &Scratch,
+    carrier: &BetaQuadrature,
+    rule_slopes: &RuleSlopes,
+    coverage_odds: &[f64],
+    branches: &BranchShares,
+    class_terms: &NoiseClassTerms,
+    into: &mut PositionScores,
+) {
+    let class = class_terms.class;
+    for candidate in 0..scratch.candidates.len() {
+        let multiplicity = float::ln(scratch.multiplicity[candidate]);
+        for node in 0..carrier.nodes.len() {
+            let at_node = float::exp(
+                class_terms.ln_class + branches.ln_duplicated - scratch.position_ln
+                    + scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
+                    + multiplicity
+                    - branches.ln_three,
+            );
+            if at_node == 0.0 {
+                continue;
+            }
+            let q = carrier.nodes[node];
+            let mut along_frequency = 0.0;
+            for s in 0..scratch.samples {
+                let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
+                let odds = coverage_odds.get(s).copied().unwrap_or(1.0);
+                let joint = [(1.0 - q) * lik[0], q * odds * lik[1]];
+                let total = joint[0] + joint[1];
+                if total <= 0.0 {
+                    continue;
+                }
+                along_frequency += (odds * lik[1] - lik[0]) / total;
+                let reads = joint[0] * into.read_slope(class, candidate, s, 0)
+                    + joint[1] * into.read_slope(class, candidate, s, 1);
+                into.samples[s][class] += at_node * reads / total;
+            }
+            for (shape, slot) in [cohort::CARRIER_A, cohort::CARRIER_B]
+                .into_iter()
+                .enumerate()
+            {
+                into.cohort[slot] += at_node
+                    * (rule_slopes.ln_weight_slope[shape][node]
+                        + along_frequency * rule_slopes.node_slope[shape][node]);
+            }
+        }
+    }
+}
+
+/// **The information, in blocks**: each position's scores multiplied pairwise and summed over
+/// positions, keeping only the products spec §3.2's block approximation reads.
+///
+/// Every block is row-major. **A sum over positions, like every other count of the pass**, so a
+/// chunk's sums add to another chunk's, and the pass joins them in its fixed order.
+#[derive(Clone, Debug)]
+pub(super) struct InformationSums {
+    /// The cohort's eight parameters with each other, `[row * 8 + column]`, indexed by [`cohort`].
+    pub cohort: [f64; COHORT_PARAMETERS * COHORT_PARAMETERS],
+    /// Per sample, its three parameters with each other, `[row * 3 + column]`, indexed by
+    /// [`sample`].
+    pub sample_blocks: Vec<[f64; SAMPLE_PARAMETERS * SAMPLE_PARAMETERS]>,
+    /// Per sample, its three parameters (rows) with the cohort's eight (columns),
+    /// `[row * 8 + column]`.
+    pub sample_cohort_blocks: Vec<[f64; SAMPLE_PARAMETERS * COHORT_PARAMETERS]>,
+}
+
+impl InformationSums {
+    pub(super) fn new(samples: usize) -> Self {
+        Self {
+            cohort: [0.0; COHORT_PARAMETERS * COHORT_PARAMETERS],
+            sample_blocks: vec![[0.0; SAMPLE_PARAMETERS * SAMPLE_PARAMETERS]; samples],
+            sample_cohort_blocks: vec![[0.0; SAMPLE_PARAMETERS * COHORT_PARAMETERS]; samples],
+        }
+    }
+
+    /// Add one position's products. A sample whose three slopes are all zero there — no reads,
+    /// or a position that underflowed — would add only zeros, so it is skipped: a saving in time,
+    /// not in what is added.
+    pub(super) fn add_position(&mut self, scores: &PositionScores) {
+        let cohort = &scores.cohort;
+        for (row, &left) in cohort.iter().enumerate() {
+            for (column, &right) in cohort.iter().enumerate() {
+                self.cohort[row * COHORT_PARAMETERS + column] += left * right;
+            }
+        }
+        for ((own, with_cohort), row_scores) in self
+            .sample_blocks
+            .iter_mut()
+            .zip(self.sample_cohort_blocks.iter_mut())
+            .zip(&scores.samples)
+        {
+            if row_scores.iter().all(|&score| score == 0.0) {
+                continue;
+            }
+            for (row, &left) in row_scores.iter().enumerate() {
+                for (column, &right) in row_scores.iter().enumerate() {
+                    own[row * SAMPLE_PARAMETERS + column] += left * right;
+                }
+                for (column, &right) in cohort.iter().enumerate() {
+                    with_cohort[row * COHORT_PARAMETERS + column] += left * right;
+                }
+            }
+        }
+    }
+
+    /// Add another chunk's sums.
+    pub(super) fn absorb(&mut self, other: &Self) {
+        debug_assert_eq!(
+            self.sample_blocks.len(),
+            other.sample_blocks.len(),
+            "two chunks of one pass hold the same samples"
+        );
+        for (into, from) in self.cohort.iter_mut().zip(&other.cohort) {
+            *into += from;
+        }
+        for (into, from) in self.sample_blocks.iter_mut().zip(&other.sample_blocks) {
+            for (into, from) in into.iter_mut().zip(from) {
+                *into += from;
+            }
+        }
+        for (into, from) in self
+            .sample_cohort_blocks
+            .iter_mut()
+            .zip(&other.sample_cohort_blocks)
+        {
+            for (into, from) in into.iter_mut().zip(from) {
+                *into += from;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -492,9 +724,9 @@ mod tests {
         DrawnCohort, as_cohort, draw_cohort_with_duplications,
     };
     use crate::parameter_estimation::joint::fit::{
-        DuplicatedPositions, EvidenceCursor, FrequencyDensity, JointFitConfig, ReadLogs,
-        SampleAtPosition, Statistics, candidate_read_probability, digamma, expectation_pass,
-        genotype_frequencies, one_position,
+        DuplicatedPositions, EvidenceCursor, FrequencyDensity, JointFitConfig, MAX_RECORDED_SPREAD,
+        MIN_POSITIONS_PER_CHUNK, Parameters, PassKeeps, SampleAtPosition, Statistics,
+        candidate_read_probability, digamma, expectation_pass, genotype_frequencies, one_position,
     };
 
     use super::*;
@@ -546,39 +778,17 @@ mod tests {
     }
 
     /// One pass over every position, in position order and on one thread: the log-likelihood,
-    /// and every parameter's slope summed over the positions.
-    fn summed_scores(
+    /// and every position's slopes.
+    fn scores_at_every_position(
         lent: &[SampleGenericSections<'_>],
         depth_cap: DepthCap,
         config: &JointFitConfig,
         group_index: &[Vec<usize>],
         coverage: &[f64],
         parameters: &Parameters,
-    ) -> (f64, PositionScores) {
-        let quadrature = BetaQuadrature::with_genotype_priors(
-            parameters.density.a,
-            parameters.density.b,
-            config.quadrature_nodes,
-            &parameters.hom_excess,
-        );
-        let density_slopes = RuleSlopes::of(
-            parameters.density.a,
-            parameters.density.b,
-            config.quadrature_nodes,
-        );
-        let carrier = parameters
-            .duplicated
-            .map(|d| BetaQuadrature::new(d.carrier_a, d.carrier_b, config.quadrature_nodes));
-        let carrier_slopes = parameters
-            .duplicated
-            .map(|d| RuleSlopes::of(d.carrier_a, d.carrier_b, config.quadrature_nodes));
-        let read_logs: Vec<Vec<ReadLogs>> = (0..2)
-            .map(|class| {
-                (0..parameters.clean.len())
-                    .map(|group| ReadLogs::of(class_rate(parameters, class, group), config.ploidy))
-                    .collect()
-            })
-            .collect();
+    ) -> (f64, Vec<PositionScores>) {
+        let model = PassModel::new(parameters, config, group_index);
+        let slopes = ScoringTables::of(&model);
         let positions = EvidenceCursor::position_count(lent);
         let mut cursor = EvidenceCursor::over(
             lent,
@@ -589,39 +799,32 @@ mod tests {
             0,
             positions,
         );
-        let mut scratch = Scratch::new(lent.len(), quadrature.nodes.len());
-        let mut statistics =
-            Statistics::new(parameters.clean.len(), lent.len(), quadrature.nodes.len());
+        let nodes = model.quadrature.nodes.len();
+        let mut scratch = Scratch::new(lent.len(), nodes);
+        let mut statistics = Statistics::new(parameters.clean.len(), lent.len(), nodes);
         let mut here = PositionScores::new(lent.len());
-        let mut total = PositionScores::new(lent.len());
+        let mut every = Vec::with_capacity(positions);
         while cursor.next_position(&mut scratch.evidence) {
-            one_position(
-                &mut scratch,
-                group_index,
-                config.ploidy,
-                &read_logs,
-                &quadrature,
-                carrier.as_ref(),
-                &[],
-                parameters,
-                &mut statistics,
-            );
-            score_position(
-                &scratch,
-                group_index,
-                config.ploidy,
-                SlopedRule {
-                    rule: &quadrature,
-                    slopes: &density_slopes,
-                },
-                carrier
-                    .as_ref()
-                    .zip(carrier_slopes.as_ref())
-                    .map(|(rule, slopes)| SlopedRule { rule, slopes }),
-                &[],
-                parameters,
-                &mut here,
-            );
+            one_position(&mut scratch, &model, &[], &mut statistics);
+            score_position(&scratch, &model, &slopes, &[], &mut here);
+            every.push(here.clone());
+        }
+        (statistics.log_likelihood, every)
+    }
+
+    /// The same pass: the log-likelihood, and every parameter's slope summed over the positions.
+    fn summed_scores(
+        lent: &[SampleGenericSections<'_>],
+        depth_cap: DepthCap,
+        config: &JointFitConfig,
+        group_index: &[Vec<usize>],
+        coverage: &[f64],
+        parameters: &Parameters,
+    ) -> (f64, PositionScores) {
+        let (log_likelihood, every) =
+            scores_at_every_position(lent, depth_cap, config, group_index, coverage, parameters);
+        let mut total = PositionScores::new(lent.len());
+        for here in &every {
             for (into, from) in total.cohort.iter_mut().zip(&here.cohort) {
                 *into += from;
             }
@@ -631,7 +834,7 @@ mod tests {
                 }
             }
         }
-        (statistics.log_likelihood, total)
+        (log_likelihood, total)
     }
 
     /// The pass's own log-likelihood — the function the slopes are slopes of.
@@ -650,7 +853,7 @@ mod tests {
             group_index,
             coverage,
             parameters,
-            false,
+            PassKeeps::SUMS_ONLY,
         )
         .log_likelihood
     }
@@ -966,7 +1169,7 @@ mod tests {
                     group_index,
                     coverage,
                     &parameters,
-                    false,
+                    PassKeeps::SUMS_ONLY,
                 );
                 let (a, b) = (parameters.density.a, parameters.density.b);
                 let digamma_form =
@@ -1148,31 +1351,16 @@ mod tests {
         parameters: &Parameters,
         mut scores: Option<&mut PositionScores>,
     ) -> f64 {
-        const NODES: usize = 12;
-        let ploidy = JointFitConfig::default().ploidy;
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            ..JointFitConfig::default()
+        };
         let samples = group_index.len();
-        let quadrature = BetaQuadrature::with_genotype_priors(
-            parameters.density.a,
-            parameters.density.b,
-            NODES,
-            &parameters.hom_excess,
-        );
-        let density_slopes = RuleSlopes::of(parameters.density.a, parameters.density.b, NODES);
-        let carrier = parameters
-            .duplicated
-            .map(|d| BetaQuadrature::new(d.carrier_a, d.carrier_b, NODES));
-        let carrier_slopes = parameters
-            .duplicated
-            .map(|d| RuleSlopes::of(d.carrier_a, d.carrier_b, NODES));
-        let read_logs: Vec<Vec<ReadLogs>> = (0..2)
-            .map(|class| {
-                (0..parameters.clean.len())
-                    .map(|group| ReadLogs::of(class_rate(parameters, class, group), ploidy))
-                    .collect()
-            })
-            .collect();
-        let mut scratch = Scratch::new(samples, NODES);
-        let mut statistics = Statistics::new(parameters.clean.len(), samples, NODES);
+        let model = PassModel::new(parameters, &config, group_index);
+        let slopes = ScoringTables::of(&model);
+        let nodes = model.quadrature.nodes.len();
+        let mut scratch = Scratch::new(samples, nodes);
+        let mut statistics = Statistics::new(parameters.clean.len(), samples, nodes);
         let mut here = PositionScores::new(samples);
         let mut total = 0.0;
         for position in stored {
@@ -1185,35 +1373,10 @@ mod tests {
                 .evidence
                 .observed_alternatives
                 .clone_from(&position.observed_alternatives);
-            one_position(
-                &mut scratch,
-                group_index,
-                ploidy,
-                &read_logs,
-                &quadrature,
-                carrier.as_ref(),
-                odds,
-                parameters,
-                &mut statistics,
-            );
+            one_position(&mut scratch, &model, odds, &mut statistics);
             total += scratch.position_ln;
             if let Some(into) = scores.as_deref_mut() {
-                score_position(
-                    &scratch,
-                    group_index,
-                    ploidy,
-                    SlopedRule {
-                        rule: &quadrature,
-                        slopes: &density_slopes,
-                    },
-                    carrier
-                        .as_ref()
-                        .zip(carrier_slopes.as_ref())
-                        .map(|(rule, slopes)| SlopedRule { rule, slopes }),
-                    odds,
-                    parameters,
-                    &mut here,
-                );
+                score_position(&scratch, &model, &slopes, odds, &mut here);
                 for (into, from) in into.cohort.iter_mut().zip(&here.cohort) {
                     *into += from;
                 }
@@ -1343,6 +1506,345 @@ mod tests {
                 disagreement < TOLERANCE,
                 "sample 0's clean-rate slope is {disagreement:.2e} off its first group's"
             );
+        });
+    }
+
+    /// The information blocks formed from every position's scores in position order, each product
+    /// written out — the independent account a pass's [`InformationSums`] is checked against.
+    fn information_by_hand(every: &[PositionScores]) -> InformationSums {
+        let samples = every.first().map_or(0, |scores| scores.samples.len());
+        let mut sums = InformationSums::new(samples);
+        for here in every {
+            for row in 0..COHORT_PARAMETERS {
+                for column in 0..COHORT_PARAMETERS {
+                    sums.cohort[row * COHORT_PARAMETERS + column] +=
+                        here.cohort[row] * here.cohort[column];
+                }
+            }
+            for s in 0..samples {
+                for row in 0..SAMPLE_PARAMETERS {
+                    for column in 0..SAMPLE_PARAMETERS {
+                        sums.sample_blocks[s][row * SAMPLE_PARAMETERS + column] +=
+                            here.samples[s][row] * here.samples[s][column];
+                    }
+                    for column in 0..COHORT_PARAMETERS {
+                        sums.sample_cohort_blocks[s][row * COHORT_PARAMETERS + column] +=
+                            here.samples[s][row] * here.cohort[column];
+                    }
+                }
+            }
+        }
+        sums
+    }
+
+    /// Every entry of two sets of blocks, beside the Cauchy–Schwarz bound on it — the square root
+    /// of the two diagonal entries its row and column meet — which is the scale its rounding is
+    /// measured against when positive and negative products cancel.
+    fn entries_with_scale(pass: &InformationSums, hand: &InformationSums) -> Vec<(f64, f64, f64)> {
+        let cohort_diagonal = |i: usize| hand.cohort[i * COHORT_PARAMETERS + i];
+        let mut entries = Vec::new();
+        for row in 0..COHORT_PARAMETERS {
+            for column in 0..COHORT_PARAMETERS {
+                let at = row * COHORT_PARAMETERS + column;
+                let scale = (cohort_diagonal(row) * cohort_diagonal(column)).sqrt();
+                entries.push((pass.cohort[at], hand.cohort[at], scale));
+            }
+        }
+        for s in 0..hand.sample_blocks.len() {
+            let own_diagonal = |i: usize| hand.sample_blocks[s][i * SAMPLE_PARAMETERS + i];
+            for row in 0..SAMPLE_PARAMETERS {
+                for column in 0..SAMPLE_PARAMETERS {
+                    let at = row * SAMPLE_PARAMETERS + column;
+                    let scale = (own_diagonal(row) * own_diagonal(column)).sqrt();
+                    entries.push((pass.sample_blocks[s][at], hand.sample_blocks[s][at], scale));
+                }
+                for column in 0..COHORT_PARAMETERS {
+                    let at = row * COHORT_PARAMETERS + column;
+                    let scale = (own_diagonal(row) * cohort_diagonal(column)).sqrt();
+                    entries.push((
+                        pass.sample_cohort_blocks[s][at],
+                        hand.sample_cohort_blocks[s][at],
+                        scale,
+                    ));
+                }
+            }
+        }
+        entries
+    }
+
+    /// **A pass asked for the information sums each position's scores multiplied pairwise**, in
+    /// the three kinds of block the standard errors read, **and moves no count it keeps anyway**
+    /// — on both ways a pass joins its chunks: in position order when it also keeps per-position
+    /// lists (a run's final pass), and in the fixed halving tree otherwise.
+    ///
+    /// The 600 positions are cut into three chunks of at most 256, so the pass's sums are joined
+    /// across chunks while the account here adds position by position: every entry agrees to 10⁻¹²
+    /// of the bound its row and column put on it. A pass that paired a sample's scores with
+    /// another sample's, dropped a chunk, or transposed a sample's block with the cohort fails
+    /// it; the other two blocks are symmetric, so transposing them changes no bit. **It runs on the
+    /// four-sample fixture and on one sample alone**, the smallest cohort the fit takes.
+    #[test]
+    fn a_pass_sums_the_scores_multiplied_pairwise() {
+        let (four, parameters_of_four) = a_cohort_and_parameters_off_the_maximum(8.0);
+        let one = draw_cohort_with_duplications(
+            1,
+            600,
+            8.0,
+            (0.003, 0.06, 0.03),
+            FrequencyDensity {
+                p_invariant: 0.88,
+                p_fixed_alt: 0.01,
+                a: 0.6,
+                b: 2.2,
+            },
+            0.3,
+            0.01,
+            0x0F17_5C03_E5A1_0003,
+        );
+        let mut parameters_of_one = parameters_of_four.clone();
+        parameters_of_one.clean.truncate(1);
+        parameters_of_one.noisy.truncate(1);
+        parameters_of_one.hom_excess.truncate(1);
+        for (cohort, parameters) in [(&four, &parameters_of_four), (&one, &parameters_of_one)] {
+            check_a_pass_against_its_scores(cohort, parameters);
+        }
+    }
+
+    /// The body of [`a_pass_sums_the_scores_multiplied_pairwise`], for one cohort.
+    fn check_a_pass_against_its_scores(cohort: &DrawnCohort, parameters: &Parameters) {
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            ..JointFitConfig::default()
+        };
+        with_sections(cohort, None, |lent, depth_cap, group_index, coverage| {
+            let positions = EvidenceCursor::position_count(lent);
+            assert!(
+                positions > 2 * MIN_POSITIONS_PER_CHUNK,
+                "the pass must join more than two chunks; {positions} positions"
+            );
+            let (_, every) = scores_at_every_position(
+                lent,
+                depth_cap,
+                &config,
+                group_index,
+                coverage,
+                parameters,
+            );
+            let by_hand = information_by_hand(&every);
+            for per_position_posteriors in [false, true] {
+                let pass = |information: bool| {
+                    expectation_pass(
+                        lent,
+                        depth_cap,
+                        &config,
+                        group_index,
+                        coverage,
+                        parameters,
+                        PassKeeps {
+                            per_position_posteriors,
+                            information,
+                        },
+                    )
+                };
+                let (with, without) = (pass(true), pass(false));
+                assert!(without.information.is_none(), "nothing asked, nothing kept");
+                for (name, asked, not_asked) in [
+                    (
+                        "log-likelihood",
+                        with.log_likelihood,
+                        without.log_likelihood,
+                    ),
+                    ("segregating mass", with.segregating, without.segregating),
+                    ("Σ ln f", with.sum_ln_f, without.sum_ln_f),
+                    ("duplicated mass", with.duplicated, without.duplicated),
+                ] {
+                    assert_eq!(
+                        asked.to_bits(),
+                        not_asked.to_bits(),
+                        "asking for the information moved the {name}"
+                    );
+                }
+                let summed = with.information.expect("the pass was asked for it");
+                let mut worst = 0.0_f64;
+                for (pass, hand, scale) in entries_with_scale(&summed, &by_hand) {
+                    if scale == 0.0 {
+                        assert_eq!(pass, 0.0, "an entry whose diagonal is empty must be zero");
+                        continue;
+                    }
+                    worst = worst.max((pass - hand).abs() / scale);
+                }
+                eprintln!(
+                    "information (per-position lists kept: {per_position_posteriors}): worst \
+                     disagreement {worst:.2e} of each entry's bound"
+                );
+                assert!(worst < 1e-12, "worst disagreement {worst:.2e}");
+                // Every sample has reads here, so every diagonal entry is positive.
+                for block in &summed.sample_blocks {
+                    for which in 0..SAMPLE_PARAMETERS {
+                        assert!(block[which * SAMPLE_PARAMETERS + which] > 0.0);
+                    }
+                }
+            }
+        });
+    }
+
+    /// **The information is the same bits at one, four and eight threads**, on both ways a pass
+    /// joins its chunks. The cohort is long enough for thirteen chunks.
+    #[test]
+    fn the_information_is_the_same_bits_at_any_pool_width() {
+        let positions = 12 * MIN_POSITIONS_PER_CHUNK + 100;
+        let cohort = draw_cohort_with_duplications(
+            3,
+            positions,
+            8.0,
+            (0.003, 0.06, 0.03),
+            FrequencyDensity {
+                p_invariant: 0.88,
+                p_fixed_alt: 0.01,
+                a: 0.6,
+                b: 2.2,
+            },
+            0.3,
+            0.01,
+            0x0F17_5C03_E5A1_0002,
+        );
+        let (_, mut parameters) = a_cohort_and_parameters_off_the_maximum(8.0);
+        parameters.clean.truncate(3);
+        parameters.noisy.truncate(3);
+        parameters.hom_excess.truncate(3);
+        let config = JointFitConfig {
+            quadrature_nodes: 8,
+            ..JointFitConfig::default()
+        };
+        for per_position_posteriors in [false, true] {
+            let at = |threads: usize| {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .expect("a pool of the asked-for width");
+                with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+                    let statistics = pool.install(|| {
+                        expectation_pass(
+                            lent,
+                            depth_cap,
+                            &config,
+                            group_index,
+                            coverage,
+                            &parameters,
+                            PassKeeps {
+                                per_position_posteriors,
+                                information: true,
+                            },
+                        )
+                    });
+                    let information = statistics
+                        .information
+                        .expect("the pass was asked for the information");
+                    // `Debug` prints every finite `f64` as its shortest round-trip form, so two
+                    // equal strings are two equal sets of bits.
+                    format!("{information:?}")
+                })
+            };
+            let at_one = at(1);
+            for threads in [4, 8] {
+                assert!(
+                    at_one == at(threads),
+                    "the information differs between one thread and {threads} (per-position \
+                     lists kept: {per_position_posteriors})"
+                );
+            }
+        }
+    }
+
+    /// **A sample with no reads carries no information**: its own block and its block with the
+    /// cohort are exactly zero, so its standard errors will be reported as absent rather than
+    /// computed from rounding (spec §3.2, "No information"). Sample 2's evidence is emptied at
+    /// every position.
+    #[test]
+    fn a_sample_without_reads_carries_no_information() {
+        let (cohort, parameters) = a_cohort_and_parameters_off_the_maximum(8.0);
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            ..JointFitConfig::default()
+        };
+        let silent = 2;
+        with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+            let mut stored = positions_with_held_out_reads(lent, depth_cap, coverage);
+            for position in &mut stored {
+                position.samples[silent] = SampleAtPosition {
+                    depth: 0.0,
+                    on: [0.0; 5],
+                    fewest_reference: 0.0,
+                    spread: 1,
+                };
+                let weights = &mut position.depth_weights[silent * MAX_RECORDED_SPREAD..]
+                    [..MAX_RECORDED_SPREAD];
+                weights.fill(0.0);
+                weights[0] = 1.0;
+            }
+            let model = PassModel::new(&parameters, &config, group_index);
+            let slopes = ScoringTables::of(&model);
+            let nodes = model.quadrature.nodes.len();
+            let mut scratch = Scratch::new(group_index.len(), nodes);
+            let mut statistics = Statistics::new(parameters.clean.len(), group_index.len(), nodes);
+            let mut here = PositionScores::new(group_index.len());
+            let mut information = InformationSums::new(group_index.len());
+            for position in &stored {
+                scratch.evidence.samples.clone_from(&position.samples);
+                scratch
+                    .evidence
+                    .depth_weights
+                    .clone_from(&position.depth_weights);
+                scratch
+                    .evidence
+                    .observed_alternatives
+                    .clone_from(&position.observed_alternatives);
+                one_position(&mut scratch, &model, &[], &mut statistics);
+                score_position(&scratch, &model, &slopes, &[], &mut here);
+                information.add_position(&here);
+            }
+            assert_eq!(information.sample_blocks[silent], [0.0; 9]);
+            assert_eq!(information.sample_cohort_blocks[silent], [0.0; 24]);
+            assert!(
+                information.sample_blocks[0][0] > 0.0,
+                "a sample with reads does carry information"
+            );
+        });
+    }
+
+    /// **A scorer handed tables built for other shapes refuses them**, in the builds that carry
+    /// debug checks: the tables here were built at a density shape `a` a hundredth higher than the
+    /// pass's own, which would give every shape's slope from the wrong rule without failing.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "built for another rule")]
+    fn tables_built_for_another_rule_are_refused() {
+        let (cohort, parameters) = a_cohort_and_parameters_off_the_maximum(8.0);
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            ..JointFitConfig::default()
+        };
+        let mut other = parameters.clone();
+        other.density.a += 0.01;
+        with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+            let model = PassModel::new(&parameters, &config, group_index);
+            let tables = ScoringTables::of(&PassModel::new(&other, &config, group_index));
+            let mut cursor = EvidenceCursor::over(
+                lent,
+                &config.edges,
+                depth_cap,
+                coverage,
+                config.depth_as_a_range,
+                0,
+                EvidenceCursor::position_count(lent),
+            );
+            let nodes = model.quadrature.nodes.len();
+            let mut scratch = Scratch::new(lent.len(), nodes);
+            let mut statistics = Statistics::new(parameters.clean.len(), lent.len(), nodes);
+            let mut here = PositionScores::new(lent.len());
+            assert!(cursor.next_position(&mut scratch.evidence));
+            one_position(&mut scratch, &model, &[], &mut statistics);
+            score_position(&scratch, &model, &tables, &[], &mut here);
         });
     }
 

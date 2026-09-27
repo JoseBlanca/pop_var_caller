@@ -59,6 +59,8 @@ use super::contamination::{
 
 mod information;
 
+use information::{InformationSums, PositionScores, ScoringTables, score_position};
+
 // ---------------------------------------------------------------------
 // What the route emits
 // ---------------------------------------------------------------------
@@ -1362,6 +1364,9 @@ struct Statistics {
     /// costs less than the branch that would skip it, and a pass that skipped it would leave the
     /// field describing whichever earlier pass last filled it.
     census_moments: CensusMomentSums,
+    /// **The information the standard errors are computed from**, summed over the positions this
+    /// chunk saw — `None` unless the pass was asked for it ([`PassKeeps::information`]).
+    information: Option<InformationSums>,
 }
 
 /// What one pass of the alternation ended at. **Collected only when a run asks for it**, and
@@ -1421,6 +1426,7 @@ impl Statistics {
             // refuses a panel of none. One is as harmless a stand-in as there is: no position is
             // ever added to it.
             census_moments: CensusMomentSums::over(samples.max(1)),
+            information: None,
         }
     }
 }
@@ -1486,6 +1492,13 @@ impl Statistics {
         self.duplicated_posterior
             .extend_from_slice(&other.duplicated_posterior);
         self.census_moments.merge(&other.census_moments);
+        match (self.information.as_mut(), other.information.as_ref()) {
+            (Some(into), Some(from)) => into.absorb(from),
+            (None, None) => {}
+            _ => {
+                unreachable!("two chunks of one pass disagree on whether they keep the information")
+            }
+        }
     }
 }
 
@@ -1958,7 +1971,10 @@ fn maximise(
         group_index,
         coverage,
         &parameters,
-        true,
+        PassKeeps {
+            per_position_posteriors: true,
+            information: false,
+        },
     );
     let Alternation { passes, trace, .. } = alternation;
     (parameters, statistics, passes, converged, trace)
@@ -2208,6 +2224,63 @@ const NOISY_ERROR_BOUNDS: (f64, f64) = (1e-4, 0.45);
 const BETA_SHAPE_BOUNDS: (f64, f64) = (0.02, 50.0);
 const HOM_EXCESS_BOUNDS: (f64, f64) = (0.0, 1.0);
 
+/// **What a pass holds fixed while it visits positions**: the parameters, which read group each
+/// sample's reads are scored under, and the tables built from the parameters once a pass — each
+/// read group's read log-probabilities and the two quadrature rules.
+///
+/// One value, handed both to [`one_position`] and to the scorer that reads what it leaves behind
+/// ([`information::score_position`]), so the two cannot be given different inputs.
+struct PassModel<'a> {
+    /// Per sample, the read groups its sections are, in the order the cursor visits them.
+    group_index: &'a [Vec<usize>],
+    ploidy: Ploidy,
+    /// `[class][read group]`.
+    read_logs: Vec<Vec<ReadLogs>>,
+    /// The frequency density's rule, with each sample's genotype priors at its nodes.
+    quadrature: BetaQuadrature,
+    /// The carrier Beta's rule, when the run fits the duplicated class.
+    carrier: Option<BetaQuadrature>,
+    parameters: &'a Parameters,
+}
+
+impl<'a> PassModel<'a> {
+    fn new(
+        parameters: &'a Parameters,
+        config: &JointFitConfig,
+        group_index: &'a [Vec<usize>],
+    ) -> Self {
+        let quadrature = BetaQuadrature::with_genotype_priors(
+            parameters.density.a,
+            parameters.density.b,
+            config.quadrature_nodes,
+            &parameters.hom_excess,
+        );
+        let carrier = parameters.duplicated.map(|duplicated| {
+            BetaQuadrature::new(
+                duplicated.carrier_a,
+                duplicated.carrier_b,
+                config.quadrature_nodes,
+            )
+        });
+        // One table a noise class a read group, beside the quadratures and for the same reason.
+        let read_logs: Vec<Vec<ReadLogs>> = (0..2)
+            .map(|class| {
+                (0..parameters.clean.len())
+                    .map(|group| ReadLogs::of(class_rate(parameters, class, group), config.ploidy))
+                    .collect()
+            })
+            .collect();
+        Self {
+            group_index,
+            ploidy: config.ploidy,
+            read_logs,
+            quadrature,
+            carrier,
+            parameters,
+        }
+    }
+}
+
 /// One pass over every position: the posteriors, and every count the maximisations need.
 ///
 /// **Split across cores by position.** Positions are independent given the parameters, and a
@@ -2227,15 +2300,35 @@ fn expectation(
         group_index,
         coverage,
         parameters,
-        false,
+        PassKeeps::SUMS_ONLY,
     )
 }
 
-/// The same pass, told whether to keep each position's probability of being mismapped.
+/// **What a pass keeps beyond the sums every maximisation reads.**
+#[derive(Copy, Clone, Debug)]
+struct PassKeeps {
+    /// Each position's probability of being mismapped and, when the run asks for them, each
+    /// sample's genotype posteriors there — one value a position, kept only on the pass whose
+    /// parameters are reported. A pass that keeps them joins its chunks in position order.
+    per_position_posteriors: bool,
+    /// The information the standard errors are computed from ([`InformationSums`]): a score per
+    /// position and parameter, summed into a few hundred bytes a sample. Kept only when a pass
+    /// asks for it.
+    information: bool,
+}
+
+impl PassKeeps {
+    /// The iterating passes: the sums, and nothing else.
+    const SUMS_ONLY: Self = Self {
+        per_position_posteriors: false,
+        information: false,
+    };
+}
+
+/// The same pass, told what to keep beyond its sums ([`PassKeeps`]).
 ///
-/// **Kept only on the last pass of a run.** Keeping it costs one four-byte value a position.
-/// Every pass, this one included, joins its chunks' totals in a tree fixed by the number of
-/// positions, so the totals do not depend on the pool's width.
+/// Every pass joins its chunks' totals in an order fixed by the number of positions, so the
+/// totals do not depend on the pool's width.
 fn expectation_pass(
     samples: &[SampleGenericSections<'_>],
     depth_cap: DepthCap,
@@ -2243,29 +2336,13 @@ fn expectation_pass(
     group_index: &[Vec<usize>],
     coverage: &[f64],
     parameters: &Parameters,
-    collect_noisy_posterior: bool,
+    keeps: PassKeeps,
 ) -> Statistics {
-    let quadrature = BetaQuadrature::with_genotype_priors(
-        parameters.density.a,
-        parameters.density.b,
-        config.quadrature_nodes,
-        &parameters.hom_excess,
-    );
-    let carrier = parameters.duplicated.map(|duplicated| {
-        BetaQuadrature::new(
-            duplicated.carrier_a,
-            duplicated.carrier_b,
-            config.quadrature_nodes,
-        )
-    });
-    // One table a noise class a read group, beside the quadratures and for the same reason.
-    let read_logs: Vec<Vec<ReadLogs>> = (0..2)
-        .map(|class| {
-            (0..parameters.clean.len())
-                .map(|group| ReadLogs::of(class_rate(parameters, class, group), config.ploidy))
-                .collect()
-        })
-        .collect();
+    let collect_noisy_posterior = keeps.per_position_posteriors;
+    let model = PassModel::new(parameters, config, group_index);
+    let quadrature = &model.quadrature;
+    // What the scorer needs that depends on the parameters alone: once a pass.
+    let scoring_tables = keeps.information.then(|| ScoringTables::of(&model));
     let positions = EvidenceCursor::position_count(samples);
     // **The chunks do not depend on the pool's width.** Every total below is a floating-point sum,
     // and a sum's last bits depend on where it is split and in what order the parts are added.
@@ -2291,6 +2368,9 @@ fn expectation_pass(
         );
         statistics.collect_noisy_posterior = collect_noisy_posterior;
         statistics.collect_genotype_posterior = collect_genotype_posterior;
+        if keeps.information {
+            statistics.information = Some(InformationSums::new(samples.len()));
+        }
         statistics
     };
     let one_chunk = |(first, end): (usize, usize)| {
@@ -2322,6 +2402,10 @@ fn expectation_pass(
                 samples.len()
             }
         ];
+        // Whether this pass scores its positions, and the row it scores them into.
+        let mut scoring = scoring_tables
+            .as_ref()
+            .map(|tables| (tables, PositionScores::new(samples.len())));
         let mut index = first;
         while cursor.next_position(&mut scratch.evidence) {
             for (slot, sample) in odds.iter_mut().enumerate() {
@@ -2332,17 +2416,15 @@ fn expectation_pass(
                         .unwrap_or(0.0),
                 ));
             }
-            one_position(
-                &mut scratch,
-                group_index,
-                config.ploidy,
-                &read_logs,
-                &quadrature,
-                carrier.as_ref(),
-                &odds,
-                parameters,
-                &mut statistics,
-            );
+            one_position(&mut scratch, &model, &odds, &mut statistics);
+            if let Some((tables, scores)) = scoring.as_mut() {
+                score_position(&scratch, &model, tables, &odds, scores);
+                statistics
+                    .information
+                    .as_mut()
+                    .expect("a pass that scores its positions keeps their sums")
+                    .add_position(scores);
+            }
             index += 1;
         }
         statistics
@@ -2533,22 +2615,18 @@ const LN_RESCALE: f64 = 345.398_899_014_487; // ln(1e150)
               scratch, the read-group map and the accumulated counts — and zipping them would \
               hide which of the four the loop is really walking"
 )]
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one position's whole problem: its evidence, the two quadratures, the coverage \
-              readings, the parameters and every count they feed"
-)]
 fn one_position(
     scratch: &mut Scratch,
-    group_index: &[Vec<usize>],
-    ploidy: Ploidy,
-    read_logs: &[Vec<ReadLogs>],
-    quadrature: &BetaQuadrature,
-    carrier: Option<&BetaQuadrature>,
+    model: &PassModel<'_>,
     coverage_odds: &[f64],
-    parameters: &Parameters,
     statistics: &mut Statistics,
 ) {
+    let group_index = model.group_index;
+    let ploidy = model.ploidy;
+    let read_logs = model.read_logs.as_slice();
+    let quadrature = &model.quadrature;
+    let carrier = model.carrier.as_ref();
+    let parameters = model.parameters;
     let samples = scratch.samples;
     let nodes = scratch.nodes;
     statistics.positions += 1.0;

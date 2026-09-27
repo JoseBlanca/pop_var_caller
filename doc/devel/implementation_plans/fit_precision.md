@@ -60,7 +60,7 @@ repeat-tract guard.
    score at one position (the posterior expectation of the complete-data score). Unit-tested against
    a central finite difference of the total log-likelihood on a small drawn cohort, one test per
    kind. *Depends:* —. *Source:* spec §3.2.
-2. ☐ **A2 — the block information.** `SampleInformationBlock` ((k + 8)² per sample) and the cohort's
+2. ✅ **A2 — the block information.** `SampleInformationBlock` ((k + 8)² per sample) and the cohort's
    8 × 8 block, accumulated in an E-pass when asked for, in the fit's fixed chunk order. The fit's
    iterating passes do not ask; nothing moves. *Depends:* A1. *Source:* spec §3.2 (the block
    approximation), §3.6 item 5.
