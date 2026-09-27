@@ -723,10 +723,14 @@ mod tests {
     use crate::parameter_estimation::joint::fit::bench_fixtures::{
         DrawnCohort, as_cohort, draw_cohort_with_duplications,
     };
+    use crate::parameter_estimation::joint::fit::standard_errors::{
+        StandardError, StandardErrors, inverse_of_positive_definite,
+    };
     use crate::parameter_estimation::joint::fit::{
         DuplicatedPositions, EvidenceCursor, FrequencyDensity, JointFitConfig, MAX_RECORDED_SPREAD,
         MIN_POSITIONS_PER_CHUNK, Parameters, PassKeeps, SampleAtPosition, Statistics,
-        candidate_read_probability, digamma, expectation_pass, genotype_frequencies, one_position,
+        candidate_read_probability, digamma, expectation_pass, fit_jointly, genotype_frequencies,
+        one_position,
     };
 
     use super::*;
@@ -1846,6 +1850,410 @@ mod tests {
             one_position(&mut scratch, &model, &[], &mut statistics);
             score_position(&scratch, &model, &tables, &[], &mut here);
         });
+    }
+
+    /// A drawn cohort fitted to its maximum, and the fitted parameters in the pass's own layout.
+    pub(crate) fn fitted_parameters(cohort: &DrawnCohort, config: &JointFitConfig) -> Parameters {
+        let mut census = as_cohort(&cohort.samples);
+        let names: Vec<String> = census.sample_names().map(str::to_string).collect();
+        let groups = census.read_groups().to_vec();
+        let fit = fit_jointly(&mut census, config).expect("a drawn cohort fits");
+        Parameters {
+            clean: groups.iter().map(|g| fit.noise[g].value.clean).collect(),
+            noisy: groups.iter().map(|g| fit.noise[g].value.noisy).collect(),
+            noisy_share: fit.noisy_share,
+            density: fit.density.value,
+            hom_excess: names
+                .iter()
+                .map(|name| fit.hom_excess[name].value.get())
+                .collect(),
+            duplicated: fit.duplicated.map(|d| d.value),
+        }
+    }
+
+    /// The kinds of parameter the comparisons report on.
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    enum Kind {
+        Shares,
+        DensityShapes,
+        CarrierShapes,
+        CleanErrorRates,
+        MismappedErrorRates,
+        HomozygoteExcess,
+    }
+
+    /// Which kind each parameter of the score layout is, for reporting.
+    fn kind_of(index: usize) -> Kind {
+        match index {
+            cohort::NOISY_SHARE
+            | cohort::P_INVARIANT
+            | cohort::P_FIXED_ALT
+            | cohort::DUPLICATED_SHARE => Kind::Shares,
+            cohort::DENSITY_A | cohort::DENSITY_B => Kind::DensityShapes,
+            cohort::CARRIER_A | cohort::CARRIER_B => Kind::CarrierShapes,
+            _ => match (index - COHORT_PARAMETERS) % SAMPLE_PARAMETERS {
+                sample::HOMOZYGOTE_EXCESS => Kind::HomozygoteExcess,
+                sample::CLEAN_ERROR_RATE => Kind::CleanErrorRates,
+                _ => Kind::MismappedErrorRates,
+            },
+        }
+    }
+
+    /// Per parameter kind, the smallest, the median and the largest of `estimate / reference − 1`:
+    /// negative where the estimate is the smaller error.
+    fn by_kind(pairs: &[(usize, f64, f64)]) -> Vec<(Kind, [f64; 3], usize)> {
+        let mut kinds: Vec<Kind> = pairs.iter().map(|(i, ..)| kind_of(*i)).collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        kinds
+            .into_iter()
+            .map(|kind| {
+                let mut gaps: Vec<f64> = pairs
+                    .iter()
+                    .filter(|(i, ..)| kind_of(*i) == kind)
+                    .map(|(_, estimate, reference)| estimate / reference - 1.0)
+                    .collect();
+                gaps.sort_by(f64::total_cmp);
+                let median = gaps[(gaps.len() - 1) / 2];
+                (kind, [gaps[0], median, gaps[gaps.len() - 1]], gaps.len())
+            })
+            .collect()
+    }
+
+    /// The errors three ways, at a cohort's fitted maximum: from the blocks (what the fit reports),
+    /// from the full matrix of every position's scores multiplied pairwise — including the products
+    /// between two samples the blocks leave out — and by the spec's first sketch (the cohort's from
+    /// its own block inverted, each sample's from `A_s − B_s C⁻¹ B_sᵀ` inverted). Returns, per kind,
+    /// the blocks' and the sketch's largest and median relative gap from the full matrix.
+    #[allow(
+        clippy::type_complexity,
+        reason = "two per-kind tables, read only by the test that prints them"
+    )]
+    fn errors_three_ways(
+        cohort: &DrawnCohort,
+        config: &JointFitConfig,
+    ) -> (Vec<(Kind, [f64; 3], usize)>, Vec<(Kind, [f64; 3], usize)>) {
+        let parameters = fitted_parameters(cohort, config);
+        with_sections(cohort, None, |lent, depth_cap, group_index, coverage| {
+            let (_, every) = scores_at_every_position(
+                lent,
+                depth_cap,
+                config,
+                group_index,
+                coverage,
+                &parameters,
+            );
+            let samples = lent.len();
+            let sums = information_by_hand(&every);
+            let blocks = StandardErrors::of(&sums);
+
+            // The parameters the blocks inverted, in the layout cohort then samples: those with an
+            // error and those whose error came out wider than their range, which stay in the
+            // inversion so their uncertainty still widens the others'. Only the first are compared.
+            let n = COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples;
+            let block_error = |i: usize| {
+                if i < COHORT_PARAMETERS {
+                    blocks.cohort[i]
+                } else {
+                    let at = i - COHORT_PARAMETERS;
+                    blocks.samples[at / SAMPLE_PARAMETERS][at % SAMPLE_PARAMETERS]
+                }
+            };
+            let kept: Vec<usize> = (0..n)
+                .filter(|&i| {
+                    matches!(
+                        block_error(i),
+                        StandardError::Estimated(_) | StandardError::WiderThanItsRange(_)
+                    )
+                })
+                .collect();
+
+            // The full matrix over the kept parameters.
+            let m = kept.len();
+            let mut full = vec![0.0; m * m];
+            let mut flat = vec![0.0; n];
+            for here in &every {
+                flat[..COHORT_PARAMETERS].copy_from_slice(&here.cohort);
+                for (s, row) in here.samples.iter().enumerate() {
+                    let first = COHORT_PARAMETERS + SAMPLE_PARAMETERS * s;
+                    flat[first..first + SAMPLE_PARAMETERS].copy_from_slice(row);
+                }
+                for (p, &i) in kept.iter().enumerate() {
+                    for (q, &j) in kept.iter().enumerate() {
+                        full[p * m + q] += flat[i] * flat[j];
+                    }
+                }
+            }
+            // How strongly two different samples' scores for the same kind of parameter move
+            // together over positions: the mean correlation over every pair of samples.
+            for (which, name) in [
+                (sample::CLEAN_ERROR_RATE, "clean rates"),
+                (sample::NOISY_ERROR_RATE, "mismapped rates"),
+                (sample::HOMOZYGOTE_EXCESS, "homozygote excesses"),
+            ] {
+                let at: Vec<usize> = kept
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &i)| {
+                        i >= COHORT_PARAMETERS
+                            && (i - COHORT_PARAMETERS) % SAMPLE_PARAMETERS == which
+                    })
+                    .map(|(p, _)| p)
+                    .collect();
+                let (mut total, mut squares, mut pairs) = (0.0, 0.0, 0);
+                for (a, &p) in at.iter().enumerate() {
+                    for &q in &at[a + 1..] {
+                        let correlation =
+                            full[p * m + q] / (full[p * m + p] * full[q * m + q]).sqrt();
+                        total += correlation;
+                        squares += correlation * correlation;
+                        pairs += 1;
+                    }
+                }
+                if pairs > 0 {
+                    eprintln!(
+                        "{samples} samples: two samples' {name} scores correlate at {:+.3} on \
+                         average, {:.3} root-mean-square, over {pairs} pairs",
+                        total / f64::from(pairs),
+                        (squares / f64::from(pairs)).sqrt()
+                    );
+                }
+            }
+            let full_inverse = inverse_of_positive_definite(&full, m).expect("full matrix inverts");
+            let full_error = |p: usize| full_inverse[p * m + p].sqrt();
+
+            // The spec's first sketch.
+            let cohort_kept: Vec<usize> = kept
+                .iter()
+                .copied()
+                .filter(|&i| i < COHORT_PARAMETERS)
+                .collect();
+            let c = cohort_kept.len();
+            let cohort_block: Vec<f64> = cohort_kept
+                .iter()
+                .flat_map(|&p| {
+                    let sums = &sums;
+                    cohort_kept
+                        .iter()
+                        .map(move |&q| sums.cohort[p * COHORT_PARAMETERS + q])
+                })
+                .collect();
+            let cohort_inverse =
+                inverse_of_positive_definite(&cohort_block, c).expect("cohort block inverts");
+            let mut sketch = vec![0.0; n];
+            for (p, &i) in cohort_kept.iter().enumerate() {
+                sketch[i] = cohort_inverse[p * c + p].sqrt();
+            }
+            for s in 0..samples {
+                let own: Vec<usize> = kept
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        i >= COHORT_PARAMETERS && (i - COHORT_PARAMETERS) / SAMPLE_PARAMETERS == s
+                    })
+                    .map(|i| (i - COHORT_PARAMETERS) % SAMPLE_PARAMETERS)
+                    .collect();
+                let k = own.len();
+                let mut reduced = vec![0.0; k * k];
+                for (a, &ja) in own.iter().enumerate() {
+                    for (b, &jb) in own.iter().enumerate() {
+                        let mut explained = 0.0;
+                        for (p, &ip) in cohort_kept.iter().enumerate() {
+                            for (q, &iq) in cohort_kept.iter().enumerate() {
+                                explained += sums.sample_cohort_blocks[s]
+                                    [ja * COHORT_PARAMETERS + ip]
+                                    * cohort_inverse[p * c + q]
+                                    * sums.sample_cohort_blocks[s][jb * COHORT_PARAMETERS + iq];
+                            }
+                        }
+                        reduced[a * k + b] =
+                            sums.sample_blocks[s][ja * SAMPLE_PARAMETERS + jb] - explained;
+                    }
+                }
+                let inverse = inverse_of_positive_definite(&reduced, k).expect("sample inverts");
+                for (a, &ja) in own.iter().enumerate() {
+                    sketch[COHORT_PARAMETERS + SAMPLE_PARAMETERS * s + ja] =
+                        inverse[a * k + a].sqrt();
+                }
+            }
+
+            let compared = || {
+                kept.iter()
+                    .enumerate()
+                    .filter_map(|(p, &i)| block_error(i).value().map(|error| (p, i, error)))
+            };
+            let blocks_against_full: Vec<(usize, f64, f64)> = compared()
+                .map(|(p, i, error)| (i, error, full_error(p)))
+                .collect();
+            let sketch_against_full: Vec<(usize, f64, f64)> = compared()
+                .map(|(p, i, _)| (i, sketch[i], full_error(p)))
+                .collect();
+            (by_kind(&blocks_against_full), by_kind(&sketch_against_full))
+        })
+    }
+
+    /// **The block errors against the full matrix, on cohorts of 4 and 20 samples** (plan step A3,
+    /// spec §3.6 item 2), fitted to their maximum from drawn data at eight reads a position, 3,000
+    /// positions, with the duplicated class on.
+    ///
+    /// The blocks leave out one thing the full matrix has: the products of two samples' scores at
+    /// the same position. Measured here, `blocks / full − 1`, over the parameters that have an error
+    /// (the carrier Beta's shapes, and at 4 samples the duplicated share, come out wider than their
+    /// ranges and are not compared, though both matrices keep them in the inversion):
+    ///
+    /// | kind | 4 samples | 20 samples |
+    /// |---|---|---|
+    /// | shares | −0.203 to +0.023 | −0.003 to 0.000 |
+    /// | density shapes | +0.011 to +0.021 | −0.001 to +0.003 |
+    /// | clean error rates | −0.084 to −0.041 | −0.011 to −0.004 |
+    /// | homozygote excess | −0.022 to +0.089 | −0.065 to −0.026 |
+    /// | mismapped error rates | −0.244 to −0.043 (median −0.166) | −0.229 to −0.093 (median −0.145) |
+    ///
+    /// **At 20 samples the cohort's parameters match the full matrix, and the samples' own gaps are
+    /// chance.** Two samples' scores for the same kind are uncorrelated on average (between +0.000
+    /// and +0.001 over 190 pairs, for each kind), but single pairs correlate by chance, and most
+    /// for the kind the fewest positions inform — root-mean-square 0.020 for the clean rates, 0.065
+    /// for the excesses and 0.121 for the mismapped rates — and the gaps follow that order. The
+    /// review measured them shrink with the positions: the mismapped rates' median gap from −0.145
+    /// at 3,000 positions to −0.014 at 30,000.
+    ///
+    /// **At 4 samples the gaps are not chance.** Measured in review, the mismapped rates' median gap
+    /// went from −0.166 to −0.135 to −0.109 at 3,000, 30,000 and 100,000 positions, and every pair's
+    /// clean-rate scores correlated at about −0.012; at 3 reads a position the clean rates' blocks sat
+    /// 0.19 below the full matrix at 30,000 positions. Two samples share a position's unknown
+    /// frequency and class, and with few samples that shared part is a real share of each one's
+    /// information, which the blocks leave out. Whether the blocks' or the full matrix's errors match
+    /// the spread of the estimates there is step A4's measurement.
+    ///
+    /// The spec's first sketch (the cohort's errors from its own block, each sample's from
+    /// `A_s − B_s C⁻¹ B_sᵀ`) is no closer on any kind and further on the cohort's (up to 0.086 at 20
+    /// samples), so the blocks are what the fit reports.
+    ///
+    /// The assertions hold each kind to its measured range with room for another draw. They pin the
+    /// comparison, not the algebra — the arrow's inverse is pinned by `standard_errors`' own tests,
+    /// which a dropped term fails and this test, at these sizes, may not.
+    #[test]
+    fn the_block_errors_against_the_full_matrix() {
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            estimate_contamination: false,
+            ..JointFitConfig::default()
+        };
+        for samples in [4, 20] {
+            let cohort = draw_cohort_with_duplications(
+                samples,
+                3_000,
+                8.0,
+                (0.003, 0.06, 0.03),
+                FrequencyDensity {
+                    p_invariant: 0.88,
+                    p_fixed_alt: 0.01,
+                    a: 0.6,
+                    b: 2.2,
+                },
+                0.3,
+                0.01,
+                0x0F17_5C03_E5A1_0010 + samples as u64,
+            );
+            let (blocks, sketch) = errors_three_ways(&cohort, &config);
+            for (
+                (kind, [low, median, high], count),
+                (_, [sketch_low, sketch_median, sketch_high], _),
+            ) in blocks.iter().zip(&sketch)
+            {
+                eprintln!(
+                    "{samples} samples, {kind:?} ({count}): blocks / full − 1 from {low:+.3} to \
+                     {high:+.3}, median {median:+.3}; spec sketch / full − 1 from \
+                     {sketch_low:+.3} to {sketch_high:+.3}, median {sketch_median:+.3}"
+                );
+                // How far each kind may land from the full matrix: the measured range above, with
+                // room for another draw.
+                let allowed = match (samples, *kind) {
+                    (20, Kind::Shares | Kind::DensityShapes | Kind::CarrierShapes) => 0.01,
+                    (20, Kind::CleanErrorRates) => 0.03,
+                    (20, Kind::HomozygoteExcess) => 0.12,
+                    _ => 0.35,
+                };
+                assert!(
+                    low.abs() < allowed && high.abs() < allowed,
+                    "{samples} samples, {kind:?}: blocks / full − 1 from {low:+.3} to {high:+.3}, \
+                     allowed ±{allowed}"
+                );
+            }
+        }
+    }
+
+    /// **At one and two samples every error rate keeps its error, and no parameter gets an error
+    /// made of rounding** — the smallest cohorts, fitted with the duplicated class on as runs are,
+    /// at eight reads a position over 30,000 positions.
+    ///
+    /// Some cohort parameters cannot be told apart there (module doc of `standard_errors`); they
+    /// must say so and be dropped alone. Before that rule, a failed inversion took every error with
+    /// it, and a rounding remainder that passed a looser threshold gave a share an error of 13.5
+    /// though a share lives in [0, 1].
+    #[test]
+    fn the_smallest_cohorts_keep_their_error_rates() {
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            estimate_contamination: false,
+            ..JointFitConfig::default()
+        };
+        for samples in [1, 2] {
+            let cohort = draw_cohort_with_duplications(
+                samples,
+                30_000,
+                8.0,
+                (0.003, 0.06, 0.03),
+                FrequencyDensity {
+                    p_invariant: 0.88,
+                    p_fixed_alt: 0.01,
+                    a: 0.6,
+                    b: 2.2,
+                },
+                0.3,
+                0.01,
+                0x0F17_5C03_E5A1_0020 + samples as u64,
+            );
+            let parameters = fitted_parameters(&cohort, &config);
+            let errors = with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+                let statistics = expectation_pass(
+                    lent,
+                    depth_cap,
+                    &config,
+                    group_index,
+                    coverage,
+                    &parameters,
+                    PassKeeps {
+                        per_position_posteriors: false,
+                        information: true,
+                    },
+                );
+                StandardErrors::of(&statistics.information.expect("asked for"))
+            });
+            eprintln!("{samples} sample(s): cohort {:?}", errors.cohort);
+            eprintln!("{samples} sample(s): samples {:?}", errors.samples);
+            for row in &errors.samples {
+                for which in [sample::CLEAN_ERROR_RATE, sample::NOISY_ERROR_RATE] {
+                    assert!(
+                        row[which].value().is_some(),
+                        "{samples} sample(s): an error rate lost its error: {row:?}"
+                    );
+                }
+            }
+            for share in [
+                cohort::NOISY_SHARE,
+                cohort::P_INVARIANT,
+                cohort::P_FIXED_ALT,
+                cohort::DUPLICATED_SHARE,
+            ] {
+                if let Some(error) = errors.cohort[share].value() {
+                    assert!(
+                        error < 1.0,
+                        "{samples} sample(s): share {share} has an error of {error}"
+                    );
+                }
+            }
+        }
     }
 
     /// **The model's slopes kept beside `fit.rs`'s functions are the derivatives of those

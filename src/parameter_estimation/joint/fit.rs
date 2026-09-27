@@ -58,6 +58,7 @@ use super::contamination::{
 };
 
 mod information;
+mod standard_errors;
 
 use information::{InformationSums, PositionScores, ScoringTables, score_position};
 
@@ -1758,7 +1759,7 @@ pub fn fit_jointly(
                 Estimate {
                     value: HomozygoteExcess::try_new(parameters.hom_excess[s])
                         .expect("the maximisation is confined to [0, 1]"),
-                    provenance: if names.len() >= 2 {
+                    provenance: if fits_homozygote_excess(names.len()) {
                         Provenance::FittedHere
                     } else {
                         Provenance::Defaulted
@@ -3260,7 +3261,7 @@ fn maximisation(
     // separates "this individual is inbred" from "the population's frequencies are what they
     // are" when there is one individual, so a fit that searched it anyway would wander without
     // converging and hand back a plausible number. `fit_jointly` marks it as not fitted.
-    if statistics.genotypes.len() >= 2 {
+    if fits_homozygote_excess(statistics.genotypes.len()) {
         for (s, counts) in statistics.genotypes.iter().enumerate() {
             let fitted = maximise_hom_excess(counts, &quadrature, parameters.hom_excess[s]);
             note(parameters.hom_excess[s], fitted);
@@ -3302,6 +3303,14 @@ fn maximise_error_rate(
         return current;
     }
     golden_section(&score, bounds.0, bounds.1)
+}
+
+/// **Whether the fit moves each sample's homozygote excess**: only with two samples or more. At one
+/// sample nothing separates an inbred individual from a population whose frequencies are what they
+/// are, so the excess is held where it starts — and, holding it, the fit has no standard error
+/// for it either ([`standard_errors`]).
+fn fits_homozygote_excess(samples: usize) -> bool {
+    samples >= 2
 }
 
 /// The homozygote excess that best explains one sample's expected genotype counts.

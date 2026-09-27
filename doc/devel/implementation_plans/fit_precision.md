@@ -64,7 +64,7 @@ repeat-tract guard.
    8 × 8 block, accumulated in an E-pass when asked for, in the fit's fixed chunk order. The fit's
    iterating passes do not ask; nothing moves. *Depends:* A1. *Source:* spec §3.2 (the block
    approximation), §3.6 item 5.
-3. ☐ **A3 — errors from the blocks.** The Schur-complement errors for each sample's parameters and
+3. ✅ **A3 — errors from the blocks.** The Schur-complement errors for each sample's parameters and
    the cohort's; `None` for a parameter with no information. Tested against the full outer-product
    matrix on drawn cohorts of 4 and 20 samples (the full matrix is small there), reporting the
    difference per parameter kind. *Depends:* A2. *Source:* spec §3.2, §3.6 item 2.
