@@ -1853,12 +1853,21 @@ mod tests {
     }
 
     /// A drawn cohort fitted to its maximum, and the fitted parameters in the pass's own layout.
-    pub(crate) fn fitted_parameters(cohort: &DrawnCohort, config: &JointFitConfig) -> Parameters {
+    fn fitted_parameters(cohort: &DrawnCohort, config: &JointFitConfig) -> Parameters {
+        fitted_parameters_and_convergence(cohort, config).0
+    }
+
+    /// The same, and whether the fit converged rather than stopping at its pass limit.
+    fn fitted_parameters_and_convergence(
+        cohort: &DrawnCohort,
+        config: &JointFitConfig,
+    ) -> (Parameters, bool) {
         let mut census = as_cohort(&cohort.samples);
         let names: Vec<String> = census.sample_names().map(str::to_string).collect();
         let groups = census.read_groups().to_vec();
         let fit = fit_jointly(&mut census, config).expect("a drawn cohort fits");
-        Parameters {
+        let converged = fit.converged;
+        let parameters = Parameters {
             clean: groups.iter().map(|g| fit.noise[g].value.clean).collect(),
             noisy: groups.iter().map(|g| fit.noise[g].value.noisy).collect(),
             noisy_share: fit.noisy_share,
@@ -1868,7 +1877,8 @@ mod tests {
                 .map(|name| fit.hom_excess[name].value.get())
                 .collect(),
             duplicated: fit.duplicated.map(|d| d.value),
-        }
+        };
+        (parameters, converged)
     }
 
     /// The kinds of parameter the comparisons report on.
@@ -1920,6 +1930,30 @@ mod tests {
             .collect()
     }
 
+    /// **The full matrix** over the layout parameters `kept`: every position's scores multiplied
+    /// pairwise and summed, the products between two samples' scores included — what the blocks
+    /// leave out. Row-major, in `kept`'s order.
+    fn full_matrix(every: &[PositionScores], kept: &[usize]) -> Vec<f64> {
+        let samples = every.first().map_or(0, |scores| scores.samples.len());
+        let n = COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples;
+        let m = kept.len();
+        let mut full = vec![0.0; m * m];
+        let mut flat = vec![0.0; n];
+        for here in every {
+            flat[..COHORT_PARAMETERS].copy_from_slice(&here.cohort);
+            for (s, row) in here.samples.iter().enumerate() {
+                let first = COHORT_PARAMETERS + SAMPLE_PARAMETERS * s;
+                flat[first..first + SAMPLE_PARAMETERS].copy_from_slice(row);
+            }
+            for (p, &i) in kept.iter().enumerate() {
+                for (q, &j) in kept.iter().enumerate() {
+                    full[p * m + q] += flat[i] * flat[j];
+                }
+            }
+        }
+        full
+    }
+
     /// The errors three ways, at a cohort's fitted maximum: from the blocks (what the fit reports),
     /// from the full matrix of every position's scores multiplied pairwise — including the products
     /// between two samples the blocks leave out — and by the spec's first sketch (the cohort's from
@@ -1968,22 +2002,8 @@ mod tests {
                 })
                 .collect();
 
-            // The full matrix over the kept parameters.
             let m = kept.len();
-            let mut full = vec![0.0; m * m];
-            let mut flat = vec![0.0; n];
-            for here in &every {
-                flat[..COHORT_PARAMETERS].copy_from_slice(&here.cohort);
-                for (s, row) in here.samples.iter().enumerate() {
-                    let first = COHORT_PARAMETERS + SAMPLE_PARAMETERS * s;
-                    flat[first..first + SAMPLE_PARAMETERS].copy_from_slice(row);
-                }
-                for (p, &i) in kept.iter().enumerate() {
-                    for (q, &j) in kept.iter().enumerate() {
-                        full[p * m + q] += flat[i] * flat[j];
-                    }
-                }
-            }
+            let full = full_matrix(&every, &kept);
             // How strongly two different samples' scores for the same kind of parameter move
             // together over positions: the mean correlation over every pair of samples.
             for (which, name) in [
@@ -2122,8 +2142,11 @@ mod tests {
     /// clean-rate scores correlated at about −0.012; at 3 reads a position the clean rates' blocks sat
     /// 0.19 below the full matrix at 30,000 positions. Two samples share a position's unknown
     /// frequency and class, and with few samples that shared part is a real share of each one's
-    /// information, which the blocks leave out. Whether the blocks' or the full matrix's errors match
-    /// the spread of the estimates there is step A4's measurement.
+    /// information, which the blocks leave out. Against the spread of the estimates
+    /// (`the_errors_mean_what_they_say`), at 4 samples and 3 reads the estimates scatter 1.23 to 1.67
+    /// times the blocks' errors and 0.89 to 1.02 times the full matrix's: the blocks' are too small
+    /// and the full matrix's close, on the wide side. At 4 samples and 30 reads both hold; at 20
+    /// samples the two are about 10% apart, either side of right.
     ///
     /// The spec's first sketch (the cohort's errors from its own block, each sample's from
     /// `A_s − B_s C⁻¹ B_sᵀ`) is no closer on any kind and further on the cohort's (up to 0.086 at 20
@@ -2253,6 +2276,491 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// **The full matrix pairs every parameter with every other**, two samples' included: on two
+    /// positions of two samples with scores chosen by hand, a product between the samples' own
+    /// parameters, one between a sample's and the cohort's, and one on the diagonal each equal their
+    /// sums over the positions, in the order `kept` lists them. A full matrix that left out the
+    /// products between two samples — the blocks — gives zero for the first.
+    #[test]
+    fn the_full_matrix_sums_the_products_between_two_samples() {
+        let mut first = PositionScores::new(2);
+        let mut second = PositionScores::new(2);
+        for (i, score) in first.cohort.iter_mut().enumerate() {
+            *score = 1.0 + i as f64;
+        }
+        first.samples = vec![[2.0, 3.0, 5.0], [7.0, 11.0, 13.0]];
+        second.cohort = [0.5; COHORT_PARAMETERS];
+        second.samples = vec![[-1.0, 4.0, 0.25], [6.0, -2.0, 3.0]];
+        let sample_slot =
+            |s: usize, which: usize| COHORT_PARAMETERS + SAMPLE_PARAMETERS * s + which;
+        let kept = [
+            cohort::DENSITY_A,
+            sample_slot(0, sample::NOISY_ERROR_RATE),
+            sample_slot(1, sample::CLEAN_ERROR_RATE),
+        ];
+        let full = full_matrix(&[first, second], &kept);
+        let m = kept.len();
+        // Sample 0's mismapped rate with sample 1's clean rate: 3·7 + 4·6.
+        assert_eq!(full[m + 2], 45.0);
+        assert_eq!(full[2 * m + 1], 45.0);
+        // The density's first shape with sample 1's clean rate: 4·7 + 0.5·6.
+        assert_eq!(full[2], 31.0);
+        // Sample 0's mismapped rate with itself: 3² + 4².
+        assert_eq!(full[m + 1], 25.0);
+    }
+
+    /// The values the coverage cohorts are drawn from. The duplicated class is not drawn: the
+    /// generator floors each carrier frequency at 0.2 (every draw below it becomes exactly 0.2), which
+    /// is outside the model's family, so no carrier shape would be true.
+    struct TrueValues {
+        noisy_share: f64,
+        density: FrequencyDensity,
+        clean_error_rate: f64,
+        noisy_error_rate: f64,
+        homozygote_excess: f64,
+    }
+
+    const TRUTH: TrueValues = TrueValues {
+        noisy_share: 0.03,
+        density: FrequencyDensity {
+            p_invariant: 0.88,
+            p_fixed_alt: 0.01,
+            a: 0.6,
+            b: 2.2,
+        },
+        clean_error_rate: 0.003,
+        noisy_error_rate: 0.06,
+        homozygote_excess: 0.3,
+    };
+
+    impl TrueValues {
+        /// The true values as the fit's parameters for `samples` samples, one read group each.
+        fn as_parameters(&self, samples: usize) -> Parameters {
+            Parameters {
+                clean: vec![self.clean_error_rate; samples],
+                noisy: vec![self.noisy_error_rate; samples],
+                noisy_share: self.noisy_share,
+                density: self.density,
+                hom_excess: vec![self.homozygote_excess; samples],
+                duplicated: None,
+            }
+        }
+    }
+
+    /// The value at layout `slot` in `parameters` — the cohort's slots by name, a sample's by kind.
+    /// A drawn cohort gives each sample one read group, numbered in sample order, so sample `s`'s
+    /// rates are read group `s`'s. Every sample is drawn at the same values, so a slip that read one
+    /// sample's estimate against another's error would barely move the coverage; drawing each at
+    /// its own rates would catch it, and would redraw every cohort (step A4 review, deferred).
+    fn value_at(parameters: &Parameters, slot: usize) -> f64 {
+        match slot {
+            cohort::NOISY_SHARE => parameters.noisy_share,
+            cohort::P_INVARIANT => parameters.density.p_invariant,
+            cohort::P_FIXED_ALT => parameters.density.p_fixed_alt,
+            cohort::DENSITY_A => parameters.density.a,
+            cohort::DENSITY_B => parameters.density.b,
+            cohort::DUPLICATED_SHARE | cohort::CARRIER_A | cohort::CARRIER_B => {
+                unreachable!("the duplicated class is not fitted here")
+            }
+            _ => {
+                let at = slot - COHORT_PARAMETERS;
+                let s = at / SAMPLE_PARAMETERS;
+                match at % SAMPLE_PARAMETERS {
+                    sample::CLEAN_ERROR_RATE => parameters.clean[s],
+                    sample::NOISY_ERROR_RATE => parameters.noisy[s],
+                    sample::HOMOZYGOTE_EXCESS => parameters.hom_excess[s],
+                    _ => unreachable!("a sample carries three parameters"),
+                }
+            }
+        }
+    }
+
+    /// How a set of distances, each in units of an error, fell.
+    #[derive(Default, Debug, Clone, Copy)]
+    struct Tally {
+        /// How many distances.
+        count: usize,
+        /// Of those, how many were at most one, and at most two, in size.
+        within_one: usize,
+        within_two: usize,
+        /// Their sum and their sum of squares.
+        sum: f64,
+        sum_of_squares: f64,
+    }
+
+    impl Tally {
+        fn add(&mut self, distance: f64) {
+            self.count += 1;
+            self.within_one += usize::from(distance.abs() <= 1.0);
+            self.within_two += usize::from(distance.abs() <= 2.0);
+            self.sum += distance;
+            self.sum_of_squares += distance * distance;
+        }
+
+        fn share_within_one(&self) -> f64 {
+            self.within_one as f64 / self.count.max(1) as f64
+        }
+
+        fn share_within_two(&self) -> f64 {
+            self.within_two as f64 / self.count.max(1) as f64
+        }
+
+        /// How far off centre the distances sit.
+        fn mean(&self) -> f64 {
+            self.sum / self.count.max(1) as f64
+        }
+
+        /// How widely they scatter about their mean: their standard deviation, which for a centred
+        /// estimate whose error means what it says is about one.
+        fn spread(&self) -> f64 {
+            let mean = self.mean();
+            (self.sum_of_squares / self.count.max(1) as f64 - mean * mean)
+                .max(0.0)
+                .sqrt()
+        }
+    }
+
+    /// How the estimates of one kind of parameter fell against their errors, over many cohorts.
+    #[derive(Default, Debug)]
+    struct Coverage {
+        /// `(estimate − truth)` in units of the blocks' error — the error the fit reports.
+        blocks: Tally,
+        /// The same in units of the full matrix's error, over the estimates it inverted for.
+        full: Tally,
+        /// `(estimate + Newton step − truth)` in units of the full matrix's error: where one Newton
+        /// step — the full inverse times the log-likelihood's slopes summed over the positions —
+        /// puts the likelihood's maximum, against the truth. Over the same estimates as `full`.
+        at_flat_point: Tally,
+        /// Parameters of this kind without a blocks' error.
+        absent: usize,
+    }
+
+    impl Coverage {
+        /// How far the likelihood's flat point lies from where the fit stopped, in errors, on
+        /// average: the Newton step's mean, which is the two tallies' difference.
+        fn flat_point(&self) -> f64 {
+            self.at_flat_point.mean() - self.full.mean()
+        }
+    }
+
+    /// Draw `cohorts` cohorts of `samples` samples at `mean_depth` from the true values, fit each by
+    /// the fit's own rule, and tally how far each estimate lands from the truth in units of its
+    /// error — the blocks' error, and the full matrix's over the same parameters — and how far the
+    /// likelihood's maximum lies from it. Returns the tallies by kind, and how many fits converged.
+    fn coverage_of(
+        samples: usize,
+        positions: usize,
+        mean_depth: f64,
+        cohorts: usize,
+        seed: u64,
+    ) -> (std::collections::BTreeMap<&'static str, Coverage>, usize) {
+        let config = JointFitConfig {
+            duplicated_positions: false,
+            estimate_contamination: false,
+            ..JointFitConfig::default()
+        };
+        let truth = TRUTH.as_parameters(samples);
+        let mut tally: std::collections::BTreeMap<&'static str, Coverage> = Default::default();
+        let mut converged = 0;
+        for draw in 0..cohorts {
+            let cohort = draw_cohort_with_duplications(
+                samples,
+                positions,
+                mean_depth,
+                (
+                    TRUTH.clean_error_rate,
+                    TRUTH.noisy_error_rate,
+                    TRUTH.noisy_share,
+                ),
+                TRUTH.density,
+                TRUTH.homozygote_excess,
+                0.0,
+                seed + draw as u64,
+            );
+            let (parameters, this_converged) = fitted_parameters_and_convergence(&cohort, &config);
+            converged += usize::from(this_converged);
+            with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+                let (_, every) = scores_at_every_position(
+                    lent,
+                    depth_cap,
+                    &config,
+                    group_index,
+                    coverage,
+                    &parameters,
+                );
+                let blocks = StandardErrors::of(&information_by_hand(&every));
+                let n = COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples;
+                let block_error = |slot: usize| {
+                    if slot < COHORT_PARAMETERS {
+                        blocks.cohort[slot]
+                    } else {
+                        let at = slot - COHORT_PARAMETERS;
+                        blocks.samples[at / SAMPLE_PARAMETERS][at % SAMPLE_PARAMETERS]
+                    }
+                };
+                // The duplicated class is off: its three slots are not parameters of this fit.
+                let fitted: Vec<usize> = (0..n)
+                    .filter(|&slot| !(cohort::DUPLICATED_SHARE..COHORT_PARAMETERS).contains(&slot))
+                    .collect();
+                let kept: Vec<usize> = fitted
+                    .iter()
+                    .copied()
+                    .filter(|&slot| {
+                        matches!(
+                            block_error(slot),
+                            StandardError::Estimated(_) | StandardError::WiderThanItsRange(_)
+                        )
+                    })
+                    .collect();
+                let m = kept.len();
+                let full_inverse = inverse_of_positive_definite(&full_matrix(&every, &kept), m);
+                // The log-likelihood's slope in each kept parameter, summed over the positions.
+                let slope: Vec<f64> = kept
+                    .iter()
+                    .map(|&slot| {
+                        every
+                            .iter()
+                            .map(|here| {
+                                if slot < COHORT_PARAMETERS {
+                                    here.cohort[slot]
+                                } else {
+                                    let at = slot - COHORT_PARAMETERS;
+                                    here.samples[at / SAMPLE_PARAMETERS][at % SAMPLE_PARAMETERS]
+                                }
+                            })
+                            .sum()
+                    })
+                    .collect();
+                for &slot in &fitted {
+                    let entry = tally.entry(label_of(slot)).or_default();
+                    let Some(block) = block_error(slot).value() else {
+                        entry.absent += 1;
+                        continue;
+                    };
+                    let off = value_at(&parameters, slot) - value_at(&truth, slot);
+                    entry.blocks.add(off / block);
+                    if let Some(inverse) = &full_inverse {
+                        let p = kept.iter().position(|&k| k == slot).expect("kept");
+                        let error = inverse[p * m + p].sqrt();
+                        let step: f64 = (0..m).map(|q| inverse[p * m + q] * slope[q]).sum();
+                        entry.full.add(off / error);
+                        entry.at_flat_point.add((off + step) / error);
+                    }
+                }
+            });
+        }
+        (tally, converged)
+    }
+
+    /// What the coverage tallies a parameter under: each cohort-level parameter by its own name,
+    /// each sample-level kind pooled over the samples.
+    fn label_of(slot: usize) -> &'static str {
+        match slot {
+            cohort::NOISY_SHARE => "mismapped share",
+            cohort::P_INVARIANT => "invariant share",
+            cohort::P_FIXED_ALT => "fixed share",
+            cohort::DENSITY_A => "density shape a",
+            cohort::DENSITY_B => "density shape b",
+            _ => match kind_of(slot) {
+                Kind::CleanErrorRates => "clean error rates",
+                Kind::MismappedErrorRates => "mismapped error rates",
+                Kind::HomozygoteExcess => "homozygote excess",
+                _ => unreachable!("the duplicated class is not fitted here"),
+            },
+        }
+    }
+
+    /// Every kind the coverage tallies, as [`label_of`] names them, in the tally's order.
+    const COVERAGE_KINDS: [&str; 8] = [
+        "clean error rates",
+        "density shape a",
+        "density shape b",
+        "fixed share",
+        "homozygote excess",
+        "invariant share",
+        "mismapped error rates",
+        "mismapped share",
+    ];
+
+    /// How many cohorts a regime draws unless `NG_FIT_PRECISION_COVERAGE_COHORTS` says otherwise;
+    /// the assertions on the measured coverage apply only at this count.
+    const COVERAGE_COHORTS: usize = 200;
+
+    /// **What the coverage run must show**, so that a change to what it measures fails it rather
+    /// than printing different numbers under a green result.
+    ///
+    /// At any cohort count: every kind is tallied, and every estimate has an error from both
+    /// matrices. At the full count only — the draws are fixed by their seeds, so the numbers move only
+    /// when the code does — each regime is held to what it measured, with room to spare:
+    ///
+    /// - at 4 and 20 samples, at most five fits in a regime stop at the pass limit;
+    /// - where the errors cover (20 samples at both depths, 4 samples at 30 reads), the error rates,
+    ///   the homozygote excess and the mismapped share — and at 20 samples the fixed share — land
+    ///   between 0.58 and 0.78 within one of the blocks' errors and between 0.90 and 0.99 within
+    ///   two;
+    /// - at 4 samples and 3 reads the full matrix's errors put at least 0.08 more of the error rates
+    ///   within one error than the blocks' do;
+    /// - at 20 samples the Newton step carries both density shapes to within half an error of the
+    ///   truth on average, which a step of the wrong sign or size does not.
+    ///
+    /// The 2-sample regime is printed and held only to the checks that apply at any count: 34 of its
+    /// 200 fits stop at the pass limit, and neither matrix's errors cover there.
+    fn check_the_coverage(
+        samples: usize,
+        mean_depth: f64,
+        cohorts: usize,
+        converged: usize,
+        tally: &std::collections::BTreeMap<&'static str, Coverage>,
+    ) {
+        let regime = format!("{samples} samples, {mean_depth} reads");
+        assert_eq!(
+            tally.keys().copied().collect::<Vec<_>>(),
+            COVERAGE_KINDS,
+            "{regime}: the kinds tallied"
+        );
+        for (kind, coverage) in tally {
+            assert!(
+                coverage.blocks.count > 0 && coverage.full.count == coverage.blocks.count,
+                "{regime}, {kind}: {} estimates with a blocks' error, {} with a full-matrix error",
+                coverage.blocks.count,
+                coverage.full.count
+            );
+        }
+        if cohorts != COVERAGE_COHORTS {
+            return;
+        }
+        assert!(
+            samples == 2 || converged + 5 >= cohorts,
+            "{regime}: {converged} of {cohorts} fits converged"
+        );
+        let depth = mean_depth as usize;
+        if samples == 20 || (samples == 4 && depth == 30) {
+            let mut covering = vec![
+                "clean error rates",
+                "mismapped error rates",
+                "homozygote excess",
+                "mismapped share",
+            ];
+            if samples == 20 {
+                covering.push("fixed share");
+            }
+            for kind in covering {
+                let blocks = &tally[kind].blocks;
+                assert!(
+                    (0.58..=0.78).contains(&blocks.share_within_one())
+                        && (0.90..=0.99).contains(&blocks.share_within_two()),
+                    "{regime}, {kind}: {:.3} within one of the blocks' errors, {:.3} within two",
+                    blocks.share_within_one(),
+                    blocks.share_within_two()
+                );
+            }
+        }
+        if samples == 4 && depth == 3 {
+            for kind in ["clean error rates", "mismapped error rates"] {
+                let (blocks, full) = (&tally[kind].blocks, &tally[kind].full);
+                assert!(
+                    full.share_within_one() >= blocks.share_within_one() + 0.08,
+                    "{regime}, {kind}: within one error {:.3} (full) against {:.3} (blocks)",
+                    full.share_within_one(),
+                    blocks.share_within_one()
+                );
+            }
+        }
+        if samples == 20 {
+            for kind in ["density shape a", "density shape b"] {
+                let at_flat_point = tally[kind].at_flat_point.mean();
+                assert!(
+                    at_flat_point.abs() < 0.5,
+                    "{regime}, {kind}: the Newton-corrected estimate sits {at_flat_point:+.3} errors \
+                     from the truth"
+                );
+            }
+        }
+    }
+
+    /// **The errors mean what they say** (plan step A4, spec §3.6 item 3): 200 cohorts drawn from
+    /// known values in each regime, each fitted by the fit's own rule; of every estimate with an
+    /// error, the share within one error of the truth and within two, which for an error that means
+    /// what it says are about 68 in 100 and 95 in 100, and the spread of the distances, about one.
+    /// Measured for the errors the fit reports (the blocks) and for the full matrix's over the same
+    /// parameters, on 4 samples over 20,000 positions and 20 over 5,000 at 3 and at 30 reads a
+    /// position, and on 2 samples over 30,000 at 3 reads. The duplicated class is off in the draw and
+    /// the fit ([`TRUTH`]).
+    /// Also printed, per kind: how far the log-likelihood's own flat point lies from where the fit
+    /// stopped, and the coverage there — both by one Newton step.
+    ///
+    /// What it measured, and what it holds each regime to, are in [`check_the_coverage`] and the step
+    /// A4 report, which has every number.
+    ///
+    /// Ignored by default: some twenty minutes in the container. Run with
+    /// `scripts/dev.sh cargo test --release --lib the_errors_mean_what_they_say -- --ignored --nocapture`;
+    /// `scripts/dev.sh env NG_FIT_PRECISION_COVERAGE_COHORTS=3 cargo test …` shortens it to a minute
+    /// or so, with only the checks that hold at any count.
+    #[test]
+    #[ignore = "a measurement over 1,000 fitted cohorts; run at a checkpoint"]
+    fn the_errors_mean_what_they_say() {
+        let cohorts = match std::env::var("NG_FIT_PRECISION_COVERAGE_COHORTS") {
+            Err(_) => COVERAGE_COHORTS,
+            Ok(value) => value
+                .trim()
+                .parse()
+                .ok()
+                .filter(|&count: &usize| count > 0)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "NG_FIT_PRECISION_COVERAGE_COHORTS={value:?} is not a positive whole number"
+                    )
+                }),
+        };
+        for (samples, positions, mean_depth) in [
+            (2, 30_000, 3.0),
+            (4, 20_000, 3.0),
+            (4, 20_000, 30.0),
+            (20, 5_000, 3.0),
+            (20, 5_000, 30.0),
+        ] {
+            let (tally, converged) = coverage_of(
+                samples,
+                positions,
+                mean_depth,
+                cohorts,
+                0x0F17_5C03_A400_0000 + (samples as u64) * 1_000 + mean_depth as u64,
+            );
+            eprintln!(
+                "COVERAGE {samples} samples, {mean_depth} reads: {converged} of {cohorts} fits \
+                     converged"
+            );
+            for (kind, coverage) in &tally {
+                let (blocks, full, at_flat) =
+                    (&coverage.blocks, &coverage.full, &coverage.at_flat_point);
+                eprintln!(
+                    "COVERAGE {samples} samples, {mean_depth} reads, {kind}: {} estimates ({} \
+                         with a full-matrix error), {} without an error; within one error {:.3} \
+                         (blocks) {:.3} (full), within two {:.3} {:.3}; mean distance {:+.3} \
+                         {:+.3}; spread {:.3} {:.3}; the likelihood's flat point lies {:+.3} errors \
+                         from the fit, on average; there, within one {:.3}, within two {:.3}, mean \
+                         {:+.3}",
+                    blocks.count,
+                    full.count,
+                    coverage.absent,
+                    blocks.share_within_one(),
+                    full.share_within_one(),
+                    blocks.share_within_two(),
+                    full.share_within_two(),
+                    blocks.mean(),
+                    full.mean(),
+                    blocks.spread(),
+                    full.spread(),
+                    coverage.flat_point(),
+                    at_flat.share_within_one(),
+                    at_flat.share_within_two(),
+                    at_flat.mean(),
+                );
+            }
+            check_the_coverage(samples, mean_depth, cohorts, converged, &tally);
         }
     }
 

@@ -68,7 +68,7 @@ repeat-tract guard.
    the cohort's; `None` for a parameter with no information. Tested against the full outer-product
    matrix on drawn cohorts of 4 and 20 samples (the full matrix is small there), reporting the
    difference per parameter kind. *Depends:* A2. *Source:* spec §3.2, §3.6 item 2.
-4. ☐ **A4 — the errors mean what they say.** A test (ignored by default for its length, run at the
+4. ✅ **A4 — the errors mean what they say.** A test (ignored by default for its length, run at the
    checkpoint) drawing 200 cohorts from known parameters at 3 and at 30 reads a position, reporting
    the share of estimates within one and two errors of the truth, per parameter kind. *Depends:* A3.
    *Source:* spec §3.6 item 3.
