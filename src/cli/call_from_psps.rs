@@ -166,6 +166,18 @@ pub struct CallFromPspsArgs {
     #[arg(long, help_heading = "Advanced")]
     pub cohort_locus_builder_regions_len: Option<u32>,
 
+    /// How much of the operating system's file cache to fill ahead of the calling, in bytes.
+    /// Zero turns it off.
+    ///
+    /// A background thread reads each psp a stretch of genome ahead of where the calling is,
+    /// so the disk works while the cores compute rather than in turn with them. **The output
+    /// does not depend on it**: the calling reads the same bytes either way, from memory rather
+    /// than from the disk. The memory is the kernel's file cache, which it takes back under
+    /// pressure, not this process's own. On a spinning disk with thousands of psps, more is
+    /// faster — each refill of a file is half its share of this, read in one go.
+    #[arg(long, default_value_t = crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES, help_heading = "Advanced")]
+    pub psp_prefetch_bytes: u64,
+
     /// How many threads to use. Zero means every core.
     ///
     /// **The output does not depend on this number.** What the threads parallelise is the
@@ -507,7 +519,8 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         candidate_selection,
         merge_parameters,
     )
-    .map_err(|source| CallFromPspsCliError::Run { source })?;
+    .map_err(|source| CallFromPspsCliError::Run { source })?
+    .with_psp_prefetch_budget(args.psp_prefetch_bytes);
 
     let read_groups = caller.read_groups().clone();
     let metadata = calling_run::header_for(
