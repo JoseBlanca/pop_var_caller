@@ -62,7 +62,8 @@ use super::callers::{
     refuse_a_catalog_built_on_another_reference, refuse_parameters_assembled_for_another_cohort,
     refuse_two_references_that_are_not_one,
 };
-use super::cohort_merge::observation_cache::ObservationCache;
+use super::cohort_merge::observation_cache::{MergeReference, ObservationCache};
+use super::psp_prefetch::{DEFAULT_PSP_PREFETCH_BUDGET_BYTES, PspPrefetch};
 use super::psp_source::{PspSummarySource, StoredSampleTallies};
 use super::walker::WalkReference;
 use super::{RunError, Segmentation, SegmentationInputs};
@@ -388,6 +389,9 @@ pub struct PspVariantCaller {
     calling_loop_config: RunnableCallingLoopConfig,
     candidate_selection: CandidateSelectionConfig,
     merge_parameters: MergeParameters,
+    /// How much page cache the calling may fill reading the psps ahead of the merge
+    /// ([`PspPrefetch`]); zero reads nothing ahead.
+    psp_prefetch_budget_bytes: u64,
 }
 
 impl PspVariantCaller {
@@ -478,7 +482,16 @@ impl PspVariantCaller {
             calling_loop_config,
             candidate_selection,
             merge_parameters,
+            psp_prefetch_budget_bytes: DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
         })
+    }
+
+    /// The same caller, reading the psps ahead of the merge into at most about `bytes` of page
+    /// cache — zero turns it off. **The records do not depend on it**; see [`PspPrefetch`].
+    #[must_use]
+    pub fn with_psp_prefetch_budget(mut self, bytes: u64) -> Self {
+        self.psp_prefetch_budget_bytes = bytes;
+        self
     }
 
     /// How many samples this run calls.
@@ -573,6 +586,7 @@ impl PspVariantCaller {
             calling_loop_config,
             candidate_selection,
             merge_parameters,
+            psp_prefetch_budget_bytes,
         } = self;
         // **One accessor for the whole run, never shared** — it walks forward with the merge
         // and releases what it has passed, exactly as direct mode's does.
@@ -587,9 +601,14 @@ impl PspVariantCaller {
         // same expression: they are separate fields, and only a destructuring says so.
         let OpenPspCohort {
             mut psps,
+            paths,
             read_groups,
             ..
         } = cohort;
+        // **Started before the sources borrow the readers**, because it copies what it needs
+        // out of their block indexes. It lives in the cache's cover hook and stops when the
+        // cache is dropped, at the end of the calling pass.
+        let prefetch = PspPrefetch::start(&psps, &paths, psp_prefetch_budget_bytes);
         let mut sources = Vec::with_capacity(psps.len());
         for (psp, sample) in psps.iter_mut().zip(read_groups.read_groups_per_sample()) {
             // **The one place two per-sample lists are walked together**, and a mis-pairing
@@ -638,14 +657,14 @@ impl PspVariantCaller {
             > 1
         {
             call_cohort_from_sources_in_rounds(
-                ObservationCache::over(sources, Box::new(reference_for_the_merge)),
+                cache_over(sources, Box::new(reference_for_the_merge), prefetch),
                 inputs,
                 genotyper,
                 hand_over,
             )?
         } else {
             call_cohort_from_sources_handing_each_record_over(
-                ObservationCache::over(sources, Box::new(reference_for_the_merge)),
+                cache_over(sources, Box::new(reference_for_the_merge), prefetch),
                 inputs,
                 genotyper,
                 hand_over,
@@ -1094,6 +1113,20 @@ fn refuse_if_more_descriptors_are_needed_than_allowed_for_psps(
         });
     }
     Ok(())
+}
+
+/// The merge's cache over `sources`, telling `prefetch` where every cover begins when there is
+/// one. **The prefetch moves into the hook**, so it stops when the calling pass drops the cache.
+fn cache_over<'a>(
+    sources: Vec<PspSummarySource<'a>>,
+    reference: Box<dyn MergeReference + Send + Sync>,
+    prefetch: Option<PspPrefetch>,
+) -> ObservationCache<PspSummarySource<'a>> {
+    let cache = ObservationCache::over(sources, reference);
+    match prefetch {
+        Some(prefetch) => cache.telling_each_cover_to(Box::new(move |at| prefetch.merge_is_at(at))),
+        None => cache,
+    }
 }
 
 #[cfg(test)]

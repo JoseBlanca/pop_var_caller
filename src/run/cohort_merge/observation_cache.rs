@@ -387,6 +387,11 @@ pub struct ObservationCache<S> {
     /// than hand out a window that is short — and short is a locus closed over the wrong
     /// ground, which is a wrong answer rather than a failure.
     covered_to: Option<GenomePosition>,
+    /// **Told the first base of every cover before it draws**, or `None`. This is how a reader
+    /// running ahead of the merge on another thread
+    /// ([`PspPrefetch`](crate::run::psp_prefetch::PspPrefetch)) learns where the merge is; it is
+    /// told and nothing comes back, so it cannot change what the cover draws.
+    told_of_each_cover: Option<Box<dyn Fn(GenomePosition) + Send + Sync>>,
 }
 
 /// One sample's reader and the observations drawn from it that have not been evicted.
@@ -794,6 +799,27 @@ impl<S> ObservationCache<S> {
                 .collect(),
             covered_to: None,
             keeps_evidence: false,
+            told_of_each_cover: None,
+        }
+    }
+
+    /// The same cache, telling `tell` the first base of every cover before the cover draws.
+    #[must_use]
+    pub fn telling_each_cover_to(
+        mut self,
+        tell: Box<dyn Fn(GenomePosition) + Send + Sync>,
+    ) -> Self {
+        self.told_of_each_cover = Some(tell);
+        self
+    }
+
+    /// Tell whoever asked where this cover begins.
+    fn tell_of_the_cover(&self, region: GenomeRegion) {
+        if let Some(tell) = &self.told_of_each_cover {
+            tell(GenomePosition {
+                contig: region.contig,
+                position: region.start,
+            });
         }
     }
 
@@ -1224,6 +1250,7 @@ where
     where
         E: From<ReferenceUnreadable>,
     {
+        self.tell_of_the_cover(region);
         let mut chain_reach = self.where_the_chain_reaches_before_any_sweep(region);
 
         // The fixpoint: sweep until a whole sweep moves nothing.
@@ -1309,6 +1336,7 @@ where
     {
         use rayon::prelude::*;
 
+        self.tell_of_the_cover(region);
         let mut chain_reach = self.where_the_chain_reaches_before_any_sweep(region);
         loop {
             let snapshot = chain_reach;
@@ -1439,6 +1467,7 @@ where
                 reference: _,
                 keeps_evidence: _,
                 covered_to: _,
+                told_of_each_cover: _,
             } = self;
             // **The buffer's own first position, not the ground's**, so that which contig the
             // bases are on and where they start cannot be two answers: `fetch_the_ground` is

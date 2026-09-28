@@ -38,6 +38,7 @@ pub mod cohort_merge;
 pub mod gatherer;
 pub mod paralog_filter;
 pub mod psp_caller;
+pub mod psp_prefetch;
 pub mod psp_source;
 pub mod psp_writer_line;
 pub mod records;

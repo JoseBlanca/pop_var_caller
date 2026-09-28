@@ -215,6 +215,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         paralog_fdr: 0.0,
         paralog_filter_tag: false,
         cohort_locus_builder_regions_len: None,
+        psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
         threads: 0,
         min_copies: MinCopies::default(),
         min_period: DEFAULT_MIN_PERIOD,
