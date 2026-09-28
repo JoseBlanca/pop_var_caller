@@ -131,6 +131,31 @@ impl LiveSet {
     pub fn contains(&self, id: ChainId) -> bool {
         self.ids.binary_search(&id).is_ok()
     }
+
+    /// Empty the set, keeping its allocation for the next set built into it.
+    pub fn clear(&mut self) {
+        self.ids.clear();
+    }
+
+    /// Move the set by one record's changes — `departed` out, then `arrived` in.
+    ///
+    /// **For a caller replaying changes a [`LiveSetReader`] already decoded**, which is what makes
+    /// them safe to apply unchecked: the decoder refuses a departure that is not live and an
+    /// arrival that already is, so changes copied out of [`LiveSetReader::changes`] and applied to
+    /// the set they were decoded against are consistent. Applied to any other set they are not,
+    /// and nothing here would notice; the debug assertions are the only guard.
+    pub fn apply(&mut self, departed: &[ChainId], arrived: &[ChainId]) {
+        debug_assert!(
+            departed.iter().all(|id| self.contains(*id)),
+            "every departure is live"
+        );
+        debug_assert!(
+            arrived.iter().all(|id| !self.contains(*id)),
+            "no arrival is already live"
+        );
+        apply_departures(self, departed);
+        apply_arrivals(self, arrived);
+    }
 }
 
 /// What changed between the previous record and this one.
@@ -175,6 +200,13 @@ impl LiveSetChanges {
     fn clear(&mut self) {
         self.departed.clear();
         self.arrived.clear();
+    }
+
+    /// Changes as a test states them, for a consumer's tests that replay changes without
+    /// writing a file to decode them from. Both lists must be ascending.
+    #[cfg(test)]
+    pub(crate) fn for_tests(departed: Vec<ChainId>, arrived: Vec<ChainId>) -> Self {
+        Self { departed, arrived }
     }
 }
 
