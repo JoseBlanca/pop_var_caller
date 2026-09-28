@@ -47,8 +47,17 @@ use crate::types::{GenomePosition, GenomeRegion, ReadGroupId};
 
 use super::cohort_merge::observation_cache::ObservationSource;
 use super::cohort_merge::observation_cache::{Drawn, LocusSummary};
+use crate::psp::LiveSet;
 use crate::psp::RecordHead;
 use crate::psp::record::{LocatedRecord, RecordLayout, decode_the_body_of};
+
+mod held_live_sets;
+use held_live_sets::HeldLiveSets;
+
+thread_local! {
+    /// The live set a build on this thread rebuilds into — see [`PspSummarySource`]'s `build`.
+    static LIVE_SET_SCRATCH: core::cell::RefCell<LiveSet> = core::cell::RefCell::new(LiveSet::new());
+}
 
 /// **A stored record's head is a summary** — the claim the whole deferred-build design rests
 /// on, written down as a conversion so it can be tested rather than asserted.
@@ -251,13 +260,9 @@ pub struct PspSummarySource<'a> {
     read_groups: Vec<ReadGroupId>,
     /// The heads handed over so far, so a body can be located and described when it is built.
     heads: Vec<KeptRecord>,
-    /// The live sets of the records still held, back to back in draw order.
-    ///
-    /// **A span addresses the whole file, not this buffer** — the same rule `kept` follows, and
-    /// for the same reason: the merge holds spans across draws.
-    live_ids: Vec<crate::types::ChainId>,
-    /// How many entries have been dropped from the front of `live_ids`.
-    live_released: u64,
+    /// The reads live at each record still held, stored as what changed from one record to the
+    /// next plus a whole copy every so often ([`held_live_sets`]).
+    live: HeldLiveSets,
     /// What this sample contributed, for the run report.
     read: StoredSampleTallies,
 }
@@ -269,36 +274,18 @@ pub struct KeptRecord {
     pub summary: LocusSummary,
     /// Where the body's bytes sit in the source's arena.
     pub body: core::ops::Range<usize>,
-    /// **The reads live at this record, which its body cannot be built without.**
+    /// **Which record of the file this is, counted from 0** — the address of the reads live at
+    /// it, which its body cannot be built without.
     ///
     /// One observation in a record has its read list *derived* rather than stored — the
-    /// residual is this set minus every other observation's list, and the body declares what
-    /// that should come to. So a body is not self-contained after all: built against the wrong
-    /// set it is refused, which is how this field came to exist.
+    /// residual is the live set minus every other observation's list, and the body declares what
+    /// that should come to. So a body is not self-contained: built against the wrong set it is
+    /// refused.
     ///
-    /// **Kept per record, which is the simple answer and not yet the measured one.** The set is
-    /// the reads open at one position, so it grows with depth: at three reads a position it is
-    /// a handful of identifiers and at three hundred it is three hundred, over a window of a
-    /// few thousand records a sample. The alternatives both trade memory for work — a snapshot
-    /// every so many records with the changes replayed from it, or one per building region —
-    /// and choosing between them wants the measurement that has not been taken
-    /// (`spec/cohort_merge_psp_path.md` §3.2).
-    ///
-    /// **The window is what it is now per, and until 2026-09-07 it was the file.** A snapshot
-    /// per record is bounded by the merge's window only because the heads are released with the
-    /// bodies they describe; before that they were not, and this set — the largest field of the
-    /// three, and the one that grows with depth — was held for every record the file had.
-    pub live: LiveSpan,
-}
-
-/// Where a record's live set sits in the source's chain-id arena, measured from the file the
-/// way a body's range is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct LiveSpan {
-    /// First entry of this record's live set, counted from the file's first record.
-    pub start: u64,
-    /// How many entries it has.
-    pub len: u32,
+    /// **The set is not copied per record.** It was, until the 2,169-sample tomato run was
+    /// killed at a pile-up where the copies came to 160 MB a sample; the source now keeps what
+    /// changed between records and rebuilds a set when a body is built ([`held_live_sets`]).
+    pub ordinal: u64,
 }
 
 impl<'a> PspSummarySource<'a> {
@@ -324,8 +311,7 @@ impl<'a> PspSummarySource<'a> {
             layout,
             read_groups,
             heads: Vec::new(),
-            live_ids: Vec::new(),
-            live_released: 0,
+            live: HeldLiveSets::default(),
             read: StoredSampleTallies::default(),
         })
     }
@@ -366,7 +352,7 @@ impl<'a> PspSummarySource<'a> {
     /// cut cannot be derived from either of the others.
     #[must_use]
     pub fn held_live_ids(&self) -> usize {
-        self.live_ids.len()
+        self.live.held_ids()
     }
 
     /// The bytes of the body at `body`, which must be one this source still holds.
@@ -398,22 +384,19 @@ impl<'a> PspSummarySource<'a> {
                 // **Shifted from the buffer's terms into the file's**, which is what makes a
                 // range outlive the release that moves the bytes it names.
                 let body = body.start + self.released..body.end + self.released;
-                // The ids go into the source's own arena and the record carries a span into
-                // it, so a record costs no allocation and no `Vec` header.
-                let ids = self.walk.live_reads().ids();
-                let live = LiveSpan {
-                    start: self.live_released + self.live_ids.len() as u64,
-                    len: ids.len() as u32,
-                };
-                self.live_ids.extend_from_slice(ids);
+                // **After the step, so the changes this record's head carried are in.** The
+                // walk parses a head's live-set changes and applies them before handing the
+                // record over, so this is the set as of this record and not as of the one
+                // before it.
+                let ordinal = self.live.push(
+                    self.walk.live_reads(),
+                    self.walk.live_changes(),
+                    self.walk.blocks_begun(),
+                );
                 Some(Ok(KeptRecord {
                     summary: LocusSummary::from(&streamed.head),
                     body,
-                    // **After the step, so the changes this record's head carried are in.**
-                    // The walk parses a head's live-set changes and applies them before
-                    // handing the record over, so this is the set as of this record and not
-                    // as of the one before it.
-                    live,
+                    ordinal,
                 }))
             }
             Some(Err(failed)) => Some(Err(failed)),
@@ -687,9 +670,8 @@ impl ObservationSource for PspSummarySource<'_> {
     ///
     /// Which is why the set is kept: building against the wrong one is the failure that does
     /// not announce itself, because a body decoded against a plausible-but-wrong set is a
-    /// plausible body. The set lives in the source's own arena and the record carries a span
-    /// into it, released with the head that names it
-    /// ([`release_before`](ObservationSource::release_before)).
+    /// plausible body. **It is rebuilt here** from the changes the source kept
+    /// ([`held_live_sets`]), into a buffer this thread reuses for every build.
     fn build(&self, body: core::ops::Range<usize>) -> Result<SampleLocusObservations, RunError> {
         let kept = self
             .heads
@@ -707,15 +689,15 @@ impl ObservationSource for PspSummarySource<'_> {
             body: self.body_bytes(&body),
             record_bytes: body.len(),
         };
-        // **The arena's own span is handed to the decoder, not a copy of it.** The decoder
-        // reads the live identifiers in order and nothing it does needs the owning `LiveSet`,
-        // so the span this source already holds is what it gets. Copying it into a fresh
-        // `LiveSet` per record built was 19% of the calling thread at 63 accessions.
-        let at = (kept.live.start - self.live_released) as usize;
-        let live = &self.live_ids[at..at + kept.live.len as usize];
-        let mut record = decode_the_body_of(&found, live, &self.layout)
-            .map_err(|source| self.refuse(source))?
-            .record;
+        // **Rebuilt into a buffer this thread keeps, not a fresh one.** Builds run on several
+        // threads at once, so the buffer cannot be the source's; and an allocation per build
+        // was measured once already, as a copy into a fresh `LiveSet`: 19% of the calling
+        // thread at 63 accessions.
+        let decoded = LIVE_SET_SCRATCH.with_borrow_mut(|live| {
+            self.live.rebuild(kept.ordinal, live);
+            decode_the_body_of(&found, live.ids(), &self.layout)
+        });
+        let mut record = decoded.map_err(|source| self.refuse(source))?.record;
         // **The same renumbering the building source makes, for the same reason**: every
         // sample numbers its read groups from zero, so without it every sample's first group
         // would reach the merge as identifier 0 and the cohort would score them as one lane.
@@ -755,18 +737,14 @@ impl ObservationSource for PspSummarySource<'_> {
         let past = self
             .heads
             .partition_point(|kept| kept.body.end <= body_start);
-        // **The live arena is drained with the heads that address it, and it needs its own
-        // cut.** A record contributes as many bytes as its body has and as many identifiers as
-        // it has reads, so the two arenas fill at different rates and one cut cannot serve
-        // both: this one is read off the first surviving head's span.
-        let drawn_ids = self.live_released + self.live_ids.len() as u64;
-        let live_from = self
+        // **The live sets are released by record, not by byte**: the first surviving head says
+        // which record the merge can still ask for, and the held sets keep whatever rebuilding
+        // it needs — which reaches back to the restart point before it.
+        let first_held = self
             .heads
             .get(past)
-            .map_or(drawn_ids, |surviving| surviving.live.start);
-        self.live_ids
-            .drain(..(live_from - self.live_released) as usize);
-        self.live_released = live_from;
+            .map_or(u64::MAX, |surviving| surviving.ordinal);
+        self.live.release_before(first_held);
         self.heads.drain(..past);
     }
 }

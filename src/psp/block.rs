@@ -38,7 +38,7 @@
 use std::num::NonZeroU64;
 
 use crate::locus_generation::SampleLocusObservations;
-use crate::psp::chain_ids::{LiveSet, LiveSetReader};
+use crate::psp::chain_ids::{LiveSet, LiveSetChanges, LiveSetReader};
 use crate::psp::header::{MAX_LOOK_BACK_WINDOW_LOG, MIN_LOOK_BACK_WINDOW_LOG, Manifest};
 use crate::psp::record::{
     OffsetBase, RecordDecodeError, RecordEncodeError, RecordEncoder, RecordHead, RecordLayout,
@@ -1474,6 +1474,17 @@ impl<R: std::io::Read> BlockStream<R> {
     #[must_use]
     pub fn live_reads(&self) -> &LiveSet {
         self.live_reads.live()
+    }
+
+    /// Which reads started and stopped being live at the record last handed back — the step
+    /// from the record before it to [`live_reads`](Self::live_reads).
+    ///
+    /// **At a block's first record it is not a step from the record before**: the set restarts
+    /// at every block, so that record's arrivals are its whole live set. A caller replaying
+    /// these has to watch [`blocks_begun`](Self::blocks_begun) to know where that happens.
+    #[must_use]
+    pub fn live_changes(&self) -> &LiveSetChanges {
+        self.live_reads.changes()
     }
 
     pub fn parses_restarted(&self) -> u64 {
