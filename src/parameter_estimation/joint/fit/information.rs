@@ -60,19 +60,20 @@
 //! else. So a sample read from `k` libraries carries `1 + 2k` parameters of its own: its
 //! homozygote excess, and each library's clean and mismapped error rates.
 //!
-//! **This module holds three a sample for now**: the homozygote excess, and the two rates of a
-//! sample read from one library. A sample read from several gets no slope for its rates here
-//! ([`fill_read_slopes`]), so a cohort holding one gets no standard errors at all until plan step
-//! A6's second half scores each library's.
+//! A library's rate's slope at a position is its own reads' slope in that rate, weighted by the
+//! posterior of the genotype its sample's libraries share. A sample's row lays its parameters out
+//! as [`sample`] says: its first library's two rates, its excess, then each further library's two,
+//! so a sample of one library has the same three slots whatever the rest of the cohort holds.
 //!
 //! # From scores to information
 //!
 //! The information is the sum, over positions, of each position's scores multiplied pairwise
 //! ([`InformationSums`]). **Only the blocks the standard errors need are kept** (spec §3.2's block
-//! approximation): the cohort's eight parameters with each other, each sample's three with each
-//! other, and each sample's three with the cohort's eight. A product of two different samples'
+//! approximation): the cohort's eight parameters with each other, each sample's own with each
+//! other, and each sample's own with the cohort's eight. A product of two different samples'
 //! scores is never formed — the full matrix at 2,169 samples would be about 450 MB, these blocks
-//! are 264 bytes a sample.
+//! are 264 bytes a sample of one library and `8(n² + 8n)` bytes a sample of `n` own parameters
+//! (520 at two libraries).
 
 use crate::float;
 
@@ -196,20 +197,57 @@ pub(super) mod cohort {
     pub const CARRIER_B: usize = 7;
 }
 
-/// How many parameters a sample carries of its own.
-pub(super) const SAMPLE_PARAMETERS: usize = 3;
+/// How many parameters a sample read from one library carries of its own: that library's two
+/// error rates and the sample's homozygote excess.
+pub(super) const ONE_LIBRARY_SAMPLE_PARAMETERS: usize = 3;
 
-/// Where each of a sample's own parameters sits in its row.
+/// How many parameters a sample read from `libraries` libraries carries of its own: two error rates
+/// a library and its homozygote excess. A sample holding no library keeps the one-library row, its
+/// two rate slots at zero.
+pub(super) const fn own_parameters(libraries: usize) -> usize {
+    if libraries <= 1 {
+        ONE_LIBRARY_SAMPLE_PARAMETERS
+    } else {
+        1 + 2 * libraries
+    }
+}
+
+/// Where each of a sample's own parameters sits in its row: **its first library's two error rates,
+/// its homozygote excess, and then each further library's two rates**, in the order the sample's
+/// sections are lent. A sample read from one library has exactly the first three.
+///
+/// The first library comes before the excess so that a one-library sample's row is the same three
+/// slots whatever the cohort's other samples hold.
 pub(super) mod sample {
-    /// Its library's error rate at an ordinary position (a sample of one library; module doc).
+    /// Its first library's error rate at an ordinary position.
     pub const CLEAN_ERROR_RATE: usize = 0;
     /// …and at a mismapped one.
     pub const NOISY_ERROR_RATE: usize = 1;
     /// How much less heterozygous the sample is than random mating predicts.
     pub const HOMOZYGOTE_EXCESS: usize = 2;
+
+    /// The slot of the rate in noise class `class` (0 ordinary, 1 mismapped) of the sample's
+    /// `library`-th library, counted from 0 in the order its sections are lent.
+    pub const fn rate(library: usize, class: usize) -> usize {
+        if library == 0 {
+            class
+        } else {
+            1 + 2 * library + class
+        }
+    }
+
+    /// For a slot holding an error rate, its noise class (0 ordinary, 1 mismapped); `None` for the
+    /// homozygote excess.
+    pub const fn class_of(slot: usize) -> Option<usize> {
+        match slot {
+            HOMOZYGOTE_EXCESS => None,
+            0 | 1 => Some(slot),
+            _ => Some((slot - super::ONE_LIBRARY_SAMPLE_PARAMETERS) % 2),
+        }
+    }
 }
 
-/// Every parameter's slope at one position: the cohort's eight, and each sample's three.
+/// Every parameter's slope at one position: the cohort's eight, and each sample's own.
 ///
 /// **One value reused over every position**: [`score_position`] clears and refills it, so a
 /// pass allocates it once per chunk. It also holds the table of each read's slope the error
@@ -218,48 +256,60 @@ pub(super) mod sample {
 pub(super) struct PositionScores {
     /// The cohort's parameters, indexed by [`cohort`].
     pub cohort: [f64; COHORT_PARAMETERS],
-    /// Per sample, in the order the fit iterates samples, indexed by [`sample`].
-    pub samples: Vec<[f64; SAMPLE_PARAMETERS]>,
-    /// `[class][candidate][sample][genotype]` — the slope of the log-probability of one sample's
-    /// reads in its error rate, if the sample held that genotype with that candidate allele.
+    /// Per sample, in the order the fit iterates samples, its own parameters in [`sample`]'s
+    /// layout: [`own_parameters`] of its library count.
+    pub samples: Vec<Vec<f64>>,
+    /// `[class][candidate][library][genotype]` — the slope of the log-probability of one library's
+    /// reads in its error rate, if its sample held that genotype with that candidate allele.
+    /// Libraries are indexed as the fit indexes read groups.
     read_slopes: Vec<f64>,
+    /// How many read groups the fit has, which the table is laid out over.
+    libraries: usize,
 }
 
 impl PositionScores {
-    pub(super) fn new(samples: usize) -> Self {
+    /// A row for each sample over its libraries (`group_index`, as the fit lends them), and a
+    /// read-slope table over the fit's `libraries` read groups.
+    pub(super) fn new(group_index: &[Vec<usize>], libraries: usize) -> Self {
         Self {
             cohort: [0.0; COHORT_PARAMETERS],
-            samples: vec![[0.0; SAMPLE_PARAMETERS]; samples],
-            read_slopes: vec![0.0; read_slope_table_len(samples)],
+            samples: group_index
+                .iter()
+                .map(|own| vec![0.0; own_parameters(own.len())])
+                .collect(),
+            read_slopes: vec![0.0; read_slope_table_len(libraries)],
+            libraries,
         }
     }
 
     fn clear(&mut self) {
         self.cohort = [0.0; COHORT_PARAMETERS];
-        self.samples.fill([0.0; SAMPLE_PARAMETERS]);
+        for row in &mut self.samples {
+            row.fill(0.0);
+        }
     }
 
-    /// The slope of sample `s`'s reads under genotype `genotype` with the position's
+    /// The slope of library `library`'s reads under genotype `genotype` with the position's
     /// `candidate`-th candidate allele, in noise class `class`'s error rate.
-    fn read_slope(&self, class: usize, candidate: usize, s: usize, genotype: usize) -> f64 {
-        self.read_slopes[read_slope_index(self.samples.len(), class, candidate, s, genotype)]
+    fn read_slope(&self, class: usize, candidate: usize, library: usize, genotype: usize) -> f64 {
+        self.read_slopes[read_slope_index(self.libraries, class, candidate, library, genotype)]
     }
 }
 
-/// How many entries the read-slope table holds for `samples` samples.
-const fn read_slope_table_len(samples: usize) -> usize {
-    2 * MAX_CANDIDATES * samples * 3
+/// How many entries the read-slope table holds for `libraries` read groups.
+const fn read_slope_table_len(libraries: usize) -> usize {
+    2 * MAX_CANDIDATES * libraries * 3
 }
 
-/// Where the slope for (class, candidate, sample, genotype) sits in the read-slope table.
+/// Where the slope for (class, candidate, library, genotype) sits in the read-slope table.
 const fn read_slope_index(
-    samples: usize,
+    libraries: usize,
     class: usize,
     candidate: usize,
-    s: usize,
+    library: usize,
     genotype: usize,
 ) -> usize {
-    ((class * MAX_CANDIDATES + candidate) * samples + s) * 3 + genotype
+    ((class * MAX_CANDIDATES + candidate) * libraries + library) * 3 + genotype
 }
 
 /// Every parameter's slope at the position [`one_position`](super::one_position) has just
@@ -305,7 +355,13 @@ pub(super) fn score_position(
     for class in 0..2 {
         let class_terms = NoiseClassTerms::of(scratch, branches, parameters, class);
         score_the_shares(scratch, branches, &class_terms, into);
-        score_the_invariant_and_fixed_branches(scratch, branches, &class_terms, into);
+        score_the_invariant_and_fixed_branches(
+            scratch,
+            model.group_index,
+            branches,
+            &class_terms,
+            into,
+        );
         score_the_segregating_branch(
             scratch,
             model,
@@ -323,6 +379,7 @@ pub(super) fn score_position(
             );
             score_the_duplicated_branch(
                 scratch,
+                model.group_index,
                 rule,
                 rule_slopes,
                 coverage_odds,
@@ -407,29 +464,12 @@ impl NoiseClassTerms {
 /// a range and the likelihood sums over it. Reads held out of the model (indels, spanning
 /// deletions, `N`) do not move at all.
 ///
-/// **Only a sample read from one library is scored here**, under that library's rates. A sample
-/// read from several has each library's reads under its own rates, so its reads' slope is one per
-/// library, which this table of one slope a sample cannot hold: its entries are zero, and the
-/// cohort's errors are all reported absent
-/// ([`AwaitingEachLibrarysScores`](super::standard_errors::StandardError::AwaitingEachLibrarysScores)).
-/// Scoring each library's rates is the second half of plan step A6.
-#[allow(
-    clippy::needless_range_loop,
-    reason = "the sample index addresses the evidence, the read-group map and the table at once"
-)]
+/// **One slope a library**, under that library's own rates: a sample's libraries share its
+/// genotype, and each library's reads move with its own rates alone.
 fn fill_read_slopes(scratch: &Scratch, model: &PassModel<'_>, into: &mut PositionScores) {
-    let samples = scratch.samples;
-    for s in 0..samples {
-        let &[library] = model.group_index[s].as_slice() else {
-            for class in 0..2 {
-                for position_candidate in 0..MAX_CANDIDATES {
-                    let first = read_slope_index(samples, class, position_candidate, s, 0);
-                    into.read_slopes[first..first + 3].fill(0.0);
-                }
-            }
-            continue;
-        };
-        let sample = &scratch.evidence.libraries[library];
+    let libraries = into.libraries;
+    for &library in model.group_index.iter().flatten() {
+        let reads = &scratch.evidence.libraries[library];
         let weights = scratch.evidence.weights_of(library);
         for class in 0..2 {
             let rate = class_rate(model.parameters, class, library);
@@ -441,16 +481,17 @@ fn fill_read_slopes(scratch: &Scratch, model: &PassModel<'_>, into: &mut Positio
                 candidate[usize::from(j)] = candidate_read_probability_slope(j, model.ploidy)
                     / on_candidate.max(f64::MIN_POSITIVE);
                 let on_reference = reference_read_probability(j, model.ploidy, rate);
-                let expected = expected_reference_reads(sample, weights, on_reference);
+                let expected = expected_reference_reads(reads, weights, on_reference);
                 reference[usize::from(j)] = expected
                     * reference_read_probability_slope(j, model.ploidy)
                     / on_reference.max(f64::MIN_POSITIVE);
             }
             for (position_candidate, &allele) in scratch.candidates.iter().enumerate() {
-                let candidate_reads = sample.on[allele];
-                let other_reads = sample.non_reference() - candidate_reads - sample.on[4];
+                let candidate_reads = reads.on[allele];
+                let other_reads = reads.non_reference() - candidate_reads - reads.on[4];
                 for j in 0..3 {
-                    into.read_slopes[read_slope_index(samples, class, position_candidate, s, j)] =
+                    into.read_slopes
+                        [read_slope_index(libraries, class, position_candidate, library, j)] =
                         candidate_reads * candidate[j]
                             + other_reads * per_other_read
                             + reference[j];
@@ -497,16 +538,21 @@ fn score_the_shares(
 }
 
 /// The error rates' slopes on the two branches where every sample holds the same genotype: all
-/// homozygous for the reference, or all for a candidate allele.
+/// homozygous for the reference, or all for a candidate allele. Each of a sample's libraries
+/// (`group_index`) takes its own reads' slope, into its own slot of the sample's row.
 fn score_the_invariant_and_fixed_branches(
     scratch: &Scratch,
+    group_index: &[Vec<usize>],
     branches: &BranchShares,
     class_terms: &NoiseClassTerms,
     into: &mut PositionScores,
 ) {
-    // A class's error rate is that class's slot in the sample's row: the clean rate is class
+    // A class's error rate is that class's slot in a library's pair: the clean rate is class
     // zero's, the mismapped rate class one's.
-    const _: () = assert!(sample::CLEAN_ERROR_RATE == 0 && sample::NOISY_ERROR_RATE == 1);
+    const _: () = assert!(
+        sample::rate(0, 0) == sample::CLEAN_ERROR_RATE
+            && sample::rate(0, 1) == sample::NOISY_ERROR_RATE
+    );
     let class = class_terms.class;
     let invariant = float::exp(
         class_terms.ln_posterior_per_share + branches.ln_invariant + scratch.invariant_ln[class],
@@ -514,9 +560,11 @@ fn score_the_invariant_and_fixed_branches(
     // At genotype 0 no read's slope depends on which allele is the candidate — the candidate's
     // `(1/3)/(ε/3)` is the other bases' `1/ε` — so the first candidate stands for all (in exact
     // arithmetic; another candidate's table entry can differ in its last bits).
-    for s in 0..scratch.samples {
-        let slope = into.read_slope(class, 0, s, 0);
-        into.samples[s][class] += invariant * slope;
+    for (s, own) in group_index.iter().enumerate() {
+        for (section, &library) in own.iter().enumerate() {
+            let slope = into.read_slope(class, 0, library, 0);
+            into.samples[s][sample::rate(section, class)] += invariant * slope;
+        }
     }
     for candidate in 0..scratch.candidates.len() {
         let fixed = float::exp(
@@ -526,15 +574,17 @@ fn score_the_invariant_and_fixed_branches(
                 + float::ln(scratch.multiplicity[candidate])
                 - branches.ln_three,
         );
-        for s in 0..scratch.samples {
-            let slope = into.read_slope(class, candidate, s, 2);
-            into.samples[s][class] += fixed * slope;
+        for (s, own) in group_index.iter().enumerate() {
+            for (section, &library) in own.iter().enumerate() {
+                let slope = into.read_slope(class, candidate, library, 2);
+                into.samples[s][sample::rate(section, class)] += fixed * slope;
+            }
         }
     }
 }
 
-/// The segregating branch, node by node: each sample's error rate and homozygote excess, and the
-/// density's two shapes.
+/// The segregating branch, node by node: each library's error rate, each sample's homozygote
+/// excess, and the density's two shapes.
 fn score_the_segregating_branch(
     scratch: &Scratch,
     model: &PassModel<'_>,
@@ -583,11 +633,15 @@ fn score_the_segregating_branch(
                     + prior_along_f[1] * lik[1]
                     + prior_along_f[2] * lik[2])
                     / total;
-                let mut reads = 0.0;
-                for (j, weight) in joint.iter().enumerate() {
-                    reads += weight * into.read_slope(class, candidate, s, j);
+                // Each library's reads move with its own rate, weighted by the genotype posterior
+                // its sample's libraries share.
+                for (section, &library) in model.group_index[s].iter().enumerate() {
+                    let mut reads = 0.0;
+                    for (j, weight) in joint.iter().enumerate() {
+                        reads += weight * into.read_slope(class, candidate, library, j);
+                    }
+                    into.samples[s][sample::rate(section, class)] += at_node * reads / total;
                 }
-                into.samples[s][class] += at_node * reads / total;
             }
             for (shape, slot) in [cohort::DENSITY_A, cohort::DENSITY_B]
                 .into_iter()
@@ -601,10 +655,16 @@ fn score_the_segregating_branch(
     }
 }
 
-/// The duplicated branch, node by node over the carrier frequency: each sample's error rate and
+/// The duplicated branch, node by node over the carrier frequency: each library's error rate and
 /// the carrier Beta's two shapes.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the position, the carrier rule and its slopes, the coverage odds, the library map, \
+              the branch's and the class's terms, and the row written"
+)]
 fn score_the_duplicated_branch(
     scratch: &Scratch,
+    group_index: &[Vec<usize>],
     carrier: &BetaQuadrature,
     rule_slopes: &RuleSlopes,
     coverage_odds: &[f64],
@@ -627,7 +687,7 @@ fn score_the_duplicated_branch(
             }
             let q = carrier.nodes[node];
             let mut along_frequency = 0.0;
-            for s in 0..scratch.samples {
+            for (s, own) in group_index.iter().enumerate() {
                 let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
                 let odds = coverage_odds.get(s).copied().unwrap_or(1.0);
                 let joint = [(1.0 - q) * lik[0], q * odds * lik[1]];
@@ -636,9 +696,11 @@ fn score_the_duplicated_branch(
                     continue;
                 }
                 along_frequency += (odds * lik[1] - lik[0]) / total;
-                let reads = joint[0] * into.read_slope(class, candidate, s, 0)
-                    + joint[1] * into.read_slope(class, candidate, s, 1);
-                into.samples[s][class] += at_node * reads / total;
+                for (section, &library) in own.iter().enumerate() {
+                    let reads = joint[0] * into.read_slope(class, candidate, library, 0)
+                        + joint[1] * into.read_slope(class, candidate, library, 1);
+                    into.samples[s][sample::rate(section, class)] += at_node * reads / total;
+                }
             }
             for (shape, slot) in [cohort::CARRIER_A, cohort::CARRIER_B]
                 .into_iter()
@@ -661,26 +723,39 @@ fn score_the_duplicated_branch(
 pub(super) struct InformationSums {
     /// The cohort's eight parameters with each other, `[row * 8 + column]`, indexed by [`cohort`].
     pub cohort: [f64; COHORT_PARAMETERS * COHORT_PARAMETERS],
-    /// Per sample, its three parameters with each other, `[row * 3 + column]`, indexed by
-    /// [`sample`].
-    pub sample_blocks: Vec<[f64; SAMPLE_PARAMETERS * SAMPLE_PARAMETERS]>,
-    /// Per sample, its three parameters (rows) with the cohort's eight (columns),
+    /// Per sample, its own parameters with each other, `[row * n + column]` with `n` its row's
+    /// length ([`own_parameters`]), indexed by [`sample`].
+    pub sample_blocks: Vec<Vec<f64>>,
+    /// Per sample, its own parameters (rows) with the cohort's eight (columns),
     /// `[row * 8 + column]`.
-    pub sample_cohort_blocks: Vec<[f64; SAMPLE_PARAMETERS * COHORT_PARAMETERS]>,
+    pub sample_cohort_blocks: Vec<Vec<f64>>,
 }
 
 impl InformationSums {
-    pub(super) fn new(samples: usize) -> Self {
+    /// Empty sums for samples reading the libraries `group_index` lists.
+    pub(super) fn new(group_index: &[Vec<usize>]) -> Self {
+        let own = |libraries: &Vec<usize>| own_parameters(libraries.len());
         Self {
             cohort: [0.0; COHORT_PARAMETERS * COHORT_PARAMETERS],
-            sample_blocks: vec![[0.0; SAMPLE_PARAMETERS * SAMPLE_PARAMETERS]; samples],
-            sample_cohort_blocks: vec![[0.0; SAMPLE_PARAMETERS * COHORT_PARAMETERS]; samples],
+            sample_blocks: group_index
+                .iter()
+                .map(|libraries| vec![0.0; own(libraries) * own(libraries)])
+                .collect(),
+            sample_cohort_blocks: group_index
+                .iter()
+                .map(|libraries| vec![0.0; own(libraries) * COHORT_PARAMETERS])
+                .collect(),
         }
     }
 
-    /// Add one position's products. A sample whose three slopes are all zero there — no reads,
-    /// or a position that underflowed — would add only zeros, so it is skipped: a saving in time,
-    /// not in what is added.
+    /// How many of its own parameters sample `s` carries.
+    pub(super) fn own_parameters_of(&self, s: usize) -> usize {
+        self.sample_cohort_blocks[s].len() / COHORT_PARAMETERS
+    }
+
+    /// Add one position's products. A sample whose own slopes are all zero there — no reads, or a
+    /// position that underflowed — would add only zeros, so it is skipped: a saving in time, not
+    /// in what is added.
     pub(super) fn add_position(&mut self, scores: &PositionScores) {
         let cohort = &scores.cohort;
         for (row, &left) in cohort.iter().enumerate() {
@@ -694,12 +769,18 @@ impl InformationSums {
             .zip(self.sample_cohort_blocks.iter_mut())
             .zip(&scores.samples)
         {
+            let n = row_scores.len();
+            debug_assert_eq!(
+                own.len(),
+                n * n,
+                "a sample's scores and block disagree on its size"
+            );
             if row_scores.iter().all(|&score| score == 0.0) {
                 continue;
             }
             for (row, &left) in row_scores.iter().enumerate() {
                 for (column, &right) in row_scores.iter().enumerate() {
-                    own[row * SAMPLE_PARAMETERS + column] += left * right;
+                    own[row * n + column] += left * right;
                 }
                 for (column, &right) in cohort.iter().enumerate() {
                     with_cohort[row * COHORT_PARAMETERS + column] += left * right;
@@ -719,6 +800,11 @@ impl InformationSums {
             *into += from;
         }
         for (into, from) in self.sample_blocks.iter_mut().zip(&other.sample_blocks) {
+            debug_assert_eq!(
+                into.len(),
+                from.len(),
+                "two chunks size a sample's block alike"
+            );
             for (into, from) in into.iter_mut().zip(from) {
                 *into += from;
             }
@@ -756,8 +842,9 @@ mod tests {
 
     /// The tolerance every slope is held to, relative to the slope or to 10⁻³ where the slope is
     /// smaller — so a carrier shape's slope of 0.06 is held to 6 × 10⁻⁸ and not to an absolute
-    /// 10⁻⁵. The largest disagreement any test here reaches is 1.7 × 10⁻⁷ (the carrier Beta's first
-    /// shape); the next, 1.54 × 10⁻⁷, is a homozygote excess.
+    /// 10⁻⁵. The largest disagreement any test here reaches is 6.8 × 10⁻⁷, a homozygote excess in the
+    /// two-library fixture (`a_samples_libraries_are_scored_each_under_its_own_rates`); the next are
+    /// 1.7 × 10⁻⁷ (the carrier Beta's first shape) and 1.6 × 10⁻⁷ (a ranged library's excess).
     const TOLERANCE: f64 = 1e-6;
 
     fn relative_disagreement(analytic: f64, numeric: f64) -> f64 {
@@ -832,7 +919,7 @@ mod tests {
         let nodes = model.quadrature.nodes.len();
         let mut scratch = Scratch::new(lent.len(), parameters.clean.len(), nodes);
         let mut statistics = Statistics::new(parameters.clean.len(), lent.len(), nodes);
-        let mut here = PositionScores::new(lent.len());
+        let mut here = PositionScores::new(group_index, parameters.clean.len());
         let mut every = Vec::with_capacity(positions);
         while cursor.next_position(&mut scratch.evidence) {
             one_position(&mut scratch, &model, &[], &mut statistics);
@@ -853,7 +940,7 @@ mod tests {
     ) -> (f64, PositionScores) {
         let (log_likelihood, every) =
             scores_at_every_position(lent, depth_cap, config, group_index, coverage, parameters);
-        let mut total = PositionScores::new(lent.len());
+        let mut total = PositionScores::new(group_index, parameters.clean.len());
         for here in &every {
             for (into, from) in total.cohort.iter_mut().zip(&here.cohort) {
                 *into += from;
@@ -1396,7 +1483,7 @@ mod tests {
         let nodes = model.quadrature.nodes.len();
         let mut scratch = Scratch::new(samples, parameters.clean.len(), nodes);
         let mut statistics = Statistics::new(parameters.clean.len(), samples, nodes);
-        let mut here = PositionScores::new(samples);
+        let mut here = PositionScores::new(group_index, parameters.clean.len());
         let mut total = 0.0;
         for position in stored {
             scratch.evidence.libraries.clone_from(&position.libraries);
@@ -1450,7 +1537,7 @@ mod tests {
                 "only {held_out} sample-positions carry a held-out read"
             );
             let odds = [0.25, 3.0, 1.0, 8.0];
-            let mut scores = PositionScores::new(group_index.len());
+            let mut scores = PositionScores::new(group_index, parameters.clean.len());
             over_stored(&stored, group_index, &odds, &parameters, Some(&mut scores));
             let values: Vec<f64> = parameters.coordinates().iter().map(|c| c.value).collect();
             let mut worst = 0.0_f64;
@@ -1539,8 +1626,9 @@ mod tests {
     /// - **At different rates each library's rate moves the log-likelihood**: a nudge to the
     ///   second library's rates moves it, where the likelihood before this step scored every
     ///   library of a sample under its first library's rates and left it bit-for-bit unchanged.
-    /// - **Until the scorer forms each library's slopes, the sample's rates have none**, and its
-    ///   homozygote excess's slope still matches a finite difference.
+    /// - **Every library's two rates' slopes are the derivative of the log-likelihood**, each read
+    ///   from its own slot of its sample's row — both of sample 0's libraries at rates unlike each
+    ///   other's and every other sample's — and so is every sample's homozygote excess's.
     #[test]
     fn a_samples_libraries_are_scored_each_under_its_own_rates() {
         let (cohort, parameters) = a_cohort_and_parameters_off_the_maximum(8.0);
@@ -1564,6 +1652,9 @@ mod tests {
             let mut own = parameters.clone();
             own.clean.push(0.0079);
             own.noisy.push(0.113);
+            // Sample 2's mismapped rate moved off the value where its slope is near zero (−0.038 at
+            // 0.062), which a finite difference cannot resolve from the likelihood's rounding.
+            own.noisy[2] = 0.03;
             let values: Vec<f64> = own.coordinates().iter().map(|c| c.value).collect();
             let at = |index: usize, by: f64| {
                 let mut changed = values.clone();
@@ -1587,25 +1678,38 @@ mod tests {
                 );
             }
 
-            let mut scores = PositionScores::new(split_index.len());
+            let mut scores = PositionScores::new(&split_index, own.clean.len());
             over_stored(&split, &split_index, &[], &own, Some(&mut scores));
-            assert_eq!(
-                [
-                    scores.samples[0][sample::CLEAN_ERROR_RATE],
-                    scores.samples[0][sample::NOISY_ERROR_RATE]
-                ],
-                [0.0; 2],
-                "a sample of two libraries has no rate slopes yet"
-            );
-            let excess = sample_coordinate(&own, 0, sample::HOMOZYGOTE_EXCESS);
-            let step = 1e-5 * values[excess];
-            let numeric = (at(excess, step) - at(excess, -step)) / (2.0 * step);
-            let disagreement =
-                relative_disagreement(scores.samples[0][sample::HOMOZYGOTE_EXCESS], numeric);
-            eprintln!("sample 0's excess: slope {numeric:.6e}, disagreement {disagreement:.2e}");
+            let mut worst = 0.0_f64;
+            let mut check = |name: String, analytic: f64, index: usize| {
+                let step = 1e-5 * values[index];
+                let numeric = (at(index, step) - at(index, -step)) / (2.0 * step);
+                let disagreement = relative_disagreement(analytic, numeric);
+                eprintln!(
+                    "{name}: summed slope {analytic:.8e}, central difference {numeric:.8e}, \
+                     relative disagreement {disagreement:.2e}"
+                );
+                worst = worst.max(disagreement);
+            };
+            for (s, own_libraries) in split_index.iter().enumerate() {
+                for (section, &library) in own_libraries.iter().enumerate() {
+                    for class in 0..2 {
+                        check(
+                            format!("sample {s}'s library {library}, rate {class}"),
+                            scores.samples[s][sample::rate(section, class)],
+                            COHORT_PARAMETERS + 2 * library + class,
+                        );
+                    }
+                }
+                check(
+                    format!("sample {s}'s homozygote excess"),
+                    scores.samples[s][sample::HOMOZYGOTE_EXCESS],
+                    sample_coordinate(&own, s, sample::HOMOZYGOTE_EXCESS),
+                );
+            }
             assert!(
-                disagreement < TOLERANCE,
-                "sample 0's homozygote-excess slope is {disagreement:.2e} off"
+                worst < TOLERANCE,
+                "largest relative disagreement {worst:.2e}"
             );
         });
     }
@@ -1853,11 +1957,282 @@ mod tests {
         assert!(ranged > 200, "only {ranged} library-positions were ranges");
     }
 
+    /// **Each library's rate slopes hold where its depths are ranges**: two samples, each read from
+    /// a library at about 40 reads a position and one at about 132, recorded under a cap of 140 so
+    /// the deep library's depths above 124 are ranges; every library's two slopes and each sample's
+    /// excess against a central difference, at parameters away from the maximum and unlike from
+    /// library to library.
+    #[test]
+    fn each_librarys_slopes_hold_where_its_depths_are_ranges() {
+        let library = |clean: f64, noisy: f64, mean_depth: f64| DrawnLibrary {
+            clean,
+            noisy,
+            mean_depth,
+        };
+        let cohort = draw_cohort_of_libraries(
+            &[
+                vec![library(0.003, 0.06, 40.0), library(0.006, 0.09, 132.0)],
+                vec![library(0.004, 0.05, 40.0), library(0.002, 0.08, 132.0)],
+            ],
+            0.03,
+            400,
+            FrequencyDensity {
+                p_invariant: 0.88,
+                p_fixed_alt: 0.01,
+                a: 0.6,
+                b: 2.2,
+            },
+            0.3,
+            0.0,
+            0x0F17_5C03_A600_0004,
+        );
+        let parameters = Parameters {
+            clean: vec![0.0021, 0.0071, 0.0043, 0.0013],
+            noisy: vec![0.041, 0.113, 0.083, 0.062],
+            noisy_share: 0.047,
+            density: FrequencyDensity {
+                p_invariant: 0.83,
+                p_fixed_alt: 0.023,
+                a: 0.9,
+                b: 1.6,
+            },
+            hom_excess: vec![0.12, 0.47],
+            duplicated: None,
+        };
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            duplicated_positions: false,
+            ..JointFitConfig::default()
+        };
+        with_sections(
+            &cohort,
+            Some(DepthCap::new(140)),
+            |lent, depth_cap, group_index, coverage| {
+                let (_, scores) =
+                    summed_scores(lent, depth_cap, &config, group_index, coverage, &parameters);
+                let cohort_count = cohort_coordinates(&parameters);
+                let mut worst = 0.0_f64;
+                for (s, own) in group_index.iter().enumerate() {
+                    let mut slots: Vec<(usize, usize)> = own
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(section, &library)| {
+                            (0..2).map(move |class| {
+                                (
+                                    sample::rate(section, class),
+                                    cohort_count + 2 * library + class,
+                                )
+                            })
+                        })
+                        .collect();
+                    slots.push((
+                        sample::HOMOZYGOTE_EXCESS,
+                        cohort_count + 2 * parameters.clean.len() + s,
+                    ));
+                    for (slot, index) in slots {
+                        let numeric = central_difference(
+                            lent,
+                            depth_cap,
+                            &config,
+                            group_index,
+                            coverage,
+                            &parameters,
+                            index,
+                            1e-5,
+                        );
+                        let disagreement = relative_disagreement(scores.samples[s][slot], numeric);
+                        eprintln!(
+                            "sample {s}, slot {slot}: summed slope {:.8e}, central difference \
+                             {numeric:.8e}, relative disagreement {disagreement:.2e}",
+                            scores.samples[s][slot]
+                        );
+                        worst = worst.max(disagreement);
+                    }
+                }
+                assert!(
+                    worst < TOLERANCE,
+                    "largest relative disagreement {worst:.2e}"
+                );
+            },
+        );
+    }
+
+    /// **A sample of three libraries has every slope right**, through a whole pass: one sample of
+    /// one library beside one of three, every library at its own rates and the duplicated class
+    /// fitted, so all four branches credit a third library's slot. Each library's two rate slopes
+    /// and each excess against a central difference of the log-likelihood.
+    #[test]
+    fn a_sample_of_three_libraries_has_every_slope_right() {
+        let library = |clean: f64, noisy: f64| DrawnLibrary {
+            clean,
+            noisy,
+            mean_depth: 4.0,
+        };
+        let cohort = draw_cohort_of_libraries(
+            &[
+                vec![library(0.003, 0.06)],
+                vec![
+                    library(0.002, 0.05),
+                    library(0.006, 0.09),
+                    library(0.004, 0.12),
+                ],
+            ],
+            0.03,
+            600,
+            FrequencyDensity {
+                p_invariant: 0.88,
+                p_fixed_alt: 0.01,
+                a: 0.6,
+                b: 2.2,
+            },
+            0.3,
+            0.01,
+            0x0F17_5C03_A600_0006,
+        );
+        let parameters = Parameters {
+            clean: vec![0.0021, 0.0043, 0.0071, 0.0013],
+            noisy: vec![0.041, 0.083, 0.113, 0.062],
+            noisy_share: 0.047,
+            density: FrequencyDensity {
+                p_invariant: 0.83,
+                p_fixed_alt: 0.023,
+                a: 0.9,
+                b: 1.6,
+            },
+            hom_excess: vec![0.12, 0.47],
+            duplicated: Some(DuplicatedPositions {
+                share: 0.006,
+                carrier_a: 1.7,
+                carrier_b: 6.3,
+            }),
+        };
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            ..JointFitConfig::default()
+        };
+        with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+            assert_eq!(group_index[1].len(), 3, "sample 1 reads three libraries");
+            let (_, scores) =
+                summed_scores(lent, depth_cap, &config, group_index, coverage, &parameters);
+            let cohort_count = cohort_coordinates(&parameters);
+            let mut worst = 0.0_f64;
+            for (s, own) in group_index.iter().enumerate() {
+                assert_eq!(scores.samples[s].len(), own_parameters(own.len()));
+                let mut slots: Vec<(usize, usize)> = own
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(section, &library)| {
+                        (0..2).map(move |class| {
+                            (
+                                sample::rate(section, class),
+                                cohort_count + 2 * library + class,
+                            )
+                        })
+                    })
+                    .collect();
+                slots.push((
+                    sample::HOMOZYGOTE_EXCESS,
+                    cohort_count + 2 * parameters.clean.len() + s,
+                ));
+                for (slot, index) in slots {
+                    let numeric = central_difference(
+                        lent,
+                        depth_cap,
+                        &config,
+                        group_index,
+                        coverage,
+                        &parameters,
+                        index,
+                        1e-5,
+                    );
+                    let disagreement = relative_disagreement(scores.samples[s][slot], numeric);
+                    eprintln!(
+                        "sample {s}, slot {slot}: summed slope {:.8e}, central difference \
+                         {numeric:.8e}, relative disagreement {disagreement:.2e}",
+                        scores.samples[s][slot]
+                    );
+                    worst = worst.max(disagreement);
+                }
+            }
+            assert!(
+                worst < TOLERANCE,
+                "largest relative disagreement {worst:.2e}"
+            );
+        });
+    }
+
+    /// **A sample holding no library carries no parameter information, and changes nothing else**
+    /// — a sample whose census holds repeat tracts only, which the census keeps. Sample 2 is given
+    /// no library: the log-likelihood is bit-for-bit the one where its library holds no read, its
+    /// row is three zeros at every position, its three errors say no information, and the log counts
+    /// the three read groups the cohort holds, not four.
+    #[test]
+    fn a_sample_holding_no_library_carries_no_information() {
+        let (cohort, parameters) = a_cohort_and_parameters_off_the_maximum(8.0);
+        with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+            let mut stored = positions_with_held_out_reads(lent, depth_cap, group_index, coverage);
+            let silent = 2;
+            for position in &mut stored {
+                position.libraries[silent] = LibraryAtPosition {
+                    spread: 1,
+                    ..LibraryAtPosition::default()
+                };
+                position.depth_weights[silent * MAX_RECORDED_SPREAD] = 1.0;
+            }
+            let without = vec![vec![0], vec![1], vec![], vec![3]];
+            let empty_library = over_stored(&stored, group_index, &[], &parameters, None);
+            let mut scores = PositionScores::new(&without, parameters.clean.len());
+            let no_library = over_stored(&stored, &without, &[], &parameters, Some(&mut scores));
+            assert_eq!(no_library.to_bits(), empty_library.to_bits());
+            assert_eq!(scores.samples[silent], [0.0; 3]);
+
+            let config = JointFitConfig {
+                quadrature_nodes: 12,
+                ..JointFitConfig::default()
+            };
+            let model = PassModel::new(&parameters, &config, &without);
+            let tables = ScoringTables::of(&model);
+            let nodes = model.quadrature.nodes.len();
+            let mut scratch = Scratch::new(without.len(), parameters.clean.len(), nodes);
+            let mut statistics = Statistics::new(parameters.clean.len(), without.len(), nodes);
+            let mut here = PositionScores::new(&without, parameters.clean.len());
+            let mut information = InformationSums::new(&without);
+            for position in &stored {
+                scratch.evidence.libraries.clone_from(&position.libraries);
+                scratch
+                    .evidence
+                    .depth_weights
+                    .clone_from(&position.depth_weights);
+                scratch
+                    .evidence
+                    .observed_alternatives
+                    .clone_from(&position.observed_alternatives);
+                one_position(&mut scratch, &model, &[], &mut statistics);
+                score_position(&scratch, &model, &tables, &[], &mut here);
+                information.add_position(&here);
+            }
+            let errors = StandardErrors::of(&information);
+            assert_eq!(errors.samples[silent], [StandardError::NoInformation; 3]);
+            let line = errors.described(&parameters, &without);
+            assert!(
+                line.contains("error rates at ordinary positions (3 read groups)"),
+                "{line}"
+            );
+        });
+    }
+
     /// The information blocks formed from every position's scores in position order, each product
     /// written out — the independent account a pass's [`InformationSums`] is checked against.
     fn information_by_hand(every: &[PositionScores]) -> InformationSums {
-        let samples = every.first().map_or(0, |scores| scores.samples.len());
-        let mut sums = InformationSums::new(samples);
+        // Each sample's library count, read back off its row's length.
+        let shape: Vec<Vec<usize>> = every.first().map_or_else(Vec::new, |scores| {
+            scores
+                .samples
+                .iter()
+                .map(|row| vec![0; (row.len() - 1) / 2])
+                .collect()
+        });
+        let mut sums = InformationSums::new(&shape);
         for here in every {
             for row in 0..COHORT_PARAMETERS {
                 for column in 0..COHORT_PARAMETERS {
@@ -1865,15 +2240,15 @@ mod tests {
                         here.cohort[row] * here.cohort[column];
                 }
             }
-            for s in 0..samples {
-                for row in 0..SAMPLE_PARAMETERS {
-                    for column in 0..SAMPLE_PARAMETERS {
-                        sums.sample_blocks[s][row * SAMPLE_PARAMETERS + column] +=
-                            here.samples[s][row] * here.samples[s][column];
+            for (s, own) in here.samples.iter().enumerate() {
+                let n = own.len();
+                for row in 0..n {
+                    for column in 0..n {
+                        sums.sample_blocks[s][row * n + column] += own[row] * own[column];
                     }
                     for column in 0..COHORT_PARAMETERS {
                         sums.sample_cohort_blocks[s][row * COHORT_PARAMETERS + column] +=
-                            here.samples[s][row] * here.cohort[column];
+                            own[row] * here.cohort[column];
                     }
                 }
             }
@@ -1895,10 +2270,11 @@ mod tests {
             }
         }
         for s in 0..hand.sample_blocks.len() {
-            let own_diagonal = |i: usize| hand.sample_blocks[s][i * SAMPLE_PARAMETERS + i];
-            for row in 0..SAMPLE_PARAMETERS {
-                for column in 0..SAMPLE_PARAMETERS {
-                    let at = row * SAMPLE_PARAMETERS + column;
+            let n = hand.own_parameters_of(s);
+            let own_diagonal = |i: usize| hand.sample_blocks[s][i * n + i];
+            for row in 0..n {
+                for column in 0..n {
+                    let at = row * n + column;
                     let scale = (own_diagonal(row) * own_diagonal(column)).sqrt();
                     entries.push((pass.sample_blocks[s][at], hand.sample_blocks[s][at], scale));
                 }
@@ -1926,7 +2302,8 @@ mod tests {
     /// of the bound its row and column put on it. A pass that paired a sample's scores with
     /// another sample's, dropped a chunk, or transposed a sample's block with the cohort fails
     /// it; the other two blocks are symmetric, so transposing them changes no bit. **It runs on the
-    /// four-sample fixture and on one sample alone**, the smallest cohort the fit takes.
+    /// four-sample fixture, on one sample alone** — the smallest cohort the fit takes — **and on
+    /// samples of one, two and three libraries**, whose blocks are 3, 5 and 7 wide.
     #[test]
     fn a_pass_sums_the_scores_multiplied_pairwise() {
         let (four, parameters_of_four) = a_cohort_and_parameters_off_the_maximum(8.0);
@@ -1949,7 +2326,43 @@ mod tests {
         parameters_of_one.clean.truncate(1);
         parameters_of_one.noisy.truncate(1);
         parameters_of_one.hom_excess.truncate(1);
-        for (cohort, parameters) in [(&four, &parameters_of_four), (&one, &parameters_of_one)] {
+        // And a cohort whose samples read one, two and three libraries, so blocks of 3, 5 and 7.
+        let library = |clean: f64, noisy: f64| DrawnLibrary {
+            clean,
+            noisy,
+            mean_depth: 4.0,
+        };
+        let mixed = draw_cohort_of_libraries(
+            &[
+                vec![library(0.003, 0.06)],
+                vec![library(0.002, 0.05), library(0.006, 0.09)],
+                vec![
+                    library(0.004, 0.07),
+                    library(0.001, 0.04),
+                    library(0.008, 0.11),
+                ],
+            ],
+            0.03,
+            600,
+            FrequencyDensity {
+                p_invariant: 0.88,
+                p_fixed_alt: 0.01,
+                a: 0.6,
+                b: 2.2,
+            },
+            0.3,
+            0.01,
+            0x0F17_5C03_A600_0005,
+        );
+        let mut parameters_of_mixed = parameters_of_four.clone();
+        parameters_of_mixed.clean = vec![0.0021, 0.0043, 0.0035, 0.0057, 0.0012, 0.0074];
+        parameters_of_mixed.noisy = vec![0.041, 0.083, 0.062, 0.097, 0.053, 0.121];
+        parameters_of_mixed.hom_excess.truncate(3);
+        for (cohort, parameters) in [
+            (&four, &parameters_of_four),
+            (&one, &parameters_of_one),
+            (&mixed, &parameters_of_mixed),
+        ] {
             check_a_pass_against_its_scores(cohort, parameters);
         }
     }
@@ -2023,9 +2436,10 @@ mod tests {
                 );
                 assert!(worst < 1e-12, "worst disagreement {worst:.2e}");
                 // Every sample has reads here, so every diagonal entry is positive.
-                for block in &summed.sample_blocks {
-                    for which in 0..SAMPLE_PARAMETERS {
-                        assert!(block[which * SAMPLE_PARAMETERS + which] > 0.0);
+                for (s, block) in summed.sample_blocks.iter().enumerate() {
+                    let n = summed.own_parameters_of(s);
+                    for which in 0..n {
+                        assert!(block[which * n + which] > 0.0, "sample {s}, slot {which}");
                     }
                 }
             }
@@ -2131,8 +2545,8 @@ mod tests {
             let nodes = model.quadrature.nodes.len();
             let mut scratch = Scratch::new(group_index.len(), parameters.clean.len(), nodes);
             let mut statistics = Statistics::new(parameters.clean.len(), group_index.len(), nodes);
-            let mut here = PositionScores::new(group_index.len());
-            let mut information = InformationSums::new(group_index.len());
+            let mut here = PositionScores::new(group_index, parameters.clean.len());
+            let mut information = InformationSums::new(group_index);
             for position in &stored {
                 scratch.evidence.libraries.clone_from(&position.libraries);
                 scratch
@@ -2186,7 +2600,7 @@ mod tests {
             let nodes = model.quadrature.nodes.len();
             let mut scratch = Scratch::new(lent.len(), parameters.clean.len(), nodes);
             let mut statistics = Statistics::new(parameters.clean.len(), lent.len(), nodes);
-            let mut here = PositionScores::new(lent.len());
+            let mut here = PositionScores::new(group_index, parameters.clean.len());
             assert!(cursor.next_position(&mut scratch.evidence));
             one_position(&mut scratch, &model, &[], &mut statistics);
             score_position(&scratch, &model, &tables, &[], &mut here);
@@ -2247,7 +2661,7 @@ mod tests {
             | cohort::DUPLICATED_SHARE => Kind::Shares,
             cohort::DENSITY_A | cohort::DENSITY_B => Kind::DensityShapes,
             cohort::CARRIER_A | cohort::CARRIER_B => Kind::CarrierShapes,
-            _ => match (index - COHORT_PARAMETERS) % SAMPLE_PARAMETERS {
+            _ => match (index - COHORT_PARAMETERS) % ONE_LIBRARY_SAMPLE_PARAMETERS {
                 sample::HOMOZYGOTE_EXCESS => Kind::HomozygoteExcess,
                 sample::CLEAN_ERROR_RATE => Kind::CleanErrorRates,
                 _ => Kind::MismappedErrorRates,
@@ -2281,15 +2695,15 @@ mod tests {
     /// leave out. Row-major, in `kept`'s order.
     fn full_matrix(every: &[PositionScores], kept: &[usize]) -> Vec<f64> {
         let samples = every.first().map_or(0, |scores| scores.samples.len());
-        let n = COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples;
+        let n = COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * samples;
         let m = kept.len();
         let mut full = vec![0.0; m * m];
         let mut flat = vec![0.0; n];
         for here in every {
             flat[..COHORT_PARAMETERS].copy_from_slice(&here.cohort);
             for (s, row) in here.samples.iter().enumerate() {
-                let first = COHORT_PARAMETERS + SAMPLE_PARAMETERS * s;
-                flat[first..first + SAMPLE_PARAMETERS].copy_from_slice(row);
+                let first = COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * s;
+                flat[first..first + ONE_LIBRARY_SAMPLE_PARAMETERS].copy_from_slice(row);
             }
             for (p, &i) in kept.iter().enumerate() {
                 for (q, &j) in kept.iter().enumerate() {
@@ -2330,13 +2744,14 @@ mod tests {
             // The parameters the blocks inverted, in the layout cohort then samples: those with an
             // error and those whose error came out wider than their range, which stay in the
             // inversion so their uncertainty still widens the others'. Only the first are compared.
-            let n = COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples;
+            let n = COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * samples;
             let block_error = |i: usize| {
                 if i < COHORT_PARAMETERS {
                     blocks.cohort[i]
                 } else {
                     let at = i - COHORT_PARAMETERS;
-                    blocks.samples[at / SAMPLE_PARAMETERS][at % SAMPLE_PARAMETERS]
+                    blocks.samples[at / ONE_LIBRARY_SAMPLE_PARAMETERS]
+                        [at % ONE_LIBRARY_SAMPLE_PARAMETERS]
                 }
             };
             let kept: Vec<usize> = (0..n)
@@ -2362,7 +2777,7 @@ mod tests {
                     .enumerate()
                     .filter(|&(_, &i)| {
                         i >= COHORT_PARAMETERS
-                            && (i - COHORT_PARAMETERS) % SAMPLE_PARAMETERS == which
+                            && (i - COHORT_PARAMETERS) % ONE_LIBRARY_SAMPLE_PARAMETERS == which
                     })
                     .map(|(p, _)| p)
                     .collect();
@@ -2415,9 +2830,10 @@ mod tests {
                     .iter()
                     .copied()
                     .filter(|&i| {
-                        i >= COHORT_PARAMETERS && (i - COHORT_PARAMETERS) / SAMPLE_PARAMETERS == s
+                        i >= COHORT_PARAMETERS
+                            && (i - COHORT_PARAMETERS) / ONE_LIBRARY_SAMPLE_PARAMETERS == s
                     })
-                    .map(|i| (i - COHORT_PARAMETERS) % SAMPLE_PARAMETERS)
+                    .map(|i| (i - COHORT_PARAMETERS) % ONE_LIBRARY_SAMPLE_PARAMETERS)
                     .collect();
                 let k = own.len();
                 let mut reduced = vec![0.0; k * k];
@@ -2432,13 +2848,14 @@ mod tests {
                                     * sums.sample_cohort_blocks[s][jb * COHORT_PARAMETERS + iq];
                             }
                         }
-                        reduced[a * k + b] =
-                            sums.sample_blocks[s][ja * SAMPLE_PARAMETERS + jb] - explained;
+                        reduced[a * k + b] = sums.sample_blocks[s]
+                            [ja * ONE_LIBRARY_SAMPLE_PARAMETERS + jb]
+                            - explained;
                     }
                 }
                 let inverse = inverse_of_positive_definite(&reduced, k).expect("sample inverts");
                 for (a, &ja) in own.iter().enumerate() {
-                    sketch[COHORT_PARAMETERS + SAMPLE_PARAMETERS * s + ja] =
+                    sketch[COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * s + ja] =
                         inverse[a * k + a].sqrt();
                 }
             }
@@ -2837,16 +3254,17 @@ mod tests {
     /// products between two samples — the blocks — gives zero for the first.
     #[test]
     fn the_full_matrix_sums_the_products_between_two_samples() {
-        let mut first = PositionScores::new(2);
-        let mut second = PositionScores::new(2);
+        let two_samples = [vec![0], vec![1]];
+        let mut first = PositionScores::new(&two_samples, 2);
+        let mut second = PositionScores::new(&two_samples, 2);
         for (i, score) in first.cohort.iter_mut().enumerate() {
             *score = 1.0 + i as f64;
         }
-        first.samples = vec![[2.0, 3.0, 5.0], [7.0, 11.0, 13.0]];
+        first.samples = vec![vec![2.0, 3.0, 5.0], vec![7.0, 11.0, 13.0]];
         second.cohort = [0.5; COHORT_PARAMETERS];
-        second.samples = vec![[-1.0, 4.0, 0.25], [6.0, -2.0, 3.0]];
+        second.samples = vec![vec![-1.0, 4.0, 0.25], vec![6.0, -2.0, 3.0]];
         let sample_slot =
-            |s: usize, which: usize| COHORT_PARAMETERS + SAMPLE_PARAMETERS * s + which;
+            |s: usize, which: usize| COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * s + which;
         let kept = [
             cohort::DENSITY_A,
             sample_slot(0, sample::NOISY_ERROR_RATE),
@@ -2918,12 +3336,12 @@ mod tests {
             }
             _ => {
                 let at = slot - COHORT_PARAMETERS;
-                let s = at / SAMPLE_PARAMETERS;
-                match at % SAMPLE_PARAMETERS {
+                let s = at / ONE_LIBRARY_SAMPLE_PARAMETERS;
+                match at % ONE_LIBRARY_SAMPLE_PARAMETERS {
                     sample::CLEAN_ERROR_RATE => parameters.clean[s],
                     sample::NOISY_ERROR_RATE => parameters.noisy[s],
                     sample::HOMOZYGOTE_EXCESS => parameters.hom_excess[s],
-                    _ => unreachable!("a sample carries three parameters"),
+                    _ => unreachable!("a sample of one library carries three parameters"),
                 }
             }
         }
@@ -3043,13 +3461,14 @@ mod tests {
                     &parameters,
                 );
                 let blocks = StandardErrors::of(&information_by_hand(&every));
-                let n = COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples;
+                let n = COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * samples;
                 let block_error = |slot: usize| {
                     if slot < COHORT_PARAMETERS {
                         blocks.cohort[slot]
                     } else {
                         let at = slot - COHORT_PARAMETERS;
-                        blocks.samples[at / SAMPLE_PARAMETERS][at % SAMPLE_PARAMETERS]
+                        blocks.samples[at / ONE_LIBRARY_SAMPLE_PARAMETERS]
+                            [at % ONE_LIBRARY_SAMPLE_PARAMETERS]
                     }
                 };
                 // The duplicated class is off: its three slots are not parameters of this fit.
@@ -3079,7 +3498,8 @@ mod tests {
                                     here.cohort[slot]
                                 } else {
                                     let at = slot - COHORT_PARAMETERS;
-                                    here.samples[at / SAMPLE_PARAMETERS][at % SAMPLE_PARAMETERS]
+                                    here.samples[at / ONE_LIBRARY_SAMPLE_PARAMETERS]
+                                        [at % ONE_LIBRARY_SAMPLE_PARAMETERS]
                                 }
                             })
                             .sum()

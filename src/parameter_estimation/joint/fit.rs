@@ -367,10 +367,9 @@ pub struct JointFit {
     /// **Every parameter's standard error at the returned parameters, or why it has none** —
     /// computed from the information the final pass sums (`fit_precision.md` §3.3). In the fit's
     /// own layout: the cohort's eight by slot — the duplicated class's three saying no
-    /// information when the run does not fit it — then each sample's two error rates and its
-    /// homozygote excess, the samples in the order the census lists them. The rates are those of
-    /// the sample's one library; in a cohort holding a sample read from several, no error is
-    /// computed yet ([`StandardErrors::with_errors_awaiting_each_librarys_scores`]).
+    /// information when the run does not fit it — then each sample's own parameters, the samples in
+    /// the order the census lists them: its first library's two error rates, its homozygote excess,
+    /// then each further library's two rates ([`sample`](information::sample)).
     ///
     /// Private until each [`Estimate`] carries its own error (plan step E1), which reads it.
     standard_errors: StandardErrors,
@@ -1782,8 +1781,7 @@ pub fn fit_jointly(
 
         // **Every parameter's standard error, at the parameters the fit returns**, from the
         // information the winning start's final pass summed (spec §3.3).
-        let standard_errors = StandardErrors::of(&information)
-            .with_errors_awaiting_each_librarys_scores(&group_index);
+        let standard_errors = StandardErrors::of(&information);
         stage.always(|into| {
             format!(
                 "SNP/indel fit: standard errors at the returned values: {}; {into}",
@@ -2598,7 +2596,7 @@ fn expectation_pass(
         statistics.collect_noisy_posterior = collect_noisy_posterior;
         statistics.collect_genotype_posterior = collect_genotype_posterior;
         if keeps.information {
-            statistics.information = Some(InformationSums::new(samples.len()));
+            statistics.information = Some(InformationSums::new(group_index));
         }
         statistics
     };
@@ -2637,9 +2635,12 @@ fn expectation_pass(
             }
         ];
         // Whether this pass scores its positions, and the row it scores them into.
-        let mut scoring = scoring_tables
-            .as_ref()
-            .map(|tables| (tables, PositionScores::new(samples.len())));
+        let mut scoring = scoring_tables.as_ref().map(|tables| {
+            (
+                tables,
+                PositionScores::new(group_index, parameters.clean.len()),
+            )
+        });
         let mut index = first;
         while cursor.next_position(&mut scratch.evidence) {
             for (slot, sample) in odds.iter_mut().enumerate() {
@@ -4166,7 +4167,7 @@ mod tests {
             passes: 1,
             converged: true,
             log_likelihood: -1.0,
-            standard_errors: StandardErrors::of(&InformationSums::new(0)),
+            standard_errors: StandardErrors::of(&InformationSums::new(&[])),
         }
     }
 
@@ -5480,19 +5481,51 @@ mod whole_fit_tests {
                 "sample {name}'s positions with one read and with two"
             );
         }
-        // Until each library's rates are scored, no error is computed in such a cohort.
-        let awaiting = super::standard_errors::StandardError::AwaitingEachLibrarysScores;
-        assert!(
-            fit.standard_errors.cohort.iter().all(|&e| e == awaiting)
-                && fit
-                    .standard_errors
-                    .samples
-                    .iter()
-                    .flatten()
-                    .all(|&e| e == awaiting),
-            "{:?}",
-            fit.standard_errors
-        );
+        // Each library's clean rate lands within three of its own standard errors of the rate it
+        // was drawn at.
+        for (s, own) in cohort.libraries_of_each_sample.iter().enumerate() {
+            for (section, &group) in own.iter().enumerate() {
+                let error = fit.standard_errors.samples[s]
+                    [super::information::sample::rate(section, 0)]
+                .value()
+                .expect("each library's rate has an error");
+                let fitted = fit.noise
+                    [&ReadGroupId(u32::try_from(group).expect("twelve libraries"))]
+                    .value
+                    .clean;
+                let distance = (fitted - cohort.per_library_clean[group]) / error;
+                eprintln!("library {group}: {distance:+.2} errors from its drawn clean rate");
+                assert!(
+                    distance.abs() < 3.0,
+                    "library {group} sits {distance} errors from its drawn clean rate"
+                );
+            }
+            // **Each library's error is its own**: at equal depth a rate's error grows with the
+            // rate (about as its square root), so within a sample the library drawn at the higher
+            // rate has the larger error, for both rates. An error read from a sibling's slot gives
+            // the two libraries one error.
+            let error = |section: usize, class: usize| {
+                fit.standard_errors.samples[s][super::information::sample::rate(section, class)]
+                    .value()
+                    .expect("each library's rate has an error")
+            };
+            let drawn = |section: usize| cohort.per_library_clean[own[section]];
+            assert_eq!(
+                error(1, 0) > error(0, 0),
+                drawn(1) > drawn(0),
+                "sample {s}: clean-rate errors {} and {} against rates drawn at {} and {}",
+                error(0, 0),
+                error(1, 0),
+                drawn(0),
+                drawn(1)
+            );
+            assert!(
+                error(1, 1) > error(0, 1),
+                "sample {s}: the mismapped rate drawn at 0.10 has error {} against {} at 0.04",
+                error(1, 1),
+                error(0, 1)
+            );
+        }
         let fitted = |group: usize| {
             fit.noise[&ReadGroupId(u32::try_from(group).expect("twelve libraries"))].value
         };

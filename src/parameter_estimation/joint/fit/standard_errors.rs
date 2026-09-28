@@ -16,10 +16,11 @@
 //! whose effect another parameter can mimic is less well determined than its own curvature says.
 //!
 //! The pass keeps the information in blocks ([`InformationSums`]): the cohort's eight parameters
-//! with each other (`C`), each sample's three with each other (`A_s`), and each sample's three with
-//! the cohort's (`B_s`). Two samples' parameters are never paired, so the matrix is an **arrow**:
-//! the cohort's row and column run along one edge and every sample's block sits on the diagonal,
-//! alone. An arrow is inverted exactly, block by block, without ever forming it:
+//! with each other (`C`), each sample's own with each other (`A_s`) — three for a sample of one
+//! library, `1 + 2k` for one of `k` — and each sample's own with the cohort's (`B_s`). Two samples'
+//! parameters are never paired, so the matrix is an **arrow**: the cohort's row and column run
+//! along one edge and every sample's block sits on the diagonal, alone. An arrow is inverted
+//! exactly, block by block, without ever forming it:
 //!
 //! - the cohort's errors come from `C − Σ_s B_sᵀ A_s⁻¹ B_s` inverted — the cohort's information,
 //!   less what each sample's own parameters could explain of it;
@@ -54,18 +55,13 @@
 //!   the full matrix, with the products of the two samples' scores in, does not invert over those
 //!   parameters at all.
 //!
-//! - **the cohort holds a sample read from more than one library** — for now, every parameter: the
-//!   likelihood reads each library under its own rates, the scorer does not yet form each
-//!   library's slopes (plan step A6's second half), and every other error would be computed as if
-//!   those rates were known.
-//!
 //! A parameter counts as not told apart when the curvature left to it once the parameters before
 //! it are accounted for is below [`IDENTIFIED_SHARE`] of its own curvature — which parameter of a
 //! mimicking set that is depends on their order, the cohort's first. Without the threshold, a
 //! remainder that is only rounding would be inverted into an error of millions (measured: 2 × 10⁶
 //! on a carrier shape, 13.5 on a share that lives in [0, 1], at two samples and 300,000 positions).
 
-use super::information::{COHORT_PARAMETERS, InformationSums, SAMPLE_PARAMETERS, cohort, sample};
+use super::information::{COHORT_PARAMETERS, InformationSums, cohort, own_parameters, sample};
 use super::{
     BETA_SHAPE_BOUNDS, CLEAN_ERROR_BOUNDS, DUPLICATED_SHARE_BOUNDS, HOM_EXCESS_BOUNDS,
     NOISY_ERROR_BOUNDS, NOISY_SHARE_BOUNDS, P_FIXED_ALT_BOUNDS, P_INVARIANT_BOUNDS, Parameters,
@@ -88,12 +84,6 @@ pub(super) enum StandardError {
     /// do not place it anywhere in that interval. The width it came out at is kept for reporting;
     /// it is not an error.
     WiderThanItsRange(f64),
-    /// Any parameter of a cohort that holds a sample read from more than one library, for now.
-    /// The likelihood reads each such library under its own rates, and the scorer does not yet
-    /// form each library's slopes (plan step A6's second half), so those rates are left out of the
-    /// information — and with them left out, every other error would come out as if they were
-    /// known: the mismapped share's at a quarter of its size at four samples and three reads.
-    AwaitingEachLibrarysScores,
 }
 
 impl StandardError {
@@ -104,8 +94,7 @@ impl StandardError {
             Self::NoInformation
             | Self::HeldFixed
             | Self::NotIdentified
-            | Self::WiderThanItsRange(_)
-            | Self::AwaitingEachLibrarysScores => None,
+            | Self::WiderThanItsRange(_) => None,
         }
     }
 
@@ -117,7 +106,6 @@ impl StandardError {
             Self::HeldFixed => Some(HELD_FIXED),
             Self::NotIdentified => Some(NOT_IDENTIFIED),
             Self::WiderThanItsRange(_) => Some(WIDER_THAN_ITS_RANGE),
-            Self::AwaitingEachLibrarysScores => Some(AWAITING_EACH_LIBRARYS_SCORES),
         }
     }
 
@@ -135,7 +123,6 @@ impl StandardError {
             Self::NoInformation => NO_INFORMATION,
             Self::HeldFixed => HELD_FIXED,
             Self::NotIdentified => NOT_IDENTIFIED,
-            Self::AwaitingEachLibrarysScores => AWAITING_EACH_LIBRARYS_SCORES,
         };
         format!("{value:.4e}, no standard error ({why})")
     }
@@ -146,15 +133,13 @@ const NO_INFORMATION: &str = "no information";
 const HELD_FIXED: &str = "held fixed";
 const NOT_IDENTIFIED: &str = "not identified";
 const WIDER_THAN_ITS_RANGE: &str = "wider than the parameter's whole range";
-const AWAITING_EACH_LIBRARYS_SCORES: &str = "not computed yet where a sample has several libraries";
 
 /// The reasons in the order the run's log counts them.
-const ABSENT_REASONS: [&str; 5] = [
+const ABSENT_REASONS: [&str; 4] = [
     NO_INFORMATION,
     HELD_FIXED,
     NOT_IDENTIFIED,
     WIDER_THAN_ITS_RANGE,
-    AWAITING_EACH_LIBRARYS_SCORES,
 ];
 
 /// What the run's log calls each cohort-level parameter, by slot
@@ -170,11 +155,10 @@ const COHORT_PARAMETER_NAMES: [&str; COHORT_PARAMETERS] = [
     "carrier-frequency shape b",
 ];
 
-/// What the run's log calls each kind of a sample's own parameters, by slot ([`sample`]).
-const SAMPLE_PARAMETER_NAMES: [&str; SAMPLE_PARAMETERS] = [
+/// What the run's log calls each library's two rates, by noise class.
+const RATE_NAMES: [&str; 2] = [
     "error rates at ordinary positions",
     "error rates at mismapped positions",
-    "homozygote excesses",
 ];
 
 /// Every fitted parameter's standard error, or why it has none.
@@ -182,8 +166,9 @@ const SAMPLE_PARAMETER_NAMES: [&str; SAMPLE_PARAMETERS] = [
 pub(super) struct StandardErrors {
     /// The cohort's eight, indexed by [`cohort`](super::information::cohort).
     pub cohort: [StandardError; COHORT_PARAMETERS],
-    /// Per sample, in the order the fit iterates samples, indexed by [`sample`].
-    pub samples: Vec<[StandardError; SAMPLE_PARAMETERS]>,
+    /// Per sample, in the order the fit iterates samples, in [`sample`]'s layout: its first
+    /// library's two rates, its homozygote excess, then each further library's two rates.
+    pub samples: Vec<Vec<StandardError>>,
 }
 
 impl StandardErrors {
@@ -194,7 +179,9 @@ impl StandardErrors {
         let excess_is_fitted = fits_homozygote_excess(samples);
         let mut errors = Self {
             cohort: [StandardError::NoInformation; COHORT_PARAMETERS],
-            samples: vec![[StandardError::NoInformation; SAMPLE_PARAMETERS]; samples],
+            samples: (0..samples)
+                .map(|s| vec![StandardError::NoInformation; sums.own_parameters_of(s)])
+                .collect(),
         };
 
         // Which cohort parameters carry information at all.
@@ -208,9 +195,10 @@ impl StandardErrors {
         let mut explained = vec![0.0; c * c];
         let mut per_sample: Vec<Option<SampleBlockInverse>> = Vec::with_capacity(samples);
         for s in 0..samples {
-            let own_diagonal = |j: usize| sums.sample_blocks[s][j * SAMPLE_PARAMETERS + j];
-            let mut informed = Vec::with_capacity(SAMPLE_PARAMETERS);
-            for j in 0..SAMPLE_PARAMETERS {
+            let n = sums.own_parameters_of(s);
+            let own_diagonal = |j: usize| sums.sample_blocks[s][j * n + j];
+            let mut informed = Vec::with_capacity(n);
+            for j in 0..n {
                 if !has_information(own_diagonal(j)) {
                     continue;
                 }
@@ -221,7 +209,7 @@ impl StandardErrors {
                 informed.push(j);
             }
             let own: Vec<f64> = square_of(&informed, |row, column| {
-                sums.sample_blocks[s][row * SAMPLE_PARAMETERS + column]
+                sums.sample_blocks[s][row * n + column]
             });
             let reference: Vec<f64> = informed.iter().map(|&j| own_diagonal(j)).collect();
             let identified = invert_identified(&own, informed.len(), &reference);
@@ -306,56 +294,44 @@ impl StandardErrors {
                 }
                 errors.samples[s][which] = error_from_variance(
                     inverse.own_inverse[j * k + j] + carried,
-                    SAMPLE_BOUNDS[which],
+                    bounds_of_own(which),
                 );
             }
         }
         errors
     }
 
-    /// **These errors, every one marked [`StandardError::AwaitingEachLibrarysScores`] when the
-    /// cohort holds a sample read from more than one library** (`group_index` says which read
-    /// groups each sample's sections are). Such a sample's libraries' rates get no slope yet
-    /// ([`information`](super::information)'s `fill_read_slopes`), so the pass sums nothing for
-    /// them, and every other parameter's error would then be computed as if they were known.
-    pub(super) fn with_errors_awaiting_each_librarys_scores(
-        mut self,
-        group_index: &[Vec<usize>],
-    ) -> Self {
-        if group_index.iter().any(|own| own.len() > 1) {
-            self.cohort = [StandardError::AwaitingEachLibrarysScores; COHORT_PARAMETERS];
-            self.samples
-                .fill([StandardError::AwaitingEachLibrarysScores; SAMPLE_PARAMETERS]);
-        }
-        self
-    }
-
     /// **Every parameter's error, under the name the per-pass trace gives its value**
     /// ([`Parameters::named`], prefixed `standard_error:`, in its order), and NaN where it has none
     /// — so the trace can be read in units of each parameter's error. `group_index` says which read
-    /// groups each sample's sections are, as the pass reads them: each read group carries its
-    /// sample's two rates' errors, and a read group no sample holds none.
+    /// groups each sample's sections are, as the pass reads them: each read group carries its own
+    /// two rates' errors, and a read group no sample holds none.
     pub(super) fn named(
         &self,
         parameters: &Parameters,
         group_index: &[Vec<usize>],
     ) -> Vec<(String, f64)> {
+        debug_assert!(
+            self.laid_out_for(group_index),
+            "rows laid out for another cohort"
+        );
         let value = |error: StandardError| error.value().unwrap_or(f64::NAN);
         let mut errors: Vec<f64> = self.cohort[..cohort_parameters_fitted(parameters)]
             .iter()
             .map(|&error| value(error))
             .collect();
-        let mut sample_of = vec![None; parameters.clean.len()];
+        // Which sample holds each read group, and as which of its libraries.
+        let mut held_by = vec![None; parameters.clean.len()];
         for (s, own) in group_index.iter().enumerate() {
-            for &group in own {
-                sample_of[group] = Some(s);
+            for (section, &group) in own.iter().enumerate() {
+                held_by[group] = Some((s, section));
             }
         }
-        for owner in sample_of {
-            let [clean, noisy] = match owner {
-                Some(s) => [
-                    self.samples[s][sample::CLEAN_ERROR_RATE],
-                    self.samples[s][sample::NOISY_ERROR_RATE],
+        for holder in held_by {
+            let [clean, noisy] = match holder {
+                Some((s, section)) => [
+                    self.samples[s][sample::rate(section, 0)],
+                    self.samples[s][sample::rate(section, 1)],
                 ],
                 None => [StandardError::NoInformation; 2],
             };
@@ -380,13 +356,16 @@ impl StandardErrors {
     }
 
     /// **The errors as one line of the run's log**: each cohort-level parameter's value and
-    /// standard error, or why it has none; for each kind of a sample's own parameters, the median
-    /// and the largest standard error and how many have none, by reason; and, when some sample
-    /// holds more than one library, how many and why no error is computed yet
-    /// ([`Self::with_errors_awaiting_each_librarys_scores`]). `group_index` says which read groups
-    /// each sample's sections are. The duplicated class's three are left out when the run does not
-    /// fit it. The median of an even count is the lower of the middle two.
+    /// standard error, or why it has none; for each library's two rates and each sample's
+    /// homozygote excess, the median and the largest standard error and how many have none, by
+    /// reason. `group_index` says which read groups each sample's sections are. The duplicated
+    /// class's three are left out when the run does not fit it. The median of an even count is the
+    /// lower of the middle two.
     pub(super) fn described(&self, parameters: &Parameters, group_index: &[Vec<usize>]) -> String {
+        debug_assert!(
+            self.laid_out_for(group_index),
+            "rows laid out for another cohort"
+        );
         let values = parameters.named();
         let mut parts = vec![
             (0..cohort_parameters_fitted(parameters))
@@ -400,34 +379,43 @@ impl StandardErrors {
                 .collect::<Vec<_>>()
                 .join(", "),
         ];
-        for (which, name) in SAMPLE_PARAMETER_NAMES.iter().enumerate() {
+        for (class, name) in RATE_NAMES.iter().enumerate() {
+            let rates: Vec<StandardError> = self
+                .samples
+                .iter()
+                .zip(group_index)
+                .flat_map(|(row, own)| (0..own.len()).map(move |i| row[sample::rate(i, class)]))
+                .collect();
             parts.push(format!(
-                "{name} ({} samples): {}",
-                self.samples.len(),
-                summary_of(
-                    &self
-                        .samples
-                        .iter()
-                        .map(|row| row[which])
-                        .collect::<Vec<_>>()
-                )
+                "{name} ({} read groups): {}",
+                rates.len(),
+                summary_of(&rates)
             ));
         }
-        let several: Vec<usize> = group_index
-            .iter()
-            .map(Vec::len)
-            .filter(|&libraries| libraries > 1)
-            .collect();
-        if !several.is_empty() {
-            parts.push(format!(
-                "{} sample(s) hold more than one library ({} read groups between them), so no \
-                 standard error is computed yet: every error depends on those libraries' own \
-                 rates, whose slopes the next step adds",
-                several.len(),
-                several.iter().sum::<usize>(),
-            ));
-        }
+        parts.push(format!(
+            "homozygote excesses ({} samples): {}",
+            self.samples.len(),
+            summary_of(
+                &self
+                    .samples
+                    .iter()
+                    .map(|row| row[sample::HOMOZYGOTE_EXCESS])
+                    .collect::<Vec<_>>()
+            )
+        ));
         parts.join("; ")
+    }
+}
+
+impl StandardErrors {
+    /// Whether each sample's row has the length its libraries in `group_index` give it.
+    fn laid_out_for(&self, group_index: &[Vec<usize>]) -> bool {
+        self.samples.len() == group_index.len()
+            && self
+                .samples
+                .iter()
+                .zip(group_index)
+                .all(|(row, own)| row.len() == own_parameters(own.len()))
     }
 }
 
@@ -514,9 +502,14 @@ const COHORT_BOUNDS: [(f64, f64); COHORT_PARAMETERS] = [
     BETA_SHAPE_BOUNDS,
 ];
 
-/// The interval the fit keeps each of a sample's parameters in, by slot ([`sample`]).
-const SAMPLE_BOUNDS: [(f64, f64); SAMPLE_PARAMETERS] =
-    [CLEAN_ERROR_BOUNDS, NOISY_ERROR_BOUNDS, HOM_EXCESS_BOUNDS];
+/// The interval the fit keeps a sample's own parameter in, by its slot ([`sample`]).
+fn bounds_of_own(slot: usize) -> (f64, f64) {
+    match sample::class_of(slot) {
+        None => HOM_EXCESS_BOUNDS,
+        Some(0) => CLEAN_ERROR_BOUNDS,
+        Some(_) => NOISY_ERROR_BOUNDS,
+    }
+}
 
 /// The square matrix `entry(row, column)` over `indices`, row-major.
 fn square_of(indices: &[usize], entry: impl Fn(usize, usize) -> f64) -> Vec<f64> {
@@ -646,7 +639,9 @@ fn inverse_by_cholesky(matrix: &[f64], n: usize, floor: &[f64]) -> Result<Vec<f6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parameter_estimation::joint::fit::information::cohort;
+    use crate::parameter_estimation::joint::fit::information::{
+        ONE_LIBRARY_SAMPLE_PARAMETERS, cohort, own_parameters,
+    };
 
     /// A random symmetric positive-definite matrix, `G Gᵀ + n·I` with `G` drawn from a fixed
     /// sequence — well conditioned, so its inverse is known to many digits.
@@ -703,15 +698,46 @@ mod tests {
         assert!(inverse_of_positive_definite(&[f64::NAN], 1).is_none());
     }
 
-    /// Blocks of a random arrow and the whole arrow beside them: a random symmetric matrix of the
-    /// full size with every entry between two different samples set to zero, and each diagonal entry
-    /// then raised above the sum of its row's other entries' sizes — which makes it positive
-    /// definite.
+    /// Blocks of a random arrow over `samples` samples of one library each, and the whole arrow
+    /// beside them ([`an_arrow_of`]).
     fn an_arrow(samples: usize, seed: u64) -> (InformationSums, Vec<f64>) {
-        let n = COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples;
+        an_arrow_of(&vec![1; samples], seed)
+    }
+
+    /// Which read groups each sample reads, for samples of `libraries` libraries each, numbered in
+    /// sample order.
+    fn group_index_of(libraries: &[usize]) -> Vec<Vec<usize>> {
+        let mut next = 0;
+        libraries
+            .iter()
+            .map(|&count| {
+                let own: Vec<usize> = (next..next + count).collect();
+                next += count;
+                own
+            })
+            .collect()
+    }
+
+    /// Blocks of a random arrow over samples of `libraries` libraries each, and the whole arrow
+    /// beside them — the cohort's eight, then each sample's own parameters in turn: a random
+    /// symmetric matrix of the full size with every entry between two different samples set to
+    /// zero, and each diagonal entry then raised above the sum of its row's other entries' sizes —
+    /// which makes it positive definite.
+    fn an_arrow_of(libraries: &[usize], seed: u64) -> (InformationSums, Vec<f64>) {
+        let sizes: Vec<usize> = libraries.iter().map(|&k| own_parameters(k)).collect();
+        let n = COHORT_PARAMETERS + sizes.iter().sum::<usize>();
         let mut full = positive_definite(n, seed);
+        let firsts: Vec<usize> = sizes
+            .iter()
+            .scan(COHORT_PARAMETERS, |at, &size| {
+                let first = *at;
+                *at += size;
+                Some(first)
+            })
+            .collect();
         let owner = |i: usize| {
-            (i >= COHORT_PARAMETERS).then(|| (i - COHORT_PARAMETERS) / SAMPLE_PARAMETERS)
+            (i >= COHORT_PARAMETERS)
+                .then(|| firsts.iter().rposition(|&first| first <= i).expect("owned"))
         };
         for row in 0..n {
             for column in 0..n {
@@ -734,17 +760,16 @@ mod tests {
         for entry in &mut full {
             *entry *= 1e6;
         }
-        let mut sums = InformationSums::new(samples);
+        let mut sums = InformationSums::new(&group_index_of(libraries));
         for row in 0..COHORT_PARAMETERS {
             for column in 0..COHORT_PARAMETERS {
                 sums.cohort[row * COHORT_PARAMETERS + column] = full[row * n + column];
             }
         }
-        for s in 0..samples {
-            let first = COHORT_PARAMETERS + SAMPLE_PARAMETERS * s;
-            for row in 0..SAMPLE_PARAMETERS {
-                for column in 0..SAMPLE_PARAMETERS {
-                    sums.sample_blocks[s][row * SAMPLE_PARAMETERS + column] =
+        for (s, (&first, &size)) in firsts.iter().zip(&sizes).enumerate() {
+            for row in 0..size {
+                for column in 0..size {
+                    sums.sample_blocks[s][row * size + column] =
                         full[(first + row) * n + first + column];
                 }
                 for column in 0..COHORT_PARAMETERS {
@@ -756,14 +781,19 @@ mod tests {
         (sums, full)
     }
 
-    /// The error of layout parameter `i` — the cohort's eight, then each sample's three.
+    /// The error of layout parameter `i` — the cohort's eight, then each sample's own in turn.
     fn error_at(errors: &StandardErrors, i: usize) -> StandardError {
         if i < COHORT_PARAMETERS {
-            errors.cohort[i]
-        } else {
-            let at = i - COHORT_PARAMETERS;
-            errors.samples[at / SAMPLE_PARAMETERS][at % SAMPLE_PARAMETERS]
+            return errors.cohort[i];
         }
+        let mut at = i - COHORT_PARAMETERS;
+        for row in &errors.samples {
+            if at < row.len() {
+                return row[at];
+            }
+            at -= row.len();
+        }
+        panic!("parameter {i} is past the layout")
     }
 
     /// Every parameter's error from the whole arrow inverted densely, with the parameters `removed`
@@ -809,9 +839,55 @@ mod tests {
     fn the_blocks_give_the_errors_of_the_whole_arrow() {
         let samples = 5;
         let (sums, full) = an_arrow(samples, 11);
-        let n = COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples;
+        let n = COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * samples;
         let errors = StandardErrors::of(&sums);
         assert_errors_match(&errors, &dense_errors_without(&full, n, |_| false));
+    }
+
+    /// **The same holds where samples read different numbers of libraries**: samples of one, two,
+    /// three and one library — blocks of 3, 5, 7 and 3 own parameters, 26 with the cohort's — every
+    /// error against the dense inverse to 10⁻¹² relative. A sample's block read at another sample's
+    /// size, or a later library's error written to the first library's slot, fails. **And each
+    /// slot is judged against its own parameter's interval**: a second library's rate whose error
+    /// comes out at 0.3 is an error as a mismapped rate and wider than the whole range as a clean
+    /// one.
+    #[test]
+    fn the_blocks_give_the_errors_of_an_arrow_of_mixed_libraries() {
+        let libraries = [1, 2, 3, 1];
+        let (sums, full) = an_arrow_of(&libraries, 13);
+        let n = COHORT_PARAMETERS + libraries.iter().map(|&k| own_parameters(k)).sum::<usize>();
+        assert_eq!(n, COHORT_PARAMETERS + 18);
+        let errors = StandardErrors::of(&sums);
+        assert_eq!(
+            errors.samples.iter().map(Vec::len).collect::<Vec<_>>(),
+            [3, 5, 7, 3]
+        );
+        assert_errors_match(&errors, &dense_errors_without(&full, n, |_| false));
+
+        // **Each slot is judged against its own parameter's interval.** Sample 1's second library's
+        // rates rescaled so each error comes out at 0.3: inside the mismapped rate's interval
+        // (0.0001 to 0.45, width 0.4499) and outside the clean rate's (0.000001 to 0.2).
+        for (class, expect_estimated) in [(1, true), (0, false)] {
+            let slot = sample::rate(1, class);
+            let size = sums.own_parameters_of(1);
+            let factor = 0.3 / errors.samples[1][slot].value().expect("an error");
+            let mut rescaled = sums.clone();
+            for j in 0..size {
+                rescaled.sample_blocks[1][slot * size + j] /= factor;
+                rescaled.sample_blocks[1][j * size + slot] /= factor;
+            }
+            for column in 0..COHORT_PARAMETERS {
+                rescaled.sample_cohort_blocks[1][slot * COHORT_PARAMETERS + column] /= factor;
+            }
+            let wider = StandardErrors::of(&rescaled).samples[1][slot];
+            match (wider, expect_estimated) {
+                (StandardError::Estimated(error), true)
+                | (StandardError::WiderThanItsRange(error), false) => {
+                    assert!((error - 0.3).abs() < 1e-9, "rate {class}: {error}");
+                }
+                (other, _) => panic!("rate {class} of a second library at 0.3: {other:?}"),
+            }
+        }
     }
 
     /// **A parameter with no information has no error, and does not disturb the others'**: the
@@ -821,11 +897,11 @@ mod tests {
     fn a_parameter_with_no_information_has_no_error() {
         let samples = 3;
         let (mut sums, full) = an_arrow(samples, 23);
-        let n = COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples;
+        let n = COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * samples;
         let removed = |i: usize| {
             (cohort::DUPLICATED_SHARE..COHORT_PARAMETERS).contains(&i)
-                || (COHORT_PARAMETERS + SAMPLE_PARAMETERS
-                    ..COHORT_PARAMETERS + 2 * SAMPLE_PARAMETERS)
+                || (COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS
+                    ..COHORT_PARAMETERS + 2 * ONE_LIBRARY_SAMPLE_PARAMETERS)
                     .contains(&i)
         };
         for i in cohort::DUPLICATED_SHARE..COHORT_PARAMETERS {
@@ -834,13 +910,13 @@ mod tests {
                 sums.cohort[j * COHORT_PARAMETERS + i] = 0.0;
             }
             for s in 0..samples {
-                for row in 0..SAMPLE_PARAMETERS {
+                for row in 0..ONE_LIBRARY_SAMPLE_PARAMETERS {
                     sums.sample_cohort_blocks[s][row * COHORT_PARAMETERS + i] = 0.0;
                 }
             }
         }
-        sums.sample_blocks[1] = [0.0; SAMPLE_PARAMETERS * SAMPLE_PARAMETERS];
-        sums.sample_cohort_blocks[1] = [0.0; SAMPLE_PARAMETERS * COHORT_PARAMETERS];
+        sums.sample_blocks[1].fill(0.0);
+        sums.sample_cohort_blocks[1].fill(0.0);
         let errors = StandardErrors::of(&sums);
         assert_eq!(
             errors.cohort[cohort::DUPLICATED_SHARE..],
@@ -856,7 +932,7 @@ mod tests {
     #[test]
     fn at_one_sample_the_homozygote_excess_is_held_fixed() {
         let (sums, full) = an_arrow(1, 31);
-        let n = COHORT_PARAMETERS + SAMPLE_PARAMETERS;
+        let n = COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS;
         let excess = COHORT_PARAMETERS + sample::HOMOZYGOTE_EXCESS;
         assert!(full[excess * n + excess] > 0.0, "the excess is informed");
         let errors = StandardErrors::of(&sums);
@@ -876,7 +952,7 @@ mod tests {
     fn a_parameter_the_others_mimic_is_dropped_alone() {
         let samples = 2;
         let (mut sums, mut full) = an_arrow(samples, 41);
-        let n = COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples;
+        let n = COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * samples;
         for j in 0..n {
             full[n + j] = full[j];
         }
@@ -888,7 +964,7 @@ mod tests {
             sums.cohort[j * COHORT_PARAMETERS + 1] = full[j * n + 1];
         }
         for s in 0..samples {
-            for row in 0..SAMPLE_PARAMETERS {
+            for row in 0..ONE_LIBRARY_SAMPLE_PARAMETERS {
                 sums.sample_cohort_blocks[s][row * COHORT_PARAMETERS + 1] =
                     sums.sample_cohort_blocks[s][row * COHORT_PARAMETERS];
             }
@@ -912,7 +988,7 @@ mod tests {
             sums.cohort[j * COHORT_PARAMETERS + at] *= shrink;
         }
         for s in 0..samples {
-            for row in 0..SAMPLE_PARAMETERS {
+            for row in 0..ONE_LIBRARY_SAMPLE_PARAMETERS {
                 sums.sample_cohort_blocks[s][row * COHORT_PARAMETERS + at] *= shrink;
             }
         }
@@ -923,7 +999,9 @@ mod tests {
             }
             other => panic!("the duplicated share's error is {other:?}"),
         }
-        for i in (0..COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples).filter(|&i| i != at) {
+        for i in
+            (0..COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * samples).filter(|&i| i != at)
+        {
             assert!(error_at(&errors, i).value().is_some(), "parameter {i}");
         }
     }
@@ -937,7 +1015,7 @@ mod tests {
     fn a_sample_parameter_it_cannot_tell_apart_is_dropped_alone() {
         let samples = 2;
         let (mut sums, mut full) = an_arrow(samples, 67);
-        let n = COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples;
+        let n = COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * samples;
         let (clean, noisy) = (COHORT_PARAMETERS, COHORT_PARAMETERS + 1);
         for j in 0..n {
             full[noisy * n + j] = full[clean * n + j];
@@ -945,9 +1023,9 @@ mod tests {
         for j in 0..n {
             full[j * n + noisy] = full[j * n + clean];
         }
-        for row in 0..SAMPLE_PARAMETERS {
-            for column in 0..SAMPLE_PARAMETERS {
-                sums.sample_blocks[0][row * SAMPLE_PARAMETERS + column] =
+        for row in 0..ONE_LIBRARY_SAMPLE_PARAMETERS {
+            for column in 0..ONE_LIBRARY_SAMPLE_PARAMETERS {
+                sums.sample_blocks[0][row * ONE_LIBRARY_SAMPLE_PARAMETERS + column] =
                     full[(clean + row) * n + clean + column];
             }
             for column in 0..COHORT_PARAMETERS {
@@ -990,17 +1068,19 @@ mod tests {
         let samples = 2;
         let (mut sums, _) = an_arrow(samples, 71);
         sums.cohort = [0.0; COHORT_PARAMETERS * COHORT_PARAMETERS];
-        sums.sample_cohort_blocks
-            .fill([0.0; SAMPLE_PARAMETERS * COHORT_PARAMETERS]);
+        for block in &mut sums.sample_cohort_blocks {
+            block.fill(0.0);
+        }
         let errors = StandardErrors::of(&sums);
         assert_eq!(
             errors.cohort,
             [StandardError::NoInformation; COHORT_PARAMETERS]
         );
         for (s, own) in sums.sample_blocks.iter().enumerate() {
-            let inverse = inverse_of_positive_definite(own, SAMPLE_PARAMETERS).expect("inverts");
-            for j in 0..SAMPLE_PARAMETERS {
-                let expected = inverse[j * SAMPLE_PARAMETERS + j].sqrt();
+            let inverse =
+                inverse_of_positive_definite(own, ONE_LIBRARY_SAMPLE_PARAMETERS).expect("inverts");
+            for j in 0..ONE_LIBRARY_SAMPLE_PARAMETERS {
+                let expected = inverse[j * ONE_LIBRARY_SAMPLE_PARAMETERS + j].sqrt();
                 let got = errors.samples[s][j].value().expect("an error");
                 assert!((got - expected).abs() < 1e-12 * expected, "sample {s}, {j}");
             }
@@ -1016,7 +1096,7 @@ mod tests {
     fn a_parameter_without_information_mid_block_leaves_the_others_in_place() {
         let samples = 2;
         let (mut sums, full) = an_arrow(samples, 73);
-        let n = COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples;
+        let n = COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * samples;
         let (share, rate) = (
             cohort::P_INVARIANT,
             COHORT_PARAMETERS + sample::NOISY_ERROR_RATE,
@@ -1026,14 +1106,14 @@ mod tests {
             sums.cohort[j * COHORT_PARAMETERS + share] = 0.0;
         }
         for s in 0..samples {
-            for row in 0..SAMPLE_PARAMETERS {
+            for row in 0..ONE_LIBRARY_SAMPLE_PARAMETERS {
                 sums.sample_cohort_blocks[s][row * COHORT_PARAMETERS + share] = 0.0;
             }
         }
         let which = sample::NOISY_ERROR_RATE;
-        for j in 0..SAMPLE_PARAMETERS {
-            sums.sample_blocks[0][which * SAMPLE_PARAMETERS + j] = 0.0;
-            sums.sample_blocks[0][j * SAMPLE_PARAMETERS + which] = 0.0;
+        for j in 0..ONE_LIBRARY_SAMPLE_PARAMETERS {
+            sums.sample_blocks[0][which * ONE_LIBRARY_SAMPLE_PARAMETERS + j] = 0.0;
+            sums.sample_blocks[0][j * ONE_LIBRARY_SAMPLE_PARAMETERS + which] = 0.0;
         }
         for column in 0..COHORT_PARAMETERS {
             sums.sample_cohort_blocks[0][which * COHORT_PARAMETERS + column] = 0.0;
@@ -1053,15 +1133,15 @@ mod tests {
     fn a_diagonal_that_is_not_finite_is_no_information() {
         let samples = 2;
         let (mut sums, full) = an_arrow(samples, 79);
-        let n = COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples;
+        let n = COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * samples;
         let at = cohort::DENSITY_B;
         sums.cohort[at * COHORT_PARAMETERS + at] = f64::INFINITY;
         let excess = sample::HOMOZYGOTE_EXCESS;
-        sums.sample_blocks[1][excess * SAMPLE_PARAMETERS + excess] = f64::NAN;
+        sums.sample_blocks[1][excess * ONE_LIBRARY_SAMPLE_PARAMETERS + excess] = f64::NAN;
         let errors = StandardErrors::of(&sums);
         assert_eq!(errors.cohort[at], StandardError::NoInformation);
         assert_eq!(errors.samples[1][excess], StandardError::NoInformation);
-        let excess_of_one = COHORT_PARAMETERS + SAMPLE_PARAMETERS + excess;
+        let excess_of_one = COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS + excess;
         assert_errors_match(
             &errors,
             &dense_errors_without(&full, n, |i| i == at || i == excess_of_one),
@@ -1092,32 +1172,34 @@ mod tests {
     }
 
     /// **The run's log line gives every cohort parameter's value and standard error by name, and
-    /// summarises each sample kind**: the median (the lower middle of an even count) and the largest
-    /// standard error, and how many are missing, by reason — with values chosen so a median taken as
-    /// the mean, the upper middle, or the largest taken as the last listed, prints a different line.
-    /// The duplicated class's three appear only when the run fits it. When a sample holds two
-    /// libraries every error is marked as not computed yet, and the line says why and how many.
+    /// summarises each kind of a sample's own**: the median (the lower middle of an even count) and
+    /// the largest standard error, and how many are missing, by reason — with values chosen so a
+    /// median taken as the mean, the upper middle, or the largest taken as the last listed, prints a
+    /// different line. The duplicated class's three appear only when the run fits it. **The rates
+    /// are counted a read group each**: with sample 0 read from two libraries, its second library's
+    /// two rates join the counts, from their own slots.
     #[test]
     fn the_logged_line_summarises_each_kind() {
         use StandardError::{
             Estimated, HeldFixed, NoInformation, NotIdentified, WiderThanItsRange,
         };
+        let cohort = [
+            Estimated(2e-4),
+            Estimated(3.25e-3),
+            NotIdentified,
+            WiderThanItsRange(61.0),
+            Estimated(0.5),
+            Estimated(1e-3),
+            NoInformation,
+            NotIdentified,
+        ];
         let errors = StandardErrors {
-            cohort: [
-                Estimated(2e-4),
-                Estimated(3.25e-3),
-                NotIdentified,
-                WiderThanItsRange(61.0),
-                Estimated(0.5),
-                Estimated(1e-3),
-                NoInformation,
-                NotIdentified,
-            ],
+            cohort,
             samples: vec![
-                [Estimated(4e-4), Estimated(0.01), HeldFixed],
-                [Estimated(1e-4), NoInformation, HeldFixed],
-                [Estimated(3e-4), NotIdentified, HeldFixed],
-                [Estimated(2e-4), Estimated(0.02), HeldFixed],
+                vec![Estimated(4e-4), Estimated(0.01), HeldFixed],
+                vec![Estimated(1e-4), NoInformation, HeldFixed],
+                vec![Estimated(3e-4), NotIdentified, HeldFixed],
+                vec![Estimated(2e-4), Estimated(0.02), HeldFixed],
             ],
         };
         let one_group_each = vec![vec![0], vec![1], vec![2], vec![3]];
@@ -1127,10 +1209,10 @@ mod tests {
              non-reference share 1.2500e-2, no standard error (not identified), allele-frequency \
              shape a 5.0000e-1, no standard error (it came out at 6.10e1, wider than the \
              parameter's whole range), allele-frequency shape b 6.1000e1 ± 5.00e-1; error rates at \
-             ordinary positions (4 samples): median standard error 2.00e-4, largest 4.00e-4, none \
-             missing; error rates at mismapped positions (4 samples): median standard error \
-             1.00e-2, largest 2.00e-2, 2 missing (1 no information, 1 not identified); homozygote \
-             excesses (4 samples): none has a standard error (4 held fixed)"
+             ordinary positions (4 read groups): median standard error 2.00e-4, largest 4.00e-4, \
+             none missing; error rates at mismapped positions (4 read groups): median standard \
+             error 1.00e-2, largest 2.00e-2, 2 missing (1 no information, 1 not identified); \
+             homozygote excesses (4 samples): none has a standard error (4 held fixed)"
         );
         let with_the_class = errors.described(&parameters_for_the_log(true, 4, 4), &one_group_each);
         assert!(
@@ -1142,56 +1224,45 @@ mod tests {
             ),
             "{with_the_class}"
         );
+        let mut two_libraries = errors.clone();
+        two_libraries.samples[0].extend([Estimated(5e-4), NoInformation]);
         let second_group_of_sample_0 = vec![vec![0, 2], vec![1], vec![3], vec![4]];
-        let awaiting = errors
-            .clone()
-            .with_errors_awaiting_each_librarys_scores(&second_group_of_sample_0)
-            .described(
-                &parameters_for_the_log(true, 5, 4),
-                &second_group_of_sample_0,
-            );
-        for part in [
-            "mismapped share 3.1200e-2, no standard error (not computed yet where a sample has \
-             several libraries)",
-            "carrier-frequency shape b 5.0000e0, no standard error (not computed yet where a \
-             sample has several libraries)",
-            "error rates at ordinary positions (4 samples): none has a standard error (4 not \
-             computed yet where a sample has several libraries)",
-            "homozygote excesses (4 samples): none has a standard error (4 not computed yet where \
-             a sample has several libraries)",
-        ] {
-            assert!(awaiting.contains(part), "{awaiting}");
-        }
-        assert!(
-            awaiting.ends_with(
-                "; 1 sample(s) hold more than one library (2 read groups between them), so no \
-                 standard error is computed yet: every error depends on those libraries' own \
-                 rates, whose slopes the next step adds"
-            ),
-            "{awaiting}"
+        let line = two_libraries.described(
+            &parameters_for_the_log(false, 5, 4),
+            &second_group_of_sample_0,
         );
-        assert_eq!(
-            errors
-                .clone()
-                .with_errors_awaiting_each_librarys_scores(&one_group_each),
-            errors,
-            "a cohort of one library a sample keeps its errors"
+        assert!(
+            line.ends_with(
+                "error rates at ordinary positions (5 read groups): median standard error \
+                 3.00e-4, largest 5.00e-4, none missing; error rates at mismapped positions (5 read \
+                 groups): median standard error 1.00e-2, largest 2.00e-2, 3 missing (2 no \
+                 information, 1 not identified); homozygote excesses (4 samples): none has a \
+                 standard error (4 held fixed)"
+            ),
+            "{line}"
         );
     }
 
     /// **The trace names each error after the value it belongs to**: the same names as
     /// [`Parameters::named`](crate::parameter_estimation::joint::fit::Parameters), in the same order,
     /// with and without the duplicated class. Two samples over four read groups, the first sample
-    /// holding groups 0 and 2 and no sample group 3: each held group carries its sample's row, and
-    /// group 3 NaN. Once marked as awaiting each library's slopes, every error is NaN.
+    /// holding groups 0 and 2 and no sample group 3: group 0 carries sample 0's first library's
+    /// errors, group 2 its second library's (from the row's fourth and fifth slots), group 1 sample
+    /// 1's, and group 3 NaN.
     #[test]
     fn the_trace_names_each_error_after_its_value() {
         use StandardError::{Estimated, HeldFixed, NoInformation};
         let errors = StandardErrors {
             cohort: [Estimated(1.0); COHORT_PARAMETERS],
             samples: vec![
-                [Estimated(0.1), Estimated(0.2), Estimated(0.3)],
-                [Estimated(0.4), NoInformation, HeldFixed],
+                vec![
+                    Estimated(0.1),
+                    Estimated(0.2),
+                    Estimated(0.3),
+                    Estimated(0.5),
+                    Estimated(0.6),
+                ],
+                vec![Estimated(0.4), NoInformation, HeldFixed],
             ],
         };
         let group_index = vec![vec![0, 2], vec![1]];
@@ -1214,23 +1285,48 @@ mod tests {
             };
             assert_eq!(value_of("clean_error_0"), 0.1);
             assert_eq!(value_of("noisy_error_0"), 0.2);
-            assert_eq!(value_of("clean_error_2"), 0.1);
-            assert_eq!(value_of("noisy_error_2"), 0.2);
+            assert_eq!(value_of("clean_error_2"), 0.5);
+            assert_eq!(value_of("noisy_error_2"), 0.6);
             assert!(value_of("clean_error_3").is_nan());
             assert!(value_of("noisy_error_3").is_nan());
             assert_eq!(value_of("clean_error_1"), 0.4);
             assert!(value_of("noisy_error_1").is_nan());
             assert_eq!(value_of("hom_excess_0"), 0.3);
             assert!(value_of("hom_excess_1").is_nan());
-            let awaiting = errors
-                .clone()
-                .with_errors_awaiting_each_librarys_scores(&group_index)
-                .named(&parameters, &group_index);
+        }
+    }
+
+    /// **Each slot of a sample's row is the parameter the layout says, with that parameter's
+    /// bounds**: for samples of one to four libraries, every library's two rates land in distinct
+    /// slots that, with the homozygote excess, fill the row exactly; a rate's slot names its own noise
+    /// class and carries that class's bounds, and the excess's slot names none and carries the
+    /// excess's. A further library's mismapped rate given the clean rate's bounds fails it.
+    #[test]
+    fn each_slot_of_a_samples_row_is_its_own_parameter_with_its_own_bounds() {
+        for libraries in 1..=4 {
+            let n = own_parameters(libraries);
+            let mut filled = vec![false; n];
+            filled[sample::HOMOZYGOTE_EXCESS] = true;
+            assert_eq!(sample::class_of(sample::HOMOZYGOTE_EXCESS), None);
+            assert_eq!(bounds_of_own(sample::HOMOZYGOTE_EXCESS), HOM_EXCESS_BOUNDS);
+            for library in 0..libraries {
+                for (class, bounds) in [(0, CLEAN_ERROR_BOUNDS), (1, NOISY_ERROR_BOUNDS)] {
+                    let slot = sample::rate(library, class);
+                    assert!(
+                        slot < n && !filled[slot],
+                        "{libraries} libraries: library {library}'s rate {class} at slot {slot}"
+                    );
+                    filled[slot] = true;
+                    assert_eq!(sample::class_of(slot), Some(class), "slot {slot}");
+                    assert_eq!(bounds_of_own(slot), bounds, "slot {slot}");
+                }
+            }
             assert!(
-                awaiting.iter().all(|(_, error)| error.is_nan()),
-                "{awaiting:?}"
+                filled.iter().all(|&slot| slot),
+                "{libraries} libraries: {filled:?}"
             );
         }
+        assert_eq!(own_parameters(0), ONE_LIBRARY_SAMPLE_PARAMETERS);
     }
 
     /// **The threshold does not depend on a parameter's units**: one cohort parameter's scores
@@ -1248,12 +1344,12 @@ mod tests {
             scaled.cohort[j * COHORT_PARAMETERS + at] *= scale;
         }
         for s in 0..samples {
-            for row in 0..SAMPLE_PARAMETERS {
+            for row in 0..ONE_LIBRARY_SAMPLE_PARAMETERS {
                 scaled.sample_cohort_blocks[s][row * COHORT_PARAMETERS + at] *= scale;
             }
         }
         let (plain, small) = (StandardErrors::of(&sums), StandardErrors::of(&scaled));
-        for i in 0..COHORT_PARAMETERS + SAMPLE_PARAMETERS * samples {
+        for i in 0..COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * samples {
             let expected = error_at(&plain, i).value().expect("identified")
                 / if i == at { scale } else { 1.0 };
             let got = error_at(&small, i).value().expect("still identified");

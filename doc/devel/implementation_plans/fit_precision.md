@@ -115,7 +115,7 @@ Before the errors are used to stop the fit, the fit must estimate what the error
 step here that moves a fitted number is its own commit, with the checksums re-recorded after
 `scripts/promote_ng_oracle.sh` has measured the change.
 
-1. ☐ **A6 — each library's reads under its own error rates.** At a position, a sample's likelihood
+1. ✅ **A6 — each library's reads under its own error rates.** At a position, a sample's likelihood
    given its genotype becomes the product over its libraries of each library's reads under that
    library's two rates; the genotype, and everything above it, stays one a sample. Today every stage
    assumes one set of counts and one rate pair a sample, so the step reaches each of them:
