@@ -36,8 +36,11 @@
 //! shapes, each sample's homozygote excess — are one- and two-dimensional and see a few dozen
 //! accumulated numbers apiece.
 //!
-//! Each iteration cannot lower the likelihood, which is what expectation-maximisation gives
-//! and a coordinate climb over a non-concave surface does not.
+//! Each iteration is meant not to lower the likelihood. Expectation-maximisation guarantees that
+//! for every update solved exactly, and a coordinate climb over a non-concave surface does not.
+//! The density's two shapes and the carrier Beta's take one step along the likelihood's own slope
+//! instead ([`step_beta_shapes`]); that the step does not lower it is measured
+//! (`plain_passes_never_lower_the_log_likelihood`), not guaranteed.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -60,7 +63,7 @@ use super::contamination::{
 mod information;
 mod standard_errors;
 
-use information::{InformationSums, PositionScores, ScoringTables, score_position};
+use information::{InformationSums, PositionScores, RuleSlopes, ScoringTables, score_position};
 use standard_errors::StandardErrors;
 
 // ---------------------------------------------------------------------
@@ -1386,14 +1389,20 @@ struct Statistics {
     invariant: f64,
     fixed_alt: f64,
     segregating: f64,
-    /// Posterior mass on the duplicated class, and the same two sums for its carrier Beta.
+    /// Posterior mass on the duplicated class.
     duplicated: f64,
-    sum_ln_q: f64,
-    sum_ln_one_minus_q: f64,
-    /// Σ posterior · ln f and Σ posterior · ln(1 − f) over the quadrature, which is all a
-    /// Beta's two shapes need.
+    /// **The log-likelihood's slope in the density's two shapes** `[a, b]`, summed over the
+    /// positions: the slope of the likelihood the quadrature rule computes, as the rule's nodes
+    /// and weights move with the shapes ([`information::RuleSlopes`]). What the shapes'
+    /// update steps on ([`step_beta_shapes`]); zero where the shapes are the likelihood's maximum.
+    density_shape_slopes: [f64; 2],
+    /// The same for the carrier Beta's two shapes, over the duplicated branch.
+    carrier_shape_slopes: [f64; 2],
+    /// Σ posterior · ln f over the density's rule — the statistic the shapes' update solved before
+    /// it stepped on the rule's own slopes. Kept in test builds only, for the test that measures
+    /// how far that form lands from the likelihood's slope.
+    #[cfg(test)]
     sum_ln_f: f64,
-    sum_ln_one_minus_f: f64,
     /// Per read group × class × genotype: expected reads on the candidate allele, on neither
     /// base, and on the reference. **This is what replaces a data pass per candidate error
     /// rate**: the rate's own maximisation is over these nine numbers.
@@ -1479,10 +1488,10 @@ impl Statistics {
             fixed_alt: 0.0,
             segregating: 0.0,
             duplicated: 0.0,
-            sum_ln_q: 0.0,
-            sum_ln_one_minus_q: 0.0,
+            density_shape_slopes: [0.0; 2],
+            carrier_shape_slopes: [0.0; 2],
+            #[cfg(test)]
             sum_ln_f: 0.0,
-            sum_ln_one_minus_f: 0.0,
             reads: vec![[[ReadTally::default(); 3]; 2]; groups],
             genotypes: vec![vec![[0.0; 3]; nodes]; samples],
             heterozygous: vec![0.0; samples],
@@ -1516,10 +1525,23 @@ impl Statistics {
         self.fixed_alt += other.fixed_alt;
         self.segregating += other.segregating;
         self.duplicated += other.duplicated;
-        self.sum_ln_q += other.sum_ln_q;
-        self.sum_ln_one_minus_q += other.sum_ln_one_minus_q;
-        self.sum_ln_f += other.sum_ln_f;
-        self.sum_ln_one_minus_f += other.sum_ln_one_minus_f;
+        for (into, from) in self
+            .density_shape_slopes
+            .iter_mut()
+            .chain(self.carrier_shape_slopes.iter_mut())
+            .zip(
+                other
+                    .density_shape_slopes
+                    .iter()
+                    .chain(&other.carrier_shape_slopes),
+            )
+        {
+            *into += from;
+        }
+        #[cfg(test)]
+        {
+            self.sum_ln_f += other.sum_ln_f;
+        }
         for (into, from) in self.reads.iter_mut().zip(other.reads.iter()) {
             for (into, from) in into.iter_mut().zip(from.iter()) {
                 for (into, from) in into.iter_mut().zip(from.iter()) {
@@ -2465,9 +2487,20 @@ struct PassModel<'a> {
     read_logs: Vec<Vec<ReadLogs>>,
     /// The frequency density's rule, with each sample's genotype priors at its nodes.
     quadrature: BetaQuadrature,
-    /// The carrier Beta's rule, when the run fits the duplicated class.
-    carrier: Option<BetaQuadrature>,
+    /// The carrier Beta's rule and its slopes, when the run fits the duplicated class.
+    carrier: Option<CarrierRule>,
+    /// How the density's rule's nodes and weights move with its two shapes — what the
+    /// likelihood's slope in the shapes is made of, taken every pass for the shapes' update.
+    density_slopes: RuleSlopes,
     parameters: &'a Parameters,
+}
+
+/// **The carrier Beta's rule and how it moves with the carrier's two shapes**, held together so
+/// that a pass cannot have one without the other: a rule without its slopes would leave the
+/// carrier's shapes where they started, and nothing would say so.
+struct CarrierRule {
+    quadrature: BetaQuadrature,
+    slopes: RuleSlopes,
 }
 
 impl<'a> PassModel<'a> {
@@ -2483,11 +2516,17 @@ impl<'a> PassModel<'a> {
             &parameters.hom_excess,
         );
         let carrier = parameters.duplicated.map(|duplicated| {
-            BetaQuadrature::new(
+            let quadrature = BetaQuadrature::new(
                 duplicated.carrier_a,
                 duplicated.carrier_b,
                 config.quadrature_nodes,
-            )
+            );
+            let slopes = RuleSlopes::of(
+                duplicated.carrier_a,
+                duplicated.carrier_b,
+                quadrature.nodes.len(),
+            );
+            CarrierRule { quadrature, slopes }
         });
         // One table a noise class a read group, beside the quadratures and for the same reason.
         let read_logs: Vec<Vec<ReadLogs>> = (0..2)
@@ -2497,12 +2536,18 @@ impl<'a> PassModel<'a> {
                     .collect()
             })
             .collect();
+        let density_slopes = RuleSlopes::of(
+            parameters.density.a,
+            parameters.density.b,
+            quadrature.nodes.len(),
+        );
         Self {
             group_index,
             ploidy: config.ploidy,
             read_logs,
             quadrature,
             carrier,
+            density_slopes,
             parameters,
         }
     }
@@ -2862,7 +2907,7 @@ fn one_position(
     let ploidy = model.ploidy;
     let read_logs = model.read_logs.as_slice();
     let quadrature = &model.quadrature;
-    let carrier = model.carrier.as_ref();
+    let carrier = model.carrier.as_ref().map(|rule| &rule.quadrature);
     let parameters = model.parameters;
     let samples = scratch.samples;
     let nodes = scratch.nodes;
@@ -3267,8 +3312,13 @@ fn one_position(
                     if share <= 1e-12 {
                         continue;
                     }
-                    statistics.sum_ln_f += share * quadrature.ln_nodes[node];
-                    statistics.sum_ln_one_minus_f += share * quadrature.ln_one_minus_nodes[node];
+                    #[cfg(test)]
+                    {
+                        statistics.sum_ln_f += share * quadrature.ln_nodes[node];
+                    }
+                    // How this node's product over samples moves as its frequency moves: each
+                    // sample's term's slope in `f` over the term, summed.
+                    let mut along_frequency = 0.0;
                     for s in 0..samples {
                         let prior = &quadrature.priors[(node * samples + s) * 3..][..3];
                         let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
@@ -3277,6 +3327,11 @@ fn one_position(
                         if total <= 0.0 {
                             continue;
                         }
+                        let prior_slope = &quadrature.prior_slopes[(node * samples + s) * 3..][..3];
+                        along_frequency += (prior_slope[0] * lik[0]
+                            + prior_slope[1] * lik[1]
+                            + prior_slope[2] * lik[2])
+                            / total;
                         let base = (candidate * samples + s) * 3;
                         for j in 0..3 {
                             let weight = share * joint[j] / total;
@@ -3284,6 +3339,14 @@ fn one_position(
                             scratch.genotype_weight[s * 3 + j] += weight;
                             statistics.genotypes[s][node][j] += weight;
                         }
+                    }
+                    // The node's share of the likelihood's slope in each shape: its weight moves
+                    // and it moves along the frequency axis ([`information::RuleSlopes`]).
+                    let rule = &model.density_slopes;
+                    for (shape, slope) in statistics.density_shape_slopes.iter_mut().enumerate() {
+                        *slope += share
+                            * (rule.ln_weight_slope[shape][node]
+                                + along_frequency * rule.node_slope[shape][node]);
                     }
                 }
             }
@@ -3323,7 +3386,14 @@ fn one_position(
         // The duplicated branch. A carrier's reads are scored exactly as a heterozygote's, so
         // they go into the same tally the error rate is maximised over — what differs is where
         // the position's own weight is booked, and **a carrier is not counted heterozygous**.
-        if let Some(carrier) = carrier.filter(|_| branch[DUPLICATED] > 1e-12) {
+        if let Some(CarrierRule {
+            quadrature: carrier,
+            slopes: rule,
+        }) = model
+            .carrier
+            .as_ref()
+            .filter(|_| branch[DUPLICATED] > 1e-12)
+        {
             {
                 let carrier_nodes = carrier.nodes.len();
                 scratch.shares.clear();
@@ -3347,8 +3417,7 @@ fn one_position(
                             continue;
                         }
                         let q = carrier.nodes[node];
-                        statistics.sum_ln_q += share * carrier.ln_nodes[node];
-                        statistics.sum_ln_one_minus_q += share * carrier.ln_one_minus_nodes[node];
+                        let mut along_frequency = 0.0;
                         for s in 0..samples {
                             let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
                             let odds = coverage_odds.get(s).copied().unwrap_or(1.0);
@@ -3357,10 +3426,17 @@ fn one_position(
                             if total <= 0.0 {
                                 continue;
                             }
+                            along_frequency += (odds * lik[1] - lik[0]) / total;
                             let base = (candidate * samples + s) * 3;
                             scratch.per_candidate_weight[base] += share * joint[0] / total;
                             scratch.per_candidate_weight[base + 1] += share * joint[1] / total;
                             scratch.carrier_weight[s] += share * joint[1] / total;
+                        }
+                        for (shape, slope) in statistics.carrier_shape_slopes.iter_mut().enumerate()
+                        {
+                            *slope += share
+                                * (rule.ln_weight_slope[shape][node]
+                                    + along_frequency * rule.node_slope[shape][node]);
                         }
                     }
                 }
@@ -3468,9 +3544,9 @@ fn maximisation(
             .clamp(DUPLICATED_SHARE_BOUNDS.0, DUPLICATED_SHARE_BOUNDS.1);
         note_share(before, duplicated.share);
         if statistics.duplicated > 0.0 {
-            let (a, b) = fit_beta_shapes(
-                statistics.sum_ln_q / statistics.duplicated,
-                statistics.sum_ln_one_minus_q / statistics.duplicated,
+            let (a, b) = step_beta_shapes(
+                statistics.carrier_shape_slopes,
+                statistics.duplicated,
                 duplicated.carrier_a,
                 duplicated.carrier_b,
             );
@@ -3481,13 +3557,11 @@ fn maximisation(
         }
     }
 
-    // The Beta's two shapes, from the mean of `ln f` and `ln (1 − f)` under the posterior.
+    // The Beta's two shapes, one step along the log-likelihood's own slope in them.
     if statistics.segregating > 0.0 {
-        let mean_ln_f = statistics.sum_ln_f / statistics.segregating;
-        let mean_ln_one_minus = statistics.sum_ln_one_minus_f / statistics.segregating;
-        let (a, b) = fit_beta_shapes(
-            mean_ln_f,
-            mean_ln_one_minus,
+        let (a, b) = step_beta_shapes(
+            statistics.density_shape_slopes,
+            statistics.segregating,
             parameters.density.a,
             parameters.density.b,
         );
@@ -3636,36 +3710,71 @@ fn golden_section(score: &dyn Fn(f64) -> f64, low: f64, high: f64) -> f64 {
     0.5 * (low + high)
 }
 
-/// The Beta whose `E[ln f]` and `E[ln (1 − f)]` match the two accumulated means.
+/// **A Beta's two shapes, one Newton step along the log-likelihood's own slope in them.**
 ///
-/// The two equations are `ψ(a) − ψ(a+b) = mean ln f` and `ψ(b) − ψ(a+b) = mean ln (1−f)`;
-/// they are solved by a damped Newton step from the current shapes, which is enough because
-/// one expectation-maximisation pass never moves them far.
-fn fit_beta_shapes(mean_ln_f: f64, mean_ln_one_minus: f64, a0: f64, b0: f64) -> (f64, f64) {
-    let (mut a, mut b) = (a0, b0);
-    for _ in 0..50 {
-        let ab = a + b;
-        let g1 = digamma(a) - digamma(ab) - mean_ln_f;
-        let g2 = digamma(b) - digamma(ab) - mean_ln_one_minus;
-        let h11 = trigamma(a) - trigamma(ab);
-        let h22 = trigamma(b) - trigamma(ab);
-        let h12 = -trigamma(ab);
-        let determinant = h11 * h22 - h12 * h12;
-        if determinant.abs() < 1e-12 {
-            break;
-        }
-        let step_a = (g1 * h22 - g2 * h12) / determinant;
-        let step_b = (g2 * h11 - g1 * h12) / determinant;
-        let next_a = (a - step_a).clamp(BETA_SHAPE_BOUNDS.0, BETA_SHAPE_BOUNDS.1);
-        let next_b = (b - step_b).clamp(BETA_SHAPE_BOUNDS.0, BETA_SHAPE_BOUNDS.1);
-        let moved = (next_a - a).abs() + (next_b - b).abs();
-        a = next_a;
-        b = next_b;
-        if moved < 1e-10 {
-            break;
+/// `slope` is the log-likelihood's slope in `[a, b]` summed over the positions — the slope of
+/// the likelihood the quadrature rule computes, nodes and weights moving with the shapes
+/// ([`Statistics::density_shape_slopes`]). The step divides it by the curvature `positions` Beta
+/// draws would give if each position's frequency were seen — `positions` times the matrix of
+/// trigamma terms `[[ψ′(a) − ψ′(a+b), −ψ′(a+b)], [−ψ′(a+b), ψ′(b) − ψ′(a+b)]]`, with `positions`
+/// the posterior count of positions the Beta covers. That curvature is the complete-data one, so
+/// this is one step of the EM gradient algorithm (Lange 1995), **at rest only where the
+/// likelihood's slope is zero** — where the update it replaces solved the digamma form, whose
+/// integral on the rule misses that slope (`information` module doc, "The Beta shapes' slopes"),
+/// and came to rest 0.65 to 2.3 standard errors from the likelihood's flat point
+/// (`fit_precision_a4_2026-09-27.md` §2.3).
+///
+/// **It takes more passes than the update it replaces**: one step a pass, where that update solved
+/// its two equations to convergence each pass. Measured on drawn cohorts of 20 samples at 3 reads,
+/// an accelerated start converges in 18 to 30 passes where it took 12 to 18
+/// (`fit_precision_a7_2026-09-28.md` §3).
+///
+/// **At a bound the step is projected.** A shape whose step would leave its interval is held at the
+/// bound it crosses, and the other takes the step the same curvature gives with that shape held —
+/// so the free shape still comes to rest only where its own slope is zero. Clamping each shape of
+/// the joint step instead left the free one where its slope was not zero: a joint step's cross term
+/// assumes both shapes move (plan step A7's review, where a density wanting its second shape above
+/// 50 stopped its first 4.1 units from the maximum and lost log-likelihood from pass to pass). A
+/// slope that is not a number moves nothing.
+fn step_beta_shapes(slope: [f64; 2], positions: f64, a: f64, b: f64) -> (f64, f64) {
+    let (low, high) = BETA_SHAPE_BOUNDS;
+    let within = |shape: f64| (low..=high).contains(&shape);
+    if !(slope[0].is_finite() && slope[1].is_finite()) {
+        return (a, b);
+    }
+    let ab = a + b;
+    let h11 = positions * (trigamma(a) - trigamma(ab));
+    let h22 = positions * (trigamma(b) - trigamma(ab));
+    let h12 = -positions * trigamma(ab);
+    let determinant = h11 * h22 - h12 * h12;
+    if !(determinant > 0.0 && determinant.is_finite()) {
+        return (a, b);
+    }
+    let joint = (
+        a + (slope[0] * h22 - slope[1] * h12) / determinant,
+        b + (slope[1] * h11 - slope[0] * h12) / determinant,
+    );
+    if within(joint.0) && within(joint.1) {
+        return joint;
+    }
+    // One shape held at the bound its step crosses; the other's step with it held.
+    let a_given = |held_b: f64| a + (slope[0] - h12 * (held_b - b)) / h11;
+    let b_given = |held_a: f64| b + (slope[1] - h12 * (held_a - a)) / h22;
+    if !within(joint.1) {
+        let held_b = joint.1.clamp(low, high);
+        let free_a = a_given(held_b);
+        if within(free_a) {
+            return (free_a, held_b);
         }
     }
-    (a, b)
+    if !within(joint.0) {
+        let held_a = joint.0.clamp(low, high);
+        let free_b = b_given(held_a);
+        if within(free_b) {
+            return (held_a, free_b);
+        }
+    }
+    (joint.0.clamp(low, high), joint.1.clamp(low, high))
 }
 
 // ---------------------------------------------------------------------
@@ -3689,12 +3798,17 @@ struct BetaQuadrature {
     )]
     weights: Vec<f64>,
     ln_weights: Vec<f64>,
+    /// `ln f` at each node, for the test that measures the digamma form ([`Statistics`]).
+    #[cfg(test)]
     ln_nodes: Vec<f64>,
-    ln_one_minus_nodes: Vec<f64>,
     /// `[node][sample][genotype]` — how common each genotype is at that node's frequency for
     /// that sample's own inbreeding. **Computed once for the whole pass**, because it depends
     /// on nothing that varies from position to position, and it sits in the innermost loop.
     priors: Vec<f64>,
+    /// `[node][sample][genotype]` — how that genotype frequency moves with the node's frequency
+    /// (`genotype_frequencies_slope_in_frequency`), laid out as `priors`: what the likelihood's
+    /// slope in the density's shapes reads as the rule's nodes move.
+    prior_slopes: Vec<f64>,
 }
 
 impl BetaQuadrature {
@@ -3702,10 +3816,13 @@ impl BetaQuadrature {
     fn with_genotype_priors(a: f64, b: f64, count: usize, hom_excess: &[f64]) -> Self {
         let mut rule = Self::new(a, b, count);
         rule.priors = Vec::with_capacity(rule.nodes.len() * hom_excess.len() * 3);
+        rule.prior_slopes = Vec::with_capacity(rule.nodes.len() * hom_excess.len() * 3);
         for &f in &rule.nodes {
             for &excess in hom_excess {
                 rule.priors
                     .extend_from_slice(&genotype_frequencies(f, excess));
+                rule.prior_slopes
+                    .extend_from_slice(&genotype_frequencies_slope_in_frequency(f, excess));
             }
         }
         rule
@@ -3722,8 +3839,8 @@ impl BetaQuadrature {
             .collect();
         let total: f64 = w.iter().sum();
         let weights: Vec<f64> = w.iter().map(|w| w / total).collect();
+        #[cfg(test)]
         let ln_nodes = nodes.iter().map(|f| float::ln(*f)).collect();
-        let ln_one_minus_nodes = nodes.iter().map(|f| float::ln(1.0 - f)).collect();
         let ln_weights = weights
             .iter()
             .map(|w| float::ln(w.max(f64::MIN_POSITIVE)))
@@ -3732,9 +3849,10 @@ impl BetaQuadrature {
             nodes,
             weights,
             ln_weights,
+            #[cfg(test)]
             ln_nodes,
-            ln_one_minus_nodes,
             priors: Vec::new(),
+            prior_slopes: Vec::new(),
         }
     }
 }
@@ -3838,7 +3956,9 @@ fn symmetric_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// `ψ(x)`, the derivative of `ln Γ(x)`, by recurrence up to eight and then an asymptotic
-/// series.
+/// series. Only the tests read it: the shapes' update steps on the rule's own slope instead of
+/// solving the digamma form ([`step_beta_shapes`]).
+#[cfg(test)]
 fn digamma(x: f64) -> f64 {
     let mut x = x;
     let mut result = 0.0;
@@ -3914,26 +4034,67 @@ mod tests {
         );
     }
 
+    /// **The shapes' step is a Newton step with the complete-data curvature, at rest where the
+    /// slope is zero, and projected at a bound.** A slope built as the curvature times a known move
+    /// lands on that move exactly; a zero slope moves nothing, to the bit; a slope far beyond both
+    /// bounds stops at them; a slope that is not a number moves nothing. **With the second shape at
+    /// its bound and its slope pushing out**, the second stays and the first takes its own step,
+    /// `slope / curvature` — so it moves not at all where its own slope is zero, which clamping each
+    /// shape of the joint step does not give.
     #[test]
-    fn the_beta_shapes_come_back_from_their_own_log_means() {
-        for (a, b) in [(0.4, 1.5), (2.0, 2.0), (0.9, 6.0)] {
-            let rule = BetaQuadrature::new(a, b, 48);
-            let mean_ln_f: f64 = rule
-                .nodes
-                .iter()
-                .zip(rule.weights.iter())
-                .map(|(f, w)| w * float::ln(*f))
-                .sum();
-            let mean_ln_one_minus: f64 = rule
-                .nodes
-                .iter()
-                .zip(rule.weights.iter())
-                .map(|(f, w)| w * float::ln(1.0 - f))
-                .sum();
-            let (fitted_a, fitted_b) = fit_beta_shapes(mean_ln_f, mean_ln_one_minus, 1.0, 1.0);
+    fn the_shapes_step_follows_the_slope_by_the_complete_data_curvature() {
+        let (a, b, weight) = (0.7, 2.5, 1_000.0);
+        let (to_a, to_b) = (0.8, 2.3);
+        let ab = a + b;
+        let h11 = weight * (trigamma(a) - trigamma(ab));
+        let h22 = weight * (trigamma(b) - trigamma(ab));
+        let h12 = -weight * trigamma(ab);
+        let slope = [
+            h11 * (to_a - a) + h12 * (to_b - b),
+            h12 * (to_a - a) + h22 * (to_b - b),
+        ];
+        let (stepped_a, stepped_b) = step_beta_shapes(slope, weight, a, b);
+        assert!(
+            (stepped_a - to_a).abs() < 1e-12 && (stepped_b - to_b).abs() < 1e-12,
+            "stepped to ({stepped_a}, {stepped_b})"
+        );
+        assert_eq!(step_beta_shapes([0.0, 0.0], weight, a, b), (a, b));
+        // A slope pointing at (100, 100), past the upper bound of both shapes, stops at it.
+        let (far_a, far_b) = (100.0, 100.0);
+        let towards_far = [
+            h11 * (far_a - a) + h12 * (far_b - b),
+            h12 * (far_a - a) + h22 * (far_b - b),
+        ];
+        assert_eq!(
+            step_beta_shapes(towards_far, weight, a, b),
+            (BETA_SHAPE_BOUNDS.1, BETA_SHAPE_BOUNDS.1)
+        );
+        assert_eq!(step_beta_shapes([f64::NAN, 1.0], weight, a, b), (a, b));
+        // A count of positions so small that the curvature's determinant underflows to zero.
+        assert_eq!(step_beta_shapes([1.0, -1.0], 1e-170, a, b), (a, b));
+        // One step worked by hand rather than from the code's own trigamma: at (1, 1), one position's
+        // curvature is [[1, −c], [−c, 1]] with c = ψ′(2) = π²/6 − 1, so a slope of (1, 0) moves the
+        // shapes by (1, c) / (1 − c²).
+        let c = std::f64::consts::PI * std::f64::consts::PI / 6.0 - 1.0;
+        let (by_hand_a, by_hand_b) = step_beta_shapes([1.0, 0.0], 1.0, 1.0, 1.0);
+        assert!(
+            (by_hand_a - (1.0 + 1.0 / (1.0 - c * c))).abs() < 1e-6
+                && (by_hand_b - (1.0 + c / (1.0 - c * c))).abs() < 1e-6,
+            "from (1, 1) the step reached ({by_hand_a}, {by_hand_b})"
+        );
+
+        let (a, b) = (0.7, BETA_SHAPE_BOUNDS.1);
+        let ab = a + b;
+        let h11 = weight * (trigamma(a) - trigamma(ab));
+        for slope_in_a in [0.0, 30.0, -12.0] {
+            let (stepped_a, stepped_b) = step_beta_shapes([slope_in_a, 500.0], weight, a, b);
+            assert_eq!(
+                stepped_b, BETA_SHAPE_BOUNDS.1,
+                "the second shape held at its bound"
+            );
             assert!(
-                (fitted_a - a).abs() < 0.02 && (fitted_b - b).abs() < 0.05,
-                "Beta({a}, {b}) came back as Beta({fitted_a}, {fitted_b})"
+                (stepped_a - (a + slope_in_a / h11)).abs() < 1e-12,
+                "slope {slope_in_a} in the first shape: stepped to {stepped_a}"
             );
         }
     }
@@ -5556,6 +5717,210 @@ mod whole_fit_tests {
                 "sample {s}: the mismapped rates came back in the wrong order: {noisy:?}"
             );
         }
+    }
+
+    /// **No plain pass lowers the log-likelihood** — the shapes' update included, which steps along
+    /// the likelihood's own slope in them (`step_beta_shapes`): plain passes, with no acceleration,
+    /// from each of the three starts on three drawn cohorts — 20 samples at 3 reads, 8 samples at 8
+    /// reads with duplicated positions fitted, and 4 samples at 5 reads **drawn with the density's
+    /// second shape at 150, above its bound of 50**, so the update runs with that shape held at the
+    /// bound for most of its 150 passes. Measured over a wider set (`fit_precision_a7_2026-09-28.md`
+    /// §3): on eight cohorts with interior shapes, none of 1,920 plain passes lowers it, where the
+    /// update that solved the digamma form lowered it at 357 of them, by up to 0.0095 units — the
+    /// 20-sample cohort here fails with that update; on nine cohorts with a shape at its bound,
+    /// 8,100 passes, none lowers it by more than 3 × 10⁻¹¹ units, the rounding of a log-likelihood
+    /// that has stopped moving. The bound cohort here fails with a step that clamps each shape of
+    /// the joint step on its own (plan step A7's review: 36 units lost between passes 100 and 200).
+    /// It guards the update against falling; it cannot tell a correct update from a frozen or a
+    /// timid one, which lower nothing either. Where the update comes to rest is checked by
+    /// `the_shapes_rest_where_the_likelihoods_slope_is_zero_at_a_bound_too`, and the slopes it steps
+    /// on by `the_passs_shape_slopes_are_the_likelihoods`.
+    #[test]
+    fn plain_passes_never_lower_the_log_likelihood() {
+        let density_with_second_shape = |b: f64| FrequencyDensity {
+            p_invariant: 0.88,
+            p_fixed_alt: 0.01,
+            a: 0.6,
+            b,
+        };
+        for (samples, positions, depth, duplicated, second_shape, passes, seed) in [
+            (20_usize, 5_000, 3.0, 0.0, 2.2, 40, 4_u64),
+            (8, 10_000, 8.0, 0.01, 2.2, 40, 6),
+            (4, 20_000, 5.0, 0.0, 150.0, 150, 8),
+        ] {
+            let drawn = draw_cohort_with_duplications(
+                samples,
+                positions,
+                depth,
+                (0.003, 0.06, 0.03),
+                density_with_second_shape(second_shape),
+                0.3,
+                duplicated,
+                0x7A77_0000 + seed,
+            );
+            let mut cohort = as_cohort(&drawn.samples);
+            let groups: Vec<ReadGroupId> = cohort.read_groups().to_vec();
+            let cap = cohort
+                .terms()
+                .map_or(DepthCap::MAX, |terms| terms.depth_cap);
+            let config = JointFitConfig {
+                duplicated_positions: duplicated > 0.0,
+                ..JointFitConfig::default()
+            };
+            cohort
+                .with_generic(&groups, |lent| {
+                    let group_index: Vec<Vec<usize>> = lent
+                        .iter()
+                        .map(|sections| {
+                            sections
+                                .iter()
+                                .map(|(id, _)| groups.iter().position(|g| g == id).expect("listed"))
+                                .collect()
+                        })
+                        .collect();
+                    let coverage = EvidenceCursor::mean_depth_of_each_library(
+                        lent,
+                        &group_index,
+                        groups.len(),
+                        &config.edges,
+                        cap,
+                    );
+                    for start in StartingPoint::spanning_the_class_separation() {
+                        let mut parameters = Parameters {
+                            clean: vec![start.clean; groups.len()],
+                            noisy: vec![start.noisy; groups.len()],
+                            noisy_share: start.noisy_share,
+                            density: FrequencyDensity {
+                                p_invariant: start.p_invariant,
+                                p_fixed_alt: start.p_fixed_alt,
+                                a: start.a,
+                                b: start.b,
+                            },
+                            hom_excess: vec![0.0; samples],
+                            duplicated: config.duplicated_positions.then_some(
+                                DuplicatedPositions {
+                                    share: start.duplicated_share,
+                                    carrier_a: start.carrier_a,
+                                    carrier_b: start.carrier_b,
+                                },
+                            ),
+                        };
+                        let mut previous = f64::NEG_INFINITY;
+                        for pass in 0..passes {
+                            let statistics = expectation(
+                                lent,
+                                cap,
+                                &config,
+                                &group_index,
+                                &coverage,
+                                &parameters,
+                            );
+                            assert!(
+                                statistics.log_likelihood >= previous,
+                                "{samples} sample(s), start ({}, {}), pass {pass}: the \
+                                 log-likelihood fell from {previous} to {}",
+                                start.clean,
+                                start.noisy,
+                                statistics.log_likelihood
+                            );
+                            previous = statistics.log_likelihood;
+                            maximisation(&mut parameters, &statistics, &config);
+                        }
+                    }
+                })
+                .expect("a drawn cohort lends its sections");
+        }
+    }
+
+    /// **The shapes come to rest where the likelihood's slope in them is zero, at a bound too.** A
+    /// cohort of 20 samples at 3 reads drawn with the density's second shape at 150, above its bound
+    /// of 50: the fit returns that shape at the bound, and one more pass at the returned values
+    /// finds the first shape where the step its slope still asks for, with the second held, is
+    /// below a hundredth of the shape. (The data do not tell this first shape apart from the
+    /// invariant share, so it has no standard error to measure the distance in.) A step that clamps
+    /// each shape of the joint step on its own leaves the first shape where its slope is not zero —
+    /// plan step A7's review measured a slope of −105 there, at a first shape of 4.4 where the
+    /// projected step reaches 0.29, a remaining step of about a tenth of the shape.
+    #[test]
+    fn the_shapes_rest_where_the_likelihoods_slope_is_zero_at_a_bound_too() {
+        let drawn = draw_cohort_with_duplications(
+            20,
+            5_000,
+            3.0,
+            (0.003, 0.06, 0.03),
+            FrequencyDensity {
+                p_invariant: 0.88,
+                p_fixed_alt: 0.01,
+                a: 0.6,
+                b: 150.0,
+            },
+            0.3,
+            0.0,
+            0x7A77_0B0D,
+        );
+        let config = JointFitConfig {
+            duplicated_positions: false,
+            estimate_contamination: false,
+            ..JointFitConfig::default()
+        };
+        let mut cohort = as_cohort(&drawn.samples);
+        let names: Vec<String> = cohort.sample_names().map(str::to_string).collect();
+        let groups: Vec<ReadGroupId> = cohort.read_groups().to_vec();
+        let fit = fit_jointly(&mut cohort, &config).expect("a drawn cohort fits");
+        assert_eq!(
+            fit.density.value.b, BETA_SHAPE_BOUNDS.1,
+            "the second shape at its bound"
+        );
+        let parameters = Parameters {
+            clean: groups.iter().map(|g| fit.noise[g].value.clean).collect(),
+            noisy: groups.iter().map(|g| fit.noise[g].value.noisy).collect(),
+            noisy_share: fit.noisy_share,
+            density: fit.density.value,
+            hom_excess: names
+                .iter()
+                .map(|name| fit.hom_excess[name].value.get())
+                .collect(),
+            duplicated: None,
+        };
+        let cap = cohort
+            .terms()
+            .map_or(DepthCap::MAX, |terms| terms.depth_cap);
+        let slope = cohort
+            .with_generic(&groups, |lent| {
+                let group_index: Vec<Vec<usize>> = lent
+                    .iter()
+                    .map(|sections| {
+                        sections
+                            .iter()
+                            .map(|(id, _)| groups.iter().position(|g| g == id).expect("listed"))
+                            .collect()
+                    })
+                    .collect();
+                let coverage = EvidenceCursor::mean_depth_of_each_library(
+                    lent,
+                    &group_index,
+                    groups.len(),
+                    &config.edges,
+                    cap,
+                );
+                let statistics =
+                    expectation(lent, cap, &config, &group_index, &coverage, &parameters);
+                (statistics.density_shape_slopes[0], statistics.segregating)
+            })
+            .expect("a drawn cohort lends its sections");
+        let (slope, segregating) = slope;
+        let (a, b) = (fit.density.value.a, fit.density.value.b);
+        let curvature = segregating * (trigamma(a) - trigamma(a + b));
+        let remaining = slope / curvature;
+        eprintln!(
+            "first shape {a:.4}, slope {slope:.4e}, the step it still asks for {remaining:+.3e}; \
+             {} passes, converged {}",
+            fit.passes, fit.converged
+        );
+        assert!(
+            remaining.abs() < 0.01 * a,
+            "the first shape {a} rests where its slope still asks for a step of {remaining}"
+        );
     }
 
     /// **The refusal, before any arithmetic.** Two samples that did not keep the same loci

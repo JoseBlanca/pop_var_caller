@@ -103,9 +103,9 @@ pub(super) struct RuleSlopes {
     /// The two shapes the rule was built at.
     shapes: (f64, f64),
     /// `[shape][node]` — how far a node moves per unit of the shape; shape 0 is `a`, 1 is `b`.
-    node_slope: [Vec<f64>; 2],
+    pub(super) node_slope: [Vec<f64>; 2],
     /// `[shape][node]` — how the logarithm of a node's weight moves per unit of the shape.
-    ln_weight_slope: [Vec<f64>; 2],
+    pub(super) ln_weight_slope: [Vec<f64>; 2],
 }
 
 impl RuleSlopes {
@@ -158,13 +158,9 @@ impl ScoringTables {
     /// The tables for the rules and parameters `model` carries, at the node count its rules were
     /// built with.
     pub(super) fn of(model: &PassModel<'_>) -> Self {
-        let parameters = model.parameters;
-        let count = model.quadrature.nodes.len();
         Self {
-            density: RuleSlopes::of(parameters.density.a, parameters.density.b, count),
-            carrier: parameters
-                .duplicated
-                .map(|d| RuleSlopes::of(d.carrier_a, d.carrier_b, count)),
+            density: model.density_slopes.clone(),
+            carrier: model.carrier.as_ref().map(|carrier| carrier.slopes.clone()),
             branches: BranchShares::of(model),
         }
     }
@@ -370,7 +366,10 @@ pub(super) fn score_position(
             &class_terms,
             into,
         );
-        if let (Some(rule), Some(rule_slopes)) = (model.carrier.as_ref(), &tables.carrier) {
+        if let (Some(rule), Some(rule_slopes)) = (
+            model.carrier.as_ref().map(|carrier| &carrier.quadrature),
+            &tables.carrier,
+        ) {
             debug_assert!(
                 parameters
                     .duplicated
@@ -1263,13 +1262,14 @@ mod tests {
     /// **Why the shapes' slopes are taken on the rule: the digamma form, integrated on it, is
     /// several percent off** — at twelve nodes and at the sixteen the pass ships with.
     ///
-    /// The maximisation's own sums are that form — `Σ posterior · ln f` over the rule's nodes, less
-    /// the segregating posterior times `ψ(a) − ψ(a + b)`, where `ψ` is the digamma function, the
-    /// slope of `ln Γ` — so the pass's statistics give it directly. It lands more than 3% from the
-    /// finite difference of the log-likelihood at twelve nodes and more than 2% at sixteen, while
-    /// the slope this module takes lands within a part in a million at both. If the rule ever
-    /// integrated `ln f` well, the first assertions would fail and the module doc's explanation
-    /// would be out of date.
+    /// That form is `Σ posterior · ln f` over the rule's nodes, less the segregating posterior times
+    /// `ψ(a) − ψ(a + b)`, where `ψ` is the digamma function, the slope of `ln Γ` — the form the
+    /// maximisation's shapes' update solved until plan step A7, and the sum a test build's pass still
+    /// keeps (`Statistics::sum_ln_f`), so the statistics give it directly. It lands more than 3%
+    /// from the finite difference of the log-likelihood at twelve nodes and more than 2% at
+    /// sixteen, while the slope this module takes lands within a part in a million at both. If the
+    /// rule ever integrated `ln f` well, the first assertions would fail and the module doc's
+    /// explanation would be out of date.
     #[test]
     fn the_digamma_form_integrated_on_the_rule_misses_the_slope_in_a_shape() {
         let (cohort, parameters) = a_cohort_and_parameters_off_the_maximum(8.0);
@@ -2221,6 +2221,132 @@ mod tests {
         });
     }
 
+    /// **The slopes the shapes' update steps on are the likelihood's slopes**: a pass's summed
+    /// `density_shape_slopes` and `carrier_shape_slopes` equal the scorer's summed slopes in the
+    /// same four shapes — which the finite-difference tests above hold to the log-likelihood — with
+    /// the duplicated class fitted and without it, over a census the pass cuts into three chunks and
+    /// joins. The pass skips nodes whose posterior is below 10⁻¹² where the scorer keeps them, so the
+    /// two differ by rounding and those nodes (measured 1.8 × 10⁻⁹ relative; held to 10⁻⁷).
+    /// Dropping the along-the-frequency term, flipping its sign, reading another shape's or another
+    /// node's slope, or losing a chunk's slopes when chunks are joined fails it.
+    #[test]
+    fn the_passs_shape_slopes_are_the_likelihoods() {
+        for duplicated in [true, false] {
+            let (cohort, mut parameters) = a_cohort_and_parameters_off_the_maximum(8.0);
+            if !duplicated {
+                parameters.duplicated = None;
+            }
+            let config = JointFitConfig {
+                duplicated_positions: duplicated,
+                ..JointFitConfig::default()
+            };
+            with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+                assert!(EvidenceCursor::position_count(lent) > 2 * MIN_POSITIONS_PER_CHUNK);
+                let statistics = expectation_pass(
+                    lent,
+                    depth_cap,
+                    &config,
+                    group_index,
+                    coverage,
+                    &parameters,
+                    PassKeeps::SUMS_ONLY,
+                );
+                let (_, scores) =
+                    summed_scores(lent, depth_cap, &config, group_index, coverage, &parameters);
+                let pairs = [
+                    (
+                        "density a",
+                        statistics.density_shape_slopes[0],
+                        cohort::DENSITY_A,
+                    ),
+                    (
+                        "density b",
+                        statistics.density_shape_slopes[1],
+                        cohort::DENSITY_B,
+                    ),
+                    (
+                        "carrier a",
+                        statistics.carrier_shape_slopes[0],
+                        cohort::CARRIER_A,
+                    ),
+                    (
+                        "carrier b",
+                        statistics.carrier_shape_slopes[1],
+                        cohort::CARRIER_B,
+                    ),
+                ];
+                for (name, pass, slot) in pairs {
+                    let scorer = scores.cohort[slot];
+                    let off = relative_disagreement(pass, scorer);
+                    eprintln!(
+                        "duplicated class {duplicated}, {name}: pass {pass:.10e}, scorer \
+                         {scorer:.10e}, {off:.2e} apart"
+                    );
+                    assert!(
+                        off < 1e-7,
+                        "duplicated class {duplicated}, {name}: the pass's slope {pass} against \
+                         the scorer's {scorer}"
+                    );
+                }
+                if !duplicated {
+                    assert_eq!(statistics.carrier_shape_slopes, [0.0; 2]);
+                }
+            });
+        }
+    }
+
+    /// **The carrier shapes' slopes follow each sample's coverage odds**: with the odds set (a
+    /// quarter, three, one and eight), a pass's carrier slopes equal the scorer's, position by
+    /// position summed — the one input the drawn cohort never sets, and dropping the odds from the
+    /// pass's slope fails it.
+    #[test]
+    fn the_passs_carrier_slopes_follow_the_coverage_odds() {
+        let (cohort, parameters) = a_cohort_and_parameters_off_the_maximum(8.0);
+        with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+            let stored = positions_with_held_out_reads(lent, depth_cap, group_index, coverage);
+            let odds = [0.25, 3.0, 1.0, 8.0];
+            let config = JointFitConfig::default();
+            let samples = group_index.len();
+            let model = PassModel::new(&parameters, &config, group_index);
+            let tables = ScoringTables::of(&model);
+            let nodes = model.quadrature.nodes.len();
+            let mut scratch = Scratch::new(samples, parameters.clean.len(), nodes);
+            let mut statistics = Statistics::new(parameters.clean.len(), samples, nodes);
+            let mut here = PositionScores::new(group_index, parameters.clean.len());
+            let mut summed = [0.0_f64; 2];
+            for position in &stored {
+                scratch.evidence.libraries.clone_from(&position.libraries);
+                scratch
+                    .evidence
+                    .depth_weights
+                    .clone_from(&position.depth_weights);
+                scratch
+                    .evidence
+                    .observed_alternatives
+                    .clone_from(&position.observed_alternatives);
+                one_position(&mut scratch, &model, &odds, &mut statistics);
+                score_position(&scratch, &model, &tables, &odds, &mut here);
+                summed[0] += here.cohort[cohort::CARRIER_A];
+                summed[1] += here.cohort[cohort::CARRIER_B];
+            }
+            for (shape, (&pass, &scorer)) in statistics
+                .carrier_shape_slopes
+                .iter()
+                .zip(&summed)
+                .enumerate()
+            {
+                let off = relative_disagreement(pass, scorer);
+                eprintln!(
+                    "carrier shape {shape}: pass {pass:.10e}, scorer {scorer:.10e}, {off:.2e}"
+                );
+                assert!(
+                    off < 1e-7,
+                    "carrier shape {shape}: pass {pass}, scorer {scorer}"
+                );
+            }
+        });
+    }
+
     /// The information blocks formed from every position's scores in position order, each product
     /// written out — the independent account a pass's [`InformationSums`] is checked against.
     fn information_by_hand(every: &[PositionScores]) -> InformationSums {
@@ -3112,11 +3238,13 @@ mod tests {
     }
 
     /// **The trace files what the fit returns under the winning start, one pass after its last**:
-    /// on the four-sample fixture of the test above, whose winner is start 2 of 3 (so a slip to the
-    /// first or the last start is a different start), the rows after the winner's last pass are
-    /// exactly the returned values and their errors, under the names the value rows use, with the
-    /// final pass's log-likelihood; and the winner's last pass left the returned values too (its
-    /// last accelerated step was kept, not refused at the pass limit).
+    /// on the four-sample fixture of the test above, with three starts, the rows after the
+    /// winner's last pass are exactly the returned values and their errors, under the names the
+    /// value rows use, with the final pass's log-likelihood; the winner's last pass left the
+    /// returned values too (its last accelerated step was kept, not refused at the pass limit);
+    /// and **no other start's last pass did**, so rows filed under another start are a different
+    /// start's. Which start wins moves with the draw and with the fit's arithmetic, so the test
+    /// reads it from the rows rather than naming it.
     #[test]
     fn the_trace_files_the_returned_fit_after_the_winning_starts_last_pass() {
         use crate::parameter_estimation::joint::fit_trace::captured;
@@ -3144,18 +3272,37 @@ mod tests {
         let is_error = |name: &str| name.starts_with("standard_error:");
         let error_rows: Vec<_> = rows.iter().filter(|row| is_error(&row.3)).collect();
         let (start, pass) = (error_rows[0].0, error_rows[0].1);
-        assert_eq!(start, 2, "the fixture's winner");
         assert_eq!(pass, fit.passes + 1);
-        let values_at = |at: u32| -> Vec<(String, f64)> {
+        let values_of = |of: usize, at: u32| -> Vec<(String, f64)> {
             rows.iter()
-                .filter(|row| (row.0, row.1) == (start, at) && !is_error(&row.3))
+                .filter(|row| (row.0, row.1) == (of, at) && !is_error(&row.3))
                 .map(|row| (row.3.clone(), row.4))
                 .collect()
         };
+        let values_at = |at: u32| values_of(start, at);
         // `Debug` prints every `f64` as its shortest round-trip form: equal strings are equal bits.
         let returned = format!("{:?}", parameters.named());
         assert_eq!(format!("{:?}", values_at(pass)), returned);
         assert_eq!(format!("{:?}", values_at(fit.passes)), returned);
+        let starts: std::collections::BTreeSet<usize> = rows.iter().map(|row| row.0).collect();
+        assert_eq!(starts.len(), 3, "the fixture runs three starts");
+        let ending_at_the_returned_values: Vec<usize> = starts
+            .into_iter()
+            .filter(|&of| {
+                let last = rows
+                    .iter()
+                    .filter(|row| row.0 == of && !is_error(&row.3) && (of, row.1) != (start, pass))
+                    .map(|row| row.1)
+                    .max()
+                    .expect("every start writes its passes");
+                format!("{:?}", values_of(of, last)) == returned
+            })
+            .collect();
+        assert_eq!(
+            ending_at_the_returned_values,
+            [start],
+            "only the winner's last pass left the returned values"
+        );
         let group_index: Vec<Vec<usize>> = (0..4).map(|s| vec![s]).collect();
         let errors: Vec<(String, f64)> = error_rows
             .iter()
@@ -3565,19 +3712,26 @@ mod tests {
     ///
     /// At any cohort count: every kind is tallied, and every estimate has an error from both
     /// matrices. At the full count only — the draws are fixed by their seeds, so the numbers move only
-    /// when the code does — each regime is held to what it measured, with room to spare:
+    /// when the code does — each regime is held to what it measured (plan step A7's run,
+    /// `tmp/fit_precision/a7b_coverage_full.log`; every line the same before the step's bound fix,
+    /// since no drawn shape reaches a bound), with room to spare:
     ///
-    /// - at 4 and 20 samples, at most five fits in a regime stop at the pass limit;
-    /// - where the errors cover (20 samples at both depths, 4 samples at 30 reads), the error rates,
-    ///   the homozygote excess and the mismapped share — and at 20 samples the fixed share — land
-    ///   between 0.58 and 0.78 within one of the blocks' errors and between 0.90 and 0.99 within
-    ///   two;
+    /// - at 4 and 20 samples, at most five fits in a regime stop at the pass limit (2 did, at 4
+    ///   samples and 3 reads);
+    /// - where the errors cover — 20 samples at both depths, 4 samples at 30 reads — **every kind**
+    ///   lands between 0.58 and 0.78 within one of the blocks' errors and between 0.90 and 0.99
+    ///   within two (measured 0.620 to 0.735, and 0.925 to 0.980);
+    /// - **the fit stops at the likelihood's flat point**: at 20 samples every kind's flat point lies
+    ///   within 0.02 errors of where the fit stopped (measured at most 0.002), and at 4 samples the
+    ///   density's shapes' and the invariant share's within 0.25 (at most 0.108). With the shapes'
+    ///   update that solved the digamma form, those three lay 0.65 to 1.35 errors away at 20 samples
+    ///   and 1.8 to 2.3 at 4 (step A4's report, §2);
+    /// - at 20 samples both density shapes sit within 0.25 errors of the truth on average (measured
+    ///   at most 0.033), where the digamma form left them 1.05 to 1.29 above it;
     /// - at 4 samples and 3 reads the full matrix's errors put at least 0.08 more of the error rates
-    ///   within one error than the blocks' do;
-    /// - at 20 samples the Newton step carries both density shapes to within half an error of the
-    ///   truth on average, which a step of the wrong sign or size does not.
+    ///   within one error than the blocks' do (measured 0.150 and 0.148 more).
     ///
-    /// The 2-sample regime is printed and held only to the checks that apply at any count: 34 of its
+    /// The 2-sample regime is printed and held only to the checks that apply at any count: 54 of its
     /// 200 fits stop at the pass limit, and neither matrix's errors cover there.
     fn check_the_coverage(
         samples: usize,
@@ -3609,16 +3763,7 @@ mod tests {
         );
         let depth = mean_depth as usize;
         if samples == 20 || (samples == 4 && depth == 30) {
-            let mut covering = vec![
-                "clean error rates",
-                "mismapped error rates",
-                "homozygote excess",
-                "mismapped share",
-            ];
-            if samples == 20 {
-                covering.push("fixed share");
-            }
-            for kind in covering {
+            for kind in COVERAGE_KINDS {
                 let blocks = &tally[kind].blocks;
                 assert!(
                     (0.58..=0.78).contains(&blocks.share_within_one())
@@ -3626,6 +3771,33 @@ mod tests {
                     "{regime}, {kind}: {:.3} within one of the blocks' errors, {:.3} within two",
                     blocks.share_within_one(),
                     blocks.share_within_two()
+                );
+            }
+        }
+        let flat_point_bound = match samples {
+            20 => Some((COVERAGE_KINDS.as_slice(), 0.02)),
+            4 => Some((
+                ["density shape a", "density shape b", "invariant share"].as_slice(),
+                0.25,
+            )),
+            _ => None,
+        };
+        if let Some((kinds, bound)) = flat_point_bound {
+            for &kind in kinds {
+                let flat_point = tally[kind].flat_point();
+                assert!(
+                    flat_point.abs() < bound,
+                    "{regime}, {kind}: the likelihood's flat point lies {flat_point:+.3} errors from \
+                     where the fit stopped"
+                );
+            }
+        }
+        if samples == 20 {
+            for kind in ["density shape a", "density shape b"] {
+                let off_centre = tally[kind].blocks.mean();
+                assert!(
+                    off_centre.abs() < 0.25,
+                    "{regime}, {kind}: the estimates sit {off_centre:+.3} errors from the truth"
                 );
             }
         }
@@ -3640,16 +3812,6 @@ mod tests {
                 );
             }
         }
-        if samples == 20 {
-            for kind in ["density shape a", "density shape b"] {
-                let at_flat_point = tally[kind].at_flat_point.mean();
-                assert!(
-                    at_flat_point.abs() < 0.5,
-                    "{regime}, {kind}: the Newton-corrected estimate sits {at_flat_point:+.3} errors \
-                     from the truth"
-                );
-            }
-        }
     }
 
     /// **The errors mean what they say** (plan step A4, spec §3.6 item 3): 200 cohorts drawn from
@@ -3659,7 +3821,9 @@ mod tests {
     /// Measured for the errors the fit reports (the blocks) and for the full matrix's over the same
     /// parameters, on 4 samples over 20,000 positions and 20 over 5,000 at 3 and at 30 reads a
     /// position, and on 2 samples over 30,000 at 3 reads. The duplicated class is off in the draw and
-    /// the fit ([`TRUTH`]).
+    /// the fit ([`TRUTH`]), so nothing here checks where the carrier Beta's shapes come to rest: the
+    /// slopes they step on are held to the scorer's by `the_passs_shape_slopes_are_the_likelihoods`
+    /// and `the_passs_carrier_slopes_follow_the_coverage_odds`.
     /// Also printed, per kind: how far the log-likelihood's own flat point lies from where the fit
     /// stopped, and the coverage there — both by one Newton step.
     ///

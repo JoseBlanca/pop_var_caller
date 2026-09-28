@@ -73,7 +73,23 @@ mod tests {
     /// arithmetic, measured on four tomato accessions before it was recorded (the fit ends 40
     /// log-likelihood units higher for the same passes). Recorded in the Linux container (arm64,
     /// glibc) only; it was `3edab375185d74ad84ab52255b418c0b`.
-    const FITTED_PARAMETERS_MD5: &str = "70e634849f232de2fb32200dd21e0ab5";
+    ///
+    /// **Re-recorded 2026-09-28** when the SNP/indel fit's allele-frequency shapes began to step
+    /// along the log-likelihood's own slope in them rather than solve the digamma form
+    /// (`fit_precision.md` step A7), measured on four tomato accessions first
+    /// (`scripts/promote_ng_oracle.sh`: the fit ends 30 log-likelihood units higher, at
+    /// −7.991302 × 10⁵ against −7.991599 × 10⁵). A shape whose step would carry it past its bound is
+    /// held there and the other takes the step the curvature gives with it held, so the free shape
+    /// comes to rest where its own slope is zero. On this fixture two lines move: the ordinary-site
+    /// prior's `reference_concentration`, 3.9591 to 39.089, and `alternative_concentration_total`,
+    /// 7.30 × 10⁻¹⁰ to 6.60 × 10⁻³, both read off the fitted density, whose shapes moved from
+    /// a = 10.8, b = 47.9 to a = 0.288, b = 50.0 (its upper bound); the fit's best log-likelihood
+    /// rises from −44.919 to −44.704. Two samples over 600 bases do not place the shapes: the fit
+    /// reports neither as identified. Recorded in the Linux container (arm64, glibc) only; it was
+    /// `70e634849f232de2fb32200dd21e0ab5`. (Plan step A6, the read groups' own error rates, moved
+    /// neither checksum: this fixture's reads carry no sequencing error, so every read group's two
+    /// rates sit on their lower bounds either way.)
+    const FITTED_PARAMETERS_MD5: &str = "9d421df0bc755522f8a7b5617b4c30f8";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -86,7 +102,13 @@ mod tests {
     ///
     /// **Re-recorded 2026-09-25** with the fit above, whose different numbers this file is called
     /// with; it was `3432b4219342c6277ec1d0072945e423`.
-    const CALLS_MD5: &str = "dad5ff61fad91ca1d3d6a0e7587de946";
+    ///
+    /// **Re-recorded 2026-09-28** with the fit above (step A7): the ordinary-site prior it carries
+    /// moved, and with it three records' quality: the SNP at chrV:121 QUAL 480.2 to 541.9 and the
+    /// other sample's GQ 65 to 73, the SNP at chrV:456 QUAL 481.0 to 542.7 and the other sample's GQ
+    /// 65 to 73, the repeat tract at chrV:201 QUAL 0.0 to 7.4. No genotype moved. It was
+    /// `dad5ff61fad91ca1d3d6a0e7587de946`.
+    const CALLS_MD5: &str = "7a570c442a4060fcd62f4af85b50a4fa";
 
     /// Hex MD5 of some bytes.
     fn md5_hex(bytes: &[u8]) -> String {

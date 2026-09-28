@@ -144,7 +144,7 @@ step here that moves a fitted number is its own commit, with the checksums re-re
    it splits at the scores: the likelihood first, with a multi-library sample's errors reported
    absent until the second part.* *Depends:* A5. *Source:* checkpoint A decision 1; spec §3.2's
    per-library block.
-2. ☐ **A7 — the allele-frequency shapes maximise the likelihood the fit computes.** The update of
+2. ✅ **A7 — the allele-frequency shapes maximise the likelihood the fit computes.** The update of
    the density's two Beta shapes, and of the carrier Beta's, which uses the same form
    (`fit_beta_shapes`), is replaced by one whose fixed point is where the likelihood's own slope in
    the shapes is zero: Newton steps on the slopes the quadrature rule gives (`RuleSlopes`, step A1),
