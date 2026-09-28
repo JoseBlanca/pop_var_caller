@@ -54,6 +54,11 @@
 //!   the full matrix, with the products of the two samples' scores in, does not invert over those
 //!   parameters at all.
 //!
+//! - **the cohort holds a sample read from more than one library** — for now, every parameter: the
+//!   likelihood reads each library under its own rates, the scorer does not yet form each
+//!   library's slopes (plan step A6's second half), and every other error would be computed as if
+//!   those rates were known.
+//!
 //! A parameter counts as not told apart when the curvature left to it once the parameters before
 //! it are accounted for is below [`IDENTIFIED_SHARE`] of its own curvature — which parameter of a
 //! mimicking set that is depends on their order, the cohort's first. Without the threshold, a
@@ -83,6 +88,12 @@ pub(super) enum StandardError {
     /// do not place it anywhere in that interval. The width it came out at is kept for reporting;
     /// it is not an error.
     WiderThanItsRange(f64),
+    /// Any parameter of a cohort that holds a sample read from more than one library, for now.
+    /// The likelihood reads each such library under its own rates, and the scorer does not yet
+    /// form each library's slopes (plan step A6's second half), so those rates are left out of the
+    /// information — and with them left out, every other error would come out as if they were
+    /// known: the mismapped share's at a quarter of its size at four samples and three reads.
+    AwaitingEachLibrarysScores,
 }
 
 impl StandardError {
@@ -93,7 +104,8 @@ impl StandardError {
             Self::NoInformation
             | Self::HeldFixed
             | Self::NotIdentified
-            | Self::WiderThanItsRange(_) => None,
+            | Self::WiderThanItsRange(_)
+            | Self::AwaitingEachLibrarysScores => None,
         }
     }
 
@@ -105,6 +117,7 @@ impl StandardError {
             Self::HeldFixed => Some(HELD_FIXED),
             Self::NotIdentified => Some(NOT_IDENTIFIED),
             Self::WiderThanItsRange(_) => Some(WIDER_THAN_ITS_RANGE),
+            Self::AwaitingEachLibrarysScores => Some(AWAITING_EACH_LIBRARYS_SCORES),
         }
     }
 
@@ -122,6 +135,7 @@ impl StandardError {
             Self::NoInformation => NO_INFORMATION,
             Self::HeldFixed => HELD_FIXED,
             Self::NotIdentified => NOT_IDENTIFIED,
+            Self::AwaitingEachLibrarysScores => AWAITING_EACH_LIBRARYS_SCORES,
         };
         format!("{value:.4e}, no standard error ({why})")
     }
@@ -132,13 +146,15 @@ const NO_INFORMATION: &str = "no information";
 const HELD_FIXED: &str = "held fixed";
 const NOT_IDENTIFIED: &str = "not identified";
 const WIDER_THAN_ITS_RANGE: &str = "wider than the parameter's whole range";
+const AWAITING_EACH_LIBRARYS_SCORES: &str = "not computed yet where a sample has several libraries";
 
 /// The reasons in the order the run's log counts them.
-const ABSENT_REASONS: [&str; 4] = [
+const ABSENT_REASONS: [&str; 5] = [
     NO_INFORMATION,
     HELD_FIXED,
     NOT_IDENTIFIED,
     WIDER_THAN_ITS_RANGE,
+    AWAITING_EACH_LIBRARYS_SCORES,
 ];
 
 /// What the run's log calls each cohort-level parameter, by slot
@@ -297,12 +313,28 @@ impl StandardErrors {
         errors
     }
 
+    /// **These errors, every one marked [`StandardError::AwaitingEachLibrarysScores`] when the
+    /// cohort holds a sample read from more than one library** (`group_index` says which read
+    /// groups each sample's sections are). Such a sample's libraries' rates get no slope yet
+    /// ([`information`](super::information)'s `fill_read_slopes`), so the pass sums nothing for
+    /// them, and every other parameter's error would then be computed as if they were known.
+    pub(super) fn with_errors_awaiting_each_librarys_scores(
+        mut self,
+        group_index: &[Vec<usize>],
+    ) -> Self {
+        if group_index.iter().any(|own| own.len() > 1) {
+            self.cohort = [StandardError::AwaitingEachLibrarysScores; COHORT_PARAMETERS];
+            self.samples
+                .fill([StandardError::AwaitingEachLibrarysScores; SAMPLE_PARAMETERS]);
+        }
+        self
+    }
+
     /// **Every parameter's error, under the name the per-pass trace gives its value**
     /// ([`Parameters::named`], prefixed `standard_error:`, in its order), and NaN where it has none
     /// — so the trace can be read in units of each parameter's error. `group_index` says which read
-    /// groups each sample's sections are, as the pass reads them: a sample's first read group carries
-    /// the sample's two rates' errors, and a later one NaN, since the likelihood never reads its
-    /// rates.
+    /// groups each sample's sections are, as the pass reads them: each read group carries its
+    /// sample's two rates' errors, and a read group no sample holds none.
     pub(super) fn named(
         &self,
         parameters: &Parameters,
@@ -313,14 +345,14 @@ impl StandardErrors {
             .iter()
             .map(|&error| value(error))
             .collect();
-        let mut first_group_of = vec![None; parameters.clean.len()];
+        let mut sample_of = vec![None; parameters.clean.len()];
         for (s, own) in group_index.iter().enumerate() {
-            if let Some(&first) = own.first() {
-                first_group_of[first] = Some(s);
+            for &group in own {
+                sample_of[group] = Some(s);
             }
         }
-        for sample_of in first_group_of {
-            let [clean, noisy] = match sample_of {
+        for owner in sample_of {
+            let [clean, noisy] = match owner {
                 Some(s) => [
                     self.samples[s][sample::CLEAN_ERROR_RATE],
                     self.samples[s][sample::NOISY_ERROR_RATE],
@@ -349,12 +381,11 @@ impl StandardErrors {
 
     /// **The errors as one line of the run's log**: each cohort-level parameter's value and
     /// standard error, or why it has none; for each kind of a sample's own parameters, the median
-    /// and the largest standard error and how many have none, by reason; and how many read groups
-    /// have none because they are a sample's second or later (module doc of
-    /// [`information`](super::information): the likelihood reads only a sample's first).
-    /// `group_index` says which read groups each sample's sections are. The duplicated class's three
-    /// are left out when the run does not fit it. The median of an even count is the lower of the
-    /// middle two.
+    /// and the largest standard error and how many have none, by reason; and, when some sample
+    /// holds more than one library, how many and why no error is computed yet
+    /// ([`Self::with_errors_awaiting_each_librarys_scores`]). `group_index` says which read groups
+    /// each sample's sections are. The duplicated class's three are left out when the run does not
+    /// fit it. The median of an even count is the lower of the middle two.
     pub(super) fn described(&self, parameters: &Parameters, group_index: &[Vec<usize>]) -> String {
         let values = parameters.named();
         let mut parts = vec![
@@ -382,14 +413,18 @@ impl StandardErrors {
                 )
             ));
         }
-        let later_read_groups: usize = group_index
+        let several: Vec<usize> = group_index
             .iter()
-            .map(|own| own.len().saturating_sub(1))
-            .sum();
-        if later_read_groups > 0 {
+            .map(Vec::len)
+            .filter(|&libraries| libraries > 1)
+            .collect();
+        if !several.is_empty() {
             parts.push(format!(
-                "{later_read_groups} read group(s) after a sample's first: no standard error \
-                 ({NO_INFORMATION})"
+                "{} sample(s) hold more than one library ({} read groups between them), so no \
+                 standard error is computed yet: every error depends on those libraries' own \
+                 rates, whose slopes the next step adds",
+                several.len(),
+                several.iter().sum::<usize>(),
             ));
         }
         parts.join("; ")
@@ -1060,8 +1095,8 @@ mod tests {
     /// summarises each sample kind**: the median (the lower middle of an even count) and the largest
     /// standard error, and how many are missing, by reason — with values chosen so a median taken as
     /// the mean, the upper middle, or the largest taken as the last listed, prints a different line.
-    /// The duplicated class's three appear only when the run fits it, and the later read groups
-    /// only when there are some: one here, a sample's second read group.
+    /// The duplicated class's three appear only when the run fits it. When a sample holds two
+    /// libraries every error is marked as not computed yet, and the line says why and how many.
     #[test]
     fn the_logged_line_summarises_each_kind() {
         use StandardError::{
@@ -1097,11 +1132,7 @@ mod tests {
              1.00e-2, largest 2.00e-2, 2 missing (1 no information, 1 not identified); homozygote \
              excesses (4 samples): none has a standard error (4 held fixed)"
         );
-        let second_group_of_sample_0 = vec![vec![0, 2], vec![1], vec![3], vec![4]];
-        let with_the_class = errors.described(
-            &parameters_for_the_log(true, 5, 4),
-            &second_group_of_sample_0,
-        );
+        let with_the_class = errors.described(&parameters_for_the_log(true, 4, 4), &one_group_each);
         assert!(
             with_the_class.contains(
                 "allele-frequency shape b 6.1000e1 ± 5.00e-1, duplicated share 1.0000e-2 ± 1.00e-3, \
@@ -1111,19 +1142,48 @@ mod tests {
             ),
             "{with_the_class}"
         );
+        let second_group_of_sample_0 = vec![vec![0, 2], vec![1], vec![3], vec![4]];
+        let awaiting = errors
+            .clone()
+            .with_errors_awaiting_each_librarys_scores(&second_group_of_sample_0)
+            .described(
+                &parameters_for_the_log(true, 5, 4),
+                &second_group_of_sample_0,
+            );
+        for part in [
+            "mismapped share 3.1200e-2, no standard error (not computed yet where a sample has \
+             several libraries)",
+            "carrier-frequency shape b 5.0000e0, no standard error (not computed yet where a \
+             sample has several libraries)",
+            "error rates at ordinary positions (4 samples): none has a standard error (4 not \
+             computed yet where a sample has several libraries)",
+            "homozygote excesses (4 samples): none has a standard error (4 not computed yet where \
+             a sample has several libraries)",
+        ] {
+            assert!(awaiting.contains(part), "{awaiting}");
+        }
         assert!(
-            with_the_class.ends_with(
-                "; 1 read group(s) after a sample's first: no standard error (no information)"
+            awaiting.ends_with(
+                "; 1 sample(s) hold more than one library (2 read groups between them), so no \
+                 standard error is computed yet: every error depends on those libraries' own \
+                 rates, whose slopes the next step adds"
             ),
-            "{with_the_class}"
+            "{awaiting}"
+        );
+        assert_eq!(
+            errors
+                .clone()
+                .with_errors_awaiting_each_librarys_scores(&one_group_each),
+            errors,
+            "a cohort of one library a sample keeps its errors"
         );
     }
 
     /// **The trace names each error after the value it belongs to**: the same names as
     /// [`Parameters::named`](crate::parameter_estimation::joint::fit::Parameters), in the same order,
-    /// with and without the duplicated class. Two samples over three read groups, the first sample
-    /// holding groups 0 and 2: group 0 carries sample 0's rates' errors, group 1 sample 1's, and group
-    /// 2 — sample 0's second — NaN.
+    /// with and without the duplicated class. Two samples over four read groups, the first sample
+    /// holding groups 0 and 2 and no sample group 3: each held group carries its sample's row, and
+    /// group 3 NaN. Once marked as awaiting each library's slopes, every error is NaN.
     #[test]
     fn the_trace_names_each_error_after_its_value() {
         use StandardError::{Estimated, HeldFixed, NoInformation};
@@ -1136,7 +1196,7 @@ mod tests {
         };
         let group_index = vec![vec![0, 2], vec![1]];
         for duplicated in [false, true] {
-            let parameters = parameters_for_the_log(duplicated, 3, 2);
+            let parameters = parameters_for_the_log(duplicated, 4, 2);
             let named = errors.named(&parameters, &group_index);
             let expected: Vec<String> = parameters
                 .named()
@@ -1154,12 +1214,22 @@ mod tests {
             };
             assert_eq!(value_of("clean_error_0"), 0.1);
             assert_eq!(value_of("noisy_error_0"), 0.2);
+            assert_eq!(value_of("clean_error_2"), 0.1);
+            assert_eq!(value_of("noisy_error_2"), 0.2);
+            assert!(value_of("clean_error_3").is_nan());
+            assert!(value_of("noisy_error_3").is_nan());
             assert_eq!(value_of("clean_error_1"), 0.4);
             assert!(value_of("noisy_error_1").is_nan());
-            assert!(value_of("clean_error_2").is_nan());
-            assert!(value_of("noisy_error_2").is_nan());
             assert_eq!(value_of("hom_excess_0"), 0.3);
             assert!(value_of("hom_excess_1").is_nan());
+            let awaiting = errors
+                .clone()
+                .with_errors_awaiting_each_librarys_scores(&group_index)
+                .named(&parameters, &group_index);
+            assert!(
+                awaiting.iter().all(|(_, error)| error.is_nan()),
+                "{awaiting:?}"
+            );
         }
     }
 

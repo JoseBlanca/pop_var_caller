@@ -367,9 +367,10 @@ pub struct JointFit {
     /// **Every parameter's standard error at the returned parameters, or why it has none** —
     /// computed from the information the final pass sums (`fit_precision.md` §3.3). In the fit's
     /// own layout: the cohort's eight by slot — the duplicated class's three saying no
-    /// information when the run does not fit it — then each sample's first read group's two error
-    /// rates and its homozygote excess, the samples in the order the census lists them. A sample's
-    /// second and later read groups have none: the likelihood never reads their rates.
+    /// information when the run does not fit it — then each sample's two error rates and its
+    /// homozygote excess, the samples in the order the census lists them. The rates are those of
+    /// the sample's one library; in a cohort holding a sample read from several, no error is
+    /// computed yet ([`StandardErrors::with_errors_awaiting_each_librarys_scores`]).
     ///
     /// Private until each [`Estimate`] carries its own error (plan step E1), which reads it.
     standard_errors: StandardErrors,
@@ -657,7 +658,8 @@ impl Default for JointFitConfig {
 // The evidence, laid out the way the pass over it wants
 // ---------------------------------------------------------------------
 
-/// One sample's reads at one position, as the likelihood reads them.
+/// One library's reads at one position, as the likelihood reads them — a sample sequenced in two
+/// libraries has two of these at every position, each scored under its own library's error rates.
 ///
 /// Counts, not codes: `on[k]` is how many reads showed base `k`. **The reference base is not
 /// here and is not needed** — the records list only what disagreed with it, so reads on the
@@ -686,10 +688,10 @@ impl Default for JointFitConfig {
 /// was, which is where every cohort this caller has been run on spends nearly all its
 /// positions.
 #[derive(Copy, Clone, Default, Debug)]
-struct SampleAtPosition {
-    /// The mean of the depths the code could stand for. **What the read tallies the error rate
-    /// is maximised over are attributed at, and not what the likelihood uses** — that sums over
-    /// the range.
+struct LibraryAtPosition {
+    /// The mean of the depths the code could stand for. **What a sample's count of positions with
+    /// reads is taken from** (its libraries' depths added), and not what the likelihood uses —
+    /// that sums over the range.
     depth: f64,
     /// Reads on each of the four bases that are **not** the reference, indexed by allele code;
     /// the reference base's own entry is always zero, and so is any base no read showed.
@@ -701,7 +703,7 @@ struct SampleAtPosition {
     spread: usize,
 }
 
-impl SampleAtPosition {
+impl LibraryAtPosition {
     /// Reads that disagreed with the reference in any way.
     fn non_reference(&self) -> f64 {
         self.on.iter().sum()
@@ -749,12 +751,17 @@ impl From<CohortRefusal> for JointFitError {
 }
 
 /// The cohort at one position.
+///
+/// **Kept per library, not per sample.** Two libraries of one sample are two experiments, each
+/// with its own error rates, so their reads are scored apart and only the genotype they share
+/// joins them. Which libraries are a sample's is the fit's `group_index`.
 struct PositionEvidence {
-    /// One entry per sample, in the order the fit iterates samples.
-    samples: Vec<SampleAtPosition>,
-    /// Per sample, `MAX_RECORDED_SPREAD` slots holding how much weight each depth in that
-    /// sample's range carries, relative to the shallowest — see
-    /// [`ln_reference_reads`]. Flat rather than per sample so that one position's evidence is
+    /// One entry per library, indexed as the fit indexes read groups. A read group no sample
+    /// holds a section of keeps its default, and nothing reads it.
+    libraries: Vec<LibraryAtPosition>,
+    /// Per library, `MAX_RECORDED_SPREAD` slots holding how much weight each depth in that
+    /// library's range carries, relative to the shallowest — see
+    /// [`ln_reference_reads`]. Flat rather than per library so that one position's evidence is
     /// one allocation reused over two million positions.
     depth_weights: Vec<f64>,
     /// Which non-reference bases any sample showed a read on. **The candidates the fit sums
@@ -764,8 +771,8 @@ struct PositionEvidence {
 }
 
 impl PositionEvidence {
-    fn weights_of(&self, sample: usize) -> &[f64] {
-        &self.depth_weights[sample * MAX_RECORDED_SPREAD..][..MAX_RECORDED_SPREAD]
+    fn weights_of(&self, library: usize) -> &[f64] {
+        &self.depth_weights[library * MAX_RECORDED_SPREAD..][..MAX_RECORDED_SPREAD]
     }
 }
 
@@ -778,13 +785,17 @@ struct EvidenceCursor<'a> {
     /// Per sample, the ordinary-position sections the census lent for this call — **borrowed
     /// and never held**: the cursor lives inside the scoped call that produced them.
     samples: &'a [SampleGenericSections<'a>],
+    /// Per sample, which read group each of its sections is, in the order the sections are
+    /// lent: where each section's reads are put in [`PositionEvidence::libraries`].
+    group_index: &'a [Vec<usize>],
     edges: &'a DepthBinEdges,
     /// The cap the allele counts were thinned to. **Held beside the ladder because the two
     /// answer different questions**: the ladder says what depth a stored code stands for, and
     /// this puts that depth into the units the counts beside it were taken in.
     cap: DepthCap,
-    /// Each sample's own mean read depth over the kept positions — the centre of the Poisson
-    /// that [`fill_depth_weights`] weights a stored code's range with.
+    /// Each library's own mean read depth over the kept positions, indexed by read group — the
+    /// centre of the Poisson that [`fill_depth_weights`] weights that library's stored ranges
+    /// with ([`Self::mean_depth_of_each_library`]).
     coverage: &'a [f64],
     /// False restores the point-read a stored code used to be given: the middle of its range,
     /// one number, with no sum over the depths it stands for.
@@ -803,15 +814,9 @@ impl<'a> EvidenceCursor<'a> {
             .map_or(0, |(_, records)| records.depth().len())
     }
 
-    /// Each sample's mean read depth over the positions it was walked at.
-    ///
-    /// **One number per sample for the whole run, and coverage is not one number.** A sample
-    /// reads deeper in some parts of a genome than others, and this cannot see that: it is the
-    /// centre of the prior a stored code's range is weighted with, so where a position's own
-    /// coverage is far from the sample's mean, the range is weighted by the wrong Poisson.
-    /// What it costs is bounded by the width of a bin, which is why a single number is enough
-    /// to be going on with — the per-window coverage summary the records already carry is
-    /// where a better one would come from.
+    /// Each sample's mean read depth over the positions it was walked at, its libraries' depths
+    /// added — what the run's log reports of how deep the samples are. The likelihood weights each
+    /// library's ranges by that library's own ([`Self::mean_depth_of_each_library`]).
     fn mean_depth(
         samples: &[SampleGenericSections<'_>],
         edges: &DepthBinEdges,
@@ -851,12 +856,62 @@ impl<'a> EvidenceCursor<'a> {
             .collect()
     }
 
+    /// Each library's mean read depth over the positions it was walked at, indexed by read group
+    /// (`group_index` says which read group each sample's sections are; `groups` is how many read
+    /// groups the fit has). A read group with no walked position, or that no sample holds a section
+    /// of, is read as one read.
+    ///
+    /// **One number per library for the whole run, and coverage is not one number.** A library
+    /// reads deeper in some parts of a genome than others, and this cannot see that: it is the
+    /// centre of the prior a stored code's range is weighted with, so where a position's own
+    /// coverage is far from the library's mean, the range is weighted by the wrong Poisson.
+    /// What it costs is bounded by the width of a bin, which is why a single number is enough
+    /// to be going on with — the per-window coverage summary the records already carry is
+    /// where a better one would come from.
+    ///
+    /// **Per library and not per sample**, because each library's reads at a position are a
+    /// Poisson draw around that library's own coverage: two libraries of one sample are two
+    /// draws, and the sum of their depths is not what either one's range stands for. A sample with
+    /// one library gets the same number, to the bit, as its sample's mean.
+    fn mean_depth_of_each_library(
+        samples: &[SampleGenericSections<'_>],
+        group_index: &[Vec<usize>],
+        groups: usize,
+        edges: &DepthBinEdges,
+        cap: DepthCap,
+    ) -> Vec<f64> {
+        let mut coverage = vec![1.0; groups];
+        for (sections, groups_of_sample) in samples.iter().zip(group_index) {
+            for ((_, records), &group) in sections.iter().zip(groups_of_sample) {
+                let mut total = 0.0_f64;
+                let mut counted = 0_u64;
+                for index in 0..records.depth().len() {
+                    if let DepthCode::Binned(bin) = records.depth().get(index) {
+                        let range = cap.denominator_for(edges.depth_range(bin));
+                        total += 0.5 * f64::from(*range.start() + *range.end());
+                        counted += 1;
+                    }
+                }
+                if counted > 0 {
+                    coverage[group] = (total / counted as f64).max(1e-3);
+                }
+            }
+        }
+        coverage
+    }
+
     /// A cursor over `first..end` only — **what lets one pass over the positions be split
-    /// across cores.** Each sample's sparse list is binary-searched once to find where the
+    /// across cores.** Each library's sparse list is binary-searched once to find where the
     /// chunk begins, and walked with a cursor from there, so a chunk costs one search per
-    /// sample rather than one per position.
+    /// library rather than one per position.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the lent evidence, what it means (the library map, the ladder, the cap, each \
+                  library's coverage, how a range is read) and the chunk"
+    )]
     fn over(
         samples: &'a [SampleGenericSections<'a>],
+        group_index: &'a [Vec<usize>],
         edges: &'a DepthBinEdges,
         cap: DepthCap,
         coverage: &'a [f64],
@@ -879,6 +934,7 @@ impl<'a> EvidenceCursor<'a> {
             .collect();
         Self {
             samples,
+            group_index,
             edges,
             cap,
             coverage,
@@ -898,23 +954,24 @@ impl<'a> EvidenceCursor<'a> {
         into.observed_alternatives.clear();
         let mut seen = [false; 5];
         for (s, sections) in self.samples.iter().enumerate() {
-            let slot = &mut into.samples[s];
-            *slot = SampleAtPosition::default();
-            // The depths this sample's stored codes could stand for, added across its read
-            // groups. Two groups' ranges are summed endpoint to endpoint, which is the range
-            // the total depth lies in.
-            let (mut shallowest, mut deepest) = (0_u32, 0_u32);
-            for (g, (_, records)) in sections.iter().enumerate() {
-                if let DepthCode::Binned(bin) = records.depth().get(index) {
-                    // **The counts' own denominator, not the position's depth.** The reads
-                    // subtracted below were thinned to the cap; subtracting them from an
-                    // unthinned depth would charge the position reference reads it never
-                    // had, and at a few hundred reads a position that is most of them.
-                    let range = self.cap.denominator_for(self.edges.depth_range(bin));
-                    shallowest += *range.start();
-                    deepest += *range.end();
-                }
-                let cursor = &mut self.at[s][g];
+            for (section, (_, records)) in sections.iter().enumerate() {
+                let library = self.group_index[s][section];
+                let slot = &mut into.libraries[library];
+                *slot = LibraryAtPosition::default();
+                // The depths this library's stored code could stand for — none when the library
+                // was not walked here, which leaves it no reads to score.
+                let (shallowest, deepest) = match records.depth().get(index) {
+                    DepthCode::Binned(bin) => {
+                        // **The counts' own denominator, not the position's depth.** The reads
+                        // subtracted below were thinned to the cap; subtracting them from an
+                        // unthinned depth would charge the position reference reads it never
+                        // had, and at a few hundred reads a position that is most of them.
+                        let range = self.cap.denominator_for(self.edges.depth_range(bin));
+                        (*range.start(), *range.end())
+                    }
+                    DepthCode::NeverWalked => (0_u32, 0_u32),
+                };
+                let cursor = &mut self.at[s][section];
                 let entries = records.non_reference();
                 while *cursor < entries.len() && (entries[*cursor].index as usize) < index {
                     *cursor += 1;
@@ -926,40 +983,41 @@ impl<'a> EvidenceCursor<'a> {
                     seen[code] = true;
                     *cursor += 1;
                 }
+                // Reads on an insertion, a deletion or a spanning deletion are not a base and are
+                // held out of the model entirely, so the depth they occupied goes with them.
+                let held_out = slot.on[4];
+                let disagreeing = slot.non_reference() - held_out;
+                // How many reference reads each end of the range implies. A range that would
+                // demand fewer than zero is cut at zero: the reads are the harder evidence, so
+                // the depth gives way rather than charging a negative count of reference reads.
+                let (shallowest, deepest) = if self.as_a_range {
+                    (f64::from(shallowest), f64::from(deepest))
+                } else {
+                    // The point-read this replaced: the middle of the range, given to the
+                    // likelihood as though it were the depth.
+                    let middle = 0.5 * f64::from(shallowest + deepest);
+                    (middle, middle)
+                };
+                let fewest = (shallowest - held_out - disagreeing).max(0.0);
+                let most = (deepest - held_out - disagreeing).max(0.0);
+                slot.fewest_reference = fewest;
+                slot.spread = (most - fewest) as usize + 1;
+                assert!(
+                    slot.spread <= MAX_RECORDED_SPREAD,
+                    "a stored depth code stands for {} depths, more than the \
+                     {MAX_RECORDED_SPREAD} this fit reserves room for",
+                    slot.spread
+                );
+                slot.depth = held_out + disagreeing + 0.5 * (fewest + most);
+                let weights = &mut into.depth_weights[library * MAX_RECORDED_SPREAD..];
+                fill_depth_weights(&mut weights[..slot.spread], self.coverage[library], fewest);
             }
-            // Reads on an insertion, a deletion or a spanning deletion are not a base and are
-            // held out of the model entirely, so the depth they occupied goes with them.
-            let held_out = slot.on[4];
-            let disagreeing = slot.non_reference() - held_out;
-            // How many reference reads each end of the range implies. A range that would
-            // demand fewer than zero is cut at zero: the reads are the harder evidence, so the
-            // depth gives way rather than charging a negative count of reference reads.
-            let (shallowest, deepest) = if self.as_a_range {
-                (f64::from(shallowest), f64::from(deepest))
-            } else {
-                // The point-read this replaced: the middle of the range, given to the
-                // likelihood as though it were the depth.
-                let middle = 0.5 * f64::from(shallowest + deepest);
-                (middle, middle)
-            };
-            let fewest = (shallowest - held_out - disagreeing).max(0.0);
-            let most = (deepest - held_out - disagreeing).max(0.0);
-            slot.fewest_reference = fewest;
-            slot.spread = (most - fewest) as usize + 1;
-            assert!(
-                slot.spread <= MAX_RECORDED_SPREAD,
-                "a stored depth code stands for {} depths, more than the {MAX_RECORDED_SPREAD} \
-                 this fit reserves room for",
-                slot.spread
-            );
-            slot.depth = held_out + disagreeing + 0.5 * (fewest + most);
-            let weights = &mut into.depth_weights[s * MAX_RECORDED_SPREAD..];
-            fill_depth_weights(&mut weights[..slot.spread], self.coverage[s], fewest);
         }
         for (code, was_seen) in seen.iter().enumerate() {
             // `Other` — an indel or a spanning deletion — is not a base and cannot be the
             // segregating allele of a substitution model. Its reads are held out of both the
-            // numerator and the denominator by `SampleAtPosition::reference_reads`.
+            // numerator and the denominator: the depth above leaves them out of the reference
+            // count, and [`ln_reads_given_genotype`] out of the reads it scores.
             if *was_seen && code < 4 {
                 into.observed_alternatives.push(code);
             }
@@ -972,10 +1030,12 @@ impl<'a> EvidenceCursor<'a> {
 const CANDIDATE_ALTERNATIVES: usize = 3;
 
 // ---------------------------------------------------------------------
-// The likelihood of one sample's reads under one genotype
+// The likelihood of one library's reads under one genotype
 // ---------------------------------------------------------------------
 
-/// `ln P(this sample's reads | j of its copies carry base k, error rate ε)`.
+/// `ln P(this library's reads | j of the sample's copies carry base k, the library's error rate
+/// ε)`. A sample's reads under a genotype are the sum of this over its libraries: the genotype is
+/// the sample's, the error rate each library's own.
 ///
 /// A read is drawn from one of the individual's copies and may be misread into any of the
 /// other three bases, so the four bases form a multinomial with three distinct
@@ -991,12 +1051,12 @@ const CANDIDATE_ALTERNATIVES: usize = 3;
 /// between them a comparison.
 /// **The reference-read term and the non-reference total are handed in rather than taken
 /// here**, because neither depends on which base the alternative is. [`ln_reference_reads`]
-/// reads the sample, its depth weights and how many copies of the alternative it carries — and
-/// it is the one logarithm in this block — so the caller takes it once for the three copy
-/// counts and reuses it across every candidate allele and across the invariant branch beside
-/// them. Taken inside this function it was ten calls a sample where three do.
+/// reads the library, its depth weights and how many copies of the alternative the sample
+/// carries — and it is the one logarithm in this block — so the caller takes it once for the
+/// three copy counts and reuses it across every candidate allele and across the invariant branch
+/// beside them. Taken inside this function it was ten calls a library where three do.
 fn ln_reads_given_genotype(
-    sample: &SampleAtPosition,
+    library: &LibraryAtPosition,
     non_reference: f64,
     alt_copies: u8,
     alternative: usize,
@@ -1004,10 +1064,10 @@ fn ln_reads_given_genotype(
     reference_term: f64,
 ) -> f64 {
     let copies = alt_copies as usize;
-    let candidate_reads = sample.on[alternative];
+    let candidate_reads = library.on[alternative];
     // `Other` is neither the candidate nor the reference; it is held out of the model
     // entirely, so the depth it occupied is removed with it.
-    let other_reads = non_reference - candidate_reads - sample.on[4];
+    let other_reads = non_reference - candidate_reads - library.on[4];
 
     // **A count of zero needs no guard now.** `count_times_ln` branched on it only to keep
     // `0 · −∞` out of the sum; the logarithms below are clamped at `MIN_POSITIVE` when they are
@@ -1015,40 +1075,44 @@ fn ln_reads_given_genotype(
     candidate_reads * logs.ln_candidate[copies] + other_reads * logs.ln_neither + reference_term
 }
 
-/// `ln P(this sample's reads | every copy is the reference base)` — the term the invariant
+/// `ln P(this library's reads | every copy is the reference base)` — the term the invariant
 /// branch needs, and it does not depend on which base would have been the alternative. Its
 /// `reference_term` is the zero-copy entry of the same triple.
 fn ln_reads_given_all_reference(
-    sample: &SampleAtPosition,
+    library: &LibraryAtPosition,
     non_reference: f64,
     logs: &ReadLogs,
     reference_term: f64,
 ) -> f64 {
-    (non_reference - sample.on[4]) * logs.ln_neither + reference_term
+    (non_reference - library.on[4]) * logs.ln_neither + reference_term
 }
 
-/// `ln P(the reference reads | this sample carries 0, 1 or 2 copies of the alternative)`.
+/// `ln P(the reference reads | the sample carries 0, 1 or 2 copies of the alternative)`.
 ///
 /// **Candidate-invariant, which is why it is a function of its own.** Nothing in
-/// [`ln_reference_reads`] reads *which* base the alternative is — only the sample's reference
+/// [`ln_reference_reads`] reads *which* base the alternative is — only the library's reference
 /// count, the depths its stored code allows and the per-copy probability from its read group's
 /// table — so one triple serves all three candidate alleles and the invariant branch.
-fn reference_terms(sample: &SampleAtPosition, depth_weights: &[f64], logs: &ReadLogs) -> [f64; 3] {
+fn reference_terms(
+    library: &LibraryAtPosition,
+    depth_weights: &[f64],
+    logs: &ReadLogs,
+) -> [f64; 3] {
     [
         ln_reference_reads(
-            sample,
+            library,
             depth_weights,
             logs.reference[0],
             logs.ln_reference[0],
         ),
         ln_reference_reads(
-            sample,
+            library,
             depth_weights,
             logs.reference[1],
             logs.ln_reference[1],
         ),
         ln_reference_reads(
-            sample,
+            library,
             depth_weights,
             logs.reference[2],
             logs.ln_reference[2],
@@ -1170,47 +1234,47 @@ fn candidate_read_probability_slope(alt_copies: u8, ploidy: Ploidy) -> f64 {
 /// above the truth on a drawn cohort at eight reads a position** where the consistent pair
 /// returns it to within 6%.
 fn expected_reference_reads(
-    sample: &SampleAtPosition,
+    library: &LibraryAtPosition,
     depth_weights: &[f64],
     on_reference: f64,
 ) -> f64 {
-    if sample.spread <= 1 {
-        return sample.fewest_reference;
+    if library.spread <= 1 {
+        return library.fewest_reference;
     }
     let probability = on_reference.max(f64::MIN_POSITIVE);
     let (mut total, mut weighted, mut power) = (0.0, 0.0, 1.0);
-    for (step, weight) in depth_weights[..sample.spread].iter().enumerate() {
+    for (step, weight) in depth_weights[..library.spread].iter().enumerate() {
         let term = weight * power;
         total += term;
-        weighted += term * (sample.fewest_reference + step as f64);
+        weighted += term * (library.fewest_reference + step as f64);
         power *= probability;
     }
     if total > 0.0 {
         weighted / total
     } else {
-        sample.fewest_reference
+        library.fewest_reference
     }
 }
 
 /// `ln P(the reference reads | a read shows the reference base with probability p)`, summed
-/// over every depth the sample's stored code could have come from.
+/// over every depth the library's stored code could have come from.
 ///
 /// The shallowest depth's term is factored out, which is what keeps the sum in range: what is
 /// left runs from one upwards and cannot underflow however small `p` is.
 fn ln_reference_reads(
-    sample: &SampleAtPosition,
+    library: &LibraryAtPosition,
     depth_weights: &[f64],
     on_reference: f64,
     ln_on_reference: f64,
 ) -> f64 {
-    let shallowest = sample.fewest_reference * ln_on_reference;
-    if sample.spread <= 1 {
+    let shallowest = library.fewest_reference * ln_on_reference;
+    if library.spread <= 1 {
         return shallowest;
     }
     let probability = on_reference.max(f64::MIN_POSITIVE);
     let mut total = 0.0;
     let mut power = 1.0;
-    for weight in &depth_weights[..sample.spread] {
+    for weight in &depth_weights[..library.spread] {
         total += weight * power;
         power *= probability;
     }
@@ -1513,23 +1577,23 @@ impl Statistics {
     }
 }
 
-/// The read counts one sample contributes to a read group's tally, under one candidate allele
+/// The read counts one library contributes to its read group's tally, under one candidate allele
 /// and one genotype.
 ///
 /// The counts on the candidate allele and on the two bases that are neither are exact; the
 /// reference count is the one that has to be taken in expectation, because the depth it is
 /// derived from is a range.
 fn tally_of(
-    sample: &SampleAtPosition,
+    library: &LibraryAtPosition,
     depth_weights: &[f64],
     alternative: usize,
     on_reference: f64,
 ) -> ReadTally {
-    let candidate = sample.on[alternative];
+    let candidate = library.on[alternative];
     ReadTally {
         candidate,
-        neither: sample.non_reference() - candidate - sample.on[4],
-        reference: expected_reference_reads(sample, depth_weights, on_reference),
+        neither: library.non_reference() - candidate - library.on[4],
+        reference: expected_reference_reads(library, depth_weights, on_reference),
     }
 }
 
@@ -1600,9 +1664,15 @@ pub fn fit_jointly(
             })
             .collect();
 
-        // Each sample's own mean depth, read once from the codes: the centre of the prior a
+        // Each library's own mean depth, read once from the codes: the centre of the prior a
         // stored code's range is weighted with when the likelihood sums over it.
-        let coverage = EvidenceCursor::mean_depth(lent, &config.edges, depth_cap);
+        let coverage = EvidenceCursor::mean_depth_of_each_library(
+            lent,
+            &group_index,
+            groups.len(),
+            &config.edges,
+            depth_cap,
+        );
 
         // **What the evidence holds and how deep the samples are**, printed because both set
         // this step's memory and neither is otherwise visible from a run's output.
@@ -1628,7 +1698,7 @@ pub fn fit_jointly(
                 })
             })
             .count();
-        let mut depths = coverage.clone();
+        let mut depths = EvidenceCursor::mean_depth(lent, &config.edges, depth_cap);
         depths.sort_by(f64::total_cmp);
         let depth_at = |share: f64| {
             depths
@@ -1712,7 +1782,8 @@ pub fn fit_jointly(
 
         // **Every parameter's standard error, at the parameters the fit returns**, from the
         // information the winning start's final pass summed (spec §3.3).
-        let standard_errors = StandardErrors::of(&information);
+        let standard_errors = StandardErrors::of(&information)
+            .with_errors_awaiting_each_librarys_scores(&group_index);
         stage.always(|into| {
             format!(
                 "SNP/indel fit: standard errors at the returned values: {}; {into}",
@@ -2544,6 +2615,7 @@ fn expectation_pass(
         }
         let mut cursor = EvidenceCursor::over(
             samples,
+            group_index,
             &config.edges,
             depth_cap,
             coverage,
@@ -2551,7 +2623,11 @@ fn expectation_pass(
             first,
             end,
         );
-        let mut scratch = Scratch::new(samples.len(), quadrature.nodes.len());
+        let mut scratch = Scratch::new(
+            samples.len(),
+            parameters.clean.len(),
+            quadrature.nodes.len(),
+        );
         let mut odds = vec![
             1.0_f64;
             if config.coverage_odds.is_empty() {
@@ -2714,11 +2790,13 @@ struct Scratch {
 }
 
 impl Scratch {
-    fn new(samples: usize, nodes: usize) -> Self {
+    /// Room for `samples` samples holding `libraries` read groups between them, at a rule of
+    /// `nodes` nodes.
+    fn new(samples: usize, libraries: usize, nodes: usize) -> Self {
         Self {
             evidence: PositionEvidence {
-                samples: vec![SampleAtPosition::default(); samples],
-                depth_weights: vec![0.0; samples * MAX_RECORDED_SPREAD],
+                libraries: vec![LibraryAtPosition::default(); libraries],
+                depth_weights: vec![0.0; libraries * MAX_RECORDED_SPREAD],
                 observed_alternatives: Vec::with_capacity(MAX_CANDIDATES),
             },
             samples,
@@ -2789,7 +2867,10 @@ fn one_position(
     let nodes = scratch.nodes;
     statistics.positions += 1.0;
     for s in 0..samples {
-        let depth = scratch.evidence.samples[s].depth;
+        let depth: f64 = group_index[s]
+            .iter()
+            .map(|&library| scratch.evidence.libraries[library].depth)
+            .sum();
         if depth >= 1.0 {
             statistics.with_reads[s] += 1;
         }
@@ -2820,39 +2901,70 @@ fn one_position(
 
     // ---- the read likelihoods, once per candidate and reused across every node -------------
     //
-    // **The sample loop is on the outside so that the two candidate-invariant quantities are
-    // taken once.** [`reference_terms`] holds this block's only logarithms and
+    // **The library loop is outside the candidate loop so that the two candidate-invariant
+    // quantities are taken once.** [`reference_terms`] holds this block's only logarithms and
     // `non_reference()` is a sum over four counts; neither reads which base the alternative
     // is, so with the candidate loop outermost both were recomputed for every candidate — ten
-    // reference terms a sample where three do the same job. The sums are unchanged: `invariant`
-    // and each candidate's `fixed` still accumulate over the samples in the same order.
+    // reference terms a library where three do the same job. `invariant` and each candidate's
+    // `fixed` accumulate over the samples in the samples' order.
+    //
+    // **A sample's reads under a genotype are its libraries' reads under that genotype, each
+    // library scored under its own two error rates**, and added: the genotype is one a sample,
+    // the rates are one a library. The first library's terms are taken as they are and each
+    // later library's added to them, so a sample of one library is scored with exactly the
+    // arithmetic it was scored with before its libraries were kept apart.
     for class in 0..2 {
         let mut invariant = 0.0;
         let mut fixed = [0.0_f64; MAX_CANDIDATES];
         for s in 0..samples {
-            let logs = &read_logs[class][group_index[s][0]];
-            let sample = &scratch.evidence.samples[s];
-            let weights = scratch.evidence.weights_of(s);
-            let non_reference = sample.non_reference();
-            let reference_term = reference_terms(sample, weights, logs);
-            invariant +=
-                ln_reads_given_all_reference(sample, non_reference, logs, reference_term[0]);
-            for candidate in 0..candidates {
-                let allele = scratch.candidates[candidate];
-                let base = scratch.ell_at(class, candidate, s);
-                let mut largest = f64::NEG_INFINITY;
-                for j in 0..3 {
-                    let value = ln_reads_given_genotype(
-                        sample,
-                        non_reference,
-                        j as u8,
-                        allele,
-                        logs,
-                        reference_term[j],
-                    );
-                    scratch.ell[base + j] = value;
-                    largest = largest.max(value);
+            let mut sample_invariant = 0.0;
+            if group_index[s].is_empty() {
+                // A sample with no library has no reads: every genotype explains them alike.
+                for candidate in 0..candidates {
+                    let base = scratch.ell_at(class, candidate, s);
+                    scratch.ell[base..base + 3].fill(0.0);
                 }
+            }
+            for (section, &library) in group_index[s].iter().enumerate() {
+                let logs = &read_logs[class][library];
+                let reads = &scratch.evidence.libraries[library];
+                let weights = scratch.evidence.weights_of(library);
+                let non_reference = reads.non_reference();
+                let reference_term = reference_terms(reads, weights, logs);
+                let all_reference =
+                    ln_reads_given_all_reference(reads, non_reference, logs, reference_term[0]);
+                sample_invariant = if section == 0 {
+                    all_reference
+                } else {
+                    sample_invariant + all_reference
+                };
+                for candidate in 0..candidates {
+                    let allele = scratch.candidates[candidate];
+                    let base = scratch.ell_at(class, candidate, s);
+                    for j in 0..3 {
+                        let value = ln_reads_given_genotype(
+                            reads,
+                            non_reference,
+                            j as u8,
+                            allele,
+                            logs,
+                            reference_term[j],
+                        );
+                        scratch.ell[base + j] = if section == 0 {
+                            value
+                        } else {
+                            scratch.ell[base + j] + value
+                        };
+                    }
+                }
+            }
+            invariant += sample_invariant;
+            for candidate in 0..candidates {
+                let base = scratch.ell_at(class, candidate, s);
+                let largest = scratch.ell[base..base + 3]
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
                 fixed[candidate] += scratch.ell[base + 2];
                 let slot = scratch.max_at(class, candidate, s);
                 scratch.lik_max[slot] = largest;
@@ -3073,18 +3185,24 @@ fn one_position(
 
         // The invariant branch: every sample is homozygous reference, and every read that is
         // not on the reference base is an error, so none of them is "the allele".
+        //
+        // **Here and in every branch below, a library's tally is credited with that library's
+        // reads alone, at its own rate** — so each library's rates are fitted from its own
+        // evidence, where crediting every library of a sample with the sample's reads gave them
+        // one rate between them.
         if branch[0] > 1e-12 {
-            for s in 0..samples {
-                let sample = &scratch.evidence.samples[s];
-                let rate = class_rate(parameters, class, group_index[s][0]);
-                let neither = sample.non_reference() - sample.on[4];
-                let reference =
-                    expected_reference_reads(sample, scratch.evidence.weights_of(s), 1.0 - rate);
-                for &g in &group_index[s] {
-                    let tally = &mut statistics.reads[g][class][0];
-                    tally.neither += branch[0] * neither;
-                    tally.reference += branch[0] * reference;
-                }
+            for &library in group_index.iter().flatten() {
+                let reads = &scratch.evidence.libraries[library];
+                let rate = class_rate(parameters, class, library);
+                let neither = reads.non_reference() - reads.on[4];
+                let reference = expected_reference_reads(
+                    reads,
+                    scratch.evidence.weights_of(library),
+                    1.0 - rate,
+                );
+                let tally = &mut statistics.reads[library][class][0];
+                tally.neither += branch[0] * neither;
+                tally.reference += branch[0] * reference;
             }
         }
 
@@ -3105,15 +3223,15 @@ fn one_position(
                 }
                 let allele = scratch.candidates[candidate];
                 for s in 0..samples {
-                    let rate = class_rate(parameters, class, group_index[s][0]);
-                    let counts = tally_of(
-                        &scratch.evidence.samples[s],
-                        scratch.evidence.weights_of(s),
-                        allele,
-                        reference_read_probability(2, ploidy, rate),
-                    );
-                    for &g in &group_index[s] {
-                        let tally = &mut statistics.reads[g][class][2];
+                    for &library in &group_index[s] {
+                        let rate = class_rate(parameters, class, library);
+                        let counts = tally_of(
+                            &scratch.evidence.libraries[library],
+                            scratch.evidence.weights_of(library),
+                            allele,
+                            reference_read_probability(2, ploidy, rate),
+                        );
+                        let tally = &mut statistics.reads[library][class][2];
                         tally.candidate += share * counts.candidate;
                         tally.neither += share * counts.neither;
                         tally.reference += share * counts.reference;
@@ -3171,21 +3289,21 @@ fn one_position(
             for candidate in 0..candidates {
                 let allele = scratch.candidates[candidate];
                 for s in 0..samples {
-                    let rate = class_rate(parameters, class, group_index[s][0]);
                     let base = (candidate * samples + s) * 3;
                     for j in 0..3 {
                         let weight = scratch.per_candidate_weight[base + j];
                         if weight <= 0.0 {
                             continue;
                         }
-                        let counts = tally_of(
-                            &scratch.evidence.samples[s],
-                            scratch.evidence.weights_of(s),
-                            allele,
-                            reference_read_probability(j as u8, ploidy, rate),
-                        );
-                        for &g in &group_index[s] {
-                            let tally = &mut statistics.reads[g][class][j];
+                        for &library in &group_index[s] {
+                            let rate = class_rate(parameters, class, library);
+                            let counts = tally_of(
+                                &scratch.evidence.libraries[library],
+                                scratch.evidence.weights_of(library),
+                                allele,
+                                reference_read_probability(j as u8, ploidy, rate),
+                            );
+                            let tally = &mut statistics.reads[library][class][j];
                             tally.candidate += weight * counts.candidate;
                             tally.neither += weight * counts.neither;
                             tally.reference += weight * counts.reference;
@@ -3248,21 +3366,21 @@ fn one_position(
                 for candidate in 0..candidates {
                     let allele = scratch.candidates[candidate];
                     for s in 0..samples {
-                        let rate = class_rate(parameters, class, group_index[s][0]);
                         let base = (candidate * samples + s) * 3;
                         for j in 0..2 {
                             let weight = scratch.per_candidate_weight[base + j];
                             if weight <= 0.0 {
                                 continue;
                             }
-                            let counts = tally_of(
-                                &scratch.evidence.samples[s],
-                                scratch.evidence.weights_of(s),
-                                allele,
-                                reference_read_probability(j as u8, ploidy, rate),
-                            );
-                            for &g in &group_index[s] {
-                                let tally = &mut statistics.reads[g][class][j];
+                            for &library in &group_index[s] {
+                                let rate = class_rate(parameters, class, library);
+                                let counts = tally_of(
+                                    &scratch.evidence.libraries[library],
+                                    scratch.evidence.weights_of(library),
+                                    allele,
+                                    reference_read_probability(j as u8, ploidy, rate),
+                                );
+                                let tally = &mut statistics.reads[library][class][j];
                                 tally.candidate += weight * counts.candidate;
                                 tally.neither += weight * counts.neither;
                                 tally.reference += weight * counts.reference;
@@ -4261,11 +4379,18 @@ pub mod bench_fixtures {
         /// spread where they were not.
         pub clean: f64,
         pub noisy: f64,
-        /// **Sample `s`'s own library's rates**, which are what the fit estimates: a library
-        /// belongs to one sample, so every one of these is fitted from that sample's reads
-        /// alone.
+        /// **Each library's own rates, in read-group order**, which are what the fit estimates:
+        /// a library belongs to one sample, so every one of these is fitted from that library's
+        /// reads alone. With one library a sample, library `s` is sample `s`'s.
         pub per_library_clean: Vec<f64>,
         pub per_library_noisy: Vec<f64>,
+        /// Per sample, the read groups its libraries were drawn as, numbered across the cohort
+        /// in sample order.
+        pub libraries_of_each_sample: Vec<Vec<usize>>,
+        /// Per sample, how many positions it was drawn at least one read at, and at least two —
+        /// its libraries' reads added.
+        pub positions_with_reads: Vec<u64>,
+        pub positions_with_two_reads: Vec<u64>,
         pub noisy_share: f64,
         pub density: FrequencyDensity,
         pub hom_excess: Vec<f64>,
@@ -4319,7 +4444,7 @@ pub mod bench_fixtures {
         )
     }
 
-    /// The same, with **a rate of its own for every library**.
+    /// The same, with **a rate of its own for every library**, one library a sample.
     ///
     /// A cohort whose libraries all misread at one rate cannot tell a fit that keeps them apart
     /// from one that pooled them — and pooling them is exactly the defect
@@ -4347,22 +4472,89 @@ pub mod bench_fixtures {
             per_library_noisy.len(),
             "one clean rate and one mismapped rate a library"
         );
-        let samples = per_library_clean.len();
-        let clean = per_library_clean.iter().sum::<f64>() / samples as f64;
-        let noisy = per_library_noisy.iter().sum::<f64>() / samples as f64;
+        let libraries: Vec<Vec<DrawnLibrary>> = per_library_clean
+            .iter()
+            .zip(per_library_noisy)
+            .map(|(&clean, &noisy)| {
+                vec![DrawnLibrary {
+                    clean,
+                    noisy,
+                    mean_depth,
+                }]
+            })
+            .collect();
+        draw_cohort_of_libraries(
+            &libraries,
+            noisy_share,
+            positions,
+            density,
+            hom_excess,
+            duplicated_share,
+            seed,
+        )
+    }
+
+    /// One library of a drawn sample: its two error rates, and how many reads it gives a position
+    /// on average.
+    #[derive(Copy, Clone, Debug)]
+    pub struct DrawnLibrary {
+        pub clean: f64,
+        pub noisy: f64,
+        pub mean_depth: f64,
+    }
+
+    /// The same, with **each sample read from the libraries listed for it**, each at its own
+    /// rates and its own depth — the shape of a sample sequenced more than once.
+    ///
+    /// A sample's genotype at a position is drawn once, and each of its libraries draws its own
+    /// reads from it: the libraries share the genotype and nothing else. Read groups are numbered
+    /// across the cohort in sample order, so a cohort of one library a sample numbers each
+    /// sample's library as the sample, and **draws exactly the numbers it drew before samples
+    /// could hold several**: a library's read count is drawn before the sample's genotype, as the
+    /// sample's was.
+    pub fn draw_cohort_of_libraries(
+        libraries_of_each_sample: &[Vec<DrawnLibrary>],
+        noisy_share: f64,
+        positions: usize,
+        density: FrequencyDensity,
+        hom_excess: f64,
+        duplicated_share: f64,
+        seed: u64,
+    ) -> DrawnCohort {
+        let samples = libraries_of_each_sample.len();
+        let every_library: Vec<DrawnLibrary> =
+            libraries_of_each_sample.iter().flatten().copied().collect();
+        let mut numbered = 0_usize;
+        let group_of: Vec<Vec<usize>> = libraries_of_each_sample
+            .iter()
+            .map(|own| {
+                own.iter()
+                    .map(|_| {
+                        numbered += 1;
+                        numbered - 1
+                    })
+                    .collect()
+            })
+            .collect();
+        let clean = every_library.iter().map(|l| l.clean).sum::<f64>() / every_library.len() as f64;
+        let noisy = every_library.iter().map(|l| l.noisy).sum::<f64>() / every_library.len() as f64;
         let mut draw = Draw(seed);
         let excess = vec![hom_excess; samples];
-        let mut depth: Vec<PackedDepthCodes> = (0..samples)
+        let mut depth: Vec<PackedDepthCodes> = every_library
+            .iter()
             .map(|_| PackedDepthCodes::never_walked(positions))
             .collect();
-        let mut sparse: Vec<Vec<AlleleObservation>> = vec![Vec::new(); samples];
+        let mut sparse: Vec<Vec<AlleleObservation>> = vec![Vec::new(); every_library.len()];
         let mut heterozygous = vec![0_u64; samples];
+        let mut positions_with_reads = vec![0_u64; samples];
+        let mut positions_with_two_reads = vec![0_u64; samples];
         let edges = DepthBinEdges::for_census();
+        let mut reads_of_each_library: Vec<u32> = Vec::new();
 
         for index in 0..positions {
             // **Whether a position is mismapped is a property of the position**, so it is drawn
             // once and every sample shares it; *how often a read misreads there* is a property
-            // of the library, so it is looked up per sample below.
+            // of the library, so it is looked up per library below.
             let mismapped = draw.uniform() < noisy_share;
             let branch = draw.pick(&[
                 density.p_invariant,
@@ -4384,18 +4576,19 @@ pub mod bench_fixtures {
                 (false, 0.0)
             };
             for sample in 0..samples {
-                let rate = if mismapped {
-                    per_library_noisy[sample]
-                } else {
-                    per_library_clean[sample]
-                };
                 let copies = if duplicated && draw.uniform() < carrier_frequency {
                     2.0
                 } else {
                     1.0
                 };
                 let _ = carrier_frequency;
-                let reads = draw.poisson(mean_depth * copies);
+                reads_of_each_library.clear();
+                for library in &libraries_of_each_sample[sample] {
+                    reads_of_each_library.push(draw.poisson(library.mean_depth * copies));
+                }
+                let reads_here: u32 = reads_of_each_library.iter().sum();
+                positions_with_reads[sample] += u64::from(reads_here >= 1);
+                positions_with_two_reads[sample] += u64::from(reads_here >= 2);
                 let genotype = if duplicated {
                     usize::from(copies > 1.0)
                 } else {
@@ -4409,37 +4602,48 @@ pub mod bench_fixtures {
                     heterozygous[sample] += 1;
                 }
                 let carried = genotype as f64 / 2.0;
-                let on_candidate = carried * (1.0 - rate) + (1.0 - carried) * rate / 3.0;
-                let on_reference = (1.0 - carried) * (1.0 - rate) + carried * rate / 3.0;
-                let mut counts = [0_u32; 5];
-                for _ in 0..reads {
-                    let u = draw.uniform();
-                    let code = if u < on_candidate {
-                        allele
-                    } else if u < on_candidate + on_reference {
-                        0
-                    } else if u < on_candidate + on_reference + rate / 3.0 {
-                        (allele % 3) + 1
+                for ((library, &group), &reads) in libraries_of_each_sample[sample]
+                    .iter()
+                    .zip(&group_of[sample])
+                    .zip(&reads_of_each_library)
+                {
+                    let rate = if mismapped {
+                        library.noisy
                     } else {
-                        ((allele + 1) % 3) + 1
+                        library.clean
                     };
-                    counts[code] += 1;
-                }
-                depth[sample].set(index, DepthCode::Binned(edges.bin_for(reads)));
-                for (code, count) in counts.iter().enumerate() {
-                    if code == 0 || *count == 0 {
-                        continue;
+                    let on_candidate = carried * (1.0 - rate) + (1.0 - carried) * rate / 3.0;
+                    let on_reference = (1.0 - carried) * (1.0 - rate) + carried * rate / 3.0;
+                    let mut counts = [0_u32; 5];
+                    for _ in 0..reads {
+                        let u = draw.uniform();
+                        let code = if u < on_candidate {
+                            allele
+                        } else if u < on_candidate + on_reference {
+                            0
+                        } else if u < on_candidate + on_reference + rate / 3.0 {
+                            (allele % 3) + 1
+                        } else {
+                            ((allele + 1) % 3) + 1
+                        };
+                        counts[code] += 1;
                     }
-                    sparse[sample].push(AlleleObservation {
-                        index: index as u32,
-                        allele: match code {
-                            1 => ObservedAllele::C,
-                            2 => ObservedAllele::G,
-                            _ => ObservedAllele::T,
-                        },
-                        reads: u8::try_from(*count)
-                            .expect("a drawn count fits the census's one-byte field"),
-                    });
+                    depth[group].set(index, DepthCode::Binned(edges.bin_for(reads)));
+                    for (code, count) in counts.iter().enumerate() {
+                        if code == 0 || *count == 0 {
+                            continue;
+                        }
+                        sparse[group].push(AlleleObservation {
+                            index: index as u32,
+                            allele: match code {
+                                1 => ObservedAllele::C,
+                                2 => ObservedAllele::G,
+                                _ => ObservedAllele::T,
+                            },
+                            reads: u8::try_from(*count)
+                                .expect("a drawn count fits the census's one-byte field"),
+                        });
+                    }
                 }
             }
         }
@@ -4452,6 +4656,9 @@ pub mod bench_fixtures {
             depth_ladder: DepthLadderDigest::of(&DepthBinEdges::for_census()),
             depth_cap: DepthCap::new(124),
         };
+        let read_group = |group: usize| {
+            ReadGroupId(u32::try_from(group).expect("a drawn cohort's read groups fit in u32"))
+        };
         let records = (0..samples)
             .map(|s| {
                 SampleCensusEvidence::resident(
@@ -4459,26 +4666,30 @@ pub mod bench_fixtures {
                     terms.clone(),
                     crate::parameter_estimation::joint::census::NamedReadGroup::drawn_for(
                         &format!("s{s}"),
-                        [ReadGroupId(
-                            u32::try_from(s).expect("a drawn cohort fits in u32"),
-                        )],
+                        group_of[s].iter().map(|&group| read_group(group)),
                     ),
                     BTreeMap::new(),
-                    BTreeMap::from([(
-                        // **One read group a sample, because that is the only shape a real run
-                        // can have**: a read group is one library preparation of one plant's
-                        // DNA, so no two samples ever share one. A drawn cohort that gave every
-                        // sample read group `0` would ask the fit to pool every library into a
-                        // single error rate — the very thing
-                        // `CohortCensusEvidence::new` now refuses.
-                        SectionKey::Generic(ReadGroupId(
-                            u32::try_from(s).expect("a drawn cohort fits in u32"),
-                        )),
-                        Section::Generic(GenericEvidence::from_parts(
-                            std::mem::replace(&mut depth[s], PackedDepthCodes::never_walked(0)),
-                            std::mem::take(&mut sparse[s]),
-                        )),
-                    )]),
+                    group_of[s]
+                        .iter()
+                        .map(|&group| {
+                            (
+                                // **A read group belongs to one sample, because that is the only
+                                // shape a real run can have**: a read group is one library
+                                // preparation of one plant's DNA, so no two samples ever share
+                                // one. A drawn cohort that gave every sample read group `0` would
+                                // ask the fit to pool every library into a single error rate —
+                                // the very thing `CohortCensusEvidence::new` now refuses.
+                                SectionKey::Generic(read_group(group)),
+                                Section::Generic(GenericEvidence::from_parts(
+                                    std::mem::replace(
+                                        &mut depth[group],
+                                        PackedDepthCodes::never_walked(0),
+                                    ),
+                                    std::mem::take(&mut sparse[group]),
+                                )),
+                            )
+                        })
+                        .collect(),
                 )
             })
             .collect();
@@ -4486,8 +4697,11 @@ pub mod bench_fixtures {
             samples: records,
             clean,
             noisy,
-            per_library_clean: per_library_clean.to_vec(),
-            per_library_noisy: per_library_noisy.to_vec(),
+            per_library_clean: every_library.iter().map(|l| l.clean).collect(),
+            per_library_noisy: every_library.iter().map(|l| l.noisy).collect(),
+            libraries_of_each_sample: group_of,
+            positions_with_reads,
+            positions_with_two_reads,
             noisy_share,
             density,
             hom_excess: excess,
@@ -4508,7 +4722,8 @@ pub mod bench_fixtures {
 #[cfg(test)]
 mod whole_fit_tests {
     use super::bench_fixtures::{
-        as_cohort, draw_cohort, draw_cohort_with_duplications, draw_cohort_with_library_rates,
+        DrawnLibrary, as_cohort, draw_cohort, draw_cohort_of_libraries,
+        draw_cohort_with_duplications, draw_cohort_with_library_rates,
     };
     use super::*;
     use crate::parameter_estimation::joint::census::DepthCap;
@@ -5187,6 +5402,127 @@ mod whole_fit_tests {
             fitted.windows(2).all(|pair| pair[0] < pair[1]),
             "the fitted rates do not rise with the drawn ones: {fitted:?}"
         );
+    }
+
+    /// **A sample's two libraries come back at their own rates** (plan step A6). Six samples, each
+    /// read from two libraries at six reads a position apiece, the two drawn at clean rates two to
+    /// four times apart and at mismapped rates of 0.04 and 0.10. Each library's rates are fitted
+    /// from its own reads now; before, both libraries of a sample were credited with the sample's
+    /// pooled reads and came back at one rate between them, so every ratio below would read one.
+    #[test]
+    fn a_samples_two_libraries_come_back_at_their_own_rates() {
+        let density = FrequencyDensity {
+            p_invariant: 0.92,
+            p_fixed_alt: 0.01,
+            a: 0.7,
+            b: 2.5,
+        };
+        let drawn_clean = [
+            (0.002, 0.008),
+            (0.009, 0.003),
+            (0.004, 0.012),
+            (0.006, 0.002),
+            (0.003, 0.006),
+            (0.010, 0.005),
+        ];
+        let libraries: Vec<Vec<DrawnLibrary>> = drawn_clean
+            .iter()
+            .map(|&(first, second)| {
+                vec![
+                    DrawnLibrary {
+                        clean: first,
+                        noisy: 0.04,
+                        mean_depth: 6.0,
+                    },
+                    DrawnLibrary {
+                        clean: second,
+                        noisy: 0.10,
+                        mean_depth: 6.0,
+                    },
+                ]
+            })
+            .collect();
+        let cohort = draw_cohort_of_libraries(
+            &libraries,
+            0.03,
+            12_000,
+            density,
+            0.0,
+            0.0,
+            0x5DEE_CE66_A600_0002,
+        );
+        let fit = fit_jointly(
+            &mut as_cohort(&cohort.samples),
+            &JointFitConfig {
+                quadrature_nodes: 12,
+                max_passes: 40,
+                duplicated_positions: false,
+                estimate_contamination: false,
+                starting_points: vec![StartingPoint::spanning_the_class_separation()[1]],
+                ..JointFitConfig::default()
+            },
+        )
+        .expect("the drawn libraries are identified apart");
+        assert_eq!(
+            fit.noise.len(),
+            2 * drawn_clean.len(),
+            "one pair of rates a library"
+        );
+        // A sample's positions with reads count its libraries' reads together.
+        for (s, name) in fit.rates.keys().enumerate() {
+            let rates = &fit.rates[name].value;
+            assert_eq!(
+                (rates.positions_with_reads, rates.positions_with_two_reads),
+                (
+                    cohort.positions_with_reads[s],
+                    cohort.positions_with_two_reads[s]
+                ),
+                "sample {name}'s positions with one read and with two"
+            );
+        }
+        // Until each library's rates are scored, no error is computed in such a cohort.
+        let awaiting = super::standard_errors::StandardError::AwaitingEachLibrarysScores;
+        assert!(
+            fit.standard_errors.cohort.iter().all(|&e| e == awaiting)
+                && fit
+                    .standard_errors
+                    .samples
+                    .iter()
+                    .flatten()
+                    .all(|&e| e == awaiting),
+            "{:?}",
+            fit.standard_errors
+        );
+        let fitted = |group: usize| {
+            fit.noise[&ReadGroupId(u32::try_from(group).expect("twelve libraries"))].value
+        };
+        for (s, own) in cohort.libraries_of_each_sample.iter().enumerate() {
+            let [first, second] = [own[0], own[1]];
+            for group in [first, second] {
+                let (value, drawn) = (fitted(group).clean, cohort.per_library_clean[group]);
+                eprintln!("sample {s}, library {group}: clean rate {value:.5}, drawn {drawn:.5}");
+                assert!(
+                    (value / drawn - 1.0).abs() < 0.25,
+                    "library {group} came back at {value} against the {drawn} it was drawn at"
+                );
+            }
+            let ratio = fitted(second).clean / fitted(first).clean;
+            let drawn_ratio = cohort.per_library_clean[second] / cohort.per_library_clean[first];
+            let noisy = [fitted(first).noisy, fitted(second).noisy];
+            eprintln!(
+                "sample {s}: clean ratio {ratio:.3} against {drawn_ratio:.3} drawn; mismapped \
+                 rates {:.4} and {:.4} against 0.04 and 0.10",
+                noisy[0], noisy[1]
+            );
+            assert!(
+                (float::ln(ratio / drawn_ratio)).abs() < float::ln(1.5),
+                "sample {s}: its libraries came back {ratio}-fold apart against {drawn_ratio}"
+            );
+            assert!(
+                noisy[0] < noisy[1],
+                "sample {s}: the mismapped rates came back in the wrong order: {noisy:?}"
+            );
+        }
     }
 
     /// **The refusal, before any arithmetic.** Two samples that did not keep the same loci
