@@ -191,7 +191,7 @@ step here that moves a fitted number is its own commit, with the checksums re-re
 
 ### Milestone B — the SNP/indel fit stops by its errors
 
-1. ☐ **B1 — the settled test replaces the relative-move rule.** The log-likelihood trigger, the
+1. ✅ **B1 — the settled test replaces the relative-move rule.** The log-likelihood trigger, the
    information pass when it first holds and every `ERROR_REFRESH_CYCLES` after, the per-parameter
    projection with `MAX_CONTRACTION`, and convergence when every parameter is settled.
    `largest_relative_move` no longer stops the fit. **Own commit; moves fitted numbers.** Validated by
@@ -199,6 +199,11 @@ step here that moves a fitted number is its own commit, with the checksums re-re
    `SETTLED_FRACTION` of each error; the passes saved are reported. The checksums are re-recorded in
    this commit, with the explanation. `SETTLED_FRACTION` = 0.1 (checkpoint A). *Depends:* A8,
    checkpoint A′. *Source:* spec §2, §3.3.
+   **Decided during B1 (owner, 2026-09-29):** built as specified, the projection stopped the oracle
+   cohort's fit 74 log-likelihood units short of a 1,000-pass fit
+   ([report](../reports/implementations/fit_precision_b1_stopped_2026-09-29.md)); the distance still to
+   travel is now the Newton step the cycle's information pass gives, judged every cycle once the
+   trigger has held (spec §2, §3.3, §3.4 amended).
 2. ☐ **B2 — a later start stops when it agrees.** The agreement test on projected endpoints against
    the best converged earlier start. **Own commit; moves passes, and moves numbers only where a start
    that would have won by a hair now stops.** *Depends:* B1. *Source:* spec §3.4.

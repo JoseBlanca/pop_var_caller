@@ -750,6 +750,11 @@ pub(super) struct InformationSums {
     /// The whole matrix, when the sums were made for a cohort small enough to hold it
     /// ([`InformationSums::for_a_cohort_of`]); the standard errors are then read from it.
     pub full: Option<FullInformation>,
+    /// **Each parameter's score summed over the positions** — the slope of the whole log-likelihood,
+    /// in the layout of [`PositionScores`]: the cohort's eight, then each sample's own. Zero at the
+    /// likelihood's maximum; the information solved against it gives the Newton step there
+    /// ([`newton_step`](super::standard_errors::newton_step)).
+    pub slope: PositionScores,
 }
 
 impl InformationSums {
@@ -767,6 +772,7 @@ impl InformationSums {
                 .map(|libraries| vec![0.0; own(libraries) * COHORT_PARAMETERS])
                 .collect(),
             full: None,
+            slope: PositionScores::new(group_index, 0),
         }
     }
 
@@ -796,6 +802,14 @@ impl InformationSums {
     /// in what is added.
     pub(super) fn add_position(&mut self, scores: &PositionScores) {
         let cohort = &scores.cohort;
+        for (into, from) in self.slope.cohort.iter_mut().zip(cohort) {
+            *into += from;
+        }
+        for (into, from) in self.slope.samples.iter_mut().zip(&scores.samples) {
+            for (into, from) in into.iter_mut().zip(from) {
+                *into += from;
+            }
+        }
         for (row, &left) in cohort.iter().enumerate() {
             for (column, &right) in cohort.iter().enumerate() {
                 self.cohort[row * COHORT_PARAMETERS + column] += left * right;
@@ -839,6 +853,14 @@ impl InformationSums {
         );
         for (into, from) in self.cohort.iter_mut().zip(&other.cohort) {
             *into += from;
+        }
+        for (into, from) in self.slope.cohort.iter_mut().zip(&other.slope.cohort) {
+            *into += from;
+        }
+        for (into, from) in self.slope.samples.iter_mut().zip(&other.slope.samples) {
+            for (into, from) in into.iter_mut().zip(from) {
+                *into += from;
+            }
         }
         for (into, from) in self.sample_blocks.iter_mut().zip(&other.sample_blocks) {
             debug_assert_eq!(
@@ -2666,7 +2688,9 @@ mod tests {
     }
 
     /// **A pass asked for the information sums each position's scores multiplied pairwise**, in
-    /// the three kinds of block the standard errors read, **and moves no count it keeps anyway**
+    /// the three kinds of block the standard errors read and as the whole matrix, **and each
+    /// parameter's scores summed** — the slope the Newton step is solved against — **and moves no
+    /// count it keeps anyway**
     /// — on both ways a pass joins its chunks: in position order when it also keeps per-position
     /// lists (a run's final pass), and in the fixed halving tree otherwise.
     ///
@@ -2832,6 +2856,30 @@ mod tests {
                 }
                 eprintln!("the whole matrix: worst disagreement {worst_full:.2e}");
                 assert!(worst_full < 1e-12, "the whole matrix: {worst_full:.2e}");
+                // Each parameter's score summed over the positions — the slope the Newton step is
+                // solved against — against the same sum by hand, each judged against the sum of its
+                // scores' sizes.
+                let flat = |scores: &PositionScores| -> Vec<f64> {
+                    scores
+                        .cohort
+                        .iter()
+                        .chain(scores.samples.iter().flatten())
+                        .copied()
+                        .collect()
+                };
+                let summed_slope = flat(&summed.slope);
+                let mut worst_slope = 0.0_f64;
+                for (i, &pass) in summed_slope.iter().enumerate() {
+                    let hand: f64 = every.iter().map(|here| flat(here)[i]).sum();
+                    let size: f64 = every.iter().map(|here| flat(here)[i].abs()).sum();
+                    if size == 0.0 {
+                        assert_eq!(pass, 0.0, "a slope with no score must be zero");
+                        continue;
+                    }
+                    worst_slope = worst_slope.max((pass - hand).abs() / size);
+                }
+                eprintln!("the summed slope: worst disagreement {worst_slope:.2e}");
+                assert!(worst_slope < 1e-12, "the summed slope: {worst_slope:.2e}");
                 // Every sample has reads here, so every diagonal entry is positive.
                 for (s, block) in summed.sample_blocks.iter().enumerate() {
                     let n = summed.own_parameters_of(s);
@@ -3611,6 +3659,212 @@ mod tests {
         }
     }
 
+    /// **A fit stopped by the settled test lands within a tenth of an error of one run far longer**
+    /// (spec §3.6 item 4, on drawn cohorts): the same cohort fitted under the default rule and with
+    /// `settled_fraction` at zero, which never stops before its 600 passes; every parameter the long
+    /// fit gives an error lies within [`SETTLED_FRACTION`](super::super::settled::SETTLED_FRACTION)
+    /// of that error of it, and the settled fit took fewer passes. Twenty samples at 3 reads, with
+    /// the allele-frequency shapes inside their bounds, and four samples at 8 reads with the
+    /// duplicated class fitted.
+    #[test]
+    fn a_settled_fit_lands_within_a_tenth_of_an_error_of_a_long_one() {
+        let settled_config = JointFitConfig {
+            estimate_contamination: false,
+            ..JointFitConfig::default()
+        };
+        let long_config = JointFitConfig {
+            settled_fraction: 0.0,
+            max_passes: 600,
+            ..settled_config.clone()
+        };
+        for (samples, positions, depth, duplicated) in
+            [(20, 4_000, 3.0, false), (4, 6_000, 8.0, true)]
+        {
+            let cohort = draw_cohort_with_duplications(
+                samples,
+                positions,
+                depth,
+                (0.003, 0.06, 0.03),
+                FrequencyDensity {
+                    p_invariant: 0.88,
+                    p_fixed_alt: 0.01,
+                    a: 0.6,
+                    b: 2.2,
+                },
+                0.3,
+                if duplicated { 0.01 } else { 0.0 },
+                0x5E77_1ED0_B100_0000 + samples as u64,
+            );
+            let (settled_fit, settled_values) = fitted(
+                &cohort,
+                &JointFitConfig {
+                    duplicated_positions: duplicated,
+                    ..settled_config.clone()
+                },
+            );
+            let (long_fit, long_values) = fitted(
+                &cohort,
+                &JointFitConfig {
+                    duplicated_positions: duplicated,
+                    ..long_config.clone()
+                },
+            );
+            assert!(
+                settled_fit.converged,
+                "{samples} samples: the settled fit ran out of passes"
+            );
+            assert!(
+                !long_fit.converged,
+                "{samples} samples: a fraction of zero never settles"
+            );
+            assert!(
+                settled_fit.passes < long_fit.passes,
+                "{samples} samples: {} passes against {}",
+                settled_fit.passes,
+                long_fit.passes
+            );
+            let errors = with_sections(&cohort, None, |_, _, group_index, _| {
+                long_fit
+                    .standard_errors
+                    .by_coordinate(&long_values, group_index)
+            });
+            let mut judged = 0;
+            let mut furthest = 0.0_f64;
+            for ((settled, long), error) in settled_values
+                .coordinates()
+                .iter()
+                .zip(long_values.coordinates())
+                .zip(errors)
+            {
+                let Some(error) = error.value() else { continue };
+                judged += 1;
+                let apart = (settled.value - long.value).abs() / error;
+                furthest = furthest.max(apart);
+            }
+            eprintln!(
+                "{samples} samples: {} passes settled against {} long, {judged} parameters judged, \
+                 the furthest {furthest:.4} errors apart",
+                settled_fit.passes, long_fit.passes
+            );
+            assert!(
+                judged > samples,
+                "{samples} samples: {judged} parameters have an error"
+            );
+            assert!(
+                furthest < super::super::settled::SETTLED_FRACTION,
+                "{samples} samples: a parameter {furthest} errors from the long fit's"
+            );
+        }
+    }
+
+    /// **A fit whose maximum lies on a bound converges**: cohorts drawn with no homozygote excess
+    /// (the excesses' maximum at 0), with a clean error rate of 10⁻⁷ (below the rates' floor of
+    /// 10⁻⁶), and with the density's second shape at 150 (above its bound of 50). Under the first
+    /// form of the Newton rule, which held a parameter only when it sat exactly on an end, the last
+    /// three ran to the pass limit (plan step B1's review).
+    #[test]
+    fn a_fit_whose_maximum_lies_on_a_bound_converges() {
+        let config = JointFitConfig {
+            duplicated_positions: false,
+            estimate_contamination: false,
+            ..JointFitConfig::default()
+        };
+        let density = FrequencyDensity {
+            p_invariant: 0.88,
+            p_fixed_alt: 0.01,
+            a: 0.6,
+            b: 2.2,
+        };
+        let shape_above_its_bound = FrequencyDensity {
+            b: 150.0,
+            ..density
+        };
+        let cases = [
+            (
+                20,
+                4_000,
+                3.0,
+                0.003,
+                density,
+                0.0,
+                0xE0_0001_u64,
+                "excesses at 0",
+            ),
+            (
+                4,
+                20_000,
+                3.0,
+                0.003,
+                density,
+                0.0,
+                0xE0_0002,
+                "excesses at 0",
+            ),
+            (
+                4,
+                6_000,
+                30.0,
+                0.003,
+                density,
+                0.0,
+                0xE0_0003,
+                "excesses at 0",
+            ),
+            (
+                20,
+                4_000,
+                3.0,
+                1e-7,
+                density,
+                0.3,
+                0xC1_0001,
+                "clean rates at their floor",
+            ),
+            (
+                4,
+                20_000,
+                8.0,
+                1e-7,
+                density,
+                0.3,
+                0xC1_0002,
+                "clean rates at their floor",
+            ),
+            (
+                20,
+                5_000,
+                3.0,
+                0.003,
+                shape_above_its_bound,
+                0.3,
+                0x7A77_0B0D,
+                "the second shape at 50",
+            ),
+        ];
+        for (samples, positions, depth, clean, density, excess, seed, what) in cases {
+            let cohort = draw_cohort_with_duplications(
+                samples,
+                positions,
+                depth,
+                (clean, 0.06, 0.03),
+                density,
+                excess,
+                0.0,
+                seed,
+            );
+            let (fit, _) = fitted(&cohort, &config);
+            eprintln!(
+                "{what}, {samples} samples × {depth} reads: {} passes, converged {}",
+                fit.passes, fit.converged
+            );
+            assert!(
+                fit.converged,
+                "{what}, {samples} samples × {depth} reads: {} passes, not converged",
+                fit.passes
+            );
+        }
+    }
+
     /// **The trace files what the fit returns under the winning start, one pass after its last**:
     /// on the four-sample fixture of the test above, with three starts, the rows after the
     /// winner's last pass are exactly the returned values and their errors, under the names the
@@ -4148,8 +4402,17 @@ mod tests {
         if cohorts != COVERAGE_COHORTS {
             return;
         }
+        // **How many fits converge within the pass limit.** Since plan step B1 a fit converges only
+        // when every parameter is within a tenth of its error of the maximum, and at a few samples
+        // and 3 reads some fits still crawl at 200 passes and say so: 182 of 200 at 4 samples
+        // (198 under the relative-move rule) and 8 of 200 at 2 (146), which is left unchecked.
+        let fewest_converged = match (samples, mean_depth as usize) {
+            (2, _) => 0,
+            (4, 3) => 175,
+            _ => cohorts - 5,
+        };
         assert!(
-            samples == 2 || converged + 5 >= cohorts,
+            converged >= fewest_converged,
             "{regime}: {converged} of {cohorts} fits converged"
         );
         let depth = mean_depth as usize;

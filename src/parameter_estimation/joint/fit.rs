@@ -61,10 +61,12 @@ use super::contamination::{
 };
 
 mod information;
+mod settled;
 mod standard_errors;
 
 use information::{InformationSums, PositionScores, RuleSlopes, ScoringTables, score_position};
-use standard_errors::StandardErrors;
+use settled::{SETTLED_FRACTION, furthest, not_settled};
+use standard_errors::{StandardErrors, newton_step};
 
 // ---------------------------------------------------------------------
 // What the route emits
@@ -584,11 +586,17 @@ pub struct JointFitConfig {
     pub quadrature_nodes: usize,
     pub starting_points: Vec<StartingPoint>,
     pub max_passes: u32,
-    /// The fit stops when no parameter moves over a whole accelerated cycle by more than this,
-    /// relative to itself — **one part in a thousand**, which is finer than any consumer of these
-    /// numbers reads them.
-    pub stillness: f64,
-    /// And when the log-likelihood gains less than this per position over that cycle.
+    /// **The fit stops when every parameter is within this share of its own standard error of the
+    /// likelihood's maximum**, as a Newton step estimates the distance — a tenth by default
+    /// ([`settled`]'s `SETTLED_FRACTION`), judged on each parameter's own scale, so a parameter the
+    /// data determine well is fitted closely and one they barely determine is fitted roughly. At
+    /// zero — or below it, or not a number — the fit never stops before `max_passes`, unless no
+    /// parameter has both an error and a distance.
+    pub settled_fraction: f64,
+    /// **When the fit starts judging its parameters' distances to the maximum**: once a cycle gains
+    /// less than this much log-likelihood per position, every later cycle's first pass computes the
+    /// errors and the distances, at 1.48 to 1.80 times a plain pass (4 to 64 samples, measured in
+    /// plan step B1's review).
     pub log_likelihood_stillness: f64,
     /// The ladder the records' depth codes index. Two samples binned under different edges
     /// hold codes that mean different depths, which the recording-terms check already refuses.
@@ -656,7 +664,7 @@ impl Default for JointFitConfig {
             quadrature_nodes: 16,
             starting_points: StartingPoint::spanning_the_class_separation(),
             max_passes: 200,
-            stillness: 1e-3,
+            settled_fraction: SETTLED_FRACTION,
             log_likelihood_stillness: 1e-4,
             // **The census ladder and not the histogram one.** This fit reads census codes and
             // nothing else, and since 2026-08-16 the two ladders differ above 8 reads a
@@ -1830,7 +1838,11 @@ pub fn fit_jointly(
                         "stopped at the pass limit"
                     },
                     outcome.passes,
-                    cost_of_the_last_pass(began.elapsed(), outcome.last_pass_took, outcome.passes),
+                    cost_of_the_last_pass(
+                        began.elapsed().saturating_sub(outcome.judging_took),
+                        outcome.last_pass_took,
+                        outcome.passes - outcome.judging_passes,
+                    ),
                 )
             });
             if best
@@ -1850,6 +1862,8 @@ pub fn fit_jointly(
                 converged,
                 trace,
                 last_pass_took: _,
+                judging_passes: _,
+                judging_took: _,
             },
         ) = best.expect("a run always has at least one starting point");
 
@@ -2055,13 +2069,15 @@ struct WhichStart<'a> {
 /// schedule: once, to begin with, four times further each time a jump reaches the limit and
 /// holds, and back down by four when one fails.
 ///
-/// **When it stops.** A cycle — the two plain steps, the jump and the steadying step — counts
-/// as converged when **no parameter moved over the whole cycle by more than
-/// [`JointFitConfig::stillness`] of itself** and the log-likelihood gained less than
-/// [`JointFitConfig::log_likelihood_stillness`] a position. The whole cycle's move rather than
-/// one plain step's, because a creeping step is small without the fit being close: that is the
-/// failure this function was changed for. `max_passes` still bounds the passes over the data,
-/// and a cycle that would overrun it is not started.
+/// **When it stops** ([`settled`]). A cycle is the two plain steps, the jump and the steadying
+/// step. Once a cycle has gained less than [`JointFitConfig::log_likelihood_stillness`] of
+/// log-likelihood a position, every later cycle's first pass also sums the information and each
+/// parameter's score, at the cycle's starting parameters; solved against each other they give each
+/// parameter's distance to the likelihood's maximum as a Newton step estimates it
+/// ([`newton_step`]). **The fit has converged at the end of a cycle whose first pass found every
+/// parameter within [`JointFitConfig::settled_fraction`] of its standard error of the maximum.**
+/// `max_passes` still bounds the passes over the data, and a cycle that would overrun it is not
+/// started.
 fn maximise(
     samples: &[SampleGenericSections<'_>],
     depth_cap: DepthCap,
@@ -2097,14 +2113,29 @@ fn maximise(
         coverage,
         which,
         passes: 0,
+        judging_passes: 0,
+        judging_took: std::time::Duration::ZERO,
         trace: Vec::new(),
     };
     let mut converged = false;
     let mut reach = 1.0_f64;
+    // Whether a cycle has yet gained less than `log_likelihood_stillness` a position: from then on
+    // every cycle's first pass also sums the information and judges the distances to the maximum.
+    let mut judging = false;
     while alternation.passes + 3 <= config.max_passes {
         let cycle_began = std::time::Instant::now();
-        let (first, entering) = alternation.step(&parameters);
-        let (second, _) = alternation.step(&first);
+        let (first, mut entering) = alternation.step(&parameters, judging);
+        // How many parameters this cycle's information pass found further than their share of an
+        // error from the maximum, and the furthest; `None` before the fit judges them.
+        let judged_here = entering.information.take().map(|information| {
+            let errors = StandardErrors::of(&information).by_coordinate(&parameters, group_index);
+            let distances = newton_step(&information, &parameters, group_index);
+            (
+                not_settled(&errors, &distances, config.settled_fraction),
+                furthest(&errors, &distances),
+            )
+        });
+        let (second, _) = alternation.step(&first, false);
         let mut alpha = squarem_step_length(&parameters, &first, &second).clamp(1.0, reach);
         let (landed, landed_at) = loop {
             let jumped = if alpha > 1.0 {
@@ -2113,7 +2144,7 @@ fn maximise(
                 Some(second.clone())
             };
             if let Some(jumped) = jumped {
-                let (steadied, at_jump) = alternation.step(&jumped);
+                let (steadied, at_jump) = alternation.step(&jumped, false);
                 if at_jump.log_likelihood >= entering.log_likelihood - JUMP_SLACK || alpha <= 1.0 {
                     if alpha >= reach {
                         reach *= 4.0;
@@ -2133,27 +2164,44 @@ fn maximise(
                 }
             }
         };
-        let moved = largest_relative_move(&parameters, &landed);
         let gain = landed_at - entering.log_likelihood;
-        let gain_to_stop = config.log_likelihood_stillness * entering.positions.max(1.0);
+        let gain_to_judge = config.log_likelihood_stillness * entering.positions.max(1.0);
+        judging |= gain.abs() < gain_to_judge;
         parameters = landed;
-        // Both numbers the stop rule compares, beside their thresholds, so a person can see how
-        // far the fit is from stopping and not only that it is still going.
+        // How far the fit is from stopping, and which parameter holds it, so a fit that runs to the
+        // pass limit says why.
         which.stage.now_and_then(|into| {
+            let judged = match &judged_here {
+                None => format!(
+                    "the parameters are judged against their errors once a cycle moves the \
+                     log-likelihood less than {gain_to_judge:.2e}"
+                ),
+                Some((not_settled, furthest)) => {
+                    let names = parameters.named();
+                    format!(
+                        "{not_settled} of {} parameter(s) not yet within {} of an error of the \
+                         maximum{}",
+                        names.len(),
+                        config.settled_fraction,
+                        furthest.map_or_else(String::new, |(j, errors)| format!(
+                            ", the furthest {} at {errors:.2} errors",
+                            names[j].0
+                        ))
+                    )
+                }
+            };
             format!(
                 "SNP/indel fit, start {} of {}, pass {} of at most {}: log-likelihood moved \
-                 {:.2e} (stops below {gain_to_stop:.2e}), largest parameter move {moved:.2e} \
-                 (stops below {:.0e}); {} a cycle, {into}",
+                 {:.2e}; {judged}; {} a cycle, {into}",
                 which.number,
                 which.of,
                 alternation.passes,
                 config.max_passes,
                 gain.abs(),
-                config.stillness,
                 crate::parameter_estimation::progress::duration(cycle_began.elapsed()),
             )
         });
-        if moved < config.stillness && gain.abs() < gain_to_stop {
+        if judged_here.is_some_and(|(not_settled, _)| not_settled == 0) {
             converged = true;
             break;
         }
@@ -2182,7 +2230,13 @@ fn maximise(
         .information
         .take()
         .expect("the pass above keeps the information");
-    let Alternation { passes, trace, .. } = alternation;
+    let Alternation {
+        passes,
+        judging_passes,
+        judging_took,
+        trace,
+        ..
+    } = alternation;
     StartOutcome {
         parameters,
         statistics,
@@ -2191,6 +2245,8 @@ fn maximise(
         converged,
         trace,
         last_pass_took,
+        judging_passes,
+        judging_took,
     }
 }
 
@@ -2207,10 +2263,15 @@ struct StartOutcome {
     trace: Vec<PassSummary>,
     /// How long the final pass took ([`cost_of_the_last_pass`]).
     last_pass_took: std::time::Duration,
+    /// How many passes before it also summed the information for the stop rule, and how long they
+    /// took.
+    judging_passes: u32,
+    judging_took: std::time::Duration,
 }
 
-/// **What a start's last pass took, against the average pass before it** — the whole start's
-/// time less the last pass's, over its passes, each with its maximisation and counting SQUAREM's
+/// **What a start's last pass took, against the average plain pass before it** — `whole`, the
+/// start's time less that of the passes that also summed the information for the stop rule, less the
+/// last pass's, over `passes`, the plain passes, each with its maximisation and counting SQUAREM's
 /// jump passes. Measured in review (one thread, median of five interleaved runs), neither the
 /// maximisation nor keeping the per-position posteriors adds a measurable share of a pass, so the
 /// ratio is what collecting the information costs: 1.42 times a plain pass at 4 samples, 1.72 at
@@ -2226,7 +2287,7 @@ fn cost_of_the_last_pass(
         return format!("took {}, with no pass before it to compare", finely(last));
     }
     format!(
-        "took {}, {:.2} times the average pass before it ({})",
+        "took {}, {:.2} times the average plain pass before it ({})",
         finely(last),
         last.as_secs_f64() / average.as_secs_f64(),
         finely(average)
@@ -2292,23 +2353,42 @@ struct Alternation<'a, 'b> {
     which: &'a WhichStart<'a>,
     /// Passes over the data so far — what `max_passes` bounds.
     passes: u32,
+    /// How many of those also summed the information for the stop rule, and how long they took: left
+    /// out of the plain pass the final pass's cost is compared with ([`cost_of_the_last_pass`]).
+    judging_passes: u32,
+    judging_took: std::time::Duration,
     trace: Vec<PassSummary>,
 }
 
 impl Alternation<'_, '_> {
     /// From `parameters`, one step: where the maximisation leaves them, and the statistics of
-    /// the pass — whose log-likelihood is the one `parameters` themselves produce.
-    fn step(&mut self, parameters: &Parameters) -> (Parameters, Statistics) {
+    /// the pass — whose log-likelihood is the one `parameters` themselves produce. With
+    /// `keeps_information` the pass also sums the information the standard errors come from, at
+    /// `parameters`, and the statistics carry it.
+    fn step(
+        &mut self,
+        parameters: &Parameters,
+        keeps_information: bool,
+    ) -> (Parameters, Statistics) {
         self.passes += 1;
         let pass = self.passes;
-        let statistics = expectation(
+        let began = std::time::Instant::now();
+        let statistics = expectation_pass(
             self.samples,
             self.depth_cap,
             self.config,
             self.group_index,
             self.coverage,
             parameters,
+            PassKeeps {
+                per_position_posteriors: false,
+                information: keeps_information,
+            },
         );
+        if keeps_information {
+            self.judging_passes += 1;
+            self.judging_took += began.elapsed();
+        }
         let mut next = parameters.clone();
         let moved = maximisation(&mut next, &statistics, self.config);
         if super::fit_trace::is_on() {
@@ -2369,25 +2449,11 @@ fn squarem_step_length(start: &Parameters, first: &Parameters, second: &Paramete
     }
 }
 
-/// The largest move any parameter made from `before` to `after`, relative to itself — the
-/// measure [`maximisation`] reports for one step, applied to a whole cycle. The same floors:
-/// a share is judged against one position in ten thousand, everything else against 10⁻⁶.
-fn largest_relative_move(before: &Parameters, after: &Parameters) -> f64 {
-    before
-        .coordinates()
-        .iter()
-        .zip(after.coordinates())
-        .map(|(x0, x1)| (x1.value - x0.value).abs() / x0.value.abs().max(x0.scale_floor))
-        .fold(0.0, f64::max)
-}
-
-/// One fitted number, the interval its maximisation keeps it in, and the smallest size a move
-/// of it is judged relative to.
+/// One fitted number and the interval its maximisation keeps it in.
 #[derive(Copy, Clone)]
 struct Coordinate {
     value: f64,
     bounds: (f64, f64),
-    scale_floor: f64,
 }
 
 impl Coordinate {
@@ -2406,42 +2472,29 @@ impl Coordinate {
     }
 }
 
-/// A move is judged against this where the parameter is a share of positions.
-const SHARE_SCALE_FLOOR: f64 = 1e-4;
-/// And against this for every other parameter.
-const SCALE_FLOOR: f64 = 1e-6;
-
 impl Parameters {
     /// Every fitted number as a [`Coordinate`], in one fixed order — the order
     /// [`with_coordinates`](Self::with_coordinates) reads them back in.
     fn coordinates(&self) -> Vec<Coordinate> {
-        let at = |value, bounds, scale_floor| Coordinate {
-            value,
-            bounds,
-            scale_floor,
-        };
+        let at = |value, bounds| Coordinate { value, bounds };
         let mut all = vec![
-            at(self.noisy_share, NOISY_SHARE_BOUNDS, SHARE_SCALE_FLOOR),
-            at(self.density.p_invariant, P_INVARIANT_BOUNDS, SCALE_FLOOR),
-            at(self.density.p_fixed_alt, P_FIXED_ALT_BOUNDS, SCALE_FLOOR),
-            at(self.density.a, BETA_SHAPE_BOUNDS, SCALE_FLOOR),
-            at(self.density.b, BETA_SHAPE_BOUNDS, SCALE_FLOOR),
+            at(self.noisy_share, NOISY_SHARE_BOUNDS),
+            at(self.density.p_invariant, P_INVARIANT_BOUNDS),
+            at(self.density.p_fixed_alt, P_FIXED_ALT_BOUNDS),
+            at(self.density.a, BETA_SHAPE_BOUNDS),
+            at(self.density.b, BETA_SHAPE_BOUNDS),
         ];
         if let Some(duplicated) = &self.duplicated {
-            all.push(at(
-                duplicated.share,
-                DUPLICATED_SHARE_BOUNDS,
-                SHARE_SCALE_FLOOR,
-            ));
-            all.push(at(duplicated.carrier_a, BETA_SHAPE_BOUNDS, SCALE_FLOOR));
-            all.push(at(duplicated.carrier_b, BETA_SHAPE_BOUNDS, SCALE_FLOOR));
+            all.push(at(duplicated.share, DUPLICATED_SHARE_BOUNDS));
+            all.push(at(duplicated.carrier_a, BETA_SHAPE_BOUNDS));
+            all.push(at(duplicated.carrier_b, BETA_SHAPE_BOUNDS));
         }
         for (clean, noisy) in self.clean.iter().zip(&self.noisy) {
-            all.push(at(*clean, CLEAN_ERROR_BOUNDS, SCALE_FLOOR));
-            all.push(at(*noisy, NOISY_ERROR_BOUNDS, SCALE_FLOOR));
+            all.push(at(*clean, CLEAN_ERROR_BOUNDS));
+            all.push(at(*noisy, NOISY_ERROR_BOUNDS));
         }
         for excess in &self.hom_excess {
-            all.push(at(*excess, HOM_EXCESS_BOUNDS, SCALE_FLOOR));
+            all.push(at(*excess, HOM_EXCESS_BOUNDS));
         }
         all
     }
@@ -2608,7 +2661,9 @@ impl<'a> PassModel<'a> {
 /// One pass over every position: the posteriors, and every count the maximisations need.
 ///
 /// **Split across cores by position.** Positions are independent given the parameters, and a
-/// chunk's counts add to another chunk's, so the pass is a map and a sum.
+/// chunk's counts add to another chunk's, so the pass is a map and a sum. The fit's own passes
+/// call [`expectation_pass`], which may also keep the information; this plain one is the tests'.
+#[cfg(test)]
 fn expectation(
     samples: &[SampleGenericSections<'_>],
     depth_cap: DepthCap,
@@ -2642,7 +2697,8 @@ struct PassKeeps {
 }
 
 impl PassKeeps {
-    /// The iterating passes: the sums, and nothing else.
+    /// The sums, and nothing else — what the tests' plain pass keeps.
+    #[cfg(test)]
     const SUMS_ONLY: Self = Self {
         per_position_posteriors: false,
         information: false,
@@ -3548,7 +3604,8 @@ fn class_rate(parameters: &Parameters, class: usize, group: usize) -> f64 {
 }
 
 /// Every parameter's own maximisation, over the counts one pass accumulated. Returns the
-/// largest relative move any parameter made.
+/// largest relative move any parameter made — what the per-pass trace ([`PassSummary`]) records;
+/// since plan step B1 it no longer decides when the fit stops.
 fn maximisation(
     parameters: &mut Parameters,
     statistics: &Statistics,
@@ -3561,9 +3618,9 @@ fn maximisation(
     };
     // **A share is judged against a floor rather than against itself.** A class the data does
     // not want shrinks geometrically — halving on every pass — and halving is a relative move
-    // of one half however small the number has become, so a run on a cohort with no such
-    // positions would never report convergence. One position in ten thousand is the point below
-    // which a share stops being a quantity anyone reads.
+    // of one half however small the number has become, so the move of such a share would read as
+    // large forever. One position in ten thousand is the point below which a share stops being a
+    // quantity anyone reads.
     let note_share = |before: f64, after: f64| {
         let scale = before.abs().max(1e-4);
         moved.set(moved.get().max((after - before).abs() / scale));
@@ -4329,7 +4386,7 @@ mod tests {
         use std::time::Duration;
         assert_eq!(
             cost_of_the_last_pass(Duration::from_secs(10), Duration::from_secs(2), 4),
-            "took 2.00s, 1.00 times the average pass before it (2.00s)"
+            "took 2.00s, 1.00 times the average plain pass before it (2.00s)"
         );
         assert_eq!(
             cost_of_the_last_pass(
@@ -4337,7 +4394,7 @@ mod tests {
                 Duration::from_micros(1_500),
                 3
             ),
-            "took 1.5ms, 3.00 times the average pass before it (0.5ms)"
+            "took 1.5ms, 3.00 times the average plain pass before it (0.5ms)"
         );
         assert_eq!(
             cost_of_the_last_pass(Duration::from_secs(2), Duration::from_secs(2), 0),
@@ -4349,7 +4406,7 @@ mod tests {
         );
         assert_eq!(
             cost_of_the_last_pass(Duration::from_secs(300), Duration::from_secs(75), 3),
-            "took 1m15s, 1.00 times the average pass before it (1m15s)"
+            "took 1m15s, 1.00 times the average plain pass before it (1m15s)"
         );
     }
 
@@ -4986,28 +5043,43 @@ mod whole_fit_tests {
             0.2,
             0x5EED_0C4A_4C5E_0001,
         );
-        let config = JointFitConfig {
-            quadrature_nodes: 8,
-            max_passes: 3,
-            ..JointFitConfig::default()
-        };
-        let fitted_at = |threads: usize| {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .expect("a pool of the asked-for width");
-            let fit = pool
-                .install(|| fit_jointly(&mut as_cohort(&cohort.samples), &config))
-                .expect("the cohort pools");
+        // Three passes, one cycle; and a fit whose stop is decided by the information and scores a
+        // cycle sums once the log-likelihood has nearly stopped moving (plan step B1) — with a
+        // settled fraction so wide that the first cycle judged stops it, since this three-sample
+        // cohort is still crawling at 200 passes.
+        for max_passes in [3, 200] {
+            let config = JointFitConfig {
+                quadrature_nodes: 8,
+                max_passes,
+                settled_fraction: if max_passes == 200 {
+                    1e9
+                } else {
+                    SETTLED_FRACTION
+                },
+                ..JointFitConfig::default()
+            };
+            let fitted_at = |threads: usize| {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .expect("a pool of the asked-for width");
+                pool.install(|| fit_jointly(&mut as_cohort(&cohort.samples), &config))
+                    .expect("the cohort pools")
+            };
+            let at_one = fitted_at(1);
+            assert_eq!(
+                at_one.converged,
+                max_passes == 200,
+                "{max_passes} passes: converged after {}",
+                at_one.passes
+            );
             // `Debug` prints every `f64` as its shortest round-trip form, so two equal strings are
             // two equal sets of bits; `==` would also call `0.0` and `-0.0` equal.
-            format!("{fit:?}")
-        };
-        let at_one = fitted_at(1);
-        assert!(
-            at_one == fitted_at(4),
-            "the census fitted to different numbers at one thread and at four"
-        );
+            assert!(
+                format!("{at_one:?}") == format!("{:?}", fitted_at(4)),
+                "{max_passes} passes: the census fitted to different numbers at one thread and at four"
+            );
+        }
     }
 
     /// **The whole chain, on a cohort drawn from the fit's own family: the census average and the

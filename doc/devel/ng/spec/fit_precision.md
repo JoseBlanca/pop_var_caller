@@ -1,6 +1,6 @@
 # Fitting to the precision the data support
 
-**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29). Build order:
+**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29) and at plan step B1 (§2, §3.3, §3.4; 2026-09-29). Build order:
 [`../../implementation_plans/fit_precision.md`](../../implementation_plans/fit_precision.md). It
 amends the SNP/indel fit ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3,
 which says only "repeat until the fitted values stop moving"), the repeat-tract fit
@@ -164,6 +164,42 @@ the most missing information — the poorly determined ones, whose standard erro
 The cap keeps one near-flat direction from holding the fit forever; with it, the projection is at
 most twenty times the last step.
 
+**Amended at plan step B1 (owner, 2026-09-29): for the SNP/indel fit the distance still to travel is
+Newton's, not the projection above.** Built as written, the projection stopped the fit far too early
+(the plan's B1 report, `fit_precision_b1_stopped_2026-09-29.md`): on the 4-accession oracle cohort
+every start stopped at 36 to 57 passes, 74 log-likelihood units below a fit run to 1,000 passes, the
+invariant share 28 of its errors away; and on 15 drawn cohorts nine stopped with a parameter more than a
+tenth of an error short, up to 1.9 errors at two samples. Two causes. The errors in force had been
+computed on a plateau the fit crosses slowly, where the invariant share's was 34 times wider than at the maximum. And
+the projection cannot see a slow approach: where a path turns, the moves change sign and λ is taken as
+zero; where it crawls, λ is 0.98 to 0.99, above the cap. A higher cap and a log-likelihood condition
+repaired the 20-sample cohorts and not the 2- and 4-sample ones.
+
+**The rule, as amended.** On a pass that sums the information (§3.3) the pass also sums each
+parameter's score — the slope of the whole log-likelihood, `g`. The information solved against it,
+`dⱼ = (I⁻¹ g)ⱼ`, is each parameter's distance to the likelihood's maximum as a Newton step estimates it,
+on its natural scale; it does not depend on how fast the fit happens to be moving.
+
+- The matrix is the one the errors come from (§3.2): the whole one for a small cohort, the blocks
+  above, solved as an arrow — each sample's own parameters given the cohort's, the cohort's from what
+  the samples leave of its slope.
+- **The step stays inside the parameters' bounds** — the maximum of the quadratic model
+  `g·d − ½ dᵀ I d` within the box the fit keeps the parameters in: a parameter whose step would carry
+  it past an end of its interval stops at that end, its distance the way there, and the others are
+  solved again with its move taken out of their scores; a stopped parameter whose slope at the
+  solution points back into its interval is freed (the active-set rule for a box). *Found in B1's
+  review:* holding only a parameter exactly on an end left a clean error rate the golden section rests
+  4.4 × 10⁻¹⁰ above its floor, and a density shape the fit walks towards its lower bound, unsettled for
+  1,000 passes; with the box both converge.
+- **A parameter is settled when |dⱼ| < `SETTLED_FRACTION` × SEⱼ**, both from the same pass; one with
+  no error, or no distance (not solved for), is settled by definition. **The fit has converged when
+  every parameter is settled**, and stops at the end of that cycle.
+
+Measured on the same 15 cohorts, before the box: every fit this rule calls converged is within 0.088 of
+an error of the 600-pass fit; the ones still crawling run to the pass limit and say so (all three two-sample
+cohorts and two of the three 4-sample ones with the duplicated class). On the oracle no start converges within 200 passes, and none
+claims to. Part B's climb (§4.3) keeps its projection of the log-likelihood gain.
+
 ---
 
 ## 3. Part A — the SNP/indel fit
@@ -293,6 +329,14 @@ that reaches it still returns what it has, as today.
 **The final pass** ([`fit.rs:1909-1921`](../../../../src/parameter_estimation/joint/fit.rs#L1909))
 also accumulates the information, so the errors reported are those at the returned parameters.
 
+**Amended at plan step B1 (owner, 2026-09-29): once the trigger has held, every cycle's first pass
+accumulates the information and the scores**, at the cycle's starting parameters, and the Newton
+distances of §2's amendment are judged there; `ERROR_REFRESH_CYCLES` is gone. The fit can stop only
+where fresh errors and distances say it is settled — errors ten cycles old were how the projection
+came to judge the oracle's plateau by the plateau's much wider errors. The cost is one information
+pass a cycle, at 1.48 to 1.80 times a plain pass (4 to 64 samples, one thread, measured in B1's
+review), in cycles of three or more passes: about 11 to 13% more time on a small cohort's fit.
+
 ### 3.4 Stopping a starting point that is heading where another arrived
 
 The three starting points exist because a start that puts the ordinary and the mismapped class close
@@ -310,7 +354,8 @@ starts agree, which is exactly when running them all to the end was wasted.
 
 - **Trap: the test compares a start's projected endpoint** (its current value plus the projected
   distance, §2) **with the earlier answer**, not its current value — early in a start, the current
-  value is far from anything.
+  value is far from anything. *Amended at plan step B1 (owner, 2026-09-29): the projected endpoint is
+  the current value plus the Newton step of §2's amendment, from the cycle's information pass.*
 - **Trap: the first start's errors are the yardstick**, so the first start must itself have
   converged under §2; if it hit `max_passes`, the others run to their own end.
 
@@ -567,6 +612,9 @@ a write and a read.
    `AGREEMENT_FRACTION` (0.5), `ERROR_REFRESH_CYCLES` (10), `FIRST_SUBSET` (256),
    `LEVEL_RELATIVE_ERROR_TARGET` (0.02), `MIN_SAMPLES_A_GROUP` (8). All starting values, none
    measured. **Settled by:** the plan's checkpoints A and D.
+   *Amended at plan step B1 (2026-09-29): `SETTLED_FRACTION` was kept at 0.1 at checkpoint A;
+   `MAX_CONTRACTION` and `ERROR_REFRESH_CYCLES` belonged to the projection §2's amendment replaced and
+   are no longer used.*
 3. **Is the outer-product estimator close enough to the observed information here?** — OPEN.
    *Leaning:* yes for the well-determined parameters, possibly not for the Beta shapes at three reads.
    **Settled by:** §3.6 items 2 and 3; if it is not, Louis's method replaces it for the cohort-level

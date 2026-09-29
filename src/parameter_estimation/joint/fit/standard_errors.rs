@@ -2,12 +2,15 @@
 //! and as the whole matrix for a small cohort.
 //!
 //! Design: `doc/devel/ng/spec/fit_precision.md` §3.2–3.3. Build order:
-//! `doc/devel/implementation_plans/fit_precision.md`, steps A3, A5 and A8.
+//! `doc/devel/implementation_plans/fit_precision.md`, steps A3, A5, A8 and B1.
 //!
-//! Every fit computes them once, at the parameters it returns, from the information its final pass
+//! Every fit computes them at the parameters it returns, from the information its final pass
 //! sums ([`fit_jointly`](super::fit_jointly)); it prints them as one line of the run's log
 //! ([`StandardErrors::described`]) and, when the per-pass trace is on, one row a parameter
-//! ([`StandardErrors::named`]).
+//! ([`StandardErrors::named`]). While it runs, once its log-likelihood has nearly stopped moving, it
+//! computes them every cycle beside each parameter's distance to the maximum ([`newton_step`], the
+//! same matrix solved against the summed scores), and stops when every distance is below a tenth of
+//! its error ([`settled`](super::settled), [`StandardErrors::by_coordinate`]).
 //!
 //! # From information to errors
 //!
@@ -425,37 +428,7 @@ impl StandardErrors {
         parameters: &Parameters,
         group_index: &[Vec<usize>],
     ) -> Vec<(String, f64)> {
-        debug_assert!(
-            self.laid_out_for(group_index),
-            "rows laid out for another cohort"
-        );
-        let value = |error: StandardError| error.value().unwrap_or(f64::NAN);
-        let mut errors: Vec<f64> = self.cohort[..cohort_parameters_fitted(parameters)]
-            .iter()
-            .map(|&error| value(error))
-            .collect();
-        // Which sample holds each read group, and as which of its libraries.
-        let mut held_by = vec![None; parameters.clean.len()];
-        for (s, own) in group_index.iter().enumerate() {
-            for (section, &group) in own.iter().enumerate() {
-                held_by[group] = Some((s, section));
-            }
-        }
-        for holder in held_by {
-            let [clean, noisy] = match holder {
-                Some((s, section)) => [
-                    self.samples[s][sample::rate(section, 0)],
-                    self.samples[s][sample::rate(section, 1)],
-                ],
-                None => [StandardError::NoInformation; 2],
-            };
-            errors.extend([value(clean), value(noisy)]);
-        }
-        errors.extend(
-            self.samples
-                .iter()
-                .map(|row| value(row[sample::HOMOZYGOTE_EXCESS])),
-        );
+        let errors = self.by_coordinate(parameters, group_index);
         let names = parameters.named();
         assert_eq!(
             names.len(),
@@ -465,8 +438,36 @@ impl StandardErrors {
         names
             .into_iter()
             .zip(errors)
-            .map(|((name, _), error)| (format!("standard_error:{name}"), error))
+            .map(|((name, _), error)| {
+                (
+                    format!("standard_error:{name}"),
+                    error.value().unwrap_or(f64::NAN),
+                )
+            })
             .collect()
+    }
+
+    /// **Every parameter's error in the order the fit's own vector lists them**
+    /// ([`Parameters::coordinates`], which [`Parameters::named`] follows): the cohort's fitted
+    /// parameters, each read group's two rates, then each sample's homozygote excess. `group_index`
+    /// says which read groups each sample's sections are, as the pass reads them; a read group no
+    /// sample holds has no information.
+    pub(super) fn by_coordinate(
+        &self,
+        parameters: &Parameters,
+        group_index: &[Vec<usize>],
+    ) -> Vec<StandardError> {
+        debug_assert!(
+            self.laid_out_for(group_index),
+            "rows laid out for another cohort"
+        );
+        in_coordinate_order(
+            &self.cohort,
+            &self.samples,
+            parameters,
+            group_index,
+            StandardError::NoInformation,
+        )
     }
 
     /// **The errors as one line of the run's log**: each cohort-level parameter's value and
@@ -531,6 +532,420 @@ impl StandardErrors {
                 .zip(group_index)
                 .all(|(row, own)| row.len() == own_parameters(own.len()))
     }
+}
+
+/// **Per-parameter values in the order the fit's own vector lists them**
+/// ([`Parameters::coordinates`]), from the cohort's eight slots and each sample's own row in the
+/// [`sample`] layout: the cohort's fitted parameters, each read group's two rates, then each
+/// sample's homozygote excess. A read group no sample holds gets `absent`.
+fn in_coordinate_order<T: Copy>(
+    cohort: &[T; COHORT_PARAMETERS],
+    samples: &[Vec<T>],
+    parameters: &Parameters,
+    group_index: &[Vec<usize>],
+    absent: T,
+) -> Vec<T> {
+    let mut ordered: Vec<T> = cohort[..cohort_parameters_fitted(parameters)].to_vec();
+    // Which sample holds each read group, and as which of its libraries.
+    let mut held_by = vec![None; parameters.clean.len()];
+    for (s, own) in group_index.iter().enumerate() {
+        for (section, &group) in own.iter().enumerate() {
+            held_by[group] = Some((s, section));
+        }
+    }
+    for holder in held_by {
+        ordered.extend(match holder {
+            Some((s, section)) => [
+                samples[s][sample::rate(section, 0)],
+                samples[s][sample::rate(section, 1)],
+            ],
+            None => [absent; 2],
+        });
+    }
+    ordered.extend(samples.iter().map(|row| row[sample::HOMOZYGOTE_EXCESS]));
+    ordered
+}
+
+/// **How far each parameter is from the likelihood's maximum, as a Newton step estimates it**, in
+/// the order the fit's vector lists them ([`Parameters::coordinates`]), on each parameter's own
+/// scale; `None` where the parameter is not solved for — no information, held fixed by the fit, or
+/// not told apart from the others.
+///
+/// **The step is the one to the maximum of the quadratic model within the parameters' bounds**
+/// ([`bounded_step`]): the information `I` and the summed scores `g` of one pass describe the
+/// log-likelihood near the parameters as `g·d − ½ dᵀ I d`, and a parameter whose maximum lies past
+/// one end of the interval the fit keeps it in stops at that end, its distance the way there. Without
+/// the bounds the step is `I⁻¹ g`, which carries a parameter the fit is walking towards a bound far
+/// past it and, through the parameters it is correlated with, the others' steps too.
+///
+/// The same matrix the errors come from ([`StandardErrors::of`]): the whole one where the pass kept
+/// it, the arrow of blocks otherwise, and the same parameters left out of it.
+pub(super) fn newton_step(
+    sums: &InformationSums,
+    parameters: &Parameters,
+    group_index: &[Vec<usize>],
+) -> Vec<Option<f64>> {
+    let layout = Layout::of(sums);
+    let values = layout.values_of(parameters, group_index);
+    let bounds = layout.bounds();
+    let step = bounded_step(sums, &layout, &values, &bounds);
+    let (cohort, samples) = layout.split(&step);
+    in_coordinate_order(&cohort, &samples, parameters, group_index, None)
+}
+
+/// **The Newton step to the maximum of the quadratic model within the bounds**, by the active-set
+/// rule for a box: solve with the free parameters; a parameter whose step would carry it past an end
+/// is fixed at that end and the rest solved again, its move taken out of their scores; a fixed one
+/// whose slope at the solution points back into its interval is freed. It ends when no free
+/// parameter crosses an end and no fixed one wants back in — the constrained maximum, where a fixed
+/// parameter's distance is the way to its end — or, should the rule cycle, after as many rounds as
+/// there are parameters thrice over, with the step it last had.
+fn bounded_step(
+    sums: &InformationSums,
+    layout: &Layout,
+    values: &[f64],
+    bounds: &[(f64, f64)],
+) -> Vec<Option<f64>> {
+    let slope = layout.slope_of(sums);
+    // Where each fixed parameter is fixed: the end of its interval, or `None` while it is free.
+    let mut fixed_at: Vec<Option<f64>> = vec![None; layout.side];
+    let mut step = vec![None; layout.side];
+    for _ in 0..3 * layout.side + 3 {
+        // The fixed parameters' moves, and the scores the free ones are solved against once those
+        // moves are taken out.
+        let fixed_move: Vec<f64> = fixed_at
+            .iter()
+            .zip(values)
+            .map(|(end, value)| end.map_or(0.0, |end| end - value))
+            .collect();
+        let taken = information_times(sums, layout, &fixed_move);
+        let slope_left: Vec<f64> = slope.iter().zip(&taken).map(|(g, t)| g - t).collect();
+        let held: Vec<bool> = fixed_at.iter().map(Option::is_some).collect();
+        let free_step = match &sums.full {
+            Some(full) => whole_matrix_solve(full, &slope_left, &held),
+            None => arrow_solve(sums, layout, &slope_left, &held),
+        };
+        step = free_step
+            .iter()
+            .zip(&fixed_at)
+            .zip(&fixed_move)
+            .map(|((free, end), moved)| if end.is_some() { Some(*moved) } else { *free })
+            .collect();
+        // A free parameter carried past an end is fixed there.
+        let mut changed = false;
+        for (j, free) in free_step.iter().enumerate() {
+            let Some(free) = free else { continue };
+            if fixed_at[j].is_some() {
+                continue;
+            }
+            let (low, high) = bounds[j];
+            let landing = values[j] + free;
+            if landing < low {
+                fixed_at[j] = Some(low);
+                changed = true;
+            } else if landing > high {
+                fixed_at[j] = Some(high);
+                changed = true;
+            }
+        }
+        if changed {
+            continue;
+        }
+        // A fixed parameter whose slope at the solution points back into its interval is freed.
+        let whole_move: Vec<f64> = step.iter().map(|moved| moved.unwrap_or(0.0)).collect();
+        let curved = information_times(sums, layout, &whole_move);
+        for j in 0..layout.side {
+            let Some(end) = fixed_at[j] else { continue };
+            let slope_there = slope[j] - curved[j];
+            let at_low_end = end == bounds[j].0;
+            if (at_low_end && slope_there > 0.0) || (!at_low_end && slope_there < 0.0) {
+                fixed_at[j] = None;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    step
+}
+
+/// **Where each parameter sits in one flat list**: the cohort's eight, then each sample's own in turn
+/// — the whole matrix's layout ([`FullInformation`]), used for the blocks too.
+struct Layout {
+    /// Where each sample's own parameters start.
+    starts: Vec<usize>,
+    /// How many parameters in all.
+    side: usize,
+}
+
+impl Layout {
+    fn of(sums: &InformationSums) -> Self {
+        let mut starts = Vec::with_capacity(sums.sample_blocks.len());
+        let mut side = COHORT_PARAMETERS;
+        for s in 0..sums.sample_blocks.len() {
+            starts.push(side);
+            side += sums.own_parameters_of(s);
+        }
+        Self { starts, side }
+    }
+
+    /// Sample `s`'s own parameters' positions.
+    fn of_sample(&self, s: usize) -> std::ops::Range<usize> {
+        let end = self.starts.get(s + 1).copied().unwrap_or(self.side);
+        self.starts[s]..end
+    }
+
+    /// The summed scores, flat.
+    fn slope_of(&self, sums: &InformationSums) -> Vec<f64> {
+        let mut slope = sums.slope.cohort.to_vec();
+        for row in &sums.slope.samples {
+            slope.extend_from_slice(row);
+        }
+        debug_assert_eq!(slope.len(), self.side, "the slope fills the layout");
+        slope
+    }
+
+    /// The fit's parameters, flat: the duplicated class's three at zero when it is not fitted.
+    fn values_of(&self, parameters: &Parameters, group_index: &[Vec<usize>]) -> Vec<f64> {
+        let mut values = vec![0.0; self.side];
+        values[cohort::NOISY_SHARE] = parameters.noisy_share;
+        values[cohort::P_INVARIANT] = parameters.density.p_invariant;
+        values[cohort::P_FIXED_ALT] = parameters.density.p_fixed_alt;
+        values[cohort::DENSITY_A] = parameters.density.a;
+        values[cohort::DENSITY_B] = parameters.density.b;
+        if let Some(duplicated) = parameters.duplicated {
+            values[cohort::DUPLICATED_SHARE] = duplicated.share;
+            values[cohort::CARRIER_A] = duplicated.carrier_a;
+            values[cohort::CARRIER_B] = duplicated.carrier_b;
+        }
+        for (s, own) in group_index.iter().enumerate() {
+            let start = self.starts[s];
+            values[start + sample::HOMOZYGOTE_EXCESS] = parameters.hom_excess[s];
+            for (section, &group) in own.iter().enumerate() {
+                values[start + sample::rate(section, 0)] = parameters.clean[group];
+                values[start + sample::rate(section, 1)] = parameters.noisy[group];
+            }
+        }
+        values
+    }
+
+    /// The interval the fit keeps each parameter in, flat.
+    fn bounds(&self) -> Vec<(f64, f64)> {
+        let mut bounds = COHORT_BOUNDS.to_vec();
+        for s in 0..self.starts.len() {
+            bounds.extend(
+                self.of_sample(s)
+                    .map(|at| bounds_of_own(at - self.starts[s])),
+            );
+        }
+        bounds
+    }
+
+    /// A flat list cut back into the cohort's eight and each sample's own.
+    fn split<T: Copy>(&self, flat: &[T]) -> ([T; COHORT_PARAMETERS], Vec<Vec<T>>) {
+        let cohort = std::array::from_fn(|slot| flat[slot]);
+        let samples = (0..self.starts.len())
+            .map(|s| flat[self.of_sample(s)].to_vec())
+            .collect();
+        (cohort, samples)
+    }
+}
+
+/// The information times a flat vector: on the whole matrix every pairing, on the arrow the cohort's
+/// block, each sample's own, and each sample's with the cohort's both ways.
+fn information_times(sums: &InformationSums, layout: &Layout, vector: &[f64]) -> Vec<f64> {
+    if let Some(full) = &sums.full {
+        return (0..layout.side)
+            .map(|row| {
+                (0..layout.side)
+                    .filter(|&column| vector[column] != 0.0)
+                    .map(|column| full.entry(row, column) * vector[column])
+                    .sum()
+            })
+            .collect();
+    }
+    let mut product = vec![0.0; layout.side];
+    for (row, into) in product[..COHORT_PARAMETERS].iter_mut().enumerate() {
+        let entries = &sums.cohort[row * COHORT_PARAMETERS..(row + 1) * COHORT_PARAMETERS];
+        for (entry, value) in entries.iter().zip(&vector[..COHORT_PARAMETERS]) {
+            *into += entry * value;
+        }
+    }
+    for s in 0..layout.starts.len() {
+        let rows = layout.of_sample(s);
+        let (start, n) = (rows.start, rows.len());
+        for j in 0..n {
+            let mut own = 0.0;
+            for k in 0..n {
+                own += sums.sample_blocks[s][j * n + k] * vector[start + k];
+            }
+            for c in 0..COHORT_PARAMETERS {
+                let cross = sums.sample_cohort_blocks[s][j * COHORT_PARAMETERS + c];
+                own += cross * vector[c];
+                product[c] += cross * vector[start + j];
+            }
+            product[start + j] += own;
+        }
+    }
+    product
+}
+
+/// `I⁻¹ g` on the whole matrix, over the parameters [`StandardErrors::of_the_whole_matrix`] inverts
+/// less those `held`, from the flat `slope`; flat, `None` for the rest.
+fn whole_matrix_solve(full: &FullInformation, slope: &[f64], held: &[bool]) -> Vec<Option<f64>> {
+    let excess_is_fitted = fits_homozygote_excess(full.samples());
+    let mut solved: Vec<usize> = Vec::with_capacity(full.side());
+    for s in 0..full.samples() {
+        for (slot, row) in full.rows_of_sample(s).enumerate() {
+            if has_information(full.entry(row, row))
+                && (slot != sample::HOMOZYGOTE_EXCESS || excess_is_fitted)
+                && !held[row]
+            {
+                solved.push(row);
+            }
+        }
+    }
+    for (slot, &is_held) in held.iter().enumerate().take(COHORT_PARAMETERS) {
+        if has_information(full.entry(slot, slot)) && !is_held {
+            solved.push(slot);
+        }
+    }
+    let matrix = square_of(&solved, |row, column| full.entry(row, column));
+    let reference: Vec<f64> = solved.iter().map(|&row| full.entry(row, row)).collect();
+    let identified = invert_identified(&matrix, solved.len(), &reference);
+    let kept = identified.kept.len();
+    let mut step = vec![None; full.side()];
+    for (p, &position) in identified.kept.iter().enumerate() {
+        let moved: f64 = identified
+            .kept
+            .iter()
+            .enumerate()
+            .map(|(q, &other)| identified.inverse[p * kept + q] * slope[solved[other]])
+            .sum();
+        step[solved[position]] = Some(moved);
+    }
+    step
+}
+
+/// One sample's part of the arrow's solve: its parameters kept, `A_s⁻¹ g_s` and `A_s⁻¹ B_s`.
+type SampleSolve = (Vec<usize>, Vec<f64>, Vec<f64>);
+
+/// `I⁻¹ g` on the arrow of blocks, by the same elimination the errors use
+/// ([`StandardErrors::of_the_blocks`]), over the parameters it inverts less those `held`: each
+/// sample's own parameters solved given the cohort's, the cohort's from what the samples leave of its
+/// slope, and each sample's own step then corrected by the cohort's. Flat, `None` for the rest.
+fn arrow_solve(
+    sums: &InformationSums,
+    layout: &Layout,
+    slope: &[f64],
+    held: &[bool],
+) -> Vec<Option<f64>> {
+    let samples = sums.sample_blocks.len();
+    let excess_is_fitted = fits_homozygote_excess(samples);
+    let mut step = vec![None; layout.side];
+    let cohort_informed: Vec<usize> = (0..COHORT_PARAMETERS)
+        .filter(|&i| has_information(sums.cohort[i * COHORT_PARAMETERS + i]) && !held[i])
+        .collect();
+    let c = cohort_informed.len();
+    let mut explained = vec![0.0; c * c];
+    // The cohort's slope less what each sample's own parameters take up of it: `g_c − Σ B_sᵀ A_s⁻¹ g_s`.
+    let mut cohort_slope_left: Vec<f64> = cohort_informed.iter().map(|&i| slope[i]).collect();
+    // Per sample: its kept parameters, `A_s⁻¹ g_s` and `A_s⁻¹ B_s`.
+    let mut per_sample: Vec<Option<SampleSolve>> = Vec::with_capacity(samples);
+    for s in 0..samples {
+        let start = layout.starts[s];
+        let n = sums.own_parameters_of(s);
+        let own_diagonal = |j: usize| sums.sample_blocks[s][j * n + j];
+        let informed: Vec<usize> = (0..n)
+            .filter(|&j| {
+                has_information(own_diagonal(j))
+                    && (j != sample::HOMOZYGOTE_EXCESS || excess_is_fitted)
+                    && !held[start + j]
+            })
+            .collect();
+        let own = square_of(&informed, |row, column| {
+            sums.sample_blocks[s][row * n + column]
+        });
+        let reference: Vec<f64> = informed.iter().map(|&j| own_diagonal(j)).collect();
+        let identified = invert_identified(&own, informed.len(), &reference);
+        let kept: Vec<usize> = identified.kept.iter().map(|&p| informed[p]).collect();
+        if kept.is_empty() {
+            per_sample.push(None);
+            continue;
+        }
+        let k = kept.len();
+        let with_cohort: Vec<f64> = kept
+            .iter()
+            .flat_map(|&row| {
+                cohort_informed.iter().map(move |&column| {
+                    sums.sample_cohort_blocks[s][row * COHORT_PARAMETERS + column]
+                })
+            })
+            .collect();
+        let own_inverse_times_cross = multiply(&identified.inverse, &with_cohort, k, k, c);
+        let own_slope: Vec<f64> = kept.iter().map(|&j| slope[start + j]).collect();
+        let own_inverse_times_slope = multiply(&identified.inverse, &own_slope, k, k, 1);
+        for p in 0..c {
+            for q in 0..c {
+                let mut entry = 0.0;
+                for j in 0..k {
+                    entry += with_cohort[j * c + p] * own_inverse_times_cross[j * c + q];
+                }
+                explained[p * c + q] += entry;
+            }
+            let mut taken = 0.0;
+            for j in 0..k {
+                taken += with_cohort[j * c + p] * own_inverse_times_slope[j];
+            }
+            cohort_slope_left[p] -= taken;
+        }
+        per_sample.push(Some((
+            kept,
+            own_inverse_times_slope,
+            own_inverse_times_cross,
+        )));
+    }
+    let reduced: Vec<f64> = (0..c)
+        .flat_map(|p| {
+            let explained = &explained;
+            let cohort_informed = &cohort_informed;
+            (0..c).map(move |q| {
+                sums.cohort[cohort_informed[p] * COHORT_PARAMETERS + cohort_informed[q]]
+                    - explained[p * c + q]
+            })
+        })
+        .collect();
+    let reference: Vec<f64> = cohort_informed
+        .iter()
+        .map(|&i| sums.cohort[i * COHORT_PARAMETERS + i])
+        .collect();
+    let identified = invert_identified(&reduced, c, &reference);
+    let v = identified.kept.len();
+    // The cohort's step over the informed slots, zero for one dropped as not identified.
+    let mut cohort_solved = vec![0.0; c];
+    for (p, &position) in identified.kept.iter().enumerate() {
+        let moved: f64 = identified
+            .kept
+            .iter()
+            .enumerate()
+            .map(|(q, &other)| identified.inverse[p * v + q] * cohort_slope_left[other])
+            .sum();
+        cohort_solved[position] = moved;
+        step[cohort_informed[position]] = Some(moved);
+    }
+    for (s, solved) in per_sample.into_iter().enumerate() {
+        let Some((kept, own_inverse_times_slope, own_inverse_times_cross)) = solved else {
+            continue;
+        };
+        for (j, &which) in kept.iter().enumerate() {
+            let carried: f64 = (0..c)
+                .map(|p| own_inverse_times_cross[j * c + p] * cohort_solved[p])
+                .sum();
+            step[layout.starts[s] + which] = Some(own_inverse_times_slope[j] - carried);
+        }
+    }
+    step
 }
 
 /// How many of the cohort's slots are parameters of this fit: all eight with the duplicated class,
@@ -754,7 +1169,7 @@ fn inverse_by_cholesky(matrix: &[f64], n: usize, floor: &[f64]) -> Result<Vec<f6
 mod tests {
     use super::*;
     use crate::parameter_estimation::joint::fit::information::{
-        ONE_LIBRARY_SAMPLE_PARAMETERS, cohort, own_parameters,
+        ONE_LIBRARY_SAMPLE_PARAMETERS, PositionScores, cohort, own_parameters,
     };
 
     /// A random symmetric positive-definite matrix, `G Gᵀ + n·I` with `G` drawn from a fixed
@@ -1690,6 +2105,324 @@ mod tests {
                 (got - expected).abs() < 1e-9 * expected,
                 "parameter {i}: {got} against {expected}"
             );
+        }
+    }
+
+    /// A fit's parameters for samples of `libraries` libraries each, every one well inside its
+    /// interval, with the duplicated class fitted.
+    fn parameters_inside(libraries: &[usize]) -> Parameters {
+        let mut parameters = parameters_for_the_log(true, libraries.iter().sum(), libraries.len());
+        parameters.density.b = 5.0;
+        parameters
+    }
+
+    /// A slope in the errors' layout for samples of `libraries` libraries: every entry different,
+    /// of the size a few thousand positions give, and the same numbers flattened in the layout's order.
+    fn a_slope_of(libraries: &[usize], seed: u64) -> (PositionScores, Vec<f64>) {
+        let group_index = group_index_of(libraries);
+        let mut slope = PositionScores::new(&group_index, 0);
+        let mut state = seed;
+        let mut draw = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 20.0
+        };
+        for entry in slope.cohort.iter_mut() {
+            *entry = draw();
+        }
+        for row in &mut slope.samples {
+            for entry in row.iter_mut() {
+                *entry = draw();
+            }
+        }
+        let flat = slope
+            .cohort
+            .iter()
+            .chain(slope.samples.iter().flatten())
+            .copied()
+            .collect();
+        (slope, flat)
+    }
+
+    /// `matrix⁻¹ slope` over the parameters `kept` says to solve for, by the dense inverse, in the
+    /// errors' layout; `None` for the rest.
+    fn dense_step(matrix: &[f64], slope: &[f64], kept: impl Fn(usize) -> bool) -> Vec<Option<f64>> {
+        let n = slope.len();
+        let kept: Vec<usize> = (0..n).filter(|&i| kept(i)).collect();
+        let inverse = inverse_of_positive_definite(
+            &square_of(&kept, |row, column| matrix[row * n + column]),
+            kept.len(),
+        )
+        .expect("positive definite");
+        let mut step = vec![None; n];
+        for (at, &i) in kept.iter().enumerate() {
+            step[i] = Some(
+                kept.iter()
+                    .enumerate()
+                    .map(|(other, &j)| inverse[at * kept.len() + other] * slope[j])
+                    .sum(),
+            );
+        }
+        step
+    }
+
+    /// A step in the errors' layout reordered as the fit's vector lists its parameters.
+    fn in_the_fits_order(
+        step: &[Option<f64>],
+        libraries: &[usize],
+        parameters: &Parameters,
+    ) -> Vec<Option<f64>> {
+        let cohort: [Option<f64>; COHORT_PARAMETERS] = std::array::from_fn(|slot| step[slot]);
+        let mut at = COHORT_PARAMETERS;
+        let samples: Vec<Vec<Option<f64>>> = libraries
+            .iter()
+            .map(|&k| {
+                let row = step[at..at + own_parameters(k)].to_vec();
+                at += own_parameters(k);
+                row
+            })
+            .collect();
+        in_coordinate_order(
+            &cohort,
+            &samples,
+            parameters,
+            &group_index_of(libraries),
+            None,
+        )
+    }
+
+    fn assert_steps_match(got: &[Option<f64>], expected: &[Option<f64>], what: &str) {
+        assert_eq!(got.len(), expected.len(), "{what}");
+        for (i, (got, expected)) in got.iter().zip(expected).enumerate() {
+            match (got, expected) {
+                (Some(got), Some(expected)) => assert!(
+                    (got - expected).abs() <= 1e-9 * expected.abs().max(1e-12),
+                    "{what}, parameter {i}: {got} against {expected}"
+                ),
+                (None, None) => {}
+                _ => panic!("{what}, parameter {i}: {got:?} against {expected:?}"),
+            }
+        }
+    }
+
+    /// **On the whole matrix the Newton step is the dense solve**: samples of one, two and three
+    /// libraries, every parameter informed, every step inside its interval — each parameter's
+    /// distance equals the dense inverse times the slope to 10⁻⁹, reordered as the fit lists them.
+    #[test]
+    fn on_the_whole_matrix_the_newton_step_is_the_dense_solve() {
+        let libraries = [1, 2, 3, 1];
+        let (mut sums, dense) = a_whole_matrix_of(&libraries, 91);
+        let (slope, flat) = a_slope_of(&libraries, 92);
+        sums.slope = slope;
+        let parameters = parameters_inside(&libraries);
+        let got = newton_step(&sums, &parameters, &group_index_of(&libraries));
+        let expected = in_the_fits_order(
+            &dense_step(&dense, &flat, |_| true),
+            &libraries,
+            &parameters,
+        );
+        assert!(expected.iter().all(Option::is_some));
+        assert_steps_match(&got, &expected, "whole matrix");
+    }
+
+    /// **On the arrow the Newton step is the dense solve of the whole arrow**: the blocks solved one
+    /// sample at a time, then the cohort's, then each sample's corrected — the same numbers as
+    /// inverting the whole arrow at once.
+    #[test]
+    fn on_the_arrow_the_newton_step_is_the_dense_solve() {
+        let libraries = [1, 2, 3, 1];
+        let (mut sums, dense) = an_arrow_of(&libraries, 93);
+        assert!(sums.full.is_none(), "the blocks only");
+        let (slope, flat) = a_slope_of(&libraries, 94);
+        sums.slope = slope;
+        let parameters = parameters_inside(&libraries);
+        let got = newton_step(&sums, &parameters, &group_index_of(&libraries));
+        let expected = in_the_fits_order(
+            &dense_step(&dense, &flat, |_| true),
+            &libraries,
+            &parameters,
+        );
+        assert_steps_match(&got, &expected, "arrow");
+    }
+
+    /// Set the parameter at flat position `row` of the errors' layout — a cohort slot, or the first
+    /// sample's homozygote excess — to `value`.
+    fn set_at(parameters: &mut Parameters, row: usize, value: f64) {
+        match row {
+            cohort::P_FIXED_ALT => parameters.density.p_fixed_alt = value,
+            cohort::DENSITY_B => parameters.density.b = value,
+            _ if row == COHORT_PARAMETERS + sample::HOMOZYGOTE_EXCESS => {
+                parameters.hom_excess[0] = value
+            }
+            _ => unreachable!("the tests move only these"),
+        }
+    }
+
+    /// **A parameter whose free step would carry it past an end of its interval stops at that end**,
+    /// its distance the way there, and every other parameter's distance is the dense solve without it,
+    /// its move taken out of their scores — for a cohort share, a density shape and a sample's
+    /// homozygote excess, on both matrices, at whichever end the free step points to, with the slope
+    /// and its negative so each parameter is tried at both ends; the parameter placed a quarter of its
+    /// free step inside the end, and again exactly on it.
+    #[test]
+    fn a_parameter_carried_past_an_end_stops_there() {
+        let libraries = [1, 2, 1];
+        let group_index = group_index_of(&libraries);
+        let excess = COHORT_PARAMETERS + sample::HOMOZYGOTE_EXCESS;
+        let mut ends_reached = [false; 2];
+        for row in [cohort::P_FIXED_ALT, cohort::DENSITY_B, excess] {
+            let bounds = if row == excess {
+                HOM_EXCESS_BOUNDS
+            } else {
+                COHORT_BOUNDS[row]
+            };
+            for sign in [1.0, -1.0] {
+                for (label, (mut sums, dense)) in [
+                    ("whole matrix", a_whole_matrix_of(&libraries, 95)),
+                    ("arrow", an_arrow_of(&libraries, 97)),
+                ] {
+                    let (mut slope, mut flat) = a_slope_of(&libraries, 96);
+                    for entry in slope
+                        .cohort
+                        .iter_mut()
+                        .chain(slope.samples.iter_mut().flatten())
+                    {
+                        *entry *= sign;
+                    }
+                    flat.iter_mut().for_each(|entry| *entry *= sign);
+                    sums.slope = slope;
+                    let n = flat.len();
+                    let free = dense_step(&dense, &flat, |_| true)[row].expect("solved");
+                    let end = if free < 0.0 { bounds.0 } else { bounds.1 };
+                    ends_reached[usize::from(free > 0.0)] = true;
+                    for inside in [0.25 * free.abs(), 0.0] {
+                        let value = if free < 0.0 {
+                            end + inside
+                        } else {
+                            end - inside
+                        };
+                        let mut parameters = parameters_inside(&libraries);
+                        set_at(&mut parameters, row, value);
+                        let moved = end - value;
+                        let slope_left: Vec<f64> = (0..n)
+                            .map(|i| flat[i] - dense[i * n + row] * moved)
+                            .collect();
+                        let mut expected = dense_step(&dense, &slope_left, |i| i != row);
+                        expected[row] = Some(moved);
+                        let expected = in_the_fits_order(&expected, &libraries, &parameters);
+                        let got = newton_step(&sums, &parameters, &group_index);
+                        assert_steps_match(
+                            &got,
+                            &expected,
+                            &format!("{label}, row {row}, sign {sign}, {inside} inside"),
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(ends_reached, [true, true], "both ends reached");
+    }
+
+    /// **A parameter on an end whose step points back into its interval is left free**: its distance
+    /// and every other one is the unbounded dense solve.
+    #[test]
+    fn a_parameter_on_an_end_stepping_inwards_is_free() {
+        let libraries = [1, 2, 1];
+        let group_index = group_index_of(&libraries);
+        let row = cohort::P_FIXED_ALT;
+        for (label, (mut sums, dense)) in [
+            ("whole matrix", a_whole_matrix_of(&libraries, 95)),
+            ("arrow", an_arrow_of(&libraries, 97)),
+        ] {
+            let (slope, flat) = a_slope_of(&libraries, 96);
+            sums.slope = slope;
+            let free = dense_step(&dense, &flat, |_| true);
+            let step = free[row].expect("solved");
+            // The end the step points away from.
+            let end = if step > 0.0 {
+                COHORT_BOUNDS[row].0
+            } else {
+                COHORT_BOUNDS[row].1
+            };
+            let mut parameters = parameters_inside(&libraries);
+            set_at(&mut parameters, row, end);
+            let got = newton_step(&sums, &parameters, &group_index);
+            assert_steps_match(
+                &got,
+                &in_the_fits_order(&free, &libraries, &parameters),
+                label,
+            );
+        }
+    }
+
+    /// **A clean error rate the golden section leaves beside its floor or its ceiling is fixed at
+    /// that end**, with a distance of the gap the search left: the search stops within 10⁻⁹ of an end
+    /// rather than on it (it left one rate 4.4 × 10⁻¹⁰ above its floor of 10⁻⁶ in review), and a rate
+    /// held only when exactly at its end never settled.
+    #[test]
+    fn a_rate_the_golden_section_leaves_beside_an_end_stops_there() {
+        use crate::parameter_estimation::joint::fit::{CLEAN_ERROR_BOUNDS, golden_section};
+        let (low, high) = CLEAN_ERROR_BOUNDS;
+        let beside = [
+            golden_section(&|rate: f64| -rate, low, high),
+            golden_section(&|rate: f64| rate, low, high),
+        ];
+        assert!(
+            beside[0] > low && beside[1] < high,
+            "the search stops beside the ends: {beside:?}"
+        );
+        let libraries = [1, 2, 1];
+        for sign in [1.0, -1.0] {
+            let (mut sums, dense) = a_whole_matrix_of(&libraries, 95);
+            let (mut slope, mut flat) = a_slope_of(&libraries, 96);
+            for entry in slope
+                .cohort
+                .iter_mut()
+                .chain(slope.samples.iter_mut().flatten())
+            {
+                *entry *= sign;
+            }
+            flat.iter_mut().for_each(|entry| *entry *= sign);
+            sums.slope = slope;
+            let row = COHORT_PARAMETERS + sample::rate(0, 0);
+            let free = dense_step(&dense, &flat, |_| true)[row].expect("solved");
+            let mut parameters = parameters_inside(&libraries);
+            parameters.clean[0] = if free < 0.0 { beside[0] } else { beside[1] };
+            let got = newton_step(&sums, &parameters, &group_index_of(&libraries));
+            // In the fit's order: the cohort's eight, then read group 0's clean rate.
+            let distance = got[COHORT_PARAMETERS].expect("solved");
+            assert!(
+                distance.abs() < 1e-9,
+                "sign {sign}: a rate at {} moves {distance}",
+                parameters.clean[0]
+            );
+        }
+    }
+
+    /// **At one sample the homozygote excess is not solved for** — the fit holds it at its start —
+    /// and every other distance is the dense solve without it, on both matrices; the excess set
+    /// inside its interval, so no end can mask a mistake.
+    #[test]
+    fn at_one_sample_the_newton_step_leaves_the_held_excess_out() {
+        let libraries = [2];
+        let excess = COHORT_PARAMETERS + sample::HOMOZYGOTE_EXCESS;
+        for (label, (mut sums, dense)) in [
+            ("whole matrix", a_whole_matrix_of(&libraries, 101)),
+            ("arrow", an_arrow_of(&libraries, 103)),
+        ] {
+            let (slope, flat) = a_slope_of(&libraries, 102);
+            sums.slope = slope;
+            let mut parameters = parameters_inside(&libraries);
+            parameters.hom_excess[0] = 0.5;
+            let got = newton_step(&sums, &parameters, &group_index_of(&libraries));
+            let expected = in_the_fits_order(
+                &dense_step(&dense, &flat, |i| i != excess),
+                &libraries,
+                &parameters,
+            );
+            assert_eq!(expected.last(), Some(&None), "the excess is not solved for");
+            assert_steps_match(&got, &expected, label);
         }
     }
 }

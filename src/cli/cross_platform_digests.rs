@@ -89,7 +89,22 @@ mod tests {
     /// `70e634849f232de2fb32200dd21e0ab5`. (Plan step A6, the read groups' own error rates, moved
     /// neither checksum: this fixture's reads carry no sequencing error, so every read group's two
     /// rates sit on their lower bounds either way.)
-    const FITTED_PARAMETERS_MD5: &str = "9d421df0bc755522f8a7b5617b4c30f8";
+    ///
+    /// **Re-recorded 2026-09-29** when the SNP/indel fit began to stop once every parameter is within
+    /// a tenth of its standard error of the maximum, as a Newton step estimates the distance
+    /// (`fit_precision.md` step B1), measured on four tomato accessions first
+    /// (`scripts/promote_ng_oracle.sh`: every start there still runs to the 200-pass limit, and the
+    /// fit's two checksums do not move). A parameter without an error is settled by definition, and
+    /// two samples over 600 bases give almost none one — the mismapped share and the density's
+    /// shapes are not identified, the invariant and fixed shares' errors are wider than their
+    /// ranges — so every start now converges after 18 passes where it ran to the limit. Two lines
+    /// move, both read off the density, whose first shape stops at 1.546 where 200 passes took it to
+    /// 0.288 (the second at its bound, 50, both times): the ordinary-site prior's
+    /// `reference_concentration`, 39.089 to 20.047, and `alternative_concentration_total`,
+    /// 6.60 × 10⁻³ to 2.08 × 10⁻². The fit's best log-likelihood is −44.939 against −44.704.
+    /// Recorded in the Linux container (arm64, glibc) only; it was
+    /// `9d421df0bc755522f8a7b5617b4c30f8`.
+    const FITTED_PARAMETERS_MD5: &str = "22dda760d260572b786958e69b15b2b2";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -108,7 +123,13 @@ mod tests {
     /// other sample's GQ 65 to 73, the SNP at chrV:456 QUAL 481.0 to 542.7 and the other sample's GQ
     /// 65 to 73, the repeat tract at chrV:201 QUAL 0.0 to 7.4. No genotype moved. It was
     /// `dad5ff61fad91ca1d3d6a0e7587de946`.
-    const CALLS_MD5: &str = "7a570c442a4060fcd62f4af85b50a4fa";
+    ///
+    /// **Re-recorded 2026-09-29** with the fit above (step B1): the same three records' quality moves
+    /// with the ordinary-site prior — the SNP at chrV:121 QUAL 541.9 to 549.5 and the other sample's
+    /// GQ 73 to 71, the SNP at chrV:456 QUAL 542.7 to 550.3 and the other sample's GQ 73 to 71, the
+    /// repeat tract at chrV:201 QUAL 7.4 to 14.3. No genotype moved. It was
+    /// `7a570c442a4060fcd62f4af85b50a4fa`.
+    const CALLS_MD5: &str = "2c0a89466d21c301a1704ed4e6cd0c84";
 
     /// Hex MD5 of some bytes.
     fn md5_hex(bytes: &[u8]) -> String {
