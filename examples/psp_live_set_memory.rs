@@ -61,12 +61,7 @@ fn main() {
 }
 
 /// Walk one file holding a sliding window; build each record before it is released if `build`.
-fn walk(
-    path: &Path,
-    window_bp: u64,
-    stop_after_bp: u64,
-    build: bool,
-) -> (u64, usize, usize, f64) {
+fn walk(path: &Path, window_bp: u64, stop_after_bp: u64, build: bool) -> (u64, usize, usize, f64) {
     let mut reader = PspReader::open(path).expect("a psp that opens");
     let groups: Vec<ReadGroupId> = (0..reader.header().read_groups.len() as u32)
         .map(ReadGroupId)
