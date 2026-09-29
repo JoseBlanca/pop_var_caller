@@ -46,7 +46,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::float;
-use crate::parameter_estimation::depth_bins::DepthBinEdges;
+use crate::parameter_estimation::depth_bins::{DepthBin, DepthBinEdges};
 use crate::parameter_estimation::progress::StageProgress;
 use crate::parameter_estimation::{Estimate, Provenance};
 use crate::types::{ExpectedAlternativeFrequency, ExpectedHeterozygosity, Ploidy, ReadGroupId};
@@ -500,6 +500,24 @@ pub enum JointFitError {
     Census(#[from] CensusError),
     #[error("the joint fit needs at least one sample")]
     NoSamples,
+    /// **A census whose depth cap leaves one stored depth code standing for more depths than the
+    /// fit makes room for** ([`MAX_RECORDED_SPREAD`]). A code above 124 reads stands for a range
+    /// (125 to 159, then 160 to 204, …), and the fit reads it clipped at the cap the census
+    /// thinned its counts to; a cap of 157 or more leaves the range 125 to 159 wider than 32
+    /// depths. Refused before a section is read, rather than stopping the pass part-way.
+    #[error(
+        "the census was recorded with a depth cap of {cap}, which leaves one stored depth code \
+         standing for depths {shallowest} to {deepest}, {width} depths — more than the {limit} \
+         this fit makes room for; record the census with a cap of at most 156 (the shipped cap \
+         is 124)"
+    )]
+    DepthRangeTooWide {
+        cap: u32,
+        shallowest: u32,
+        deepest: u32,
+        width: usize,
+        limit: usize,
+    },
     #[error(
         "this route fits diploids; sample {sample} was given ploidy {ploidy}, and the \
          homozygote excess has no agreed form above two copies"
@@ -715,6 +733,27 @@ impl LibraryAtPosition {
 /// The widest range of depths one stored code can stand for, plus room for a ladder someone
 /// later widens. The adopted ladder's widest recorded range is 76–97, which is twenty-two.
 const MAX_RECORDED_SPREAD: usize = 32;
+
+/// **The widest range of depths one stored code stands for once clipped at the cap**, over every
+/// bin of the ladder, and that range: what a library's room in the pass ([`MAX_RECORDED_SPREAD`])
+/// must hold. The pass reads each code the same way ([`DepthCap::denominator_for`]).
+fn widest_clipped_range(
+    edges: &DepthBinEdges,
+    cap: DepthCap,
+) -> (usize, std::ops::RangeInclusive<u32>) {
+    (0..edges.bin_count())
+        .map(|bin| {
+            let bin = u16::try_from(bin).expect("a census ladder has fewer than 65,536 bins");
+            let depths = cap.denominator_for(edges.depth_range(DepthBin(bin)));
+            ((depths.end() - depths.start()) as usize + 1, depths)
+        })
+        .fold(
+            (0, 0..=0),
+            |widest, this| {
+                if this.0 > widest.0 { this } else { widest }
+            },
+        )
+}
 
 /// A cohort refused at the door, as the fit's own error.
 ///
@@ -1630,10 +1669,11 @@ fn tally_of(
 ///
 /// # Errors
 ///
-/// [`JointFitError::NoSamples`] on an empty cohort and [`JointFitError::NotDiploid`] on a
-/// ploidy this estimator does not model. **The refusal for samples that did not record the same
-/// thing has already happened**: building a [`CohortCensusEvidence`] is what makes it, before a
-/// section is read.
+/// [`JointFitError::NoSamples`] on an empty cohort, [`JointFitError::NotDiploid`] on a ploidy
+/// this estimator does not model, and [`JointFitError::DepthRangeTooWide`] on a census whose depth
+/// cap leaves a stored depth code wider than the fit makes room for. **The refusal for samples
+/// that did not record the same thing has already happened**: building a
+/// [`CohortCensusEvidence`] is what makes it, before a section is read.
 pub fn fit_jointly(
     cohort: &mut CohortCensusEvidence,
     config: &JointFitConfig,
@@ -1651,6 +1691,18 @@ pub fn fit_jointly(
     let depth_cap = cohort
         .terms()
         .map_or(DepthCap::MAX, |terms| terms.depth_cap);
+    if config.depth_as_a_range {
+        let (width, depths) = widest_clipped_range(&config.edges, depth_cap);
+        if width > MAX_RECORDED_SPREAD {
+            return Err(JointFitError::DepthRangeTooWide {
+                cap: depth_cap.get(),
+                shallowest: *depths.start(),
+                deepest: *depths.end(),
+                width,
+                limit: MAX_RECORDED_SPREAD,
+            });
+        }
+    }
     let groups: Vec<ReadGroupId> = cohort.read_groups().to_vec();
 
     // **Every section the generic half needs, lent for the length of one call.** The estimator
@@ -5944,6 +5996,71 @@ mod whole_fit_tests {
                 assert_eq!(field, "per-position depth cap")
             }
             other => panic!("{other}"),
+        }
+    }
+
+    /// **The widest range a stored depth code stands for, clipped at the cap.** Up to 124 reads
+    /// every depth has its own code, and a deeper position's code is clipped to the cap, so a cap
+    /// of 124 or below leaves every code one depth. Above it the code for 125 to 159 is cut at the
+    /// cap: 32 depths at a cap of 156, 33 at 157 — the first the fit cannot hold — and the whole
+    /// 35 from 159; higher caps cut into wider ranges still (205 to 255, 51 depths, at 255).
+    #[test]
+    fn a_cap_inside_the_first_range_above_124_widens_its_code() {
+        let edges = DepthBinEdges::for_census();
+        for (cap, width, shallowest, deepest) in [
+            (60, 1, 0, 0),
+            (124, 1, 0, 0),
+            (140, 16, 125, 140),
+            (156, 32, 125, 156),
+            (157, 33, 125, 157),
+            (159, 35, 125, 159),
+            (255, 51, 205, 255),
+        ] {
+            let (got, depths) = widest_clipped_range(&edges, DepthCap::new(cap));
+            assert_eq!(got, width, "cap {cap}: {depths:?}");
+            if width > 1 {
+                assert_eq!(depths, shallowest..=deepest, "cap {cap}");
+            }
+        }
+    }
+
+    /// **A census whose cap leaves a code wider than the fit makes room for is refused before a
+    /// section is read**, naming the cap and the range, instead of stopping the pass part-way; a
+    /// cap one below fits.
+    #[test]
+    fn a_cap_the_fit_cannot_hold_is_refused_at_the_door() {
+        let density = FrequencyDensity {
+            p_invariant: 0.95,
+            p_fixed_alt: 0.005,
+            a: 0.7,
+            b: 2.0,
+        };
+        let config = JointFitConfig {
+            estimate_contamination: false,
+            max_passes: 6,
+            ..JointFitConfig::default()
+        };
+        for (cap, refused) in [(157, true), (156, false)] {
+            let mut drawn = draw_cohort(2, 400, 4.0, (0.002, 0.05, 0.01), density, 0.0, 11);
+            for sample in &mut drawn.samples {
+                sample.terms.depth_cap = DepthCap::new(cap);
+            }
+            let mut cohort = as_cohort(&drawn.samples);
+            match (fit_jointly(&mut cohort, &config), refused) {
+                (
+                    Err(JointFitError::DepthRangeTooWide {
+                        cap: 157,
+                        shallowest: 125,
+                        deepest: 157,
+                        width: 33,
+                        limit: MAX_RECORDED_SPREAD,
+                    }),
+                    true,
+                )
+                | (Ok(_), false) => {}
+                (Err(error), _) => panic!("cap {cap}: {error}"),
+                (Ok(_), true) => panic!("cap {cap}: the fit ran"),
+            }
         }
     }
 
