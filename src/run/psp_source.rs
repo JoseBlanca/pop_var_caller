@@ -77,11 +77,12 @@ thread_local! {
 /// mapping from the other end.
 impl From<&RecordHead> for LocusSummary {
     fn from(head: &RecordHead) -> Self {
-        Self {
-            region: head.region,
-            non_reference_reads: head.non_reference_reads,
-            reads_compared_with_reference: head.reads_compared_with_reference,
-        }
+        Self::new(
+            head.region,
+            head.non_reference_reads,
+            head.reads_compared_with_reference,
+            head.reads_discarded_by_cap,
+        )
     }
 }
 use super::{RunError, WalkProgress};
@@ -721,9 +722,10 @@ impl ObservationSource for PspSummarySource<'_> {
             .map(|at| &self.heads[at])
             .expect("a body range this source handed out");
         let head = RecordHead {
-            region: kept.summary.region,
+            region: kept.summary.region(),
             non_reference_reads: kept.summary.non_reference_reads,
             reads_compared_with_reference: kept.summary.reads_compared_with_reference,
+            reads_discarded_by_cap: kept.summary.reads_discarded_by_cap,
             body_bytes: u32::try_from(body.len()).expect("a body this source wrote down"),
         };
         let found = LocatedRecord {
@@ -1649,10 +1651,11 @@ mod tests {
         let live: Vec<u64> = Vec::new();
         for (at, kept_record) in kept.iter().enumerate().rev() {
             let head = crate::psp::RecordHead {
-                region: kept_record.summary.region,
+                region: kept_record.summary.region(),
                 non_reference_reads: kept_record.summary.non_reference_reads,
                 reads_compared_with_reference: kept_record.summary.reads_compared_with_reference,
                 body_bytes: u32::try_from(kept_record.body.len()).expect("a small body"),
+                reads_discarded_by_cap: 0,
             };
             let found = crate::psp::record::LocatedRecord {
                 head,

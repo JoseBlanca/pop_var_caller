@@ -405,6 +405,27 @@ record = position_offset | reference_span | non_reference_reads
 A reader takes the head, decides, and either builds the body or advances `record_length` bytes past
 it. **Nothing else in the block has to be touched to make that decision.**
 
+#### Format 1.1 — the head carries the reads the depth cap discarded (2026-09-29)
+
+**Version 1.1 adds one field after `reads_compared_with_reference`:
+`reads-discarded-by-the-depth-cap-head-copy`**, a variable-length integer copying the body's own
+`reads-discarded-by-the-depth-cap`. With it a record's whole depth — compared reads plus the reads
+the per-read-group cap took away (`--max-reads-per-position`) — is read from the head. The coverage
+measurement behind the hidden-paralog filter needs that depth at every record, and reads it from
+the head so as not to decode ninety-nine bodies in a hundred; without the copy, a capped pile-up
+would read as the cap's value rather than as the pile-up it is (owner, 2026-09-29).
+
+- **A copy, not a move.** The body is unchanged between 1.0 and 1.1, so its decoder needs no
+  version logic, and a 1.1 reader checks the head's copy against the body whenever it builds one.
+  Its name differs from the body's because a manifest may not declare one name twice. The cost is
+  one varint a record, nearly always zero.
+- **A 1.1 reader reads 1.0 files.** `RecordLayout::from_manifest` accepts this build's field list
+  or the 1.0 list, which lacks the copy; a 1.0 head reads it as zero. That is close to exact for
+  every 1.0 file there is: they were written under a cap of 8,000 reads a sample, which almost never
+  fired, and their bodies still carry the exact count. Psps too costly to regenerate — the
+  2,169-sample tomato cohort's 8.6 TB — keep working unchanged.
+- **Writers write 1.1 only**, as before a writer produces exactly one version.
+
 #### Why a head and not a second stream
 
 **Because the alternative does not save what it appears to.** The obvious design — and the one this

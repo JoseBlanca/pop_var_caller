@@ -80,8 +80,8 @@ fn walk(path: &Path, window_bp: u64, stop_after_bp: u64, build: bool) -> (u64, u
             unreachable!("a summary source keeps every body")
         };
         records += 1;
-        let contig = summary.region.contig.get();
-        let start = summary.region.start.get();
+        let contig = summary.region().contig.get();
+        let start = summary.region().start.get();
         let on_a_later_contig = contig != *first_contig.get_or_insert(contig);
         if stop_after_bp != u64::MAX && (on_a_later_contig || start > stop_after_bp) {
             break;
