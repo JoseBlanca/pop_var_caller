@@ -1,6 +1,6 @@
 # Fitting to the precision the data support
 
-**Status:** design, 2026-09-27. **No code yet — this settles the design.** Build order:
+**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29). Build order:
 [`../../implementation_plans/fit_precision.md`](../../implementation_plans/fit_precision.md). It
 amends the SNP/indel fit ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3,
 which says only "repeat until the fitted values stop moving"), the repeat-tract fit
@@ -80,8 +80,13 @@ thousands of samples to be known well.
 
 ### 1.3 Non-goals, and what this does not do
 
-- **It does not change the models.** The same likelihoods, the same parameters, the same starting
-  points. Only when the fits stop, which samples a stratum is read from, and what is reported.
+- **It does not change the models** — **amended at checkpoint A (owner, 2026-09-28; recorded
+  2026-09-29): two corrections do.** Each library's reads are now scored under that library's own
+  error rates, where a sample's libraries shared the first one's (plan step A6), and the
+  allele-frequency density's and the carrier Beta's shapes now step along the likelihood's own
+  slope, where they solved the digamma form and stopped beside the maximum (step A7). Both move
+  fitted numbers. Otherwise the same likelihoods, parameters and starting points; what changes is
+  when the fits stop, which samples a stratum is read from, and what is reported.
 - **It does not make calling read the standard errors.** Consumers "combine warrants; they do not
   branch on them" ([`parameters_file.md`](parameters_file.md) §2); whether calling should weight by
   a standard error is its own design (§7).
@@ -216,13 +221,31 @@ cohort-level parameters explain); the cohort's from its own block.
 - **Where a sample carries several read groups** k is 1 + 2 × its read groups; the block grows
   with it.
 
+**Amended at checkpoints A and A′ (owner, 2026-09-28 and 2026-09-29) — what was built:**
+
+- **The blocks are inverted exactly, as an arrow**, not by the Schur-complement sketch above: the
+  cohort's errors come from `C − Σ_s B_sᵀ A_s⁻¹ B_s` inverted (the cohort's information less what
+  each sample's own parameters explain), and a sample's from `A_s⁻¹ + A_s⁻¹ B_s V B_sᵀ A_s⁻¹` with
+  `V` that inverse — the sample's own uncertainty plus the cohort's carried through the parameters
+  they share. The sketch was measured no closer on any kind and further on the cohort's (plan step
+  A3). A sample of k libraries carries 1 + 2k own parameters: its excess and each library's two
+  rates (step A6).
+- **Small cohorts use the whole matrix** (checkpoint A's decision 3, step A8): for a cohort of at most
+  `FULL_MATRIX_SAMPLES` = 20 samples, and at most 188 parameters (checkpoint A′), every pairing is
+  summed, two samples' included, and the matrix is inverted at once — the parameters taken in the
+  blocks' order, each sample's own then the cohort's, so the same one is dropped when others mimic
+  it. At 4 samples and 3 reads the blocks' errors were too small (the error rates and the mismapped
+  share scattered 1.23 to 1.67 times them) and the whole matrix's about right (0.89 to 1.02). The
+  parameter limit keeps the final pass's matrices to about 18 MB (20 samples of four libraries); a
+  cohort of samples with more libraries takes the blocks.
+
 **The scores to derive**, one per parameter kind, each new code:
 
 | parameter | the complete-data score is … |
 |---|---|
 | error rates | the read tallies' derivative in the rate — `maximise_error_rate` maximises the same function by golden section ([`fit.rs:3137-3163`](../../../../src/parameter_estimation/joint/fit.rs#L3137)) |
 | homozygote excess | the genotype prior's derivative in the excess, weighted by the posterior genotype counts `maximise_hom_excess` reads ([`fit.rs:3166-3182`](../../../../src/parameter_estimation/joint/fit.rs#L3166)) |
-| density and carrier Beta shapes | the digamma terms `fit_beta_shapes` already uses ([`fit.rs:3217-3242`](../../../../src/parameter_estimation/joint/fit.rs#L3217)) |
+| density and carrier Beta shapes | the slope of the likelihood the quadrature rule computes, as the rule's nodes and weights move with the shapes (`RuleSlopes`, step A1) — **amended 2026-09-29**: not the digamma terms, whose integral on the rule misses that slope. Since step A7 the fit's update of the shapes steps along this same slope (`step_beta_shapes`), and `fit_beta_shapes` is gone |
 | the three shares | the class posteriors over the share, as in their closed-form M-steps ([`fit.rs:3028-3048`](../../../../src/parameter_estimation/joint/fit.rs#L3028)) |
 
 **Trap: the per-position score must be the observed-data score at that position**, the posterior
@@ -241,6 +264,18 @@ position, so its row of the block is zero and its error does not exist. It is re
 never as zero and never as a large number (`Option::None`). **At one sample** the homozygote excess
 is carried but never moved ([`fit.rs:3117-3127`](../../../../src/parameter_estimation/joint/fit.rs#L3117))
 and has no error either; the error rates and the cohort's parameters still get theirs.
+
+**Amended 2026-09-29 — two more reasons an error is absent**, found on drawn cohorts (plan steps A3
+and A5), so a parameter without an error says which of four it is:
+
+- **no information** — the case above;
+- **held fixed** — the homozygote excess at one sample;
+- **not identified** — other parameters mimic its effect at every position, so once they are
+  accounted for less than 10⁻⁸ of its own curvature is left (at one sample the four density
+  parameters, at two samples the duplicated class's share and carrier shapes). Only that parameter is
+  dropped; the others are inverted without it;
+- **wider than its range** — its error came out wider than the whole interval the fit keeps it in,
+  so the data do not place it anywhere in that interval.
 
 ### 3.3 When the standard errors are computed
 

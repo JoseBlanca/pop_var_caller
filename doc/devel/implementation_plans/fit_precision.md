@@ -1,7 +1,9 @@
 # Fitting to the precision the data support — implementation plan
 
 *Status: plan, 2026-09-27; Milestone A built. **Amended at checkpoint A (owner, 2026-09-28)**: three
-steps added before Milestone B (§4, Milestone A′), and the checkpoint's decisions recorded under it.*
+steps added before Milestone B (§4, Milestone A′), and the checkpoint's decisions recorded under it.
+Milestone A′ built; **checkpoint A′'s decisions (owner, 2026-09-29)** recorded under it, with two
+small changes before Milestone B and a case added to step E2.*
 
 This plan turns [`doc/devel/ng/spec/fit_precision.md`](../ng/spec/fit_precision.md) into build
 order. **It is not a place for new design**: every step cites the spec section it builds, and a
@@ -164,6 +166,29 @@ step here that moves a fitted number is its own commit, with the checksums re-re
 > **Checkpoint A′ — pause for review.** A6's and A7's changes on the oracle cohort, A4's coverage
 > re-run, and the kimura run of the A5 build if the owner has made it.
 
+**Decided at checkpoint A′ (owner, 2026-09-29).** The measurements are in the
+[A7](../reports/implementations/fit_precision_a7_2026-09-28.md) and
+[A8](../reports/implementations/fit_precision_a8_2026-09-28.md) reports.
+
+1. **"Never lowering the log-likelihood" is measured, not enforced.** Over 10,020 plain passes on 17
+   drawn cohorts, none on cohorts with the shapes inside their bounds lowered it, and on cohorts
+   with a shape at its bound 161 lowered it by at most 3 × 10⁻¹¹ units, the rounding of a
+   log-likelihood that has stopped moving.
+2. **The shapes' step is accepted though it takes more passes** where the shapes are inside their
+   bounds (18 to 30 accelerated passes at 20 samples × 3 reads, against 12 to 18). Step B's
+   stopping rule will show whether the shapes are the last parameters to settle; if they are,
+   several Newton steps a pass is the fix.
+3. **The whole matrix is also limited to 188 parameters** — 20 samples of four libraries, 18 MB in
+   the final pass — so a cohort of samples with more libraries takes the blocks rather than
+   gigabytes (20 samples of 16 libraries would hold 231 MB). Built before step B, no fitted number
+   moving.
+4. **Spec §1.3 and §3.2 amended** to what was built (A6, A7, the arrow inverse, the four reasons an
+   error is absent, the whole matrix), and the oracle baseline's fit lines re-recorded in their own
+   commit.
+5. **A census whose depth cap leaves one stored depth code wider than the fit's 32 depths is refused
+   before a section is read** (a cap of 157 or more; the shipped cap is 124), where the pass used to
+   stop with a panic. Built before step B.
+
 ### Milestone B — the SNP/indel fit stops by its errors
 
 1. ☐ **B1 — the settled test replaces the relative-move rule.** The log-likelihood trigger, the
@@ -233,6 +258,10 @@ step here that moves a fitted number is its own commit, with the checksums re-re
    in `fitted_from`, `FORMAT_VERSION` = 2, the reader accepting versions 1 and 2, the golden files
    updated; a parameter with no information written as `defaulted` with the default value (spec
    question 1) — after A6, a library with no reads; no library's rate is copied from another's.
+   **The same for a read group no sample lends ordinary-position evidence for** (owner, checkpoint
+   A′): a sample whose walk wrote repeat-tract sections and no ordinary one leaves its read groups in
+   the fit's list with nothing scored, and they are written `defaulted` with zero observations — not
+   fitted, with the run's position count — with a test on a tracts-only sample.
    The fitted-parameters checksum is re-recorded (the key and the version move it; no fitted
    number does — the commit shows the file's diff). *Depends:* E1.
    *Source:* spec §5.2–5.3.
