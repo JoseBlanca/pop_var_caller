@@ -250,6 +250,9 @@ pub struct SiteQualityBuffers<'a> {
 pub struct CountPriorMemo {
     built_for: Option<(usize, u64, u64)>,
     terms: Vec<f64>,
+    /// How far apart the largest and the smallest term are, in nats — what bounds how much the
+    /// prior can magnify an entry the fold dropped ([`negligible_share`]).
+    log_range: f64,
 }
 
 /// **How unlikely is it that the cohort carries no copy of any non-reference allele here?**
@@ -327,6 +330,19 @@ pub struct CountPriorMemo {
 /// difference between 4295.97 and the 9999 ceiling, and at 80 between 6899.70 and 9999. So it
 /// starts to matter between 20 and 50 samples — well inside the range this caller commits to,
 /// and below the 63 of the tomato panel.
+///
+/// # What makes it affordable at thousands of samples
+///
+/// **The fold computes only the stretch of counts that can still move the answer.** It is
+/// quadratic in the cohort: each sample updates a distribution one entry longer per chromosome.
+/// At three reads a sample that distribution's tails fall to around 10⁻³⁰⁰ of its peak without
+/// reaching zero, and below about 2 × 10⁻³⁰⁸ an `f64` is *subnormal*, which the processor
+/// multiplies roughly a hundred times slower than an ordinary number. So the fold drops, from
+/// either end, entries below a share of the peak too small for the quality to feel
+/// ([`negligible_share`]). Measured on 2,169 diploid samples at about three reads each
+/// (`site_quality_at_cohort_scale`): 10 ms a locus before, 1.9 ms at a rare variant and 1.3 ms
+/// at a common one after. Over random tables up to that size the normalising total came out
+/// the same to the last bit (`dropping_negligible_entries_leaves_the_site_quality_as_it_was`).
 ///
 /// # Panics
 ///
@@ -433,16 +449,8 @@ pub fn score_uncorrected_site_quality(
         );
     }
 
-    // 2. Fold the samples into the cohort's count distribution.
-    fold_samples_into_allele_counts(
-        ploidy,
-        copy_count_log_likelihoods,
-        allele_count_distribution,
-        allele_count_distribution_next,
-        log_allele_count_distribution,
-    );
-
-    // 3. The Beta-Binomial prior on the cohort's count, from the run's fitted spectrum.
+    // The Beta-Binomial prior on the cohort's count, from the run's fitted spectrum — step 3,
+    // built here because the fold reads how far apart its terms are.
     //
     // **Built once a run rather than once a locus.** Every term below is a function of the
     // fitted spectrum and the chromosome count and of nothing this locus carries, so the
@@ -476,8 +484,26 @@ pub fn score_uncorrected_site_quality(
                 .terms
                 .push(log_ways + log_split - log_denominator - log_beta_normaliser);
         }
+        let (lowest, highest) = count_prior
+            .terms
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), term| {
+                (low.min(*term), high.max(*term))
+            });
+        count_prior.log_range = highest - lowest;
         count_prior.built_for = Some(built_for);
     }
+    // 2. Fold the samples into the cohort's count distribution.
+    fold_samples_into_allele_counts(
+        ploidy,
+        copy_count_log_likelihoods,
+        allele_count_distribution,
+        allele_count_distribution_next,
+        log_allele_count_distribution,
+        negligible_share(count_prior.log_range, largest_count + 1),
+    );
+
+    // 3. The prior on the cohort's count, built before the fold (see [`CountPriorMemo`]).
     for (slot, term) in log_allele_count_distribution
         .iter_mut()
         .zip(&count_prior.terms)
@@ -522,73 +548,107 @@ fn fold_samples_into_allele_counts<'a>(
     mut current: &'a mut [f64],
     mut next: &'a mut [f64],
     log_allele_count_distribution: &mut [f64],
+    negligible: f64,
 ) {
-    // **Both buffers, not just the one the first sample reads.** Each pass zeroes only the
-    // window it is about to write — `[0, padding + live)` — and the *next* pass's `copies = 0`
-    // tap reads `ploidy` entries beyond that, into the counts this sample has just made
-    // reachable. Those entries are logically zero and must literally be zero, and after this
-    // fill they stay so: no pass ever writes above its own window.
+    // **Both buffers, whole, once a locus.** They arrive holding
+    // [`UNWRITTEN_SCRATCH_VALUE`](crate::calling::UNWRITTEN_SCRATCH_VALUE), which is `NaN`, and
+    // the loop below reads a few entries past the stretch it writes — a sample's lower taps
+    // reach `ploidy` entries below it, and its upper ones read counts the last sample never
+    // made reachable. Those entries are logically zero and must literally be zero.
     //
     // **The alternative was measured and it is a silent wrong answer, not a crash.** Clearing
-    // only `current` leaves `next` holding
-    // [`UNWRITTEN_SCRATCH_VALUE`](crate::calling::UNWRITTEN_SCRATCH_VALUE), which is
-    // `NaN`; the `NaN` multiplies into the high counts from the second sample on, survives the
-    // rescaling because `f64::max` returns the other operand, and is written out as `−∞`. The
-    // count axis is then permanently truncated to `0..=ploidy` at every cohort size — at 63
-    // diploid samples the site quality came out 46.3 Phred against production's 733.7 on the
-    // same table.
+    // only `current` leaves `next` holding `NaN`; the `NaN` multiplies into the high counts
+    // from the second sample on, survives the rescaling because `f64::max` returns the other
+    // operand, and is written out as `−∞`. The count axis is then permanently truncated to
+    // `0..=ploidy` at every cohort size — at 63 diploid samples the site quality came out
+    // 46.3 Phred against production's 733.7 on the same table.
     current.fill(0.0);
     next.fill(0.0);
     current[ploidy] = 1.0;
     let mut log_scale = 0.0;
     let mut log_at_zero = 0.0;
 
-    for (sample, copy_counts) in copy_count_log_likelihoods
-        .chunks_exact(ploidy + 1)
-        .enumerate()
-    {
+    // **Where each buffer can be non-zero**, as a stretch of indices; everything outside it is
+    // exactly zero, so a sample computes only the stretch the last one's non-zero entries
+    // reach. The count distribution is a bump, and entries far from its peak are dropped once
+    // they fall below `negligible` of it ([`negligible_share`]), so the stretch is the bump
+    // rather than the axis — 4,339 entries at 2,169 diploid samples.
+    let mut current_band = (ploidy, ploidy);
+    let mut next_band: Option<(usize, usize)> = None;
+    let mut taps = [(0usize, 0.0f64); crate::calling::likelihood::MAX_PLOIDY_COPIES + 1];
+
+    for copy_counts in copy_count_log_likelihoods.chunks_exact(ploidy + 1) {
         // The exact recurrence, independent of the linear bulk below.
         log_at_zero += copy_counts[0];
 
         // The row over its own maximum, so every tap lands in `(0, 1]`; the maximum folds
-        // into the running scale.
+        // into the running scale. Only the taps with a weight are kept, in copy order.
         let largest = copy_counts
             .iter()
             .copied()
             .fold(f64::NEG_INFINITY, f64::max);
-        let live = (sample + 1) * ploidy + 1;
-        next[..ploidy + live].fill(0.0);
+        let mut tap_count = 0;
         for (copies, &log_weight) in copy_counts.iter().enumerate() {
             let weight = if log_weight > f64::NEG_INFINITY {
                 float::exp(log_weight - largest)
             } else {
                 0.0
             };
-            if weight == 0.0 {
-                continue;
+            if weight != 0.0 {
+                taps[tap_count] = (copies, weight);
+                tap_count += 1;
             }
-            // Tap-major, so each pass is a contiguous multiply-add the compiler can
-            // vectorise: `next[k] += current[k − copies] × weight`.
-            let source = &current[(ploidy - copies)..(ploidy - copies) + live];
-            let destination = &mut next[ploidy..ploidy + live];
-            for (into, &from) in destination.iter_mut().zip(source) {
-                *into += from * weight;
+        }
+        let taps = &taps[..tap_count];
+        let (lowest_tap, highest_tap) = (taps[0].0, taps[tap_count - 1].0);
+        let (from, to) = (current_band.0 + lowest_tap, current_band.1 + highest_tap);
+
+        // What `next` held two samples ago, outside the stretch about to be written, goes back
+        // to zero — the invariant the reads below rely on.
+        if let Some((stale_from, stale_to)) = next_band {
+            if stale_from < from {
+                next[stale_from..from.min(stale_to + 1)].fill(0.0);
+            }
+            if stale_to > to {
+                next[(to + 1).max(stale_from)..=stale_to].fill(0.0);
             }
         }
 
+        // Tap-major, so each pass is a contiguous multiply-add the compiler can vectorise:
+        // `next[k] += current[k − copies] × weight`.
+        next[from..=to].fill(0.0);
+        for &(copies, weight) in taps {
+            let source = &current[from - copies..=to - copies];
+            for (into, &value) in next[from..=to].iter_mut().zip(source) {
+                *into += value * weight;
+            }
+        }
+        let peak = next[from..=to].iter().copied().fold(0.0_f64, f64::max);
+
         log_scale += largest;
-        let peak = next[ploidy..ploidy + live]
-            .iter()
-            .copied()
-            .fold(0.0_f64, f64::max);
+
+        // **Entries too small to matter leave the stretch, from either end, and become zero** —
+        // see [`negligible_share`] for why nothing downstream can tell. With a share of zero
+        // only entries that underflowed to exactly zero go, and the fold is exact.
+        let floor = peak * negligible;
+        let (mut from, mut to) = (from, to);
+        while from < to && next[from] <= floor {
+            next[from] = 0.0;
+            from += 1;
+        }
+        while to > from && next[to] <= floor {
+            next[to] = 0.0;
+            to -= 1;
+        }
         if peak > 0.0 {
             let inverse = 1.0 / peak;
-            for value in next[ploidy..ploidy + live].iter_mut() {
+            for value in &mut next[from..=to] {
                 *value *= inverse;
             }
             log_scale += float::ln(peak);
         }
-
+        next_band = Some(current_band);
+        current_band = (from, to);
         std::mem::swap(&mut current, &mut next);
     }
 
@@ -601,6 +661,31 @@ fn fold_samples_into_allele_counts<'a>(
         };
     }
     log_allele_count_distribution[0] = log_at_zero;
+}
+
+/// **Below what share of its sample's peak an entry of the fold can be dropped without the site
+/// quality noticing.**
+///
+/// The quality reads two things off the fold: the entry at zero copies, which is tracked
+/// exactly and apart from the linear buffer, and the total over every count once the prior has
+/// been applied. Only the total can feel a dropped entry. An entry dropped at share `r` of its
+/// sample's peak has descendants, after every later sample, of at most `r × entries` of the
+/// final peak at each count; summed over `entries` counts that is `r × entries²` of the final
+/// peak, and the prior can magnify it against the rest by at most `e^prior_log_range`. So the
+/// relative change in the total is at most `r × entries² × e^prior_log_range`, and this
+/// returns the `r` that makes that `e^-60` — about 10⁻²⁶, ten orders of magnitude below what a
+/// `f64` can resolve.
+///
+/// **It is what makes the fold affordable at thousands of samples.** At three reads a sample
+/// the count distribution's tails fall to around 10⁻³⁰⁰ of its peak without ever reaching
+/// zero, so skipping exact zeros skips nothing; skipping entries below this share leaves the
+/// stretch around the peak that can move the answer.
+///
+/// Where the bound is so tight that the share underflows, it is zero and only exact zeros are
+/// dropped.
+fn negligible_share(prior_log_range: f64, entries: usize) -> f64 {
+    const MARGIN_NATS: f64 = 60.0;
+    float::exp(-(prior_log_range + 2.0 * float::ln(entries as f64) + MARGIN_NATS))
 }
 
 /// `ln Σ exp(v)` over a slice, in two passes: the largest entry, then the sum of the rest
@@ -1114,5 +1199,300 @@ mod tests {
     #[should_panic(expected = "must be finite and within [0, 1]")]
     fn a_winning_probability_above_one_is_refused_even_where_the_row_totals_one() {
         let _ = score_best_genotype(&[1.5, -0.5]);
+    }
+
+    // -----------------------------------------------------------------------------------
+    // The fold at cohort scale
+    // -----------------------------------------------------------------------------------
+
+    /// **The fold as it was before it skipped zeros and fused its passes** — six passes over the
+    /// whole live axis a sample. Kept only to check the fold against, bit for bit.
+    fn fold_as_it_was<'a>(
+        ploidy: usize,
+        copy_count_log_likelihoods: &[f64],
+        mut current: &'a mut [f64],
+        mut next: &'a mut [f64],
+        log_allele_count_distribution: &mut [f64],
+    ) {
+        // **Both buffers, not just the one the first sample reads.** Each pass zeroes only the
+        // window it is about to write — `[0, padding + live)` — and the *next* pass's `copies = 0`
+        // tap reads `ploidy` entries beyond that, into the counts this sample has just made
+        // reachable. Those entries are logically zero and must literally be zero, and after this
+        // fill they stay so: no pass ever writes above its own window.
+        //
+        // **The alternative was measured and it is a silent wrong answer, not a crash.** Clearing
+        // only `current` leaves `next` holding
+        // [`UNWRITTEN_SCRATCH_VALUE`](crate::calling::UNWRITTEN_SCRATCH_VALUE), which is
+        // `NaN`; the `NaN` multiplies into the high counts from the second sample on, survives the
+        // rescaling because `f64::max` returns the other operand, and is written out as `−∞`. The
+        // count axis is then permanently truncated to `0..=ploidy` at every cohort size — at 63
+        // diploid samples the site quality came out 46.3 Phred against production's 733.7 on the
+        // same table.
+        current.fill(0.0);
+        next.fill(0.0);
+        current[ploidy] = 1.0;
+        let mut log_scale = 0.0;
+        let mut log_at_zero = 0.0;
+
+        for (sample, copy_counts) in copy_count_log_likelihoods
+            .chunks_exact(ploidy + 1)
+            .enumerate()
+        {
+            // The exact recurrence, independent of the linear bulk below.
+            log_at_zero += copy_counts[0];
+
+            // The row over its own maximum, so every tap lands in `(0, 1]`; the maximum folds
+            // into the running scale.
+            let largest = copy_counts
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let live = (sample + 1) * ploidy + 1;
+            next[..ploidy + live].fill(0.0);
+            for (copies, &log_weight) in copy_counts.iter().enumerate() {
+                let weight = if log_weight > f64::NEG_INFINITY {
+                    float::exp(log_weight - largest)
+                } else {
+                    0.0
+                };
+                if weight == 0.0 {
+                    continue;
+                }
+                // Tap-major, so each pass is a contiguous multiply-add the compiler can
+                // vectorise: `next[k] += current[k − copies] × weight`.
+                let source = &current[(ploidy - copies)..(ploidy - copies) + live];
+                let destination = &mut next[ploidy..ploidy + live];
+                for (into, &from) in destination.iter_mut().zip(source) {
+                    *into += from * weight;
+                }
+            }
+
+            log_scale += largest;
+            let peak = next[ploidy..ploidy + live]
+                .iter()
+                .copied()
+                .fold(0.0_f64, f64::max);
+            if peak > 0.0 {
+                let inverse = 1.0 / peak;
+                for value in next[ploidy..ploidy + live].iter_mut() {
+                    *value *= inverse;
+                }
+                log_scale += float::ln(peak);
+            }
+
+            std::mem::swap(&mut current, &mut next);
+        }
+
+        for (count, slot) in log_allele_count_distribution.iter_mut().enumerate() {
+            let value = current[ploidy + count];
+            *slot = if value > 0.0 {
+                float::ln(value) + log_scale
+            } else {
+                f64::NEG_INFINITY
+            };
+        }
+        log_allele_count_distribution[0] = log_at_zero;
+    }
+
+    /// **The fold gives the same bits as the six-pass fold it replaced**, over random tables:
+    /// ploidies one to four, cohorts from one sample to the tomato cohort's 2,169, rows that
+    /// rule a genotype out entirely, and likelihoods spread over hundreds of nats so the
+    /// distribution's tails underflow to zero — the entries the new fold skips.
+    #[test]
+    fn the_fold_gives_the_bits_the_six_pass_fold_gave() {
+        let mut state = 11u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for ploidy in 1..=4usize {
+            for samples in [1usize, 2, 7, 63, 500, 2_169] {
+                for spread in [1.0, 30.0, 400.0] {
+                    let rows: Vec<f64> = (0..samples * (ploidy + 1))
+                        .map(|_| {
+                            let draw = next();
+                            if draw < 0.03 {
+                                f64::NEG_INFINITY
+                            } else {
+                                -spread * next()
+                            }
+                        })
+                        .collect();
+                    // Every row keeps at least one possible entry, as the collapse asserts.
+                    let rows: Vec<f64> = rows
+                        .chunks(ploidy + 1)
+                        .flat_map(|row| {
+                            let mut row = row.to_vec();
+                            if row.iter().all(|value| *value == f64::NEG_INFINITY) {
+                                row[0] = 0.0;
+                            }
+                            row
+                        })
+                        .collect();
+                    let axis = samples * ploidy + 1;
+                    let fold = |which: bool| {
+                        let mut current = vec![f64::NAN; ploidy + axis];
+                        let mut following = vec![f64::NAN; ploidy + axis];
+                        let mut out = vec![f64::NAN; axis];
+                        if which {
+                            fold_samples_into_allele_counts(
+                                ploidy,
+                                &rows,
+                                &mut current,
+                                &mut following,
+                                &mut out,
+                                0.0,
+                            );
+                        } else {
+                            fold_as_it_was(ploidy, &rows, &mut current, &mut following, &mut out);
+                        }
+                        out.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
+                    };
+                    assert_eq!(
+                        fold(true),
+                        fold(false),
+                        "ploidy {ploidy}, {samples} samples, spread {spread}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Dropping negligible entries does not move the site quality.** The fold with its
+    /// share set by [`negligible_share`] against the exact fold, over random diploid tables up
+    /// to the tomato cohort's size and random priors whose terms span as far as the bound
+    /// allows for: the total the quality is normalised by agrees to within four units in its
+    /// last place, and the quality itself — a 32-bit Phred — is the same number.
+    #[test]
+    fn dropping_negligible_entries_leaves_the_site_quality_as_it_was() {
+        let mut state = 5u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let ploidy = 2;
+        for samples in [63usize, 500, 2_169] {
+            for carriers_per_thousand in [0, 2, 50, 300, 900] {
+                for prior_range in [5.0, 40.0, 200.0] {
+                    let rows: Vec<f64> =
+                        cohort_rows(samples, carriers_per_thousand, next().to_bits())
+                            .into_iter()
+                            .flatten()
+                            .collect();
+                    let entries = samples * ploidy + 1;
+                    let prior: Vec<f64> = (0..entries).map(|_| -prior_range * next()).collect();
+                    let quality_with = |share: f64| {
+                        let mut current = vec![f64::NAN; ploidy + entries];
+                        let mut following = vec![f64::NAN; ploidy + entries];
+                        let mut out = vec![f64::NAN; entries];
+                        fold_samples_into_allele_counts(
+                            ploidy,
+                            &rows,
+                            &mut current,
+                            &mut following,
+                            &mut out,
+                            share,
+                        );
+                        for (slot, term) in out.iter_mut().zip(&prior) {
+                            *slot += term;
+                        }
+                        let total = log_sum_exp_over(&out);
+                        (total, Phred::from_log_prob(LogProb(out[0] - total)))
+                    };
+                    let (exact_total, exact) = quality_with(0.0);
+                    let (dropped_total, dropped) =
+                        quality_with(negligible_share(prior_range, entries));
+                    let ulps =
+                        (exact_total.to_bits() as i64 - dropped_total.to_bits() as i64).abs();
+                    assert!(
+                        ulps <= 4,
+                        "{samples} samples, {carriers_per_thousand} carriers in 1,000, prior \
+                         range {prior_range}: the total moved {ulps} units in its last place"
+                    );
+                    assert_eq!(
+                        exact.map(|quality| quality.get().to_bits()).ok(),
+                        dropped.map(|quality| quality.get().to_bits()).ok(),
+                        "{samples} samples, {carriers_per_thousand} carriers in 1,000, prior \
+                         range {prior_range}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Diploid likelihood rows for `samples` samples at about three reads each, shaped like the
+    /// tomato cohort's: a sample carrying no alternative is `[0, d·ln ½, d·ln 0.01]` over
+    /// (hom-ref, het, hom-alt) for its `d` reads, and `carriers` in a thousand samples are
+    /// heterozygous or homozygous for the alternative instead. A fixed linear congruential
+    /// generator, so every run sees the same table.
+    fn cohort_rows(samples: usize, carriers_per_thousand: u64, seed: u64) -> Vec<Vec<f64>> {
+        let mut state = seed;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state >> 33
+        };
+        let (half, error) = (float::ln(0.5), float::ln(0.01));
+        (0..samples)
+            .map(|_| {
+                let reads = (next() % 7) as f64;
+                let alternative_reads = match next() % 1_000 {
+                    draw if draw < carriers_per_thousand / 2 => reads,
+                    draw if draw < carriers_per_thousand => (reads / 2.0).ceil(),
+                    _ => 0.0,
+                };
+                let reference_reads = reads - alternative_reads;
+                vec![
+                    reference_reads * 0.0 + alternative_reads * error,
+                    reads * half,
+                    reference_reads * error + alternative_reads * 0.0,
+                ]
+            })
+            .collect()
+    }
+
+    /// **Timing, not a test**: the site quality over 2,169 diploid samples, the tomato25
+    /// cohort's size, at a rare and a common variant. Run with
+    /// `cargo test --release --lib site_quality_at_cohort_scale -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a timing, run by hand"]
+    fn site_quality_at_cohort_scale() {
+        for (label, carriers) in [("rare, 2 in 1,000", 2), ("common, 300 in 1,000", 300)] {
+            let rows = cohort_rows(2_169, carriers, 7);
+            let (alleles, table) = generic_locus(1);
+            let view = table.view();
+            let mut scratch = CallingScratch::<()>::default();
+            scratch.prepare_for_locus(rows.len(), &alleles, &view);
+            for (sample, row) in rows.iter().enumerate() {
+                for (slot, &value) in scratch
+                    .sample_genotype_likelihoods_mut(sample)
+                    .iter_mut()
+                    .zip(row)
+                {
+                    *slot = LogProb(value);
+                }
+            }
+            let calls = 200;
+            let started = std::time::Instant::now();
+            let mut quality = Phred::try_new(0.0).expect("zero");
+            for _ in 0..calls {
+                quality = score_uncorrected_site_quality(
+                    scratch.site_quality_buffers_mut(),
+                    &view,
+                    human_like_seed(),
+                );
+            }
+            let each = started.elapsed().as_secs_f64() / f64::from(calls);
+            println!(
+                "{label}: {:.3} ms a locus, quality {}",
+                each * 1_000.0,
+                quality.get()
+            );
+        }
     }
 }
