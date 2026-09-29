@@ -720,10 +720,16 @@ fn score_the_duplicated_branch(
 /// scattered 1.23 to 1.67 times them, and 0.89 to 1.02 times the whole matrix's — while at 20
 /// samples the two came within 11% of each other. What the whole matrix costs grows as the square
 /// of the parameters: at 20 samples of one library each, 68 parameters, a position adds 2,346
-/// products where the blocks add 724. **The limit is on samples, not on parameters**, so samples
-/// of many libraries make it larger: 20 samples of 16 libraries each have 668 parameters and add
-/// 223,446 products a position.
+/// products where the blocks add 724. So the parameters are limited too
+/// ([`FULL_MATRIX_PARAMETERS`]).
 pub(super) const FULL_MATRIX_SAMPLES: usize = 20;
+
+/// **And only while the whole matrix has at most this many parameters** (checkpoint A′, owner,
+/// 2026-09-29): 20 samples of four libraries each, whose final pass holds 18.3 MB of matrices and
+/// took 1.10 to 1.12 times the blocks' pass (plan step A8's review). Samples of more libraries make
+/// the matrix grow as the square of their parameters — 20 samples of 16 libraries have 668 and
+/// would hold 231 MB — so a cohort above the limit takes the blocks.
+pub(super) const FULL_MATRIX_PARAMETERS: usize = 188;
 
 /// **The information, in blocks**: each position's scores multiplied pairwise and summed over
 /// positions, keeping only the products spec §3.2's block approximation reads — and, for a cohort
@@ -765,10 +771,16 @@ impl InformationSums {
     }
 
     /// **What a pass sums for the standard errors**: the blocks, and the whole matrix too when the
-    /// cohort has at most [`FULL_MATRIX_SAMPLES`] samples.
+    /// cohort has at most [`FULL_MATRIX_SAMPLES`] samples and the matrix at most
+    /// [`FULL_MATRIX_PARAMETERS`] parameters.
     pub(super) fn for_a_cohort_of(group_index: &[Vec<usize>]) -> Self {
         let mut sums = Self::new(group_index);
-        if group_index.len() <= FULL_MATRIX_SAMPLES {
+        let parameters = COHORT_PARAMETERS
+            + group_index
+                .iter()
+                .map(|libraries| own_parameters(libraries.len()))
+                .sum::<usize>();
+        if group_index.len() <= FULL_MATRIX_SAMPLES && parameters <= FULL_MATRIX_PARAMETERS {
             sums.full = Some(FullInformation::new(group_index));
         }
         sums
@@ -860,9 +872,9 @@ impl InformationSums {
 /// over the positions, in the layout the standard errors are reported in — the cohort's eight
 /// ([`cohort`]), then each sample's own parameters in turn ([`sample`]) — so two samples' parameters
 /// are paired too, which the blocks leave out. Kept only for a cohort of at most
-/// [`FULL_MATRIX_SAMPLES`] samples. It is symmetric, so only its upper triangle is held, row after
-/// row. The pass that sums it keeps one for each chunk, at most 128, and one total they are added
-/// into, which at 20 samples of one library is 129 × 2,346 numbers, 2.4 MB.
+/// [`FULL_MATRIX_SAMPLES`] samples and [`FULL_MATRIX_PARAMETERS`] parameters. It is symmetric, so
+/// only its upper triangle is held, row after row. The pass that sums it keeps one for each chunk,
+/// at most 128, and one total they are added into, which at 20 samples of one library is 129 × 2,346 numbers, 2.4 MB.
 #[derive(Clone)]
 pub(super) struct FullInformation {
     /// How many parameters the matrix pairs: its side.
@@ -2575,9 +2587,11 @@ mod tests {
         (dense, side)
     }
 
-    /// **The pass keeps the whole matrix up to [`FULL_MATRIX_SAMPLES`] samples and not above**:
-    /// sums made for 20 samples hold it, sized for their own parameters — a sample of two libraries
-    /// counting five — and sums made for 21 do not.
+    /// **The pass keeps the whole matrix up to [`FULL_MATRIX_SAMPLES`] samples and
+    /// [`FULL_MATRIX_PARAMETERS`] parameters, and not above either**: sums made for 20 samples hold
+    /// it, sized for their own parameters — a sample of two libraries counting five — and sums made
+    /// for 21 do not; 20 samples of four libraries each (188 parameters) hold it, and one library
+    /// more (190) does not.
     #[test]
     fn the_whole_matrix_is_kept_up_to_twenty_samples() {
         let mut twenty: Vec<Vec<usize>> = (0..FULL_MATRIX_SAMPLES).map(|s| vec![s]).collect();
@@ -2598,6 +2612,20 @@ mod tests {
             "twenty-one samples keep the blocks only"
         );
         assert!(InformationSums::new(&twenty).full.is_none());
+        let mut four_each: Vec<Vec<usize>> = (0..FULL_MATRIX_SAMPLES)
+            .map(|s| (4 * s..4 * s + 4).collect())
+            .collect();
+        let full = InformationSums::for_a_cohort_of(&four_each).full;
+        assert_eq!(
+            full.map(|full| full.side()),
+            Some(FULL_MATRIX_PARAMETERS),
+            "twenty samples of four libraries keep the whole matrix"
+        );
+        four_each[0].push(4 * FULL_MATRIX_SAMPLES);
+        assert!(
+            InformationSums::for_a_cohort_of(&four_each).full.is_none(),
+            "190 parameters keep the blocks only"
+        );
     }
 
     /// Every entry of two sets of blocks, beside the Cauchy–Schwarz bound on it — the square root

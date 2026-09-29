@@ -115,10 +115,10 @@ bound as libraries a sample grow (§3 item 1).
    | 16 (lane-level read groups) | 668 | 223,446 | 231 MB |
    | 50 | 2,028 | 2,057,406 | 2.1 GB |
 
-   **For the owner at checkpoint A′**, with the recommendation to cap the parameters as well: the
-   whole matrix only while it has at most 188 parameters — 20 samples of four libraries, 18.3 MB and
-   1.1 times the blocks' pass, measured — so a cohort of many-library samples falls back to the
-   blocks rather than to gigabytes.
+   **Decided at checkpoint A′ (owner, 2026-09-29): the parameters are capped too**, at
+   `FULL_MATRIX_PARAMETERS` = 188 — 20 samples of four libraries, 18.3 MB and 1.1 times the blocks'
+   pass, measured — so a cohort of many-library samples takes the blocks rather than gigabytes.
+   Built in its own commit after this step's.
 2. **The blocks are still summed below the threshold**, beside the whole matrix. They cost about a
    third of the whole matrix's products at 20 one-library samples (724 against 2,346), keep the two
    paths separate, and let the tests compare the blocks' errors with the whole matrix's on the same

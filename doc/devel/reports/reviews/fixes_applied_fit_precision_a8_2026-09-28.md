@@ -55,7 +55,7 @@
 
 ## 3. Per-finding log
 
-- **M1 — Deferred to the owner.** The plan fixes the limit on samples. The report (§2.2, §3 item 1)
+- **M1 — Deferred to the owner; decided at checkpoint A′ (2026-09-29): cap at 188 parameters, built in its own commit.** The plan fixes the limit on samples. The report (§2.2, §3 item 1)
   and the constant's doc give the sizes: 20 samples of 16 libraries have 668 parameters and 223,446
   products a position; the correctness reviewer measured 231 MB of whole matrices in the final pass.
   **Recommendation for checkpoint A′:** cap the parameters at 188 as well (20 samples of four

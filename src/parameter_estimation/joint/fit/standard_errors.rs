@@ -19,8 +19,10 @@
 //! **Two ways, chosen by the cohort's size** ([`StandardErrors::of`]):
 //!
 //! - **the whole matrix**, for a cohort of at most
-//!   [`FULL_MATRIX_SAMPLES`](super::information::FULL_MATRIX_SAMPLES) samples: every parameter's
-//!   score paired with every other's, two samples' included ([`FullInformation`]), inverted at once;
+//!   [`FULL_MATRIX_SAMPLES`](super::information::FULL_MATRIX_SAMPLES) samples and
+//!   [`FULL_MATRIX_PARAMETERS`](super::information::FULL_MATRIX_PARAMETERS) parameters: every
+//!   parameter's score paired with every other's, two samples' included ([`FullInformation`]),
+//!   inverted at once;
 //! - **the blocks**, above that ([`InformationSums`]): the cohort's eight parameters with each other
 //!   (`C`), each sample's own with each other (`A_s`) — three for a sample of one library, `1 + 2k`
 //!   for one of `k` — and each sample's own with the cohort's (`B_s`). Two samples' parameters are
@@ -37,8 +39,8 @@
 //! matters**: at 4 samples and 3 reads a position the error rates and the mismapped share scattered
 //! 1.23 to 1.67 times the blocks' errors and 0.89 to 1.02 times the whole matrix's (plan step A4).
 //! At 20 samples the two came within 11% of each other (1.067 against 0.965, the mismapped rates at
-//! 3 reads), and the whole matrix grows as the square of the samples, so above 20 the blocks are
-//! kept.
+//! 3 reads), and the whole matrix grows as the square of its parameters, so above 20 samples, or
+//! 188 parameters, the blocks are kept.
 //!
 //! # When a parameter has no error
 //!
@@ -205,8 +207,9 @@ pub(super) struct StandardErrors {
 impl StandardErrors {
     /// The errors of every parameter, from the information one pass summed at the parameters
     /// being reported: from the whole matrix when the pass kept it — a cohort of at most
-    /// [`FULL_MATRIX_SAMPLES`](super::information::FULL_MATRIX_SAMPLES) samples — and from the
-    /// blocks otherwise.
+    /// [`FULL_MATRIX_SAMPLES`](super::information::FULL_MATRIX_SAMPLES) samples and
+    /// [`FULL_MATRIX_PARAMETERS`](super::information::FULL_MATRIX_PARAMETERS) parameters — and from
+    /// the blocks otherwise.
     pub(super) fn of(sums: &InformationSums) -> Self {
         match &sums.full {
             Some(full) => Self::of_the_whole_matrix(full),
