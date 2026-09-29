@@ -154,7 +154,7 @@ step here that moves a fitted number is its own commit, with the checksums re-re
    column near zero for the shapes and the invariant share, their coverage near nominal at 20
    samples, and the test's bounds re-recorded from the new run; the oracle's change measured and
    explained before the checksums are re-recorded. *Depends:* A6. *Source:* checkpoint A decision 2.
-3. ☐ **A8 — the full matrix at small cohorts.** When a cohort has at most `FULL_MATRIX_SAMPLES` = 20
+3. ✅ **A8 — the full matrix at small cohorts.** When a cohort has at most `FULL_MATRIX_SAMPLES` = 20
    samples, the errors come from the full outer-product matrix — every parameter paired with every
    other, two samples' included — and from the blocks above that. No fitted number moves. Validated by
    A4's coverage test, whose 2- and 4-sample regimes at 3 reads then report the full matrix's

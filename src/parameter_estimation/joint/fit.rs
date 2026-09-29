@@ -2641,7 +2641,7 @@ fn expectation_pass(
         statistics.collect_noisy_posterior = collect_noisy_posterior;
         statistics.collect_genotype_posterior = collect_genotype_posterior;
         if keeps.information {
-            statistics.information = Some(InformationSums::new(group_index));
+            statistics.information = Some(InformationSums::for_a_cohort_of(group_index));
         }
         statistics
     };

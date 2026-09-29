@@ -713,8 +713,21 @@ fn score_the_duplicated_branch(
     }
 }
 
+/// **Up to this many samples the information is also summed as the whole matrix** — every
+/// parameter paired with every other, two samples' parameters included — and the standard errors
+/// come from it; above, from the blocks alone (checkpoint A's decision 3, plan step A8). At 4
+/// samples and 3 reads the blocks' errors were too small — the error rates and the mismapped share
+/// scattered 1.23 to 1.67 times them, and 0.89 to 1.02 times the whole matrix's — while at 20
+/// samples the two came within 11% of each other. What the whole matrix costs grows as the square
+/// of the parameters: at 20 samples of one library each, 68 parameters, a position adds 2,346
+/// products where the blocks add 724. **The limit is on samples, not on parameters**, so samples
+/// of many libraries make it larger: 20 samples of 16 libraries each have 668 parameters and add
+/// 223,446 products a position.
+pub(super) const FULL_MATRIX_SAMPLES: usize = 20;
+
 /// **The information, in blocks**: each position's scores multiplied pairwise and summed over
-/// positions, keeping only the products spec §3.2's block approximation reads.
+/// positions, keeping only the products spec §3.2's block approximation reads — and, for a cohort
+/// of at most [`FULL_MATRIX_SAMPLES`] samples, every product ([`FullInformation`]).
 ///
 /// Every block is row-major. **A sum over positions, like every other count of the pass**, so a
 /// chunk's sums add to another chunk's, and the pass joins them in its fixed order.
@@ -728,10 +741,13 @@ pub(super) struct InformationSums {
     /// Per sample, its own parameters (rows) with the cohort's eight (columns),
     /// `[row * 8 + column]`.
     pub sample_cohort_blocks: Vec<Vec<f64>>,
+    /// The whole matrix, when the sums were made for a cohort small enough to hold it
+    /// ([`InformationSums::for_a_cohort_of`]); the standard errors are then read from it.
+    pub full: Option<FullInformation>,
 }
 
 impl InformationSums {
-    /// Empty sums for samples reading the libraries `group_index` lists.
+    /// Empty sums for samples reading the libraries `group_index` lists, in blocks only.
     pub(super) fn new(group_index: &[Vec<usize>]) -> Self {
         let own = |libraries: &Vec<usize>| own_parameters(libraries.len());
         Self {
@@ -744,7 +760,18 @@ impl InformationSums {
                 .iter()
                 .map(|libraries| vec![0.0; own(libraries) * COHORT_PARAMETERS])
                 .collect(),
+            full: None,
         }
+    }
+
+    /// **What a pass sums for the standard errors**: the blocks, and the whole matrix too when the
+    /// cohort has at most [`FULL_MATRIX_SAMPLES`] samples.
+    pub(super) fn for_a_cohort_of(group_index: &[Vec<usize>]) -> Self {
+        let mut sums = Self::new(group_index);
+        if group_index.len() <= FULL_MATRIX_SAMPLES {
+            sums.full = Some(FullInformation::new(group_index));
+        }
+        sums
     }
 
     /// How many of its own parameters sample `s` carries.
@@ -786,6 +813,9 @@ impl InformationSums {
                 }
             }
         }
+        if let Some(full) = &mut self.full {
+            full.add_position(scores);
+        }
     }
 
     /// Add another chunk's sums.
@@ -817,6 +847,146 @@ impl InformationSums {
                 *into += from;
             }
         }
+        match (&mut self.full, &other.full) {
+            (Some(into), Some(from)) => into.absorb(from),
+            (None, None) => {}
+            // A total missing a chunk's pairings would give errors from part of the positions.
+            _ => unreachable!("two chunks of one pass both keep the whole matrix or neither does"),
+        }
+    }
+}
+
+/// **The whole information matrix**: every parameter's score paired with every other's and summed
+/// over the positions, in the layout the standard errors are reported in — the cohort's eight
+/// ([`cohort`]), then each sample's own parameters in turn ([`sample`]) — so two samples' parameters
+/// are paired too, which the blocks leave out. Kept only for a cohort of at most
+/// [`FULL_MATRIX_SAMPLES`] samples. It is symmetric, so only its upper triangle is held, row after
+/// row. The pass that sums it keeps one for each chunk, at most 128, and one total they are added
+/// into, which at 20 samples of one library is 129 × 2,346 numbers, 2.4 MB.
+#[derive(Clone)]
+pub(super) struct FullInformation {
+    /// How many parameters the matrix pairs: its side.
+    side: usize,
+    /// Where each sample's own parameters start in the layout.
+    sample_starts: Vec<usize>,
+    /// The upper triangle, row after row, each row from its diagonal entry to the end:
+    /// `side · (side + 1) / 2` sums.
+    upper: Vec<f64>,
+    /// One position's scores in the layout's order. Scratch, refilled at every position and not
+    /// part of what the sums are.
+    row: Vec<f64>,
+}
+
+impl std::fmt::Debug for FullInformation {
+    /// The sums only, not the scratch row: two sums that print alike are the same bits.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FullInformation")
+            .field("side", &self.side)
+            .field("sample_starts", &self.sample_starts)
+            .field("upper", &self.upper)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FullInformation {
+    /// Empty sums for samples reading the libraries `group_index` lists.
+    fn new(group_index: &[Vec<usize>]) -> Self {
+        let mut sample_starts = Vec::with_capacity(group_index.len());
+        let mut side = COHORT_PARAMETERS;
+        for libraries in group_index {
+            sample_starts.push(side);
+            side += own_parameters(libraries.len());
+        }
+        Self {
+            side,
+            sample_starts,
+            upper: vec![0.0; side * (side + 1) / 2],
+            row: Vec::with_capacity(side),
+        }
+    }
+
+    /// How many parameters the matrix pairs.
+    pub(super) fn side(&self) -> usize {
+        self.side
+    }
+
+    /// The rows of sample `s`'s own parameters in the matrix, in its [`sample`] order.
+    pub(super) fn rows_of_sample(&self, s: usize) -> std::ops::Range<usize> {
+        let end = self.sample_starts.get(s + 1).copied().unwrap_or(self.side);
+        self.sample_starts[s]..end
+    }
+
+    /// How many samples the matrix pairs the parameters of.
+    pub(super) fn samples(&self) -> usize {
+        self.sample_starts.len()
+    }
+
+    /// Where row `row`'s part of the upper triangle starts: after the rows before it, each one
+    /// entry shorter than the last.
+    fn row_start(&self, row: usize) -> usize {
+        row * self.side - (row * row - row) / 2
+    }
+
+    /// The sum at `(row, column)`, in either order.
+    pub(super) fn entry(&self, row: usize, column: usize) -> f64 {
+        let (row, column) = (row.min(column), row.max(column));
+        self.upper[self.row_start(row) + column - row]
+    }
+
+    /// Add one position's products. A score of zero adds only zeros, so its row is skipped.
+    fn add_position(&mut self, scores: &PositionScores) {
+        let Self {
+            side, upper, row, ..
+        } = self;
+        row.clear();
+        row.extend_from_slice(&scores.cohort);
+        for own in &scores.samples {
+            row.extend_from_slice(own);
+        }
+        debug_assert_eq!(row.len(), *side, "a position's scores fill the layout");
+        let mut start = 0;
+        for (at, &left) in row.iter().enumerate() {
+            let length = *side - at;
+            if left != 0.0 {
+                for (into, &right) in upper[start..start + length].iter_mut().zip(&row[at..]) {
+                    *into += left * right;
+                }
+            }
+            start += length;
+        }
+    }
+
+    /// Add another chunk's sums.
+    fn absorb(&mut self, other: &Self) {
+        assert_eq!(
+            self.side, other.side,
+            "two chunks of one pass pair the same parameters"
+        );
+        for (into, from) in self.upper.iter_mut().zip(&other.upper) {
+            *into += from;
+        }
+    }
+
+    /// The whole matrix from a dense one in the same layout, `[row * side + column]`, for the tests
+    /// that compare the errors it gives with a dense inverse's.
+    #[cfg(test)]
+    pub(super) fn of_dense(group_index: &[Vec<usize>], dense: &[f64]) -> Self {
+        let mut full = Self::new(group_index);
+        let side = full.side;
+        assert_eq!(
+            dense.len(),
+            side * side,
+            "a dense matrix of the layout's size"
+        );
+        let mut at = 0;
+        for row in 0..side {
+            for column in row..side {
+                full.upper[at] = dense[row * side + column];
+                at += 1;
+            }
+        }
+        full
     }
 }
 
@@ -2382,6 +2552,54 @@ mod tests {
         sums
     }
 
+    /// Every position's scores laid out flat — the cohort's eight, then each sample's own in turn
+    /// — multiplied pairwise and summed: the whole matrix, dense and row-major, and its side.
+    fn whole_matrix_by_hand(every: &[PositionScores]) -> (Vec<f64>, usize) {
+        let side = every.first().map_or(COHORT_PARAMETERS, |scores| {
+            COHORT_PARAMETERS + scores.samples.iter().map(Vec::len).sum::<usize>()
+        });
+        let mut dense = vec![0.0; side * side];
+        for here in every {
+            let flat: Vec<f64> = here
+                .cohort
+                .iter()
+                .chain(here.samples.iter().flatten())
+                .copied()
+                .collect();
+            for (row, &left) in flat.iter().enumerate() {
+                for (column, &right) in flat.iter().enumerate() {
+                    dense[row * side + column] += left * right;
+                }
+            }
+        }
+        (dense, side)
+    }
+
+    /// **The pass keeps the whole matrix up to [`FULL_MATRIX_SAMPLES`] samples and not above**:
+    /// sums made for 20 samples hold it, sized for their own parameters — a sample of two libraries
+    /// counting five — and sums made for 21 do not.
+    #[test]
+    fn the_whole_matrix_is_kept_up_to_twenty_samples() {
+        let mut twenty: Vec<Vec<usize>> = (0..FULL_MATRIX_SAMPLES).map(|s| vec![s]).collect();
+        twenty[3].push(FULL_MATRIX_SAMPLES);
+        let sums = InformationSums::for_a_cohort_of(&twenty);
+        let full = sums
+            .full
+            .as_ref()
+            .expect("twenty samples keep the whole matrix");
+        assert_eq!(full.side(), COHORT_PARAMETERS + 3 * 19 + 5);
+        assert_eq!(
+            full.rows_of_sample(3),
+            COHORT_PARAMETERS + 9..COHORT_PARAMETERS + 14
+        );
+        let twenty_one: Vec<Vec<usize>> = (0..=FULL_MATRIX_SAMPLES).map(|s| vec![s]).collect();
+        assert!(
+            InformationSums::for_a_cohort_of(&twenty_one).full.is_none(),
+            "twenty-one samples keep the blocks only"
+        );
+        assert!(InformationSums::new(&twenty).full.is_none());
+    }
+
     /// Every entry of two sets of blocks, beside the Cauchy–Schwarz bound on it — the square root
     /// of the two diagonal entries its row and column meet — which is the scale its rounding is
     /// measured against when positive and negative products cancel.
@@ -2561,6 +2779,30 @@ mod tests {
                      disagreement {worst:.2e} of each entry's bound"
                 );
                 assert!(worst < 1e-12, "worst disagreement {worst:.2e}");
+                // The whole matrix, every pairing including two samples', against the same
+                // products summed by hand.
+                let full = summed
+                    .full
+                    .as_ref()
+                    .expect("a cohort this small keeps the whole matrix");
+                let (by_hand_full, side) = whole_matrix_by_hand(&every);
+                assert_eq!(full.side(), side, "the whole matrix's size");
+                let mut worst_full = 0.0_f64;
+                for row in 0..side {
+                    for column in 0..side {
+                        let hand = by_hand_full[row * side + column];
+                        let scale = (by_hand_full[row * side + row]
+                            * by_hand_full[column * side + column])
+                            .sqrt();
+                        if scale == 0.0 {
+                            assert_eq!(full.entry(row, column), 0.0, "({row}, {column})");
+                            continue;
+                        }
+                        worst_full = worst_full.max((full.entry(row, column) - hand).abs() / scale);
+                    }
+                }
+                eprintln!("the whole matrix: worst disagreement {worst_full:.2e}");
+                assert!(worst_full < 1e-12, "the whole matrix: {worst_full:.2e}");
                 // Every sample has reads here, so every diagonal entry is positive.
                 for (s, block) in summed.sample_blocks.iter().enumerate() {
                     let n = summed.own_parameters_of(s);
@@ -2638,6 +2880,88 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A sample with no reads has no row in the whole matrix either**: through the sums a pass
+    /// makes for a cohort this small ([`InformationSums::for_a_cohort_of`]), sample 2's rows and
+    /// columns — its pairings with every other parameter — are exactly zero, every other entry equals
+    /// the products summed by hand to 10⁻¹² of its bound, the errors say it has no information, and
+    /// the other samples keep their rates' errors.
+    #[test]
+    fn a_sample_without_reads_has_no_row_in_the_whole_matrix() {
+        let (cohort, parameters) = a_cohort_and_parameters_off_the_maximum(8.0);
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            ..JointFitConfig::default()
+        };
+        let silent = 2;
+        with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+            let mut stored = positions_with_held_out_reads(lent, depth_cap, group_index, coverage);
+            for position in &mut stored {
+                position.libraries[silent] = LibraryAtPosition {
+                    depth: 0.0,
+                    on: [0.0; 5],
+                    fewest_reference: 0.0,
+                    spread: 1,
+                };
+                let weights = &mut position.depth_weights[silent * MAX_RECORDED_SPREAD..]
+                    [..MAX_RECORDED_SPREAD];
+                weights.fill(0.0);
+                weights[0] = 1.0;
+            }
+            let model = PassModel::new(&parameters, &config, group_index);
+            let slopes = ScoringTables::of(&model);
+            let nodes = model.quadrature.nodes.len();
+            let mut scratch = Scratch::new(group_index.len(), parameters.clean.len(), nodes);
+            let mut statistics = Statistics::new(parameters.clean.len(), group_index.len(), nodes);
+            let mut here = PositionScores::new(group_index, parameters.clean.len());
+            let mut information = InformationSums::for_a_cohort_of(group_index);
+            let mut every = Vec::new();
+            for position in &stored {
+                scratch.evidence.libraries.clone_from(&position.libraries);
+                scratch
+                    .evidence
+                    .depth_weights
+                    .clone_from(&position.depth_weights);
+                scratch
+                    .evidence
+                    .observed_alternatives
+                    .clone_from(&position.observed_alternatives);
+                one_position(&mut scratch, &model, &[], &mut statistics);
+                score_position(&scratch, &model, &slopes, &[], &mut here);
+                information.add_position(&here);
+                every.push(here.clone());
+            }
+            let full = information.full.as_ref().expect("kept");
+            let (dense, side) = whole_matrix_by_hand(&every);
+            let silent_rows = full.rows_of_sample(silent);
+            let mut worst = 0.0_f64;
+            for row in 0..side {
+                for column in 0..side {
+                    if silent_rows.contains(&row) || silent_rows.contains(&column) {
+                        assert_eq!(full.entry(row, column), 0.0, "({row}, {column})");
+                    }
+                    let scale = (dense[row * side + row] * dense[column * side + column]).sqrt();
+                    if scale > 0.0 {
+                        worst = worst.max(
+                            (full.entry(row, column) - dense[row * side + column]).abs() / scale,
+                        );
+                    }
+                }
+            }
+            assert!(worst < 1e-12, "{worst:.2e}");
+            let errors = StandardErrors::of(&information);
+            assert_eq!(errors.samples[silent], [StandardError::NoInformation; 3]);
+            for s in [0, 1, 3] {
+                for which in [sample::CLEAN_ERROR_RATE, sample::NOISY_ERROR_RATE] {
+                    assert!(
+                        errors.samples[s][which].value().is_some(),
+                        "{s}: {:?}",
+                        errors.samples[s]
+                    );
+                }
+            }
+        });
     }
 
     /// **A sample with no reads carries no information**: its own block and its block with the
@@ -2840,7 +3164,8 @@ mod tests {
         full
     }
 
-    /// The errors three ways, at a cohort's fitted maximum: from the blocks (what the fit reports),
+    /// The errors three ways, at a cohort's fitted maximum: from the blocks (what the fit reports
+    /// above [`FULL_MATRIX_SAMPLES`] samples),
     /// from the full matrix of every position's scores multiplied pairwise — including the products
     /// between two samples the blocks leave out — and by the spec's first sketch (the cohort's from
     /// its own block inverted, each sample's from `A_s − B_s C⁻¹ B_sᵀ` inverted). Returns, per kind,
@@ -3039,7 +3364,8 @@ mod tests {
     ///
     /// The spec's first sketch (the cohort's errors from its own block, each sample's from
     /// `A_s − B_s C⁻¹ B_sᵀ`) is no closer on any kind and further on the cohort's (up to 0.086 at 20
-    /// samples), so the blocks are what the fit reports.
+    /// samples), so the blocks are what the fit reports above [`FULL_MATRIX_SAMPLES`] samples, and
+    /// the full matrix below (plan step A8).
     ///
     /// The assertions hold each kind to its measured range with room for another draw. They pin the
     /// comparison, not the algebra — the arrow's inverse is pinned by `standard_errors`' own tests,
@@ -3174,7 +3500,8 @@ mod tests {
     /// or an earlier pass. Four samples with the duplicated class on, as runs are, where three starts
     /// end close together but not at the same bits, and one sample. At four samples every error rate
     /// and every homozygote excess has an error; at one, the excess says it is held fixed and the
-    /// two rates keep theirs.
+    /// two rates keep theirs. **They are the whole matrix's**, which a cohort this small keeps: at
+    /// four samples the blocks' differ.
     #[test]
     fn a_fit_carries_the_errors_at_the_parameters_it_returns() {
         let config = JointFitConfig {
@@ -3213,14 +3540,32 @@ mod tests {
                             information: true,
                         },
                     );
-                    StandardErrors::of(&statistics.information.expect("asked for"))
+                    let sums = statistics.information.expect("asked for");
+                    assert!(
+                        sums.full.is_some(),
+                        "a cohort this small keeps the whole matrix"
+                    );
+                    (
+                        StandardErrors::of(&sums),
+                        StandardErrors::of_the_blocks(&sums),
+                    )
                 });
+            let (at_the_returned_parameters, from_the_blocks) = at_the_returned_parameters;
             // `Debug` prints every `f64` as its shortest round-trip form: equal strings are equal bits.
             assert_eq!(
                 format!("{:?}", fit.standard_errors),
                 format!("{at_the_returned_parameters:?}"),
                 "{samples} sample(s)"
             );
+            // **The errors are the whole matrix's** (plan step A8): at four samples the blocks,
+            // which leave two samples' pairings out, give others.
+            if samples > 1 {
+                assert_ne!(
+                    format!("{:?}", fit.standard_errors),
+                    format!("{from_the_blocks:?}"),
+                    "{samples} samples: the fit's errors are the blocks'"
+                );
+            }
             for row in &fit.standard_errors.samples {
                 for which in [sample::CLEAN_ERROR_RATE, sample::NOISY_ERROR_RATE] {
                     assert!(row[which].value().is_some(), "{samples} sample(s): {row:?}");
@@ -3542,15 +3887,19 @@ mod tests {
     /// How the estimates of one kind of parameter fell against their errors, over many cohorts.
     #[derive(Default, Debug)]
     struct Coverage {
-        /// `(estimate − truth)` in units of the blocks' error — the error the fit reports.
+        /// `(estimate − truth)` in units of the error the fit reports — the whole matrix's, since
+        /// every regime here has at most [`FULL_MATRIX_SAMPLES`] samples (plan step A8).
+        reported: Tally,
+        /// The same in units of the blocks' error for the same cohort — the way a cohort above
+        /// [`FULL_MATRIX_SAMPLES`] samples is given its errors — over the estimates that have both
+        /// errors, so the two tallies compare like with like where the blocks give one.
         blocks: Tally,
-        /// The same in units of the full matrix's error, over the estimates it inverted for.
-        full: Tally,
-        /// `(estimate + Newton step − truth)` in units of the full matrix's error: where one Newton
-        /// step — the full inverse times the log-likelihood's slopes summed over the positions —
-        /// puts the likelihood's maximum, against the truth. Over the same estimates as `full`.
+        /// `(estimate + Newton step − truth)` in units of the reported error: where one Newton step
+        /// — the whole matrix's inverse times the log-likelihood's slopes summed over the positions
+        /// — puts the likelihood's maximum, against the truth. Over the same estimates as
+        /// `reported`.
         at_flat_point: Tally,
-        /// Parameters of this kind without a blocks' error.
+        /// Parameters of this kind without a reported error.
         absent: usize,
     }
 
@@ -3558,14 +3907,28 @@ mod tests {
         /// How far the likelihood's flat point lies from where the fit stopped, in errors, on
         /// average: the Newton step's mean, which is the two tallies' difference.
         fn flat_point(&self) -> f64 {
-            self.at_flat_point.mean() - self.full.mean()
+            self.at_flat_point.mean() - self.reported.mean()
+        }
+    }
+
+    /// The entry at layout `slot` of a set of errors — the cohort's by slot, a sample's by kind.
+    fn error_in(errors: &StandardErrors, slot: usize) -> StandardError {
+        if slot < COHORT_PARAMETERS {
+            errors.cohort[slot]
+        } else {
+            let at = slot - COHORT_PARAMETERS;
+            errors.samples[at / ONE_LIBRARY_SAMPLE_PARAMETERS][at % ONE_LIBRARY_SAMPLE_PARAMETERS]
         }
     }
 
     /// Draw `cohorts` cohorts of `samples` samples at `mean_depth` from the true values, fit each by
     /// the fit's own rule, and tally how far each estimate lands from the truth in units of its
-    /// error — the blocks' error, and the full matrix's over the same parameters — and how far the
-    /// likelihood's maximum lies from it. Returns the tallies by kind, and how many fits converged.
+    /// error — the error the fit itself reports, and the blocks' — and how far the likelihood's
+    /// maximum lies from it. Returns the tallies by kind, and how many fits converged.
+    ///
+    /// **The fit's reported errors are checked to be the whole matrix's**: the test sums every
+    /// position's scores multiplied pairwise itself, inverts that over the parameters the fit gave
+    /// an error, and requires every reported error to agree to 10⁻⁶ relative.
     fn coverage_of(
         samples: usize,
         positions: usize,
@@ -3596,8 +3959,9 @@ mod tests {
                 0.0,
                 seed + draw as u64,
             );
-            let (parameters, this_converged) = fitted_parameters_and_convergence(&cohort, &config);
-            converged += usize::from(this_converged);
+            let (fit, parameters) = fitted(&cohort, &config);
+            converged += usize::from(fit.converged);
+            let reported = &fit.standard_errors;
             with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
                 let (_, every) = scores_at_every_position(
                     lent,
@@ -3607,17 +3971,8 @@ mod tests {
                     coverage,
                     &parameters,
                 );
-                let blocks = StandardErrors::of(&information_by_hand(&every));
+                let blocks = StandardErrors::of_the_blocks(&information_by_hand(&every));
                 let n = COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * samples;
-                let block_error = |slot: usize| {
-                    if slot < COHORT_PARAMETERS {
-                        blocks.cohort[slot]
-                    } else {
-                        let at = slot - COHORT_PARAMETERS;
-                        blocks.samples[at / ONE_LIBRARY_SAMPLE_PARAMETERS]
-                            [at % ONE_LIBRARY_SAMPLE_PARAMETERS]
-                    }
-                };
                 // The duplicated class is off: its three slots are not parameters of this fit.
                 let fitted: Vec<usize> = (0..n)
                     .filter(|&slot| !(cohort::DUPLICATED_SHARE..COHORT_PARAMETERS).contains(&slot))
@@ -3627,13 +3982,14 @@ mod tests {
                     .copied()
                     .filter(|&slot| {
                         matches!(
-                            block_error(slot),
+                            error_in(reported, slot),
                             StandardError::Estimated(_) | StandardError::WiderThanItsRange(_)
                         )
                     })
                     .collect();
                 let m = kept.len();
-                let full_inverse = inverse_of_positive_definite(&full_matrix(&every, &kept), m);
+                let full_inverse = inverse_of_positive_definite(&full_matrix(&every, &kept), m)
+                    .expect("the whole matrix inverts over the parameters the fit gave an error");
                 // The log-likelihood's slope in each kept parameter, summed over the positions.
                 let slope: Vec<f64> = kept
                     .iter()
@@ -3654,19 +4010,24 @@ mod tests {
                     .collect();
                 for &slot in &fitted {
                     let entry = tally.entry(label_of(slot)).or_default();
-                    let Some(block) = block_error(slot).value() else {
+                    let off = value_at(&parameters, slot) - value_at(&truth, slot);
+                    let Some(error) = error_in(reported, slot).value() else {
                         entry.absent += 1;
                         continue;
                     };
-                    let off = value_at(&parameters, slot) - value_at(&truth, slot);
-                    entry.blocks.add(off / block);
-                    if let Some(inverse) = &full_inverse {
-                        let p = kept.iter().position(|&k| k == slot).expect("kept");
-                        let error = inverse[p * m + p].sqrt();
-                        let step: f64 = (0..m).map(|q| inverse[p * m + q] * slope[q]).sum();
-                        entry.full.add(off / error);
-                        entry.at_flat_point.add((off + step) / error);
+                    if let Some(block) = error_in(&blocks, slot).value() {
+                        entry.blocks.add(off / block);
                     }
+                    let p = kept.iter().position(|&k| k == slot).expect("kept");
+                    let whole = full_inverse[p * m + p].sqrt();
+                    assert!(
+                        (error - whole).abs() < 1e-6 * whole,
+                        "{samples} samples, slot {slot}: the fit reports {error}, the whole matrix \
+                         gives {whole}"
+                    );
+                    let step: f64 = (0..m).map(|q| full_inverse[p * m + q] * slope[q]).sum();
+                    entry.reported.add(off / error);
+                    entry.at_flat_point.add((off + step) / error);
                 }
             });
         }
@@ -3710,17 +4071,18 @@ mod tests {
     /// **What the coverage run must show**, so that a change to what it measures fails it rather
     /// than printing different numbers under a green result.
     ///
-    /// At any cohort count: every kind is tallied, and every estimate has an error from both
-    /// matrices. At the full count only — the draws are fixed by their seeds, so the numbers move only
-    /// when the code does — each regime is held to what it measured (plan step A7's run,
-    /// `tmp/fit_precision/a7b_coverage_full.log`; every line the same before the step's bound fix,
-    /// since no drawn shape reaches a bound), with room to spare:
+    /// At any cohort count: every kind is tallied, and every estimate the fit gives an error has one
+    /// from the whole matrix the test sums itself, equal to it ([`coverage_of`]). At the full count
+    /// only — the draws are fixed by their seeds, so the numbers move only when the code does — each
+    /// regime is held to what it measured (plan step A8's run,
+    /// `tmp/fit_precision/a8_coverage_full.log`), with room to spare:
     ///
     /// - at 4 and 20 samples, at most five fits in a regime stop at the pass limit (2 did, at 4
     ///   samples and 3 reads);
-    /// - where the errors cover — 20 samples at both depths, 4 samples at 30 reads — **every kind**
-    ///   lands between 0.58 and 0.78 within one of the blocks' errors and between 0.90 and 0.99
-    ///   within two (measured 0.620 to 0.735, and 0.925 to 0.980);
+    /// - where the reported errors cover — **every kind** at 20 samples at both depths and at 4
+    ///   samples and 30 reads, and the error rates and the homozygote excess at 4 samples and 3
+    ///   reads — each lands between 0.58 and 0.78 within one error and between 0.90 and 0.99 within
+    ///   two (measured 0.650 to 0.741, and 0.925 to 0.980);
     /// - **the fit stops at the likelihood's flat point**: at 20 samples every kind's flat point lies
     ///   within 0.02 errors of where the fit stopped (measured at most 0.002), and at 4 samples the
     ///   density's shapes' and the invariant share's within 0.25 (at most 0.108). With the shapes'
@@ -3728,7 +4090,7 @@ mod tests {
     ///   and 1.8 to 2.3 at 4 (step A4's report, §2);
     /// - at 20 samples both density shapes sit within 0.25 errors of the truth on average (measured
     ///   at most 0.033), where the digamma form left them 1.05 to 1.29 above it;
-    /// - at 4 samples and 3 reads the full matrix's errors put at least 0.08 more of the error rates
+    /// - at 4 samples and 3 reads the reported errors put at least 0.08 more of the error rates
     ///   within one error than the blocks' do (measured 0.150 and 0.148 more).
     ///
     /// The 2-sample regime is printed and held only to the checks that apply at any count: 54 of its
@@ -3748,10 +4110,10 @@ mod tests {
         );
         for (kind, coverage) in tally {
             assert!(
-                coverage.blocks.count > 0 && coverage.full.count == coverage.blocks.count,
-                "{regime}, {kind}: {} estimates with a blocks' error, {} with a full-matrix error",
-                coverage.blocks.count,
-                coverage.full.count
+                coverage.reported.count > 0
+                    && coverage.at_flat_point.count == coverage.reported.count,
+                "{regime}, {kind}: {} estimates with a reported error",
+                coverage.reported.count,
             );
         }
         if cohorts != COVERAGE_COHORTS {
@@ -3762,17 +4124,24 @@ mod tests {
             "{regime}: {converged} of {cohorts} fits converged"
         );
         let depth = mean_depth as usize;
-        if samples == 20 || (samples == 4 && depth == 30) {
-            for kind in COVERAGE_KINDS {
-                let blocks = &tally[kind].blocks;
-                assert!(
-                    (0.58..=0.78).contains(&blocks.share_within_one())
-                        && (0.90..=0.99).contains(&blocks.share_within_two()),
-                    "{regime}, {kind}: {:.3} within one of the blocks' errors, {:.3} within two",
-                    blocks.share_within_one(),
-                    blocks.share_within_two()
-                );
-            }
+        let covering: &[&str] = match (samples, depth) {
+            (20, _) | (4, 30) => &COVERAGE_KINDS,
+            (4, 3) => &[
+                "clean error rates",
+                "mismapped error rates",
+                "homozygote excess",
+            ],
+            _ => &[],
+        };
+        for &kind in covering {
+            let reported = &tally[kind].reported;
+            assert!(
+                (0.58..=0.78).contains(&reported.share_within_one())
+                    && (0.90..=0.99).contains(&reported.share_within_two()),
+                "{regime}, {kind}: {:.3} within one of the reported errors, {:.3} within two",
+                reported.share_within_one(),
+                reported.share_within_two()
+            );
         }
         let flat_point_bound = match samples {
             20 => Some((COVERAGE_KINDS.as_slice(), 0.02)),
@@ -3794,7 +4163,7 @@ mod tests {
         }
         if samples == 20 {
             for kind in ["density shape a", "density shape b"] {
-                let off_centre = tally[kind].blocks.mean();
+                let off_centre = tally[kind].reported.mean();
                 assert!(
                     off_centre.abs() < 0.25,
                     "{regime}, {kind}: the estimates sit {off_centre:+.3} errors from the truth"
@@ -3803,11 +4172,11 @@ mod tests {
         }
         if samples == 4 && depth == 3 {
             for kind in ["clean error rates", "mismapped error rates"] {
-                let (blocks, full) = (&tally[kind].blocks, &tally[kind].full);
+                let (reported, blocks) = (&tally[kind].reported, &tally[kind].blocks);
                 assert!(
-                    full.share_within_one() >= blocks.share_within_one() + 0.08,
-                    "{regime}, {kind}: within one error {:.3} (full) against {:.3} (blocks)",
-                    full.share_within_one(),
+                    reported.share_within_one() >= blocks.share_within_one() + 0.08,
+                    "{regime}, {kind}: within one error {:.3} (reported) against {:.3} (blocks)",
+                    reported.share_within_one(),
                     blocks.share_within_one()
                 );
             }
@@ -3818,8 +4187,9 @@ mod tests {
     /// known values in each regime, each fitted by the fit's own rule; of every estimate with an
     /// error, the share within one error of the truth and within two, which for an error that means
     /// what it says are about 68 in 100 and 95 in 100, and the spread of the distances, about one.
-    /// Measured for the errors the fit reports (the blocks) and for the full matrix's over the same
-    /// parameters, on 4 samples over 20,000 positions and 20 over 5,000 at 3 and at 30 reads a
+    /// Measured for the errors the fit reports — the whole matrix's, since every regime has at most
+    /// [`FULL_MATRIX_SAMPLES`] samples (plan step A8) — and for the blocks', which a larger cohort
+    /// would be given, on 4 samples over 20,000 positions and 20 over 5,000 at 3 and at 30 reads a
     /// position, and on 2 samples over 30,000 at 3 reads. The duplicated class is off in the draw and
     /// the fit ([`TRUTH`]), so nothing here checks where the carrier Beta's shapes come to rest: the
     /// slopes they step on are held to the scorer's by `the_passs_shape_slopes_are_the_likelihoods`
@@ -3827,10 +4197,10 @@ mod tests {
     /// Also printed, per kind: how far the log-likelihood's own flat point lies from where the fit
     /// stopped, and the coverage there — both by one Newton step.
     ///
-    /// What it measured, and what it holds each regime to, are in [`check_the_coverage`] and the step
-    /// A4 report, which has every number.
+    /// What it measured, and what it holds each regime to, are in [`check_the_coverage`] and the
+    /// reports of plan steps A4, A7 and A8.
     ///
-    /// Ignored by default: some twenty minutes in the container. Run with
+    /// Ignored by default: some thirty-five minutes in the container. Run with
     /// `scripts/dev.sh cargo test --release --lib the_errors_mean_what_they_say -- --ignored --nocapture`;
     /// `scripts/dev.sh env NG_FIT_PRECISION_COVERAGE_COHORTS=3 cargo test …` shortens it to a minute
     /// or so, with only the checks that hold at any count.
@@ -3869,26 +4239,29 @@ mod tests {
                      converged"
             );
             for (kind, coverage) in &tally {
-                let (blocks, full, at_flat) =
-                    (&coverage.blocks, &coverage.full, &coverage.at_flat_point);
+                let (reported, blocks, at_flat) = (
+                    &coverage.reported,
+                    &coverage.blocks,
+                    &coverage.at_flat_point,
+                );
                 eprintln!(
                     "COVERAGE {samples} samples, {mean_depth} reads, {kind}: {} estimates ({} \
-                         with a full-matrix error), {} without an error; within one error {:.3} \
-                         (blocks) {:.3} (full), within two {:.3} {:.3}; mean distance {:+.3} \
+                         with a blocks' error), {} without an error; within one error {:.3} \
+                         (reported) {:.3} (blocks), within two {:.3} {:.3}; mean distance {:+.3} \
                          {:+.3}; spread {:.3} {:.3}; the likelihood's flat point lies {:+.3} errors \
                          from the fit, on average; there, within one {:.3}, within two {:.3}, mean \
                          {:+.3}",
+                    reported.count,
                     blocks.count,
-                    full.count,
                     coverage.absent,
+                    reported.share_within_one(),
                     blocks.share_within_one(),
-                    full.share_within_one(),
+                    reported.share_within_two(),
                     blocks.share_within_two(),
-                    full.share_within_two(),
+                    reported.mean(),
                     blocks.mean(),
-                    full.mean(),
+                    reported.spread(),
                     blocks.spread(),
-                    full.spread(),
                     coverage.flat_point(),
                     at_flat.share_within_one(),
                     at_flat.share_within_two(),

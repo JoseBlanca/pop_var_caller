@@ -1,7 +1,8 @@
-//! Each SNP/indel parameter's **standard error**, from the information a pass summed in blocks.
+//! Each SNP/indel parameter's **standard error**, from the information a pass summed — in blocks,
+//! and as the whole matrix for a small cohort.
 //!
 //! Design: `doc/devel/ng/spec/fit_precision.md` §3.2–3.3. Build order:
-//! `doc/devel/implementation_plans/fit_precision.md`, steps A3 and A5.
+//! `doc/devel/implementation_plans/fit_precision.md`, steps A3, A5 and A8.
 //!
 //! Every fit computes them once, at the parameters it returns, from the information its final pass
 //! sums ([`fit_jointly`](super::fit_jointly)); it prints them as one line of the run's log
@@ -15,21 +16,29 @@
 //! **inverse** of the information matrix — not one over its own diagonal entry, because a parameter
 //! whose effect another parameter can mimic is less well determined than its own curvature says.
 //!
-//! The pass keeps the information in blocks ([`InformationSums`]): the cohort's eight parameters
-//! with each other (`C`), each sample's own with each other (`A_s`) — three for a sample of one
-//! library, `1 + 2k` for one of `k` — and each sample's own with the cohort's (`B_s`). Two samples'
-//! parameters are never paired, so the matrix is an **arrow**: the cohort's row and column run
-//! along one edge and every sample's block sits on the diagonal, alone. An arrow is inverted
-//! exactly, block by block, without ever forming it:
+//! **Two ways, chosen by the cohort's size** ([`StandardErrors::of`]):
 //!
-//! - the cohort's errors come from `C − Σ_s B_sᵀ A_s⁻¹ B_s` inverted — the cohort's information,
-//!   less what each sample's own parameters could explain of it;
-//! - a sample's errors come from `A_s⁻¹ + A_s⁻¹ B_s V B_sᵀ A_s⁻¹`, where `V` is the cohort's inverse
-//!   just computed — the sample's own uncertainty, plus the cohort's carried through the parameters
-//!   the two share.
+//! - **the whole matrix**, for a cohort of at most
+//!   [`FULL_MATRIX_SAMPLES`](super::information::FULL_MATRIX_SAMPLES) samples: every parameter's
+//!   score paired with every other's, two samples' included ([`FullInformation`]), inverted at once;
+//! - **the blocks**, above that ([`InformationSums`]): the cohort's eight parameters with each other
+//!   (`C`), each sample's own with each other (`A_s`) — three for a sample of one library, `1 + 2k`
+//!   for one of `k` — and each sample's own with the cohort's (`B_s`). Two samples' parameters are
+//!   not paired, so the matrix is an **arrow**: the cohort's row and column run along one edge and
+//!   every sample's block sits on the diagonal, alone. An arrow is inverted exactly, block by block,
+//!   without ever forming it:
+//!   - the cohort's errors come from `C − Σ_s B_sᵀ A_s⁻¹ B_s` inverted — the cohort's information,
+//!     less what each sample's own parameters could explain of it;
+//!   - a sample's errors come from `A_s⁻¹ + A_s⁻¹ B_s V B_sᵀ A_s⁻¹`, where `V` is the cohort's
+//!     inverse just computed — the sample's own uncertainty, plus the cohort's carried through the
+//!     parameters the two share.
 //!
-//! What the arrow leaves out is the direct pairing of two samples' scores, which the pass does not
-//! sum; the tests measure what that costs against the full matrix on small cohorts.
+//! What the arrow leaves out is the pairing of two samples' scores, and **at small cohorts that
+//! matters**: at 4 samples and 3 reads a position the error rates and the mismapped share scattered
+//! 1.23 to 1.67 times the blocks' errors and 0.89 to 1.02 times the whole matrix's (plan step A4).
+//! At 20 samples the two came within 11% of each other (1.067 against 0.965, the mismapped rates at
+//! 3 reads), and the whole matrix grows as the square of the samples, so above 20 the blocks are
+//! kept.
 //!
 //! # When a parameter has no error
 //!
@@ -51,17 +60,23 @@
 //! - **the data do not place it anywhere in the interval the fit keeps it in** — its error came out
 //!   wider than that whole interval. Measured at two samples with the duplicated class on: once the
 //!   carrier Beta's second shape is dropped, the invariant share's error came out at 3.6 though it
-//!   lives in [0, 1], and the density's shapes' at 720 and 1,148 though they live in [0.02, 50];
-//!   the full matrix, with the products of the two samples' scores in, does not invert over those
-//!   parameters at all.
+//!   lives in [0, 1], and the density's shapes' at 720 and 1,148 though they live in [0.02, 50].
+//!   That was on the blocks; a two-sample cohort now takes the whole matrix, which, with the
+//!   products of the two samples' scores in, cannot tell those parameters apart at all and drops
+//!   them as not identified.
 //!
 //! A parameter counts as not told apart when the curvature left to it once the parameters before
 //! it are accounted for is below [`IDENTIFIED_SHARE`] of its own curvature — which parameter of a
-//! mimicking set that is depends on their order, the cohort's first. Without the threshold, a
+//! mimicking set that is depends on their order: each sample's own first, the samples in turn,
+//! then the cohort's, on both ways. On an arrow the two ways drop the same parameters. On the whole
+//! matrix a sample's parameter is also judged against earlier samples', so where a parameter of one
+//! sample mimics one of another, the later sample's is the one dropped. Without the threshold, a
 //! remainder that is only rounding would be inverted into an error of millions (measured: 2 × 10⁶
 //! on a carrier shape, 13.5 on a share that lives in [0, 1], at two samples and 300,000 positions).
 
-use super::information::{COHORT_PARAMETERS, InformationSums, cohort, own_parameters, sample};
+use super::information::{
+    COHORT_PARAMETERS, FullInformation, InformationSums, cohort, own_parameters, sample,
+};
 use super::{
     BETA_SHAPE_BOUNDS, CLEAN_ERROR_BOUNDS, DUPLICATED_SHARE_BOUNDS, HOM_EXCESS_BOUNDS,
     NOISY_ERROR_BOUNDS, NOISY_SHARE_BOUNDS, P_FIXED_ALT_BOUNDS, P_INVARIANT_BOUNDS, Parameters,
@@ -161,6 +176,22 @@ const RATE_NAMES: [&str; 2] = [
     "error rates at mismapped positions",
 ];
 
+/// Whose parameter a row of the whole matrix is: the cohort's, or one sample's.
+#[derive(Copy, Clone, Debug)]
+enum Owner {
+    Cohort,
+    Sample(usize),
+}
+
+/// A parameter the whole matrix is inverted over: whose it is, its slot among its owner's
+/// parameters (a [`cohort`] slot or a [`sample`] slot), and its row in the matrix.
+#[derive(Copy, Clone, Debug)]
+struct InvertedParameter {
+    owner: Owner,
+    slot: usize,
+    row: usize,
+}
+
 /// Every fitted parameter's standard error, or why it has none.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct StandardErrors {
@@ -173,8 +204,88 @@ pub(super) struct StandardErrors {
 
 impl StandardErrors {
     /// The errors of every parameter, from the information one pass summed at the parameters
-    /// being reported.
+    /// being reported: from the whole matrix when the pass kept it — a cohort of at most
+    /// [`FULL_MATRIX_SAMPLES`](super::information::FULL_MATRIX_SAMPLES) samples — and from the
+    /// blocks otherwise.
     pub(super) fn of(sums: &InformationSums) -> Self {
+        match &sums.full {
+            Some(full) => Self::of_the_whole_matrix(full),
+            None => Self::of_the_blocks(sums),
+        }
+    }
+
+    /// **The errors from the whole matrix**, two samples' parameters paired included: the matrix
+    /// inverted at once over every parameter that has information and that the fit moves.
+    ///
+    /// The parameters are taken in the order the blocks take them — each sample's own, the samples
+    /// in turn, then the cohort's — so a parameter the others mimic is dropped by the same rule
+    /// ([`invert_identified`]): a sample's own is judged against the parameters before it, the
+    /// cohort's against everything the samples explain. On an arrow, where no two samples' scores
+    /// are paired, the two ways drop the same parameters and give the same errors.
+    fn of_the_whole_matrix(full: &FullInformation) -> Self {
+        let samples = full.samples();
+        let excess_is_fitted = fits_homozygote_excess(samples);
+        let mut errors = Self {
+            cohort: [StandardError::NoInformation; COHORT_PARAMETERS],
+            samples: (0..samples)
+                .map(|s| vec![StandardError::NoInformation; full.rows_of_sample(s).len()])
+                .collect(),
+        };
+        let mut inverted: Vec<InvertedParameter> = Vec::with_capacity(full.side());
+        for s in 0..samples {
+            for (slot, row) in full.rows_of_sample(s).enumerate() {
+                if !has_information(full.entry(row, row)) {
+                    continue;
+                }
+                if slot == sample::HOMOZYGOTE_EXCESS && !excess_is_fitted {
+                    errors.samples[s][slot] = StandardError::HeldFixed;
+                    continue;
+                }
+                inverted.push(InvertedParameter {
+                    owner: Owner::Sample(s),
+                    slot,
+                    row,
+                });
+            }
+        }
+        for slot in 0..COHORT_PARAMETERS {
+            if has_information(full.entry(slot, slot)) {
+                inverted.push(InvertedParameter {
+                    owner: Owner::Cohort,
+                    slot,
+                    row: slot,
+                });
+            }
+        }
+        let rows: Vec<usize> = inverted.iter().map(|parameter| parameter.row).collect();
+        let matrix = square_of(&rows, |row, column| full.entry(row, column));
+        let reference: Vec<f64> = rows.iter().map(|&row| full.entry(row, row)).collect();
+        let identified = invert_identified(&matrix, rows.len(), &reference);
+        let mut record = |parameter: InvertedParameter, error: StandardError| match parameter.owner
+        {
+            Owner::Sample(s) => errors.samples[s][parameter.slot] = error,
+            Owner::Cohort => errors.cohort[parameter.slot] = error,
+        };
+        for &position in &identified.dropped {
+            record(inverted[position], StandardError::NotIdentified);
+        }
+        let kept = identified.kept.len();
+        for (p, &position) in identified.kept.iter().enumerate() {
+            let parameter = inverted[position];
+            let bounds = match parameter.owner {
+                Owner::Sample(_) => bounds_of_own(parameter.slot),
+                Owner::Cohort => COHORT_BOUNDS[parameter.slot],
+            };
+            record(
+                parameter,
+                error_from_variance(identified.inverse[p * kept + p], bounds),
+            );
+        }
+        errors
+    }
+
+    /// **The errors from the blocks**: the arrow inverted block by block (module doc).
+    pub(super) fn of_the_blocks(sums: &InformationSums) -> Self {
         let samples = sums.sample_blocks.len();
         let excess_is_fitted = fits_homozygote_excess(samples);
         let mut errors = Self {
@@ -760,25 +871,35 @@ mod tests {
         for entry in &mut full {
             *entry *= 1e6;
         }
+        (blocks_of_dense(libraries, &full), full)
+    }
+
+    /// The blocks of a dense matrix in the layout — the cohort's eight, then each sample's own in
+    /// turn — for samples of `libraries` libraries each; what pairs two samples is left out.
+    fn blocks_of_dense(libraries: &[usize], dense: &[f64]) -> InformationSums {
+        let sizes: Vec<usize> = libraries.iter().map(|&k| own_parameters(k)).collect();
+        let n = COHORT_PARAMETERS + sizes.iter().sum::<usize>();
         let mut sums = InformationSums::new(&group_index_of(libraries));
         for row in 0..COHORT_PARAMETERS {
             for column in 0..COHORT_PARAMETERS {
-                sums.cohort[row * COHORT_PARAMETERS + column] = full[row * n + column];
+                sums.cohort[row * COHORT_PARAMETERS + column] = dense[row * n + column];
             }
         }
-        for (s, (&first, &size)) in firsts.iter().zip(&sizes).enumerate() {
+        let mut first = COHORT_PARAMETERS;
+        for (s, &size) in sizes.iter().enumerate() {
             for row in 0..size {
                 for column in 0..size {
                     sums.sample_blocks[s][row * size + column] =
-                        full[(first + row) * n + first + column];
+                        dense[(first + row) * n + first + column];
                 }
                 for column in 0..COHORT_PARAMETERS {
                     sums.sample_cohort_blocks[s][row * COHORT_PARAMETERS + column] =
-                        full[(first + row) * n + column];
+                        dense[(first + row) * n + column];
                 }
             }
+            first += size;
         }
-        (sums, full)
+        sums
     }
 
     /// The error of layout parameter `i` — the cohort's eight, then each sample's own in turn.
@@ -888,6 +1009,215 @@ mod tests {
                 (other, _) => panic!("rate {class} of a second library at 0.3: {other:?}"),
             }
         }
+    }
+
+    /// A random dense information matrix in the layout — every parameter paired with every other,
+    /// two samples' included — for samples of `libraries` libraries each, and the sums holding it as
+    /// the whole matrix. Scaled as [`an_arrow_of`] is, so every error is about 10⁻³.
+    fn a_whole_matrix_of(libraries: &[usize], seed: u64) -> (InformationSums, Vec<f64>) {
+        let n = COHORT_PARAMETERS + libraries.iter().map(|&k| own_parameters(k)).sum::<usize>();
+        let dense: Vec<f64> = positive_definite(n, seed)
+            .into_iter()
+            .map(|entry| entry * 1e6)
+            .collect();
+        (with_the_whole_matrix(libraries, &dense), dense)
+    }
+
+    /// Sums holding `dense` as the whole matrix, for samples of `libraries` libraries each.
+    fn with_the_whole_matrix(libraries: &[usize], dense: &[f64]) -> InformationSums {
+        let group_index = group_index_of(libraries);
+        let mut sums = InformationSums::new(&group_index);
+        sums.full = Some(FullInformation::of_dense(&group_index, dense));
+        sums
+    }
+
+    /// **The whole matrix gives the errors of its own dense inverse** (plan step A8): a random
+    /// matrix with every pair of parameters informed — two samples' included, which the blocks
+    /// never see — over samples of one, two, three and one library, 26 parameters; every error
+    /// agrees with the square root of the dense inverse's diagonal to 10⁻¹² relative. An entry read
+    /// from the wrong triangle, a sample's slots read at another's offset, or the blocks used
+    /// instead, fails.
+    #[test]
+    fn the_whole_matrix_gives_the_errors_of_its_dense_inverse() {
+        let libraries = [1, 2, 3, 1];
+        let (sums, dense) = a_whole_matrix_of(&libraries, 17);
+        let n = COHORT_PARAMETERS + 18;
+        let errors = StandardErrors::of(&sums);
+        assert_eq!(
+            errors.samples.iter().map(Vec::len).collect::<Vec<_>>(),
+            [3, 5, 7, 3]
+        );
+        assert_errors_match(&errors, &dense_errors_without(&dense, n, |_| false));
+    }
+
+    /// **On an arrow the whole matrix and the blocks give the same errors**: where no two samples'
+    /// scores are paired the two ways invert the same matrix, and every error agrees to 10⁻¹²
+    /// relative — the whole matrix only adds what the arrow leaves out.
+    #[test]
+    fn on_an_arrow_the_whole_matrix_and_the_blocks_agree() {
+        let libraries = [1, 2, 3, 1];
+        let (mut sums, dense) = an_arrow_of(&libraries, 19);
+        let n = COHORT_PARAMETERS + 18;
+        let blocks = StandardErrors::of_the_blocks(&sums);
+        sums.full = Some(FullInformation::of_dense(
+            &group_index_of(&libraries),
+            &dense,
+        ));
+        let whole = StandardErrors::of(&sums);
+        for i in 0..n {
+            match (error_at(&blocks, i), error_at(&whole, i)) {
+                (StandardError::Estimated(from_blocks), StandardError::Estimated(from_whole)) => {
+                    assert!(
+                        (from_blocks - from_whole).abs() < 1e-12 * from_blocks,
+                        "parameter {i}: {from_blocks} from the blocks, {from_whole} from the whole"
+                    );
+                }
+                (from_blocks, from_whole) => {
+                    panic!(
+                        "parameter {i}: {from_blocks:?} from the blocks, {from_whole:?} from the whole"
+                    )
+                }
+            }
+        }
+    }
+
+    /// **On an arrow the whole matrix and the blocks drop the same parameters**, which rests on the
+    /// order the whole matrix takes them in — each sample's own first, the samples in turn, then the
+    /// cohort's — since the blocks judge the cohort's only after the samples' share is taken out.
+    /// On an arrow over samples of one, two and one library, the density's first shape is made to
+    /// copy sample 0's clean rate (twice its row), and sample 1's second library's mismapped rate
+    /// to copy that library's clean rate (three times its row). Both ways drop the density's shape,
+    /// keep sample 0's rate, drop the second library's mismapped rate, and agree on every other
+    /// error to 10⁻⁹ relative. Taking the cohort's parameters first would keep the shape and drop
+    /// the sample's rate instead.
+    #[test]
+    fn on_an_arrow_the_whole_matrix_and_the_blocks_drop_the_same_parameters() {
+        let libraries = [1, 2, 1];
+        let (_, mut dense) = an_arrow_of(&libraries, 23);
+        let n = COHORT_PARAMETERS + 11;
+        let sample_rate = COHORT_PARAMETERS + sample::CLEAN_ERROR_RATE;
+        let second_library = COHORT_PARAMETERS + 3;
+        let (second_clean, second_mismapped) = (
+            second_library + sample::rate(1, 0),
+            second_library + sample::rate(1, 1),
+        );
+        for (copy, of, factor) in [
+            (cohort::DENSITY_A, sample_rate, 2.0),
+            (second_mismapped, second_clean, 3.0),
+        ] {
+            for k in 0..n {
+                dense[copy * n + k] = factor * dense[of * n + k];
+            }
+            for k in 0..n {
+                dense[k * n + copy] = factor * dense[k * n + of];
+            }
+        }
+        let mut sums = blocks_of_dense(&libraries, &dense);
+        let blocks = StandardErrors::of_the_blocks(&sums);
+        sums.full = Some(FullInformation::of_dense(
+            &group_index_of(&libraries),
+            &dense,
+        ));
+        let whole = StandardErrors::of(&sums);
+        for errors in [&blocks, &whole] {
+            assert_eq!(
+                errors.cohort[cohort::DENSITY_A],
+                StandardError::NotIdentified
+            );
+            assert!(matches!(
+                error_at(errors, sample_rate),
+                StandardError::Estimated(_)
+            ));
+            assert_eq!(
+                error_at(errors, second_mismapped),
+                StandardError::NotIdentified
+            );
+        }
+        for i in 0..n {
+            match (error_at(&blocks, i), error_at(&whole, i)) {
+                (StandardError::Estimated(from_blocks), StandardError::Estimated(from_whole)) => {
+                    assert!(
+                        (from_blocks - from_whole).abs() < 1e-9 * from_blocks,
+                        "parameter {i}: {from_blocks} from the blocks, {from_whole} from the whole"
+                    );
+                }
+                (from_blocks, from_whole) => assert_eq!(from_blocks, from_whole, "parameter {i}"),
+            }
+        }
+    }
+
+    /// **The whole matrix judges each slot against its own parameter's interval**, as the blocks do:
+    /// a second library's mismapped rate rescaled so its error comes out at 0.3 has that error —
+    /// inside the mismapped rate's interval (0.0001 to 0.45), outside the clean rate's (0.000001 to
+    /// 0.2), so judging every slot by the clean rate's would report it wider than its range.
+    #[test]
+    fn the_whole_matrix_judges_each_slot_against_its_own_interval() {
+        let libraries = [1, 2];
+        let (sums, dense) = a_whole_matrix_of(&libraries, 47);
+        let n = COHORT_PARAMETERS + 8;
+        let slot = sample::rate(1, 1);
+        let row = COHORT_PARAMETERS + 3 + slot;
+        let factor = 0.3
+            / StandardErrors::of(&sums).samples[1][slot]
+                .value()
+                .expect("an error");
+        let mut rescaled = dense;
+        for j in 0..n {
+            rescaled[row * n + j] /= factor;
+            rescaled[j * n + row] /= factor;
+        }
+        let rescaled_error =
+            StandardErrors::of(&with_the_whole_matrix(&libraries, &rescaled)).samples[1][slot];
+        assert!(
+            matches!(rescaled_error, StandardError::Estimated(error) if (error - 0.3).abs() < 1e-9),
+            "{rescaled_error:?}"
+        );
+    }
+
+    /// **The whole matrix says why a parameter has no error, by the blocks' rules**: a sample whose
+    /// rows are empty has no information; the duplicated share made twice the mismapped share's
+    /// row cannot be told apart from it and is dropped alone, the mismapped share keeping its
+    /// error; at one sample the homozygote excess is held fixed. Every other error equals the dense
+    /// inverse's without those parameters.
+    #[test]
+    fn the_whole_matrix_says_why_a_parameter_has_no_error() {
+        let libraries = [1, 2, 1];
+        let (_, mut dense) = a_whole_matrix_of(&libraries, 29);
+        let n = COHORT_PARAMETERS + 11;
+        let silent: Vec<usize> = (COHORT_PARAMETERS + 3..COHORT_PARAMETERS + 8).collect();
+        for &i in &silent {
+            for k in 0..n {
+                dense[i * n + k] = 0.0;
+                dense[k * n + i] = 0.0;
+            }
+        }
+        let (copy, of) = (cohort::DUPLICATED_SHARE, cohort::NOISY_SHARE);
+        for k in 0..n {
+            dense[copy * n + k] = 2.0 * dense[of * n + k];
+        }
+        for k in 0..n {
+            dense[k * n + copy] = 2.0 * dense[k * n + of];
+        }
+        let errors = StandardErrors::of(&with_the_whole_matrix(&libraries, &dense));
+        assert_eq!(errors.samples[1], [StandardError::NoInformation; 5]);
+        assert_eq!(errors.cohort[copy], StandardError::NotIdentified);
+        assert!(matches!(errors.cohort[of], StandardError::Estimated(_)));
+        assert_errors_match(
+            &errors,
+            &dense_errors_without(&dense, n, |i| silent.contains(&i) || i == copy),
+        );
+
+        let (one, dense_of_one) = a_whole_matrix_of(&[1], 31);
+        let excess = COHORT_PARAMETERS + sample::HOMOZYGOTE_EXCESS;
+        let errors = StandardErrors::of(&one);
+        assert_eq!(
+            errors.samples[0][sample::HOMOZYGOTE_EXCESS],
+            StandardError::HeldFixed
+        );
+        assert_errors_match(
+            &errors,
+            &dense_errors_without(&dense_of_one, COHORT_PARAMETERS + 3, |i| i == excess),
+        );
     }
 
     /// **A parameter with no information has no error, and does not disturb the others'**: the
