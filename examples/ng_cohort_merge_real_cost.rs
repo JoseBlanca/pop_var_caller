@@ -784,6 +784,8 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                 Verdict::Build => built += 1,
                 Verdict::TooQuiet => quiet += 1,
                 Verdict::Failed => failed += 1,
+                // A cohort handed over in memory carries no stand-ins for dropped records.
+                Verdict::OverDepthCeiling => unreachable!("no record here is over a depth ceiling"),
             }
             // **A locus's members are index ranges now, not records**, so they are resolved
             // against the cohort before their observations can be read. This is a counting

@@ -51,7 +51,7 @@
 use core::ops::Range;
 
 use crate::locus_generation::{LocusKind, SampleLocusObservations};
-use crate::run::cohort_merge::observation_cache::{Drawn, LocusSummary};
+use crate::run::cohort_merge::observation_cache::{Drawn, LocusSummary, StandIn};
 use crate::types::{GenomePosition, Position};
 
 /// Call `report` once for every reference position this record speaks for, with this sample's
@@ -151,6 +151,16 @@ impl<'a> From<&'a Drawn> for EvidenceForOneRecord<'a> {
             // `Drawn::Kept` fails to compile here.
             Drawn::Built(record) => Self::InHand(record),
             Drawn::Kept { body, summary: _ } => Self::Kept(body.clone()),
+            // Never measured — `observe` skips a record over the depth ceiling before it asks
+            // for evidence — but it still names the slot the record's evidence would be in.
+            Drawn::OverDepthCeiling {
+                stand_in: StandIn::Record(record),
+                region: _,
+            } => Self::InHand(record),
+            Drawn::OverDepthCeiling {
+                stand_in: StandIn::Body(body),
+                region: _,
+            } => Self::Kept(body.clone()),
         }
     }
 }

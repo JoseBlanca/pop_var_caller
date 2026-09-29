@@ -64,6 +64,7 @@ fn walked(
         // sample with no reads in the analysed ground reports — and the case the "with none"
         // line is about.
         snp_indel: None,
+        loci_over_the_depth_ceiling: 0,
     }
 }
 
@@ -881,6 +882,7 @@ fn a_stored_sample(
             reads_compared_with_reference,
             loci_thinned_to_the_read_cap: 0,
             reads_thinned_by_the_read_cap: 0,
+            loci_over_the_depth_ceiling: 0,
         },
         read_filters_the_walk_applied: min_mapq
             .map(|floor| {

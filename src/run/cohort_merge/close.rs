@@ -222,6 +222,13 @@ pub enum Verdict {
     TooQuiet,
     /// Assemble it (spec §4.2).
     Build,
+    /// Some sample had a read group deeper than the run's depth ceiling somewhere in it: not
+    /// assembled for any sample, and **not counted** as a failure — the ground is dropped on the
+    /// reads' evidence that it is a pile-up, not refused for its width
+    /// ([`depth_ceiling`](crate::run::depth_ceiling); owner, 2026-09-29). Judged before
+    /// everything else, because a member over the ceiling carries no counts to judge the others
+    /// with.
+    OverDepthCeiling,
 }
 
 /// Judge one closed locus — a pure function of its span, whether any one sample reached
@@ -885,6 +892,7 @@ impl<'a> Iterator for LocusCloser<'a> {
         let mut reach = start;
         let mut non_reference_reads = 0u32;
         let mut covering_samples = 0usize;
+        let mut some_member_over_the_depth_ceiling = false;
 
         // Take heads while the next one begins inside the reach, extending the reach as
         // we go.
@@ -964,6 +972,16 @@ impl<'a> Iterator for LocusCloser<'a> {
                 );
             }
             reach = reach.max(summary.reach());
+            if summary.is_over_depth_ceiling() {
+                // **Taken like any member, so the locus closes over its ground**, but its
+                // counts are a marker's and not reads: they must not reach the keep rule.
+                some_member_over_the_depth_ceiling = true;
+                if self.cursors[sample] == self.cursors_at_open[sample] {
+                    covering_samples += 1;
+                }
+                self.take_head();
+                continue;
+            }
             // **Each sample's two totals are kept apart, because the keep rule asks each
             // sample about its own reads** (spec §4.3). Summing them into one cohort
             // total and comparing that — the rule until 2026-08-19 — asks a question
@@ -1039,18 +1057,22 @@ impl<'a> Iterator for LocusCloser<'a> {
             region,
             members,
             non_reference_reads,
-            verdict: judge_here(
-                self.observations_per_sample.is_empty(),
-                span_of(region),
-                some_sample_reached_the_threshold,
-                // **Read only when the locus is not quiet**, which is the whole reason the
-                // quiet verdict is asked first: a walk whose evidence is still compressed
-                // cannot answer for a kind without building a body, and a locus nobody varied
-                // at must never cost one. For a locus that survives, the record is one the
-                // caller is about to assemble anyway.
-                || &self.observations_per_sample[opening_at.0][opening_at.1].kind,
-                self.max_cohort_locus_span,
-            ),
+            verdict: if some_member_over_the_depth_ceiling {
+                Verdict::OverDepthCeiling
+            } else {
+                judge_here(
+                    self.observations_per_sample.is_empty(),
+                    span_of(region),
+                    some_sample_reached_the_threshold,
+                    // **Read only when the locus is not quiet**, which is the whole reason the
+                    // quiet verdict is asked first: a walk whose evidence is still compressed
+                    // cannot answer for a kind without building a body, and a locus nobody varied
+                    // at must never cost one. For a locus that survives, the record is one the
+                    // caller is about to assemble anyway.
+                    || &self.observations_per_sample[opening_at.0][opening_at.1].kind,
+                    self.max_cohort_locus_span,
+                )
+            },
         })
     }
 }
@@ -1192,6 +1214,59 @@ mod tests {
         walk(observations_per_sample)
             .map(|closed| (closed.region.start.get(), closed.region.end.get()))
             .collect()
+    }
+
+    /// **One sample over the depth ceiling drops the locus for every sample**, however well the
+    /// others vary there, and the ground it covered still chains: sample 1's SNP at 14 lies
+    /// inside sample 0's dropped deletion (10–15), so it goes too. A SNP beyond the dropped
+    /// record's reach is untouched.
+    #[test]
+    fn a_record_over_the_depth_ceiling_drops_its_locus_for_every_sample() {
+        let over_the_ceiling = [
+            LocusSummary::over_depth_ceiling(region(10, 15)),
+            LocusSummary::of(&observation(region(30, 30), 5)),
+        ];
+        let varying = [
+            LocusSummary::of(&observation(region(10, 10), 9)),
+            LocusSummary::of(&observation(region(14, 14), 9)),
+            LocusSummary::of(&observation(region(20, 20), 9)),
+        ];
+        let summaries: [&[LocusSummary]; 2] = [&over_the_ceiling, &varying];
+        let window = WindowedCohort {
+            observations: None,
+            summaries: Some(&summaries),
+            finalised_windows: None,
+        };
+        let closed: Vec<(u64, u64, Verdict)> =
+            LocusCloser::over_windowed(&window, unbounded(), keep_at(2))
+                .map(|closed| {
+                    (
+                        closed.region.start.get(),
+                        closed.region.end.get(),
+                        closed.verdict,
+                    )
+                })
+                .collect();
+        assert_eq!(
+            closed,
+            vec![
+                (10, 15, Verdict::OverDepthCeiling),
+                (20, 20, Verdict::Build),
+                (30, 30, Verdict::Build),
+            ]
+        );
+    }
+
+    /// **The stand-in cannot be mistaken for a real record**: its counts are a pair no record
+    /// has, and no record's counts read as a stand-in.
+    #[test]
+    fn a_stand_in_is_told_apart_from_every_real_record() {
+        assert!(LocusSummary::over_depth_ceiling(region(1, 1)).is_over_depth_ceiling());
+        for reads in [0, 1, 7, 1_000] {
+            assert!(!LocusSummary::of(&observation(region(1, 1), reads)).is_over_depth_ceiling());
+            let mixed = with_reference_reads(region(1, 1), reads, 3);
+            assert!(!LocusSummary::of(&mixed).is_over_depth_ceiling());
+        }
     }
 
     /// **Neither observation covers the other's base, so they cannot be called apart** —

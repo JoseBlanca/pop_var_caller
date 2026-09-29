@@ -63,6 +63,7 @@ use crate::run::cohort_merge::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
     MinAltReads,
 };
+use crate::run::depth_ceiling::DepthCeiling;
 use crate::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::vcf::VcfRecord;
 use crate::vcf::assemble::assemble_record;
@@ -249,6 +250,9 @@ pub struct AlignedFilesVariantCaller {
     /// The settings every one of this run's locus generators is built with — checked at
     /// `open`, so building a generator from them cannot fail later.
     locus_generator_settings: PileupGeneratorConfig,
+    /// The most reads one read group may have at a locus before the locus is dropped for the
+    /// whole cohort (`--max-read-group-depth`, [`depth_ceiling`](super::depth_ceiling)).
+    depth_ceiling: DepthCeiling,
     /// What the assembly check could do at construction.
     assembly_check: AssemblyCheckOutcome,
 }
@@ -346,7 +350,16 @@ impl AlignedFilesVariantCaller {
             candidate_selection,
             merge_parameters,
             locus_generator_settings: alignments.locus_generator_settings,
+            depth_ceiling: DepthCeiling::default(),
         })
+    }
+
+    /// The same run, dropping for the whole cohort every locus where some sample has a read
+    /// group deeper than `ceiling` ([`depth_ceiling`](super::depth_ceiling)).
+    #[must_use]
+    pub fn with_depth_ceiling(mut self, ceiling: DepthCeiling) -> Self {
+        self.depth_ceiling = ceiling;
+        self
     }
 
     /// How many samples this run calls — the length every per-sample row downstream has.
@@ -470,11 +483,10 @@ impl AlignedFilesVariantCaller {
                 // the criteria the ground was actually cut with, by construction.
                 self.segmentation.inputs(),
             )?;
-            walkers.push(AlignmentFilesWalker::over(
-                Arc::clone(&self.segmentation),
-                reads,
-                generators,
-            ));
+            walkers.push(
+                AlignmentFilesWalker::over(Arc::clone(&self.segmentation), reads, generators)
+                    .with_depth_ceiling(Some(self.depth_ceiling)),
+            );
         }
         Ok(RunReadyToWalk {
             segmentation: self.segmentation,
@@ -1598,6 +1610,7 @@ impl CohortWalkTallies {
                         Some(GeneratorCounts::Pileup(counts)) => Some(*counts),
                         Some(_) | None => None,
                     },
+                    loci_over_the_depth_ceiling: walker.loci_over_the_depth_ceiling(),
                     sample_name,
                 })
                 .collect(),
@@ -1655,6 +1668,10 @@ pub struct SampleWalkTallies {
     /// ceiling kept every read and the caps then declined to score on all of them. So "did my
     /// depth settings shape the evidence" is answered by **both**, and by neither alone.
     pub snp_indel: Option<PileupGeneratorCounts>,
+    /// **Loci this sample's walk dropped because a read group there was deeper than the run's
+    /// depth ceiling** (`--max-read-group-depth`, [`depth_ceiling`](super::depth_ceiling)). No
+    /// locus was called over their ground, for any sample.
+    pub loci_over_the_depth_ceiling: u64,
 }
 
 /// **The sample names and the sizes, not the contents.** A derived `Debug` would print every
