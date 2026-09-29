@@ -3757,6 +3757,294 @@ mod tests {
         }
     }
 
+    /// A cohort drawn as step B2's measurement drew them: `samples` samples at `depth` reads over
+    /// `positions` positions, the density's shapes inside their bounds, no duplicated class.
+    fn a_cohort_of(samples: usize, positions: usize, depth: f64, seed: u64) -> DrawnCohort {
+        draw_cohort_with_duplications(
+            samples,
+            positions,
+            depth,
+            (0.003, 0.06, 0.03),
+            FrequencyDensity {
+                p_invariant: 0.88,
+                p_fixed_alt: 0.01,
+                a: 0.6,
+                b: 2.2,
+            },
+            0.3,
+            0.0,
+            seed,
+        )
+    }
+
+    /// Start `number` (counted from one) of `config`'s starting points, run by `maximise` on
+    /// `cohort`'s lent sections, judged against `earlier` if given.
+    #[allow(clippy::too_many_arguments)]
+    fn one_start(
+        cohort: &DrawnCohort,
+        lent: &[SampleGenericSections<'_>],
+        depth_cap: DepthCap,
+        group_index: &[Vec<usize>],
+        coverage: &[f64],
+        config: &JointFitConfig,
+        number: usize,
+        earlier: Option<&super::super::settled::EarlierAnswer>,
+    ) -> super::super::StartOutcome {
+        use crate::parameter_estimation::progress::StageProgress;
+        let groups = as_cohort(&cohort.samples).read_groups().to_vec();
+        let stage = StageProgress::begin("a test of one start");
+        let which = super::super::WhichStart {
+            number,
+            of: config.starting_points.len(),
+            point: &config.starting_points[number - 1],
+            earlier,
+            stage: &stage,
+        };
+        super::super::maximise(
+            lent,
+            depth_cap,
+            config,
+            &groups,
+            group_index,
+            coverage,
+            &which,
+        )
+    }
+
+    /// **A later start heading where the first converged stops there** (spec §3.4), **judged by its
+    /// projected endpoint and not its value**: on four samples at 3 reads, the second start judged
+    /// against the first's answer stops as having agreed, in fewer passes than it takes to converge
+    /// on its own — at a point whose value is still more than half an error from the answer on some
+    /// parameter, so only its endpoint could have agreed. Judged against that answer moved three
+    /// errors on the invariant share, it runs to its own convergence instead.
+    #[test]
+    fn a_later_start_heading_where_the_first_converged_stops_there() {
+        use crate::parameter_estimation::joint::fit::settled::{
+            AGREEMENT_FRACTION, EarlierAnswer, StartEnd,
+        };
+        let config = JointFitConfig {
+            duplicated_positions: false,
+            estimate_contamination: false,
+            ..JointFitConfig::default()
+        };
+        let cohort = a_cohort_of(4, 6_000, 3.0, 0x5E77_1ED0_B200_0000 + 201);
+        with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+            let run = |number: usize, earlier: Option<&EarlierAnswer>| {
+                one_start(
+                    &cohort,
+                    lent,
+                    depth_cap,
+                    group_index,
+                    coverage,
+                    &config,
+                    number,
+                    earlier,
+                )
+            };
+            let first = run(1, None);
+            assert_eq!(
+                first.ended,
+                StartEnd::Converged,
+                "the first start converges"
+            );
+            let answer = EarlierAnswer::of(1, &first, group_index);
+            let alone = run(2, None);
+            assert_eq!(
+                alone.ended,
+                StartEnd::Converged,
+                "the second start converges alone"
+            );
+            let judged = run(2, Some(&answer));
+            let value_apart = judged
+                .parameters
+                .values()
+                .iter()
+                .zip(&answer.values)
+                .zip(&answer.errors)
+                .filter_map(|((value, at), error)| error.value().map(|e| (value - at).abs() / e))
+                .fold(0.0_f64, f64::max);
+            eprintln!(
+                "second start: {} passes alone, {} judged against the first ({:?}), its value \
+                 {value_apart:.3} errors from the answer where it stopped",
+                alone.passes, judged.passes, judged.ended
+            );
+            assert_eq!(judged.ended, StartEnd::Agreed { with: 1 });
+            assert!(
+                judged.passes < alone.passes,
+                "{} against {}",
+                judged.passes,
+                alone.passes
+            );
+            assert!(
+                value_apart > AGREEMENT_FRACTION,
+                "the stop's value is {value_apart} errors from the answer: the fixture must stop \
+                 where only the endpoint agrees"
+            );
+            // The first answer moved three errors on the invariant share, which every start's
+            // endpoint lies within a fraction of an error of.
+            let mut elsewhere = answer;
+            let error = elsewhere.errors[cohort::P_INVARIANT]
+                .value()
+                .expect("the invariant share has an error");
+            elsewhere.values[cohort::P_INVARIANT] += 3.0 * error;
+            let not_agreeing = run(2, Some(&elsewhere));
+            assert_eq!(not_agreeing.ended, StartEnd::Converged);
+            assert_eq!(
+                not_agreeing.passes, alone.passes,
+                "judged against an answer it is not heading to"
+            );
+        });
+    }
+
+    /// **A start whose judging pass finds it settled converges, whether or not it also agrees**, and
+    /// the run's own agreement fraction is the one read: on the second start of a 20-sample cohort,
+    /// judged against its own answer, a settled fraction and an agreement fraction both of 10⁹ make it
+    /// converge at its first judging pass; with the settled fraction at zero it agrees there instead;
+    /// with the agreement fraction at zero it runs to its own convergence, pass for pass.
+    #[test]
+    fn a_start_both_settled_and_agreeing_converges() {
+        use crate::parameter_estimation::joint::fit::settled::{EarlierAnswer, StartEnd};
+        let base = JointFitConfig {
+            estimate_contamination: false,
+            duplicated_positions: false,
+            ..JointFitConfig::default()
+        };
+        let cohort = a_cohort_of(20, 4_000, 3.0, 0x5E77_1ED0_B100_0014);
+        with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+            let run = |config: &JointFitConfig, earlier: Option<&EarlierAnswer>| {
+                one_start(
+                    &cohort,
+                    lent,
+                    depth_cap,
+                    group_index,
+                    coverage,
+                    config,
+                    2,
+                    earlier,
+                )
+            };
+            let alone = run(&base, None);
+            let answer = EarlierAnswer::of(1, &alone, group_index);
+            let loose = JointFitConfig {
+                settled_fraction: 1e9,
+                agreement_fraction: 1e9,
+                ..base.clone()
+            };
+            let settled = run(&loose, Some(&answer));
+            assert_eq!(settled.ended, StartEnd::Converged);
+            let never_settled = JointFitConfig {
+                settled_fraction: 0.0,
+                ..loose.clone()
+            };
+            let agreed = run(&never_settled, Some(&answer));
+            assert_eq!(agreed.ended, StartEnd::Agreed { with: 1 });
+            assert!(agreed.passes < settled.passes, "it stops at once");
+            let off = JointFitConfig {
+                agreement_fraction: 0.0,
+                ..base.clone()
+            };
+            let judged_off = run(&off, Some(&answer));
+            assert_eq!(judged_off.ended, StartEnd::Converged);
+            assert_eq!(judged_off.passes, alone.passes);
+        });
+    }
+
+    /// **A start at the pass limit is no yardstick** (spec §3.4's second trap): on four samples at 3
+    /// reads every start runs to the limit alone, and `fit_jointly` returns the best of them — none is
+    /// judged against another, so no later start stops early on an answer that is not the maximum.
+    #[test]
+    fn a_start_at_the_pass_limit_is_no_yardstick() {
+        use crate::parameter_estimation::joint::fit::settled::StartEnd;
+        let config = JointFitConfig {
+            estimate_contamination: false,
+            duplicated_positions: false,
+            ..JointFitConfig::default()
+        };
+        let cohort = a_cohort_of(4, 6_000, 3.0, 0x5E77_1ED0_B200_0000 + 200);
+        let alone: Vec<_> =
+            with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+                (1..=config.starting_points.len())
+                    .map(|number| {
+                        let outcome = one_start(
+                            &cohort,
+                            lent,
+                            depth_cap,
+                            group_index,
+                            coverage,
+                            &config,
+                            number,
+                            None,
+                        );
+                        (
+                            outcome.ended,
+                            outcome.statistics.log_likelihood,
+                            outcome.passes,
+                        )
+                    })
+                    .collect()
+            });
+        assert!(
+            alone
+                .iter()
+                .all(|(ended, _, _)| *ended == StartEnd::AtTheLimit),
+            "the fixture needs every start to run to the limit: {alone:?}"
+        );
+        let (_, best, passes) = alone
+            .iter()
+            .copied()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .expect("three starts");
+        let (fit, _) = fitted(&cohort, &config);
+        assert!(!fit.converged);
+        assert_eq!(fit.log_likelihood, best, "the best start at the limit wins");
+        assert_eq!(fit.passes, passes);
+    }
+
+    /// **Once a start converges, later starts heading there stop and do not compete**: on 20 samples
+    /// at 3 reads, where the second start run alone converges a little higher than the first,
+    /// `fit_jointly` returns the first start's answer, pass for pass.
+    #[test]
+    fn later_starts_that_agree_leave_the_first_converged_answer() {
+        use crate::parameter_estimation::joint::fit::settled::StartEnd;
+        let config = JointFitConfig {
+            estimate_contamination: false,
+            duplicated_positions: false,
+            ..JointFitConfig::default()
+        };
+        let cohort = a_cohort_of(20, 4_000, 3.0, 0x5E77_1ED0_B200_0000);
+        let alone: Vec<_> =
+            with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+                (1..=2)
+                    .map(|number| {
+                        let outcome = one_start(
+                            &cohort,
+                            lent,
+                            depth_cap,
+                            group_index,
+                            coverage,
+                            &config,
+                            number,
+                            None,
+                        );
+                        (
+                            outcome.ended,
+                            outcome.statistics.log_likelihood,
+                            outcome.passes,
+                        )
+                    })
+                    .collect()
+            });
+        assert_eq!(alone[0].0, StartEnd::Converged);
+        assert!(
+            alone[1].1 > alone[0].1,
+            "the fixture needs a later start that would win alone: {alone:?}"
+        );
+        let (fit, _) = fitted(&cohort, &config);
+        assert!(fit.converged);
+        assert_eq!(fit.log_likelihood, alone[0].1);
+        assert_eq!(fit.passes, alone[0].2);
+    }
+
     /// **A fit whose maximum lies on a bound converges**: cohorts drawn with no homozygote excess
     /// (the excesses' maximum at 0), with a clean error rate of 10⁻⁷ (below the rates' floor of
     /// 10⁻⁶), and with the density's second shape at 150 (above its bound of 50). Under the first

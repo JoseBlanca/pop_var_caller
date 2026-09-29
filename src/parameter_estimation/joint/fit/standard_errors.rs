@@ -2425,4 +2425,65 @@ mod tests {
             assert_steps_match(&got, &expected, label);
         }
     }
+
+    /// **A parameter the Newton step cannot solve for has no distance, and the rest are solved
+    /// without it**, on both matrices: the second sample's first mismapped rate given no information
+    /// (its row, column and score zero, as for a library with no reads), and the fixed non-reference
+    /// share made a copy of the invariant share in every entry and in its score (the data cannot tell
+    /// them apart). Both come back `None`, as their errors do, and every other distance is the dense
+    /// solve with the two left out — so neither leaks a stale step into the others'.
+    #[test]
+    fn a_parameter_the_newton_step_cannot_solve_has_no_distance() {
+        let libraries = [1, 2, 1];
+        let n = COHORT_PARAMETERS + libraries.iter().map(|&k| own_parameters(k)).sum::<usize>();
+        let uninformed = COHORT_PARAMETERS + own_parameters(1) + sample::rate(0, 1);
+        let (copied, copy_of) = (cohort::P_FIXED_ALT, cohort::P_INVARIANT);
+        for (label, (_, mut dense), whole) in [
+            ("whole matrix", a_whole_matrix_of(&libraries, 111), true),
+            ("arrow", an_arrow_of(&libraries, 113), false),
+        ] {
+            let (mut slope, mut flat) = a_slope_of(&libraries, 112);
+            for j in 0..n {
+                dense[uninformed * n + j] = 0.0;
+                dense[j * n + uninformed] = 0.0;
+            }
+            flat[uninformed] = 0.0;
+            for j in 0..n {
+                dense[copied * n + j] = dense[copy_of * n + j];
+            }
+            for j in 0..n {
+                dense[j * n + copied] = dense[j * n + copy_of];
+            }
+            flat[copied] = flat[copy_of];
+            slope.cohort[copied] = slope.cohort[copy_of];
+            slope.samples[1][sample::rate(0, 1)] = 0.0;
+            let mut sums = if whole {
+                with_the_whole_matrix(&libraries, &dense)
+            } else {
+                blocks_of_dense(&libraries, &dense)
+            };
+            sums.slope = slope;
+            let errors = StandardErrors::of(&sums);
+            assert_eq!(
+                error_at(&errors, uninformed),
+                StandardError::NoInformation,
+                "{label}"
+            );
+            assert_eq!(
+                error_at(&errors, copied),
+                StandardError::NotIdentified,
+                "{label}"
+            );
+            let parameters = parameters_inside(&libraries);
+            let got = newton_step(&sums, &parameters, &group_index_of(&libraries));
+            let in_layout = dense_step(&dense, &flat, |i| i != uninformed && i != copied);
+            let expected = in_the_fits_order(&in_layout, &libraries, &parameters);
+            assert_eq!(
+                expected.iter().filter(|step| step.is_none()).count(),
+                2,
+                "{label}: the two left out"
+            );
+            assert_steps_match(&got, &expected, label);
+        }
+    }
 }

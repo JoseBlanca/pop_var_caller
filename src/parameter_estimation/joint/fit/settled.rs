@@ -23,6 +23,19 @@
 //! cannot tell it from others, or its error is wider than its whole range — is settled by definition:
 //! nothing the fit does to it matters to the likelihood. **The fit has converged when every parameter
 //! is settled**, and stops at the end of that cycle.
+//!
+//! # Agreement between starts
+//!
+//! Spec §3.4, plan step B2. The fit runs its starting points one after another. Once one has
+//! converged, **a later start stops as soon as it is heading where that one arrived**: when, on one of
+//! its judging passes, its *projected endpoint* — each parameter's value plus its Newton distance — lies
+//! within [`AGREEMENT_FRACTION`] of the earlier answer's standard error of that answer, on every
+//! parameter the earlier answer gives an error ([`agrees`]). It is recorded as having agreed
+//! ([`StartEnd::Agreed`]) and does not compete to be the fit's answer. A start whose judging pass finds
+//! every parameter settled is not stopped by agreement: it finishes its cycle, converges and competes.
+//!
+//! The earlier answer is the best-scoring start that has converged so far ([`EarlierAnswer`]); a start
+//! stopped at the pass limit is never one, since its errors need not be the maximum's.
 
 use super::standard_errors::StandardError;
 
@@ -73,6 +86,103 @@ pub(super) fn furthest(
         .enumerate()
         .filter_map(|(j, (error, distance))| Some((j, distance.as_ref()?.abs() / error.value()?)))
         .max_by(|(_, left), (_, right)| left.total_cmp(right))
+}
+
+/// **How close a later start's projected endpoint must come to an earlier start's answer**, in units
+/// of that answer's standard errors, for the later start to stop as having agreed (spec §3.4) — the
+/// spec's starting value.
+pub(super) const AGREEMENT_FRACTION: f64 = 0.5;
+
+/// **How one start of the fit ended.**
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) enum StartEnd {
+    /// Every parameter was settled (the rule above).
+    Converged,
+    /// It ran out of passes first.
+    AtTheLimit,
+    /// It was heading where an earlier start, counted from one, had converged ([`agrees`]), and stopped
+    /// there: it adds nothing new, and does not compete to be the fit's answer.
+    Agreed { with: usize },
+}
+
+/// **An earlier start's answer, as a later start is judged against it**: which start it was, counted
+/// from one, its log-likelihood, and its values and standard errors at the parameters it returned, in
+/// the order the fit's vector lists them.
+pub(super) struct EarlierAnswer {
+    pub(super) start: usize,
+    pub(super) log_likelihood: f64,
+    pub(super) values: Vec<f64>,
+    pub(super) errors: Vec<StandardError>,
+}
+
+impl EarlierAnswer {
+    /// The answer start `start` (counted from one) returned: its parameters, and the errors from the
+    /// information its final pass summed.
+    pub(super) fn of(
+        start: usize,
+        outcome: &super::StartOutcome,
+        group_index: &[Vec<usize>],
+    ) -> Self {
+        Self {
+            start,
+            log_likelihood: outcome.statistics.log_likelihood,
+            values: outcome.parameters.values(),
+            errors: super::StandardErrors::of(&outcome.information)
+                .by_coordinate(&outcome.parameters, group_index),
+        }
+    }
+}
+
+/// **Whether a start is heading where an earlier one arrived**: its projected endpoint — each
+/// parameter's value plus its distance to the maximum (`distances`, a Newton step's; a parameter
+/// without one stays where it is) — within `fraction` of the earlier answer's standard error of that
+/// answer, on every parameter the earlier answer gives an error. The endpoint, not the value: early
+/// in a start the value is far from anything (spec §3.4).
+///
+/// **An earlier answer that gives no parameter an error is agreed with by nothing**: there is no
+/// yardstick to be within. At a `fraction` of zero, below it or not a number, no start agrees.
+pub(super) fn agrees(
+    values: &[f64],
+    distances: &[Option<f64>],
+    earlier: &EarlierAnswer,
+    fraction: f64,
+) -> bool {
+    // Every list is the fit's vector in its own order, from one fit: the same parameters.
+    assert!(
+        distances.len() == values.len()
+            && earlier.values.len() == values.len()
+            && earlier.errors.len() == values.len(),
+        "two starts of one fit list the same parameters"
+    );
+    let mut judged = 0;
+    let within = values
+        .iter()
+        .zip(distances)
+        .zip(earlier.values.iter().zip(&earlier.errors))
+        .all(|((value, distance), (answer, error))| {
+            let Some(error) = error.value() else {
+                return true;
+            };
+            judged += 1;
+            let endpoint = value + distance.unwrap_or(0.0);
+            (endpoint - answer).abs() < fraction * error
+        });
+    within && judged > 0
+}
+
+/// **Whether a start that ended so, scoring `score`, becomes the answer later starts are judged
+/// against**, in place of one scoring `current`: only a start that converged — an answer found at the
+/// pass limit has errors that need not be the maximum's (spec §3.4) — and only above the current one,
+/// so later starts are judged against the best converged answer.
+pub(super) fn is_the_new_yardstick(ended: StartEnd, score: f64, current: Option<f64>) -> bool {
+    ended == StartEnd::Converged && current.is_none_or(|current| score > current)
+}
+
+/// **Whether a start that ended so, scoring `score`, becomes the fit's answer** in place of one
+/// scoring `current`: the best log-likelihood wins, among the starts that did not agree. A start that
+/// agreed stopped part-way on purpose, heading where another had already arrived.
+pub(super) fn is_the_new_best(ended: StartEnd, score: f64, current: Option<f64>) -> bool {
+    !matches!(ended, StartEnd::Agreed { .. }) && current.is_none_or(|current| score > current)
 }
 
 #[cfg(test)]
@@ -152,5 +262,150 @@ mod tests {
             Some((1, 0.75))
         );
         assert_eq!(furthest(&errors[2..3], &[Some(1.0)]), None);
+    }
+
+    fn an_earlier_answer() -> EarlierAnswer {
+        EarlierAnswer {
+            start: 1,
+            log_likelihood: -100.0,
+            values: vec![1.0, 10.0, 0.5],
+            errors: vec![
+                StandardError::Estimated(0.1),
+                StandardError::Estimated(2.0),
+                StandardError::NotIdentified,
+            ],
+        }
+    }
+
+    #[test]
+    fn a_start_agrees_when_its_endpoint_is_within_half_an_error_on_every_parameter() {
+        let earlier = an_earlier_answer();
+        // Endpoints 1.04 and 10.5: 0.4 and 0.25 errors away. The third has no error in the earlier
+        // answer and is not judged, however far.
+        assert!(agrees(
+            &[1.0, 11.0, 0.9],
+            &[Some(0.04), Some(-0.5), Some(5.0)],
+            &earlier,
+            AGREEMENT_FRACTION
+        ));
+        // 1.06 is 0.6 errors away.
+        assert!(!agrees(
+            &[1.0, 11.0, 0.9],
+            &[Some(0.06), Some(-0.5), None],
+            &earlier,
+            AGREEMENT_FRACTION
+        ));
+    }
+
+    #[test]
+    fn the_endpoint_and_not_the_value_is_compared() {
+        let earlier = an_earlier_answer();
+        // The value is 5 errors off, the endpoint on the answer.
+        assert!(agrees(
+            &[1.5, 10.0, 0.5],
+            &[Some(-0.5), None, None],
+            &earlier,
+            AGREEMENT_FRACTION
+        ));
+        // The value is on the answer, the endpoint 5 errors off.
+        assert!(!agrees(
+            &[1.0, 10.0, 0.5],
+            &[Some(0.5), None, None],
+            &earlier,
+            AGREEMENT_FRACTION
+        ));
+        // Without a distance a parameter's endpoint is its value.
+        assert!(agrees(
+            &[1.0, 10.0, 0.5],
+            &[None, None, None],
+            &earlier,
+            AGREEMENT_FRACTION
+        ));
+    }
+
+    /// With no parameter given an error by the earlier answer there is nothing to agree on, at any
+    /// fraction; and an endpoint that is not a number agrees with nothing.
+    #[test]
+    fn nothing_agrees_with_an_answer_that_gives_no_error_or_at_a_nan_endpoint() {
+        let mut earlier = an_earlier_answer();
+        earlier.errors = vec![StandardError::NotIdentified; 3];
+        assert!(!agrees(
+            &[1.0, 10.0, 0.5],
+            &[None, None, None],
+            &earlier,
+            f64::INFINITY
+        ));
+        let earlier = an_earlier_answer();
+        assert!(!agrees(
+            &[1.0, 10.0, 0.5],
+            &[Some(f64::NAN), None, None],
+            &earlier,
+            AGREEMENT_FRACTION
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "list the same parameters")]
+    fn a_distance_list_of_another_length_is_refused() {
+        agrees(
+            &[1.0, 10.0, 0.5],
+            &[None, None],
+            &an_earlier_answer(),
+            AGREEMENT_FRACTION,
+        );
+    }
+
+    /// Only a converged start becomes the yardstick, and only above the current one — the best
+    /// converged answer, never one at the pass limit, however well it scores.
+    #[test]
+    fn the_yardstick_is_the_best_converged_start() {
+        assert!(is_the_new_yardstick(StartEnd::Converged, -10.0, None));
+        assert!(is_the_new_yardstick(
+            StartEnd::Converged,
+            -10.0,
+            Some(-11.0)
+        ));
+        assert!(!is_the_new_yardstick(
+            StartEnd::Converged,
+            -12.0,
+            Some(-11.0)
+        ));
+        assert!(!is_the_new_yardstick(StartEnd::AtTheLimit, -1.0, None));
+        assert!(!is_the_new_yardstick(
+            StartEnd::AtTheLimit,
+            -1.0,
+            Some(-11.0)
+        ));
+        assert!(!is_the_new_yardstick(
+            StartEnd::Agreed { with: 1 },
+            -1.0,
+            None
+        ));
+    }
+
+    /// The best log-likelihood wins among the starts that did not agree; one that agreed does not
+    /// compete however well it scores.
+    #[test]
+    fn the_answer_is_the_best_start_that_did_not_agree() {
+        assert!(is_the_new_best(StartEnd::AtTheLimit, -1.0, Some(-10.0)));
+        assert!(is_the_new_best(StartEnd::Converged, -1.0, None));
+        assert!(!is_the_new_best(StartEnd::Converged, -12.0, Some(-10.0)));
+        assert!(!is_the_new_best(
+            StartEnd::Agreed { with: 1 },
+            -1.0,
+            Some(-10.0)
+        ));
+        assert!(!is_the_new_best(StartEnd::Agreed { with: 1 }, -1.0, None));
+    }
+
+    #[test]
+    fn at_a_fraction_of_zero_no_start_agrees() {
+        let earlier = an_earlier_answer();
+        assert!(!agrees(
+            &[1.0, 10.0, 0.5],
+            &[None, None, None],
+            &earlier,
+            0.0
+        ));
     }
 }

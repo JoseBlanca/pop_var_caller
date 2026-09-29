@@ -65,7 +65,10 @@ mod settled;
 mod standard_errors;
 
 use information::{InformationSums, PositionScores, RuleSlopes, ScoringTables, score_position};
-use settled::{SETTLED_FRACTION, furthest, not_settled};
+use settled::{
+    AGREEMENT_FRACTION, EarlierAnswer, SETTLED_FRACTION, StartEnd, agrees, furthest,
+    is_the_new_best, is_the_new_yardstick, not_settled,
+};
 use standard_errors::{StandardErrors, newton_step};
 
 // ---------------------------------------------------------------------
@@ -593,6 +596,14 @@ pub struct JointFitConfig {
     /// zero — or below it, or not a number — the fit never stops before `max_passes`, unless no
     /// parameter has both an error and a distance.
     pub settled_fraction: f64,
+    /// **A later start stops once it is heading where an earlier one converged**: when its projected
+    /// endpoint lies within this share of the earlier answer's standard error of that answer, on
+    /// every parameter the earlier answer gives an error — a half by default ([`settled`]'s
+    /// `AGREEMENT_FRACTION`, spec §3.4). The earlier answer is the best-scoring start that converged;
+    /// with none, every start runs to its own end. A parameter without an error in the earlier answer
+    /// is not compared, so where few have one — at one or two samples — agreement rests on those few.
+    /// At zero — or below it, or not a number — no start agrees.
+    pub agreement_fraction: f64,
     /// **When the fit starts judging its parameters' distances to the maximum**: once a cycle gains
     /// less than this much log-likelihood per position, every later cycle's first pass computes the
     /// errors and the distances, at 1.48 to 1.80 times a plain pass (4 to 64 samples, measured in
@@ -665,6 +676,7 @@ impl Default for JointFitConfig {
             starting_points: StartingPoint::spanning_the_class_separation(),
             max_passes: 200,
             settled_fraction: SETTLED_FRACTION,
+            agreement_fraction: AGREEMENT_FRACTION,
             log_likelihood_stillness: 1e-4,
             // **The census ladder and not the histogram one.** This fit reads census codes and
             // nothing else, and since 2026-08-16 the two ladders differ above 8 reads a
@@ -1675,6 +1687,13 @@ fn tally_of(
 /// against a position's own allele frequency means a sample's evidence cannot be reduced
 /// alone.
 ///
+/// **The starting points run one after another, and the best log-likelihood wins** among those
+/// that converged or ran to the pass limit. Once one has converged, each later start is judged
+/// against the best-scoring converged answer so far and stops as soon as it is heading there
+/// ([`JointFitConfig::agreement_fraction`], spec §3.4): it adds nothing new, and does not compete.
+/// Until one converges, later starts run to their own end, since an answer found at the pass limit
+/// has errors that may not be the maximum's.
+///
 /// # Errors
 ///
 /// [`JointFitError::NoSamples`] on an empty cohort, [`JointFitError::NotDiploid`] on a ploidy
@@ -1807,11 +1826,17 @@ pub fn fit_jointly(
             )
         });
         let mut best: Option<(usize, StartOutcome)> = None;
-        for (number, start) in config.starting_points.iter().enumerate() {
+        // The best-scoring converged start so far.
+        let mut earlier: Option<EarlierAnswer> = None;
+        for (index, start) in config.starting_points.iter().enumerate() {
+            // Counted from one. `which` borrows `earlier`, which this start may replace below, so
+            // what follows reads the number from here and not from `which`.
+            let number = index + 1;
             let which = WhichStart {
-                number: number + 1,
+                number,
                 of: config.starting_points.len(),
                 point: start,
+                earlier: earlier.as_ref(),
                 stage: &stage,
             };
             let began = std::time::Instant::now();
@@ -1826,32 +1851,53 @@ pub fn fit_jointly(
             );
             let score = outcome.statistics.log_likelihood;
             stage.always(|into| {
-                format!(
-                    "SNP/indel fit, start {} of {}: {} after {} pass(es), log-likelihood \
-                         {score:.6e}; its last pass, which also collects what the standard errors \
-                         are computed from, {}; {into}",
-                    which.number,
-                    which.of,
-                    if outcome.converged {
-                        "converged"
-                    } else {
-                        "stopped at the pass limit"
-                    },
-                    outcome.passes,
-                    cost_of_the_last_pass(
-                        began.elapsed().saturating_sub(outcome.judging_took),
-                        outcome.last_pass_took,
-                        outcome.passes - outcome.judging_passes,
+                let (how, last_pass) = match outcome.ended {
+                    StartEnd::Converged => ("converged".to_owned(), None),
+                    StartEnd::AtTheLimit => ("stopped at the pass limit".to_owned(), None),
+                    StartEnd::Agreed { with } => (
+                        format!(
+                            "stopped, heading where start {with} converged (its projected \
+                             endpoint within {} of that start's standard error on every parameter \
+                             it gives one)",
+                            config.agreement_fraction
+                        ),
+                        Some("no last pass of its own, as it does not compete".to_owned()),
                     ),
+                };
+                let last_pass = last_pass.unwrap_or_else(|| {
+                    format!(
+                        "its last pass, which also collects what the standard errors are \
+                         computed from, {}",
+                        cost_of_the_last_pass(
+                            began.elapsed().saturating_sub(outcome.judging_took),
+                            outcome.last_pass_took,
+                            outcome.passes - outcome.judging_passes,
+                        )
+                    )
+                });
+                format!(
+                    "SNP/indel fit, start {} of {}: {how} after {} pass(es), log-likelihood \
+                         {score:.6e}; {last_pass}; {into}",
+                    which.number, which.of, outcome.passes,
                 )
             });
-            if best
-                .as_ref()
-                .is_none_or(|(_, current)| score > current.statistics.log_likelihood)
-            {
-                best = Some((which.number, outcome));
+            if is_the_new_yardstick(
+                outcome.ended,
+                score,
+                earlier.as_ref().map(|answer| answer.log_likelihood),
+            ) {
+                earlier = Some(EarlierAnswer::of(number, &outcome, &group_index));
+            }
+            if is_the_new_best(
+                outcome.ended,
+                score,
+                best.as_ref()
+                    .map(|(_, current)| current.statistics.log_likelihood),
+            ) {
+                best = Some((number, outcome));
             }
         }
+        // PANIC-FREE: the first start has no earlier answer to agree with, so it always competes.
         let (
             winning_start,
             StartOutcome {
@@ -1859,13 +1905,20 @@ pub fn fit_jointly(
                 statistics,
                 information,
                 passes,
-                converged,
+                ended,
                 trace,
                 last_pass_took: _,
                 judging_passes: _,
                 judging_took: _,
             },
-        ) = best.expect("a run always has at least one starting point");
+        ) = best.expect("the first start always competes");
+        // The winner's statistics come from a final pass, the only pass that keeps each position's
+        // posteriors, which contamination and the returned fit read; a start that agreed has none
+        // and never competes.
+        assert!(
+            statistics.collect_noisy_posterior,
+            "the winning start's statistics are those of its final pass"
+        );
 
         // **Every parameter's standard error, at the parameters the fit returns**, from the
         // information the winning start's final pass summed (spec §3.3).
@@ -1930,7 +1983,7 @@ pub fn fit_jointly(
             parameters,
             statistics,
             passes,
-            converged,
+            converged: ended == StartEnd::Converged,
             trace,
             contamination,
             standard_errors,
@@ -2030,14 +2083,17 @@ pub fn fit_jointly(
     })
 }
 
-/// Which of the fit's starting points a run of the alternation is, and the stage clock its
-/// progress lines are printed against.
+/// Which of the fit's starting points a run of the alternation is, the earlier answer it is judged
+/// against, and the stage clock its progress lines are printed against.
 struct WhichStart<'a> {
     /// Counted from one, as the progress line prints it.
     number: usize,
     of: usize,
     /// The point the run starts from.
     point: &'a StartingPoint,
+    /// The best-scoring earlier start that converged, which this one stops on heading towards
+    /// ([`agrees`]); `None` for the first start, and for any start before one has converged.
+    earlier: Option<&'a EarlierAnswer>,
     stage: &'a StageProgress,
 }
 
@@ -2078,6 +2134,14 @@ struct WhichStart<'a> {
 /// parameter within [`JointFitConfig::settled_fraction`] of its standard error of the maximum.**
 /// `max_passes` still bounds the passes over the data, and a cycle that would overrun it is not
 /// started.
+///
+/// **A start judged against an earlier answer (`which.earlier`) stops as soon as it is heading
+/// there** (spec §3.4): when a cycle's first pass puts its projected endpoint — each parameter's
+/// value plus its Newton distance — within [`JointFitConfig::agreement_fraction`] of the earlier
+/// answer's standard error of that answer on every parameter it gives one ([`agrees`]). It stops at
+/// once, the rest of the cycle not run, and returns the parameters that pass judged, with that
+/// pass's statistics in place of a final one. **A start that pass finds settled is not stopped by
+/// agreement**: it finishes its cycle and converges, and so competes to be the fit's answer.
 fn maximise(
     samples: &[SampleGenericSections<'_>],
     depth_cap: DepthCap,
@@ -2117,24 +2181,47 @@ fn maximise(
         judging_took: std::time::Duration::ZERO,
         trace: Vec::new(),
     };
-    let mut converged = false;
+    let mut ended = StartEnd::AtTheLimit;
     let mut reach = 1.0_f64;
     // Whether a cycle has yet gained less than `log_likelihood_stillness` a position: from then on
     // every cycle's first pass also sums the information and judges the distances to the maximum.
     let mut judging = false;
+    // The statistics of the pass that found this start heading where an earlier one converged: at
+    // the parameters it returns, with their information, so no final pass is needed.
+    let mut agreed_at: Option<Statistics> = None;
     while alternation.passes + 3 <= config.max_passes {
         let cycle_began = std::time::Instant::now();
-        let (first, mut entering) = alternation.step(&parameters, judging);
+        let (first, entering) = alternation.step(&parameters, judging);
         // How many parameters this cycle's information pass found further than their share of an
-        // error from the maximum, and the furthest; `None` before the fit judges them.
-        let judged_here = entering.information.take().map(|information| {
-            let errors = StandardErrors::of(&information).by_coordinate(&parameters, group_index);
-            let distances = newton_step(&information, &parameters, group_index);
-            (
-                not_settled(&errors, &distances, config.settled_fraction),
-                furthest(&errors, &distances),
-            )
+        // error from the maximum, the furthest, and — when some are — the earlier start this one is
+        // heading towards, if any; `None` before the fit judges them.
+        let judged_here = entering.information.as_ref().map(|information| {
+            let errors = StandardErrors::of(information).by_coordinate(&parameters, group_index);
+            let distances = newton_step(information, &parameters, group_index);
+            let not_settled = not_settled(&errors, &distances, config.settled_fraction);
+            // A start that is settled finishes its cycle, converges and competes: agreement stops
+            // only a start still on its way.
+            let heading_to = which
+                .earlier
+                .filter(|answer| {
+                    not_settled > 0
+                        && agrees(
+                            &parameters.values(),
+                            &distances,
+                            answer,
+                            config.agreement_fraction,
+                        )
+                })
+                .map(|answer| answer.start);
+            (not_settled, furthest(&errors, &distances), heading_to)
         });
+        // **Heading where an earlier start converged** (spec §3.4): it stops here, at the parameters
+        // this pass judged, and the rest of the cycle is not run.
+        if let Some((_, _, Some(with))) = judged_here {
+            ended = StartEnd::Agreed { with };
+            agreed_at = Some(entering);
+            break;
+        }
         let (second, _) = alternation.step(&first, false);
         let mut alpha = squarem_step_length(&parameters, &first, &second).clamp(1.0, reach);
         let (landed, landed_at) = loop {
@@ -2176,7 +2263,7 @@ fn maximise(
                     "the parameters are judged against their errors once a cycle moves the \
                      log-likelihood less than {gain_to_judge:.2e}"
                 ),
-                Some((not_settled, furthest)) => {
+                Some((not_settled, furthest, _)) => {
                     let names = parameters.named();
                     format!(
                         "{not_settled} of {} parameter(s) not yet within {} of an error of the \
@@ -2201,8 +2288,8 @@ fn maximise(
                 crate::parameter_estimation::progress::duration(cycle_began.elapsed()),
             )
         });
-        if judged_here.is_some_and(|(not_settled, _)| not_settled == 0) {
-            converged = true;
+        if judged_here.is_some_and(|(not_settled, _, _)| not_settled == 0) {
+            ended = StartEnd::Converged;
             break;
         }
     }
@@ -2210,22 +2297,27 @@ fn maximise(
     // cycle is followed by one more pass rather than by a pass that preceded it — and it is
     // this pass, at the parameters that will be reported, that keeps each position's
     // probability of being mismapped, and the information their standard errors come from.
+    // **A start that agreed has that pass already** — the one that judged it, at the parameters
+    // it returns — and no use for the posteriors, since it does not compete to be the answer.
     let last_pass_began = std::time::Instant::now();
-    let mut statistics = expectation_pass(
-        samples,
-        depth_cap,
-        config,
-        group_index,
-        coverage,
-        &parameters,
-        PassKeeps {
-            per_position_posteriors: true,
-            information: true,
-        },
-    );
+    let mut statistics = agreed_at.unwrap_or_else(|| {
+        expectation_pass(
+            samples,
+            depth_cap,
+            config,
+            group_index,
+            coverage,
+            &parameters,
+            PassKeeps {
+                per_position_posteriors: true,
+                information: true,
+            },
+        )
+    });
     let last_pass_took = last_pass_began.elapsed();
-    // PANIC-FREE: the pass above was asked to keep the information, and a pass that is asked
-    // starts every chunk's statistics, and its empty total, with the sums in place.
+    // PANIC-FREE: the final pass was asked to keep the information, and a pass that is asked
+    // starts every chunk's statistics, and its empty total, with the sums in place; an agreeing
+    // start's statistics are those of a pass that judged it, which kept the information too.
     let information = statistics
         .information
         .take()
@@ -2242,7 +2334,7 @@ fn maximise(
         statistics,
         information,
         passes,
-        converged,
+        ended,
         trace,
         last_pass_took,
         judging_passes,
@@ -2254,14 +2346,18 @@ fn maximise(
 struct StartOutcome {
     parameters: Parameters,
     /// The final pass's, at `parameters`: the log-likelihood, the counts and the per-position
-    /// posteriors.
+    /// posteriors. **For a start that agreed, the judging pass's**, at the same parameters and
+    /// without the per-position posteriors, which only the winner's are read for — and such a start
+    /// never wins.
     statistics: Statistics,
     /// The information the same pass summed, which the standard errors come from.
     information: InformationSums,
     passes: u32,
-    converged: bool,
+    /// Converged, at the pass limit, or stopped as heading where an earlier start converged.
+    ended: StartEnd,
     trace: Vec<PassSummary>,
-    /// How long the final pass took ([`cost_of_the_last_pass`]).
+    /// How long the final pass took ([`cost_of_the_last_pass`]); next to nothing for a start that
+    /// agreed, which runs none.
     last_pass_took: std::time::Duration,
     /// How many passes before it also summed the information for the stop rule, and how long they
     /// took.
@@ -2473,6 +2569,14 @@ impl Coordinate {
 }
 
 impl Parameters {
+    /// Every fitted number's value, in the order [`coordinates`](Self::coordinates) lists them.
+    fn values(&self) -> Vec<f64> {
+        self.coordinates()
+            .iter()
+            .map(|coordinate| coordinate.value)
+            .collect()
+    }
+
     /// Every fitted number as a [`Coordinate`], in one fixed order — the order
     /// [`with_coordinates`](Self::with_coordinates) reads them back in.
     fn coordinates(&self) -> Vec<Coordinate> {
