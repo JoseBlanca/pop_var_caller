@@ -207,7 +207,7 @@ step here that moves a fitted number is its own commit, with the checksums re-re
 2. ✅ **B2 — a later start stops when it agrees.** The agreement test on projected endpoints against
    the best converged earlier start. **Own commit; moves passes, and moves numbers only where a start
    that would have won by a hair now stops.** *Depends:* B1. *Source:* spec §3.4.
-3. ☐ **B3 — reporting.** Per start: converged, at the limit, or agreed; and when not converged, the
+3. ✅ **B3 — reporting.** Per start: converged, at the limit, or agreed; and when not converged, the
    parameter furthest from settled with its distance in errors. The per-cycle progress line gains the
    count not yet settled. `JointFit` gains the per-start record. *Depends:* B2. *Source:* spec §3.5.
 

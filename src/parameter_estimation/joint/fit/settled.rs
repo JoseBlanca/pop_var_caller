@@ -31,7 +31,7 @@
 //! its judging passes, its *projected endpoint* — each parameter's value plus its Newton distance — lies
 //! within [`AGREEMENT_FRACTION`] of the earlier answer's standard error of that answer, on every
 //! parameter the earlier answer gives an error ([`agrees`]). It is recorded as having agreed
-//! ([`StartEnd::Agreed`]) and does not compete to be the fit's answer. A start whose judging pass finds
+//! ([`StartEnding::Agreed`]) and does not compete to be the fit's answer. A start whose judging pass finds
 //! every parameter settled is not stopped by agreement: it finishes its cycle, converges and competes.
 //!
 //! The earlier answer is the best-scoring start that has converged so far ([`EarlierAnswer`]); a start
@@ -93,16 +93,33 @@ pub(super) fn furthest(
 /// spec's starting value.
 pub(super) const AGREEMENT_FRACTION: f64 = 0.5;
 
-/// **How one start of the fit ended.**
+/// **How one start of the SNP/indel fit ended** (spec §3.5).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(super) enum StartEnd {
-    /// Every parameter was settled (the rule above).
+pub enum StartEnding {
+    /// Every parameter was within the settled fraction of its standard error of the maximum.
     Converged,
     /// It ran out of passes first.
     AtTheLimit,
-    /// It was heading where an earlier start, counted from one, had converged ([`agrees`]), and stopped
-    /// there: it adds nothing new, and does not compete to be the fit's answer.
-    Agreed { with: usize },
+    /// It was heading where an earlier start had converged ([`agrees`]), and stopped there: it adds
+    /// nothing new, and does not compete to be the fit's answer. `with_start` counts from one.
+    Agreed { with_start: usize },
+}
+
+/// **Why a start that did not converge had not** (spec §3.5): at the values it returned, how many
+/// parameters were not yet within the settled fraction of their standard error of the maximum, of
+/// how many, and the one furthest from it, named as the run's log names it, with its distance in
+/// units of its own standard error.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FurthestFromSettled {
+    /// How many parameters were not yet within the settled fraction of their error.
+    pub not_settled: usize,
+    /// Of how many parameters the fit carries.
+    pub parameters: usize,
+    /// The furthest, as the run's log names it: `invariant share`, `homozygote excess of LA1589`,
+    /// `error rate at ordinary positions of LA1589's library 2`.
+    pub parameter: String,
+    /// Its distance to the maximum over its standard error.
+    pub errors: f64,
 }
 
 /// **An earlier start's answer, as a later start is judged against it**: which start it was, counted
@@ -170,19 +187,49 @@ pub(super) fn agrees(
     within && judged > 0
 }
 
+/// **What a start's log line adds about how far from settled it stopped** (spec §3.5): nothing for a
+/// start that converged; for one that did not, at the values it returned, how many parameters were
+/// still further than `fraction` of a standard error from where the likelihood peaks and the furthest
+/// — or that every one was within it, for a start that ran out of passes before a cycle judged it —
+/// or, with no parameter to judge, that too. Begins with `"; "` when not empty.
+pub(super) fn describe_short_of_settled(
+    ended: StartEnding,
+    furthest: Option<&FurthestFromSettled>,
+    fraction: f64,
+) -> String {
+    if ended == StartEnding::Converged {
+        return String::new();
+    }
+    match furthest {
+        None => "; no parameter has both a standard error and a distance to the maximum, so how \
+                 far it stopped from settled cannot be said"
+            .to_owned(),
+        Some(furthest) if furthest.not_settled == 0 => format!(
+            "; at the values it returned every one of its {} parameter(s) was within {fraction} \
+             standard errors of where the likelihood peaks (furthest, the {}, at {:.2})",
+            furthest.parameters, furthest.parameter, furthest.errors
+        ),
+        Some(furthest) => format!(
+            "; at the values it returned {} of {} parameter(s) still more than {fraction} standard \
+             errors from where the likelihood peaks; furthest, the {}, at {:.2} standard errors",
+            furthest.not_settled, furthest.parameters, furthest.parameter, furthest.errors
+        ),
+    }
+}
+
 /// **Whether a start that ended so, scoring `score`, becomes the answer later starts are judged
 /// against**, in place of one scoring `current`: only a start that converged — an answer found at the
 /// pass limit has errors that need not be the maximum's (spec §3.4) — and only above the current one,
 /// so later starts are judged against the best converged answer.
-pub(super) fn is_the_new_yardstick(ended: StartEnd, score: f64, current: Option<f64>) -> bool {
-    ended == StartEnd::Converged && current.is_none_or(|current| score > current)
+pub(super) fn is_the_new_yardstick(ended: StartEnding, score: f64, current: Option<f64>) -> bool {
+    ended == StartEnding::Converged && current.is_none_or(|current| score > current)
 }
 
 /// **Whether a start that ended so, scoring `score`, becomes the fit's answer** in place of one
 /// scoring `current`: the best log-likelihood wins, among the starts that did not agree. A start that
 /// agreed stopped part-way on purpose, heading where another had already arrived.
-pub(super) fn is_the_new_best(ended: StartEnd, score: f64, current: Option<f64>) -> bool {
-    !matches!(ended, StartEnd::Agreed { .. }) && current.is_none_or(|current| score > current)
+pub(super) fn is_the_new_best(ended: StartEnding, score: f64, current: Option<f64>) -> bool {
+    !matches!(ended, StartEnding::Agreed { .. }) && current.is_none_or(|current| score > current)
 }
 
 #[cfg(test)]
@@ -359,25 +406,25 @@ mod tests {
     /// converged answer, never one at the pass limit, however well it scores.
     #[test]
     fn the_yardstick_is_the_best_converged_start() {
-        assert!(is_the_new_yardstick(StartEnd::Converged, -10.0, None));
+        assert!(is_the_new_yardstick(StartEnding::Converged, -10.0, None));
         assert!(is_the_new_yardstick(
-            StartEnd::Converged,
+            StartEnding::Converged,
             -10.0,
             Some(-11.0)
         ));
         assert!(!is_the_new_yardstick(
-            StartEnd::Converged,
+            StartEnding::Converged,
             -12.0,
             Some(-11.0)
         ));
-        assert!(!is_the_new_yardstick(StartEnd::AtTheLimit, -1.0, None));
+        assert!(!is_the_new_yardstick(StartEnding::AtTheLimit, -1.0, None));
         assert!(!is_the_new_yardstick(
-            StartEnd::AtTheLimit,
+            StartEnding::AtTheLimit,
             -1.0,
             Some(-11.0)
         ));
         assert!(!is_the_new_yardstick(
-            StartEnd::Agreed { with: 1 },
+            StartEnding::Agreed { with_start: 1 },
             -1.0,
             None
         ));
@@ -387,15 +434,58 @@ mod tests {
     /// compete however well it scores.
     #[test]
     fn the_answer_is_the_best_start_that_did_not_agree() {
-        assert!(is_the_new_best(StartEnd::AtTheLimit, -1.0, Some(-10.0)));
-        assert!(is_the_new_best(StartEnd::Converged, -1.0, None));
-        assert!(!is_the_new_best(StartEnd::Converged, -12.0, Some(-10.0)));
+        assert!(is_the_new_best(StartEnding::AtTheLimit, -1.0, Some(-10.0)));
+        assert!(is_the_new_best(StartEnding::Converged, -1.0, None));
+        assert!(!is_the_new_best(StartEnding::Converged, -12.0, Some(-10.0)));
         assert!(!is_the_new_best(
-            StartEnd::Agreed { with: 1 },
+            StartEnding::Agreed { with_start: 1 },
             -1.0,
             Some(-10.0)
         ));
-        assert!(!is_the_new_best(StartEnd::Agreed { with: 1 }, -1.0, None));
+        assert!(!is_the_new_best(
+            StartEnding::Agreed { with_start: 1 },
+            -1.0,
+            None
+        ));
+    }
+
+    /// The start's log line says nothing more for a start that converged, and for one that did not,
+    /// the count, the name and the distance — or that every parameter was within the fraction, or
+    /// that none could be judged.
+    #[test]
+    fn a_start_that_did_not_converge_says_how_far_it_stopped_from_settled() {
+        let furthest = FurthestFromSettled {
+            not_settled: 4,
+            parameters: 17,
+            parameter: "allele-frequency shape a".to_owned(),
+            errors: 0.2344,
+        };
+        assert_eq!(
+            describe_short_of_settled(StartEnding::Converged, Some(&furthest), 0.1),
+            ""
+        );
+        let at_the_limit = describe_short_of_settled(StartEnding::AtTheLimit, Some(&furthest), 0.1);
+        for part in [
+            "4 of 17 parameter(s) still more than 0.1 standard errors",
+            "the allele-frequency shape a, at 0.23 standard errors",
+        ] {
+            assert!(at_the_limit.contains(part), "{at_the_limit}");
+        }
+        let agreed =
+            describe_short_of_settled(StartEnding::Agreed { with_start: 1 }, Some(&furthest), 0.1);
+        assert_eq!(agreed, at_the_limit);
+        let settled = FurthestFromSettled {
+            not_settled: 0,
+            errors: 0.04,
+            ..furthest
+        };
+        let never_judged = describe_short_of_settled(StartEnding::AtTheLimit, Some(&settled), 0.1);
+        assert!(
+            never_judged.contains("every one of its 17 parameter(s) was within 0.1"),
+            "{never_judged}"
+        );
+        let nothing = describe_short_of_settled(StartEnding::AtTheLimit, None, 0.1);
+        assert!(nothing.contains("cannot be said"), "{nothing}");
     }
 
     #[test]

@@ -164,7 +164,7 @@ const ABSENT_REASONS: [&str; 4] = [
 
 /// What the run's log calls each cohort-level parameter, by slot
 /// ([`cohort`](super::information::cohort)).
-const COHORT_PARAMETER_NAMES: [&str; COHORT_PARAMETERS] = [
+pub(super) const COHORT_PARAMETER_NAMES: [&str; COHORT_PARAMETERS] = [
     "mismapped share",
     "invariant share",
     "fixed non-reference share",

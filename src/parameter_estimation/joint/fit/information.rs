@@ -3791,13 +3791,16 @@ mod tests {
         earlier: Option<&super::super::settled::EarlierAnswer>,
     ) -> super::super::StartOutcome {
         use crate::parameter_estimation::progress::StageProgress;
-        let groups = as_cohort(&cohort.samples).read_groups().to_vec();
+        let census = as_cohort(&cohort.samples);
+        let groups = census.read_groups().to_vec();
+        let sample_names: Vec<String> = census.sample_names().map(str::to_string).collect();
         let stage = StageProgress::begin("a test of one start");
         let which = super::super::WhichStart {
             number,
             of: config.starting_points.len(),
             point: &config.starting_points[number - 1],
             earlier,
+            sample_names: &sample_names,
             stage: &stage,
         };
         super::super::maximise(
@@ -3820,7 +3823,7 @@ mod tests {
     #[test]
     fn a_later_start_heading_where_the_first_converged_stops_there() {
         use crate::parameter_estimation::joint::fit::settled::{
-            AGREEMENT_FRACTION, EarlierAnswer, StartEnd,
+            AGREEMENT_FRACTION, EarlierAnswer, StartEnding,
         };
         let config = JointFitConfig {
             duplicated_positions: false,
@@ -3844,14 +3847,14 @@ mod tests {
             let first = run(1, None);
             assert_eq!(
                 first.ended,
-                StartEnd::Converged,
+                StartEnding::Converged,
                 "the first start converges"
             );
             let answer = EarlierAnswer::of(1, &first, group_index);
             let alone = run(2, None);
             assert_eq!(
                 alone.ended,
-                StartEnd::Converged,
+                StartEnding::Converged,
                 "the second start converges alone"
             );
             let judged = run(2, Some(&answer));
@@ -3868,7 +3871,7 @@ mod tests {
                  {value_apart:.3} errors from the answer where it stopped",
                 alone.passes, judged.passes, judged.ended
             );
-            assert_eq!(judged.ended, StartEnd::Agreed { with: 1 });
+            assert_eq!(judged.ended, StartEnding::Agreed { with_start: 1 });
             assert!(
                 judged.passes < alone.passes,
                 "{} against {}",
@@ -3888,7 +3891,7 @@ mod tests {
                 .expect("the invariant share has an error");
             elsewhere.values[cohort::P_INVARIANT] += 3.0 * error;
             let not_agreeing = run(2, Some(&elsewhere));
-            assert_eq!(not_agreeing.ended, StartEnd::Converged);
+            assert_eq!(not_agreeing.ended, StartEnding::Converged);
             assert_eq!(
                 not_agreeing.passes, alone.passes,
                 "judged against an answer it is not heading to"
@@ -3903,7 +3906,7 @@ mod tests {
     /// with the agreement fraction at zero it runs to its own convergence, pass for pass.
     #[test]
     fn a_start_both_settled_and_agreeing_converges() {
-        use crate::parameter_estimation::joint::fit::settled::{EarlierAnswer, StartEnd};
+        use crate::parameter_estimation::joint::fit::settled::{EarlierAnswer, StartEnding};
         let base = JointFitConfig {
             estimate_contamination: false,
             duplicated_positions: false,
@@ -3931,20 +3934,20 @@ mod tests {
                 ..base.clone()
             };
             let settled = run(&loose, Some(&answer));
-            assert_eq!(settled.ended, StartEnd::Converged);
+            assert_eq!(settled.ended, StartEnding::Converged);
             let never_settled = JointFitConfig {
                 settled_fraction: 0.0,
                 ..loose.clone()
             };
             let agreed = run(&never_settled, Some(&answer));
-            assert_eq!(agreed.ended, StartEnd::Agreed { with: 1 });
+            assert_eq!(agreed.ended, StartEnding::Agreed { with_start: 1 });
             assert!(agreed.passes < settled.passes, "it stops at once");
             let off = JointFitConfig {
                 agreement_fraction: 0.0,
                 ..base.clone()
             };
             let judged_off = run(&off, Some(&answer));
-            assert_eq!(judged_off.ended, StartEnd::Converged);
+            assert_eq!(judged_off.ended, StartEnding::Converged);
             assert_eq!(judged_off.passes, alone.passes);
         });
     }
@@ -3954,7 +3957,7 @@ mod tests {
     /// judged against another, so no later start stops early on an answer that is not the maximum.
     #[test]
     fn a_start_at_the_pass_limit_is_no_yardstick() {
-        use crate::parameter_estimation::joint::fit::settled::StartEnd;
+        use crate::parameter_estimation::joint::fit::settled::StartEnding;
         let config = JointFitConfig {
             estimate_contamination: false,
             duplicated_positions: false,
@@ -3986,7 +3989,7 @@ mod tests {
         assert!(
             alone
                 .iter()
-                .all(|(ended, _, _)| *ended == StartEnd::AtTheLimit),
+                .all(|(ended, _, _)| *ended == StartEnding::AtTheLimit),
             "the fixture needs every start to run to the limit: {alone:?}"
         );
         let (_, best, passes) = alone
@@ -4005,7 +4008,7 @@ mod tests {
     /// `fit_jointly` returns the first start's answer, pass for pass.
     #[test]
     fn later_starts_that_agree_leave_the_first_converged_answer() {
-        use crate::parameter_estimation::joint::fit::settled::StartEnd;
+        use crate::parameter_estimation::joint::fit::settled::StartEnding;
         let config = JointFitConfig {
             estimate_contamination: false,
             duplicated_positions: false,
@@ -4034,7 +4037,7 @@ mod tests {
                     })
                     .collect()
             });
-        assert_eq!(alone[0].0, StartEnd::Converged);
+        assert_eq!(alone[0].0, StartEnding::Converged);
         assert!(
             alone[1].1 > alone[0].1,
             "the fixture needs a later start that would win alone: {alone:?}"
@@ -4043,6 +4046,262 @@ mod tests {
         assert!(fit.converged);
         assert_eq!(fit.log_likelihood, alone[0].1);
         assert_eq!(fit.passes, alone[0].2);
+    }
+
+    /// **Each start is recorded as it ended** (spec §3.5), in order: on 20 samples at 3 reads, start 1
+    /// converged with no reason recorded, and starts 2 and 3 agreed with it, each with how far from
+    /// settled it stopped; on 4 samples where every start runs to the pass limit, each says which
+    /// parameter held it and by how many errors. The count not settled is non-zero exactly when the
+    /// furthest is at least the settled fraction, and the returned fit is the winner's record.
+    #[test]
+    fn each_start_is_recorded_as_it_ended() {
+        use crate::parameter_estimation::joint::fit::settled::{SETTLED_FRACTION, StartEnding};
+        let config = JointFitConfig {
+            estimate_contamination: false,
+            duplicated_positions: false,
+            ..JointFitConfig::default()
+        };
+        let consistent = |record: &crate::parameter_estimation::joint::fit::StartRecord| {
+            let furthest = record
+                .furthest_from_settled
+                .as_ref()
+                .expect("a start that did not converge says why");
+            assert_eq!(
+                furthest.not_settled > 0,
+                furthest.errors >= SETTLED_FRACTION,
+                "{record:?}"
+            );
+            assert!(furthest.not_settled <= furthest.parameters, "{record:?}");
+        };
+
+        let (agreeing, _) = fitted(&a_cohort_of(20, 4_000, 3.0, 0x5E77_1ED0_B200_0000), &config);
+        let numbers: Vec<usize> = agreeing.starts.iter().map(|start| start.number).collect();
+        assert_eq!(numbers, [1, 2, 3]);
+        assert_eq!(agreeing.starts[0].ended, StartEnding::Converged);
+        assert_eq!(agreeing.starts[0].furthest_from_settled, None);
+        for record in &agreeing.starts[1..] {
+            assert_eq!(record.ended, StartEnding::Agreed { with_start: 1 });
+            consistent(record);
+        }
+        assert_eq!(agreeing.passes, agreeing.starts[0].passes);
+        assert_eq!(agreeing.log_likelihood, agreeing.starts[0].log_likelihood);
+
+        let (at_the_limit, _) = fitted(
+            &a_cohort_of(4, 6_000, 3.0, 0x5E77_1ED0_B200_0000 + 200),
+            &config,
+        );
+        for record in &at_the_limit.starts {
+            assert_eq!(record.ended, StartEnding::AtTheLimit);
+            consistent(record);
+            let furthest = record.furthest_from_settled.as_ref().expect("checked");
+            eprintln!(
+                "start {} at the limit after {} passes: {} of {} not settled, the furthest {} at \
+                 {:.2} errors",
+                record.number,
+                record.passes,
+                furthest.not_settled,
+                furthest.parameters,
+                furthest.parameter,
+                furthest.errors
+            );
+        }
+        let winner = at_the_limit
+            .starts
+            .iter()
+            .max_by(|left, right| left.log_likelihood.total_cmp(&right.log_likelihood))
+            .expect("three starts");
+        assert_eq!(at_the_limit.log_likelihood, winner.log_likelihood);
+        assert_eq!(at_the_limit.passes, winner.passes);
+    }
+
+    /// **A fit stops only on a cycle whose judging pass found every parameter settled**, on a
+    /// 20-sample fit whose judged passes find 3, then 1, then 0 parameters unsettled — so stopping
+    /// with one unsettled would stop a cycle early. In the winning start's per-pass trace the last
+    /// judged pass found none, every earlier one some; the verdicts sit one a cycle, on the pass
+    /// that judged, and the fit's first pass never judges. A fit that ran to the pass limit never
+    /// found none.
+    #[test]
+    fn a_fit_stops_only_on_a_pass_that_found_every_parameter_settled() {
+        let config = JointFitConfig {
+            estimate_contamination: false,
+            duplicated_positions: false,
+            pass_trace: true,
+            ..JointFitConfig::default()
+        };
+        let (converged, _) = fitted(
+            &a_cohort_of(20, 4_000, 3.0, 0x5E77_1ED0_B200_0000 + 3),
+            &config,
+        );
+        assert!(converged.converged);
+        let judged: Vec<(u32, usize)> = converged
+            .trace
+            .iter()
+            .filter_map(|summary| summary.not_settled.map(|count| (summary.pass, count)))
+            .collect();
+        eprintln!("the converged fit's judged passes (pass, unsettled): {judged:?}");
+        assert!(
+            judged.iter().any(|&(_, count)| count == 1),
+            "the fixture needs a judged pass with exactly one unsettled: {judged:?}"
+        );
+        assert_eq!(
+            judged.last().map(|&(_, count)| count),
+            Some(0),
+            "{judged:?}"
+        );
+        assert!(
+            judged[..judged.len() - 1]
+                .iter()
+                .all(|&(_, count)| count > 0),
+            "{judged:?}"
+        );
+        assert_eq!(
+            converged.trace[0].not_settled, None,
+            "the first pass never judges"
+        );
+        assert!(
+            judged.windows(2).all(|pair| pair[1].0 >= pair[0].0 + 3),
+            "one judged pass a cycle: {judged:?}"
+        );
+        let last_judged = judged.last().expect("judged").0;
+        assert!(
+            converged.passes >= last_judged + 2,
+            "the converged cycle is finished after the pass that judged it: {} against {last_judged}",
+            converged.passes
+        );
+        let (at_the_limit, _) = fitted(
+            &a_cohort_of(4, 6_000, 3.0, 0x5E77_1ED0_B200_0000 + 200),
+            &config,
+        );
+        assert!(!at_the_limit.converged);
+        let judged: Vec<usize> = at_the_limit
+            .trace
+            .iter()
+            .filter_map(|summary| summary.not_settled)
+            .collect();
+        assert!(!judged.is_empty(), "the fit judged before the limit");
+        assert!(judged.iter().all(|&count| count > 0), "{judged:?}");
+    }
+
+    /// **A start at the limit reports the settled test as it stands at the values it returned**: on
+    /// four samples, at a settled fraction of 0.15 rather than the default, the recorded count, total,
+    /// furthest parameter and its distance equal those recomputed from a fresh pass at the returned
+    /// parameters — not from the start's last judged cycle, whose point differs.
+    #[test]
+    fn a_start_at_the_limit_reports_the_settled_test_at_the_values_it_returned() {
+        use crate::parameter_estimation::joint::fit::settled::StartEnding;
+        use crate::parameter_estimation::joint::fit::standard_errors::newton_step;
+        let config = JointFitConfig {
+            estimate_contamination: false,
+            duplicated_positions: false,
+            settled_fraction: 0.15,
+            ..JointFitConfig::default()
+        };
+        let cohort = a_cohort_of(4, 6_000, 3.0, 0x5E77_1ED0_B200_0000 + 200);
+        let sample_names: Vec<String> = as_cohort(&cohort.samples)
+            .sample_names()
+            .map(str::to_string)
+            .collect();
+        with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+            let outcome = one_start(
+                &cohort,
+                lent,
+                depth_cap,
+                group_index,
+                coverage,
+                &config,
+                1,
+                None,
+            );
+            assert_eq!(outcome.ended, StartEnding::AtTheLimit);
+            let reported = outcome
+                .furthest_from_settled
+                .clone()
+                .expect("a start at the limit says why");
+            let information = expectation_pass(
+                lent,
+                depth_cap,
+                &config,
+                group_index,
+                coverage,
+                &outcome.parameters,
+                PassKeeps {
+                    per_position_posteriors: true,
+                    information: true,
+                },
+            )
+            .information
+            .expect("asked for");
+            let errors =
+                StandardErrors::of(&information).by_coordinate(&outcome.parameters, group_index);
+            let distances = newton_step(&information, &outcome.parameters, group_index);
+            let ratios: Vec<Option<f64>> = errors
+                .iter()
+                .zip(&distances)
+                .map(|(error, distance)| Some(distance.as_ref()?.abs() / error.value()?))
+                .collect();
+            let unsettled = ratios
+                .iter()
+                .flatten()
+                .filter(|&&ratio| ratio >= config.settled_fraction)
+                .count();
+            let (at, largest) = ratios
+                .iter()
+                .enumerate()
+                .filter_map(|(j, ratio)| Some((j, (*ratio)?)))
+                .max_by(|left, right| left.1.total_cmp(&right.1))
+                .expect("some parameter has both");
+            let names = outcome.parameters.plain_names(&sample_names, group_index);
+            eprintln!(
+                "recorded {reported:?}; recomputed {unsettled} unsettled, {} at {largest}",
+                names[at]
+            );
+            assert_eq!(reported.not_settled, unsettled);
+            assert_eq!(reported.parameters, names.len());
+            assert_eq!(reported.parameter, names[at]);
+            assert!((reported.errors - largest).abs() <= 1e-9 * largest);
+        });
+    }
+
+    /// **The log names a parameter as a reader knows it**: the cohort's in the standard-error line's
+    /// words, a sample's excess by the sample's name, a library's rates by its sample — with its place
+    /// among the sample's libraries where it has several — in the fit's own order.
+    #[test]
+    fn the_log_names_each_parameter_by_its_sample() {
+        let parameters = Parameters {
+            clean: vec![1e-3; 3],
+            noisy: vec![0.05; 3],
+            noisy_share: 0.01,
+            density: FrequencyDensity {
+                p_invariant: 0.9,
+                p_fixed_alt: 0.01,
+                a: 0.5,
+                b: 2.0,
+            },
+            hom_excess: vec![0.0; 2],
+            duplicated: None,
+        };
+        let names = parameters.plain_names(
+            &["LA1589".to_owned(), "TS-1".to_owned()],
+            &[vec![0], vec![2, 1]],
+        );
+        assert_eq!(
+            names,
+            [
+                "mismapped share",
+                "invariant share",
+                "fixed non-reference share",
+                "allele-frequency shape a",
+                "allele-frequency shape b",
+                "error rate at ordinary positions of LA1589",
+                "error rate at mismapped positions of LA1589",
+                "error rate at ordinary positions of TS-1's library 2",
+                "error rate at mismapped positions of TS-1's library 2",
+                "error rate at ordinary positions of TS-1's library 1",
+                "error rate at mismapped positions of TS-1's library 1",
+                "homozygote excess of LA1589",
+                "homozygote excess of TS-1",
+            ]
+        );
     }
 
     /// **A fit whose maximum lies on a bound converges**: cohorts drawn with no homozygote excess

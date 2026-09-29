@@ -66,9 +66,10 @@ mod standard_errors;
 
 use information::{InformationSums, PositionScores, RuleSlopes, ScoringTables, score_position};
 use settled::{
-    AGREEMENT_FRACTION, EarlierAnswer, SETTLED_FRACTION, StartEnd, agrees, furthest,
-    is_the_new_best, is_the_new_yardstick, not_settled,
+    AGREEMENT_FRACTION, EarlierAnswer, SETTLED_FRACTION, agrees, describe_short_of_settled,
+    furthest, is_the_new_best, is_the_new_yardstick, not_settled,
 };
+pub use settled::{FurthestFromSettled, StartEnding};
 use standard_errors::{StandardErrors, newton_step};
 
 // ---------------------------------------------------------------------
@@ -370,6 +371,9 @@ pub struct JointFit {
     /// How the fit ended. **Running out of passes is never reported as convergence.**
     pub passes: u32,
     pub converged: bool,
+    /// **How each starting point ended**, in the order [`JointFitConfig::starting_points`] lists
+    /// them (spec §3.5); the returned parameters are the best-scoring one's that did not agree.
+    pub starts: Vec<StartRecord>,
     /// The log-likelihood at the returned parameters.
     pub log_likelihood: f64,
     /// **Every parameter's standard error at the returned parameters, or why it has none** —
@@ -381,6 +385,25 @@ pub struct JointFit {
     ///
     /// Private until each [`Estimate`] carries its own error (plan step E1), which reads it.
     standard_errors: StandardErrors,
+}
+
+/// **How one start of the SNP/indel fit ended** (spec §3.5): converged, at the pass limit, or
+/// stopped as heading where an earlier start converged; its passes and log-likelihood; and, when it
+/// did not converge, which parameter was furthest from settled at the values it returned.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StartRecord {
+    /// Counted from one, in the order [`JointFitConfig::starting_points`] lists the starts.
+    pub number: usize,
+    /// Converged, at the pass limit, or stopped as heading where an earlier start converged.
+    pub ended: StartEnding,
+    /// Passes over the data, the final pass not counted — as the start's log line prints them.
+    pub passes: u32,
+    /// At the values the start returned: its final pass's, or for a start that agreed, the pass
+    /// that judged it.
+    pub log_likelihood: f64,
+    /// For a start that did not converge, how far from settled it was at the values it returned;
+    /// `None` for one that converged, and where no parameter has both an error and a distance.
+    pub furthest_from_settled: Option<FurthestFromSettled>,
 }
 
 impl JointFit {
@@ -1412,6 +1435,36 @@ struct Parameters {
 }
 
 impl Parameters {
+    /// **Every fitted number's name as the run's log gives it**, in the order
+    /// [`coordinates`](Self::coordinates) lists them: the cohort's in the words the standard-error
+    /// line uses, a sample's by its name, a library's rates by its sample and, where the sample has
+    /// several, its place among them. `sample_names` and `group_index` are the cohort's, in the fit's
+    /// order.
+    fn plain_names(&self, sample_names: &[String], group_index: &[Vec<usize>]) -> Vec<String> {
+        let cohort = if self.duplicated.is_some() { 8 } else { 5 };
+        let mut names: Vec<String> = standard_errors::COHORT_PARAMETER_NAMES[..cohort]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        for group in 0..self.clean.len() {
+            let library = group_index.iter().enumerate().find_map(|(sample, groups)| {
+                let at = groups.iter().position(|&g| g == group)?;
+                Some(if groups.len() == 1 {
+                    sample_names[sample].clone()
+                } else {
+                    format!("{}'s library {}", sample_names[sample], at + 1)
+                })
+            });
+            let whose = library.unwrap_or_else(|| format!("read group {group}, read by no sample"));
+            names.push(format!("error rate at ordinary positions of {whose}"));
+            names.push(format!("error rate at mismapped positions of {whose}"));
+        }
+        for name in sample_names.iter().take(self.hom_excess.len()) {
+            names.push(format!("homozygote excess of {name}"));
+        }
+        names
+    }
+
     /// Every fitted number with a name saying which it is — what
     /// [`fit_trace`](super::fit_trace) writes. Read groups and samples are named by their index.
     fn named(&self) -> Vec<(String, f64)> {
@@ -1528,6 +1581,9 @@ pub struct PassSummary {
     pub noisy_share: f64,
     pub density_a: f64,
     pub density_b: f64,
+    /// On a pass that also judged every parameter's distance to the maximum, how many were not yet
+    /// within the settled fraction of their standard error; `None` on a pass that did not judge.
+    pub not_settled: Option<usize>,
 }
 
 #[derive(Copy, Clone, Default)]
@@ -1744,6 +1800,7 @@ pub fn fit_jointly(
         statistics,
         passes,
         converged,
+        starts,
         trace,
         contamination,
         standard_errors,
@@ -1826,6 +1883,7 @@ pub fn fit_jointly(
             )
         });
         let mut best: Option<(usize, StartOutcome)> = None;
+        let mut starts: Vec<StartRecord> = Vec::with_capacity(config.starting_points.len());
         // The best-scoring converged start so far.
         let mut earlier: Option<EarlierAnswer> = None;
         for (index, start) in config.starting_points.iter().enumerate() {
@@ -1837,6 +1895,7 @@ pub fn fit_jointly(
                 of: config.starting_points.len(),
                 point: start,
                 earlier: earlier.as_ref(),
+                sample_names: &names,
                 stage: &stage,
             };
             let began = std::time::Instant::now();
@@ -1852,11 +1911,11 @@ pub fn fit_jointly(
             let score = outcome.statistics.log_likelihood;
             stage.always(|into| {
                 let (how, last_pass) = match outcome.ended {
-                    StartEnd::Converged => ("converged".to_owned(), None),
-                    StartEnd::AtTheLimit => ("stopped at the pass limit".to_owned(), None),
-                    StartEnd::Agreed { with } => (
+                    StartEnding::Converged => ("converged".to_owned(), None),
+                    StartEnding::AtTheLimit => ("stopped at the pass limit".to_owned(), None),
+                    StartEnding::Agreed { with_start } => (
                         format!(
-                            "stopped, heading where start {with} converged (its projected \
+                            "stopped, heading where start {with_start} converged (its projected \
                              endpoint within {} of that start's standard error on every parameter \
                              it gives one)",
                             config.agreement_fraction
@@ -1875,11 +1934,24 @@ pub fn fit_jointly(
                         )
                     )
                 });
+                // Why a start that did not converge had not, at the values it returned.
+                let short_of_settled = describe_short_of_settled(
+                    outcome.ended,
+                    outcome.furthest_from_settled.as_ref(),
+                    config.settled_fraction,
+                );
                 format!(
                     "SNP/indel fit, start {} of {}: {how} after {} pass(es), log-likelihood \
-                         {score:.6e}; {last_pass}; {into}",
+                         {score:.6e}{short_of_settled}; {last_pass}; {into}",
                     which.number, which.of, outcome.passes,
                 )
+            });
+            starts.push(StartRecord {
+                number,
+                ended: outcome.ended,
+                passes: outcome.passes,
+                log_likelihood: score,
+                furthest_from_settled: outcome.furthest_from_settled.clone(),
             });
             if is_the_new_yardstick(
                 outcome.ended,
@@ -1906,6 +1978,7 @@ pub fn fit_jointly(
                 information,
                 passes,
                 ended,
+                furthest_from_settled: _,
                 trace,
                 last_pass_took: _,
                 judging_passes: _,
@@ -1983,7 +2056,8 @@ pub fn fit_jointly(
             parameters,
             statistics,
             passes,
-            converged: ended == StartEnd::Converged,
+            converged: ended == StartEnding::Converged,
+            starts,
             trace,
             contamination,
             standard_errors,
@@ -2078,6 +2152,7 @@ pub fn fit_jointly(
         trace,
         passes,
         converged,
+        starts,
         log_likelihood: score,
         standard_errors,
     })
@@ -2094,6 +2169,8 @@ struct WhichStart<'a> {
     /// The best-scoring earlier start that converged, which this one stops on heading towards
     /// ([`agrees`]); `None` for the first start, and for any start before one has converged.
     earlier: Option<&'a EarlierAnswer>,
+    /// The cohort's sample names, in the fit's order, which the log names parameters by.
+    sample_names: &'a [String],
     stage: &'a StageProgress,
 }
 
@@ -2181,7 +2258,7 @@ fn maximise(
         judging_took: std::time::Duration::ZERO,
         trace: Vec::new(),
     };
-    let mut ended = StartEnd::AtTheLimit;
+    let mut ended = StartEnding::AtTheLimit;
     let mut reach = 1.0_f64;
     // Whether a cycle has yet gained less than `log_likelihood_stillness` a position: from then on
     // every cycle's first pass also sums the information and judges the distances to the maximum.
@@ -2192,6 +2269,7 @@ fn maximise(
     while alternation.passes + 3 <= config.max_passes {
         let cycle_began = std::time::Instant::now();
         let (first, entering) = alternation.step(&parameters, judging);
+        let judging_pass = alternation.passes;
         // How many parameters this cycle's information pass found further than their share of an
         // error from the maximum, the furthest, and — when some are — the earlier start this one is
         // heading towards, if any; `None` before the fit judges them.
@@ -2215,10 +2293,21 @@ fn maximise(
                 .map(|answer| answer.start);
             (not_settled, furthest(&errors, &distances), heading_to)
         });
+        // The traced pass that judged records its verdict.
+        if let (Some((not_settled, _, _)), Some(traced)) = (
+            judged_here,
+            alternation
+                .trace
+                .iter_mut()
+                .rev()
+                .find(|summary| summary.pass == judging_pass),
+        ) {
+            traced.not_settled = Some(not_settled);
+        }
         // **Heading where an earlier start converged** (spec §3.4): it stops here, at the parameters
         // this pass judged, and the rest of the cycle is not run.
-        if let Some((_, _, Some(with))) = judged_here {
-            ended = StartEnd::Agreed { with };
+        if let Some((_, _, Some(with_start))) = judged_here {
+            ended = StartEnding::Agreed { with_start };
             agreed_at = Some(entering);
             break;
         }
@@ -2264,15 +2353,15 @@ fn maximise(
                      log-likelihood less than {gain_to_judge:.2e}"
                 ),
                 Some((not_settled, furthest, _)) => {
-                    let names = parameters.named();
+                    let names = parameters.plain_names(which.sample_names, group_index);
                     format!(
-                        "{not_settled} of {} parameter(s) not yet within {} of an error of the \
-                         maximum{}",
+                        "{not_settled} of {} parameter(s) still more than {} standard errors \
+                         from where the likelihood peaks{}",
                         names.len(),
                         config.settled_fraction,
                         furthest.map_or_else(String::new, |(j, errors)| format!(
-                            ", the furthest {} at {errors:.2} errors",
-                            names[j].0
+                            "; furthest, the {}, at {errors:.2} standard errors",
+                            names[j]
                         ))
                     )
                 }
@@ -2289,7 +2378,7 @@ fn maximise(
             )
         });
         if judged_here.is_some_and(|(not_settled, _, _)| not_settled == 0) {
-            ended = StartEnd::Converged;
+            ended = StartEnding::Converged;
             break;
         }
     }
@@ -2322,6 +2411,18 @@ fn maximise(
         .information
         .take()
         .expect("the pass above keeps the information");
+    // Why a start that did not converge had not, at the values it returns (spec §3.5).
+    let furthest_from_settled = (ended != StartEnding::Converged)
+        .then(|| {
+            how_far_from_settled(
+                &information,
+                &parameters,
+                group_index,
+                which.sample_names,
+                config.settled_fraction,
+            )
+        })
+        .flatten();
     let Alternation {
         passes,
         judging_passes,
@@ -2335,11 +2436,38 @@ fn maximise(
         information,
         passes,
         ended,
+        furthest_from_settled,
         trace,
         last_pass_took,
         judging_passes,
         judging_took,
     }
+}
+
+/// **How far from settled `parameters` are**, by the information and slope one pass summed there:
+/// how many are not within `fraction` of their standard error of the maximum, and the furthest with
+/// its distance in errors; `None` when no parameter has both an error and a distance.
+fn how_far_from_settled(
+    information: &InformationSums,
+    parameters: &Parameters,
+    group_index: &[Vec<usize>],
+    sample_names: &[String],
+    fraction: f64,
+) -> Option<FurthestFromSettled> {
+    let errors = StandardErrors::of(information).by_coordinate(parameters, group_index);
+    let distances = newton_step(information, parameters, group_index);
+    let names = parameters.plain_names(sample_names, group_index);
+    assert_eq!(
+        names.len(),
+        errors.len(),
+        "one name a parameter, in the order the errors list them"
+    );
+    furthest(&errors, &distances).map(|(at, errors_away)| FurthestFromSettled {
+        not_settled: not_settled(&errors, &distances, fraction),
+        parameters: names.len(),
+        parameter: names[at].clone(),
+        errors: errors_away,
+    })
 }
 
 /// Where one start of the alternation ended ([`maximise`]).
@@ -2354,7 +2482,10 @@ struct StartOutcome {
     information: InformationSums,
     passes: u32,
     /// Converged, at the pass limit, or stopped as heading where an earlier start converged.
-    ended: StartEnd,
+    ended: StartEnding,
+    /// For a start that did not converge, how far from settled it was at `parameters`, from the
+    /// information and slope `information` holds.
+    furthest_from_settled: Option<FurthestFromSettled>,
     trace: Vec<PassSummary>,
     /// How long the final pass took ([`cost_of_the_last_pass`]); next to nothing for a start that
     /// agreed, which runs none.
@@ -2433,6 +2564,8 @@ struct FittedCohort {
     statistics: Statistics,
     passes: u32,
     converged: bool,
+    /// How each start ended, in order.
+    starts: Vec<StartRecord>,
     trace: Vec<PassSummary>,
     contamination: Vec<SampleContaminationEstimates>,
     standard_errors: StandardErrors,
@@ -2516,6 +2649,7 @@ impl Alternation<'_, '_> {
                 noisy_share: parameters.noisy_share,
                 density_a: parameters.density.a,
                 density_b: parameters.density.b,
+                not_settled: None,
             });
         }
         (next, statistics)
@@ -4540,6 +4674,7 @@ mod tests {
             trace: Vec::new(),
             passes: 1,
             converged: true,
+            starts: Vec::new(),
             log_likelihood: -1.0,
             standard_errors: StandardErrors::of(&InformationSums::new(&[])),
         }
