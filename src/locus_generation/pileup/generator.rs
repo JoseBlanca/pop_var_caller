@@ -156,6 +156,19 @@ impl Default for PileupGeneratorConfig {
 }
 
 impl PileupGeneratorConfig {
+    /// The defaults with the read cap set to `max_reads_per_position` reads of one read group
+    /// — what `--max-reads-per-position` asks for. The cap at an insertion or deletion stays at
+    /// its default unless this is lower, so it is never looser than the cap elsewhere.
+    #[must_use]
+    pub fn with_max_reads_per_position(max_reads_per_position: u32) -> Self {
+        let defaults = Self::default();
+        Self {
+            max_snp_column_depth: max_reads_per_position,
+            max_indel_column_depth: defaults.max_indel_column_depth.min(max_reads_per_position),
+            ..defaults
+        }
+    }
+
     /// Reject a configuration a [`ReadWitness`] run could not describe.
     ///
     /// Called by [`PileupGenerator::new`], so a bad knob never reaches a locus.
@@ -1739,7 +1752,7 @@ mod tests {
             .build()
     }
 
-    /// **Four of the five defaults are production's, read from production's own
+    /// **Three of the five defaults are production's, read from production's own
     /// constants.**
     ///
     /// Asserted against production's `pub const`s by name until promotion step C18, so a knob
@@ -1748,13 +1761,16 @@ mod tests {
     /// purpose ends with the tree it guarded against, and what stays is the record of where ng
     /// started.
     ///
-    /// **The fifth is ng's own from 2026-08-05**, and the assertion says so rather than
-    /// being deleted: `max_active_reads` is 32,768 where production's constant is 4,096,
-    /// because production's value was refusing reads at the door on ordinary
-    /// whole-genome data. A test that merely stopped checking the knob would let ng drift
-    /// back without anybody noticing; this one fails if either number moves.
+    /// **The other two are ng's own**, and the assertions say so rather than being deleted:
+    /// `max_active_reads` is 32,768 where production's constant is 4,096 (2026-08-05), because
+    /// production's value was refusing reads at the door on ordinary whole-genome data; and
+    /// the read cap `max_snp_column_depth` is 1,000 reads of one read group where production's
+    /// was 8,000 reads of a sample (2026-09-29), because 8,000 let a collapsed-repeat pile-up of
+    /// 5,669 reads a sample through to a 2,169-sample calling run. A test that merely stopped
+    /// checking the knobs would let ng drift back without anybody noticing; this one fails if
+    /// any number moves.
     #[test]
-    fn the_default_knobs_are_productions_five_constants() {
+    fn the_default_knobs_are_productions_constants_except_two() {
         // Production's `pileup::walker` defaults at commit `d9e7b076`.
         const PRODUCTION_MAX_SNP_COLUMN_DEPTH: u32 = 8_000;
         const PRODUCTION_MAX_INDEL_COLUMN_DEPTH: u32 = 250;
@@ -1762,7 +1778,11 @@ mod tests {
         const PRODUCTION_MATE_LOOKUP_WINDOW: u32 = 10_000;
 
         let config = PileupGeneratorConfig::default();
-        assert_eq!(config.max_snp_column_depth, PRODUCTION_MAX_SNP_COLUMN_DEPTH);
+        assert_eq!(
+            config.max_snp_column_depth, 1_000,
+            "ng's own, not production's"
+        );
+        assert_ne!(config.max_snp_column_depth, PRODUCTION_MAX_SNP_COLUMN_DEPTH);
         assert_eq!(
             config.max_indel_column_depth,
             PRODUCTION_MAX_INDEL_COLUMN_DEPTH

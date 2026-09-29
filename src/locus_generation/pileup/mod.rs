@@ -338,13 +338,18 @@ pub(crate) const DEFAULT_MAX_RECORD_SPAN: u32 = 5_000;
 /// lose the pairing quietly rather than loudly.
 pub(crate) const DEFAULT_MATE_LOOKUP_WINDOW: u32 = 10_000;
 
-/// How many reads the walk will fold into one position that carries no insertion or deletion.
+/// How many reads **of one read group** the walk will fold into one position that carries no
+/// insertion or deletion — the default of `--max-reads-per-position`.
 ///
-/// samtools' `MPLP_MAX_DEPTH`. Pathologically deep ground truncates here rather than costing
-/// unbounded time.
-pub(crate) const DEFAULT_MAX_SNP_COLUMN_DEPTH: u32 = 8_000;
+/// **1,000 since 2026-09-29; it was samtools' `MPLP_MAX_DEPTH`, 8,000, per sample.** At 8,000
+/// the cap never fired at the collapsed-repeat pile-up that stopped the 2,169-sample tomato run
+/// (a median of 5,669 reads a position in each 3× sample), so every one of those reads reached
+/// the stored files and the calling that read them. 1,000 is the owner's choice: far above any
+/// position's honest depth at the coverages the caller is for, low enough to bound a pile-up.
+pub(crate) const DEFAULT_MAX_SNP_COLUMN_DEPTH: u32 = 1_000;
 
-/// How many reads the walk will fold into one position that carries an insertion or deletion.
+/// How many reads **of one read group** the walk will fold into one position that carries an
+/// insertion or deletion.
 ///
 /// samtools' `MPLP_MAX_INDEL_DEPTH`, and far tighter than the SNP cap for a reason: indel
 /// evidence in a homopolymer saturates long before the likelihood gains anything from more of
@@ -353,16 +358,14 @@ pub(crate) const DEFAULT_MAX_INDEL_COLUMN_DEPTH: u32 = 250;
 
 /// The four limits the walk reads as it runs.
 ///
-/// **The truncation is per position, not per allele**, and that is the property worth stating:
-/// when a position has more reads than the cap allows, the walk keeps the first `cap` of them
-/// in the order they arrived and drops the rest. Clipping each allele separately instead would
-/// bias the allele frequency — a position where 99 reads show one base and 1 shows another
-/// would come back as roughly 71 against 29 at a cap of 250.
+/// **The truncation is per position and per read group, not per allele**, and that is the
+/// property worth stating: when one read group has more reads at a position than the cap
+/// allows, the walk keeps `cap` of them and drops the rest. Clipping each allele separately
+/// instead would bias the allele frequency — a position where 99 reads show one base and 1
+/// shows another would come back as roughly 71 against 29 at a cap of 250.
 ///
-/// That order is the order the alignment files delivered the reads, which for coordinate-sorted
-/// input is near enough arbitrary with respect to which allele a read carries. A pipeline that
-/// concatenated per-lane files rather than merging them could break that, and the fix there is
-/// to interleave upstream: this cap is a defence against unbounded work, not a sampler.
+/// **Which reads are kept is a function of the reads**: the smallest sampling keys, a hash of
+/// the query name ([`read_sampling`]), so the same reads survive at neighbouring positions.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub(crate) struct WalkerConfig {

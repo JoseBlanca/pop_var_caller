@@ -156,6 +156,17 @@ pub struct GeneratePspsArgs {
     #[arg(long, help_heading = "Advanced")]
     pub build_index_if_missing: bool,
 
+    /// The most reads of one read group used at one position. Where a read group has more, the
+    /// walk keeps this many, chosen by a hash of the read name so the same reads are kept at
+    /// neighbouring positions, and counts the rest as discarded. Positions where a read has an
+    /// insertion or deletion use the lower of this and 250.
+    ///
+    /// It bounds the work and memory a pile-up of reads costs — a collapsed repeat can put
+    /// thousands of reads on a position in a sample sequenced at 3× — and at 1,000 it leaves
+    /// every honestly covered position alone at the depths the caller is for.
+    #[arg(long, default_value_t = crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
+    pub max_reads_per_position: u32,
+
     /// The fewest motif copies a tract needs before this run treats it as a repeat: six
     /// comma-separated numbers, one per period 1 to 6. Any other count is refused.
     ///
@@ -679,7 +690,9 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
                     alignments: &files,
                     reference: &reference,
                     read_filters: ReadFilterConfig::default(),
-                    locus_generator_settings: PileupGeneratorConfig::default(),
+                    locus_generator_settings: PileupGeneratorConfig::with_max_reads_per_position(
+                        args.max_reads_per_position,
+                    ),
                     build_index_if_missing: args.build_index_if_missing,
                 },
                 Arc::clone(&segmentation),

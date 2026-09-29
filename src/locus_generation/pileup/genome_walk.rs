@@ -764,11 +764,11 @@ struct WalkerState {
     /// heap is empty, and the per-position work is one `is_empty` on an empty `Vec`.
     ceiling_losses_by_end: BinaryHeap<Reverse<u32>>,
     /// **ng's, added by the depth-cap change** — scratch for the per-position sample:
-    /// `(sampling key, index into the contributor list)` for every contributor, and then
-    /// the indices the sample keeps. Hoisted for the reason every buffer here is: a deep
+    /// `(read group, sampling key, index into the contributor list)` for every contributor,
+    /// and then the indices the sample keeps. Hoisted for the reason every buffer here is: a deep
     /// enough region caps at many consecutive positions, and each would otherwise
     /// allocate twice.
-    sample_keys_buf: Vec<(u64, u32)>,
+    sample_keys_buf: Vec<(u32, u64, u32)>,
     sample_kept_buf: Vec<u32>,
     /// EXPERIMENT E2: reusable scratch for `resolve_mate_overlap_at_pos`, replacing
     /// the per-column `AHashMap<ChainId, Vec<usize>>` and its two companion `Vec`s.
@@ -1294,13 +1294,14 @@ impl WalkerState {
             self.summary.column_depth_high_water = depth as u32;
         }
         self.truncated_read_ids_buf.clear();
+        // **The cap is per read group** (owner, 2026-09-29), so a position is only a
+        // candidate when the whole column is over it: no read group can then be.
         if depth > cap {
             // The fairness census, taken before and after the cap acts — see the four
             // fields on `RunSummary`. A read is "placed left" when it began before this
             // position, i.e. it reaches the position from the left rather than starting
             // at it.
-            self.summary.capped_column_reads_seen += depth as u64;
-            self.summary.capped_column_reads_seen_placed_left += contributors
+            let seen_placed_left = contributors
                 .iter()
                 .filter(|contrib| contrib.alignment_start < walker_pos)
                 .count() as u64;
@@ -1312,12 +1313,17 @@ impl WalkerState {
                 &mut self.sample_kept_buf,
                 &mut self.truncated_read_ids_buf,
             );
-            self.summary.capped_column_reads_kept += contributors.len() as u64;
-            self.summary.capped_column_reads_kept_placed_left += contributors
-                .iter()
-                .filter(|contrib| contrib.alignment_start < walker_pos)
-                .count() as u64;
-            self.summary.column_depth_truncations += 1;
+            if !self.truncated_read_ids_buf.is_empty() {
+                self.summary.capped_column_reads_seen += depth as u64;
+                self.summary.capped_column_reads_seen_placed_left += seen_placed_left;
+                self.summary.capped_column_reads_kept += contributors.len() as u64;
+                self.summary.capped_column_reads_kept_placed_left += contributors
+                    .iter()
+                    .filter(|contrib| contrib.alignment_start < walker_pos)
+                    .count()
+                    as u64;
+                self.summary.column_depth_truncations += 1;
+            }
         }
 
         // **The owner's test of success, counted rather than argued.** The heap holds the
@@ -2003,19 +2009,28 @@ fn pair_has_indel(a: &ReadContribution, b: &ReadContribution) -> bool {
     has_indel(a) || has_indel(b)
 }
 
-/// **ng's** — cut `contributors` down to `cap` by keeping the `cap` reads with the
-/// smallest [`sampling_key`](read_sampling::sampling_key), and put the read ids of
-/// everything dropped into `dropped`.
+/// **ng's** — cut every read group in `contributors` down to `cap` by keeping, within each
+/// group, the `cap` reads with the smallest [`sampling_key`](read_sampling::sampling_key),
+/// and put the read ids of everything dropped into `dropped`. A column where no read group
+/// is over `cap` is left as it was and `dropped` stays empty.
 ///
-/// # Why it is a select and not a sort
+/// # Per read group
 ///
-/// `select_nth_unstable` partitions in linear time, which is what a rule applied at
-/// every position of a deep region should cost. It leaves the kept side unordered,
-/// so the kept indices are sorted afterwards — `cap` of them, at most 8,000 — and the
-/// contributors compacted in index order. **Keeping the original relative order is not
-/// cosmetic**: the fold's tie-breaks read the contributor list in the order the active
-/// set holds it, so preserving that order is what confines this change to *which* reads
-/// are kept and stops it from also changing how the kept ones are folded.
+/// **The owner's rule of 2026-09-29.** A cap on the whole sample would have to decide how to
+/// share the kept reads between the sample's libraries; a cap per library needs no such
+/// decision, and every library keeps up to `cap` of its own. A sample's column can therefore
+/// hold up to `cap` times its number of read groups.
+///
+/// # A sort rather than a select
+///
+/// This was a `select_nth_unstable` over one group, linear in the column. With groups the
+/// keys are sorted by `(group, key)` and each group's first `cap` kept — `n log n` where it
+/// was `n`, paid only at positions whose whole column is over the cap. The kept indices are
+/// then sorted back into contributor order and the contributors compacted in that order.
+/// **Keeping the original relative order is not cosmetic**: the fold's tie-breaks read the
+/// contributor list in the order the active set holds it, so preserving that order is what
+/// confines this change to *which* reads are kept and stops it from also changing how the
+/// kept ones are folded.
 ///
 /// # The key comes from the active set, not from the contributor
 ///
@@ -2032,28 +2047,51 @@ fn sample_to_cap(
     contributors: &mut Vec<ReadContribution>,
     cap: usize,
     active_reads: &ActiveReads,
-    keys: &mut Vec<(u64, u32)>,
+    keys: &mut Vec<(u32, u64, u32)>,
     kept: &mut Vec<u32>,
     dropped: &mut Vec<u32>,
 ) {
     keys.clear();
     keys.extend(contributors.iter().enumerate().map(|(index, contrib)| {
-        let key = active_reads
-            .get_by_read_id(contrib.read_id)
-            .map_or(u64::MAX, |active| read_sampling::sampling_key(&active.read));
-        (key, index as u32)
+        // A read missing from the active set — see below — is put in group `u32::MAX` with
+        // key `u64::MAX`, so it is dropped before any read of a real group would be.
+        let (group, key) =
+            active_reads
+                .get_by_read_id(contrib.read_id)
+                .map_or((u32::MAX, u64::MAX), |active| {
+                    (
+                        active.read.read_group.get(),
+                        read_sampling::sampling_key(&active.read),
+                    )
+                });
+        (group, key, index as u32)
     }));
-    // `(key, index)`: the index breaks a key tie deterministically, and it is the
+    // `(group, key, index)`: the index breaks a key tie deterministically, and it is the
     // contributor's own position in a list built by walking the active set in order — so
     // a tie is broken the same way a `sort_unstable` on keys alone could not promise.
-    keys.select_nth_unstable(cap);
-    dropped.extend(
-        keys[cap..]
-            .iter()
-            .map(|&(_, index)| contributors[index as usize].read_id),
-    );
+    keys.sort_unstable();
     kept.clear();
-    kept.extend(keys[..cap].iter().map(|&(_, index)| index));
+    let mut group_start = 0;
+    while group_start < keys.len() {
+        let group = keys[group_start].0;
+        let group_end = group_start + keys[group_start..].partition_point(|k| k.0 == group);
+        let keep_end = group_end.min(group_start + cap);
+        kept.extend(
+            keys[group_start..keep_end]
+                .iter()
+                .map(|&(_, _, index)| index),
+        );
+        dropped.extend(
+            keys[keep_end..group_end]
+                .iter()
+                .map(|&(_, _, index)| contributors[index as usize].read_id),
+        );
+        group_start = group_end;
+    }
+    if dropped.is_empty() {
+        return;
+    }
+    let cap = kept.len();
     kept.sort_unstable();
     // Compaction in place. `kept` is ascending and its `rank`-th entry is at least
     // `rank`, so every swap moves an element forward into a slot already dealt with;

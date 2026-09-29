@@ -1376,6 +1376,51 @@ fn column_depth_cap_keeps_the_smallest_sampling_keys() {
     assert_eq!(total, 2, "exactly the cap's worth folded, and no more");
 }
 
+/// **The cap is per read group** (owner, 2026-09-29): each library keeps up to `cap` of its
+/// own reads, chosen within the library by the smallest sampling keys, and a column whose
+/// libraries are each within the cap is not touched even when the column as a whole is over.
+#[test]
+fn column_depth_cap_applies_to_each_read_group_separately() {
+    let in_group = |name: &str, group: u32| {
+        let mut read = snp_read(name, 1, b"A", &[30]);
+        read.read_group = ReadGroupId(group);
+        read
+    };
+    let cfg = WalkerConfig {
+        max_snp_column_depth: 2,
+        max_indel_column_depth: 99,
+        ..WalkerConfig::default()
+    };
+    let kept_by_group = |records: &[_]| -> Vec<(u32, u32)> {
+        let records: &[crate::locus_generation::SampleLocusObservations] = records;
+        let mut kept: Vec<(u32, u32)> = Vec::new();
+        for observation in &records[0].observations {
+            let group = observation.read_group.get();
+            match kept.iter_mut().find(|(seen, _)| *seen == group) {
+                Some((_, count)) => *count += observation.num_obs,
+                None => kept.push((group, observation.num_obs)),
+            }
+        }
+        kept.sort();
+        kept
+    };
+
+    // Three reads in each of two groups, a cap of two: two kept in each.
+    let reads: Vec<_> = (0..6).map(|i| in_group(&format!("r{i}"), i % 2)).collect();
+    let (records, summary) = drive_walker_with_config(reads, MockFasta::new("A"), &cfg);
+    assert_eq!(kept_by_group(&records), vec![(0, 2), (1, 2)]);
+    assert_eq!(summary.column_depth_truncations, 1);
+    assert_eq!(records[0].reads_discarded_by_cap, 2);
+
+    // Two reads in each of two groups: four in the column, over a cap of two, but no group
+    // is — so nothing is dropped and the position is not counted as capped.
+    let reads: Vec<_> = (0..4).map(|i| in_group(&format!("r{i}"), i % 2)).collect();
+    let (records, summary) = drive_walker_with_config(reads, MockFasta::new("A"), &cfg);
+    assert_eq!(kept_by_group(&records), vec![(0, 2), (1, 2)]);
+    assert_eq!(summary.column_depth_truncations, 0);
+    assert_eq!(records[0].reads_discarded_by_cap, 0);
+}
+
 #[test]
 fn column_depth_cap_uses_indel_cap_when_any_indel_event_present() {
     // Four SNP-only reads + one indel-bearing read, all anchored

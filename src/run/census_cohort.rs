@@ -273,6 +273,7 @@ mod tests {
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
         };
         run_generate_psps(&walk).expect("the cohort walks into psps");
         let paths = vec![psp_path_for(&psps, "alpha"), psp_path_for(&psps, "zeta")];
