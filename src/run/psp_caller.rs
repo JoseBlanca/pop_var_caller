@@ -392,6 +392,10 @@ pub struct PspVariantCaller {
     /// How much page cache the calling may fill reading the psps ahead of the merge
     /// ([`PspPrefetch`]); zero reads nothing ahead.
     psp_prefetch_budget_bytes: u64,
+    /// The most reads of one read group a position keeps (`--max-reads-per-position`). A psp
+    /// written under a looser cap is thinned to it as its records are decoded
+    /// ([`read_cap`](super::psp_source::read_cap)).
+    max_reads_per_position: u32,
 }
 
 impl PspVariantCaller {
@@ -483,7 +487,17 @@ impl PspVariantCaller {
             candidate_selection,
             merge_parameters,
             psp_prefetch_budget_bytes: DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
         })
+    }
+
+    /// The same caller, keeping at most `reads` reads of one read group at a position: a psp
+    /// written under a looser cap is thinned to it as its records are decoded
+    /// ([`read_cap`](super::psp_source::read_cap)).
+    #[must_use]
+    pub fn with_max_reads_per_position(mut self, reads: u32) -> Self {
+        self.max_reads_per_position = reads;
+        self
     }
 
     /// The same caller, reading the psps ahead of the merge into at most about `bytes` of page
@@ -587,6 +601,7 @@ impl PspVariantCaller {
             candidate_selection,
             merge_parameters,
             psp_prefetch_budget_bytes,
+            max_reads_per_position,
         } = self;
         // **One accessor for the whole run, never shared** — it walks forward with the merge
         // and releases what it has passed, exactly as direct mode's does.
@@ -628,7 +643,13 @@ impl PspVariantCaller {
             // **The summary source, not the building one** — every body kept and none decoded
             // until a locus survives, which at about one position in a hundred is the whole of
             // what psp mode's deferred build buys (`spec/cohort_merge_psp_path.md` §3.1).
-            sources.push(PspSummarySource::over(psp, &sample.read_groups)?);
+            //
+            // **Thinned only if the file was written under a looser read cap than this run's**,
+            // which is every psp written before the cap was recorded in the header.
+            let read_cap =
+                super::psp_source::read_cap::needs_thinning(psp.header(), max_reads_per_position)
+                    .then_some(max_reads_per_position);
+            sources.push(PspSummarySource::over(psp, &sample.read_groups)?.with_read_cap(read_cap));
         }
 
         let inputs = CohortCallingInputs {

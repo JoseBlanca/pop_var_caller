@@ -178,6 +178,20 @@ pub struct CallFromPspsArgs {
     #[arg(long, default_value_t = crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES, help_heading = "Advanced")]
     pub psp_prefetch_bytes: u64,
 
+    /// The most reads of one read group used at one position. A psp written under a looser cap
+    /// — every psp written before this option existed was capped at 8,000 reads a sample — has
+    /// its records thinned to it as they are read: where a read group has more reads at a
+    /// position, each allele keeps the same share of its reads, chosen by a hash of each read's
+    /// number in the file so the same reads are kept at neighbouring positions. A psp written
+    /// at this cap or a tighter one is read as it is.
+    ///
+    /// Thinning a stored file is close to, but not the same as, capping when the psps are
+    /// written: a psp stores each allele's error and mapping quality as totals, so the reads
+    /// removed take their share of the totals rather than their own values. The run report
+    /// says, per sample, how many positions and reads it thinned.
+    #[arg(long, default_value_t = crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
+    pub max_reads_per_position: u32,
+
     /// How many threads to use. Zero means every core.
     ///
     /// **The output does not depend on this number.** What the threads parallelise is the
@@ -520,7 +534,8 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         merge_parameters,
     )
     .map_err(|source| CallFromPspsCliError::Run { source })?
-    .with_psp_prefetch_budget(args.psp_prefetch_bytes);
+    .with_psp_prefetch_budget(args.psp_prefetch_bytes)
+    .with_max_reads_per_position(args.max_reads_per_position);
 
     let read_groups = caller.read_groups().clone();
     let metadata = calling_run::header_for(

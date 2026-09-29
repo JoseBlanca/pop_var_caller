@@ -349,6 +349,11 @@ impl CensusPlan {
     }
 }
 
+/// The psp header parameter that records the per-read-group read cap a file was written under
+/// (`--max-reads-per-position`). A file written before it existed has none; those were written
+/// under a cap of 8,000 reads a sample.
+pub const MAX_READS_PER_POSITION_KEY: &str = "max-reads-per-position";
+
 /// **Where a position's reads stop being counted one by one**, and its allele counts are thinned
 /// to that many proportionally.
 ///
@@ -628,6 +633,14 @@ fn header_for(
         .collect();
     provenance.input_reference = reference_basename.clone();
     provenance.record_parameters(inputs.read_filters.provenance_parameters());
+    // **The read cap the file was written under**, so a run reading it can tell whether its own
+    // cap is tighter and has to be applied again as the records are decoded.
+    provenance.record_parameters([(
+        MAX_READS_PER_POSITION_KEY.to_string(),
+        crate::psp::ParameterValue::Integer(i64::from(
+            inputs.locus_generator_settings.max_snp_column_depth,
+        )),
+    )]);
 
     // Exhaustive destructures of the *source* types, so a field added to either must be
     // dispositioned here — recorded, or discarded by name — rather than silently skipped
