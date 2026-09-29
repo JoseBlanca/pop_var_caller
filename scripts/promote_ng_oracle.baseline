@@ -2,6 +2,9 @@
 # by table lookup (portable_float.md Milestone D), identical in the Linux container (arm64, glibc) and on macOS (arm64).
 # Replace it only when the output is meant to change, and say in the commit which lines moved and why.
 # Previous: fitted.parameters.toml 502c3d5e6c53acd7da2f66c29d430545, from_fit.comparable b7cbf43308722894dd47940e1611c0af (libm exp).
+# Fit lines re-recorded 2026-09-29 (fit_precision.md, checkpoint A'): be31e78a… / 18f4fc11… were the fit before SQUAREM (2026-09-25),
+# which moved them to c590689d… / 5cdeafd0… on main; plan step A7 (the allele-frequency shapes step along the likelihood's own
+# slope) moved them to these. Steps A6, A8 and the two checkpoint A' changes moved neither. The other five lines are unchanged.
 # promote-ng identity oracle
 # reference: S_lycopersicum_chromosomes.4.00.fa
 # catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
@@ -18,5 +21,5 @@ b74f3edf9026fa756621e2492baf019a  from_psps.comparable
 5e6d874da147f898eda134ce342424b8  from_alignments.parameters.toml
 25d388c83819321a023deb57663c2208  from_alignments.windows.sorted
 259baf040610b33f7ead595da7b26a3b  from_alignments.windows.histograms
-be31e78ae91da4c09ce010136c707500  fitted.parameters.toml
-18f4fc11cda28243faa6d7cfc4e07ec9  from_fit.comparable
+393e7cd356811ddab00e033a42903384  fitted.parameters.toml
+1f16dec86c23eff1286c736d634f0a50  from_fit.comparable
