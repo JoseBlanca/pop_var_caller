@@ -74,6 +74,10 @@ pub(super) struct HeldLiveSets {
     changes_since_restart: usize,
     /// How many blocks the walk had begun at the record last pushed, to see a block restart.
     blocks_begun: u64,
+    /// Whether the walk passed records it did not push since the last push — records dropped
+    /// for their depth. The next push cannot then be a step from the one before, whose set the
+    /// skipped records' changes lie between, so it is a restart point.
+    skipped_since_last_push: bool,
 }
 
 impl HeldLiveSets {
@@ -106,6 +110,7 @@ impl HeldLiveSets {
         self.blocks_begun = blocks_begun;
         let changed = changes.departed().len() + changes.arrived().len();
         let restart = block_restarted
+            || std::mem::take(&mut self.skipped_since_last_push)
             || self.entries.is_empty()
             || self.changes_since_restart + changed + self.records_since_restart()
                 >= live.len().max(LEAST_REBUILD_STEPS_BETWEEN_RESTARTS);
@@ -184,6 +189,12 @@ impl HeldLiveSets {
         self.restarts.drain(..restarts);
     }
 
+    /// The walk passed a record without pushing it: the next push is stored whole, since the
+    /// changes it carries are a step from the skipped record's set and not from the last one held.
+    pub(super) fn skip(&mut self) {
+        self.skipped_since_last_push = true;
+    }
+
     /// How many read identifiers are held, changes and restart points together.
     pub(super) fn held_ids(&self) -> usize {
         self.ids.len()
@@ -254,6 +265,37 @@ mod tests {
             }
             held.release_before(sets.len() as u64);
             assert_eq!(held.held_ids(), 0, "a full release holds nothing");
+        }
+    }
+
+    /// **A record the walk passed without pushing leaves the next one rebuildable.** The walk's
+    /// changes at the record after a skipped one are a step from the skipped record's set, which
+    /// is not held; so that record is stored whole, and every held record still rebuilds to its
+    /// own set. Records 100 to 399 are skipped, as a pile-up's would be.
+    #[test]
+    fn records_skipped_between_two_held_ones_do_not_break_the_rebuild() {
+        let sets = sliding_sets(600, 40);
+        let mut held = HeldLiveSets::default();
+        let mut previous: Vec<ChainId> = Vec::new();
+        let mut pushed = Vec::new();
+        for (r, now) in sets.iter().enumerate() {
+            let (departed, arrived) = changes_between(&previous, now);
+            previous = now.clone();
+            if (100..400).contains(&r) {
+                held.skip();
+                continue;
+            }
+            let ordinal = held.push(
+                &LiveSet::from_sorted_slice(now),
+                &LiveSetChanges::for_tests(departed, arrived),
+                1,
+            );
+            pushed.push((ordinal, r));
+        }
+        let mut rebuilt = LiveSet::new();
+        for (ordinal, r) in pushed {
+            held.rebuild(ordinal, &mut rebuilt);
+            assert_eq!(rebuilt.ids(), &sets[r][..], "record {r}");
         }
     }
 

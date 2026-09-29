@@ -195,6 +195,27 @@ impl LocusSummary {
         )
     }
 
+    /// **A record its sample's source did not keep, because a read group there was deeper than
+    /// the run's depth ceiling** ([`depth_ceiling`](crate::run::depth_ceiling)). It carries only
+    /// where the record lay: the closing walk still chains through it, and judges any locus that
+    /// takes it in as one to drop for the whole cohort.
+    ///
+    /// **Told apart by a pair of counts no real record can have** — more non-reference reads than
+    /// reads compared, when the first is by definition a subset of the second — rather than by a
+    /// field. A field would take this type past 32 bytes, which is what every held record of
+    /// every sample pays for (see the note on `contig`).
+    #[must_use]
+    pub fn over_depth_ceiling(region: GenomeRegion) -> Self {
+        Self::new(region, u32::MAX, 0, 0)
+    }
+
+    /// Whether this is the stand-in for a record over the depth ceiling
+    /// ([`over_depth_ceiling`](Self::over_depth_ceiling)).
+    #[must_use]
+    pub fn is_over_depth_ceiling(self) -> bool {
+        self.non_reference_reads > self.reads_compared_with_reference
+    }
+
     /// Where the observation begins, as a whole-genome position.
     #[must_use]
     pub fn start_position(self) -> GenomePosition {
@@ -262,6 +283,26 @@ pub enum Drawn {
         /// Where the source is holding the evidence — meaningful only to that source.
         body: core::ops::Range<usize>,
     },
+    /// **A record with a read group deeper than the run's depth ceiling, not kept** — only where
+    /// it lay ([`depth_ceiling`](crate::run::depth_ceiling)). The merge builds no locus over it.
+    OverDepthCeiling {
+        /// The ground the record covered.
+        region: GenomeRegion,
+        /// What fills the record's slot in the window, which holds one per record.
+        stand_in: StandIn,
+    },
+}
+
+/// What fills a dropped record's slot in the cache's window: **in the same shape as the source's
+/// other records**, because the window holds a direct-mode sample's records and a stored sample's
+/// body ranges index for index with the summaries.
+pub enum StandIn {
+    /// A record with no observations. Direct mode's; it keeps the dropped record's kind, which
+    /// the closing walk's check that a locus never mixes kinds still reads.
+    Record(SampleLocusObservations),
+    /// An empty body range where the next body will begin. A stored sample's; nothing is ever
+    /// built from it, and its start is where the source may release up to.
+    Body(core::ops::Range<usize>),
 }
 
 impl Drawn {
@@ -271,6 +312,7 @@ impl Drawn {
         match self {
             Self::Built(record) => LocusSummary::of(record),
             Self::Kept { summary, .. } => *summary,
+            Self::OverDepthCeiling { region, .. } => LocusSummary::over_depth_ceiling(*region),
         }
     }
 }
@@ -581,6 +623,13 @@ impl WindowCoverageInProgress {
             finalised,
             observed_through,
         } = self;
+        // **A record dropped for its depth contributes no coverage**: it has no evidence to
+        // measure, and the ground under it is called for nobody. Marked as seen all the same, so
+        // the next cover does not offer it again.
+        if summary.is_over_depth_ceiling() {
+            *observed_through = Some(summary.start_position());
+            return Ok(());
+        }
         for_each_reported_depth(summary, evidence, build, |at, depth| {
             let base = base_in(bases, bases_from, at).unwrap_or_else(|| {
                 panic!(
@@ -1712,6 +1761,17 @@ where
                         self.keeps_evidence = true;
                         self.held_summaries.push(summary);
                         self.held_bodies.push(body);
+                    }
+                    Drawn::OverDepthCeiling { region, stand_in } => {
+                        self.held_summaries
+                            .push(LocusSummary::over_depth_ceiling(region));
+                        match stand_in {
+                            StandIn::Record(record) => self.held_observations.push(record),
+                            StandIn::Body(body) => {
+                                self.keeps_evidence = true;
+                                self.held_bodies.push(body);
+                            }
+                        }
                     }
                 }
             }

@@ -479,7 +479,20 @@ impl<'a> RunReport<'a> {
                      skipped, which is not a drop",
                 ));
             }
+            if walk.loci_over_the_depth_ceiling > 0 {
+                lines.push(format!(
+                    "    {} loci dropped over the depth ceiling",
+                    walk.loci_over_the_depth_ceiling,
+                ));
+            }
         }
+        depth_ceiling_total(
+            lines,
+            walked
+                .per_sample
+                .iter()
+                .map(|walk| walk.loci_over_the_depth_ceiling),
+        );
     }
 
     /// **Which of the run's numbers rest on a measurement of reads, and which are constants** —
@@ -583,11 +596,23 @@ fn what_each_stored_file_gave(lines: &mut Vec<String>, stored: &StoredCohortTall
                 sample.read.reads_thinned_by_the_read_cap
             ),
         };
+        let too_deep = match sample.read.loci_over_the_depth_ceiling {
+            0 => String::new(),
+            loci => format!("; {loci} loci dropped over the depth ceiling"),
+        };
         lines.push(format!(
-            "  {}: {} loci read, {depth:.1} reads a locus compared with the reference{thinned}",
+            "  {}: {} loci read, {depth:.1} reads a locus compared with the reference\
+             {thinned}{too_deep}",
             sample.sample_name, sample.read.loci_read,
         ));
     }
+    depth_ceiling_total(
+        lines,
+        stored
+            .per_sample
+            .iter()
+            .map(|sample| sample.read.loci_over_the_depth_ceiling),
+    );
     // **The cohort's total, so a run over thousands of samples can be read at a glance.** Only
     // files written under a looser cap than the run's are thinned (`--max-reads-per-position`).
     let (loci, reads, samples) = stored
@@ -608,6 +633,24 @@ fn what_each_stored_file_gave(lines: &mut Vec<String>, stored: &StoredCohortTall
         ));
     }
     where_the_walks_disagreed(lines, stored);
+}
+
+/// **The cohort's total of loci dropped over the depth ceiling** (`--max-read-group-depth`), and
+/// in how many samples — nothing where there were none.
+///
+/// **Loci per sample, summed, and not ground**: a pile-up that every sample shares is counted
+/// once in each of them, so this is the evidence that was not held, not the stretch of genome
+/// that was not called.
+fn depth_ceiling_total(lines: &mut Vec<String>, per_sample: impl Iterator<Item = u64>) {
+    let (loci, samples) = per_sample.fold((0, 0), |(loci, samples), dropped| {
+        (loci + dropped, samples + u64::from(dropped > 0))
+    });
+    if loci > 0 {
+        lines.push(format!(
+            "depth ceiling (--max-read-group-depth): {loci} loci dropped in {samples} samples, \
+             counted once per sample; nothing was called over their ground, for any sample"
+        ));
+    }
 }
 
 /// **Where the cohort's files were not walked alike**, one line a setting that differs.

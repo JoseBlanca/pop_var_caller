@@ -1022,7 +1022,7 @@ pub fn build_region_handing_over_windowed<'a, E>(
                 }
             },
             Verdict::Failed => refused.push(locus.region),
-            Verdict::TooQuiet => {}
+            Verdict::TooQuiet | Verdict::OverDepthCeiling => {}
         }
         // **The member vector goes back to the walk here and nowhere else.** Every arm above
         // borrows the locus rather than consuming it, so there is one place that owns the

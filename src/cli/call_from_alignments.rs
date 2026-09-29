@@ -171,6 +171,17 @@ pub struct CallFromAlignmentsArgs {
     #[arg(long, default_value_t = crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
     pub max_reads_per_position: u32,
 
+    /// The most reads one read group may have at a locus before the locus is dropped.
+    ///
+    /// Where any sample has a read group deeper than this, **no variant is called there for any
+    /// sample**, and none of that ground's evidence is held in memory. Such depth, far above a
+    /// sample's usual coverage, is almost always a collapsed repeat: many copies of a sequence
+    /// mapped onto one. Reads the read cap (`--max-reads-per-position`) discarded and reads that
+    /// showed nothing are counted with the deepest read group. The run report says, per sample,
+    /// how many loci were dropped this way.
+    #[arg(long, default_value_t = crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
+    pub max_read_group_depth: u32,
+
     /// The widest a locus may be, in reference bases, before the caller declines to assemble it.
     ///
     /// A deletion joins the positions it covers into one locus, so this is what decides how
@@ -579,7 +590,10 @@ pub fn run_call_from_alignments(
         candidate_selection,
         merge_parameters,
     )
-    .map_err(|source| CallFromAlignmentsCliError::Run { source })?;
+    .map_err(|source| CallFromAlignmentsCliError::Run { source })?
+    .with_depth_ceiling(crate::run::depth_ceiling::DepthCeiling::at(
+        args.max_read_group_depth,
+    ));
 
     let metadata = calling_run::header_for(
         &args.output,

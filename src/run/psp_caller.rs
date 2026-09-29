@@ -63,6 +63,7 @@ use super::callers::{
     refuse_two_references_that_are_not_one,
 };
 use super::cohort_merge::observation_cache::{MergeReference, ObservationCache};
+use super::depth_ceiling::DepthCeiling;
 use super::psp_prefetch::{DEFAULT_PSP_PREFETCH_BUDGET_BYTES, PspPrefetch};
 use super::psp_source::{PspSummarySource, StoredSampleTallies};
 use super::walker::WalkReference;
@@ -396,6 +397,9 @@ pub struct PspVariantCaller {
     /// written under a looser cap is thinned to it as its records are decoded
     /// ([`read_cap`](super::psp_source::read_cap)).
     max_reads_per_position: u32,
+    /// The most reads one read group may have at a locus before the locus is dropped for the
+    /// whole cohort (`--max-read-group-depth`, [`depth_ceiling`](super::depth_ceiling)).
+    depth_ceiling: DepthCeiling,
 }
 
 impl PspVariantCaller {
@@ -488,7 +492,16 @@ impl PspVariantCaller {
             merge_parameters,
             psp_prefetch_budget_bytes: DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
+            depth_ceiling: DepthCeiling::default(),
         })
+    }
+
+    /// The same caller, dropping for the whole cohort every locus where some sample has a read
+    /// group deeper than `ceiling` ([`depth_ceiling`](super::depth_ceiling)).
+    #[must_use]
+    pub fn with_depth_ceiling(mut self, ceiling: DepthCeiling) -> Self {
+        self.depth_ceiling = ceiling;
+        self
     }
 
     /// The same caller, keeping at most `reads` reads of one read group at a position: a psp
@@ -602,6 +615,7 @@ impl PspVariantCaller {
             merge_parameters,
             psp_prefetch_budget_bytes,
             max_reads_per_position,
+            depth_ceiling,
         } = self;
         // **One accessor for the whole run, never shared** — it walks forward with the merge
         // and releases what it has passed, exactly as direct mode's does.
@@ -649,7 +663,11 @@ impl PspVariantCaller {
             let read_cap =
                 super::psp_source::read_cap::needs_thinning(psp.header(), max_reads_per_position)
                     .then_some(max_reads_per_position);
-            sources.push(PspSummarySource::over(psp, &sample.read_groups)?.with_read_cap(read_cap));
+            sources.push(
+                PspSummarySource::over(psp, &sample.read_groups)?
+                    .with_read_cap(read_cap)
+                    .with_depth_ceiling(Some(depth_ceiling)),
+            );
         }
 
         let inputs = CohortCallingInputs {
