@@ -34,7 +34,7 @@ use std::time::Instant;
 
 use thiserror::Error;
 
-use super::spill::{SpillEntry, SpillError, SpillReader, SpillWriter};
+use super::spill::{EncodedSpillEntry, SpillEntry, SpillError, SpillReader, SpillWriter};
 
 /// How many of a record's bytes sit in memory before they reach the kernel, on each side.
 ///
@@ -131,32 +131,49 @@ impl SpillFile {
     /// If pass one has already ended, if something is already at the path, if the file cannot
     /// be created, or if the entry cannot be written. All name the path.
     pub fn append(&mut self, entry: &SpillEntry) -> Result<(), SpillFileError> {
-        let writer = match self.stage {
+        let written = self.writer_to_append_to()?.append(entry);
+        written.map_err(|source| SpillFileError::Write {
+            path: self.path.clone(),
+            source,
+        })?;
+        self.entries_written += 1;
+        Ok(())
+    }
+
+    /// Append one entry encoded elsewhere ([`EncodedSpillEntry::of`]); otherwise
+    /// [`append`](Self::append).
+    ///
+    /// # Errors
+    ///
+    /// As [`append`](Self::append).
+    pub fn append_encoded(&mut self, entry: &EncodedSpillEntry) -> Result<(), SpillFileError> {
+        let written = self.writer_to_append_to()?.append_encoded(entry);
+        written.map_err(|source| SpillFileError::Write {
+            path: self.path.clone(),
+            source,
+        })?;
+        self.entries_written += 1;
+        Ok(())
+    }
+
+    /// The open writer, creating the file on the first entry.
+    fn writer_to_append_to(&mut self) -> Result<&mut SpillWriter<BufWriter<File>>, SpillFileError> {
+        match self.stage {
             Stage::NotYetCreated => {
                 let opened = self.create()?;
                 self.stage = Stage::BeingWritten;
-                self.writer.insert(opened)
+                Ok(self.writer.insert(opened))
             }
             // PANIC-FREE: `BeingWritten` is set only where the writer is stored just above, and
             // only `finish_writing` takes it back out — and that moves the stage to `Finished`.
-            Stage::BeingWritten => self
+            Stage::BeingWritten => Ok(self
                 .writer
                 .as_mut()
-                .expect("a spill being written holds its writer"),
-            Stage::Finished => {
-                return Err(SpillFileError::AppendedAfterPassOneEnded {
-                    path: self.path.clone(),
-                });
-            }
-        };
-        writer
-            .append(entry)
-            .map_err(|source| SpillFileError::Write {
+                .expect("a spill being written holds its writer")),
+            Stage::Finished => Err(SpillFileError::AppendedAfterPassOneEnded {
                 path: self.path.clone(),
-                source,
-            })?;
-        self.entries_written += 1;
-        Ok(())
+            }),
+        }
     }
 
     /// End pass one: flush what has been appended, so that [`Self::read`] sees all of it.

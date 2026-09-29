@@ -20,8 +20,8 @@ use std::io::Cursor;
 use proptest::prelude::*;
 
 use super::{
-    GenericLocusSample, RepeatTractSample, SpillEntry, SpillError, SpillReader, SpillWriter,
-    SpilledSamples,
+    EncodedSpillEntry, GenericLocusSample, RepeatTractSample, SpillEntry, SpillError, SpillReader,
+    SpillWriter, SpilledSamples,
 };
 use crate::psp::varint::encode_u64_leb128;
 use crate::run::paralog_filter::WindowCoverage;
@@ -1164,4 +1164,38 @@ proptest! {
             prop_assert!(holds_the_same_bits(wrote, came_back));
         }
     }
+}
+
+/// **An entry encoded ahead of time writes the bytes `append` writes**, for both row shapes and a
+/// record with no samples — so moving the encoding to the thread that called the locus changes
+/// nothing in the file.
+#[test]
+fn an_entry_encoded_ahead_of_time_writes_what_append_writes() {
+    let entries = [
+        a_snp_two_samples_covered(),
+        a_tract_two_samples_covered(),
+        a_tiny_record(),
+    ];
+    let mut writer = SpillWriter::new(Vec::new());
+    for entry in &entries {
+        let encoded = EncodedSpillEntry::of(entry).expect("a well-formed entry encodes");
+        writer
+            .append_encoded(&encoded)
+            .expect("a Vec takes every byte");
+    }
+    assert_eq!(writer.entries_written(), entries.len() as u64);
+    let written = writer.finish().expect("a Vec flushes");
+    assert_eq!(written, encoded_bytes(&entries));
+}
+
+/// **Encoding ahead of time refuses what `append` refuses**: rows of the other shape than the
+/// entry's tract flag.
+#[test]
+fn an_entry_whose_rows_contradict_its_flag_is_refused_when_encoded_ahead_of_time() {
+    let mut contradicted = a_snp_two_samples_covered();
+    contradicted.is_repeat_tract = true;
+    assert!(matches!(
+        EncodedSpillEntry::of(&contradicted),
+        Err(SpillError::SampleShapeDisagreesWithTheTractFlag { .. })
+    ));
 }

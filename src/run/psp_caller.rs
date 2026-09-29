@@ -605,6 +605,37 @@ impl PspVariantCaller {
         S: Default + Send,
         E: std::error::Error + Send + Sync + 'static,
     {
+        self.call_cohort_preparing_each_record(
+            genotyper,
+            &|record, _| Ok(record),
+            &mut |record: VcfRecord, windows| hand_over(&record, windows),
+        )
+    }
+
+    /// [`call_cohort_handing_each_record_over`](Self::call_cohort_handing_each_record_over), with
+    /// each record **got ready by `prepare` on the thread that called its locus** and then taken
+    /// by `hand_over` on the calling thread, in genome order, beside every sample's window.
+    ///
+    /// What `prepare` does is whatever of the output's work needs no file — encoding the record's
+    /// spill entry, with the hidden-duplication filter on — so that the one thread writing in
+    /// genome order does not do it while the others wait.
+    ///
+    /// # Errors
+    ///
+    /// As [`call_cohort_handing_each_record_over`](Self::call_cohort_handing_each_record_over),
+    /// and the first record `prepare` refuses.
+    pub fn call_cohort_preparing_each_record<S, G, P, E>(
+        self,
+        genotyper: &G,
+        prepare: &(impl Fn(VcfRecord, &[WindowCoverage]) -> Result<P, E> + Sync),
+        hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
+    ) -> Result<(CohortCallingTallies, StoredCohortTallies), RunError>
+    where
+        G: LocusGenotyper<S> + Sync,
+        S: Default + Send,
+        P: Send,
+        E: std::error::Error + Send + Sync + 'static,
+    {
         let Self {
             cohort,
             segmentation,
@@ -699,6 +730,7 @@ impl PspVariantCaller {
                 cache_over(sources, Box::new(reference_for_the_merge), prefetch),
                 inputs,
                 genotyper,
+                prepare,
                 hand_over,
             )?
         } else {
@@ -706,6 +738,7 @@ impl PspVariantCaller {
                 cache_over(sources, Box::new(reference_for_the_merge), prefetch),
                 inputs,
                 genotyper,
+                prepare,
                 hand_over,
             )?
         };

@@ -52,7 +52,9 @@ pub use finish::{
     FilteredRun, ParalogFilterError, WhatTheOperatorAskedFor, WhereTheTimeWent,
     fit_score_and_write_the_calls, what_to_tell_the_operator,
 };
-pub use pass_one::{CalledRecordSink, PassOneError, SpillingSink, entry_for};
+pub use pass_one::{
+    CalledRecordSink, PassOneError, PreparedRecord, RecordPreparer, SpillingSink, entry_for,
+};
 pub use pass_three::{PassThreeError, WhatTheFilterDid, write_the_records_the_filter_kept};
 pub use pass_two::{
     LrHistogramShape, NotATargetFdr, ParalogVerdicts, PassTwoError, TargetFdr,
@@ -64,8 +66,8 @@ pub use scoring_context::{
     WhyNoCoverageModel,
 };
 pub use spill::{
-    GenericLocusSample, RepeatTractSample, SpillEntry, SpillError, SpillReader, SpillWriter,
-    SpilledSamples,
+    EncodedSpillEntry, GenericLocusSample, RepeatTractSample, SpillEntry, SpillError, SpillReader,
+    SpillWriter, SpilledSamples,
 };
 pub use spill_file::{SpillFile, SpillFileError};
 
