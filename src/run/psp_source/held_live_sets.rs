@@ -24,20 +24,27 @@
 //!
 //! # When a restart point is taken
 //!
-//! **When the changes stored since the last one add up to as many identifiers as the set now
-//! holds.** That puts one copy of the set per set's worth of changes, so memory is at most about
-//! twice the changes, and a rebuild reads at most about twice the set — whatever the depth. At
-//! three reads a position with 150-base reads a restart point lands every hundred records or so;
-//! at 5,669 reads with about 76 changes a position, every 75. Nothing is tuned to either.
-//! [`LEAST_CHANGES_BETWEEN_RESTARTS`] keeps a restart point from being taken at every record
+//! **When the steps a rebuild would take since the last one add up to the size of the set.** A
+//! rebuild steps once per record it passes and once per read that started or stopped there, so
+//! this puts one copy of the set per set's worth of rebuilding: memory is at most about twice
+//! what the changes and entries cost, and a rebuild does at most about twice the set's worth of
+//! work — whatever the depth. At 5,669 reads with about 76 changes a position that is a restart
+//! point every 74 records; at three reads a position, every 16.
+//!
+//! **Counting records and not only changes is what keeps the shallow end fast.** Counting changes
+//! alone, at three reads a position — where about one read starts or stops every twelve records —
+//! put about 200 records between restart points, and stepping through them slowed the 63-sample
+//! tomato calling pass by 7% (26.2 s to 28.2 s). A fixed cap on records instead would have bound
+//! at depth too, copying a set of thousands every few dozen records.
+//! [`LEAST_REBUILD_STEPS_BETWEEN_RESTARTS`] keeps a restart point from being taken at every record
 //! where almost nothing is live, where it would cost more in bookkeeping than it saves.
 
 use crate::psp::{LiveSet, LiveSetChanges};
 use crate::types::ChainId;
 
-/// Fewest changes stored between two restart points, whatever the set's size. At a gap in
-/// coverage the set is empty and any change would otherwise trigger a new restart point.
-const LEAST_CHANGES_BETWEEN_RESTARTS: usize = 16;
+/// Fewest rebuild steps between two restart points, whatever the set's size. At a gap in
+/// coverage the set is empty and every record would otherwise be a new restart point.
+const LEAST_REBUILD_STEPS_BETWEEN_RESTARTS: usize = 16;
 
 /// One held record's entry: where its identifiers sit in the arena, as the reads that departed
 /// followed by the reads that arrived.
@@ -75,6 +82,13 @@ impl HeldLiveSets {
         self.entries_released + self.entries.len() as u64
     }
 
+    /// Records pushed since the last restart point, that one included.
+    fn records_since_restart(&self) -> usize {
+        self.restarts.last().map_or(0, |at| {
+            usize::try_from(self.next_ordinal() - at).expect("a count")
+        })
+    }
+
     /// Record one drawn record's live set and return its ordinal, which is what
     /// [`rebuild`](Self::rebuild) takes.
     ///
@@ -93,8 +107,8 @@ impl HeldLiveSets {
         let changed = changes.departed().len() + changes.arrived().len();
         let restart = block_restarted
             || self.entries.is_empty()
-            || self.changes_since_restart + changed
-                >= live.len().max(LEAST_CHANGES_BETWEEN_RESTARTS);
+            || self.changes_since_restart + changed + self.records_since_restart()
+                >= live.len().max(LEAST_REBUILD_STEPS_BETWEEN_RESTARTS);
         let start = self.ids_released + self.ids.len() as u64;
         let entry = if restart {
             self.ids.extend_from_slice(live.ids());
@@ -245,8 +259,8 @@ mod tests {
 
     /// **At depth the arena holds a small fraction of a full copy per record.** 3,000 reads
     /// live and one arriving and one departing per record: 3,000 identifiers a record the old
-    /// way, and about four here — two changes, plus a restart point's 3,000 spread over the
-    /// 1,500 records between restart points.
+    /// way, and about five here — two changes, plus a restart point's 3,000 spread over the
+    /// 1,000 records between restart points (each record costs a rebuild three steps).
     #[test]
     fn at_depth_the_arena_holds_the_changes_not_a_copy_per_record() {
         let depth = 3_000;
