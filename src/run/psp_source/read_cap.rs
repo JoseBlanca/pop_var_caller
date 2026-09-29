@@ -68,6 +68,17 @@ pub struct Thinned {
 /// Thin every read group of `record` that has more than `cap` reads down to about `cap`,
 /// adding the reads removed to its `reads_discarded_by_cap`. See the module documentation.
 pub fn thin_to_read_cap(record: &mut SampleLocusObservations, cap: u32) -> Thinned {
+    // **The ordinary record leaves here, having allocated nothing.** This runs on every record a
+    // run decodes from an older psp, and almost none of them hold more reads than the cap even
+    // summed over every read group — in which case no single group can.
+    let reads: u64 = record
+        .observations
+        .iter()
+        .map(|o| u64::from(o.num_obs))
+        .sum();
+    if reads <= u64::from(cap) {
+        return Thinned::default();
+    }
     let mut groups: Vec<_> = record.observations.iter().map(|o| o.read_group).collect();
     groups.sort_unstable();
     groups.dedup();

@@ -122,17 +122,60 @@ pub struct ReferenceUnreadable {
 /// sequences that the closing walk made inline before this type existed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocusSummary {
-    /// The reference the observation covers, first base to last.
-    pub region: GenomeRegion,
+    /// **The region's three parts, held apart rather than as a `GenomeRegion`**, so that this
+    /// type stays 32 bytes. A `GenomeRegion` carries four bytes of padding after its contig that
+    /// no field outside it can use; held apart, the contig shares an eight-byte slot with a
+    /// count. The size is not cosmetic: every held record of every sample carries one, and
+    /// growing it from 32 to 40 bytes — which the discarded-read count did while it sat beside a
+    /// `GenomeRegion` — cost the 63-sample tomato benchmark's calling pass 12% of its CPU
+    /// (2026-09-29, measured with an unused four-byte field alone). [`region`](Self::region)
+    /// puts them back together.
+    contig: ContigId,
+    start: Position,
+    end: Position,
     /// The reads that showed something other than the reference — the keep rule's numerator.
     pub non_reference_reads: u32,
     /// The reads whose whole sequence over the locus was compared against the reference — the
     /// keep rule's denominator, and neither read depth nor the reads that merely covered the
     /// ground.
     pub reads_compared_with_reference: u32,
+    /// The reads the per-position read cap discarded here — with
+    /// [`reads_compared_with_reference`](Self::reads_compared_with_reference), what the
+    /// coverage measurement takes as the locus's depth. **Zero from a psp written before format
+    /// 1.1**, whose record heads do not carry it (`psp::RecordHead::reads_discarded_by_cap`).
+    pub reads_discarded_by_cap: u32,
 }
 
 impl LocusSummary {
+    /// A summary from its parts: the reference the observation covers, first base to last, and
+    /// its three read counts.
+    #[must_use]
+    pub fn new(
+        region: GenomeRegion,
+        non_reference_reads: u32,
+        reads_compared_with_reference: u32,
+        reads_discarded_by_cap: u32,
+    ) -> Self {
+        Self {
+            contig: region.contig,
+            start: region.start,
+            end: region.end,
+            non_reference_reads,
+            reads_compared_with_reference,
+            reads_discarded_by_cap,
+        }
+    }
+
+    /// The reference the observation covers, first base to last.
+    #[must_use]
+    pub fn region(&self) -> GenomeRegion {
+        GenomeRegion {
+            contig: self.contig,
+            start: self.start,
+            end: self.end,
+        }
+    }
+
     /// The summary of a record already in hand — direct mode's only path, and the psp path's
     /// oracle.
     ///
@@ -144,19 +187,20 @@ impl LocusSummary {
     pub fn of(observation: &SampleLocusObservations) -> Self {
         let (non_reference_reads, reads_compared_with_reference) =
             observation.non_reference_and_compared_reads();
-        Self {
-            region: observation.region,
+        Self::new(
+            observation.region,
             non_reference_reads,
             reads_compared_with_reference,
-        }
+            observation.reads_discarded_by_cap,
+        )
     }
 
     /// Where the observation begins, as a whole-genome position.
     #[must_use]
     pub fn start_position(self) -> GenomePosition {
         GenomePosition {
-            contig: self.region.contig,
-            position: self.region.start.min(self.region.end),
+            contig: self.region().contig,
+            position: self.region().start.min(self.region().end),
         }
     }
 
@@ -164,7 +208,7 @@ impl LocusSummary {
     #[must_use]
     pub fn reach_position(self) -> GenomePosition {
         GenomePosition {
-            contig: self.region.contig,
+            contig: self.region().contig,
             position: self.reach(),
         }
     }
@@ -175,7 +219,7 @@ impl LocusSummary {
     /// coordinate ceiling must not wrap a comparison the closing walk makes on every record.
     #[must_use]
     pub fn reach(self) -> Position {
-        self.region.end.max(self.region.start)
+        self.region().end.max(self.region().start)
     }
 }
 
@@ -1498,7 +1542,7 @@ where
                 .window_coverage
                 .summaries_not_yet_observed(&sample.held_summaries);
             for summary in unobserved {
-                let contig = summary.region.contig;
+                let contig = summary.region().contig;
                 if !contigs.contains(&contig) {
                     contigs.push(contig);
                 }
@@ -1719,7 +1763,7 @@ where
         let first_new = window_coverage.first_not_yet_observed(held_summaries);
         for index in first_new..held_summaries.len() {
             let summary = held_summaries[index];
-            if summary.region.contig != bases_from.contig {
+            if summary.region().contig != bases_from.contig {
                 // Ascending, so this and everything after it belongs to a later contig's turn.
                 break;
             }
@@ -1793,7 +1837,7 @@ where
                 start > previous,
                 "this sample's source is not in coordinate order: {} does not begin after \
                  {previous:?}",
-                summary.region,
+                summary.region(),
             );
         }
         self.last_drawn = Some(start);
@@ -1877,8 +1921,8 @@ fn base_in(bases: &[u8], bases_from: GenomePosition, at: GenomePosition) -> Opti
 /// The stretch of `held` that sits on `contig` — a contiguous run, because a sample's summaries
 /// ascend in `(contig, position)` (`SampleWindow::draw_next`'s ordering check).
 fn summaries_on(held: &[LocusSummary], contig: ContigId) -> &[LocusSummary] {
-    let from = held.partition_point(|summary| summary.region.contig < contig);
-    let to = held.partition_point(|summary| summary.region.contig <= contig);
+    let from = held.partition_point(|summary| summary.region().contig < contig);
+    let to = held.partition_point(|summary| summary.region().contig <= contig);
     &held[from..to]
 }
 
@@ -2024,6 +2068,8 @@ mod tests {
 
     /// **A position the merge retains costs a sample 72 bytes in psp mode**: 48 for the record's
     /// summary and the range naming its evidence, and 24 for the finalised window at that centre.
+    /// It stayed 72 when psp format 1.1 added the discarded-read count to the summary, because
+    /// the summary holds its region's parts apart (see [`LocusSummary`]).
     ///
     /// Drawing half a window further (`spec/window_coverage.md` §3.3) means every sample holds
     /// the records over that extra stretch, *and* the windows their centres finalised, until the

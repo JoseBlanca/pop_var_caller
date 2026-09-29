@@ -481,7 +481,7 @@ pub const MAX_HEADER_BODY_BYTES: u64 = (16 * 1024 * 1024) - HEADER_FRAMING_BYTES
 
 /// The format this writer produces and this reader understands. A file whose **major**
 /// differs is refused as [`PspReadError::UnsupportedVersion`], not read as damaged.
-pub const FORMAT_VERSION: (u16, u16) = (1, 0);
+pub const FORMAT_VERSION: (u16, u16) = (1, 1);
 
 /// The largest integer a TOML value can carry: TOML's integer is signed 64-bit.
 ///
@@ -2019,7 +2019,7 @@ mod tests {
         assert_eq!(&bytes[..4], b"NGP\n");
         let body = body_of(&bytes);
         for expected in [
-            "format-version = \"1.0\"",
+            "format-version = \"1.1\"",
             "sample = \"SRR7279481\"",
             "genomic-block-size-bp = 100000",
             "look-back-window-log = 15",
@@ -2148,7 +2148,7 @@ mod tests {
         let mut written = a_written_header();
         let bytes = written.encode().expect("a valid header encodes");
         let body = body_of(&bytes)
-            .replace("format-version = \"1.0\"", "format-version = \"1.4\"")
+            .replace("format-version = \"1.1\"", "format-version = \"1.4\"")
             .replace("sample = ", "a-key-a-later-minor-added = 4000\nsample = ");
 
         written.format_version = (1, 4);
@@ -2166,9 +2166,9 @@ mod tests {
     fn the_writer_refuses_to_stamp_a_version_it_does_not_produce() {
         let mut header = a_written_header();
         header.format_version = (1, 7);
-        let refused = header.encode().expect_err("this writer produces 1.0");
+        let refused = header.encode().expect_err("this writer produces 1.1");
         assert!(
-            refused.to_string().contains("produces 1.0"),
+            refused.to_string().contains("produces 1.1"),
             "got {refused}"
         );
     }
@@ -2977,13 +2977,13 @@ mod tests {
         }
     }
 
-    /// **The record's own fields, and which two of the twenty-eight are lists.** A count and
+    /// **The record's own fields, and which two of the twenty-nine are lists.** A count and
     /// the names, so a field changing shape has to be changed here on purpose — the two halves
     /// of the chain-id column are the only counted runs a record carries.
     #[test]
     fn exactly_two_of_the_records_fields_are_lists() {
         let fields = crate::psp::record::record_fields();
-        assert_eq!(fields.len(), 28);
+        assert_eq!(fields.len(), 29);
         let lists: Vec<&str> = fields
             .iter()
             .filter(|field| field.shape() == FieldShape::List)
