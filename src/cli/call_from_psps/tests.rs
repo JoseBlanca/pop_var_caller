@@ -199,6 +199,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
         min_purity: DEFAULT_MIN_PURITY,
+        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
     })
     .expect("the cohort walks into psps");
 
@@ -215,12 +216,14 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         paralog_fdr: 0.0,
         paralog_filter_tag: false,
         cohort_locus_builder_regions_len: None,
+        psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
         threads: 0,
         min_copies: MinCopies::default(),
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
         min_purity: DEFAULT_MIN_PURITY,
+        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
     };
     (cohort, args)
 }
@@ -304,6 +307,7 @@ fn a_cohort_of_psps_that_disagree_about_the_criteria_is_refused_by_the_command()
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
         min_purity: 0.99,
+        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
     })
     .expect("the cohort walks into psps a second time");
     // zeta from the first walk, alpha from the second: the disagreement is between the files.

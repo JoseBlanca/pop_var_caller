@@ -874,8 +874,8 @@ impl<'a> Iterator for LocusCloser<'a> {
         let opening = self
             .head_summary(opening_sample)
             .expect("the tournament showed a head, so its summary is at the same index");
-        let contig = opening.region.contig;
-        let start = opening.region.start;
+        let contig = opening.region().contig;
+        let start = opening.region().start;
 
         // Where each sample stands now. What it consumes before the locus closes is its
         // run of members, so no second scan is needed to find them.
@@ -894,7 +894,7 @@ impl<'a> Iterator for LocusCloser<'a> {
             let summary = self
                 .head_summary(sample)
                 .expect("the tournament showed a head, so its summary is at the same index");
-            if summary.region.contig != contig || summary.region.start > reach {
+            if summary.region().contig != contig || summary.region().start > reach {
                 break;
             }
             // **The argmin is a merge only if each sample's own slice ascends**, and
@@ -920,10 +920,10 @@ impl<'a> Iterator for LocusCloser<'a> {
             // (`spec/cohort_merge_psp_path.md` §2). Direct mode pays exactly what it paid
             // before: the same single walk over the record's sequences.
             assert!(
-                summary.region.start >= start,
+                summary.region().start >= start,
                 "sample {sample}'s observations are not in coordinate order: {} starts \
                  before the locus that opened at {}",
-                summary.region,
+                summary.region(),
                 start.get(),
             );
             // **A generic locus and an STR locus must never be mixed** (the owner,

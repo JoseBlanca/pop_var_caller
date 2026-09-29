@@ -1,0 +1,246 @@
+diff --git a/src/run/callers.rs b/src/run/callers.rs
+index 6ad733b7..97c9a23f 100644
+--- a/src/run/callers.rs
++++ b/src/run/callers.rs
+@@ -7060,6 +7060,16 @@ where
+                     },
+                     &windows,
+                 );
++                if region.contig.0 == 0 && region.start.0 > 1_503_000 {
++                    let rss_gb = std::fs::read_to_string("/proc/self/statm")
++                        .ok()
++                        .and_then(|statm| statm.split_whitespace().nth(1)?.parse::<u64>().ok())
++                        .map_or(0.0, |pages| pages as f64 * 4096.0 / 1e9);
++                    eprintln!(
++                        "DIAG handing over {}-{} alleles={} longest_allele={} rss_gb={:.1}",
++                        region.start.0, region.end.0, record.alleles().len(), record.alleles().iter().map(|a| a.len()).max().unwrap_or(0), rss_gb
++                    );
++                }
+                 match hand_over(&record, &windows) {
+                     Ok(()) => records_written += 1,
+                     Err(source) => {
+diff --git a/src/run/cohort_merge/observation_cache.rs b/src/run/cohort_merge/observation_cache.rs
+index 3f9582ba..2e2a1ad8 100644
+--- a/src/run/cohort_merge/observation_cache.rs
++++ b/src/run/cohort_merge/observation_cache.rs
+@@ -1338,7 +1338,10 @@ where
+ 
+         self.tell_of_the_cover(region);
+         let mut chain_reach = self.where_the_chain_reaches_before_any_sweep(region);
++        let diag_started = std::time::Instant::now();
++        let mut diag_sweeps = 0_u64;
+         loop {
++            diag_sweeps += 1;
+             let snapshot = chain_reach;
+             let widest = self
+                 .samples
+@@ -1350,6 +1353,7 @@ where
+                     let drawing = super::timing::Stopwatch::start();
+                     let mut reach = snapshot;
+                     sample.draw_to(&mut reach)?;
++                    super::rounds::DIAG_DRAWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                     drawing.add_to(&super::timing::COVER_BUSY_NANOS);
+                     Ok(reach)
+                 })
+@@ -1359,6 +1363,32 @@ where
+                 break;
+             }
+             chain_reach = widest;
++            if diag_sweeps > 3 || region.contig.0 == 0 && region.start.0 > 1_500_000 {
++                let held: usize = self.samples.iter().map(|s| s.held_summaries.len()).sum();
++                eprintln!(
++                    "DIAG sweep {} of {}-{}: reach {}:{} held_records={}",
++                    diag_sweeps, region.start.0, region.end.0, chain_reach.contig.0, chain_reach.position.0, held
++                );
++            }
++        }
++        // DIAGNOSTIC (not for commit): how far this cover's chain reached and what it holds.
++        {
++            let held: usize = self.samples.iter().map(|s| s.held_summaries.len()).sum();
++            let widest_sample = self.samples.iter().map(|s| s.held_summaries.len()).max().unwrap_or(0);
++            let past_end = if chain_reach.contig == region.contig {
++                chain_reach.position.0.saturating_sub(region.end.0)
++            } else {
++                u64::MAX
++            };
++            let rss_gb = std::fs::read_to_string("/proc/self/statm")
++                .ok()
++                .and_then(|statm| statm.split_whitespace().nth(1)?.parse::<u64>().ok())
++                .map_or(0.0, |pages| pages as f64 * 4096.0 / 1e9);
++            eprintln!(
++                "DIAG cover contig={} {}-{} reach_past_end={} held_records={} most_in_one_sample={} sweeps={} cover_s={:.2} rss_gb={:.1}",
++                region.contig.0, region.start.0, region.end.0, past_end, held, widest_sample, diag_sweeps,
++                diag_started.elapsed().as_secs_f64(), rss_gb
++            );
+         }
+ 
+         // **The one part of closing a cover that is per sample.** The bases are shared and read
+@@ -1659,12 +1689,32 @@ where
+                 let Some(observation) = self.draw_next()? else {
+                     break;
+                 };
++                if (self.held_summaries.len() + 1) % 100_000 == 0 {
++                    eprintln!(
++                        "DIAG one sample holds {} records, last starting at {:?}, reach {:?}",
++                        self.held_summaries.len() + 1,
++                        self.held_summaries.last().map(|s| s.start_position()),
++                        chain_reach
++                    );
++                }
+                 match observation {
+                     Drawn::Built(record) => {
+                         self.held_summaries.push(LocusSummary::of(&record));
+                         self.held_observations.push(record);
+                     }
+                     Drawn::Kept { summary, body } => {
++                        static DIAG_BIG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++                        if body.len() > 1_000_000
++                            && DIAG_BIG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 200
++                        {
++                            eprintln!(
++                                "DIAG big record: {} bytes, {} reads, at {:?}, reach {:?}",
++                                body.len(),
++                                summary.reads_compared_with_reference,
++                                summary.start_position(),
++                                summary.reach_position()
++                            );
++                        }
+                         self.keeps_evidence = true;
+                         self.held_summaries.push(summary);
+                         self.held_bodies.push(body);
+@@ -1679,6 +1729,17 @@ where
+             }
+             considered += 1;
+             let reach = observation.reach_position();
++            if reach.contig != chain_reach.contig
++                || reach.position.0 > chain_reach.position.0.saturating_add(50_000)
++            {
++                eprintln!(
++                    "DIAG reach jump: record from {:?} reaches {:?}, chain was at {:?}, {} reads",
++                    observation.start_position(),
++                    reach,
++                    chain_reach,
++                    observation.reads_compared_with_reference
++                );
++            }
+             if reach > *chain_reach {
+                 *chain_reach = reach;
+                 reach_grew = true;
+diff --git a/src/run/cohort_merge/rounds.rs b/src/run/cohort_merge/rounds.rs
+index 0623e239..b118630d 100644
+--- a/src/run/cohort_merge/rounds.rs
++++ b/src/run/cohort_merge/rounds.rs
+@@ -35,6 +35,42 @@
+ 
+ use rayon::prelude::*;
+ 
++/// DIAGNOSTIC (not for commit): which stage the round loop is in, and samples done drawing.
++pub static DIAG_PHASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++pub static DIAG_DRAWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++pub static DIAG_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++fn diag_rss_gb() -> f64 {
++    std::fs::read_to_string("/proc/self/statm")
++        .ok()
++        .and_then(|statm| statm.split_whitespace().nth(1)?.parse::<u64>().ok())
++        .map_or(0.0, |pages| pages as f64 * 4096.0 / 1e9)
++}
++
++fn diag_start_watchdog() {
++    static STARTED: std::sync::Once = std::sync::Once::new();
++    STARTED.call_once(|| {
++        std::thread::spawn(|| loop {
++            std::thread::sleep(std::time::Duration::from_millis(500));
++            let rss = diag_rss_gb();
++            if rss > 45.0 {
++                let phase = match DIAG_PHASE.load(std::sync::atomic::Ordering::Relaxed) {
++                    1 => "fold",
++                    2 => "evict",
++                    3 => "cover",
++                    4 => "build",
++                    _ => "other",
++                };
++                eprintln!(
++                    "DIAG watchdog rss_gb={rss:.1} phase={phase} round_at={} samples_drawn={}",
++                    DIAG_AT.load(std::sync::atomic::Ordering::Relaxed),
++                    DIAG_DRAWN.load(std::sync::atomic::Ordering::Relaxed)
++                );
++            }
++        });
++    });
++}
++
+ use super::build::{CohortObservation, build_region_handing_over_windowed};
+ use super::observation_cache::{
+     ObservationCache, ObservationSource, ReferenceUnreadable, building_regions_of,
+@@ -124,21 +160,34 @@ where
+                 .copied()
+                 .expect("the round is not empty");
+ 
++            diag_start_watchdog();
++            DIAG_AT.store(first.start.0, std::sync::atomic::Ordering::Relaxed);
++            let diag_skip = std::env::var("PVC_DIAG_FROM")
++                .ok()
++                .and_then(|from| from.parse::<u64>().ok())
++                .is_some_and(|from| first.contig.0 == 0 && last.end.0 < from);
+             let beside_the_builders = rayon::current_num_threads() > 1;
+             let evicted_base = GenomePosition {
+                 contig: first.contig,
+                 position: first.start,
+             };
++            DIAG_PHASE.store(2, std::sync::atomic::Ordering::Relaxed);
+             if beside_the_builders {
+                 cache.evict_before_in_parallel(evicted_base, &mut graveyard);
+             } else {
+                 cache.evict_before(evicted_base);
+             }
++            DIAG_PHASE.store(3, std::sync::atomic::Ordering::Relaxed);
++            DIAG_DRAWN.store(0, std::sync::atomic::Ordering::Relaxed);
+             cache.cover_in_parallel(GenomeRegion {
+                 contig: first.contig,
+                 start: first.start,
+                 end: last.end,
+             })?;
++            DIAG_PHASE.store(4, std::sync::atomic::Ordering::Relaxed);
++            if diag_skip {
++                continue;
++            }
+ 
+             let cache = &*cache;
+             let make_scratch = &make_scratch;
+@@ -191,6 +240,14 @@ where
+                 build_the_round()
+             };
+ 
++            {
++                let rss_gb = std::fs::read_to_string("/proc/self/statm")
++                    .ok()
++                    .and_then(|statm| statm.split_whitespace().nth(1)?.parse::<u64>().ok())
++                    .map_or(0.0, |pages| pages as f64 * 4096.0 / 1e9);
++                eprintln!("DIAG round built {}-{} rss_gb={:.1}", first.start.0, last.end.0, rss_gb);
++            }
++            DIAG_PHASE.store(1, std::sync::atomic::Ordering::Relaxed);
+             // **The frontier rule, on the calling thread, in region order** — spec §6.1's, the
+             // organiser's `resolve_and_release` with the failed spans and the calls interleaved
+             // by first base. Nothing a healthy run produces reaches the drop.
+diff --git a/src/run/psp_source.rs b/src/run/psp_source.rs
+index 646ff610..4e342f48 100644
+--- a/src/run/psp_source.rs
++++ b/src/run/psp_source.rs
+@@ -406,6 +406,16 @@ impl<'a> PspSummarySource<'a> {
+                     len: ids.len() as u32,
+                 };
+                 self.live_ids.extend_from_slice(ids);
++                if self.live_ids.len() / 5_000_000 != (self.live_ids.len() - ids.len()) / 5_000_000 {
++                    eprintln!(
++                        "DIAG live set: {} reads spanning at {:?}; {} holds {} ids in {} records",
++                        ids.len(),
++                        streamed.head.region,
++                        "a sample",
++                        self.live_ids.len(),
++                        self.heads.len()
++                    );
++                }
+                 Some(Ok(KeptRecord {
+                     summary: LocusSummary::from(&streamed.head),
+                     body,

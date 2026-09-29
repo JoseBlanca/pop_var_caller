@@ -127,6 +127,14 @@ pub struct RecordHead {
     /// **Depth would have been the wrong denominator**: it would raise the bar with reads that
     /// could never clear it.
     pub reads_compared_with_reference: u32,
+    /// **Reads the per-position read cap discarded at this locus** — a copy of the body's own
+    /// count, carried in the head since format 1.1 so that a reader can tell a record's whole
+    /// depth, `reads_compared_with_reference` plus this, without decoding the body.
+    ///
+    /// **Zero in a file written before 1.1**, whose head does not carry it. Those files were
+    /// written under a cap of 8,000 reads a sample, which almost never fired, so their compared
+    /// count is already close to the whole depth; the body still holds the exact figure.
+    pub reads_discarded_by_cap: u32,
     /// Length of the body that follows, in bytes.
     pub body_bytes: BodyByteCount,
 }
@@ -161,7 +169,12 @@ pub struct RecordHead {
 /// anything else — so a build that switched would reject every psp written before it, and a
 /// build before it would reject every psp written after. It costs nothing today because no psp
 /// exists; from Milestone F it costs a version.
-const RECORD_HEAD_FIELDS: [(&str, FieldEncoding); 6] = [
+///
+/// **Format 1.1 added the fifth field**, a copy of the body's count of reads the depth cap
+/// discarded, so that a record's whole depth can be read from its head. A reader accepts both
+/// this list and the 1.0 list before it ([`RECORD_HEAD_FIELDS_1_0`]), which is what lets psps
+/// written before 1.1 — thousands of them, too costly to regenerate — still be read.
+const RECORD_HEAD_FIELDS: [(&str, FieldEncoding); 7] = [
     ("position-offset", FieldEncoding::Varint),
     ("reference-span", FieldEncoding::Varint),
     // **The keep rule's two numbers, adjacent**: a locus is built when some single sample shows
@@ -170,8 +183,26 @@ const RECORD_HEAD_FIELDS: [(&str, FieldEncoding); 6] = [
     // a body.
     ("non-reference-reads", FieldEncoding::Varint),
     ("reads-compared-with-reference", FieldEncoding::Varint),
+    // **A copy, not a move**: the body keeps its own `reads-discarded-by-the-depth-cap`, so a
+    // body reads the same in both versions and a 1.1 head can be checked against it. The name
+    // differs because a manifest may not declare one name twice.
+    (
+        "reads-discarded-by-the-depth-cap-head-copy",
+        FieldEncoding::Varint,
+    ),
     ("record-body-byte-count", FieldEncoding::Varint),
     ("chain-id-changes", FieldEncoding::ChainIdChanges),
+];
+
+/// The head as format 1.0 declared it — [`RECORD_HEAD_FIELDS`] without the discarded-read copy.
+/// Kept only so a reader can recognise a 1.0 file ([`RecordLayout::from_manifest`]).
+const RECORD_HEAD_FIELDS_1_0: [(&str, FieldEncoding); 6] = [
+    RECORD_HEAD_FIELDS[0],
+    RECORD_HEAD_FIELDS[1],
+    RECORD_HEAD_FIELDS[2],
+    RECORD_HEAD_FIELDS[3],
+    RECORD_HEAD_FIELDS[5],
+    RECORD_HEAD_FIELDS[6],
 ];
 
 const fn record_head_field(position: usize) -> &'static str {
@@ -182,7 +213,8 @@ const POSITION_OFFSET: &str = record_head_field(0);
 const REFERENCE_SPAN: &str = record_head_field(1);
 const NON_REFERENCE_READS: &str = record_head_field(2);
 const READS_COMPARED_WITH_REFERENCE: &str = record_head_field(3);
-const RECORD_BODY_BYTE_COUNT: &str = record_head_field(4);
+const READS_DISCARDED_HEAD_COPY: &str = record_head_field(4);
+const RECORD_BODY_BYTE_COUNT: &str = record_head_field(5);
 
 // ---------------------------------------------------------------------
 // The body: one record's fields to bytes and back
@@ -386,19 +418,18 @@ pub fn record_fields() -> Vec<FieldSpec> {
 /// The head's seven fields and then the body's twenty-one — **this build's**, not a file's, which
 /// is the distinction that matters where `manifest.fields` is in scope beside it.
 fn fields_this_build_knows() -> impl Iterator<Item = FieldSpec> {
-    RECORD_HEAD_FIELDS
-        .iter()
+    fields_of(&RECORD_HEAD_FIELDS)
+}
+
+/// A head list followed by the body's fields, as a manifest declares them.
+fn fields_of(head: &[(&'static str, FieldEncoding)]) -> impl Iterator<Item = FieldSpec> {
+    head.iter()
         .chain(BODY_FIELDS.iter())
         .map(|(name, encoding)| FieldSpec {
             name: FieldName((*name).to_string()),
             encoding: *encoding,
         })
 }
-
-/// How many fields this build knows, before anything a later writer added: the head's seven and
-/// the body's twenty-one. The fields past it were declared too — by that later writer — which is
-/// why the name says whose set it is.
-const KNOWN_FIELD_COUNT: usize = RECORD_HEAD_FIELDS.len() + BODY_FIELDS.len();
 
 /// How this reader must read the records in one particular file.
 ///
@@ -437,6 +468,9 @@ pub struct RecordLayout {
     /// carries the byte offset it happened at, and they are walked in declared order, which is
     /// what identifies it.
     unknown_final_encodings: Vec<FieldEncoding>,
+    /// Whether the head carries the copy of the discarded-read count — format 1.1 and later.
+    /// `false` for a 1.0 file, whose heads are one field shorter.
+    head_carries_discarded_reads: bool,
 }
 
 impl RecordLayout {
@@ -450,6 +484,7 @@ impl RecordLayout {
     pub fn as_this_build_writes_it() -> Self {
         Self {
             unknown_final_encodings: Vec::new(),
+            head_carries_discarded_reads: true,
         }
     }
 
@@ -461,35 +496,27 @@ impl RecordLayout {
     /// Whatever the manifest lists *after* them is carried as something to walk past
     /// (see the type's own documentation, including what that cannot do).
     pub fn from_manifest(manifest: &Manifest) -> Result<Self, RecordLayoutError> {
-        for (position, expected) in fields_this_build_knows().enumerate() {
-            let Some(declared) = manifest.fields.get(position) else {
-                return Err(RecordLayoutError::MissingField {
-                    position,
-                    expected: expected.name,
-                });
+        // **This build's fields first, then format 1.0's**, whose head lacks the discarded-read
+        // copy. A file that is neither is refused with what it failed against this build's
+        // list, which names the field it is missing or has wrong.
+        let (known, head_carries_discarded_reads) =
+            match matches_fields(manifest, fields_this_build_knows()) {
+                Ok(known) => (known, true),
+                Err(against_this_build) => {
+                    match matches_fields(manifest, fields_of(&RECORD_HEAD_FIELDS_1_0)) {
+                        Ok(known) => (known, false),
+                        Err(_) => return Err(against_this_build),
+                    }
+                }
             };
-            if declared.name != expected.name {
-                return Err(RecordLayoutError::UnexpectedField {
-                    position,
-                    expected: expected.name,
-                    found: declared.name.clone(),
-                });
-            }
-            if declared.encoding != expected.encoding {
-                return Err(RecordLayoutError::WrongEncoding {
-                    field: declared.name.clone(),
-                    expected: expected.encoding,
-                    found: declared.encoding,
-                });
-            }
-        }
         Ok(Self {
             unknown_final_encodings: manifest
                 .fields
                 .iter()
-                .skip(KNOWN_FIELD_COUNT)
+                .skip(known)
                 .map(|field| field.encoding)
                 .collect(),
+            head_carries_discarded_reads,
         })
     }
 
@@ -498,6 +525,42 @@ impl RecordLayout {
     pub fn unknown_field_count(&self) -> usize {
         self.unknown_final_encodings.len()
     }
+}
+
+/// Check that `manifest` opens with exactly `expected`, and say how many fields that was.
+///
+/// **The known fields must come first, in this order, with these encodings.** A file that
+/// renames one, drops one, reorders two or declares one differently is refused — those are the
+/// shapes that would otherwise decode into plausible values rather than failing.
+fn matches_fields(
+    manifest: &Manifest,
+    expected: impl Iterator<Item = FieldSpec>,
+) -> Result<usize, RecordLayoutError> {
+    let mut known = 0;
+    for (position, expected) in expected.enumerate() {
+        let Some(declared) = manifest.fields.get(position) else {
+            return Err(RecordLayoutError::MissingField {
+                position,
+                expected: expected.name,
+            });
+        };
+        if declared.name != expected.name {
+            return Err(RecordLayoutError::UnexpectedField {
+                position,
+                expected: expected.name,
+                found: declared.name.clone(),
+            });
+        }
+        if declared.encoding != expected.encoding {
+            return Err(RecordLayoutError::WrongEncoding {
+                field: declared.name.clone(),
+                expected: expected.encoding,
+                found: declared.encoding,
+            });
+        }
+        known = position + 1;
+    }
+    Ok(known)
 }
 
 /// Why a file's manifest cannot drive this reader.
@@ -1775,6 +1838,7 @@ impl RecordEncoder {
         put_varint(out, span);
         put_varint(out, u64::from(non_reference_reads));
         put_varint(out, u64::from(reads_compared_with_reference));
+        put_varint(out, u64::from(record.reads_discarded_by_cap));
         put_varint(out, u64::from(body_bytes));
         self.live_reads.write_changes(
             record
@@ -1789,6 +1853,7 @@ impl RecordEncoder {
             region: record.region,
             non_reference_reads,
             reads_compared_with_reference,
+            reads_discarded_by_cap: record.reads_discarded_by_cap,
             body_bytes,
         };
         self.block.measured_from = OffsetBase::after(&head);
@@ -1890,6 +1955,7 @@ pub fn read_record_head<'a>(
     contig: ContigId,
     measured_from: OffsetBase,
     live_reads: &mut LiveSetReader,
+    layout: &RecordLayout,
 ) -> Result<LocatedRecord<'a>, RecordDecodeError> {
     let mut reader = FieldReader::new(bytes);
 
@@ -1947,6 +2013,13 @@ pub fn read_record_head<'a>(
         ));
     }
 
+    // **Absent from a 1.0 head**, which reads it as zero — see the field.
+    let reads_discarded_by_cap = if layout.head_carries_discarded_reads {
+        reader.read_u32(READS_DISCARDED_HEAD_COPY)?
+    } else {
+        0
+    };
+
     let body_bytes = reader.read_u32(RECORD_BODY_BYTE_COUNT)?;
 
     // **The chain ids' changes, and every reader decodes them.** They are read here rather than
@@ -1983,6 +2056,7 @@ pub fn read_record_head<'a>(
             },
             non_reference_reads,
             reads_compared_with_reference,
+            reads_discarded_by_cap,
             body_bytes,
         },
         body,
@@ -2035,7 +2109,7 @@ pub fn decode_record(
     live_reads: &mut LiveSetReader,
     layout: &RecordLayout,
 ) -> Result<DecodedRecord, RecordDecodeError> {
-    let found = read_record_head(bytes, contig, measured_from, live_reads)?;
+    let found = read_record_head(bytes, contig, measured_from, live_reads, layout)?;
     // **The head is committed to here**: nothing between this and the body can refuse the record,
     // so this is where the live set moves. `decode_the_body_of` reads the set below.
     live_reads.apply_the_changes_just_parsed();
@@ -2084,6 +2158,20 @@ pub fn decode_the_body_of(
             ),
         });
     }
+    // **The head's copy of the discarded count against the body's own** — only where the head
+    // carries one. A 1.0 head reads zero there whatever the body says, which is not a fault.
+    if layout.head_carries_discarded_reads
+        && decoded_body.record.reads_discarded_by_cap != found.head.reads_discarded_by_cap
+    {
+        return Err(RecordDecodeError::Malformed {
+            field: READS_DISCARDED_HEAD_COPY,
+            bytes_in: head_bytes,
+            reason: format!(
+                "a head reading {} discarded reads over a body that counts {}",
+                found.head.reads_discarded_by_cap, decoded_body.record.reads_discarded_by_cap
+            ),
+        });
+    }
     if decoded_body.bytes_read != found.body.len() {
         return Err(RecordDecodeError::Malformed {
             field: RECORD_BODY_BYTE_COUNT,
@@ -2105,6 +2193,13 @@ pub fn decode_the_body_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How many bytes `value` takes as a variable-length integer.
+    fn varint_length(value: u32) -> usize {
+        let mut bytes = Vec::new();
+        put_varint(&mut bytes, u64::from(value));
+        bytes.len()
+    }
 
     /// A reader for one block's worth of records.
     ///
@@ -2140,7 +2235,13 @@ mod tests {
         contig: ContigId,
         measured_from: OffsetBase,
     ) -> Result<LocatedRecord<'a>, RecordDecodeError> {
-        let found = read_record_head(bytes, contig, measured_from, live_reads)?;
+        let found = read_record_head(
+            bytes,
+            contig,
+            measured_from,
+            live_reads,
+            &RecordLayout::as_this_build_writes_it(),
+        )?;
         live_reads.apply_the_changes_just_parsed();
         Ok(found)
     }
@@ -2164,6 +2265,7 @@ mod tests {
             non_reference_reads: 3,
             reads_compared_with_reference: 11,
             body_bytes: 47,
+            reads_discarded_by_cap: 0,
         };
         let copied = head;
         assert_eq!(copied, head, "a head is Copy, so this is not a move");
@@ -2188,6 +2290,7 @@ mod tests {
             non_reference_reads: 162,
             reads_compared_with_reference: 198,
             body_bytes: 231,
+            reads_discarded_by_cap: 0,
         };
         assert_eq!(deletion.region.len(), 7);
     }
@@ -2683,6 +2786,7 @@ mod tests {
                 "reference-span",
                 "non-reference-reads",
                 "reads-compared-with-reference",
+                "reads-discarded-by-the-depth-cap-head-copy",
                 "record-body-byte-count",
                 "chain-id-changes",
                 "reference-bases",
@@ -2865,10 +2969,19 @@ mod tests {
 
             let mut dropped = declared.clone();
             dropped.remove(position);
-            assert!(
-                RecordLayout::from_manifest(&a_manifest_declaring(dropped)).is_err(),
-                "field {position} dropped"
-            );
+            // **Dropping the head's discarded-read copy is not damage: it is format 1.0**, which
+            // this reader reads. Every other field dropped is refused.
+            if declared[position].name.0 == "reads-discarded-by-the-depth-cap-head-copy" {
+                assert!(
+                    RecordLayout::from_manifest(&a_manifest_declaring(dropped)).is_ok(),
+                    "the 1.0 head, without the copy, is read"
+                );
+            } else {
+                assert!(
+                    RecordLayout::from_manifest(&a_manifest_declaring(dropped)).is_err(),
+                    "field {position} dropped"
+                );
+            }
 
             if position + 1 < declared.len() {
                 let mut swapped = declared.clone();
@@ -2879,6 +2992,94 @@ mod tests {
                     position + 1
                 );
             }
+        }
+    }
+
+    /// **A record written by format 1.0 still reads**: its head has no discarded-read copy, so it
+    /// reads zero there, and its body still carries the exact count.
+    ///
+    /// The 1.0 record is made from a 1.1 one by taking the copy out of the head — the only
+    /// difference between the two versions — and read under the layout a 1.0 manifest gives.
+    #[test]
+    fn a_format_1_0_record_reads_and_its_head_carries_no_discarded_count() {
+        let mut record = a_rich_record();
+        record.reads_discarded_by_cap = 305;
+        let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
+
+        let mut head = FieldReader::new(&bytes);
+        for name in [
+            "position-offset",
+            "reference-span",
+            "non-reference-reads",
+            "reads-compared-with-reference",
+        ] {
+            head.read_varint(name).expect("the head reads");
+        }
+        let copy_at = head.bytes_read();
+        let mut as_1_0 = bytes.clone();
+        as_1_0.drain(copy_at..copy_at + varint_length(305));
+
+        let layout_1_0 = RecordLayout::from_manifest(&a_manifest_declaring(
+            fields_of(&RECORD_HEAD_FIELDS_1_0).collect(),
+        ))
+        .expect("a 1.0 manifest is read");
+        let decoded = decode_a_record(
+            &mut a_live_set_reader(),
+            &as_1_0,
+            record.region.contig,
+            OffsetBase::at_block_start(block_starts_at),
+            &layout_1_0,
+        )
+        .expect("a 1.0 record decodes");
+        assert_eq!(
+            decoded.head.reads_discarded_by_cap, 0,
+            "a 1.0 head carries no copy"
+        );
+        assert_eq!(
+            decoded.record.reads_discarded_by_cap, 305,
+            "the body still does"
+        );
+        assert_eq!(decoded.record, as_a_decode_can_return_it(&record));
+    }
+
+    /// **A 1.1 head whose discarded-read copy disagrees with its body is refused**, naming the
+    /// head's field.
+    #[test]
+    fn a_head_whose_discarded_copy_disagrees_with_its_body_is_refused() {
+        let mut record = a_rich_record();
+        record.reads_discarded_by_cap = 41;
+        let (mut bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
+        let mut head = FieldReader::new(&bytes);
+        for name in [
+            "position-offset",
+            "reference-span",
+            "non-reference-reads",
+            "reads-compared-with-reference",
+        ] {
+            head.read_varint(name).expect("the head reads");
+        }
+        let copy_at = head.bytes_read();
+        assert_eq!(
+            bytes[copy_at], 41,
+            "one byte, so it can be changed in place"
+        );
+        bytes[copy_at] = 40;
+
+        match decode_a_record(
+            &mut a_live_set_reader(),
+            &bytes,
+            record.region.contig,
+            OffsetBase::at_block_start(block_starts_at),
+            &RecordLayout::as_this_build_writes_it(),
+        ) {
+            Err(RecordDecodeError::Malformed { field, reason, .. }) => {
+                assert_eq!(field, "reads-discarded-by-the-depth-cap-head-copy");
+                assert!(
+                    reason.contains("40") && reason.contains("41"),
+                    "got {reason}"
+                );
+            }
+            other => panic!("expected the copy to be refused, got {other:?}"),
         }
     }
 
@@ -2900,7 +3101,10 @@ mod tests {
         // everything else in this build's order.
         let old: Vec<FieldSpec> = record_fields()
             .into_iter()
-            .filter(|field| field.name.0 != "reads-compared-with-reference")
+            .filter(|field| {
+                field.name.0 != "reads-compared-with-reference"
+                    && field.name.0 != "reads-discarded-by-the-depth-cap-head-copy"
+            })
             .collect();
         match RecordLayout::from_manifest(&a_manifest_declaring(old)) {
             Err(RecordLayoutError::UnexpectedField {
@@ -3945,7 +4149,7 @@ mod tests {
         // Offset 0, span 1, kind Generic, then the two counts, an empty body, and no chain-id
         // changes either way.
         for (varying, compared) in [(5u8, 3u8), (5, 0), (1, 0)] {
-            let head = [0, 1, varying, compared, 0, 0, 0];
+            let head = [0, 1, varying, compared, 0, 0, 0, 0];
             let refused = read_a_record_head(
                 &mut live_reads,
                 &head,
@@ -3967,7 +4171,7 @@ mod tests {
 
         let nothing_varied_and_nothing_was_compared = read_a_record_head(
             &mut live_reads,
-            &[0, 1, 0, 0, 0, 0, 0],
+            &[0, 1, 0, 0, 0, 0, 0, 0],
             A_CONTIG,
             OffsetBase::at_block_start(Position(1_000)),
         )
@@ -3981,7 +4185,7 @@ mod tests {
 
         let all_of_them_varied = read_a_record_head(
             &mut live_reads,
-            &[0, 1, 5, 5, 0, 0, 0],
+            &[0, 1, 5, 5, 0, 0, 0, 0],
             A_CONTIG,
             OffsetBase::at_block_start(Position(1_000)),
         )
@@ -4094,18 +4298,19 @@ mod tests {
 
         let body_bytes = record_body_length(&record);
         assert_eq!(
-            bytes[..7],
+            bytes[..8],
             [
                 40, // position-offset: 1,040 − 1,000
                 7,  // reference-span: seven bases, inclusive
                 2,  // non-reference-reads: the two reads a base off the reference
                 5,  // reads-compared-with-reference: both observations spanned the locus
+                0,  // reads-discarded-by-the-depth-cap-head-copy: the cap discarded none
                 body_bytes as u8,
                 0, // chain-id departures: this record names no reads, so none stopped
                 0, // chain-id arrivals: and none started
             ]
         );
-        assert_eq!(bytes.len(), 7 + body_bytes);
+        assert_eq!(bytes.len(), 8 + body_bytes);
     }
 
     // -----------------------------------------------------------------
@@ -4462,7 +4667,9 @@ mod tests {
         // the varying-read count take one each, the compared-read count is 137 and takes two,
         // and the body's length is the seventh byte. (The chain-id changes follow it, and this
         // record names no reads.) The assertion below is what fails if that drifts.
-        let at_the_body_length = 5;
+        // Since format 1.1 the discarded-read copy sits in front of the body's length, and this
+        // record's count may take more than one byte.
+        let at_the_body_length = 5 + varint_length(records[0].reads_discarded_by_cap);
         assert_eq!(usize::from(bytes[at_the_body_length]), body_bytes);
         bytes[at_the_body_length] = (body_bytes - 1) as u8;
 
@@ -4587,7 +4794,8 @@ mod tests {
         // The scalar head is seven bytes here — offset, span, kind and the varying-read count
         // one each, the compared-read count two, the body's length one — so the changes begin at
         // byte seven and this cut lands one byte into them.
-        let scalar_head_bytes = 6;
+        // Since format 1.1 the discarded-read copy sits before the body's length too.
+        let scalar_head_bytes = 6 + varint_length(record.reads_discarded_by_cap);
         assert_eq!(
             usize::from(bytes[scalar_head_bytes - 1]),
             record_body_length(&record),
@@ -5161,10 +5369,11 @@ mod tests {
         for (position, expected) in [
             (2usize, "non-reference-reads"),
             (3, "reads-compared-with-reference"),
-            (4, "record-body-byte-count"),
+            (4, "reads-discarded-by-the-depth-cap-head-copy"),
+            (5, "record-body-byte-count"),
         ] {
             let mut bytes = vec![0u8, 1]; // offset 0, span 1
-            for at in 2..=4 {
+            for at in 2..=5 {
                 if at == position {
                     encode_u64_leb128(u64::from(u32::MAX) + 6, &mut bytes);
                 } else {
@@ -5213,8 +5422,8 @@ mod tests {
     #[test]
     fn a_head_declaring_a_body_no_buffer_holds_is_truncated_not_malformed() {
         let mut live_reads = a_live_set_reader();
-        // Offset 0, span 1, and neither of the keep rule's counts.
-        let mut bytes = vec![0u8, 1, 0, 0];
+        // Offset 0, span 1, neither of the keep rule's counts, and no discarded reads.
+        let mut bytes = vec![0u8, 1, 0, 0, 0];
         encode_u64_leb128(u64::from(BodyByteCount::MAX), &mut bytes);
         // No departures and no arrivals, so the head is whole and what runs out is the body.
         bytes.extend_from_slice(&[0, 0]);
@@ -5979,6 +6188,9 @@ mod tests {
             let compared = head
                 .read_varint("reads-compared-with-reference")
                 .expect("the head reads");
+            let discarded = head
+                .read_varint("reads-discarded-by-the-depth-cap-head-copy")
+                .expect("the head reads");
             head.read_varint("record-body-byte-count")
                 .expect("the head reads");
             let changes = widened[head.bytes_read()..].to_vec();
@@ -5987,6 +6199,7 @@ mod tests {
             put_varint(&mut widened, span);
             put_varint(&mut widened, non_reference);
             put_varint(&mut widened, compared);
+            put_varint(&mut widened, discarded);
             put_varint(&mut widened, body.len() as u64);
             widened.extend_from_slice(&changes);
             widened.extend_from_slice(&body);

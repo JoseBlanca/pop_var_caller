@@ -142,6 +142,7 @@ mod tests {
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
         }
     }
 
@@ -183,6 +184,7 @@ mod tests {
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
         })
         .expect("the cohort walks into psps");
         psps
@@ -215,12 +217,14 @@ mod tests {
             paralog_fdr: 0.0,
             paralog_filter_tag: false,
             cohort_locus_builder_regions_len: None,
+            psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,
             min_copies: MinCopies::default(),
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
         }
     }
 
@@ -793,6 +797,8 @@ mod tests {
                 max_period: DEFAULT_MAX_PERIOD,
                 max_str_len: DEFAULT_MAX_STR_LEN,
                 min_purity: DEFAULT_MIN_PURITY,
+                max_reads_per_position:
+                    crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
             })
             .expect("one sample walks on its own");
             apart.push(psp_path_for(&directory, sample));
@@ -839,6 +845,7 @@ mod tests {
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
         })
         .expect("the cohort walks into psps");
 
@@ -892,12 +899,14 @@ mod tests {
             paralog_fdr: 0.0,
             paralog_filter_tag: false,
             cohort_locus_builder_regions_len: None,
+            psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,
             min_copies: MinCopies::default(),
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
         }
     }
 }

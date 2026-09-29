@@ -38,7 +38,7 @@
 use std::num::NonZeroU64;
 
 use crate::locus_generation::SampleLocusObservations;
-use crate::psp::chain_ids::{LiveSet, LiveSetReader};
+use crate::psp::chain_ids::{LiveSet, LiveSetChanges, LiveSetReader};
 use crate::psp::header::{MAX_LOOK_BACK_WINDOW_LOG, MIN_LOOK_BACK_WINDOW_LOG, Manifest};
 use crate::psp::record::{
     OffsetBase, RecordDecodeError, RecordEncodeError, RecordEncoder, RecordHead, RecordLayout,
@@ -1476,6 +1476,17 @@ impl<R: std::io::Read> BlockStream<R> {
         self.live_reads.live()
     }
 
+    /// Which reads started and stopped being live at the record last handed back — the step
+    /// from the record before it to [`live_reads`](Self::live_reads).
+    ///
+    /// **At a block's first record it is not a step from the record before**: the set restarts
+    /// at every block, so that record's arrivals are its whole live set. A caller replaying
+    /// these has to watch [`blocks_begun`](Self::blocks_begun) to know where that happens.
+    #[must_use]
+    pub fn live_changes(&self) -> &LiveSetChanges {
+        self.live_reads.changes()
+    }
+
     pub fn parses_restarted(&self) -> u64 {
         self.parses_restarted
     }
@@ -1616,6 +1627,7 @@ impl<R: std::io::Read> BlockStream<R> {
                 block.contig,
                 self.cursor.measured_from,
                 &mut self.live_reads,
+                &self.layout,
             ) {
                 Ok(found) => {
                     let head = found.head;
@@ -4688,9 +4700,9 @@ mod tests {
             record_count: NonZeroU64::MIN,
         }
         .encode(&mut payload);
-        // position-offset 0, reference-span 1, neither of the keep rule's counts, and then a
-        // body length larger than anything that follows.
-        payload.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+        // position-offset 0, reference-span 1, neither of the keep rule's counts, no discarded
+        // reads, and then a body length larger than anything that follows.
+        payload.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x00]);
         encode_u64_leb128(u64::from(u32::MAX), &mut payload);
         // No chain-id departures and no arrivals, so the head is whole and what the reader
         // cannot find the end of is the body.

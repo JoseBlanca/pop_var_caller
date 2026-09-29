@@ -47,8 +47,18 @@ use crate::types::{GenomePosition, GenomeRegion, ReadGroupId};
 
 use super::cohort_merge::observation_cache::ObservationSource;
 use super::cohort_merge::observation_cache::{Drawn, LocusSummary};
+use crate::psp::LiveSet;
 use crate::psp::RecordHead;
 use crate::psp::record::{LocatedRecord, RecordLayout, decode_the_body_of};
+
+mod held_live_sets;
+use held_live_sets::HeldLiveSets;
+pub mod read_cap;
+
+thread_local! {
+    /// The live set a build on this thread rebuilds into — see [`PspSummarySource`]'s `build`.
+    static LIVE_SET_SCRATCH: core::cell::RefCell<LiveSet> = core::cell::RefCell::new(LiveSet::new());
+}
 
 /// **A stored record's head is a summary** — the claim the whole deferred-build design rests
 /// on, written down as a conversion so it can be tested rather than asserted.
@@ -67,11 +77,12 @@ use crate::psp::record::{LocatedRecord, RecordLayout, decode_the_body_of};
 /// mapping from the other end.
 impl From<&RecordHead> for LocusSummary {
     fn from(head: &RecordHead) -> Self {
-        Self {
-            region: head.region,
-            non_reference_reads: head.non_reference_reads,
-            reads_compared_with_reference: head.reads_compared_with_reference,
-        }
+        Self::new(
+            head.region,
+            head.non_reference_reads,
+            head.reads_compared_with_reference,
+            head.reads_discarded_by_cap,
+        )
     }
 }
 use super::{RunError, WalkProgress};
@@ -251,13 +262,17 @@ pub struct PspSummarySource<'a> {
     read_groups: Vec<ReadGroupId>,
     /// The heads handed over so far, so a body can be located and described when it is built.
     heads: Vec<KeptRecord>,
-    /// The live sets of the records still held, back to back in draw order.
-    ///
-    /// **A span addresses the whole file, not this buffer** — the same rule `kept` follows, and
-    /// for the same reason: the merge holds spans across draws.
-    live_ids: Vec<crate::types::ChainId>,
-    /// How many entries have been dropped from the front of `live_ids`.
-    live_released: u64,
+    /// The reads live at each record still held, stored as what changed from one record to the
+    /// next plus a whole copy every so often ([`held_live_sets`]).
+    live: HeldLiveSets,
+    /// The run's read cap, where this file was written under a looser one and so has to be
+    /// thinned as its records are decoded ([`read_cap`]); `None` where it does not.
+    read_cap: Option<u32>,
+    /// What the thinning removed, and from which records — a set, because one record can be
+    /// decoded more than once (for the coverage measurement and again for its locus) and must
+    /// be counted once. Behind a lock because builds run on several threads at once; it is only
+    /// taken where a record was actually thinned.
+    thinned: std::sync::Mutex<ThinnedSoFar>,
     /// What this sample contributed, for the run report.
     read: StoredSampleTallies,
 }
@@ -269,39 +284,38 @@ pub struct KeptRecord {
     pub summary: LocusSummary,
     /// Where the body's bytes sit in the source's arena.
     pub body: core::ops::Range<usize>,
-    /// **The reads live at this record, which its body cannot be built without.**
+    /// **Which record of the file this is, counted from 0** — the address of the reads live at
+    /// it, which its body cannot be built without.
     ///
     /// One observation in a record has its read list *derived* rather than stored — the
-    /// residual is this set minus every other observation's list, and the body declares what
-    /// that should come to. So a body is not self-contained after all: built against the wrong
-    /// set it is refused, which is how this field came to exist.
+    /// residual is the live set minus every other observation's list, and the body declares what
+    /// that should come to. So a body is not self-contained: built against the wrong set it is
+    /// refused.
     ///
-    /// **Kept per record, which is the simple answer and not yet the measured one.** The set is
-    /// the reads open at one position, so it grows with depth: at three reads a position it is
-    /// a handful of identifiers and at three hundred it is three hundred, over a window of a
-    /// few thousand records a sample. The alternatives both trade memory for work — a snapshot
-    /// every so many records with the changes replayed from it, or one per building region —
-    /// and choosing between them wants the measurement that has not been taken
-    /// (`spec/cohort_merge_psp_path.md` §3.2).
-    ///
-    /// **The window is what it is now per, and until 2026-09-07 it was the file.** A snapshot
-    /// per record is bounded by the merge's window only because the heads are released with the
-    /// bodies they describe; before that they were not, and this set — the largest field of the
-    /// three, and the one that grows with depth — was held for every record the file had.
-    pub live: LiveSpan,
+    /// **The set is not copied per record.** It was, until the 2,169-sample tomato run was
+    /// killed at a pile-up where the copies came to 160 MB a sample; the source now keeps what
+    /// changed between records and rebuilds a set when a body is built ([`held_live_sets`]).
+    pub ordinal: u64,
 }
 
-/// Where a record's live set sits in the source's chain-id arena, measured from the file the
-/// way a body's range is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct LiveSpan {
-    /// First entry of this record's live set, counted from the file's first record.
-    pub start: u64,
-    /// How many entries it has.
-    pub len: u32,
+/// What a source's thinning has removed so far: the records it thinned, by ordinal, and the
+/// reads they lost.
+#[derive(Debug, Default)]
+struct ThinnedSoFar {
+    records: std::collections::HashSet<u64>,
+    reads: u64,
 }
 
 impl<'a> PspSummarySource<'a> {
+    /// Thin this file's records to `read_cap` reads of a read group as they are decoded, or not
+    /// at all for `None`. The caller decides from the file's header
+    /// ([`read_cap::needs_thinning`]).
+    #[must_use]
+    pub fn with_read_cap(mut self, read_cap: Option<u32>) -> Self {
+        self.read_cap = read_cap;
+        self
+    }
+
     /// Walk `psp` from its first record, keeping every body.
     ///
     /// # Errors
@@ -324,8 +338,9 @@ impl<'a> PspSummarySource<'a> {
             layout,
             read_groups,
             heads: Vec::new(),
-            live_ids: Vec::new(),
-            live_released: 0,
+            live: HeldLiveSets::default(),
+            read_cap: None,
+            thinned: std::sync::Mutex::new(ThinnedSoFar::default()),
             read: StoredSampleTallies::default(),
         })
     }
@@ -345,7 +360,15 @@ impl<'a> PspSummarySource<'a> {
     /// both numbers live, so a run that never builds a body still reports them.
     #[must_use]
     pub fn read(&self) -> StoredSampleTallies {
-        self.read
+        let thinned = self
+            .thinned
+            .lock()
+            .expect("a thinning tally no build panicked holding");
+        StoredSampleTallies {
+            loci_thinned_to_the_read_cap: thinned.records.len() as u64,
+            reads_thinned_by_the_read_cap: thinned.reads,
+            ..self.read
+        }
     }
 
     /// How many body bytes this source is holding — **the number the arena is bounded by**,
@@ -366,7 +389,7 @@ impl<'a> PspSummarySource<'a> {
     /// cut cannot be derived from either of the others.
     #[must_use]
     pub fn held_live_ids(&self) -> usize {
-        self.live_ids.len()
+        self.live.held_ids()
     }
 
     /// The bytes of the body at `body`, which must be one this source still holds.
@@ -398,22 +421,19 @@ impl<'a> PspSummarySource<'a> {
                 // **Shifted from the buffer's terms into the file's**, which is what makes a
                 // range outlive the release that moves the bytes it names.
                 let body = body.start + self.released..body.end + self.released;
-                // The ids go into the source's own arena and the record carries a span into
-                // it, so a record costs no allocation and no `Vec` header.
-                let ids = self.walk.live_reads().ids();
-                let live = LiveSpan {
-                    start: self.live_released + self.live_ids.len() as u64,
-                    len: ids.len() as u32,
-                };
-                self.live_ids.extend_from_slice(ids);
+                // **After the step, so the changes this record's head carried are in.** The
+                // walk parses a head's live-set changes and applies them before handing the
+                // record over, so this is the set as of this record and not as of the one
+                // before it.
+                let ordinal = self.live.push(
+                    self.walk.live_reads(),
+                    self.walk.live_changes(),
+                    self.walk.blocks_begun(),
+                );
                 Some(Ok(KeptRecord {
                     summary: LocusSummary::from(&streamed.head),
                     body,
-                    // **After the step, so the changes this record's head carried are in.**
-                    // The walk parses a head's live-set changes and applies them before
-                    // handing the record over, so this is the set as of this record and not
-                    // as of the one before it.
-                    live,
+                    ordinal,
                 }))
             }
             Some(Err(failed)) => Some(Err(failed)),
@@ -483,6 +503,12 @@ pub struct StoredSampleTallies {
     /// the closest a stored file comes to direct mode's *what this sample's reads did* — which
     /// no psp records at all.
     pub reads_compared_with_reference: u64,
+    /// **Records this run thinned to its read cap as it decoded them** — only for a psp written
+    /// under a looser cap than the run's (`--max-reads-per-position`, [`read_cap`]). Counted
+    /// once per record however many times it was decoded.
+    pub loci_thinned_to_the_read_cap: u64,
+    /// Reads those records lost to the thinning.
+    pub reads_thinned_by_the_read_cap: u64,
 }
 
 impl StoredSampleTallies {
@@ -687,9 +713,8 @@ impl ObservationSource for PspSummarySource<'_> {
     ///
     /// Which is why the set is kept: building against the wrong one is the failure that does
     /// not announce itself, because a body decoded against a plausible-but-wrong set is a
-    /// plausible body. The set lives in the source's own arena and the record carries a span
-    /// into it, released with the head that names it
-    /// ([`release_before`](ObservationSource::release_before)).
+    /// plausible body. **It is rebuilt here** from the changes the source kept
+    /// ([`held_live_sets`]), into a buffer this thread reuses for every build.
     fn build(&self, body: core::ops::Range<usize>) -> Result<SampleLocusObservations, RunError> {
         let kept = self
             .heads
@@ -697,9 +722,10 @@ impl ObservationSource for PspSummarySource<'_> {
             .map(|at| &self.heads[at])
             .expect("a body range this source handed out");
         let head = RecordHead {
-            region: kept.summary.region,
+            region: kept.summary.region(),
             non_reference_reads: kept.summary.non_reference_reads,
             reads_compared_with_reference: kept.summary.reads_compared_with_reference,
+            reads_discarded_by_cap: kept.summary.reads_discarded_by_cap,
             body_bytes: u32::try_from(body.len()).expect("a body this source wrote down"),
         };
         let found = LocatedRecord {
@@ -707,15 +733,15 @@ impl ObservationSource for PspSummarySource<'_> {
             body: self.body_bytes(&body),
             record_bytes: body.len(),
         };
-        // **The arena's own span is handed to the decoder, not a copy of it.** The decoder
-        // reads the live identifiers in order and nothing it does needs the owning `LiveSet`,
-        // so the span this source already holds is what it gets. Copying it into a fresh
-        // `LiveSet` per record built was 19% of the calling thread at 63 accessions.
-        let at = (kept.live.start - self.live_released) as usize;
-        let live = &self.live_ids[at..at + kept.live.len as usize];
-        let mut record = decode_the_body_of(&found, live, &self.layout)
-            .map_err(|source| self.refuse(source))?
-            .record;
+        // **Rebuilt into a buffer this thread keeps, not a fresh one.** Builds run on several
+        // threads at once, so the buffer cannot be the source's; and an allocation per build
+        // was measured once already, as a copy into a fresh `LiveSet`: 19% of the calling
+        // thread at 63 accessions.
+        let decoded = LIVE_SET_SCRATCH.with_borrow_mut(|live| {
+            self.live.rebuild(kept.ordinal, live);
+            decode_the_body_of(&found, live.ids(), &self.layout)
+        });
+        let mut record = decoded.map_err(|source| self.refuse(source))?.record;
         // **The same renumbering the building source makes, for the same reason**: every
         // sample numbers its read groups from zero, so without it every sample's first group
         // would reach the merge as identifier 0 and the cohort would score them as one lane.
@@ -729,6 +755,18 @@ impl ObservationSource for PspSummarySource<'_> {
                 }));
             };
             observation.read_group = run_wide;
+        }
+        if let Some(cap) = self.read_cap {
+            let thinned = read_cap::thin_to_read_cap(&mut record, cap);
+            if thinned.reads > 0 {
+                let mut so_far = self
+                    .thinned
+                    .lock()
+                    .expect("a thinning tally no build panicked holding");
+                if so_far.records.insert(kept.ordinal) {
+                    so_far.reads += thinned.reads;
+                }
+            }
         }
         Ok(record)
     }
@@ -755,18 +793,14 @@ impl ObservationSource for PspSummarySource<'_> {
         let past = self
             .heads
             .partition_point(|kept| kept.body.end <= body_start);
-        // **The live arena is drained with the heads that address it, and it needs its own
-        // cut.** A record contributes as many bytes as its body has and as many identifiers as
-        // it has reads, so the two arenas fill at different rates and one cut cannot serve
-        // both: this one is read off the first surviving head's span.
-        let drawn_ids = self.live_released + self.live_ids.len() as u64;
-        let live_from = self
+        // **The live sets are released by record, not by byte**: the first surviving head says
+        // which record the merge can still ask for, and the held sets keep whatever rebuilding
+        // it needs — which reaches back to the restart point before it.
+        let first_held = self
             .heads
             .get(past)
-            .map_or(drawn_ids, |surviving| surviving.live.start);
-        self.live_ids
-            .drain(..(live_from - self.live_released) as usize);
-        self.live_released = live_from;
+            .map_or(u64::MAX, |surviving| surviving.ordinal);
+        self.live.release_before(first_held);
         self.heads.drain(..past);
     }
 }
@@ -1617,10 +1651,11 @@ mod tests {
         let live: Vec<u64> = Vec::new();
         for (at, kept_record) in kept.iter().enumerate().rev() {
             let head = crate::psp::RecordHead {
-                region: kept_record.summary.region,
+                region: kept_record.summary.region(),
                 non_reference_reads: kept_record.summary.non_reference_reads,
                 reads_compared_with_reference: kept_record.summary.reads_compared_with_reference,
                 body_bytes: u32::try_from(kept_record.body.len()).expect("a small body"),
+                reads_discarded_by_cap: 0,
             };
             let found = crate::psp::record::LocatedRecord {
                 head,
@@ -1690,6 +1725,73 @@ mod tests {
                 "record {at} built out of order differs from the one built at once"
             );
         }
+    }
+
+    /// **A source given a read cap thins what it builds, counts what it removed once per
+    /// record, and without one builds the file as written.**
+    ///
+    /// The same file read twice: with no cap, and with a cap of one read a read group, which is
+    /// below every multi-read observation in the fixture. Each capped record has lost exactly
+    /// the reads its discarded count gained; the tally names each thinned record once although
+    /// every body is built twice; and the uncapped source's records are the file's.
+    #[test]
+    fn a_read_cap_thins_what_is_built_and_counts_each_record_once() {
+        let records = a_sample();
+        let (_dir, path) = a_psp_of(&records);
+        let groups = as_walked();
+        let reads = |record: &SampleLocusObservations| -> u32 {
+            record.observations.iter().map(|o| o.num_obs).sum()
+        };
+
+        let mut psp = PspReader::open(&path).expect("the file opens");
+        let mut source = PspSummarySource::over(&mut psp, &groups)
+            .expect("the walk starts")
+            .with_read_cap(Some(1));
+        let mut bodies = Vec::new();
+        while let Some(next) = source.next_drawn(None) {
+            match next.expect("the fixture reads back") {
+                Drawn::Kept { body, .. } => bodies.push(body),
+                Drawn::Built(_) => panic!("this source keeps every body"),
+            }
+        }
+        let mut thinned_records = 0u64;
+        let mut removed = 0u64;
+        for (body, stored) in bodies.iter().zip(&records) {
+            let built = source.build(body.clone()).expect("a kept body builds");
+            let again = source.build(body.clone()).expect("and builds again");
+            assert_eq!(built, again, "thinning is a function of the record");
+            let lost = reads(stored) - reads(&built);
+            assert_eq!(
+                built.reads_discarded_by_cap - stored.reads_discarded_by_cap,
+                lost,
+                "the reads removed are the reads added to the discarded count"
+            );
+            thinned_records += u64::from(lost > 0);
+            removed += u64::from(lost);
+        }
+        assert!(
+            thinned_records > 0,
+            "a cap of one thinned nothing in the fixture"
+        );
+        assert_eq!(source.read().loci_thinned_to_the_read_cap, thinned_records);
+        assert_eq!(source.read().reads_thinned_by_the_read_cap, removed);
+
+        let mut psp = PspReader::open(&path).expect("the file opens again");
+        let mut uncapped = PspSummarySource::over(&mut psp, &groups)
+            .expect("the walk starts")
+            .with_read_cap(None);
+        let mut at = 0;
+        while let Some(next) = uncapped.next_drawn(None) {
+            let Drawn::Kept { body, .. } = next.expect("the fixture reads back") else {
+                panic!("this source keeps every body")
+            };
+            assert_eq!(
+                uncapped.build(body).expect("a kept body builds"),
+                records[at]
+            );
+            at += 1;
+        }
+        assert_eq!(uncapped.read().loci_thinned_to_the_read_cap, 0);
     }
 
     /// **What the merge has passed stops costing memory, and what it still holds still builds.**

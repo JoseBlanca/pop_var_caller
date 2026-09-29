@@ -4,11 +4,20 @@
 //! sample's records into that stream: given one record as the merge's cache drew it, it calls
 //! back once per position the record speaks for, with the depth there.
 //!
-//! **Depth here is observation depth** — the number of reads whose observation covers the
-//! position. It is below read depth by the reads that covered the ground and produced no
-//! observation and by any a depth cap discarded, consistently on both sides of the filter's
+//! **Depth here is observation depth plus what the read cap discarded** — the reads whose
+//! observation covers the position, and the reads the per-position cap
+//! (`--max-reads-per-position`) took away from it. It is below read depth by the reads that
+//! covered the ground and produced no observation, consistently on both sides of the filter's
 //! division, which is what spec §6's first trap is about: the yardstick and the measurement
 //! have to be the same quantity.
+//!
+//! **The cap's reads are added back** (owner, 2026-09-29) because the filter's signal *is*
+//! depth: a collapsed repeat carries a multiple of a sample's normal depth, and a cap that
+//! flattened every such position to its own value would make two copies and four look alike.
+//! Whether the cap acted when the psps were written or when a run thinned them, the count is
+//! in the record — `reads_discarded_by_cap` — and a record's head carries it since format 1.1,
+//! so a one-base record still needs no decoding. A psp written before 1.1 reads zero there,
+//! which is what its 8,000-reads-a-sample cap almost always discarded.
 //!
 //! **Three rules:**
 //!
@@ -81,14 +90,20 @@ pub fn for_each_reported_depth<E>(
 ) -> Result<(), E> {
     let first_base = summary.start_position();
     if first_base.position == summary.reach() {
-        report(first_base, summary.reads_compared_with_reference);
+        report(
+            first_base,
+            summary
+                .reads_compared_with_reference
+                .saturating_add(summary.reads_discarded_by_cap),
+        );
         return Ok(());
     }
 
     match evidence {
         EvidenceForOneRecord::InHand(record) => {
             assert_eq!(
-                record.region, summary.region,
+                record.region,
+                summary.region(),
                 "the summary handed in is not this record's",
             );
             report_body_depths(record, first_base, &mut report);
@@ -100,7 +115,8 @@ pub fn for_each_reported_depth<E>(
             // `RunError` naming the sample, beside the other producer-guarantee checks it
             // already makes.
             assert_eq!(
-                record.region, summary.region,
+                record.region,
+                summary.region(),
                 "the body built for this record covers other ground than its head claimed",
             );
             report_body_depths(&record, first_base, &mut report);
@@ -162,7 +178,10 @@ fn report_body_depths(
         // Its interior positions have records of their own.
         LocusKind::Generic => {
             if let Some(&depth_at_the_anchor) = depth_along_the_locus.first() {
-                report(first_base, depth_at_the_anchor);
+                report(
+                    first_base,
+                    depth_at_the_anchor.saturating_add(record.reads_discarded_by_cap),
+                );
             }
         }
         // Nothing else reports this ground. `SsrBundle` regions emit no loci today
@@ -180,7 +199,7 @@ fn report_body_depths(
                         contig: first_base.contig,
                         position: Position(first_base.position.get() + offset as u64),
                     },
-                    depth,
+                    depth.saturating_add(record.reads_discarded_by_cap),
                 );
             }
         }
@@ -262,11 +281,7 @@ mod tests {
     /// derived — which is the point at a one-base record, where the rule reads the summary and
     /// never the evidence.
     fn summary_of(region: GenomeRegion, reads_compared_with_reference: u32) -> LocusSummary {
-        LocusSummary {
-            region,
-            non_reference_reads: 0,
-            reads_compared_with_reference,
-        }
+        LocusSummary::new(region, 0, reads_compared_with_reference, 0)
     }
 
     /// A `build` that must not be called, and says which record it was asked for if it is.
@@ -332,6 +347,42 @@ mod tests {
         )
         .expect("the summary answers this record");
         assert_eq!(reported, vec![(at(42), 7)]);
+    }
+
+    /// **The reads the read cap discarded are part of the depth**, from the summary at one base
+    /// and from the record wider than that: a pile-up capped at a few hundred reads must still
+    /// read as the pile-up it is.
+    #[test]
+    fn the_reads_the_cap_discarded_are_counted_in_the_depth() {
+        let one_base = LocusSummary::new(region(42, 42), 0, 7, 5);
+        let drawn = Drawn::Kept {
+            summary: one_base,
+            body: 0..1,
+        };
+        let mut reported = Vec::new();
+        for_each_reported_depth(
+            one_base,
+            (&drawn).into(),
+            build_refused,
+            |position, depth| {
+                reported.push((position, depth));
+            },
+        )
+        .expect("the summary answers this record");
+        assert_eq!(
+            reported,
+            vec![(at(42), 12)],
+            "seven compared and five discarded"
+        );
+
+        let mut widened = generic_record(region(10, 12), vec![obs(ReadWitness::Complete, 4)]);
+        widened.reads_discarded_by_cap = 3;
+        let summary = LocusSummary::of(&widened);
+        assert_eq!(
+            collect_reported(&Drawn::Built(widened), summary),
+            vec![(at(10), 7)],
+            "four observed at the anchor and three discarded"
+        );
     }
 
     /// A generic record widened by a deletion reports at its first base alone: the interior

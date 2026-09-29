@@ -1543,11 +1543,12 @@ impl RecordMeasurement for WindowRecomputation {
         // **The summary is built from the head and not derived from the record**, because that
         // is what the run's cache holds in psp mode: the head's count is the number the cheap
         // rule uses, and deriving it here would test the rule against itself.
-        let summary = LocusSummary {
+        let summary = LocusSummary::new(
             region,
-            non_reference_reads: head.non_reference_reads,
-            reads_compared_with_reference: head.reads_compared_with_reference,
-        };
+            head.non_reference_reads,
+            head.reads_compared_with_reference,
+            head.reads_discarded_by_cap,
+        );
         self.reported.clear();
         // **Collected before it is folded**, because the borrow the base lookup needs and the
         // borrow the accumulator needs cannot be held at once; the buffer is a field so that the
@@ -2150,6 +2151,7 @@ mod tests {
             region: record.region,
             non_reference_reads: 0,
             reads_compared_with_reference,
+            reads_discarded_by_cap: 0,
             body_bytes: 0,
         }
     }

@@ -19,7 +19,7 @@ use std::path::Path;
 
 use super::PspReadError;
 use super::block::{BlockReadError, BlockStream, ROLLING_BYTES, StreamedRecord};
-use super::chain_ids::LiveSet;
+use super::chain_ids::{LiveSet, LiveSetChanges};
 use super::header::Manifest;
 use super::record::RecordHead;
 
@@ -183,6 +183,13 @@ impl<'a> RecordIter<'a> {
     /// reconstructing them needs this beside the record.
     pub fn live_reads(&self) -> &LiveSet {
         self.stream.live_reads()
+    }
+
+    /// Which reads started and stopped being live at the record last handed back — see
+    /// [`BlockStream::live_changes`](super::block::BlockStream::live_changes), including why a
+    /// block's first record is not a step from the one before.
+    pub fn live_changes(&self) -> &LiveSetChanges {
+        self.stream.live_changes()
     }
 
     /// How many blocks this walk has opened, the one it is inside included.
