@@ -576,9 +576,35 @@ fn what_each_stored_file_gave(lines: &mut Vec<String>, stored: &StoredCohortTall
         let Some(depth) = sample.read.mean_reads_a_locus() else {
             continue;
         };
+        let thinned = match sample.read.loci_thinned_to_the_read_cap {
+            0 => String::new(),
+            loci => format!(
+                "; {loci} loci thinned to the read cap, {} reads removed",
+                sample.read.reads_thinned_by_the_read_cap
+            ),
+        };
         lines.push(format!(
-            "  {}: {} loci read, {depth:.1} reads a locus compared with the reference",
+            "  {}: {} loci read, {depth:.1} reads a locus compared with the reference{thinned}",
             sample.sample_name, sample.read.loci_read,
+        ));
+    }
+    // **The cohort's total, so a run over thousands of samples can be read at a glance.** Only
+    // files written under a looser cap than the run's are thinned (`--max-reads-per-position`).
+    let (loci, reads, samples) = stored
+        .per_sample
+        .iter()
+        .fold((0, 0, 0), |(l, r, s), sample| {
+            let thinned = sample.read.loci_thinned_to_the_read_cap;
+            (
+                l + thinned,
+                r + sample.read.reads_thinned_by_the_read_cap,
+                s + u64::from(thinned > 0),
+            )
+        });
+    if loci > 0 {
+        lines.push(format!(
+            "read cap applied to stored files written under a looser one: {loci} loci thinned \
+             in {samples} samples, {reads} reads removed"
         ));
     }
     where_the_walks_disagreed(lines, stored);
