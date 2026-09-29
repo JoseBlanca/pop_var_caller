@@ -397,24 +397,25 @@ impl<W: Write> SpillWriter<W> {
     /// stores, so a mismatch would be written as the flag and read back as the other shape; or
     /// if the sink refuses the bytes. An entry the sink refused is not counted.
     pub fn append(&mut self, entry: &SpillEntry) -> Result<(), SpillError> {
-        // **Matched, not `matches!`**, so a third row shape cannot slip through as "not a
-        // tract". The spec already defers a tract-aware allele term that would want one, and a
-        // boolean test would have compiled unchanged and quietly written the wrong shape.
-        let carries_tract_rows = match entry.samples {
-            SpilledSamples::RepeatTract(_) => true,
-            SpilledSamples::GenericLocus(_) => false,
-        };
-        if entry.is_repeat_tract != carries_tract_rows {
-            return Err(SpillError::SampleShapeDisagreesWithTheTractFlag {
-                contig: entry.contig.get(),
-                position: entry.position.get(),
-                is_repeat_tract: entry.is_repeat_tract,
-            });
-        }
+        refuse_a_shape_the_flag_contradicts(entry)?;
         self.scratch.clear();
         encode_entry(entry, &mut self.scratch);
         self.sink
             .write_all(&self.scratch)
+            .map_err(|source| SpillError::Write { source })?;
+        self.entries_written += 1;
+        Ok(())
+    }
+
+    /// Append one entry that was encoded elsewhere ([`EncodedSpillEntry::of`]) — the same bytes
+    /// [`append`](Self::append) would have written.
+    ///
+    /// # Errors
+    ///
+    /// If the sink refuses the bytes. An entry the sink refused is not counted.
+    pub fn append_encoded(&mut self, entry: &EncodedSpillEntry) -> Result<(), SpillError> {
+        self.sink
+            .write_all(&entry.bytes)
             .map_err(|source| SpillError::Write { source })?;
         self.entries_written += 1;
         Ok(())
@@ -535,6 +536,52 @@ impl<R: BufRead> Iterator for SpillReader<R> {
 }
 
 impl<R: BufRead> FusedIterator for SpillReader<R> {}
+
+/// **One entry, already turned into the bytes the spill stores** — so that the encoding can be
+/// done on the thread that called the locus, and the thread that writes only copies bytes.
+///
+/// At 2,169 samples an entry is about 50 kB, most of it the record's VCF line; building that
+/// line and these bytes was done on the run's one writing thread while every calling thread
+/// waited for the next round.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedSpillEntry {
+    bytes: Vec<u8>,
+}
+
+impl EncodedSpillEntry {
+    /// Encode `entry` as [`SpillWriter::append`] would write it.
+    ///
+    /// # Errors
+    ///
+    /// If the entry's sample shape disagrees with its tract flag, as [`SpillWriter::append`]
+    /// refuses.
+    pub fn of(entry: &SpillEntry) -> Result<Self, SpillError> {
+        refuse_a_shape_the_flag_contradicts(entry)?;
+        let mut bytes = Vec::new();
+        encode_entry(entry, &mut bytes);
+        Ok(Self { bytes })
+    }
+}
+
+/// The entry's sample shape against its tract flag: the flag is what the file stores, so a
+/// mismatch would be written as the flag and read back as the other shape.
+fn refuse_a_shape_the_flag_contradicts(entry: &SpillEntry) -> Result<(), SpillError> {
+    // **Matched, not `matches!`**, so a third row shape cannot slip through as "not a
+    // tract". The spec already defers a tract-aware allele term that would want one, and a
+    // boolean test would have compiled unchanged and quietly written the wrong shape.
+    let carries_tract_rows = match entry.samples {
+        SpilledSamples::RepeatTract(_) => true,
+        SpilledSamples::GenericLocus(_) => false,
+    };
+    if entry.is_repeat_tract != carries_tract_rows {
+        return Err(SpillError::SampleShapeDisagreesWithTheTractFlag {
+            contig: entry.contig.get(),
+            position: entry.position.get(),
+            is_repeat_tract: entry.is_repeat_tract,
+        });
+    }
+    Ok(())
+}
 
 /// Append one entry's bytes to `out`, in the layout at the top of this module.
 ///

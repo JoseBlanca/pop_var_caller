@@ -584,10 +584,14 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         )
     };
 
+    // **The record's spill entry is encoded on the thread that called its locus** — the preparer
+    // is the sink's, taken once here — and the sink only appends it, in genome order.
+    let preparer = sink.preparer();
     let (calling, mut stored) = caller
-        .call_cohort_handing_each_record_over(
+        .call_cohort_preparing_each_record(
             &SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior),
-            &mut |record, window_coverage| sink.accept(record, window_coverage),
+            &|record, window_coverage| preparer.prepare(record, window_coverage),
+            &mut |prepared, _| sink.accept_prepared(prepared),
         )
         .map_err(|source| CallFromPspsCliError::Run { source })?;
 

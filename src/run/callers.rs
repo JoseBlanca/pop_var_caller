@@ -743,7 +743,8 @@ impl AlignedFilesVariantCaller {
             ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
             inputs,
             genotyper,
-            hand_over,
+            &|record, _| Ok(record),
+            &mut |record: VcfRecord, windows| hand_over(&record, windows),
         )?;
         Ok(WrittenCohort {
             calling,
@@ -849,15 +850,23 @@ pub(crate) struct CohortCallingOutcome<S> {
 /// # Errors
 ///
 /// The first sample whose source fails ends the run ([`RunError::SourceFailed`]); so does the
-/// first record `hand_over` refuses ([`RunError::RecordNotWritten`]) and a padding base the
-/// reference will not serve ([`RunError::PaddingBaseUnreadable`]). Calling itself cannot fail: a
-/// locus whose loop did not settle comes back with `converged` false and is written on the
-/// `EMNoConv` filter.
-pub(crate) fn call_cohort_from_sources_handing_each_record_over<Source, S, G, E>(
+/// first record `prepare` or `hand_over` refuses ([`RunError::RecordNotWritten`]) and a padding
+/// base the reference will not serve ([`RunError::PaddingBaseUnreadable`]). Calling itself cannot
+/// fail: a locus whose loop did not settle comes back with `converged` false and is written on
+/// the `EMNoConv` filter.
+///
+/// # A record reaches its output in two steps
+///
+/// `prepare` gets it ready — whatever of the output's work needs no file — and `hand_over` takes
+/// it, in genome order, with every sample's window. Here the two run back to back; the round
+/// driver ([`call_cohort_from_sources_in_rounds`]) runs `prepare` on the thread that called the
+/// locus, which is why the split exists.
+pub(crate) fn call_cohort_from_sources_handing_each_record_over<Source, S, G, P, E>(
     mut cache: ObservationCache<Source>,
     inputs: CohortCallingInputs<'_>,
     genotyper: &G,
-    hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
+    prepare: &(impl Fn(VcfRecord, &[WindowCoverage]) -> Result<P, E> + Sync),
+    hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
 ) -> Result<CohortCallingOutcome<Source>, RunError>
 where
     Source: ObservationSource<Error = RunError> + Send,
@@ -996,7 +1005,9 @@ where
                         },
                         &window_coverage,
                     );
-                    match hand_over(&record, &window_coverage) {
+                    match prepare(record, &window_coverage)
+                        .and_then(|ready| hand_over(ready, &window_coverage))
+                    {
                         Ok(()) => records_written += 1,
                         Err(source) => {
                             stopped = Some(RunError::RecordNotWritten {
@@ -5654,6 +5665,7 @@ mod records_handed_over_as_the_run_finishes_them {
             ObservationCache::over(vec![drawn.into_iter()], Box::new(reference_for_the_merge)),
             inputs,
             &the_shipped_genotyper(),
+            &|record, _| Ok::<_, std::io::Error>(record),
             &mut |_record, _window_coverage| {
                 handed += 1;
                 Err::<(), std::io::Error>(std::io::Error::other("the disk is full"))
@@ -6904,7 +6916,7 @@ impl<S> Drop for RoundCallScratch<'_, S> {
 }
 
 /// What a worker made of one locus — everything the calling thread has to do with it.
-enum RoundLocusOutcome {
+enum RoundLocusOutcome<P> {
     /// No sample of the run can be called here; the span goes in the run's list.
     NobodyToCall(GenomeRegion),
     /// Counted inside the dispatch, nothing for the calling thread to do but count the locus.
@@ -6913,29 +6925,34 @@ enum RoundLocusOutcome {
     CalledNotWritten(GenomeRegion),
     /// The padding fetch refused.
     CalledFailed(RunError),
-    /// A record, its per-sample windows, and the locus it came from.
-    CalledRecord(Box<VcfRecord>, Vec<WindowCoverage>, GenomeRegion),
+    /// A record got ready for its output, its per-sample windows, and the locus it came from.
+    CalledRecord(P, Vec<WindowCoverage>, GenomeRegion),
 }
 
 /// [`call_cohort_from_sources_handing_each_record_over`], with **each round of building regions
 /// built and genotyped on the pool** and the records folded back in genome order.
 ///
 /// The sink stays on the calling thread and sees genome order, which is what makes the VCF
-/// identical to the streaming driver's.
+/// identical to the streaming driver's. **`prepare` runs on the thread that called the locus**:
+/// with the hidden-duplication filter on it encodes the record's spill entry, which at 2,169
+/// samples was most of what the calling thread did while every other thread waited for the
+/// next round.
 ///
 /// # Errors
 ///
 /// The streaming driver's.
-pub(crate) fn call_cohort_from_sources_in_rounds<Source, S, G, E>(
+pub(crate) fn call_cohort_from_sources_in_rounds<Source, S, G, P, E>(
     mut cache: ObservationCache<Source>,
     inputs: CohortCallingInputs<'_>,
     genotyper: &G,
-    hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
+    prepare: &(impl Fn(VcfRecord, &[WindowCoverage]) -> Result<P, E> + Sync),
+    hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
 ) -> Result<CohortCallingOutcome<Source>, RunError>
 where
     Source: ObservationSource<Error = RunError> + Send + Sync,
     G: LocusGenotyper<S> + Sync,
     S: Default + Send,
+    P: Send,
     E: std::error::Error + Send + Sync + 'static,
 {
     let CohortCallingInputs {
@@ -7041,11 +7058,19 @@ where
                 }
                 LocusOutcome::Called(Err(error)) => RoundLocusOutcome::CalledFailed(error),
                 LocusOutcome::Called(Ok(None)) => RoundLocusOutcome::CalledNotWritten(region),
-                LocusOutcome::Called(Ok(Some(record))) => RoundLocusOutcome::CalledRecord(
-                    Box::new(record),
-                    std::mem::take(window_coverage),
-                    region,
-                ),
+                LocusOutcome::Called(Ok(Some(record))) => match prepare(record, window_coverage) {
+                    Ok(ready) => RoundLocusOutcome::CalledRecord(
+                        ready,
+                        std::mem::take(window_coverage),
+                        region,
+                    ),
+                    // Reported where the calling thread reaches this locus, in genome order, as a
+                    // refusal of `hand_over` would be.
+                    Err(source) => RoundLocusOutcome::CalledFailed(RunError::RecordNotWritten {
+                        locus: region,
+                        source: Box::new(source),
+                    }),
+                },
             }
         },
         &mut |outcome| match outcome {
@@ -7065,7 +7090,7 @@ where
                     stopped = Some(error);
                 }
             }
-            RoundLocusOutcome::CalledRecord(record, windows, region) => {
+            RoundLocusOutcome::CalledRecord(ready, windows, region) => {
                 if stopped.is_some() {
                     return;
                 }
@@ -7077,7 +7102,7 @@ where
                     },
                     &windows,
                 );
-                match hand_over(&record, &windows) {
+                match hand_over(ready, &windows) {
                     Ok(()) => records_written += 1,
                     Err(source) => {
                         stopped = Some(RunError::RecordNotWritten {
