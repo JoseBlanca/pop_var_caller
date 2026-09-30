@@ -338,9 +338,17 @@ impl<'a> PspSummarySource<'a> {
 
     /// Drop, as they are read, the records with a read group deeper than `ceiling`, or keep every
     /// record for `None` ([`depth_ceiling`](super::depth_ceiling)).
+    ///
+    /// **A record too large for the reader to hold is dropped too, as though it were over the
+    /// ceiling** (owner, 2026-09-30). Its reads cannot be counted without holding it, and a record
+    /// past the reader's buffer ceiling holds far more reads than any honest depth: the one that
+    /// stopped the 2,169-sample tomato run had 10,151 over 142 bases. Without a ceiling such a
+    /// record still stops the run, since the run has promised to call every locus.
     #[must_use]
     pub fn with_depth_ceiling(mut self, ceiling: Option<DepthCeiling>) -> Self {
         self.depth_ceiling = ceiling;
+        self.walk
+            .skipping_records_too_large_to_hold(ceiling.is_some());
         self
     }
 
@@ -449,6 +457,15 @@ impl<'a> PspSummarySource<'a> {
             Ok(streamed) => streamed,
             Err(failed) => return Some(Err(self.refuse(failed))),
         };
+        if streamed.too_large_to_hold {
+            // Nothing of it reached the arena, and its reads' changes are applied in the walk.
+            self.live.skip();
+            self.read.loci_too_large_to_read += 1;
+            return Some(Ok(Summarised::OverDepthCeiling {
+                region: streamed.head.region,
+                next_body_at: self.released + self.kept.len(),
+            }));
+        }
         let in_buffer = streamed
             .body
             .expect("a walk that builds nothing keeps every body");
@@ -585,6 +602,10 @@ pub struct StoredSampleTallies {
     /// depth ceiling** (`--max-read-group-depth`, [`depth_ceiling`](super::depth_ceiling)). Not
     /// in [`loci_read`](Self::loci_read). No locus was called over their ground, for any sample.
     pub loci_over_the_depth_ceiling: u64,
+    /// **Of those, the records too large for the psp reader to hold** — dropped without their
+    /// reads being counted, on the assumption that a record that size is a pile-up
+    /// ([`PspSummarySource::with_depth_ceiling`]).
+    pub loci_too_large_to_read: u64,
 }
 
 impl StoredSampleTallies {
@@ -944,6 +965,8 @@ where
             block: _,
             // This adapter builds every body, so nothing is ever kept for later.
             body: _,
+            // Its walk is never told to skip a record, so a record too large is refused instead.
+            too_large_to_hold: _,
             head,
             record,
         } = match self.walk.next()? {
@@ -1981,6 +2004,89 @@ mod tests {
             source.read().loci_read,
             built.len() as u64 - 1,
             "a dropped record is not a locus read"
+        );
+    }
+
+    /// **A source given a depth ceiling drops a record too large for the reader to hold, as
+    /// though it were over the ceiling**, and the records after it still build against the
+    /// right reads.
+    ///
+    /// The fixture is the one the test above uses: at the record in the middle three reads are
+    /// replaced by three others that stay live to the end, so the record after it can only be
+    /// rebuilt if the source applied the skipped record's changes and stored the next set whole.
+    /// That record is made too large by one observation of 600,000 bases, over the reader's
+    /// 524,288-byte ceiling, while no read group anywhere comes near the depth ceiling.
+    #[test]
+    fn a_depth_ceiling_drops_a_record_too_large_to_read() {
+        let mut records = a_sample();
+        let deep = 22;
+        for (at, record) in records.iter_mut().enumerate() {
+            for (j, observation) in record.observations.iter_mut().enumerate() {
+                let first = 1_000 * (j as u64 + 1) + if at >= deep { 500 } else { 0 };
+                observation.chain_ids = vec![first, first + 1, first + 2];
+                observation.num_obs = 3;
+            }
+        }
+        records[deep].observations[0].bases = vec![b'A'; 600_000].into_boxed_slice();
+        let (_dir, path) = a_psp_of(&records);
+        let groups = as_walked();
+
+        let built: Vec<_> = {
+            let mut psp = PspReader::open(&path)
+                .expect("the file opens")
+                .with_a_record_buffer_ceiling(16 * 1024 * 1024)
+                .expect("a ceiling over the buffer");
+            let mut source =
+                PspObservationSource::over(&mut psp, &groups).expect("the walk starts");
+            std::iter::from_fn(|| source.next_observation(None))
+                .map(|next| next.expect("the fixture reads back under a raised ceiling"))
+                .collect()
+        };
+
+        let mut psp = PspReader::open(&path).expect("the file opens again");
+        let mut source = PspSummarySource::over(&mut psp, &groups)
+            .expect("the walk starts")
+            .with_depth_ceiling(Some(DepthCeiling::default()));
+        let mut drawn = Vec::new();
+        while let Some(next) = source.next_drawn(None) {
+            drawn.push(next.expect("a record too large is dropped, not refused"));
+        }
+        assert_eq!(
+            drawn.len(),
+            built.len(),
+            "one draw a record, dropped or kept"
+        );
+        for (at, (draw, record)) in drawn.iter().zip(&built).enumerate() {
+            match draw {
+                Drawn::OverDepthCeiling { region, stand_in } => {
+                    assert_eq!(at, deep, "record {at} was dropped");
+                    assert_eq!(*region, record.region);
+                    let StandIn::Body(body) = stand_in else {
+                        panic!("a stored sample's stand-in is a body range")
+                    };
+                    assert!(body.is_empty(), "nothing of a dropped record is held");
+                }
+                Drawn::Kept { body, .. } => {
+                    assert_ne!(at, deep, "the record too large to read was kept");
+                    assert_eq!(
+                        source.build(body.clone()).expect("a kept body builds"),
+                        *record,
+                        "record {at} builds as written"
+                    );
+                }
+                Drawn::Built(_) => panic!("this source keeps every body"),
+            }
+        }
+        assert_eq!(source.read().loci_over_the_depth_ceiling, 1);
+        assert_eq!(source.read().loci_too_large_to_read, 1);
+
+        // Without a depth ceiling the run has promised to call every locus, so it still stops.
+        let mut psp = PspReader::open(&path).expect("the file opens a third time");
+        let mut source = PspSummarySource::over(&mut psp, &groups).expect("the walk starts");
+        let refused = std::iter::from_fn(|| source.next_drawn(None)).find_map(Result::err);
+        assert!(
+            refused.is_some(),
+            "a record too large stops a run with no ceiling"
         );
     }
 

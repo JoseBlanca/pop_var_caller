@@ -596,9 +596,16 @@ fn what_each_stored_file_gave(lines: &mut Vec<String>, stored: &StoredCohortTall
                 sample.read.reads_thinned_by_the_read_cap
             ),
         };
-        let too_deep = match sample.read.loci_over_the_depth_ceiling {
-            0 => String::new(),
-            loci => format!("; {loci} loci dropped over the depth ceiling"),
+        let too_deep = match (
+            sample.read.loci_over_the_depth_ceiling,
+            sample.read.loci_too_large_to_read,
+        ) {
+            (0, _) => String::new(),
+            (loci, 0) => format!("; {loci} loci dropped over the depth ceiling"),
+            (loci, too_large) => format!(
+                "; {loci} loci dropped over the depth ceiling, {too_large} of them too large to \
+                 read"
+            ),
         };
         lines.push(format!(
             "  {}: {} loci read, {depth:.1} reads a locus compared with the reference\
