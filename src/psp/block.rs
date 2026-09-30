@@ -42,7 +42,7 @@ use crate::psp::chain_ids::{LiveSet, LiveSetChanges, LiveSetReader};
 use crate::psp::header::{MAX_LOOK_BACK_WINDOW_LOG, MIN_LOOK_BACK_WINDOW_LOG, Manifest};
 use crate::psp::record::{
     OffsetBase, RecordDecodeError, RecordEncodeError, RecordEncoder, RecordHead, RecordLayout,
-    RecordLayoutError, decode_the_body_of, read_record_head,
+    RecordLayoutError, decode_the_body_of, read_record_head, read_the_head_in_front_of_its_body,
 };
 use crate::psp::varint::{VarintError, decode_u64_leb128, encode_u64_leb128};
 use crate::types::{Bp, ContigId, GenomeRegion, Position};
@@ -1200,6 +1200,10 @@ pub struct StreamedRecord {
     /// `None` when nothing was kept: no buffer was given, or the record was built and its bytes
     /// are of no further use.
     pub body: Option<core::ops::Range<usize>>,
+    /// **The record was larger than the reader's buffer ceiling and was advanced past by its
+    /// head**, so `record` and `body` are both `None` whatever the caller asked for. Only a
+    /// stream told to ([`BlockStream::skipping_records_too_large_to_hold`]) hands one back.
+    pub too_large_to_hold: bool,
 }
 
 /// Reads records back out of a run of compressed blocks, holding nothing that grows with them.
@@ -1268,6 +1272,10 @@ pub struct BlockStream<R> {
     /// How far `rolling` may grow for one record. Defaults to
     /// [`ROLLING_BUFFER_CEILING_BYTES`]; [`BlockStream::with_a_buffer_ceiling`] sets it.
     buffer_ceiling: usize,
+
+    /// Whether a record larger than `buffer_ceiling` is advanced past by its head rather than
+    /// refused — see [`BlockStream::skipping_records_too_large_to_hold`].
+    skips_records_too_large_to_hold: bool,
 
     /// Which reads are live, and the changes read out of each record's head to move between
     /// records.
@@ -1391,6 +1399,7 @@ impl<R> std::fmt::Debug for BlockStream<R> {
             parses_restarted,
             block_heads_restarted,
             buffer_ceiling,
+            skips_records_too_large_to_hold,
             refused,
         } = self;
         f.debug_struct("BlockStream")
@@ -1405,6 +1414,10 @@ impl<R> std::fmt::Debug for BlockStream<R> {
             .field("parses_restarted", parses_restarted)
             .field("block_heads_restarted", block_heads_restarted)
             .field("buffer_ceiling", buffer_ceiling)
+            .field(
+                "skips_records_too_large_to_hold",
+                skips_records_too_large_to_hold,
+            )
             .field("refused", refused)
             .finish_non_exhaustive()
     }
@@ -1460,6 +1473,7 @@ impl<R: std::io::Read> BlockStream<R> {
             parses_restarted: 0,
             block_heads_restarted: 0,
             buffer_ceiling: ROLLING_BUFFER_CEILING_BYTES,
+            skips_records_too_large_to_hold: false,
             refused: false,
         })
     }
@@ -1523,6 +1537,25 @@ impl<R: std::io::Read> BlockStream<R> {
         }
         self.buffer_ceiling = ceiling;
         Ok(self)
+    }
+
+    /// Advance past a record larger than the buffer ceiling instead of refusing it: its head is
+    /// read, its reads' arrivals and departures are applied, and its body is decompressed and
+    /// thrown away without ever being held. It comes back with
+    /// [`too_large_to_hold`](StreamedRecord::too_large_to_hold) set and neither a record nor a
+    /// kept body.
+    ///
+    /// **For a caller that drops such a locus anyway.** A cohort run with a depth ceiling
+    /// (`--max-read-group-depth`) treats a record too large to hold as one too deep to call —
+    /// the record that stopped the 2,169-sample tomato run at SL4.0ch01:34,948,547 was 142 bases
+    /// with 10,151 reads, 536,667 bytes of observed bases against the 524,288 allowed. A caller
+    /// that needs every record's evidence leaves this off and keeps the refusal.
+    ///
+    /// **Only the body is spared.** A head — position, counts and the reads' arrivals and
+    /// departures — that alone is larger than the ceiling is refused as before, so a block that
+    /// never parses still costs a bounded amount of memory.
+    pub fn skipping_records_too_large_to_hold(&mut self, skip: bool) {
+        self.skips_records_too_large_to_hold = skip;
     }
 
     /// How far this reader's rolling buffer may grow for one record.
@@ -1676,6 +1709,7 @@ impl<R: std::io::Read> BlockStream<R> {
                         head,
                         record,
                         body,
+                        too_large_to_hold: false,
                     }));
                 }
                 Err(RecordDecodeError::Truncated { .. }) => {
@@ -1688,6 +1722,14 @@ impl<R: std::io::Read> BlockStream<R> {
                     let refilled = self.pump();
                     match refilled {
                         Ok(true) => {}
+                        Err(BlockReadError::RecordLargerThanTheReaderAllows { .. })
+                            if self.skips_records_too_large_to_hold =>
+                        {
+                            return match self.skip_the_record_too_large_to_hold(block) {
+                                Ok(streamed) => Some(Ok(streamed)),
+                                Err(refused) => Some(Err(self.fail(refused))),
+                            };
+                        }
                         Ok(false) => {
                             return Some(Err(self.fail(BlockReadError::RecordRunsPastItsBlock {
                                 records_left: self.cursor.records_left,
@@ -1700,6 +1742,74 @@ impl<R: std::io::Read> BlockStream<R> {
                 Err(damage) => return Some(Err(self.fail(BlockReadError::from_record(damage)))),
             }
         }
+    }
+
+    /// Advance past the record in front of the parser, which the buffer ceiling has just refused
+    /// to grow for: read its head, apply its reads' changes, and decompress its body into the
+    /// rolling buffer a buffer's worth at a time, throwing each away.
+    ///
+    /// **The head's `body_bytes` is what makes this possible.** Nothing in a body is needed to
+    /// find where it ends, and nothing in it is state a later record is read against — the live
+    /// set moves only through the head's changes (spec `psp_record_encoding.md` §6).
+    ///
+    /// The `pump` that refused had already dropped everything before this record, so the buffer
+    /// starts at its first byte.
+    fn skip_the_record_too_large_to_hold(
+        &mut self,
+        block: BlockHead,
+    ) -> Result<StreamedRecord, BlockReadError> {
+        let refused_as_too_large = |this: &Self| BlockReadError::RecordLargerThanTheReaderAllows {
+            block: GenomeRegion {
+                contig: block.contig,
+                start: block.first_position,
+                end: block.first_position,
+            },
+            records_read: block.record_count.get() - this.cursor.records_left,
+            allowed_bytes: this.buffer_ceiling,
+        };
+        let (head, head_bytes) = match read_the_head_in_front_of_its_body(
+            &self.rolling[self.cursor.rolling_at..],
+            block.contig,
+            self.cursor.measured_from,
+            &mut self.live_reads,
+            &self.layout,
+        ) {
+            Ok(found) => found,
+            // The head alone is past the ceiling: nothing to skip by, so the refusal stands.
+            Err(RecordDecodeError::Truncated { .. }) => return Err(refused_as_too_large(self)),
+            Err(damage) => return Err(BlockReadError::from_record(damage)),
+        };
+        self.live_reads.apply_the_changes_just_parsed();
+        self.cursor.rolling_at += head_bytes;
+        let mut body_left = head.body_bytes as usize;
+        loop {
+            let here = (self.rolling.len() - self.cursor.rolling_at).min(body_left);
+            self.cursor.rolling_at += here;
+            body_left -= here;
+            if body_left == 0 {
+                break;
+            }
+            // `pump` drops what `rolling_at` has passed, so the buffer never holds more of the
+            // body than one decompression step writes.
+            if !self.pump()? {
+                return Err(BlockReadError::RecordRunsPastItsBlock {
+                    records_left: self.cursor.records_left,
+                    bytes_left: self.rolling.len() - self.cursor.rolling_at,
+                });
+            }
+        }
+        self.cursor.measured_from = OffsetBase::after(&head);
+        self.cursor.records_left -= 1;
+        if self.cursor.records_left == 0 {
+            self.check_the_block_ended_here()?;
+        }
+        Ok(StreamedRecord {
+            block,
+            head,
+            record: None,
+            body: None,
+            too_large_to_hold: true,
+        })
     }
 
     /// Read the next block's framing and its head, or report that the source is finished.
@@ -4869,6 +4979,60 @@ mod tests {
             );
         }
         assert_eq!(back, records);
+    }
+
+    /// **A stream told to skip a record past the ceiling advances past it by its head**, hands it
+    /// back marked with neither record nor body, and reads the records on either side exactly as
+    /// written — holding no more of the skipped body than one decompression step at a time.
+    #[test]
+    fn a_record_past_the_ceiling_is_skipped_by_its_head_when_asked() {
+        let records = vec![
+            a_record(0, 100, 1),
+            a_wide_record(200, 40_000),
+            a_record(0, 300, 1),
+        ];
+        let payload = one_payload(&records);
+        assert!(
+            payload.len() > ROLLING_BUFFER_CEILING_BYTES,
+            "the middle record must exceed the ceiling: {} bytes against {}",
+            payload.len(),
+            ROLLING_BUFFER_CEILING_BYTES
+        );
+        let manifest = a_manifest();
+        let mut compressor = BlockCompressor::from_manifest(&manifest).expect("a window");
+        let on_disk = compressor
+            .compress(&payload)
+            .expect("it compresses")
+            .to_vec();
+
+        let mut stream = BlockStream::new(on_disk.as_slice(), &manifest).expect("a manifest");
+        stream.skipping_records_too_large_to_hold(true);
+        let mut back = Vec::new();
+        let mut most_held = 0;
+        while let Some(next) = stream.next_record() {
+            back.push(next.unwrap_or_else(|refused| panic!("refused: {refused}")));
+            most_held = most_held.max(stream.buffered_bytes());
+        }
+        assert_eq!(back.len(), 3);
+        assert!(!back[0].too_large_to_hold && !back[2].too_large_to_hold);
+        assert_eq!(back[0].record.as_ref(), Some(&records[0]));
+        assert_eq!(back[2].record.as_ref(), Some(&records[2]));
+        assert!(back[1].too_large_to_hold);
+        assert_eq!(back[1].head.region, records[1].region);
+        assert_eq!((&back[1].record, &back[1].body), (&None, &None));
+        assert!(
+            most_held <= READ_CHUNK_BYTES + ROLLING_BUFFER_CEILING_BYTES,
+            "skipping a {}-byte block held {most_held} bytes",
+            payload.len()
+        );
+
+        // And left off, the same file is refused as before.
+        let mut stream = BlockStream::new(on_disk.as_slice(), &manifest).expect("a manifest");
+        assert!(stream.next_record().expect("the first record").is_ok());
+        assert!(matches!(
+            stream.next_record(),
+            Some(Err(BlockReadError::RecordLargerThanTheReaderAllows { .. }))
+        ));
     }
 
     /// A record genuinely larger than the ceiling is read by raising it, which is what makes a

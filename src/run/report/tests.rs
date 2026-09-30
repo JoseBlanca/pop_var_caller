@@ -883,6 +883,7 @@ fn a_stored_sample(
             loci_thinned_to_the_read_cap: 0,
             reads_thinned_by_the_read_cap: 0,
             loci_over_the_depth_ceiling: 0,
+            loci_too_large_to_read: 0,
         },
         read_filters_the_walk_applied: min_mapq
             .map(|floor| {
